@@ -721,6 +721,7 @@ fn git_rev_parse(cwd: &std::path::Path, rev: &str) -> Option<String> {
 }
 
 fn parse_branch_line(line: &str) -> (String, String, i64, i64) {
+    let line = line.strip_prefix("No commits yet on ").unwrap_or(line);
     let (branch_part, tracking) = line
         .split_once("...")
         .map(|(b, t)| (b.to_string(), t.to_string()))
@@ -734,7 +735,11 @@ fn parse_branch_line(line: &str) -> (String, String, i64, i64) {
     let mut upstream = tracking.clone();
     if let Some(idx) = tracking.find(' ') {
         upstream = tracking[..idx].to_string();
-        let meta = &tracking[idx + 1..];
+        let meta = tracking[idx + 1..].trim();
+        let meta = meta
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+            .unwrap_or(meta);
         for token in meta.split(',') {
             let token = token.trim();
             if let Some(n) = token.strip_prefix("ahead ") {
@@ -783,6 +788,117 @@ fn git_error(message: &str) -> WorkspaceError {
 #[cfg(test)]
 mod revision_scope_tests {
     use super::*;
+
+    #[test]
+    fn branch_tracking_counts_accept_porcelain_brackets() {
+        for (line, branch, upstream, ahead, behind) in [
+            ("main...upstream [ahead 1]", "main", "upstream", 1, 0),
+            ("upstream...main [behind 1]", "upstream", "main", 0, 1),
+            (
+                "upstream...main [ahead 1, behind 1]",
+                "upstream",
+                "main",
+                1,
+                1,
+            ),
+            (
+                "main...origin/main [ahead 12, behind 34]",
+                "main",
+                "origin/main",
+                12,
+                34,
+            ),
+            ("main...origin/main", "main", "origin/main", 0, 0),
+            ("main", "main", "", 0, 0),
+            ("main...origin/main [gone]", "main", "origin/main", 0, 0),
+            (
+                "main...origin/main ahead 2, behind 3",
+                "main",
+                "origin/main",
+                2,
+                3,
+            ),
+            (
+                "main...origin/main [ahead invalid, behind invalid]",
+                "main",
+                "origin/main",
+                0,
+                0,
+            ),
+            (
+                "main...origin/main [ahead 9223372036854775808]",
+                "main",
+                "origin/main",
+                0,
+                0,
+            ),
+            ("No commits yet on main", "main", "", 0, 0),
+            ("No commits yet on feature/foo", "feature/foo", "", 0, 0),
+            ("HEAD (no branch)", "HEAD", "", 0, 0),
+        ] {
+            assert_eq!(
+                parse_branch_line(line),
+                (branch.to_string(), upstream.to_string(), ahead, behind),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_status_reports_local_tracking_divergence() {
+        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/git-tracking-count-tests");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let dir = tempfile::tempdir_in(artifacts).unwrap();
+        git(dir.path(), &["init", "--template=", "-q", "-b", "main"]);
+        git(dir.path(), &["config", "core.fsmonitor", "false"]);
+        let ws = Workspace::new(dir.path().to_path_buf()).unwrap();
+        let check = |header: &str, branch: &str, upstream: &str, ahead: i64, behind: i64| {
+            assert_eq!(git(dir.path(), &["status", "--porcelain=v1", "-b"]), header);
+            let status = git_status(&ws, &json!({})).unwrap();
+            assert_eq!(status["branch"], branch);
+            assert_eq!(status["upstream"], upstream);
+            assert_eq!(status["ahead"], ahead);
+            assert_eq!(status["behind"], behind);
+            assert_eq!(status["clean"], true);
+        };
+        check("## No commits yet on main", "main", "", 0, 0);
+        git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "base"]);
+        check("## main", "main", "", 0, 0);
+        git(dir.path(), &["branch", "upstream"]);
+        git(
+            dir.path(),
+            &["branch", "--set-upstream-to=upstream", "main"],
+        );
+        check("## main...upstream", "main", "upstream", 0, 0);
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "main ahead"],
+        );
+        check("## main...upstream [ahead 1]", "main", "upstream", 1, 0);
+        git(dir.path(), &["checkout", "-q", "upstream"]);
+        git(
+            dir.path(),
+            &["branch", "--set-upstream-to=main", "upstream"],
+        );
+        check("## upstream...main [behind 1]", "upstream", "main", 0, 1);
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "upstream diverges"],
+        );
+        check(
+            "## upstream...main [ahead 1, behind 1]",
+            "upstream",
+            "main",
+            1,
+            1,
+        );
+        git(dir.path(), &["checkout", "-q", "--detach"]);
+        check("## HEAD (no branch)", "HEAD", "", 0, 0);
+        assert!(git(dir.path(), &["remote"]).is_empty());
+    }
 
     fn git(dir: &std::path::Path, args: &[&str]) -> String {
         let output = Command::new("git")

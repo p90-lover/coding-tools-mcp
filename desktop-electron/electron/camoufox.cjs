@@ -1,5 +1,8 @@
 "use strict";
 
+// Unused since #1037: the ChatGPT session stays on Chromium and Camoufox is no App plugin any more.
+// The file stays only because CI forbids deleting paths; nothing requires it.
+
 /**
  * Camoufox (daijro/camoufox), the Firefox build the ChatGPT browser can run in, as an App plugin:
  * one folder per version under <userData>/tools/camoufox/<version>, its version.json naming it.

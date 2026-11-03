@@ -123,6 +123,7 @@ async function swapIn(job, stamp) {
     }
     return journal;
   } catch (error) {
+    const failed = [];
     for (const entry of journal.reverse()) {
       try {
         // With the same retries as the swap: a restore refused once (antivirus scanning the file
@@ -130,8 +131,14 @@ async function swapIn(job, stamp) {
         if (entry.placed) await renameWithRetry(entry.destination, entry.staged);
         if (entry.aside && fs.existsSync(entry.aside)) await renameWithRetry(entry.aside, entry.destination);
       } catch (rollback) {
+        failed.push(`${entry.rel}: ${rollback?.code || rollback}`);
         appendLog(job, `could not restore ${entry.rel}: ${rollback?.code || rollback}`);
       }
+    }
+    if (failed.length) {
+      const incomplete = new Error(`${error?.message || error}; rollback incomplete: ${failed.join("; ")}`, { cause: error });
+      incomplete.rollbackFailures = failed;
+      throw incomplete;
     }
     throw error;
   }
@@ -391,9 +398,18 @@ async function applyJob(jobPath) {
     await verifyPlaced(journal);
   } catch (error) {
     // swapIn puts its own files back; a swap that finished but failed the check is undone here.
-    const failed = swapped ? await rollBack(journal) : [];
+    const failed = swapped ? await rollBack(journal) : Array.isArray(error?.rollbackFailures) ? error.rollbackFailures : [];
     for (const line of failed) appendLog(job, `could not restore ${line}`);
-    recordResult(job.installRoot, { version: job.version, ok: false, stage: "apply", message: error?.message || error });
+    const original = error?.cause || error;
+    const message = failed.length ? `${original?.message || original}; rollback incomplete: ${failed.join("; ")}` : error?.message || error;
+    recordResult(job.installRoot, { version: job.version, ok: false, stage: "apply", message });
+    if (failed.length) {
+      try { writeJsonDurable(journalPath, { ...journal, state: "restoring" }); }
+      catch (recording) { appendLog(job, `could not record restoring state; original journal kept: ${errorText(recording)}`); }
+      try { fs.rmSync(marker, { force: true }); } catch {}
+      appendLog(job, `update failed; rollback incomplete, recovery files retained: ${errorText(error)}`);
+      return;
+    }
     try { fs.rmSync(journalPath, { force: true }); } catch {}
     try { fs.rmSync(marker, { force: true }); } catch {}
     appendLog(job, `update failed and was rolled back: ${errorText(error)}`);
@@ -418,6 +434,7 @@ async function recoverJournal(journalPath, parentPid) {
   if (!await waitForParent(parentPid)) return;
   const marker = updateFile(journal.installRoot, MARKER);
   try { writeJsonDurable(marker, { pid: process.pid, version: journal.version, at: Date.now(), journal: journalPath }); } catch {}
+  let relaunch = false;
   try {
     // "restoring" was recorded as a failure by the app that could not start; a cut-off swap is
     // finished when it can be, and recorded as a failure when it cannot.
@@ -428,6 +445,7 @@ async function recoverJournal(journalPath, parentPid) {
         await verifyPlaced(journal);
         const installedManifest = readJsonFile(journal.jobPath)?.installedManifest;
         finishPlaced({ installRoot: journal.installRoot, version: journal.version, installedManifest }, journal, journalPath);
+        relaunch = true;
         return;
       } catch (error) {
         failure = error?.message || String(error);
@@ -441,11 +459,16 @@ async function recoverJournal(journalPath, parentPid) {
         message: [failure, notRestored].filter(Boolean).join("; "), countFailure: Boolean(failure),
       });
     }
+    if (failed.length) {
+      try { writeJsonDurable(journalPath, { ...journal, state: "restoring" }); } catch {}
+      return; // The retained worker can retry; a known incomplete install must not launch.
+    }
     try { fs.rmSync(journalPath, { force: true }); } catch {}
     try { fs.rmSync(journal.stageRoot, { recursive: true, force: true }); } catch {}
+    relaunch = true;
   } finally {
     try { fs.rmSync(marker, { force: true }); } catch {}
-    launch(journal.executable);
+    if (relaunch) launch(journal.executable);
   }
 }
 

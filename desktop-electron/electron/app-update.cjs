@@ -370,7 +370,7 @@ function handOffUpdateRecovery(installRoot, {
   journal.attempts = (Number.isInteger(journal.attempts) ? journal.attempts : 0) + 1;
   if (journal.attempts > MAX_RECOVERY_ATTEMPTS) {
     logger?.warn("launcher.app_update_recovery_abandoned", { version: journal.version, state: journal.state });
-    try { fs.rmSync(journalPath, { force: true }); } catch {}
+    // Stop automatic attempts, but keep ownership of the stage and old copies for explicit repair.
     return false;
   }
   try {

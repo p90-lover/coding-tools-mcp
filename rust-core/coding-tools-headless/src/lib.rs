@@ -236,7 +236,10 @@ impl ServiceConfig {
         Ok(Self {
             app_data_dir,
             descriptor_path,
-            max_active_requests: 16,
+            // Above the launcher's 24 in flight (headless-host.cjs MAX_IN_FLIGHT). Requests wait
+            // on I/O or spawn_blocking, so a slot costs a task, not a core; 16 filled when eight
+            // split-view chats refreshed at once (2026-11-03).
+            max_active_requests: 32,
             drain_timeout: Duration::from_secs(15),
         })
     }

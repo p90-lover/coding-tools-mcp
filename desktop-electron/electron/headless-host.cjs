@@ -13,15 +13,20 @@ const START_TIMEOUT_MS = 20_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 // Waits before sending a request again that the headless service turned away as full.
 const CAPACITY_RETRY_MS = [100, 250, 600];
-// The launcher's own requests in flight at once, below the service's 16 request slots
+// The launcher's own requests in flight at once, below the service's 32 request slots
 // (coding-tools-headless ServiceConfig). The rest wait their turn here instead of being turned away:
 // after each restart since 0.8.30, chats restoring at once sent more than 16 and the service
 // refused 15-39 in a burst (turn_timeline, runs, observe, chat_prewarm, board), each a failed call
 // that left a chat's Worked rows or the board empty. A slot held by a slow read on the HDD outlasted
-// the retries above (under a second in all).
-const MAX_IN_FLIGHT = 12;
-// How long a request may wait for one of those turns before it fails as the service would have.
+// the retries above (under a second in all). 12 was too few for eight split-view chats: on
+// 2026-11-03 their refresh (harness_status, chat_recover, chat_branches, runs) waited out the queue
+// and 25 calls failed in three seconds.
+const MAX_IN_FLIGHT = 24;
+// A queued request fails as the service would have only when no turn has finished for this long:
+// a queue that is moving, however long, is not full.
 const QUEUE_WAIT_MS = 15_000;
+// And in any case after this long in the queue.
+const MAX_QUEUE_WAIT_MS = 60_000;
 const CONTROL_SLOTS = 2;
 const MAX_QUEUED = 128;
 const MAX_CONTROL_QUEUED = 16;
@@ -431,7 +436,18 @@ class HeadlessHost {
         reject(error);
       };
       const abort = () => remove(abortedRequest());
-      const timer = setTimeout(() => remove(admissionError("HEADLESS_QUEUE_TIMEOUT", "HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)")), this.queueWaitMs ?? QUEUE_WAIT_MS);
+      const idleLimit = this.queueWaitMs ?? QUEUE_WAIT_MS;
+      const totalLimit = Math.max(idleLimit, this.maxQueueWaitMs ?? MAX_QUEUE_WAIT_MS);
+      let timer = null;
+      // Re-checked when it fires, not reset on every finished turn: the queue may hold 128 entries.
+      const expire = () => {
+        const now = performance.now();
+        const idle = now - Math.max(entry.queuedAt, this.lastTurnReleasedAt ?? 0);
+        const left = Math.min(idleLimit - idle, totalLimit - (now - entry.queuedAt));
+        if (left > 0) { timer = setTimeout(expire, left); return; }
+        remove(admissionError("HEADLESS_QUEUE_TIMEOUT", "HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)"));
+      };
+      timer = setTimeout(expire, idleLimit);
       entry.cleanup = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); };
       signal?.addEventListener("abort", abort, { once: true });
       this.turns.waiting.push(entry);
@@ -474,6 +490,7 @@ class HeadlessHost {
   releaseTurn(entry) {
     if (!this.activeTurns.delete(entry)) return;
     this.turns.active -= 1;
+    this.lastTurnReleasedAt = performance.now();
     this.recordTurn(entry, entry.outcome);
     this.drainTurns();
   }

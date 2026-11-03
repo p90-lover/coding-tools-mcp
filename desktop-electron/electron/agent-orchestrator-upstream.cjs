@@ -18,7 +18,7 @@ const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
-const { spawnOffThread, fetchOffThread } = require("./off-thread-run.cjs");
+const { spawnOffThread, fetchOffThread, probeTcpOffThread } = require("./off-thread-run.cjs");
 const { redactionLabel } = require("./chat-redaction.cjs");
 
 const API_OPERATIONS = Object.freeze({
@@ -408,13 +408,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
     // From a worker: the chat's session and conversation reads come here 17 times a second with two
     // chats working, and on main a socket write that a network filter held froze every window.
-    const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
-    const text = await response.text();
-    // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
-    // other AO call keeps the 900 KB limit.
+    // Bound the body before the worker buffers or transfers it. Conversation pages keep their
+    // larger budget; the handler's existing error still drives smaller-page recovery reads.
     const conversation = /\/conversation(\?|$)/.test(endpoint);
     const limit = maxBytes ?? (conversation ? AO_RESPONSE_MAX_BYTES : 900000);
-    if (Buffer.byteLength(text) > limit) throw new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
+    const tooLarge = () => new Error(`AO response exceeds the handler limit (${method} ${endpoint.split("?")[0]})`);
+    let response;
+    try {
+      response = await fetchOffThread(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", maxBytes: limit, signal: AbortSignal.timeout(waitMs) });
+    } catch (error) {
+      if (error?.code === "ERR_RESPONSE_TOO_LARGE") throw tooLarge();
+      throw error;
+    }
+    const text = await response.text();
+    if (Buffer.byteLength(text) > limit) throw tooLarge();
     // AO answers some failures with an empty or non-JSON body; keep the status instead of
     // failing on JSON.parse and losing it.
     let data = {};
@@ -444,21 +451,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     let address;
     try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
     catch { return false; }
-    const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
-    if (!match) return false;
     if (Date.now() - (chatHostAcceptedAt.get(address) ?? -Infinity) < reuseAliveMs) return false;
-    return new Promise(resolve => {
-      const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
-      const settle = gone => { socket.destroy(); if (gone) chatHostAcceptedAt.delete(address); resolve(gone); };
-      socket.setTimeout(1500, () => settle(false));
-      socket.once("connect", () => {
-        const at = Date.now();
-        for (const [known, seen] of chatHostAcceptedAt) if (at - seen > CHAT_HOST_ALIVE_REUSE_MS) chatHostAcceptedAt.delete(known);
-        chatHostAcceptedAt.set(address, at);
-        settle(false);
-      });
-      socket.once("error", error => settle(error?.code === "ECONNREFUSED"));
-    });
+    return (await probeChatHost(address))?.code === "ECONNREFUSED";
   }
   // Every read of a running card asks whether its host is gone, and the chat reads each running
   // card about twice a second: with four chats working, main made 7 loopback connects a second at
@@ -467,6 +461,23 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // still found within it, and a gone answer, a new address or a send's own check always connects.
   const CHAT_HOST_ALIVE_REUSE_MS = 10000;
   const chatHostAcceptedAt = new Map();
+  const chatHostProbes = new Map(); // address -> a reachability check already in flight
+  function probeChatHost(address) {
+    const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(typeof address === "string" ? address : "");
+    const port = match ? Number(match[1]) : 0;
+    if (port < 1 || port > 65535) return Promise.resolve(null);
+    if (chatHostProbes.has(address)) return chatHostProbes.get(address);
+    const pending = Promise.resolve().then(() => probeTcpOffThread({ host: "127.0.0.1", port, timeoutMs: 1500 })).then(reply => {
+      if (reply.ok) {
+        const at = Date.now();
+        for (const [known, seen] of chatHostAcceptedAt) if (at - seen > CHAT_HOST_ALIVE_REUSE_MS) chatHostAcceptedAt.delete(known);
+        chatHostAcceptedAt.set(address, at);
+      } else if (reply.code === "ECONNREFUSED") chatHostAcceptedAt.delete(address);
+      return reply;
+    }).finally(() => { if (chatHostProbes.get(address) === pending) chatHostProbes.delete(address); });
+    chatHostProbes.set(address, pending);
+    return pending;
+  }
   /**
    * Whether the chat host recorded for an AO session is known to be up: its record is there and its
    * loopback address accepts a connection. A host deletes its record when its agent exits, so a
@@ -477,15 +488,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     let address;
     try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", sessionId(id), "host.json"), "utf8")).address; }
     catch { return false; }
-    const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
-    if (!match) return false;
-    return new Promise(resolve => {
-      const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
-      const settle = alive => { socket.destroy(); resolve(alive); };
-      socket.setTimeout(1500, () => settle(true));
-      socket.once("connect", () => settle(true));
-      socket.once("error", () => settle(false));
-    });
+    const reply = await probeChatHost(address);
+    return reply?.ok === true || reply?.code === "ETIMEDOUT";
   }
   /**
    * How many chat hosts outlived the last app run: their recorded loopback address still accepts
@@ -494,20 +498,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   async function survivingChatHosts() {
     let ids;
-    try { ids = fs.readdirSync(path.join(dataRoot, "chat-hosts")); } catch { return 0; }
-    const answers = await Promise.all(ids.map(id => {
+    try { ids = await fs.promises.readdir(path.join(dataRoot, "chat-hosts")); } catch { return 0; }
+    const answers = await Promise.all(ids.map(async id => {
       let address;
-      try { address = JSON.parse(fs.readFileSync(path.join(dataRoot, "chat-hosts", id, "host.json"), "utf8")).address; }
+      try { address = JSON.parse(await fs.promises.readFile(path.join(dataRoot, "chat-hosts", id, "host.json"), "utf8")).address; }
       catch { return false; }
-      const match = /^127\.0\.0\.1:(\d{1,5})$/.exec(String(address));
-      if (!match) return false;
-      return new Promise(resolve => {
-        const socket = net.connect({ host: "127.0.0.1", port: Number(match[1]) });
-        const settle = alive => { socket.destroy(); resolve(alive); };
-        socket.setTimeout(1500, () => settle(false));
-        socket.once("connect", () => settle(true));
-        socket.once("error", () => settle(false));
-      });
+      return (await probeChatHost(address))?.ok === true;
     }));
     return answers.filter(Boolean).length;
   }

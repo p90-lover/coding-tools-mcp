@@ -1038,7 +1038,7 @@ test("a sign-in wait that ends on Cloudflare's check page names the check, not t
   const { fixture, warnings } = securityCheckWaitFixture(async () => true);
   await assert.rejects(
     BrowserHost.prototype.waitForAuthenticated.call(fixture, 0),
-    /Cloudflare security check\. Open the Browser tab, complete the check, then run Setup → Install models\./,
+    /Cloudflare security check\. Open the GPT Browser, complete the check, then run Setup → Install models\./,
   );
   // The challenge token in the address never reaches the log.
   assert.deepEqual(warnings, [["browser.cloudflare_check_page", { url: "https://chatgpt.com/" }]]);
@@ -1386,9 +1386,10 @@ test("launcher shutdown persists ChatGPT DOM storage and cookies before browser 
 const NEW_CHAT_URL = { saved: "https://chatgpt.com/", temporary: "https://chatgpt.com/?temporary-chat=true" };
 
 for (const saved of [true, false]) {
-  const home = saved ? NEW_CHAT_URL.saved : NEW_CHAT_URL.temporary;
-  const mode = saved ? "saved chats" : "Temporary Chat";
-  test(`OAuth completion is re-proved on the primary new chat surface before login succeeds (${mode})`, async () => {
+  // The Browser tab signs in on ChatGPT's plain home whatever the setting; task turns pick their own chat.
+  const home = NEW_CHAT_URL.saved;
+  const mode = saved ? "saved chats" : "saved chats off";
+  test(`OAuth completion is re-proved on ChatGPT's home before login succeeds (${mode})`, async () => {
     let primaryReady = false;
     const completedAuthView = {
       webContents: {
@@ -1414,8 +1415,8 @@ for (const saved of [true, false]) {
           isDestroyed: () => false,
           executeJavaScript: async () => ({
             composer: primaryReady,
-            temporary: primaryReady && !saved,
-            savedHome: primaryReady && saved,
+            temporary: false,
+            savedHome: primaryReady,
             sessionAuthenticated: primaryReady,
             readyState: "complete",
             url: primaryReady ? home : "https://chatgpt.com/auth/login",
@@ -1443,10 +1444,10 @@ for (const saved of [true, false]) {
   });
 }
 
-// With saved chats on, a login that lands on Temporary Chat (where the connector is refused) moves
-// to the saved home, and one already on the saved home stays there without a reload.
-for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.saved]], [NEW_CHAT_URL.saved, []]]) {
-  test(`a login with saved chats on ends on the saved home (starting on ${start})`, async () => {
+// Whatever the setting, a login that lands on Temporary Chat moves to ChatGPT's home, and one already
+// on the home stays there without a reload.
+for (const saved of [true, false]) for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.saved]], [NEW_CHAT_URL.saved, []]]) {
+  test(`a login ends on ChatGPT's home (saved=${saved}, starting on ${start})`, async () => {
     let currentUrl = start;
     const loadedUrls = [];
     const fixture = {
@@ -1455,7 +1456,7 @@ for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.sav
       authView: null,
       state: { authenticated: false },
       logger: { info() {} },
-      getUseSavedChats: () => true,
+      getUseSavedChats: () => saved,
       view: {
         webContents: {
           getURL: () => currentUrl,
@@ -1480,44 +1481,6 @@ for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.sav
     assert.equal(result.url, NEW_CHAT_URL.saved);
   });
 }
-
-test("a successful primary login redirect is re-proved on Temporary Chat when saved chats are off", async () => {
-  let currentUrl = "https://chatgpt.com/";
-  const loadedUrls = [];
-  const fixture = {
-    activeTraceId: null,
-    manualOperation: "ChatGPT login",
-    authView: null,
-    state: { authenticated: false },
-    logger: { info() {} },
-    getUseSavedChats: () => false,
-    view: {
-      webContents: {
-        getURL: () => currentUrl,
-        isDestroyed: () => false,
-        executeJavaScript: async () => ({
-          composer: true,
-          temporary: currentUrl === NEW_CHAT_URL.temporary,
-          sessionAuthenticated: true,
-          readyState: "complete",
-          url: currentUrl,
-        }),
-        loadURL: async (url) => {
-          loadedUrls.push(url);
-          currentUrl = url;
-        },
-      },
-    },
-    setState(patch) { this.state = { ...this.state, ...patch }; },
-    snapshot() { return this.state; },
-  };
-
-  const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
-
-  assert.deepEqual(loadedUrls, [NEW_CHAT_URL.temporary]);
-  assert.equal(result.authenticated, true);
-  assert.equal(result.url, NEW_CHAT_URL.temporary);
-});
 
 test("an authenticated primary surface closes a stale embedded auth popup", async () => {
   const staleAuthView = {
@@ -1763,7 +1726,9 @@ for (const useSavedChats of [true, false]) test(`verification refresh opens and 
         isDestroyed: () => false,
         getURL: () => currentUrl,
         loadURL: async (url) => { currentUrl = url; calls.push(["navigate", url]); },
-        executeJavaScript: async () => {
+        executeJavaScript: async (script) => {
+          // Cloudflare's check is not shown here; only the session probe counts.
+          if (script.includes("isCloudflareCheckPage")) return false;
           calls.push(["authenticate"]);
           // The page's own probe: a saved-chat home is no Temporary Chat but is a new chat.
           return { sessionAuthenticated: true, composer: true, temporary: !useSavedChats,
@@ -3237,6 +3202,43 @@ test("user and task browser tabs share the five additional-tab limit", async () 
   await assert.rejects(host.createTurnTab("trace_six", 444), /already has 5 browser tabs/);
   assert.throws(() => host.createManualTurnTab("trace_six", 444, null, "prompt", 30_000), /already has 5 browser tabs/);
   assert.throws(() => host.createUserTab(), /already has 5 browser tabs/);
+});
+
+test("the GPT Browser address bar opens a typed address in the shown tab, or in a new one", () => {
+  const loads = [];
+  const tab = { id: "user", status: "ready", loading: false, view: { webContents: { isDestroyed: () => false, loadURL: (url) => { loads.push(url); return Promise.resolve(); } } } };
+  const created = [];
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    userTabs: new Map([["user", tab]]),
+    selectedTabId: "user",
+    snapshot() { return { url: tab.url }; },
+    createUserTab(url) { created.push(url); return { created: url }; },
+  });
+
+  assert.deepEqual(host.openUrl(" example.com/page "), { url: "https://example.com/page" });
+  assert.deepEqual(loads, ["https://example.com/page"]);
+  assert.equal(tab.status, "loading");
+  assert.throws(() => host.openUrl("not a site"), /Enter a web address/);
+  assert.throws(() => host.openUrl("javascript:alert(1)"), /Enter a web address/);
+  // On the home tab nothing user-owned is shown: the address opens in a new tab.
+  host.selectedTabId = "home";
+  assert.deepEqual(host.openUrl("https://chatgpt.com/"), { created: "https://chatgpt.com/" });
+  assert.deepEqual(created, ["https://chatgpt.com/"]);
+});
+
+test("a still of the shown page stands in for it under the sidebar; none while the page is hidden", async () => {
+  const image = { isEmpty: () => false, toJPEG: (quality) => Buffer.from(`jpeg@${quality}`) };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    visible: true,
+    surfaceActive: true,
+    activeView: () => ({ webContents: { isDestroyed: () => false, capturePage: async () => image } }),
+  });
+  assert.equal(await host.captureStill(), `data:image/jpeg;base64,${Buffer.from("jpeg@80").toString("base64")}`);
+  host.surfaceActive = false;
+  assert.equal(await host.captureStill(), null);
+  host.surfaceActive = true;
+  host.activeView = () => ({ webContents: { isDestroyed: () => false, capturePage: async () => { throw new Error("gone"); } } });
+  assert.equal(await host.captureStill(), null);
 });
 
 test("five browser tabs are a hard account-safety limit", async () => {

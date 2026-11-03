@@ -421,7 +421,7 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
             if let Some(f) = current.take() {
                 files.push(f);
             }
-            let path = parse_diff_path(line.strip_prefix("--- ").unwrap_or(""));
+            let path = parse_diff_path(line.strip_prefix("--- ").unwrap_or(""), true);
             current = Some(FilePatch {
                 path,
                 hunks: Vec::new(),
@@ -430,7 +430,7 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
             });
         } else if line.starts_with("+++ ") {
             if let Some(ref mut f) = current {
-                let new_path = parse_diff_path(line.strip_prefix("+++ ").unwrap_or(""));
+                let new_path = parse_diff_path(line.strip_prefix("+++ ").unwrap_or(""), true);
                 if !new_path.is_empty() && new_path != "/dev/null" {
                     f.path = new_path;
                 }
@@ -504,7 +504,7 @@ fn parse_codex_patch(patch: &str) -> Result<Vec<FilePatch>, WorkspaceError> {
         if let Some((path, is_new_file, is_deleted)) = header {
             finish_codex_file(&mut files, &mut current, &mut current_hunk);
             current = Some(FilePatch {
-                path: parse_diff_path(path),
+                path: parse_diff_path(path, false),
                 hunks: Vec::new(),
                 is_new_file,
                 is_deleted,
@@ -574,12 +574,16 @@ fn affected_paths(affected: &[Value], operation: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_diff_path(raw: &str) -> String {
+fn parse_diff_path(raw: &str, strip_diff_prefix: bool) -> String {
     let trimmed = raw.trim();
-    let path = trimmed
-        .strip_prefix("a/")
-        .or_else(|| trimmed.strip_prefix("b/"))
-        .unwrap_or(trimmed);
+    let path = if strip_diff_prefix {
+        trimmed
+            .strip_prefix("a/")
+            .or_else(|| trimmed.strip_prefix("b/"))
+            .unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
     if path == "/dev/null" {
         return String::new();
     }
@@ -761,7 +765,13 @@ pub(crate) fn commit_staged_bytes(
         backups.insert(
             path.clone(),
             if path.exists() && path.is_file() {
-                Some(fs::read(&path).unwrap_or_default())
+                Some(fs::read(&path).map_err(|error| {
+                    cleanup_staging_roots(&staging_roots);
+                    patch_failed(format!(
+                        "Failed to read backup for {}: {error}",
+                        resolved.display
+                    ))
+                })?)
             } else {
                 None
             },
@@ -978,6 +988,91 @@ mod tests {
         })
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_backup_aborts_before_replacing_any_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/patch-backup-read-tests");
+        fs::create_dir_all(&artifacts).unwrap();
+        for blocked_position in [0, 1] {
+            let fixture = tempfile::tempdir_in(&artifacts).unwrap();
+            let ws = Workspace::new(fixture.path().to_path_buf()).unwrap();
+            let staged: HashMap<String, Option<Vec<u8>>> = HashMap::from([
+                ("a.txt".into(), Some(b"replacement a".to_vec())),
+                ("b.txt".into(), Some(b"replacement b".to_vec())),
+            ]);
+            // The helper iterates this same immutable map; insertion order is unspecified.
+            let order: Vec<_> = staged.keys().cloned().collect();
+            for name in &order {
+                fs::write(ws.root().join(name), format!("original {name}")).unwrap();
+            }
+            let blocked = ws.root().join(&order[blocked_position]);
+            // Deny reads while allowing write/delete, so an unreadable snapshot must
+            // refuse the transaction even though replacing this file could succeed.
+            let lock = fs::OpenOptions::new()
+                .write(true)
+                .share_mode(0x2 | 0x4)
+                .open(&blocked)
+                .unwrap();
+            let read_result = fs::read(&blocked);
+            let result = commit_staged_bytes(&ws, &staged);
+            drop(lock);
+
+            let read_error = read_result.expect_err("fixture must prevent reading the backup");
+            let error = result.expect_err("unreadable backup must refuse the transaction");
+            assert!(error.message().contains("Failed to read backup"));
+            assert!(error.message().contains(&read_error.to_string()));
+            for name in &order {
+                assert_eq!(
+                    fs::read(ws.root().join(name)).unwrap(),
+                    format!("original {name}").as_bytes()
+                );
+            }
+            let staging = ws.root().join("aiTemp/staging");
+            if staging.exists() {
+                assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn readable_empty_and_new_file_backups_keep_rollback_semantics() {
+        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/patch-backup-read-tests");
+        fs::create_dir_all(&artifacts).unwrap();
+        let fixture = tempfile::tempdir_in(artifacts).unwrap();
+        let ws = Workspace::new(fixture.path().to_path_buf()).unwrap();
+        let existing = ws.root().join("existing.txt");
+        let empty = ws.root().join("empty.txt");
+        let new = ws.root().join("nested/new.txt");
+        fs::write(&existing, b"original").unwrap();
+        fs::write(&empty, b"").unwrap();
+        let staged: HashMap<String, Option<Vec<u8>>> = HashMap::from([
+            ("existing.txt".into(), Some(b"replacement".to_vec())),
+            ("empty.txt".into(), Some(b"filled".to_vec())),
+            ("nested/new.txt".into(), Some(b"new".to_vec())),
+        ]);
+
+        let backups = commit_staged_bytes(&ws, &staged).unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), b"replacement");
+        assert_eq!(fs::read(&empty).unwrap(), b"filled");
+        assert_eq!(fs::read(&new).unwrap(), b"new");
+        assert_eq!(backups[&existing].as_deref(), Some(&b"original"[..]));
+        assert_eq!(backups[&empty].as_deref(), Some(&b""[..]));
+        assert!(backups[&new].is_none());
+
+        restore_backups(&ws, &backups).unwrap();
+        assert_eq!(fs::read(existing).unwrap(), b"original");
+        assert!(fs::read(empty).unwrap().is_empty());
+        assert!(!new.exists());
+    }
+
     #[test]
     fn move_to_trash_preserves_content() {
         let root = tempfile::tempdir().expect("workspace");
@@ -1084,6 +1179,130 @@ mod tests {
         assert_eq!(
             apply_hunks(input, &[hunk]).expect("patch"),
             "one\r\ninsert-a\r\ninsert-b\r\ntwo\r\n"
+        );
+    }
+
+    #[test]
+    fn codex_paths_are_literal_while_unified_prefixes_are_markers() {
+        for operation in ["Add", "Update", "Delete"] {
+            for (raw, expected) in [
+                ("a/note.txt", "a/note.txt"),
+                ("b/note.txt", "b/note.txt"),
+                (" a/space name.txt ", "a/space name.txt"),
+                ("\"a/quoted.txt\"", "\"a/quoted.txt\""),
+                ("b\\nested\\note.txt", "b/nested/note.txt"),
+                ("@peer/a/note.txt", "@peer/a/note.txt"),
+                ("/absolute/a/note.txt", "/absolute/a/note.txt"),
+                ("/dev/null", ""),
+                (" ", ""),
+            ] {
+                let patch =
+                    format!("*** Begin Patch\n*** {operation} File: {raw}\n*** End Patch\n");
+                let files = parse_unified_diff(&patch).expect("parse Codex");
+                assert_eq!(files[0].path, expected, "{operation}: {raw}");
+            }
+        }
+        for prefix in ["a", "b"] {
+            let patch =
+                format!("--- a/{prefix}/note.txt\n+++ b/{prefix}/note.txt\n@@\n-old\n+new\n");
+            assert_eq!(
+                parse_unified_diff(&patch).unwrap()[0].path,
+                format!("{prefix}/note.txt")
+            );
+        }
+    }
+
+    #[test]
+    fn codex_prefixed_paths_check_and_apply_to_the_named_files() {
+        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/patch-literal-path-tests");
+        fs::create_dir_all(&artifacts).unwrap();
+        let fixture = tempfile::tempdir_in(artifacts).unwrap();
+        let root = fixture.path().join("workspace");
+        let linked = fixture.path().join("linked");
+        for directory in [
+            root.join("a"),
+            root.join("b"),
+            root.join(".mcp-paths"),
+            linked.join("a"),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        let mapping = format!("name=peer\npath={}\nmode=read-write\n", linked.display());
+        fs::write(root.join(".mcp-paths/peer.txt"), &mapping).unwrap();
+        fs::write(root.join("note.txt"), "root sentinel\n").unwrap();
+        let context = ToolContext::for_test(root.clone(), fixture.path().join("harness")).unwrap();
+        for prefix in ["a", "b"] {
+            let path = format!("{prefix}/note.txt");
+            let target = root.join(&path);
+            let add = json!({"patch": format!("*** Begin Patch\n*** Add File: {path}\n+old\n*** End Patch\n")});
+            assert_eq!(
+                patch_check(&context, &add).unwrap()["would_create"],
+                json!([path])
+            );
+            assert!(!target.exists());
+            apply_patch(&context, &add).unwrap();
+            assert_eq!(fs::read_to_string(&target).unwrap(), "old\n");
+            let update = json!({"patch": format!("*** Begin Patch\n*** Update File: {path}\n@@\n-old\n+new\n*** End Patch\n")});
+            assert_eq!(
+                patch_check(&context, &update).unwrap()["would_modify"],
+                json!([path])
+            );
+            assert_eq!(fs::read_to_string(&target).unwrap(), "old\n");
+            apply_patch(&context, &update).unwrap();
+            assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+            let unified =
+                json!({"patch": format!("--- a/{path}\n+++ b/{path}\n@@\n-new\n+unified\n")});
+            apply_patch(&context, &unified).unwrap();
+            assert_eq!(fs::read_to_string(&target).unwrap(), "unified\n");
+            let delete = json!({"patch": format!("*** Begin Patch\n*** Delete File: {path}\n*** End Patch\n")});
+            assert_eq!(
+                patch_check(&context, &delete).unwrap()["would_delete"],
+                json!([path])
+            );
+            assert!(target.is_file());
+            apply_patch(&context, &delete).unwrap();
+            assert!(!target.exists());
+            assert_eq!(
+                fs::read_to_string(root.join("note.txt")).unwrap(),
+                "root sentinel\n"
+            );
+        }
+        for (path, target) in [
+            (
+                root.join("a/absolute.txt")
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+                root.join("a/absolute.txt"),
+            ),
+            ("@peer/a/alias.txt".into(), linked.join("a/alias.txt")),
+        ] {
+            let add = json!({"patch": format!("*** Begin Patch\n*** Add File: {path}\n+control\n*** End Patch\n")});
+            patch_check(&context, &add).unwrap();
+            assert!(!target.exists());
+            apply_patch(&context, &add).unwrap();
+            assert_eq!(fs::read_to_string(target).unwrap(), "control\n");
+        }
+        for path in [
+            "a/../../outside.txt",
+            "a/.git/config",
+            "b/.mcp-paths/foreign",
+            "/dev/null",
+        ] {
+            let add = json!({"patch": format!("*** Begin Patch\n*** Add File: {path}\n+x\n*** End Patch\n")});
+            assert!(patch_check(&context, &add).is_err(), "{path}");
+            assert!(apply_patch(&context, &add).is_err(), "{path}");
+        }
+        assert!(!fixture.path().join("outside.txt").exists());
+        assert_eq!(
+            fs::read_to_string(root.join(".mcp-paths/peer.txt")).unwrap(),
+            mapping
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("note.txt")).unwrap(),
+            "root sentinel\n"
         );
     }
 

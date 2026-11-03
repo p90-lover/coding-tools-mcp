@@ -84,6 +84,16 @@ test("a chat draws only its newest turns, never cutting a folded run of goal rou
   assert.equal(plan.turnWindowStart(97, 27, folds), 70, "a start on the fold's row stays");
 });
 
+test("an opened chat draws its newest turns with the click, the rest later, and keeps those drawn when a reply arrives", () => {
+  assert.equal(plan.FIRST_DRAWN_TURNS, 3);
+  assert.equal(plan.turnDrawStart(20, 4, null), 17, "the click draws the newest three");
+  assert.equal(plan.turnDrawStart(20, 4, 4), 4, "then the rest of the window");
+  assert.equal(plan.turnDrawStart(20, 4, 2), 4, "never past the window's start");
+  assert.equal(plan.turnDrawStart(2, 0, null), 0, "a short chat draws everything at once");
+  assert.equal(plan.turnDrawStart(21, 4, 15), 15, "a reply arriving meanwhile keeps the drawn turns");
+  assert.equal(plan.turnDrawStart(3, 0, 9), 3, "a shorter chat clamps an old index");
+});
+
 test("a retried card's attempt counts its earlier attempts, not a reviewer's cycles", () => {
   assert.equal(plan.stepAttempt(undefined), 1);
   assert.equal(plan.stepAttempt({ earlier: [{ label: "Attempt 1", text: "" }, { label: "Attempt 2", text: "" }] }), 3);

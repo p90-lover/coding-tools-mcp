@@ -2839,12 +2839,18 @@ test("a quiet turn whose model CPA keeps refusing says so, with what the refusal
   assert.equal(chat.cpaRefusalNote({ streak: 1, status: 429, since: now, lastAt: now }, now), "", "one failure is usually retried at once");
   assert.equal(chat.cpaRefusalNote(null, now), "");
 });
+// The poll helpers from AgentOrchestratorSurface.tsx, with a fixed spread so a test can see it.
+const pollHelpers = {
+  isCapacityError: cause => /HEADLESS_CAPACITY|HEADLESS_QUEUE_FULL|launcher queue is full/.test(cause instanceof Error ? cause.message : String(cause)),
+  spreadInterval: ms => ms + 300,
+};
+
 test("the approvals poll skips a card whose attempt changed mid-read instead of raising an error", async () => {
   const state = { approvals: null, policies: null, errors: [] };
   const calls = [];
   const timers = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
-    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]),
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["old", "live"]), ...pollHelpers,
     // #463: the poll asks only for a run of this project (selectedRunHere).
     workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
@@ -2869,7 +2875,7 @@ test("the approvals poll skips a card whose attempt changed mid-read instead of 
 test("the approvals poll still reports an observe failure that is not a changed attempt", async () => {
   const errors = [];
   const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
-    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]),
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]), ...pollHelpers,
     workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "idle", surfaceHidden: () => false,
     approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
     setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
@@ -2879,6 +2885,26 @@ test("the approvals poll still reports an observe failure that is not a changed 
   const cleanup = effect();
   await new Promise(setImmediate);
   assert.deepEqual(errors, ["AO result is unavailable; inspect the run before retrying"]);
+  cleanup();
+});
+
+// 2026-11-03: eight split-view chats refreshing together filled the service's queue, and each
+// refused poll showed as "Something went wrong". The next tick reads again, so it shows nothing.
+test("the approvals poll shows nothing when the service had no room for it", async () => {
+  const errors = [];
+  let period = null;
+  const effect = rendererCallback("AgentOrchestratorSurface.tsx", "effect:approvalScope.current", {
+    Error, STALE_OBSERVE: /AO receipt changed/, activeNodeIds: JSON.stringify(["n1"]), ...pollHelpers,
+    workspaceId: "w1", selectedRunId: "run1", selectedRunHere: true, autoStatus: "running", surfaceHidden: () => false,
+    approvalScope: { current: null }, selection: { current: { workspaceId: "w1", runId: "run1" } },
+    setPendingApprovals: () => {}, setRuntimePolicies: () => {}, setMissions: () => {}, setError: error => errors.push(error),
+    setInterval: (callback, ms) => { period = ms; return 1; }, clearInterval: () => {},
+    moduleCall: async () => { throw new Error("IPC_TRANSPORT_FAILED: apps.call failed: HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)"); },
+  });
+  const cleanup = effect();
+  await new Promise(setImmediate);
+  assert.deepEqual(errors, []);
+  assert.equal(period, 3300, "its period is spread (spreadInterval)");
   cleanup();
 });
 

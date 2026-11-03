@@ -469,3 +469,68 @@ test("missing, valid empty and optional GPT Browser metadata retain their startu
     assert.equal(typeof JSON.parse(f.bytes()).accounts[0].createdAt, "string");
   } finally { browser.dispose(); }
 });
+
+// The surface with its layout effects run: the native page, its still, and the frames between.
+function stillSurface() {
+  const slots = [], timers = new Map(), frames = [], calls = []; let cursor = 0, nextTimer = 0, pending = [], dirty = false, shot = null;
+  const effect = (fn, deps) => { const at = cursor++, old = slots[at]; if (!old || deps?.some((value, i) => value !== old.deps?.[i])) {
+    const slot = slots[at] = { deps, cleanup: old?.cleanup }; pending.push(() => { slot.cleanup?.(); slot.cleanup = fn(); });
+  } };
+  const react = {
+    useState(initial) { const at = cursor++; if (!(at in slots)) slots[at] = typeof initial === "function" ? initial() : initial;
+      return [slots[at], value => { const next = typeof value === "function" ? value(slots[at]) : value; dirty ||= next !== slots[at]; slots[at] = next; }]; },
+    useRef(initial) { const at = cursor++; return slots[at] ?? (slots[at] = { current: initial }); },
+    useEffect: effect, useLayoutEffect: effect, useCallback: fn => fn,
+  };
+  const status = { activeId: "a", accounts: [{ id: "a", label: "Account A" }], page: null };
+  const api = { gptBrowserStatus: async () => status, onGptBrowserChanged: () => () => {},
+    setGptBrowserSurfaceActive: async (active) => { calls.push(active ? "show" : "hide"); return status; },
+    setGptBrowserBounds: async () => true,
+    gptBrowserSnapshot: () => { calls.push("snapshot"); return new Promise((resolve) => { shot = resolve; }); } };
+  const window = { setTimeout(fn, delay) { const id = ++nextTimer; timers.set(id, { fn, delay }); return id; }, clearTimeout: id => timers.delete(id),
+    addEventListener() {}, removeEventListener() {} };
+  const globals = { window, requestAnimationFrame: fn => frames.push(fn), cancelAnimationFrame() {},
+    ResizeObserver: class { observe() {} disconnect() {} } };
+  const jsx = (type, props) => ({ type, props }), exports = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/GptBrowserSurface.tsx"), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, { exports, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, ...globals });
+  const props = { api, active: true, covered: false, setError() {} };
+  const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
+  const render = () => { let view; do { cursor = 0; pending = []; dirty = false; view = exports.GptBrowserSurface(props); for (const run of pending) run(); } while (dirty); return view; };
+  const element = { getBoundingClientRect: () => ({ x: 52, y: 60, width: 900, height: 600 }) };
+  return { props, calls, timers, render,
+    still: () => walk(render()).find(item => item.props?.className === "gpb-still")?.props.src ?? null,
+    mountSlot() { walk(render()).find(item => item.props?.className === "gpb-slot").props.ref(element); render(); },
+    snapshot: (url) => shot(url), frame() { for (const run of frames.splice(0)) run(); },
+    expire(delay) { for (const [id, timer] of [...timers]) if (timer.delay === delay) { timers.delete(id); timer.fn(); } } };
+}
+
+test("the sidebar sliding over the GPT Browser shows a still of the page, not a black pane", async () => {
+  const ui = stillSurface();
+  ui.render(); await new Promise(setImmediate); ui.mountSlot();
+  assert.equal(ui.calls.at(-1), "show");
+  ui.props.covered = true; ui.render();
+  assert.equal(ui.calls.at(-1), "snapshot", "the page is captured before it leaves the window");
+  ui.snapshot("data:image/jpeg;base64,AAAA"); await new Promise(setImmediate);
+  assert.equal(ui.still(), "data:image/jpeg;base64,AAAA", "the still takes the page's place");
+  assert.notEqual(ui.calls.at(-1), "hide", "the page stays until the still has drawn");
+  ui.frame();
+  assert.equal(ui.calls.at(-1), "hide");
+  ui.props.covered = false; ui.render();
+  assert.equal(ui.calls.at(-1), "show");
+  assert.equal(ui.still(), "data:image/jpeg;base64,AAAA", "the still stays until the page has drawn over it");
+  ui.expire(250); ui.render();
+  assert.equal(ui.still(), null);
+});
+
+test("a sidebar gone before the page was captured leaves the page in the window", async () => {
+  const ui = stillSurface();
+  ui.render(); await new Promise(setImmediate); ui.mountSlot();
+  const shown = ui.calls.length;
+  ui.props.covered = true; ui.render();
+  ui.props.covered = false; ui.render();
+  ui.snapshot("data:image/jpeg;base64,BBBB"); await new Promise(setImmediate); ui.frame();
+  assert.ok(!ui.calls.slice(shown).includes("hide"), "nothing hides the page once it is uncovered");
+  assert.equal(ui.still(), null);
+});

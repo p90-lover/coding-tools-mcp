@@ -11,7 +11,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { browserPartitionForLauncherProfile, isBrowserAccountPartition } = require("./profile.cjs");
-const { cleanUserAgent } = require("./gpt-browser.cjs");
+const { browsableUrl, cleanUserAgent } = require("./gpt-browser.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
@@ -29,6 +29,9 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const SAVED_CHAT_URL = "https://chatgpt.com/";
+// The Browser tab's own page (startup, sign-in, sign-out, a new tab) is ChatGPT's plain home whatever
+// "Save chats in ChatGPT" says; only task turns and connector verification open Temporary Chat.
+const HOME_URL = SAVED_CHAT_URL;
 const SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 // Preserve only a concrete ChatGPT conversation address, never a sign-in page, homepage,
@@ -184,7 +187,7 @@ function authenticatedChatGptSession(payload, now = Date.now()) {
 // Cloudflare can put its own check page ("Just a moment...") where ChatGPT should load. Only the
 // person can pass it, and the wait for ChatGPT then ran out as a "login" that was never the problem
 // (seen live 2026-11-03: the bridge upgrade failed this way on two launches in a row).
-const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.";
+const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the GPT Browser, complete the check, then run Setup → Install models.";
 
 /**
  * Runs inside the page (injected with toString, like authenticatedChatGptSession): true while the
@@ -1203,10 +1206,11 @@ class BrowserHost {
     return tab;
   }
 
-  createUserTab() {
+  /** A tab of the person's own; `initialUrl` (the address bar's) opens instead of a new chat. */
+  createUserTab(initialUrl = null) {
     const full = makeTabRoom(this, this.partition, false);
     if (full) throw new Error(`ChatGPT Web already has ${full} browser tabs; close one before opening another`);
-    if (!this.surfaceActive) throw new Error("Open the Browser before creating a tab");
+    if (!this.surfaceActive) throw new Error("Open the GPT Browser before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
     // A signed-out account opens tabs too, as in GPT Browser: the new tab is ChatGPT's own sign-in.
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)
@@ -1232,7 +1236,7 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: SAVED_CHAT_URL,
+      url: initialUrl ?? HOME_URL,
       status: "loading",
       loading: true,
       message: "Opening ChatGPT",
@@ -1245,7 +1249,7 @@ class BrowserHost {
     this.bindUserTabContents(tab);
     this.selectedTabId = tab.id;
     this.show();
-    void view.webContents.loadURL(SAVED_CHAT_URL).catch((error) => {
+    void view.webContents.loadURL(tab.url).catch((error) => {
       if (this.userTabs.get(tab.id) !== tab || view.webContents.isDestroyed()
         || isAbortedNavigationError(error)) return;
       tab.loading = false;
@@ -1543,6 +1547,31 @@ class BrowserHost {
       });
       document.documentElement.dataset.codexWebGptSurface = ${encoded};
     })()`, true);
+  }
+
+  /**
+   * The address bar, from the GPT Browser this browser took in: an http(s) page opens in the shown
+   * tab of the person's own, or in a new one. The home page and Codex turn tabs are the bridge's and
+   * never browse away, so an address typed while one shows opens a tab.
+   */
+  openUrl(value) {
+    const url = browsableUrl(value);
+    if (!url) throw new Error("Enter a web address, for example chatgpt.com or https://example.com");
+    const tab = this.selectedUserTab();
+    if (!tab) return this.createUserTab(url);
+    tab.url = url;
+    tab.status = "loading";
+    tab.loading = true;
+    void tab.view.webContents.loadURL(url).catch((error) => {
+      if (this.userTabs.get(tab.id) !== tab || tab.view.webContents.isDestroyed() || isAbortedNavigationError(error)) return;
+      tab.loading = false;
+      tab.status = "error";
+      tab.message = error instanceof Error ? error.message : String(error);
+      this.logger.error("browser.user_tab_navigation_failed", { tabId: tab.id, ...navigationErrorForLog(error) });
+      this.publishState?.(this.snapshot());
+    });
+    this.publishState?.(this.snapshot());
+    return this.snapshot();
   }
 
   bindUserTabContents(tab) {
@@ -1917,6 +1946,12 @@ class BrowserHost {
     // existing new-chat document of the requested kind so the helper observes one authoritative
     // SPA bootstrap (and, for verification, the same kind of chat the task turns use).
     const targetUrl = useSavedChats ? SAVED_CHAT_URL : TEMPORARY_CHAT_URL;
+    // Cloudflare's check page reloads itself until it passes; a reload from here only adds a request
+    // and a flash, then times out on the same check. Name the check at once instead.
+    if (await this.cloudflareCheckShown()) {
+      this.logger.warn("browser.cloudflare_check_page", { url: urlWithoutQuery(this.view.webContents.getURL()) });
+      throw new Error(CHATGPT_SECURITY_CHECK_MESSAGE);
+    }
     if (isNewChatUrl(this.view.webContents.getURL(), useSavedChats)) {
       await this.hardRefreshHome();
     } else {
@@ -2659,9 +2694,9 @@ class BrowserHost {
     this.syncViewVisibility();
     this.logger.info("browser.auth_surface_closed");
     if (refreshMain && this.manualOperation === "ChatGPT login" && !this.view.webContents.isDestroyed()) {
-      void this.view.webContents.loadURL(newChatUrlFor(this)).catch((error) => {
+      void this.view.webContents.loadURL(HOME_URL).catch((error) => {
         this.logger.error("browser.auth_refresh_failed", {
-          origin: navigationOriginForLog(newChatUrlFor(this)),
+          origin: navigationOriginForLog(HOME_URL),
           ...navigationErrorForLog(error),
         });
       });
@@ -2716,7 +2751,7 @@ class BrowserHost {
     if (this.selectedTurnTab() || this.selectedUserTab()) return;
     const url = this.view.webContents.getURL();
     if (url !== IDLE_BROWSER_URL && !isTemporaryChatUrl(url)) return;
-    await this.view.webContents.loadURL(SAVED_CHAT_URL);
+    await this.view.webContents.loadURL(HOME_URL);
     if (inspectSession) await this.probeAuthentication();
   }
 
@@ -2724,6 +2759,21 @@ class BrowserHost {
     this.visible = false;
     this.syncViewVisibility();
     this.setState({ visible: false });
+  }
+
+  /**
+   * A still of the page in the window, as a JPEG data URL (null when none is shown). The GPT Browser
+   * page draws it in the view's place while the sidebar slides over it: the native view is drawn
+   * above the whole app page, so it steps aside and left the pane black.
+   */
+  async captureStill() {
+    if (!this.visible || !this.surfaceActive) return null;
+    const contents = this.activeView()?.webContents;
+    if (!contents || contents.isDestroyed()) return null;
+    try {
+      const image = await contents.capturePage();
+      return image.isEmpty() ? null : `data:image/jpeg;base64,${image.toJPEG(80).toString("base64")}`;
+    } catch { return null; }
   }
 
   setSurfaceActive(active) {
@@ -3507,7 +3557,7 @@ class BrowserHost {
         this.logger.info("browser.login_opened");
         const current = this.view.webContents.getURL();
         if (!current.startsWith(CHATGPT_ORIGIN)) {
-          await this.view.webContents.loadURL(newChatUrlFor(this));
+          await this.view.webContents.loadURL(HOME_URL);
         }
         await this.probeAuthentication();
         const authenticated = await this.waitForAuthenticated();
@@ -3584,7 +3634,7 @@ class BrowserHost {
   async resetFailedPasskeyLogin() {
     await this.clearOwnedSessionForPasskey();
     const contents = this.view.webContents;
-    await contents.loadURL(newChatUrlFor(this));
+    await contents.loadURL(HOME_URL);
     const browser = await this.probeAuthentication();
     if (browser.authenticated) throw new Error("Partial passkey session remained authenticated after cleanup");
     this.setState({ authenticated: false, loading: false, status: "signed-out", message: "Sign in to ChatGPT" });
@@ -3609,7 +3659,7 @@ class BrowserHost {
       for (const cookie of state.cookies) await contents.session.cookies.set(cookie);
       contents.session.flushStorageData();
       await contents.session.cookies.flushStore();
-      await contents.loadURL(newChatUrlFor(this));
+      await contents.loadURL(HOME_URL);
       if (state.localStorage.length > 0) {
         const entries = javaScriptLiteral(state.localStorage);
         await contents.executeJavaScript(`(() => {
@@ -3618,7 +3668,7 @@ class BrowserHost {
           }
           for (const entry of ${entries}) localStorage.setItem(entry.name, entry.value);
         })()`, true);
-        await contents.loadURL(newChatUrlFor(this));
+        await contents.loadURL(HOME_URL);
       }
       result = await this.waitForAuthenticated(60_000);
       await this.runSessionInspection(false);
@@ -3670,7 +3720,7 @@ class BrowserHost {
         message: "Signing out of ChatGPT",
         status: "loading",
       });
-      await contents.loadURL(newChatUrlFor(this));
+      await contents.loadURL(HOME_URL);
       const browser = await this.probeAuthentication();
       if (browser.authenticated) {
         throw new Error("ChatGPT session remained authenticated after local session data was cleared");
@@ -3690,7 +3740,7 @@ class BrowserHost {
       // Session verification is read-only on an existing ChatGPT page, including saved chats.
       // Only the idle/off-origin document needs to open ChatGPT before it can be inspected.
       if (!this.view.webContents.getURL().startsWith(CHATGPT_ORIGIN + "/")) {
-        await this.view.webContents.loadURL(newChatUrlFor(this));
+        await this.view.webContents.loadURL(HOME_URL);
       }
       const state = await this.probeAuthentication();
       if (state.authenticated) {
@@ -3873,19 +3923,19 @@ class BrowserHost {
       if (authResult.sessionAuthenticated) {
         const completedAuthView = this.authView;
         this.closeAuthView(completedAuthView, true, false);
-        await contents.loadURL(newChatUrlFor(this));
+        await contents.loadURL(HOME_URL);
         if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
         url = contents.getURL();
         result = await probe(contents);
       }
     }
-    // A login ends on the new chat the setting chooses: with saved chats on, a Temporary Chat (where
-    // ChatGPT refuses the connector) is left for the saved home, and the saved home is kept as it is.
+    // A login ends on ChatGPT's home: a Temporary Chat (where ChatGPT also refuses the connector) is
+    // left for it, and the home is kept as it is, with no reload.
     if (this.manualOperation === "ChatGPT login"
       && result.sessionAuthenticated
-      && !isNewChatUrl(result.url ?? url, useSavedChatsFor(this))
+      && !isNewChatUrl(result.url ?? url, true)
       && !this.view.webContents.isDestroyed()) {
-      await contents.loadURL(newChatUrlFor(this));
+      await contents.loadURL(HOME_URL);
       if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
       url = contents.getURL();
       result = await probe(contents);

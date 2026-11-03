@@ -1,4 +1,4 @@
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, memo, startTransition, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { ImagePreviewDialog, type MarkupResult } from "./ImagePreview";
 import { markupReadable } from "./image-markup";
@@ -20,7 +20,7 @@ import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
-import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
+import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -2174,8 +2174,32 @@ export function AgentOrchestratorChat({
   const [shownTurns, setShownTurns] = useState(TURN_WINDOW);
   useEffect(() => { setShownTurns(TURN_WINDOW); }, [selectedTaskId]);
   const windowStart = turnWindowStart(turns.length, shownTurns, roundFolds.folds);
+  // Opening a chat drew its 16 newest turns in the click's own commit (650-900 elements each, 10-14k
+  // a chat), so the click froze until all of it was laid out. The click now draws the chat with its
+  // newest turns (turnDrawStart); the rest follow in one interruptible background render after that
+  // frame is painted, and only while the chat is shown. Kept per chat, so a newly opened chat never
+  // starts from another's. Without frames to pace it (no requestAnimationFrame) it draws all at once.
+  const [drawn, setDrawn] = useState<{ taskId: string; from: number | null }>({ taskId: "", from: null });
+  const [shownAgain, setShownAgain] = useState(0);
+  const drawKey = selectedTaskId ?? "";
+  const paced = typeof requestAnimationFrame === "function";
+  const drawStart = paced ? turnDrawStart(turns.length, windowStart, drawn.taskId === drawKey ? drawn.from : null) : windowStart;
+  useEffect(() => {
+    if (drawStart <= windowStart) return undefined;
+    const box = scroller.current;
+    // A chat on a hidden page waits until it is shown: it resizes from nothing then. Read from the
+    // markup (a [hidden] page), not the layout: asking for boxes forced a layout on every step.
+    if (box?.closest("[hidden]")) {
+      if (typeof ResizeObserver === "undefined") return undefined;
+      const observer = new ResizeObserver(() => { if (!box.closest("[hidden]")) setShownAgain((count) => count + 1); });
+      observer.observe(box);
+      return () => observer.disconnect();
+    }
+    const frame = requestAnimationFrame(() => startTransition(() => setDrawn({ taskId: drawKey, from: windowStart })));
+    return () => cancelAnimationFrame(frame);
+  }, [drawStart, windowStart, drawKey, shownAgain]);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
-    if (turnIndex < windowStart) return null;
+    if (turnIndex < drawStart) return null;
     const foldKey = roundFolds.foldOf.get(turnIndex);
     const foldRow = roundFolds.foldAt.get(turnIndex);
     const foldToggle = foldRow ? <FoldedRounds key={`fold:${foldRow.key}`} first={foldRow.first} last={foldRow.last}
@@ -2294,7 +2318,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
-    replyStyle, roundFolds, openRounds, windowStart]);
+    replyStyle, roundFolds, openRounds, drawStart]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>
@@ -2423,7 +2447,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                   : <span className="cx-empty-project">{projectName}</span>}</> : null}?</h1>
               </>}
             </div> : null}
-            {windowStart > 0 ? <button type="button" className="cx-round-fold" onClick={() => setShownTurns((shown) => shown + TURN_WINDOW)}>
+            {windowStart > 0 && drawStart === windowStart ? <button type="button" className="cx-round-fold" onClick={() => setShownTurns((shown) => shown + TURN_WINDOW)}>
               {`Show ${Math.min(windowStart, TURN_WINDOW)} earlier turns · ${windowStart} not shown`}
             </button> : null}
             {threadTurns}
@@ -2436,10 +2460,11 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               </div>
             ) : null}
             {recovering && latest ? <FailedStepCard step={failedStep} notice={notice} busy={retrying} onRetry={() => retryStart(latest.id)} /> : null}
-            {/* The agent's questions and requests end the conversation, right above the chat box, and
-                scroll with it. Docked under the box they took up to 420 px of the pane: in a split pane
-                the conversation had no room left at all (2026-10-31). */}
-            {approvals.length || computerRequests.length ? <div ref={approvalDock} className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+            {/* The agent's questions and requests float over the bottom of the conversation, right
+                above the chat box. Docked under the box they took up to 420 px of the pane (2026-10-31);
+                at the thread's end they still pushed it up by their whole height (2026-11-03). The
+                anchor holds no room: it sticks to the scroller's foot and the cards rise from it. */}
+            {approvals.length || computerRequests.length ? <div className="cx-approval-anchor"><div ref={approvalDock} className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
               {computerRequests.map((request) => <ComputerControlCard key={request.id} request={request} />)}
               {approvals.map(approval => {
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
@@ -2447,7 +2472,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
                 return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
               })}
-            </div> : null}
+            </div></div> : null}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}

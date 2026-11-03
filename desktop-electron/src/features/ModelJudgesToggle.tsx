@@ -8,6 +8,16 @@ import { getCodingToolsClient } from "../api/client";
  * allow the model to judge it … until end and it can safety kill the goal". The preference lives in
  * the app, so it holds for every chat and after a restart; shown where something waits on you.
  */
+const DETAIL = "Requests the reviewer would leave to you, and goal rounds that end needing you, are judged by the model. It may end a goal that cannot safely go on";
+
+/** Lucide's scale, the mark of the goal bar's Model judges toggle. */
+function JudgeGlyph() {
+  return <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" /><path d="m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z" />
+    <path d="M7 21h10" /><path d="M12 3v18" /><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2" />
+  </svg>;
+}
+
 export function ModelJudgesToggle({ compact = false }: { compact?: boolean }) {
   const [on, setOn] = useState<boolean | null>(null);
   const call = (args: { enabled: boolean } | Record<string, never>) => getCodingToolsClient().apps
@@ -18,14 +28,19 @@ export function ModelJudgesToggle({ compact = false }: { compact?: boolean }) {
     call({}).then((value) => { if (live) setOn(value); }, () => { if (live) setOn(false); });
     return () => { live = false; };
   }, []);
-  return <label className={`cx-auto-retry cx-model-judges${compact ? " is-compact" : ""}`}
-    title="Requests the reviewer would leave to you, and goal rounds that end needing you, are judged by the model. It may end a goal that cannot safely go on">
-    <input type="checkbox" role="switch" checked={on === true} disabled={on === null} onChange={(event) => {
-      const next = event.target.checked;
-      setOn(next);
-      call({ enabled: next }).then(setOn, () => setOn(!next));
-    }} />
+  const flip = (next: boolean) => {
+    setOn(next);
+    call({ enabled: next }).then(setOn, () => setOn(!next));
+  };
+  // On the goal bar it is one of its icon buttons, pressed while on; hovering says what it does.
+  if (compact) {
+    return <button type="button" className="cx-goal-icon cx-model-judges-toggle" aria-pressed={on === true} aria-label="Model judges"
+      disabled={on === null} title={`Model judges: ${on ? "on" : "off"}\n\n${DETAIL}.\n\nClick to turn it ${on ? "off" : "on"}`}
+      onClick={() => flip(!on)}><JudgeGlyph /></button>;
+  }
+  return <label className="cx-auto-retry cx-model-judges" title={DETAIL}>
+    <input type="checkbox" role="switch" checked={on === true} disabled={on === null} onChange={(event) => flip(event.target.checked)} />
     <span className="cx-switch" aria-hidden="true" />
-    <span>{compact ? "Model judges" : "Let the model judge"}</span>
+    <span>Let the model judge</span>
   </label>;
 }
