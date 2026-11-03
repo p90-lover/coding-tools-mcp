@@ -29,6 +29,40 @@ test("a verified saved ChatGPT conversation stays signed in without navigating",
   assert.deepEqual(loads, []);
 });
 
+for (const [label, answer] of [["a 429", { sessionStatus: 429 }], ["a 5xx", { sessionStatus: 502 }], ["a failed fetch", { sessionStatus: 0 }],
+  ["a challenge page", { sessionStatus: 403 }]]) test(`${label} from the session check keeps a signed-in page signed in`, async () => {
+  const { host, loads } = authFixture();
+  host.state = { authenticated: true, status: "ready" };
+  host.view.webContents.executeJavaScript = async () => ({ url: savedUrl, composer: true, sessionAuthenticated: false,
+    sessionAnswered: false, readyState: "complete", ...answer });
+  const flips = [];
+  host.setState = function (patch) { if ("authenticated" in patch) flips.push(patch.authenticated); this.state = { ...this.state, ...patch }; };
+  const state = await host.probeAuthentication();
+  assert.equal(state.authenticated, true);
+  assert.equal(state.status, "ready");
+  assert.deepEqual(flips, [], "no signed-out flip, so no sign-in follow-ups reload the page");
+  assert.deepEqual(loads, []);
+});
+
+for (const [label, answer] of [["an empty session", { sessionStatus: 200, sessionAnswered: true }], ["a 401", { sessionStatus: 401 }]])
+  test(`${label} still signs the page out`, async () => {
+    const { host } = authFixture();
+    host.view.webContents.executeJavaScript = async () => ({ url: savedUrl, composer: true, sessionAuthenticated: false,
+      sessionAnswered: false, readyState: "complete", ...answer });
+    const state = await host.probeAuthentication();
+    assert.equal(state.authenticated, false);
+    assert.equal(state.status, "signed-out");
+  });
+
+test("an unanswered session check does not sign in a page that was signed out", async () => {
+  const { host } = authFixture();
+  host.state = { authenticated: false, status: "signed-out" };
+  host.view.webContents.executeJavaScript = async () => ({ url: savedUrl, composer: false, sessionAuthenticated: false,
+    sessionAnswered: false, sessionStatus: 429, readyState: "complete" });
+  const state = await host.probeAuthentication();
+  assert.equal(state.authenticated, false);
+});
+
 test("refreshing saved-session authentication never replaces the user's conversation with home", async () => {
   const { host, loads } = authFixture();
   const state = await host.refreshAuthentication();
