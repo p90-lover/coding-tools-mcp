@@ -5,11 +5,13 @@ import { PartErrorBoundary } from "../PartErrorBoundary";
 import { GptBrowserSurface } from "./GptBrowserSurface";
 
 /** One browser instance and account session shared by Chat and the GPT Browser tab. */
-export function GptBrowserDock({ standaloneHost, chatHost, inChat, active, api, setError }: {
+export function GptBrowserDock({ standaloneHost, chatHost, inChat, active, covered = false, api, setError }: {
   standaloneHost: HTMLDivElement | null;
   chatHost: HTMLDivElement | null;
   inChat: boolean;
   active: boolean;
+  /** The sidebar or a dialog is laid over the pane: a still of the page stands in for it. */
+  covered?: boolean;
   api: LauncherApi;
   setError: (message: string | null) => void;
 }) {
@@ -24,7 +26,7 @@ export function GptBrowserDock({ standaloneHost, chatHost, inChat, active, api, 
   }, [root, host]);
   useLayoutEffect(() => () => { root.remove(); }, [root]);
   return createPortal(<PartErrorBoundary label="ChatGPT Web">
-    <GptBrowserSurface api={api} active={active && Boolean(host)}
+    <GptBrowserSurface api={api} active={active && Boolean(host)} covered={covered}
       placement={inChat ? "chat" : "standalone"} setError={setError} />
   </PartErrorBoundary>, root);
 }
