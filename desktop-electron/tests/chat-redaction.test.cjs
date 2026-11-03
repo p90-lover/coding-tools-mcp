@@ -44,6 +44,28 @@ test("a secret inside another is hidden whole, and repeats count once", () => {
   assert.equal(hidden, 1);
 });
 
+test("a label cannot put a quoted secret back into the saved messages", () => {
+  for (const [secret, secrets, label] of [
+    [KEY, [KEY], KEY],
+    [KEY, [KEY], `credential ${KEY}`],
+    [KEY, [KEY, PASSWORD], PASSWORD],
+    ["abc123\nXYZ789", ["abc123\nXYZ789"], "abc123\r\nXYZ789"],
+  ]) {
+    const result = chatDescriptionRedacted(`use ${secret} please`, secrets, label);
+    assert.equal(result.hidden, 1);
+    assert.equal(result.refused, 0);
+    for (const value of secrets) assert.equal(result.description.includes(value), false);
+    assert.equal(said(result.description).length, 1);
+  }
+});
+
+test("a secret in the marker's own syntax is refused instead of reported hidden", () => {
+  const result = chatDescriptionRedacted("the value is hidden:", ["hidden:"], "API key");
+  assert.equal(result.description, "the value is hidden:");
+  assert.equal(result.hidden, 0);
+  assert.equal(result.refused, 1);
+});
+
 test("a private key block is hidden whole, whichever line endings it was saved with", () => {
   // Codex review of #653: private keys are on the default list, and they span lines.
   const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmU\nAAAAAAABAAAAMwAAAAtzc2gtZWQy\n-----END OPENSSH PRIVATE KEY-----";

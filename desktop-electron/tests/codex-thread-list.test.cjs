@@ -23,6 +23,64 @@ const stored = {};
 const storage = { getItem: (key) => stored[key] ?? null, setItem: (key, value) => { stored[key] = value; } };
 const chat = compile("ao-chat.ts", () => ({}));
 const listSettings = compile("chat-list-settings.ts", () => ({}));
+
+test("chat-list settings retain failed saves for both callers until storage recovers or another window changes them", () => {
+  const events = new EventTarget();
+  let durable = JSON.stringify({ visible: 5, keepActiveOnTop: true });
+  let failWrite = true;
+  const localStorage = { getItem: () => durable, setItem: (_key, value) => {
+    if (failWrite) throw new Error("storage unavailable");
+    durable = value;
+  } };
+  const exports = {};
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/chat-list-settings.ts"), "utf8");
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
+    { exports, localStorage, window: events, Event });
+  const first = [], second = [];
+  const stopFirst = exports.onChatListSettings(value => { first.push({ ...value }); value.visible = 99; });
+  const stopSecond = exports.onChatListSettings(value => second.push({ ...value }));
+  const storageChanged = key => { const event = new Event("storage"); Object.assign(event, { key, storageArea: localStorage }); events.dispatchEvent(event); };
+  try {
+    const saved = exports.saveChatListSettings({ visible: 10 });
+    assert.deepEqual({ ...saved }, { visible: 10, keepActiveOnTop: true });
+    assert.deepEqual(first.at(-1), { visible: 10, keepActiveOnTop: true });
+    assert.deepEqual(second.at(-1), first.at(-1), "both subscribed callers see the session value");
+    assert.equal(JSON.parse(durable).visible, 5, "the simulated failed write left storage unchanged");
+    saved.visible = 80;
+    exports.readChatListSettings().visible = 70;
+    assert.equal(exports.readChatListSettings().visible, 10, "callers cannot mutate the fallback");
+    exports.saveChatListSettings({ keepActiveOnTop: false });
+    assert.deepEqual(second.at(-1), { visible: 10, keepActiveOnTop: false }, "repeated failed patches merge with session settings");
+    storageChanged("unrelated-key");
+    assert.deepEqual({ ...exports.readChatListSettings() }, second.at(-1));
+
+    failWrite = false;
+    exports.saveChatListSettings({ visible: 15 });
+    assert.deepEqual(JSON.parse(durable), { visible: 15, keepActiveOnTop: false });
+    durable = JSON.stringify({ visible: 8, keepActiveOnTop: true });
+    assert.equal(exports.readChatListSettings().visible, 8, "successful persistence cleared the fallback");
+
+    failWrite = true;
+    exports.saveChatListSettings({ visible: 20 });
+    durable = JSON.stringify({ visible: 30, keepActiveOnTop: false });
+    storageChanged(exports.CHAT_LIST_SETTINGS_KEY);
+    assert.deepEqual(first.at(-1), { visible: 30, keepActiveOnTop: false });
+    assert.deepEqual(second.at(-1), first.at(-1), "another window's update supersedes the failed local save");
+    exports.saveChatListSettings({ visible: 50 });
+    durable = null;
+    storageChanged(null);
+    assert.deepEqual(second.at(-1), { visible: 5, keepActiveOnTop: true }, "another window's storage clear restores defaults");
+
+    failWrite = false;
+    exports.saveChatListSettings({ visible: 3 });
+    assert.deepEqual(JSON.parse(durable), { visible: 3, keepActiveOnTop: true }, "ordinary writes and broadcasts still work");
+    assert.deepEqual(second.at(-1), JSON.parse(durable));
+  } finally { stopFirst(); stopSecond(); }
+  const counts = [first.length, second.length];
+  exports.saveChatListSettings({ visible: 5 });
+  storageChanged(exports.CHAT_LIST_SETTINGS_KEY);
+  assert.deepEqual([first.length, second.length], counts, "unsubscribed callers stay detached");
+});
 // AO change listeners the list subscribed (onAoPush), for tests that push a change.
 const pushes = [];
 

@@ -3,6 +3,7 @@
 const { execFile, spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
+const net = require("node:net");
 const { PassThrough, Writable } = require("node:stream");
 const { Worker } = require("node:worker_threads");
 
@@ -536,4 +537,297 @@ function resetWatchWorker() {
   watchWorkerBroken = false;
 }
 
-module.exports = { runOffThread, warmProgram, spawnOffThread, resetSpawnWorker, watchOffThread, resetWatchWorker };
+/*
+ * TCP reachability probes. libuv closes a socket on Windows with a synchronous closesocket(), and
+ * closing one whose connect has not finished waits for whatever holds that connect. On 2026-11-03,
+ * a minute after Bitdefender's Virus Shield service crashed and restarted (10:31-10:32), the MCP
+ * events monitor's 30 s probe of the proxy port held the main process 76 s, 122 s and 89 s (0.2 s
+ * of CPU each), every time inside such a close: twice in the one Node makes when the first of the
+ * proxy's two addresses has not answered in 250 ms (happy eyeballs), once in the probe's own close
+ * at its 3 s timeout. The same close takes 0.1 ms otherwise. probeTcpOffThread connects and closes
+ * in a worker and answers here by its deadline even when the worker is held; where no worker can
+ * start, it probes here.
+ */
+const PROBE_ANSWER_GRACE_MS = 1_000;
+
+// A hostname with several addresses fails with an AggregateError whose message is empty; report the
+// per-address codes (for example "EACCES 1.2.3.4") so a blocked or refused proxy is diagnosable from
+// the Proxy page's test.
+function connectErrorText(error) {
+  if (!(error instanceof Error)) return String(error);
+  const attempts = Array.isArray(error.errors)
+    ? error.errors.map((item) => [item?.code, item?.address].filter(Boolean).join(" ")).filter(Boolean)
+    : [];
+  if (attempts.length) return `Connection failed: ${attempts.join(", ")}`;
+  return error.message || error.code || "Connection failed";
+}
+
+/**
+ * The one implementation, run in the worker (as its source) or here as the fallback. Calls `done`
+ * once with { ok: true, latencyMs } or { ok: false, code, message }.
+ */
+function probeTcp({ host, port, timeoutMs }, net, describe, done) {
+  const started = Date.now();
+  let settled = false;
+  let socket = null;
+  const finish = (reply) => {
+    if (settled) return;
+    settled = true;
+    socket?.destroy();
+    done(reply);
+  };
+  try {
+    socket = net.connect({ host, port });
+  } catch (error) {
+    finish({ ok: false, code: error?.code || "EINVAL", message: describe(error) });
+    return;
+  }
+  socket.setTimeout(timeoutMs, () => finish({ ok: false, code: "ETIMEDOUT", message: "Connection timed out" }));
+  socket.once("connect", () => finish({ ok: true, latencyMs: Date.now() - started }));
+  socket.once("error", (error) => finish({ ok: false, code: error?.code || error?.errors?.[0]?.code || "ECONNREFUSED", message: describe(error) }));
+}
+
+const PROBE_WORKER_SOURCE = `
+const { parentPort } = require("node:worker_threads");
+const net = require("node:net");
+const describe = ${connectErrorText.toString()};
+const probeTcp = ${probeTcp.toString()};
+parentPort.on("message", ({ id, request }) => {
+  // A request that waited behind a held close was already answered by the caller: skip its connect.
+  if (Date.now() >= request.deadline) return;
+  probeTcp(request, net, describe, (reply) => parentPort.postMessage({ id, reply }));
+});`;
+
+let probeWorker = null;
+let probeWorkerBroken = false;
+let probeCalls = 0;
+const probes = new Map();
+
+function probeHere(request) {
+  return new Promise((resolve) => probeTcp(request, net, connectErrorText, resolve));
+}
+
+function startProbeWorker(createWorker) {
+  const started = createWorker(PROBE_WORKER_SOURCE, { eval: true });
+  started.on("message", ({ id, reply }) => probes.get(id)?.settle(reply));
+  const stopped = () => {
+    if (probeWorker !== started) return;
+    probeWorker = null;
+    probeWorkerBroken = true;
+    // Whatever it had not answered is probed here.
+    for (const entry of probes.values()) probeHere(entry.request).then(entry.settle);
+  };
+  started.on("error", stopped);
+  started.on("exit", stopped);
+  // After the listeners, which ref it again: each probe's own deadline keeps the process up instead.
+  started.unref();
+  return started;
+}
+
+/**
+ * Connects to `host`:`port` from the probe worker and resolves { ok: true, latencyMs } or
+ * { ok: false, code, message } within `timeoutMs` and a second's grace; it never rejects.
+ */
+function probeTcpOffThread({ host, port, timeoutMs = 3_000 }, { createWorker = (source, options) => new Worker(source, options) } = {}) {
+  const request = { host, port, timeoutMs, deadline: Date.now() + timeoutMs };
+  if (probeWorkerBroken) return probeHere(request);
+  try {
+    probeWorker ??= startProbeWorker(createWorker);
+  } catch {
+    probeWorkerBroken = true;
+    return probeHere(request);
+  }
+  return new Promise((resolve) => {
+    const id = ++probeCalls;
+    // The worker answers by the deadline unless it is held itself, in the close of an earlier probe.
+    const timer = setTimeout(() => settle({ ok: false, code: "ETIMEDOUT", message: "Connection timed out" }), timeoutMs + PROBE_ANSWER_GRACE_MS);
+    const settle = (reply) => {
+      if (!probes.delete(id)) return;
+      clearTimeout(timer);
+      resolve(reply);
+    };
+    probes.set(id, { request, settle });
+    probeWorker.postMessage({ id, request });
+  });
+}
+
+/*
+ * Loopback HTTP requests. The same day main also sat 70 s and 21 s inside a native socket write
+ * (0.1 s of CPU each), and a count in the running app found it making about 1,700 writes a minute,
+ * nearly all the chat's reads: of AO sessions and conversations from the AO daemon (17 a second
+ * with two chats working) and of AO state through the headless service (11 a second). A filter that
+ * holds any of those calls holds every window. fetchOffThread makes such a request from a worker
+ * and answers here: by the caller's signal when the worker is held, as fetch itself would.
+ */
+
+/**
+ * The one implementation, run in the worker (as its source) or here as the fallback. Resolves the
+ * whole response as { status, statusText, headers, body } (body an ArrayBuffer), or { tooLarge: true }
+ * once more than `maxBytes` arrived; rejects as fetch does.
+ */
+async function fetchWhole(fetch, { url, init, maxBytes }, signal) {
+  const response = await fetch(url, { ...init, signal });
+  const chunks = [];
+  let size = 0;
+  // Leaving the loop early cancels the rest of the body.
+  for await (const chunk of response.body ?? []) {
+    size += chunk.byteLength;
+    if (maxBytes !== null && size > maxBytes) return { tooLarge: true };
+    chunks.push(chunk);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { status: response.status, statusText: response.statusText, headers: [...response.headers], body: body.buffer };
+}
+
+/** What crosses back from the worker of a failed fetch: names, messages and codes, with its cause. */
+function plainError(error) {
+  const plain = (value) => {
+    const fields = { name: String((value && value.name) || "Error"), message: String((value && value.message) || value) };
+    for (const key of ["code", "errno", "syscall", "address", "port"]) if (value && value[key] !== undefined) fields[key] = value[key];
+    return fields;
+  };
+  return error && error.cause ? { ...plain(error), cause: plain(error.cause) } : plain(error);
+}
+
+const FETCH_WORKER_SOURCE = `
+const { parentPort } = require("node:worker_threads");
+const fetchWhole = ${fetchWhole.toString()};
+const plainError = ${plainError.toString()};
+const requests = new Map();
+parentPort.on("message", ({ id, request, cancel }) => {
+  if (cancel) {
+    const entry = requests.get(id);
+    if (entry) { entry.cancelled = true; entry.controller.abort(); }
+    return;
+  }
+  const entry = { cancelled: false, controller: new AbortController() };
+  requests.set(id, entry);
+  // Started after the messages already queued: one whose caller gave up while this thread was held
+  // is followed by its cancel, and is dropped before it connects or sends.
+  setImmediate(() => {
+    if (entry.cancelled) { requests.delete(id); return; }
+    fetchWhole(fetch, request, entry.controller.signal).then(
+      (reply) => parentPort.postMessage({ id, reply }, reply.body ? [reply.body] : []),
+      (error) => parentPort.postMessage({ id, error: plainError(error) }),
+    ).finally(() => requests.delete(id));
+  });
+});`;
+
+let fetchWorker = null;
+let fetchWorkerBroken = false;
+let fetchCalls = 0;
+const fetches = new Map();
+
+function rebuiltError({ name, message, cause, ...fields }) {
+  const error = Object.assign(name === "TypeError" ? new TypeError(message) : new Error(message), fields);
+  if (error.name !== name) error.name = name;
+  if (cause) error.cause = rebuiltError(cause);
+  return error;
+}
+
+function responseOf(reply, maxBytes) {
+  if (reply.tooLarge) throw Object.assign(new RangeError(`The response exceeded ${maxBytes} bytes`), { code: "ERR_RESPONSE_TOO_LARGE" });
+  // These statuses carry no body, and a Response refuses one for them.
+  const empty = [204, 205, 304].includes(reply.status);
+  return new Response(empty ? null : reply.body, { status: reply.status, statusText: reply.statusText, headers: reply.headers });
+}
+
+function fetchHere(request, signal) {
+  return fetchWhole(fetch, request, signal).then((reply) => responseOf(reply, request.maxBytes));
+}
+
+function startFetchWorker(createWorker) {
+  const started = createWorker(FETCH_WORKER_SOURCE, { eval: true });
+  let answered = false;
+  started.on("message", ({ id, reply, error }) => {
+    answered = true;
+    const entry = fetches.get(id);
+    if (error) entry?.fail(rebuiltError(error));
+    else entry?.answer(reply);
+  });
+  const stopped = () => {
+    if (fetchWorker !== started) return;
+    fetchWorker = null;
+    // One that never answered cannot run here: requests go to this thread's own fetch from now on.
+    // Otherwise the next request starts a new worker.
+    if (!answered) fetchWorkerBroken = true;
+    const lost = Object.assign(new TypeError("fetch failed"), { cause: Object.assign(new Error("The request worker stopped"), { code: "ECONNRESET" }) });
+    for (const entry of fetches.values()) entry.fail(lost);
+  };
+  started.on("error", stopped);
+  started.on("exit", stopped);
+  // Only while it has requests to answer does it keep the process up, as their sockets would here.
+  started.unref();
+  return started;
+}
+
+/**
+ * fetch(url, init) for a request whose response is read whole, made from a worker thread. It takes
+ * method, headers (plain or Headers), a string or byte body, redirect and signal, plus `maxBytes`:
+ * past it, it rejects with code ERR_RESPONSE_TOO_LARGE. It resolves a Response holding the body
+ * (without url or redirected), rejects as fetch does (TypeError "fetch failed" with the socket
+ * error as cause; the signal's reason once it aborts, even while the worker is held), and makes the
+ * request here when no worker can start or the init cannot be copied to one.
+ */
+function fetchOffThread(url, { signal, maxBytes = null, ...init } = {}, { createWorker = (source, options) => new Worker(source, options) } = {}) {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  const headers = typeof Headers === "function" && init.headers instanceof Headers ? [...init.headers] : init.headers;
+  const body = init.body;
+  const request = { url: String(url), init: { ...init, headers }, maxBytes };
+  const copyable = body === undefined || body === null || typeof body === "string" || ArrayBuffer.isView(body);
+  if (fetchWorkerBroken || !copyable) return fetchHere(request, signal);
+  try {
+    fetchWorker ??= startFetchWorker(createWorker);
+  } catch {
+    fetchWorkerBroken = true;
+    return fetchHere(request, signal);
+  }
+  const worker = fetchWorker;
+  return new Promise((resolve, reject) => {
+    const id = ++fetchCalls;
+    const done = () => {
+      if (!fetches.delete(id)) return false;
+      signal?.removeEventListener("abort", onAbort);
+      if (fetches.size === 0) fetchWorker?.unref?.();
+      return true;
+    };
+    const fail = (error) => { if (done()) reject(error); };
+    const answer = (reply) => {
+      if (!done()) return;
+      try { resolve(responseOf(reply, maxBytes)); } catch (refused) { reject(refused); }
+    };
+    const onAbort = () => {
+      fail(signal.reason);
+      worker.postMessage({ id, cancel: true });
+    };
+    fetches.set(id, { fail, answer });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    worker.ref?.();
+    try {
+      worker.postMessage({ id, request });
+    } catch {
+      // A header value or option that cannot be copied to the worker: this request is made here.
+      done();
+      fetchHere(request, signal).then(resolve, reject);
+    }
+  });
+}
+
+/** For tests: forget the request worker so the next request starts a new one. */
+function resetFetchWorker() {
+  const worker = fetchWorker;
+  fetchWorker = null;
+  fetches.clear();
+  worker?.terminate?.();
+  fetchWorkerBroken = false;
+}
+
+module.exports = {
+  runOffThread, warmProgram, spawnOffThread, resetSpawnWorker, watchOffThread, resetWatchWorker, probeTcpOffThread, connectErrorText,
+  fetchOffThread, resetFetchWorker,
+};

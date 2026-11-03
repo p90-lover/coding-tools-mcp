@@ -114,9 +114,11 @@ function mount(props, { effects = false, objectUrls } = {}) {
       setItem: (key, value) => workbenchStorage?.set(key, value),
       removeItem: (key) => workbenchStorage?.delete(key),
     } };
+  const changedFiles = transpile("ChatChangedFiles.tsx", name => name === "react" ? { ...react, useId: () => "changed-files", useLayoutEffect() {} }
+    : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, { window: timers, clearTimeout() {} });
   // The reply's head renders inline too, so a turn's who, status and files can be read.
   const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
+    : name === "./ao-chat" ? chat : name === "./ChatChangedFiles" ? changedFiles : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
   // The reply's steps (chat-reply-plan) and their views, real too.
   const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
   const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
@@ -132,7 +134,7 @@ function mount(props, { effects = false, objectUrls } = {}) {
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
-              SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
+              SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart, WaitingAnswer: "WaitingAnswer" } : {},
   { window: timers, document: { querySelector: () => null, addEventListener() {}, removeEventListener() {} }, navigator: {}, URL: objectUrls });
   props.queue?.attach?.(module.syncChatQueues);
   return {
@@ -227,12 +229,13 @@ test("the new chat's project chip opens Codex's project picker: search, projects
     [["New project", true], ["✕Don't work in a project", true]], "New project needs onAddProject; a project is always required");
 });
 
-test("the new chat is Codex's: no subtitle, a mic, and the gear opens the environment popover with the branch", () => {
+test("the new chat is Codex's: no subtitle, no placeholder mic, and the gear opens the environment popover with the branch", () => {
   const { props } = base({ composer: { mode: "single" }, projectBranch: "main", onSettings() {} });
   const view = mount(props);
   const empty = walk(view.render()).find((element) => element.props?.className === "cx-empty");
   assert.equal(walk(empty).filter((element) => element.type === "p").length, 0, "Codex has no subtitle under the question");
-  assert.equal(walk(view.render()).find((element) => element.props?.["aria-label"] === "Voice input").props.disabled, true);
+  // The mic was a disabled placeholder ("isn't available yet"); the clean chat box (2026-11-03) has none.
+  assert.equal(walk(view.render()).find((element) => element.props?.["aria-label"] === "Voice input"), undefined);
   const gear = { getBoundingClientRect: () => ({ right: 600, top: 500 }) };
   const pressGear = () => walk(view.render()).find((element) => element.props?.["aria-label"] === "Configure local environment").props.onClick({ currentTarget: gear });
   const menuOf = () => walk(view.render()).find((element) => element.type === "ChatMenu").props.menu;
@@ -928,6 +931,25 @@ test("a steer on its way stays in the chat while a message waiting for the next 
   const band = all().find((element) => element.props?.className === "cx-queued-band");
   assert.equal(text(band), "1 message queuedthen rerun the tests");
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
+  // The queued bar says it: no "Restarting" box under the chat box beside it (the user: remove it).
+  assert.doesNotMatch(text(view.render()), /Restarting|stopped responding/);
+});
+
+test("a turn waiting for you: Answer when a request is shown, else Continue, which restarts the agent with Continue.", async () => {
+  const steered = [];
+  const runs = [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })];
+  const request = { nodeId: "w", approval_id: "req-1", source: "ao", kind: "command", command: "curl -s http://127.0.0.1:7411/api/status",
+    decisions: [{ id: "allow", kind: "allow_once", label: "Yes" }, { id: "deny", kind: "reject_once", label: "No" }] };
+  const provided = (extra) => walk(mount(base({ selectedTaskId: "t", working: true, runs, steer: async (input) => { steered.push(input); return "restart"; }, ...extra }).props).render())
+    .find((element) => element.type === "TurnRestartProvider").props.value;
+  const shown = provided({ approvals: [request] });
+  assert.equal(typeof shown.onAnswer, "function", "a request in the chat is what Answer brings into view");
+  const lost = provided({ approvals: [] });
+  assert.equal(lost.onAnswer, undefined, "with none shown there is nothing to bring up");
+  lost.onContinue();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "Continue.", restart: true }], "Continue restarts the stuck turn with one message");
+  assert.equal(provided({ steer: undefined }).onContinue, undefined, "a chat that cannot steer offers no Continue");
 });
 
 test("two queued messages fold into Claude Code's stack: Next: …, then a list with ⋮ and Clear all", () => {

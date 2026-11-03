@@ -9,7 +9,7 @@ import { AgentOrchestratorChat, syncChatQueues, type ChatQueueActions } from "./
 import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
-  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, normalizeSplit, paneOrder, readSplit, relocatePane, spatialNeighbour, splitColumns,
+  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, normalizeSplit, paneOrder, readSplit, relocatePane, spatialNeighbour, splitColumns, splitHasRoom,
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
@@ -19,7 +19,7 @@ import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam
 import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
-import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection } from "./chat-pages";
+import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, type PageOpen } from "./chat-pages";
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
@@ -1949,12 +1949,18 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [splitWeightsSaved, setSplitWeightsSaved] = useState<number[] | undefined>(undefined);
   const [splitRow, setSplitRow] = useState(SPLIT_ROW.DEFAULT);
   const splitStore = chatPageKey(SPLIT_STORE, pageNumber);
+  // A chat another page had no screen for: taken once this page's saved split has loaded (splitReady).
+  const [splitReady, setSplitReady] = useState(false);
+  const [pageOpenAsked, setPageOpenAsked] = useState(0);
   useLayoutEffect(() => {
     if (pane || !pageRegistry) return;
     return pageRegistry.register(pageNumber, [
       { workspaceId, taskId: chatTaskId ?? "", paneId: "main" },
       ...splitPanes.map((item) => ({ workspaceId: item.workspaceId, taskId: item.taskId, paneId: item.id })),
-    ], (id) => { setFocusedPane(id); setView("chat"); setSettingsOpen(false); });
+    ], (id) => { setFocusedPane(id); setView("chat"); setSettingsOpen(false); }, {
+      room: (maxColumns) => splitHasRoom(splitPanes, maxColumns, chatTaskId ?? ""),
+      wake: () => setPageOpenAsked((count) => count + 1),
+    });
   }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, splitPanes]);
   useEffect(() => {
     if (pane || !pageRegistry || chatTaskId === null || loadedWorkspace !== workspaceId) return;
@@ -1999,6 +2005,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     }
     const place: PanePos | { replace: string } = !at ? defaultPlace(splitPanes, splitMaxCols)
       : "kind" in at ? at.kind === "column" ? { col: splitColumns(splitPanes), row: 0 } : { col: at.col, row: at.row } : at;
+    // Every screen holds a chat: it starts on another page with room rather than in a chat's place.
+    if ("replace" in place && !splitHasRoom(splitPanes, splitMaxCols, chatTaskId ?? "")
+      && pageRegistry?.openElsewhere(pageNumber, { workspaceId: id, taskId, maxColumns: splitMaxCols })) return;
     const holder = "replace" in place ? splitPanes.find((item) => item.id === place.replace)
       : splitPanes.find((item) => item.col === place.col && item.row === place.row);
     if ("col" in place && place.col === 0 && place.row === 0) { setFocusedPane("main"); showInMain(id, taskId); return; }
@@ -2088,6 +2097,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     if (saved.panes.length) setSplitPanes(normalizeSplit(saved.panes.map((item) => ({ ...item, id: crypto.randomUUID() }))));
     if (saved.weights) setSplitWeightsSaved(saved.weights);
     if (saved.rowSplit) setSplitRow(saved.rowSplit);
+    setSplitReady(true);
   }, [workspaceReady]);
   useEffect(() => {
     if (pane || !splitRestored.current) return;
@@ -2133,17 +2143,25 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     return () => window.removeEventListener("keydown", onKey);
   });
   // A pane focused from the keyboard or just opened takes the keyboard: its composer, as Claude
-  // Code's does. A click into a pane leaves focus where the click put it.
+  // Code's does. A click into a pane leaves focus where the click put it. A chat another page sent
+  // here asks too (composerFocusAsked): its screen may already be the focused one.
   const focusComposer = useRef(false);
+  const [composerFocusAsked, setComposerFocusAsked] = useState(0);
   useEffect(() => {
-    if (pane || !splitPanes.length || !focusComposer.current) return;
+    if (pane || !focusComposer.current) return;
     focusComposer.current = false;
-    const frame = window.requestAnimationFrame(() => {
+    // A page just added draws its composer a few frames after it took the chat: wait up to ~1 s for it.
+    let frame = 0, frames = 0;
+    const focus = () => {
       const box = stageRef.current?.querySelector<HTMLElement>(`.cx-split > .cx-pane[data-focused]`);
-      if (box && !box.contains(document.activeElement)) box.querySelector<HTMLTextAreaElement>(".cx-composer textarea")?.focus();
-    });
+      if (box?.contains(document.activeElement)) return;
+      const input = box?.querySelector<HTMLTextAreaElement>(".cx-composer textarea");
+      if (input) input.focus();
+      else if (++frames < 60) frame = window.requestAnimationFrame(focus);
+    };
+    frame = window.requestAnimationFrame(focus);
     return () => window.cancelAnimationFrame(frame);
-  }, [focusedPane]);
+  }, [focusedPane, composerFocusAsked]);
   /** A chat chosen in the sidebar: its pane if it is open, else the focused pane shows it. */
   const showChat = (id: string, taskId: string) => {
     if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
@@ -2163,10 +2181,39 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
    */
   const openNewChat = (id = workspaceId) => {
     if (pane) { pane.onNewChat(id); return; }
+    // A full page (its ten screens all chats): the new chat starts on another page, not in one's place.
+    if (!splitHasRoom(splitPanes, splitMaxCols, chatTaskId ?? "")
+      && pageRegistry?.openElsewhere(pageNumber, { workspaceId: id, taskId: "", maxColumns: splitMaxCols })) return;
     if (focusedSplit) { newChatInPane(focusedSplit.id, id); return; }
     if (id === workspaceId) startNewChat();
     else { setChatSeed({ key: crypto.randomUUID(), workspaceId: id, title: "", text: "" }); chooseWorkspace(id); }
   };
+  /**
+   * A chat a full page handed on: the screen showing an unsent chat (the window's own first), else
+   * a free cell (by the sending page's columns: this page measured none while hidden). Full here
+   * too, it goes on to the next page; with nowhere left it takes the last chat's place, as before.
+   */
+  const openFromPage = (open: PageOpen) => {
+    if (!splitHasRoom(splitPanes, open.maxColumns, chatTaskId ?? "") && pageRegistry?.openElsewhere(pageNumber, open)) return;
+    setView("chat"); setSheet(""); setSettingsOpen(false);
+    focusComposer.current = true;
+    setComposerFocusAsked((count) => count + 1);
+    const unsent = !chatTaskId ? "main" : splitPanes.find((item) => !item.taskId)?.id;
+    if (unsent === "main") { setFocusedPane("main"); showInMain(open.workspaceId, open.taskId); return; }
+    if (unsent) {
+      setSplitPanes((current) => current.map((item) => item.id === unsent ? { ...item, workspaceId: open.workspaceId, taskId: open.taskId } : item));
+      setFocusedPane(unsent);
+      return;
+    }
+    const place = defaultPlace(splitPanes, open.maxColumns);
+    const at = "replace" in place ? splitPanes.find((item) => item.id === place.replace) : place;
+    openInSplit(open.workspaceId, open.taskId, at ? { col: at.col, row: at.row } : null);
+  };
+  useEffect(() => {
+    if (pane || !pageRegistry || !splitReady || chatTaskId === null || loadedWorkspace !== workspaceId) return;
+    const open = pageRegistry.takeOpen(pageNumber);
+    if (open) openFromPage(open);
+  }, [splitReady, chatTaskId, loadedWorkspace, workspaceId, pageOpenAsked]);
   const renameChat = (taskId: string, title: string) => chatRun(taskId, async () => {
     await moduleCall("task_rename", { workspaceId, taskId, title });
     await loadBoard(workspaceId);
@@ -2301,12 +2348,12 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       .finally(() => setStoppingRuns((current) => current.filter((id) => id !== runId)));
   };
 
-  const approve = (approval: AoApproval, reply: ApprovalReply) => {
+  const approve = async (approval: AoApproval, reply: ApprovalReply) => {
     const owner = approvalScope.current;
     if (!mounted.current || owner.workspaceId !== workspaceId || owner.runId !== selectedRun?.id
       || selection.current.workspaceId !== owner.workspaceId || selection.current.runId !== owner.runId
       || !shownApprovals.some(item => item.nodeId === approval.nodeId && item.approval_id === approval.approval_id)) return;
-    void run("approval", async () => {
+    await run("approval", async () => {
       const result = await moduleCall("approve_harness", { workspaceId: owner.workspaceId, runId: owner.runId,
         nodeId: approval.nodeId, approvalId: approval.approval_id,
         ...(typeof reply === "boolean" ? { allow: reply }

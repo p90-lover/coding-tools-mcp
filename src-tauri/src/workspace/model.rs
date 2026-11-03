@@ -266,12 +266,16 @@ impl Default for ActionsConfig {
 #[allow(dead_code)]
 impl WorkspaceProfile {
     pub fn new(path: String, name: Option<String>) -> Self {
-        let cleaned = path.trim_end_matches(['\\', '/']).to_string();
+        let cleaned = if std::path::Path::new(&path).parent().is_none() {
+            path
+        } else {
+            path.trim_end_matches(['\\', '/']).to_string()
+        };
         let label = name.unwrap_or_else(|| {
             cleaned
                 .replace('\\', "/")
                 .split('/')
-                .next_back()
+                .rfind(|part| !part.is_empty())
                 .unwrap_or("工作区")
                 .to_string()
         });
@@ -393,4 +397,29 @@ fn computed_public_url(
         }
     }
     public_url.trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::data::{AppData, DataStore};
+
+    #[test]
+    fn workspace_creation_preserves_filesystem_root() {
+        let current = std::env::current_dir().unwrap().canonicalize().unwrap();
+        // Native ancestors yield `/` on Unix and the volume root on Windows.
+        let root = current.ancestors().last().unwrap();
+        let mut store = DataStore::from_data(AppData::default()).unwrap();
+        let profile = store
+            .create_workspace(root.to_string_lossy().into_owned(), None)
+            .unwrap();
+        let saved = std::path::Path::new(&profile.path);
+        assert!(saved.is_absolute(), "saved root was {:?}", profile.path);
+        assert_eq!(saved.canonicalize().unwrap(), root);
+        assert!(!profile.name.trim().is_empty());
+        let before = serde_json::to_value(store.data()).unwrap();
+        assert!(store
+            .create_workspace(root.to_string_lossy().into_owned(), None)
+            .is_err());
+        assert_eq!(serde_json::to_value(store.data()).unwrap(), before);
+    }
 }

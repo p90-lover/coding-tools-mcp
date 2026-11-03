@@ -150,7 +150,7 @@ const PREVIEW_TOOL_DEFS = Object.freeze([
     description: "The browser for checking any web page, frontend or GUI you build or change: open a page your dev server serves on this machine (http://localhost:<port>/... or http://127.0.0.1:<port>/...) in this chat's own browser, which opens the chat's Preview pane for the user. Use it (then preview_screenshot and preview_read) instead of curl, a headless browser or asking the user to open the page. Waits for the page to load. Only localhost, 127.0.0.1 and [::1] addresses open; the first time this chat opens an address, the user may be asked. The page may only reach addresses this chat opened: another port (an API on :3000, a separate hot-reload port), the other spelling of the host (localhost vs 127.0.0.1) and anything on the internet (CDN scripts, web fonts) are blocked and show in preview_console. Open a second local address with preview_open (then return to the page) if the app needs it.",
     inputSchema: object({ url: { type: "string", description: "e.g. http://localhost:5173/" } }, ["url"]) },
   { name: "preview_read", title: "Read the preview page",
-    description: "The page's URL, title, visible text and the elements you can use (links, buttons, fields), each with a ref for preview_click and preview_type.",
+    description: "The page's URL, title, visible text and the elements you can use (links, buttons, fields), each with a ref for preview_click and preview_type. Native visualization panels also include public modelContent; private UI state is not included.",
     inputSchema: object({ max_chars: { type: "integer", minimum: 500, maximum: MAX_TEXT, description: `Text limit (default 12000, at most ${MAX_TEXT})` } }) },
   { name: "preview_screenshot", title: "Screenshot the preview",
     description: "A PNG of what the preview shows now: how the page you opened with preview_open looks to the user.",
@@ -227,9 +227,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * The previews. `createView(partition)` makes a WebContentsView, `attachView`/`detachView` add it to
  * or remove it from the main window, `contentSize()` is the window's content size [width, height],
+ * `isVisible()` reports whether the owner window can currently display the selected pane,
  * and `blockedPorts()` the app's own loopback service ports.
  */
-function createChatPreviews({ createView, attachView, detachView, contentSize = () => [VIEWPORT.width, VIEWPORT.height],
+function createChatPreviews({ createView, attachView, detachView, contentSize = () => [VIEWPORT.width, VIEWPORT.height], isVisible = () => true,
   blockedPorts = () => [], logger = console, now = Date.now, openContextMenu = null } = {}) {
   if (typeof createView !== "function") throw new Error("createView is required");
   const previews = new Map(); // key -> preview
@@ -264,7 +265,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
   function place(preview) {
     const contents = preview.view.webContents;
     if (contents.isDestroyed()) return;
-    const visible = shown?.key === preview.key;
+    const visible = shown?.key === preview.key && isVisible();
     // A clipped view can have a 0x0 native surface even when Blink emulates a viewport.
     // Keep background views at real bounds in their own invisible host.
     const moved = attachView?.(preview.view, visible) === true;
@@ -591,6 +592,19 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         const max = Number.isInteger(args.max_chars) ? Math.min(MAX_TEXT, Math.max(500, args.max_chars)) : 12_000;
         const snapshot = await evaluate(preview, snapshotScript(max, MAX_ELEMENTS));
         if (preview.panelMode && snapshot) snapshot.url = LIVE_PANEL_URL;
+        if (preview.panelMode && preview.visualization && snapshot) {
+          try {
+            // Project in the renderer: the read result never carries private widget state.
+            const serialized = await evaluate(preview, `JSON.stringify(window.openai?.widgetState?.modelContent ?? null).slice(0, ${MAX_WIDGET_STATE_BYTES + 1})`);
+            if (typeof serialized === "string" && Buffer.byteLength(serialized, "utf8") <= MAX_WIDGET_STATE_BYTES) {
+              snapshot.modelContent = JSON.parse(serialized);
+            } else {
+              snapshot.modelContentUnavailable = true;
+            }
+          } catch {
+            snapshot.modelContentUnavailable = true;
+          }
+        }
         return textResult(snapshot);
       }
       case "preview_screenshot": {
@@ -725,7 +739,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         if (!preview) return failure("This chat has no page open yet; open one with preview_open first.");
         preview.usedAt = now();
         place(preview);
-        const hidden = shown?.key !== preview.key;
+        const hidden = shown?.key !== preview.key || !isVisible();
         const contents = preview.view.webContents;
         try {
           // Keep the page producing frames while its agent interacts, without OS window focus.
@@ -933,7 +947,7 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, Menu, clipboard
         window.once("closed", closeAll);
         // Back from the tray, a minimize or a (un)maximize, the renderer reports the same slot, so
         // nothing re-placed the page and it could come back white: it is placed and repainted here.
-        for (const event of ["restore", "show", "maximize", "unmaximize"]) {
+        for (const event of ["restore", "show", "maximize", "unmaximize", "hide", "minimize"]) {
           window.on(event, () => { try { previews.relayout(); } catch { /* closing */ } });
         }
       }
@@ -947,6 +961,10 @@ function createNativeChatPreviews({ BaseWindow, WebContentsView, Menu, clipboard
     contentSize: () => {
       const window = mainWindow();
       return window && !window.isDestroyed() ? window.getContentSize() : [VIEWPORT.width, VIEWPORT.height];
+    },
+    isVisible: () => {
+      const window = mainWindow();
+      return Boolean(window && !window.isDestroyed() && window.isVisible() && !window.isMinimized());
     },
   });
   return Object.freeze({ ...previews, closeAll });

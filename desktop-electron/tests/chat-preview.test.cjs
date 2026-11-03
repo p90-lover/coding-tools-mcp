@@ -249,6 +249,57 @@ test("native visualization widget state stays local to its owner across replacem
   });
 });
 
+test("native visualization reads expose only bounded public widget state", async () => {
+  const state = { modelContent: { counter: 1, selection: "blue" }, privateContent: { token: "private-ui-only" } };
+  let malformed = false, unavailable = false, publicReads = 0;
+  const { service } = previews({ page: { evaluate: (expression, contents) => {
+    if (expression.includes("document.querySelectorAll")) return { url: contents.getURL(), title: "Panel", text: "Counter 1", elements: [] };
+    if (expression.includes("widgetState?.modelContent")) {
+      publicReads++;
+      if (unavailable) throw new Error("private-ui-only");
+      if (malformed) return "{not-json";
+    }
+    return vm.runInNewContext(expression, { window: { openai: { widgetState: state } } });
+  } } });
+  try {
+    await service.call("owner", "preview_render", { html: "<button>1</button>" }, { visualization: true });
+    for (const value of [state.modelContent, null, 0, false, ["blue"]]) {
+      state.modelContent = value;
+      const read = await service.call("owner", "preview_read");
+      assert.deepEqual(read.structuredContent.modelContent, value);
+      assert.deepEqual(JSON.parse(read.content[0].text).modelContent, value);
+      assert.ok(!JSON.stringify(read).includes("private-ui-only"));
+    }
+    for (const value of ["x".repeat(16 * 1024), "界".repeat(6000)]) {
+      state.modelContent = value;
+      const read = await service.call("owner", "preview_read");
+      assert.equal(read.isError, false);
+      assert.equal(read.structuredContent.text, "Counter 1");
+      assert.equal(read.structuredContent.modelContentUnavailable, true);
+      assert.equal(Object.hasOwn(read.structuredContent, "modelContent"), false);
+    }
+    state.modelContent = { counter: 1 };
+    for (const failure of ["malformed", "unavailable"]) {
+      malformed = failure === "malformed"; unavailable = failure === "unavailable";
+      const read = await service.call("owner", "preview_read");
+      assert.equal(read.isError, false);
+      assert.equal(read.structuredContent.text, "Counter 1");
+      assert.equal(read.structuredContent.modelContentUnavailable, true);
+      assert.ok(!JSON.stringify(read).includes("private-ui-only"));
+    }
+    malformed = unavailable = false;
+    await service.call("owner", "preview_open", { url: "http://localhost:5173/" });
+    const before = publicReads;
+    for (const explicit of [false, true]) {
+      if (explicit) await service.call("owner", "preview_render", { html: "<p>Explicit panel</p>" });
+      const read = await service.call("owner", "preview_read");
+      assert.equal(Object.hasOwn(read.structuredContent, "modelContent"), false);
+      assert.equal(Object.hasOwn(read.structuredContent, "modelContentUnavailable"), false);
+      assert.equal(publicReads, before, "web pages and explicit HTML do not inspect a widget API");
+    }
+  } finally { service.closeAll(); }
+});
+
 test("parallel panel updates stay ordered and an ended owner cannot render queued content", async () => {
   let started, release;
   const began = new Promise(resolve => { started = resolve; });
@@ -379,7 +430,7 @@ test("native background views keep a surface, move into the pane and close with 
   const views = [];
   class Window extends (require("node:events").EventEmitter) {
     constructor(options) {
-      super(); this.options = options; this.destroyed = false; windows.push(this);
+      super(); this.options = options; this.destroyed = false; this.visible = options.show !== false; this.minimized = false; windows.push(this);
       this.contentView = {
         children: [],
         addChildView(view) {
@@ -390,6 +441,8 @@ test("native background views keep a surface, move into the pane and close with 
       };
     }
     isDestroyed() { return this.destroyed; }
+    isVisible() { return this.visible; }
+    isMinimized() { return this.minimized; }
     getContentSize() { return [1600, 1000]; }
     setIgnoreMouseEvents(value) { this.clickThrough = value; }
     showInactive() { this.shownInactive = true; }
@@ -419,11 +472,43 @@ test("native background views keep a surface, move into the pane and close with 
     assert.ok(background.contentView.children.includes(views[0]));
     await service.call("a", "preview_screenshot");
     assert.deepEqual(views[0].sent.filter(([method]) => method === "Emulation.setFocusEmulationEnabled").map(([, params]) => params.enabled), [true, false]);
-    views[0].webContents.debugger.sendCommand = async (method) => {
+    const bounds = { x: 1400, y: 20, width: 100, height: 300 };
+    main.visible = false;
+    service.show("a", bounds);
+    assert.ok(background.contentView.children.includes(views[0]), "a selected preview stays paintable while its owner is hidden");
+    assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 1280, height: 800 }, "parked bounds never inherit a clipped owner slot");
+    assert.equal(service.state("a").shown, true, "logical pane selection survives background hosting");
+    await service.call("a", "preview_screenshot");
+    assert.deepEqual(views[0].sent.filter(([method]) => method === "Emulation.setFocusEmulationEnabled").slice(-2).map(([, params]) => params.enabled), [true, false]);
+    main.visible = true;
+    main.emit("show");
+    assert.ok(main.contentView.children.includes(views[0]));
+    assert.deepEqual(views[0].bounds, bounds, "show restores the saved pane slot");
+    main.minimized = true;
+    main.emit("minimize");
+    assert.ok(background.contentView.children.includes(views[0]), "a minimized owner cannot host the selected preview");
+    assert.deepEqual(views[0].bounds, { x: 0, y: 0, width: 1280, height: 800 });
+    main.emit("show");
+    assert.ok(background.contentView.children.includes(views[0]), "visible but still minimized stays parked");
+    main.minimized = false;
+    main.emit("restore");
+    assert.ok(main.contentView.children.includes(views[0]));
+    assert.deepEqual(views[0].bounds, bounds);
+    main.visible = false;
+    main.emit("hide");
+    assert.equal(background.contentView.children.length, views.length);
+    assert.ok(views.every(view => background.contentView.children.includes(view)));
+    assert.equal(service.state("a").shown, true);
+    assert.equal(windows.length, 2, "visibility changes reuse the same background host");
+    for (const event of ["show", "hide", "minimize", "restore"]) assert.equal(main.listenerCount(event), 1);
+    const errorFocus = [];
+    views[0].webContents.debugger.sendCommand = async (method, params) => {
+      if (method === "Emulation.setFocusEmulationEnabled") errorFocus.push(params.enabled);
       if (method === "Page.captureScreenshot") throw new Error("capture failed");
       return {};
     };
     assert.equal((await service.call("a", "preview_screenshot")).isError, true);
+    assert.deepEqual(errorFocus, [true, false], "a failed selected-background capture still releases focus emulation");
     main.destroy();
     assert.equal(background.isDestroyed(), true);
     assert.equal(service.state("a"), null);

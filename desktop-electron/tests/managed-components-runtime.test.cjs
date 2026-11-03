@@ -27,7 +27,7 @@ function writeJson(filePath, value) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-function configureTestProxy(dataRoot) {
+async function configureTestProxy(dataRoot) {
   const directory = path.join(path.dirname(dataRoot), "providers");
   const store = createProviderNetworkStore({
     filePath: path.join(directory, "provider-network.json"),
@@ -40,6 +40,7 @@ function configureTestProxy(dataRoot) {
     scopes: ["all"],
   });
   store.setGlobalRouting({ enabled: true, profileId: "test" });
+  await store.saved();
 }
 
 function releaseManifest(id, payload) {
@@ -338,7 +339,7 @@ test("CPA inspection errors redact managed keys from projected status", async ()
   fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
   fs.writeFileSync(path.join(bundleRoot, "cpa", "cpa.bin"), payload);
   const dataRoot = path.join(temporaryDirectory("coding-tools-cpa-redaction"), "integrations");
-  configureTestProxy(dataRoot);
+  await configureTestProxy(dataRoot);
   const keys = { proxyApiKey: "CPA+proxy/fixture?key", managementKey: "CPA+management/fixture?key" };
   let failInspection = false;
   const controller = createManagedExternalServicesController({
@@ -392,7 +393,7 @@ test("CPA managed component snapshot redacts a secret-bearing process error", as
   fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
   fs.writeFileSync(path.join(bundleRoot, "cpa", "cpa.bin"), payload);
   const dataRoot = path.join(temporaryDirectory("coding-tools-cpa-managed-error"), "integrations");
-  configureTestProxy(dataRoot);
+  await configureTestProxy(dataRoot);
   const keys = { proxyApiKey: "CPA+proxy/fixture?key", managementKey: "CPA+management/fixture?key" };
   let child;
   const controller = createManagedExternalServicesController({
@@ -588,7 +589,7 @@ function bundledSourceManifest(id) {
 test("managed service start refuses installed Paseo before spawning", async () => {
   const manifestRoot = temporaryDirectory("coding-tools-retired-paseo-manifests");
   const dataRoot = path.join(temporaryDirectory("coding-tools-retired-paseo-data"), "integrations");
-  configureTestProxy(dataRoot);
+  await configureTestProxy(dataRoot);
   for (const id of COMPONENT_IDS) writeJson(path.join(manifestRoot, `${id}.json`), bundledSourceManifest(id));
   const manifest = bundledSourceManifest("paseo");
   const home = path.join(dataRoot, "components", "paseo", manifest.version);

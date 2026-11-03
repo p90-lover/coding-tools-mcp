@@ -17,6 +17,7 @@ const {
   BrowserHost,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
+  isCloudflareCheckPage,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
   MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS,
@@ -569,9 +570,10 @@ test("session inspection delegates navigation and capability detection to the sh
         type: "result",
         value: {
           authenticated: true,
-          temporary: true,
+          newChat: true,
           url: "https://chatgpt.com/?temporary-chat=true",
           solAvailable: true,
+          extraHighAvailable: true,
           proAvailable: true,
         },
       };
@@ -582,9 +584,10 @@ test("session inspection delegates navigation and capability detection to the sh
 
   assert.deepEqual(inspected, {
     authenticated: true,
-    temporary: true,
+    newChat: true,
     url: "https://chatgpt.com/?temporary-chat=true",
     solAvailable: true,
+    extraHighAvailable: true,
     proAvailable: true,
   });
   assert.equal(calls.length, 2);
@@ -604,13 +607,33 @@ test("session inspection fails closed on incomplete shared-helper capability evi
     refreshChatGptHomeDocument: async () => {},
     runBrowserHelperOperation: async () => ({
       type: "result",
-      value: { authenticated: true, temporary: true, url: "https://chatgpt.com/?temporary-chat=true" },
+      value: { authenticated: true, newChat: true, url: "https://chatgpt.com/?temporary-chat=true" },
     }),
   });
   await assert.rejects(
     BrowserHost.prototype.runSessionInspection.call(fixture, true),
     /incomplete ChatGPT capability evidence/,
   );
+});
+
+test("session inspection rejects missing, false, and non-boolean new-chat helper evidence", async () => {
+  for (const newChat of [undefined, false, "true"]) {
+    const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+      helper: {},
+      descriptorPath: "/runtime/launcher-browser.json",
+      getConnectorName: () => "Codex Native",
+      logger: { info() {} },
+      view: { webContents: { getURL: () => "https://chatgpt.com/?temporary-chat=true" } },
+      runBrowserHelperOperation: async () => ({
+        type: "result",
+        value: { authenticated: true, temporary: true, newChat, url: "https://chatgpt.com/?temporary-chat=true" },
+      }),
+    });
+    await assert.rejects(
+      BrowserHost.prototype.runSessionInspection.call(fixture, false),
+      /invalid ChatGPT session evidence/,
+    );
+  }
 });
 
 test("browser surface reactivation preserves its last measured bounds", () => {
@@ -988,6 +1011,67 @@ test("launcher authentication requires the Temporary Chat composer and complete 
   const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
   assert.equal(result.authenticated, true);
   assert.equal(result.status, "ready");
+});
+
+// The wait ends at once (timeout 0), so only what it says about the shown page is under test.
+function securityCheckWaitFixture(pageCheck) {
+  const warnings = [];
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    authNavigationError: null,
+    logger: { warn: (event, fields) => warnings.push([event, fields]) },
+    view: {
+      webContents: {
+        isDestroyed: () => false,
+        getURL: () => "https://chatgpt.com/?temporary-chat=true&__cf_chl_rt_tk=secret",
+        executeJavaScript: async (script) => {
+          assert.match(script, /^\(function isCloudflareCheckPage\(doc, win\)/);
+          assert.match(script, /\)\(document, window\)$/);
+          return await pageCheck();
+        },
+      },
+    },
+  });
+  return { fixture, warnings };
+}
+
+test("a sign-in wait that ends on Cloudflare's check page names the check, not the sign-in", async () => {
+  const { fixture, warnings } = securityCheckWaitFixture(async () => true);
+  await assert.rejects(
+    BrowserHost.prototype.waitForAuthenticated.call(fixture, 0),
+    /Cloudflare security check\. Open the Browser tab, complete the check, then run Setup → Install models\./,
+  );
+  // The challenge token in the address never reaches the log.
+  assert.deepEqual(warnings, [["browser.cloudflare_check_page", { url: "https://chatgpt.com/" }]]);
+});
+
+test("Cloudflare's check page is told from ChatGPT by its challenge setup, in any language", () => {
+  const page = (scripts, win = {}) => [{ scripts: scripts.map((src) => ({ src })) }, win];
+  const orchestrate = "https://chatgpt.com/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1?ray=8f2c";
+  // As seen live on 2026-11-03: the global and the orchestrate script, no #challenge-form.
+  assert.equal(isCloudflareCheckPage(...page([orchestrate, "https://challenges.cloudflare.com/turnstile/v0/g/abc/api.js"], { _cf_chl_opt: { cType: "managed" } })), true);
+  // Either signal alone is enough (a translated page differs only in its title).
+  assert.equal(isCloudflareCheckPage(...page([], { _cf_chl_opt: {} })), true);
+  assert.equal(isCloudflareCheckPage(...page([orchestrate])), true);
+  // ChatGPT itself loads Cloudflare's bot-detection script from the same folder: not a check.
+  assert.equal(isCloudflareCheckPage(...page([
+    "https://chatgpt.com/cdn-cgi/challenge-platform/scripts/jsd/main.js",
+    "https://cdn.oaistatic.com/assets/root-abc.js",
+  ])), false);
+  assert.equal(isCloudflareCheckPage(...page([], { _cf_chl_opt: "set" })), false);
+  assert.equal(isCloudflareCheckPage(undefined, undefined), false);
+  // It runs inside the page from its source text, so it must not lean on anything in this module.
+  assert.equal(new Function(`return (${isCloudflareCheckPage.toString()})`)()(...page([orchestrate])), true);
+});
+
+test("a sign-in wait on ChatGPT itself, or one whose page check fails, still reports the sign-in", async () => {
+  for (const pageCheck of [async () => false, async () => undefined, async () => { throw new Error("page gone"); }]) {
+    const { fixture, warnings } = securityCheckWaitFixture(pageCheck);
+    await assert.rejects(
+      BrowserHost.prototype.waitForAuthenticated.call(fixture, 0),
+      /^Error: ChatGPT login was not completed before the timeout$/,
+    );
+    assert.deepEqual(warnings, []);
+  }
 });
 
 test("authentication windows stay inside the launcher-owned browser partition", () => {

@@ -158,6 +158,17 @@ export function foldedRounds(turns: Pick<ChatTurn, "key" | "user">[], keep = 2):
   return folds;
 }
 
+/**
+ * The first turn a chat draws: the newest `shown` turns, moved back to the start of a folded run of
+ * goal rounds it would cut so the run's row stays drawn. Turns before it stay unmounted until asked
+ * for: a 97-turn goal chat drew 41k elements and every open chat drew all of its turns.
+ */
+export function turnWindowStart(count: number, shown: number, folds: Map<string, number[]> = new Map()): number {
+  let start = Math.max(0, count - shown);
+  for (const indexes of folds.values()) if (start > indexes[0] && start <= indexes[indexes.length - 1]) start = indexes[0];
+  return start;
+}
+
 /** A card's attempt now (1 for a first run): one more than the earlier attempts it keeps. */
 export function stepAttempt(step: Pick<ChatStep, "earlier"> | undefined): number {
   return 1 + (step?.earlier ?? []).filter((round) => /^Attempt \d+/.test(round.label)).length;

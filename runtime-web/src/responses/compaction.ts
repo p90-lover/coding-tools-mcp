@@ -1,4 +1,5 @@
 import { isNativeAgentsMdContext } from "./native-context";
+import { estimateTokens } from "../lib/token-estimate";
 
 /**
  * Remote compaction v2 support for ROUTED providers.
@@ -88,8 +89,8 @@ export function compactionItemToText(encryptedContent: string | undefined): stri
  * contextual wrappers are filtered there, and v2-style `compaction` items are NOT expected here.
  */
 
-/** codex-rs compact.rs COMPACT_USER_MESSAGE_MAX_TOKENS = 20k tokens (~4 chars/token). */
-const COMPACT_V1_RETAINED_CHAR_BUDGET = 20_000 * 4;
+/** codex-rs compact.rs COMPACT_USER_MESSAGE_MAX_TOKENS = 20k tokens. */
+const COMPACT_V1_RETAINED_TOKEN_BUDGET = 20_000;
 
 type CompactMessageItem = Record<string, unknown>;
 
@@ -190,7 +191,7 @@ export function buildCompactV1Output(
   maxImages = 10,
 ): CompactMessageItem[] {
   const selected: CompactMessageItem[] = [];
-  let remaining = COMPACT_V1_RETAINED_CHAR_BUDGET;
+  let remaining = COMPACT_V1_RETAINED_TOKEN_BUDGET;
   let retainedImages = 0;
   for (let i = userMessages.length - 1; i >= 0 && (remaining > 0 || retainedImages < maxImages); i--) {
     const message = structuredClone(userMessages[i]!);
@@ -207,11 +208,22 @@ export function buildCompactV1Output(
       }
       if (!textBlock(block) || remaining === 0) continue;
       const text = block.text!;
-      if (text.length <= remaining) {
-        remaining -= text.length;
+      const tokens = estimateTokens(text);
+      if (tokens <= remaining) {
+        remaining -= tokens;
         retainedReversed.push({ ...block, type: "input_text", text });
       } else {
-        retainedReversed.push({ ...block, type: "input_text", text: text.slice(text.length - remaining) });
+        let low = 0;
+        let high = text.length;
+        while (low < high) {
+          const middle = Math.floor((low + high) / 2);
+          const start = middle > 0 && text.codePointAt(middle - 1)! > 0xFFFF ? middle + 1 : middle;
+          if (estimateTokens(text.slice(start)) <= remaining) high = middle;
+          else low = middle + 1;
+        }
+        const start = low > 0 && text.codePointAt(low - 1)! > 0xFFFF ? low + 1 : low;
+        const suffix = text.slice(start);
+        if (suffix) retainedReversed.push({ ...block, type: "input_text", text: suffix });
         remaining = 0;
       }
     }

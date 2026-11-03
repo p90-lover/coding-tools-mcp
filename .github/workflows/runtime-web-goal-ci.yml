@@ -153,7 +153,9 @@ jobs:
             tests/chatgpt-web-markdown.test.ts tests/native-tool-envelope.test.ts \
             tests/launcher-helper-client.test.ts tests/chatgpt-web-harness.test.ts \
             tests/chatgpt-web-computer-vision.test.ts tests/responses-lite-tools.test.ts \
-            tests/retained-compaction.test.ts tests/rolling-checkpoint.test.ts --timeout 20000
+            tests/retained-compaction.test.ts tests/rolling-checkpoint.test.ts \
+            tests/compaction-v1.test.ts tests/compaction-goal-source.test.ts \
+            tests/compaction-task-context-review.test.ts --timeout 20000
       - name: Typecheck Runtime Web
         working-directory: ${{ env.RUNTIME_TEST_ROOT }}/runtime-web
         run: bun run typecheck

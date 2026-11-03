@@ -17,7 +17,8 @@ const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
-const { spawnOffThread } = require("./off-thread-run.cjs");
+const { spawnOffThread, fetchOffThread } = require("./off-thread-run.cjs");
+const { redactionLabel } = require("./chat-redaction.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -404,7 +405,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
-    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
+    // From a worker: the chat's session and conversation reads come here 17 times a second with two
+    // chats working, and on main a socket write that a network filter held froze every window.
+    const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
     const text = await response.text();
     // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
     // other AO call keeps the 900 KB limit.
@@ -878,7 +881,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   const REDACT_TOOL = /(^|__)redact_message$/;
   function hiddenSecretsInput(input) {
     const count = Array.isArray(input.secrets) ? input.secrets.length : 0;
-    return { ...(typeof input.label === "string" ? { label: input.label.slice(0, 40) } : {}),
+    return { ...(typeof input.label === "string" ? { label: redactionLabel(input.label, input.secrets) } : {}),
       secrets: `${count} hidden (not shown)` };
   }
   function timelineActivity(activity) {

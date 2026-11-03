@@ -76,7 +76,8 @@ function observeHarness(context) {
     logger: { info() {}, warn() {} },
     MAX_RESPONSE_BYTES: require("../electron/ipc-schema.cjs").MAX_RESPONSE_BYTES,
     // Imported by the module (not part of the helpers sliced above).
-    utf8Suffix: require("../electron/chat-agent-shell.cjs").utf8Suffix, ...context,
+    utf8Suffix: require("../electron/chat-agent-shell.cjs").utf8Suffix,
+    redactionLabel: require("../electron/chat-redaction.cjs").redactionLabel, ...context,
   });
 }
 
@@ -785,7 +786,7 @@ test("only the targeted raw approval read preserves inline-looking input", async
   const requestApi = require("node:vm").runInNewContext(method + "requestApi", {
     Buffer, AbortSignal, state: "ready", daemonPort: 1, AO_RESPONSE_MAX_BYTES: 16 * 1024 * 1024,
     dropInlineBlobs: require("../electron/agent-orchestrator-upstream.cjs").dropInlineBlobs,
-    fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ activities: [{ detail: { input: { command } } }] }) }),
+    fetchOffThread: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ activities: [{ detail: { input: { command } } }] }) }),
   });
   const normal = await requestApi("GET", "/api/v1/sessions/s/conversation?limit=100&trimLargeFields=1");
   assert.match(normal.data.activities[0].detail.input.command, /inline binary data not shown/);
@@ -1758,6 +1759,19 @@ test("a redact_message row shows its label and a count, never the secrets it hid
   assert.doesNotMatch(shown, /sk-live-0123456789abcdef|hunter2!x/);
   assert.match(row.input, /"label": "API key"/);
   assert.match(row.input, /2 hidden \(not shown\)/);
+});
+
+test("a redact_message row never echoes a secret through its label", async () => {
+  const secret = "fake-token-abc123XY";
+  const upstream = observeHarness({
+    internalApi: async () => ({ turns: [], messages: [], hasMoreBefore: false, oldestSequence: 1, activities: [{
+      id: "a1", turnId: "t", sequence: 1, activityKind: "mcp_tool", status: "completed",
+      detail: { toolName: "mcp__coding-tools__redact_message", input: { secrets: [secret], label: `credential ${secret}` },
+        output: "Hid 1 occurrence in the user's messages." } }] }),
+  });
+  const [row] = await upstream.timeline("s", "t");
+  assert.equal(JSON.stringify(row).includes(secret), false);
+  assert.match(row.input, /1 hidden \(not shown\)/);
 });
 
 test("a long finished turn keeps its tool calls when a page is over AO's handler limit, past six pages", async () => {

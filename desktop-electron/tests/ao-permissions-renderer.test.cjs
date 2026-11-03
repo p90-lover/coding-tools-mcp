@@ -57,18 +57,25 @@ test("composer mode clicks show only the corresponding real selector without sen
   let tree = view.render("AgentOrchestratorComposerControls", props);
   for (const heading of ["Harness", "Model", "Reasoning effort", "Context window"]) assert.ok(menuNamed(tree, heading), `${heading} has its own chip`);
   assert.equal(menuNamed(tree, "Orchestrator / Team"), undefined);
-  const option = label => elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined && item.props["aria-label"] === label)[0];
-  assert.equal(option("Single").props["aria-pressed"], true, "the switch names both modes and marks the active one");
-  // Each mode is a logo, not a word: one person answers alone, a group is a saved team.
-  assert.deepEqual(["Single", "Team"].map(label => option(label).props.children.props.name), ["user", "team"]);
-  assert.equal(elements(tree, item => item.props?.className === "ao-mode-switch")[0].props["data-mode"], "single", "the thumb sits on the picked mode");
-  option("Single").props.onClick();
-  assert.deepEqual(changes, [], "choosing the active mode changes nothing");
-  option("Team").props.onClick();
-  assert.deepEqual(changes, ["team"]);
+  // One button, one click: a switch that is on for Team, never two buttons to aim between.
+  const toggle = () => elements(tree, item => item.type === "button" && item.props.role === "switch")[0];
+  assert.equal(elements(tree, item => item.type === "button" && item.props["aria-pressed"] !== undefined).length, 0, "no Single and Team buttons side by side");
+  assert.equal(toggle().props["aria-label"], "Team mode");
+  assert.equal(toggle().props["aria-checked"], false, "Single: the switch is off");
+  assert.equal(toggle().props["data-mode"], "single", "the logo in use is the picked mode's");
+  // Each mode is a logo, not a word: one person answers alone, a group is a saved team. Both are in the
+  // button, so a switch can roll one out as the other rolls in.
+  assert.deepEqual(elements(toggle(), item => typeof item.props?.name === "string").map(item => item.props.name), ["user", "team"]);
+  toggle().props.onClick();
+  assert.deepEqual(changes, ["team"], "one click switches to Team");
   tree = view.render("AgentOrchestratorComposerControls", { ...props, mode: "team" });
+  assert.equal(toggle().props["aria-checked"], true, "Team: the switch is on");
   assert.equal(menuNamed(tree, "Model"), undefined);
   assert.equal(menuNamed(tree, "Orchestrator / Team").props.ariaLabel, "Choose saved team");
+  toggle().props.onClick();
+  assert.deepEqual(changes, ["team", "single"], "and one click back to Single");
+  tree = view.render("AgentOrchestratorComposerControls", { ...props, busy: true });
+  assert.equal(toggle().props.disabled, true, "no switch while the chat is busy");
 });
 
 test("saved-team menu uses only supplied setups, and Escape in a chip menu restores its trigger focus", () => {
@@ -488,6 +495,72 @@ test("an AO agent's tool request is answered by clicking an option: no Submit or
   assert.equal(options().props.picked[0], "always", "and shows the answer picked");
   buttons[2].props.onClick();
   assert.equal(replies.length, 1);
+});
+
+function pendingApprovalAttempt() {
+  const view = renderer("AgentOrchestratorApproval.tsx", { persistentRefs: true });
+  const approval = { nodeId: "worker", approval_id: "pending-request", source: "ao", kind: "command", command: "echo fixture",
+    decisions: [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Deny" }] };
+  const owner = { workspaceId: "workspace", runId: "run" }, calls = [], errors = [];
+  let resolve, reject;
+  const response = new Promise((yes, no) => { resolve = yes; reject = no; });
+  const parent = { exports: {}, busy: "", workspaceId: owner.workspaceId, selectedRun: { id: owner.runId },
+    approvalScope: { current: owner }, selection: { current: owner }, mounted: { current: true }, shownApprovals: [approval],
+    setBusy(value) { parent.busy = value; }, setError(error) { if (error) errors.push(String(error)); },
+    setPendingApprovals(update) { parent.shownApprovals = update(parent.shownApprovals); },
+    moduleCall(operation, args) { calls.push({ operation, args }); return response; },
+  };
+  // The real parent swallows reported transport errors. Its returned promise must still last
+  // until that attempt settles, including a cancelled confirmation that sends no reply.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  const file = ts.createSourceFile("Surface.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX), callbacks = {};
+  const visit = item => {
+    if (ts.isVariableDeclaration(item) && ["run", "approve"].includes(item.name.getText(file)) && item.initializer && ts.isArrowFunction(item.initializer)) {
+      assert.equal(callbacks[item.name.getText(file)], undefined, "callback must be unambiguous");
+      callbacks[item.name.getText(file)] = `const ${item.getText(file)};`;
+    }
+    ts.forEachChild(item, visit);
+  };
+  visit(file);
+  vm.runInNewContext(ts.transpileModule(`${callbacks.run}\n${callbacks.approve}\nexports.approve = approve;`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText, parent);
+  const options = () => {
+    const outer = view.render("AgentOrchestratorApproval", { approval, busy: Boolean(parent.busy), approve: parent.exports.approve });
+    const card = outer.type(outer.props);
+    return elements(card, item => typeof item.type === "function" && item.type.name === "CdxOptions")[0].props;
+  };
+  return { options, resolve, reject, calls, errors, parent };
+}
+
+for (const outcome of ["cancelled", "rejected"]) test(`AO approval permits an explicit retry after its parent attempt is ${outcome}`, async () => {
+  const attempt = pendingApprovalAttempt();
+  const pending = attempt.options().onPick("yes");
+  assert.equal(attempt.calls.length, 1);
+  assert.equal(attempt.options().disabled, true);
+  if (outcome === "cancelled") attempt.resolve({ cancelled: true });
+  else attempt.reject(new Error("fixture transport unavailable"));
+  await pending; await new Promise(setImmediate);
+  assert.equal(attempt.parent.busy, "");
+  assert.equal(attempt.parent.shownApprovals.length, 1, "same request remains pending");
+  assert.equal(attempt.options().disabled, false, "settlement releases the local send latch");
+  assert.deepEqual(plain(attempt.options().picked), []);
+  assert.equal(attempt.calls.length, 1, "settlement never resends automatically");
+  await attempt.options().onPick("no"); await new Promise(setImmediate);
+  assert.equal(attempt.calls.length, 2, "only the next explicit click sends again");
+  assert.equal(attempt.calls[1].args.approvalId, "pending-request");
+  assert.equal(attempt.calls[1].args.decisionId, "no");
+  if (outcome === "rejected") assert.match(attempt.errors[0], /fixture transport unavailable/);
+});
+
+test("AO approval blocks two same-frame picks and successful completion removes the pending request", async () => {
+  const attempt = pendingApprovalAttempt(), options = attempt.options();
+  const first = options.onPick("yes"), second = options.onPick("no");
+  attempt.resolve({});
+  await Promise.all([first, second]); await new Promise(setImmediate);
+  assert.equal(attempt.calls.length, 1, "the in-flight ref covers clicks before a React render");
+  assert.equal(attempt.parent.shownApprovals.length, 0);
+  assert.deepEqual(attempt.errors, []);
 });
 
 test("native decision objects are forwarded unchanged and unscoped requests are disabled", () => {

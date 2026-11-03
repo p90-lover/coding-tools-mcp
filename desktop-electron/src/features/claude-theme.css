@@ -114,7 +114,7 @@
 .ao-workflow .cx-chat .cx-icon-button:hover:not(:disabled), .ao-workflow .cx-chat .cx-icon-button[aria-pressed="true"] { color: var(--claude-text); }
 
 /* ---------- Reading column ---------- */
-.ao-workflow .cx-chat .cx-column { gap: 22px; max-width: 788px; padding: 20px 24px 40px; }
+.ao-workflow .cx-chat .cx-column { gap: 22px; max-width: 788px; padding: 20px 24px 10px; }
 .ao-workflow .cx-chat .cx-turn { gap: 12px; }
 
 /* The user's message: a rounded beige bubble. */
@@ -261,8 +261,8 @@
 .ao-workflow .cx-chat .cx-goal-edit { --ge-ink: var(--claude-text); border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
 .ao-workflow .cx-chat .cx-goal-edit-save { color: var(--claude-raised); }
 .ao-workflow .cx-chat .cx-composer, .ao-workflow .cx-chat .cx-context-strip, .ao-workflow .cx-chat .cx-command-card, .ao-workflow .cx-chat .cx-queued, .ao-workflow .cx-chat .cx-goal-edit,
-.ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note { max-width: 740px; }
-.ao-workflow .cx-chat .cx-composer { padding: 12px 12px 8px 14px; border: 1px solid var(--claude-line); border-radius: 16px; background: var(--claude-raised);
+.ao-workflow .cx-chat .cx-composer-modes, .ao-workflow .cx-chat .cx-route-note, .ao-workflow .cx-chat .cx-branch-bar:not(.is-inline) { max-width: 740px; }
+.ao-workflow .cx-chat .cx-composer { padding: 8px 8px 6px 12px; border: 1px solid var(--claude-line); border-radius: 16px; background: var(--claude-raised);
   box-shadow: var(--claude-shadow); }
 .ao-workflow .cx-chat .cx-composer:focus-within { border-color: color-mix(in srgb, var(--claude-accent) 45%, var(--claude-line));
   box-shadow: var(--claude-shadow), 0 0 0 3px var(--claude-accent-soft); }
@@ -270,25 +270,26 @@
 .ao-workflow .cx-chat .cx-composer textarea::placeholder { color: var(--claude-text-2); opacity: 1; }
 .ao-workflow .cx-chat .cx-context-strip { border-radius: 16px 16px 0 0; background: var(--claude-surface); }
 .ao-workflow .cx-chat .cx-chip, .ao-workflow .cx-chat .cx-chip-icon { color: var(--claude-text-2); }
-.ao-workflow .cx-chat .cx-composer .ao-composer-chip { height: 30px; color: var(--claude-text-2); font-size: 13px; }
-.ao-workflow .cx-chat .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip { color: var(--claude-text-2); }
+/* The chat box's row in Claude's palette: on the 28 px grid (codex-chat.css), its words in the second
+   ink, the model in the first, Team in use in clay. */
+.ao-workflow .cx-chat .cx-composer .ao-composer-chip { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-composer .ao-composer-chip:is([aria-label="Choose model"], [aria-label="Choose saved team"]) { color: var(--claude-text); }
 .ao-workflow .cx-chat .cx-composer .ao-composer-chip:hover:not(:disabled), .ao-workflow .cx-chat .cx-composer .ao-composer-chip[aria-expanded="true"] {
   background: var(--cx-hover); color: var(--claude-text); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch { border-color: var(--claude-line); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch::before { background: var(--claude-accent-soft); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch button { color: var(--claude-text-2); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch button.is-active { color: var(--claude-accent); }
-.ao-workflow .cx-chat .cx-composer .ao-mode-switch button:hover:not(:disabled, .is-active) { color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-toggle { color: var(--claude-text-2); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-toggle[data-mode="team"] { color: var(--claude-accent); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-toggle:hover:not(:disabled) { background: var(--cx-hover); color: var(--claude-text); }
+.ao-workflow .cx-chat .cx-composer .ao-mode-toggle:focus-visible { outline-color: var(--claude-accent); }
 .ao-workflow .cx-chat .cx-goal-dot { background: var(--claude-accent); box-shadow: 0 0 0 1.5px var(--claude-raised); }
 .ao-workflow .cx-chat .cx-goal:is(.is-stalled, .is-limited) .cx-goal-dot { background: var(--ao-amber); }
 .ao-workflow .cx-chat .cx-composer .cx-icon-button { color: var(--claude-text-2); }
 .ao-workflow .cx-chat .cx-composer .cx-icon-button:hover:not(:disabled) { color: var(--claude-text); }
 .ao-workflow .cx-chat .cx-context-meter .cx-context-fill { stroke: var(--claude-accent); }
 /* Send: a clay circle with a white arrow; Stop stays a dark square button. */
-.ao-workflow .cx-chat .cx-send { width: 32px; height: 32px; border-radius: 50%; background: var(--claude-accent); color: #fff; }
+.ao-workflow .cx-chat .cx-send { width: 28px; height: 28px; border-radius: 50%; background: var(--claude-accent); color: #fff; }
 .ao-workflow .cx-chat .cx-send:hover:not(:disabled) { background: var(--claude-accent-hover); }
 .ao-workflow .cx-chat .cx-send:disabled { background: color-mix(in srgb, var(--claude-accent) 40%, var(--claude-raised)); color: #fff; }
-.ao-workflow .cx-chat .cx-send.is-stop { border-radius: 10px; background: var(--claude-text); }
+.ao-workflow .cx-chat .cx-send.is-stop { border-radius: 8px; background: var(--claude-text); }
 .ao-workflow .cx-chat .cx-send.is-stop:hover { background: color-mix(in srgb, var(--claude-text) 85%, var(--claude-bg)); }
 .ao-workflow .cx-chat .cx-send.is-stop span { background: var(--claude-bg); }
 .ao-workflow .cx-chat .cx-attachment { border-color: var(--claude-line); border-radius: 8px; background: var(--claude-surface); }
@@ -365,8 +366,11 @@
 /* A pane is a Surface of its own: it fills its cell and draws no sidebar or drag strip. */
 .cx-pane > .cx-pane-surface { flex: 1 1 auto; height: auto; background: #faf9f5; }
 .cx-split[data-split] .cx-pane-close { color: var(--ao-muted); }
-/* A pane not focused shows its header actions only while hovered, as Claude Code's panes do. */
-.cx-split[data-split] > .cx-pane:not([data-focused]) .cx-thread-head > :is(.cx-icon-button, .cx-browser-chip, .cx-head-team) { opacity: 0; transition: opacity 0.12s ease-out; }
+/* A pane not focused dims its header actions until hovered. Hidden (as Claude Code's panes do), every
+   pane's head looked different and its buttons seemed gone (2026-11-03); faded, they stay in their row.
+   An icon fades by its colour, not its opacity, which would fade its plate (codex-chat.css) as well. */
+.cx-split[data-split] > .cx-pane:not([data-focused]) .cx-thread-head > :is(.cx-browser-chip, .cx-head-team) { opacity: 0.45; transition: opacity 0.12s ease-out; }
+.cx-split[data-split] > .cx-pane:not([data-focused]):not(:hover) .cx-thread-head > .cx-icon-button { color: color-mix(in srgb, var(--claude-text-2) 45%, transparent); }
 .cx-split[data-split] > .cx-pane:not([data-focused]):hover .cx-thread-head > :is(.cx-icon-button, .cx-browser-chip, .cx-head-team) { opacity: 1; }
 
 /* Claude Code's pane move: a grip at the top middle of each pane (its pill shows on hover), or the

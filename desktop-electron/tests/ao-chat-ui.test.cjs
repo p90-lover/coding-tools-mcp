@@ -53,7 +53,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudges
   "./ChatBranchBar": { ChatBranchBar: () => null },
   "./HarnessLogo": { ModelLogo: () => null },
   "./AgentOrchestratorRoleEditor": roles,
-  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null } }),
+  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") }),
   "./ChatReplyPlan": load("ChatReplyPlan.tsx"),
   "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }),
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
@@ -125,6 +125,28 @@ test("a project switch keeps its chat pane readable while loading and offers Ret
   assert.match(failed, /Couldn&#x27;t load project/);
   assert.match(failed, /Couldn&#x27;t load chats: Request failed/);
   assert.match(failed, /Retry loading/);
+});
+
+test("a turn waiting for you has a button beside its time: Answer with a request shown, Continue once none has been for two minutes", () => {
+  // Seen live 2026-11-02: "Deep diving for 1h 11m · waiting for you for 57m" in a split pane, with
+  // no request anywhere to answer (its agent's link to AO had gone).
+  const now = Date.now();
+  const turnAt = (quietMs) => ({ key: "k", runId: "run", status: "running", solo: false, startedAtMs: now - 3_600_000,
+    steps: [{ key: "s", nodeId: "n", role: "planner", name: "DeepSeek V4.1 Flash", detail: "", state: "running", startedAtMs: now - 3_600_000,
+      working: { detail: "", stalled: false, activity: "waiting for approval", heardAtMs: now - quietMs, timeline: [] } }] });
+  const render = (value, quietMs) => renderToStaticMarkup(React.createElement(toolParts.TurnRestart.Provider, { value },
+    React.createElement(dsh.DshTurnWork, { turn: turnAt(quietMs), live: true, expanded: false, useWork: () => null })));
+  const button = (html) => html.match(/<button[^>]*class="cx-turn-restart cx-turn-answer"[^>]*>([^<]*)<\/button>/)?.[1] ?? null;
+  const both = { restarting: false, onAnswer() {}, onContinue() {} };
+  const waiting = render(both, 30 * 60_000);
+  assert.match(waiting, /waiting for you for 30m 0s/);
+  assert.equal(button(waiting), "Answer", "a request shown in the chat is one click away");
+  assert.equal(button(render({ restarting: false, onContinue() {} }, 30 * 60_000)), "Continue", "with none shown, the agent can be restarted to ask again");
+  assert.equal(button(render({ restarting: false, onContinue() {} }, 90_000)), null, "not while the request poll may still bring it");
+  assert.equal(button(render({ restarting: false }, 30 * 60_000)), null, "a chat that cannot send offers nothing");
+  assert.equal(button(renderToStaticMarkup(React.createElement(toolParts.TurnRestart.Provider, { value: both },
+    React.createElement(dsh.DshTurnWork, { turn: { ...turnAt(30 * 60_000), steps: [{ ...turnAt(0).steps[0], working: { detail: "", stalled: false, activity: "running npm test", heardAtMs: now, timeline: [] } }] },
+      live: true, expanded: false, useWork: () => null })))), null, "a turn at work has no Answer");
 });
 
 test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group heading and Deep diving while it runs, Completed once it ends", () => {
@@ -215,7 +237,7 @@ test("ordinary model activity uses specific DeepSeek headings rather than unexpl
 });
 
 test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
-  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null } });
+  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") });
   const edit = (path, additions, deletions) => ({ id: `${path}${additions}`, kind: "edit", status: "completed", text: "", files: [{ path, additions, deletions }] });
   // Seven one-line edits of one file read as that file once, with their lines summed.
   const changes = head.turnChanges([edit("src/aistudio.js", 1, 1), { id: "c", kind: "command", status: "completed", text: "npm test" },
@@ -228,11 +250,12 @@ test("a reply's head says who answered, how it stands, why it failed, a team's c
   assert.match(single, /cx-reply-who-name">GPT-6\.1 Sol</);
   assert.match(single, /cx-reply-status is-failed">Failed</);
   assert.match(single, /cx-reply-time[^>]*>2m 34s</, "how long it ran");
-  assert.match(single, /aria-label="Changed files".*cx-reply-top/, "the changed files come before who answered");
   assert.doesNotMatch(single, /role="alert"/, "the error is not in the summary");
   const error = renderToStaticMarkup(React.createElement(head.ReplyError, { team: false, error: { step: "GPT-6.1 Sol", message: "API Error: 400 unknown provider" } }));
   assert.match(error, /role="alert".*Failed.*API Error: 400 unknown provider/, "the error leads the reply on its own");
-  assert.match(single, /2 files <span class="cx-reply-diff"><span class="is-add">\+7<\/span> <span class="is-del">−3<\/span>/, "the turn's total change");
+  assert.match(single, /aria-label="2 files changed, 7 lines added, 3 lines removed"/, "the turn's total change");
+  assert.match(single, /cx-reply-time[^>]*>2m 34s<\/span><span class="cx-changed-files"/, "the file count sits immediately beside runtime");
+  assert.doesNotMatch(single, /cx-reply-files|cx-reply-total/, "no duplicate files box or raw path tooltip");
   // The chat draws a reply as: the failure, the work and answer, then the summary.
   const chatSource = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const [failure, answer, summary] = ["<ReplyError ", "className={`cx-answer", "<ReplyHead "].map((mark) => chatSource.indexOf(mark));
