@@ -938,6 +938,50 @@ function fakeSandbox({ installed = true } = {}) {
   };
 }
 
+test("pre-spawn cancellation forwards the captured turn signal and the next turn gets a fresh signal", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const start = sandbox.start;
+  const signals = [];
+  let release, reached;
+  const gate = new Promise(resolve => { release = resolve; });
+  const waiting = new Promise(resolve => { reached = resolve; });
+  sandbox.start = async request => {
+    signals.push(request.signal);
+    if (signals.length === 1) { reached(); await gate; }
+    request.signal?.throwIfAborted();
+    return start(request);
+  };
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  let pending;
+  try {
+    const client = await session(tools, { approvalMode: "bypass-permissions" });
+    pending = callTool(client.url, client.auth, "exec_command", { cmd: "echo pending", yield_time_ms: 0 });
+    await waiting;
+    tools.cancelSessionCalls("ao-1");
+    release();
+    const cancelled = await pending;
+    assert.equal(cancelled.isError, true);
+    assert.match(cancelled.content[0].text, /abort|cancel/i);
+    assert.equal(signals[0].aborted, true, "the old signal survives resetting the session lifetime");
+    assert.equal(sandbox.started.length, 0);
+    assert.deepEqual((await tools.processes(["ao-1"], "ws1")).flatMap(item => item.commands), []);
+    const accepted = await callTool(client.url, client.auth, "exec_command", { cmd: "echo next turn", yield_time_ms: 0 });
+    assert.equal(accepted.isError, false);
+    assert.notEqual(signals[1], signals[0]);
+    assert.equal(signals[1].aborted, false);
+    assert.equal(sandbox.started.length, 1);
+    assert.equal(accepted.structuredContent.command_id, "sbx-1");
+    assert.equal(accepted.structuredContent.session_id, "sbx-1");
+    assert.equal(calls.filter(call => call.body?.tool === "exec_command").length, 0, "no fallback to headless commands");
+  } finally {
+    release();
+    await pending?.catch(() => undefined);
+    await tools.close();
+    tree.cleanup();
+  }
+});
+
 
 test("ended chats reap agent commands while ordinary credential release retains pane ownership", async (t) => {
   for (const ended of [true, false]) await t.test(ended ? "semantic end" : "credential release", async () => {
