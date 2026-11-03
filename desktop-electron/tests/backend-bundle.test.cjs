@@ -113,3 +113,134 @@ test("a deployed bundle is installed from incoming once READY exists, then hande
     manager.stopWatching();
   }
 });
+
+for (const boundary of ["readdir", "access"]) {
+  for (const restart of [false, true]) {
+    test(`stopping during ${boundary} cancels discovery${restart ? " even when a replacement watcher starts" : ""}`, async (t) => {
+      const manager = bundles(temporary("backend-cancel"));
+      const incoming = writeBundle(path.join(manager.incomingRoot, "pending"), "pending");
+      fs.writeFileSync(path.join(incoming, READY_MARKER), "ready");
+      const timers = [];
+      t.mock.method(global, "setInterval", (tick) => {
+        const timer = { tick, unref() {} };
+        timers.push(timer);
+        return timer;
+      });
+      t.mock.method(global, "clearInterval", () => {});
+      const original = fs.promises[boundary];
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      let reached;
+      const waiting = new Promise((resolve) => { reached = resolve; });
+      t.mock.method(fs.promises, boundary, async (...args) => {
+        reached();
+        await gate;
+        return original(...args);
+      });
+      const installed = [];
+      manager.watchIncoming(async () => { installed.push("old"); });
+      const scan = timers[0].tick();
+      try {
+        await waiting;
+        manager.stopWatching();
+        if (restart) {
+          manager.watchIncoming(async () => { installed.push("new"); });
+          await timers[1].tick();
+          assert.deepEqual(installed, [], "replacement waits for the existing discovery lock");
+        }
+        release();
+        await scan;
+        assert.deepEqual(installed, [], "stopped scan cannot invoke its restart hook");
+        assert.equal(manager.current().source, "builtin");
+        assert.equal(fs.existsSync(path.join(manager.root, "active.json")), false);
+        assert.equal(fs.existsSync(path.join(manager.root, "pending")), false);
+        assert.equal(fs.existsSync(path.join(incoming, READY_MARKER)), true, "cancelled discovery keeps the incoming bundle");
+        if (!restart) manager.watchIncoming(async () => { installed.push("new"); });
+        await timers[1].tick();
+        assert.deepEqual(installed, ["new"], "next owner can install the preserved bundle once");
+        assert.equal(manager.current().id, "pending");
+        assert.equal(fs.existsSync(incoming), false);
+      } finally {
+        release();
+        await scan;
+        manager.stopWatching();
+      }
+    });
+  }
+}
+
+for (const rejectCallback of [false, true]) {
+  test(`stopping after activation preserves accepted callback ${rejectCallback ? "failure" : "success"} cleanup`, async (t) => {
+    const warnings = [];
+    const manager = bundles(temporary("backend-accepted"), { logger: { warn: (...args) => warnings.push(args) } });
+    const incoming = writeBundle(path.join(manager.incomingRoot, "accepted"), "accepted");
+    fs.writeFileSync(path.join(incoming, READY_MARKER), "ready");
+    const timers = [];
+    t.mock.method(global, "setInterval", (tick) => {
+      const timer = { tick, unref() {} };
+      timers.push(timer);
+      return timer;
+    });
+    t.mock.method(global, "clearInterval", () => {});
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    let entered;
+    const waiting = new Promise((resolve) => { entered = resolve; });
+    let callbacks = 0;
+    manager.watchIncoming(async () => {
+      callbacks += 1;
+      entered();
+      await gate;
+      if (rejectCallback) throw new Error("fixture restart failed");
+    });
+    const scan = timers[0].tick();
+    try {
+      await waiting;
+      assert.equal(manager.current().id, "accepted");
+      manager.stopWatching();
+      manager.watchIncoming(async () => { callbacks += 1; });
+      await timers[1].tick();
+      assert.equal(callbacks, 1, "accepted callback retains the global applying lock");
+      release();
+      await scan;
+      assert.equal(fs.existsSync(incoming), false);
+      assert.equal(manager.current().id, "accepted");
+      assert.equal(warnings.length, rejectCallback ? 1 : 0);
+      const next = writeBundle(path.join(manager.incomingRoot, "next"), "next");
+      fs.writeFileSync(path.join(next, READY_MARKER), "ready");
+      await timers[1].tick();
+      assert.equal(callbacks, 2, "accepted cleanup releases the lock for the replacement");
+      assert.equal(manager.current().id, "next");
+    } finally {
+      release();
+      await scan;
+      manager.stopWatching();
+    }
+  });
+}
+
+test("a failed incoming install cleans up and releases the watcher lock", async (t) => {
+  const warnings = [];
+  const manager = bundles(temporary("backend-failed"), { logger: { warn: (...args) => warnings.push(args) } });
+  const incoming = writeBundle(path.join(manager.incomingRoot, "bad"), "bad", { tamper: true });
+  fs.writeFileSync(path.join(incoming, READY_MARKER), "ready");
+  let tick;
+  t.mock.method(global, "setInterval", (callback) => { tick = callback; return { unref() {} }; });
+  t.mock.method(global, "clearInterval", () => {});
+  let callbacks = 0;
+  manager.watchIncoming(async () => { callbacks += 1; });
+  try {
+    await tick();
+    assert.equal(callbacks, 0);
+    assert.equal(manager.current().source, "builtin");
+    assert.equal(fs.existsSync(incoming), false);
+    assert.equal(warnings.length, 1);
+    const next = writeBundle(path.join(manager.incomingRoot, "good"), "good");
+    fs.writeFileSync(path.join(next, READY_MARKER), "ready");
+    await tick();
+    assert.equal(callbacks, 1);
+    assert.equal(manager.current().id, "good");
+  } finally {
+    manager.stopWatching();
+  }
+});

@@ -121,11 +121,10 @@ async function dispatched(agent, model, tuning, catalog = DISPATCH_CATALOG) {
 
 test("CPA effort survives each client's gateway transport and context is forwarded unchanged", async () => {
   for (const agent of ["codex", "claude-code", "opencode"]) {
-    // Claude Code keeps the body setting and the suffix that survives AO's gateway effort reset.
-    // Codex keeps its body transport; opencode has only the session-local suffix.
+    // Both body-capable drivers also need the suffix that survives AO's gateway effort reset.
+    // opencode has only the session-local suffix.
     const body = agent !== "opencode";
-    const suffix = agent !== "codex";
-    const gatewayModel = suffix ? "gpt-5.5(high)" : "gpt-5.5";
+    const gatewayModel = "gpt-5.5(high)";
     const input = await dispatched(agent, "cpa/gpt-5.5(low)", { effort: "high", context_window: 262144 });
     assert.equal(input.model, agent === "opencode" ? `openai/${gatewayModel}` : gatewayModel);
     assert.deepEqual(input.gateway, { provider: "cpa", model: gatewayModel });
@@ -155,18 +154,18 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
     });
     const result = await workflow.call("models", { harness: "ao:" + agent });
     assert.deepEqual(result.capabilities["cpa/" + id].efforts, ["none", "low", "high", "max"], agent);
-    // Claude Code also carries the validated level in the name; Codex keeps the bare model.
+    // Both Claude Code and Codex carry the validated level in the name through AO.
     const body = agent !== "opencode";
     for (const effort of ["none", "low", "high", "max"]) {
       const input = await dispatched(agent, "cpa/" + id + "(high)", { effort }, catalog);
-      const gatewayModel = agent === "codex" ? id : id + "(" + effort + ")";
+      const gatewayModel = id + "(" + effort + ")";
       assert.equal(input.model, agent === "opencode" ? "openai/" + gatewayModel : gatewayModel);
       assert.deepEqual(input.gateway, { provider: "cpa", model: gatewayModel });
       assert.equal(input.effort, body ? effort : undefined);
     }
     await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /doesn't support the chosen reasoning effort/i);
     const blank = await dispatched(agent, "cpa/" + id, {}, catalog);
-    assert.deepEqual([blank.gateway.model, blank.effort], [agent === "codex" ? id : id + "(high)", body ? "high" : undefined],
+    assert.deepEqual([blank.gateway.model, blank.effort], [id + "(high)", body ? "high" : undefined],
       "None/Low/High/Max has no Auto: a blank card starts on High, not on no effort CPA cannot serve");
   }
 });
