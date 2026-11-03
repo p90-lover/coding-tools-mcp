@@ -325,7 +325,7 @@ class ExtraTunnels {
       await writePrivateFileAtomicAsync(this.keyPath(entryId), key);
       const currentEntries = this.entries();
       if (this.saved === null) {
-        fs.rmSync(this.keyPath(entryId), { force: true });
+        await fs.promises.rm(this.keyPath(entryId), { force: true });
         throw new Error("Could not read the extra tunnel registry. Try again.");
       }
       await this.writeEntries([...currentEntries, entry]);
