@@ -308,16 +308,44 @@ function useStableCalls<T extends Record<string, ((...args: any[]) => any) | und
 // The same read asked again while it is still on its way shares that call. Every split pane polls
 // its project's runs and board, and an AO push makes each pane of a project read at the same
 // moment: ten panes read the same runs ten times over IPC, each copy cloned on the renderer thread.
-const SHARED_READS = new Set(["runs", "board"]);
+// A run's status and its cards' harness status are read the same way, by every pane of that run on
+// each tick and on each AO push.
+const SHARED_READS = new Set(["runs", "board", "run_status", "harness_status"]);
 const readsInFlight = new Map<string, Promise<Record<string, unknown>>>();
 export function moduleCall(operation: string, args: JsonObject = {}): Promise<Record<string, unknown>> {
-  if (!SHARED_READS.has(operation)) return callModule(operation, args);
+  if (!SHARED_READS.has(operation)) return callWithRoom(operation, args);
   const key = `${operation}\n${JSON.stringify(args)}`;
   const pending = readsInFlight.get(key);
   if (pending) return pending;
-  const read = callModule(operation, args).finally(() => readsInFlight.delete(key));
+  const read = callWithRoom(operation, args).finally(() => readsInFlight.delete(key));
   readsInFlight.set(key, read);
   return read;
+}
+
+/** The local service had no room for the call: it was never sent, so nothing ran. */
+export function isCapacityError(cause: unknown): boolean {
+  return /HEADLESS_CAPACITY|HEADLESS_QUEUE_FULL|launcher queue is full/.test(cause instanceof Error ? cause.message : String(cause));
+}
+// Reads, and the contentless chat recovery (it only reads and never sends), that lost their turn
+// are sent again after a pause instead of failing at once. Eight split-view chats refreshing
+// together filled the queue on 2026-11-03, and 25 such calls failed in three seconds.
+const RETRY_WHEN_FULL = new Set(["runs", "board", "run_status", "harness_status", "chat_recover"]);
+const FULL_RETRY_PAUSES_MS = [1500, 3500];
+async function callWithRoom(operation: string, args: JsonObject) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await callModule(operation, args);
+    } catch (cause) {
+      if (!RETRY_WHEN_FULL.has(operation) || attempt >= FULL_RETRY_PAUSES_MS.length || !isCapacityError(cause)) throw cause;
+      // Spread out, so the panes that were turned away together do not come back together.
+      await new Promise(resolve => setTimeout(resolve, FULL_RETRY_PAUSES_MS[attempt] * (1 + Math.random() * 0.5)));
+    }
+  }
+}
+
+/** A poll's period, up to a fifth longer at random, so panes opened together drift apart. */
+export function spreadInterval(ms: number): number {
+  return Math.round(ms * (1 + Math.random() * 0.2));
 }
 async function callModule(operation: string, args: JsonObject) {
   const outer = await getCodingToolsClient().apps.call({
@@ -1543,10 +1571,13 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
               (current.runs as AoMission[]).find((fresh) => fresh.id === run.id) ?? run)));
           }
         }
-      } catch (cause) { if (live) setError(cause instanceof Error ? cause.message : String(cause)); }
+      } catch (cause) {
+        // A busy moment is not an error to show: the next tick reads again.
+        if (live && !isCapacityError(cause)) setError(cause instanceof Error ? cause.message : String(cause));
+      }
       finally { reading = false; }
     };
-    const timer = setInterval(() => void refresh(), 3000);
+    const timer = setInterval(() => void refresh(), spreadInterval(3000));
     const stopPush = onAoPush((change) => { if (change.runs.includes(`${workspaceId}:${selectedRunId}`)) void refresh(); });
     void refresh();
     return () => { live = false; clearInterval(timer); stopPush(); };
@@ -1596,10 +1627,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           return typeof status.policy_acknowledged === "boolean" ? [[selectedRunId + ":" + nodeId, status as unknown as RuntimePermissionPolicy]] : [];
         })));
         if (newest) { const updated = newest; setMissions(current => current.map(mission => mission.id === updated.id && mission.revision <= updated.revision ? updated : mission)); }
-      } catch (cause) { if (live) setError(cause instanceof Error ? cause.message : String(cause)); }
+      } catch (cause) { if (live && !isCapacityError(cause)) setError(cause instanceof Error ? cause.message : String(cause)); }
       finally { reading = false; }
     };
-    const timer = setInterval(() => void refresh(), 3000);
+    const timer = setInterval(() => void refresh(), spreadInterval(3000));
     void refresh();
     return () => { live = false; clearInterval(timer); };
   }, [workspaceId, selectedRunId, selectedRunHere, activeNodeIds, autoStatus, setError]);

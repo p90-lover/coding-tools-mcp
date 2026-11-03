@@ -121,7 +121,7 @@ test("identical concurrent read polls share one HTTP request, but later polls re
   assert.equal(host.admissionStatus().coalesced, 34);
 });
 
-test("control requests reach HTTP while twelve distinct long-chat reads are pending", async t => {
+test("control requests reach HTTP while twenty-four distinct long-chat reads are pending", async t => {
   const held = [];
   const paths = [];
   const host = await serverHost(t, (request, response) => {
@@ -129,7 +129,7 @@ test("control requests reach HTTP while twelve distinct long-chat reads are pend
     if (request.url === "/api/v1/ao/read") held.push(response);
     else response.end('{"ok":true}');
   });
-  const pending = Array.from({ length: 12 }, (_, i) => host.request("/api/v1/ao/read", { workspace_id: "ws", run_id: `run-${i}` }));
+  const pending = Array.from({ length: 24 }, (_, i) => host.request("/api/v1/ao/read", { workspace_id: "ws", run_id: `run-${i}` }));
   const settled = Promise.allSettled(pending);
   t.after(async () => {
     for (let i = 0; i < 4; i += 1) {
@@ -138,12 +138,12 @@ test("control requests reach HTTP while twelve distinct long-chat reads are pend
     }
     await settled;
   });
-  await until(() => held.length >= 10);
+  await until(() => held.length >= 22);
   const control = host.request("/api/v1/ao/control", { workspace_id: "ws", run_id: "run-0", action: "stop", confirm: true }, { localConfirmation: true });
   control.catch(() => {});
   await until(() => paths.includes("/api/v1/ao/control"));
   assert.deepEqual(await control, { ok: true });
-  assert.equal(host.admissionStatus().active, 10);
+  assert.equal(host.admissionStatus().active, 22);
   for (const response of held.splice(0)) response.end('{"ok":true}');
   await until(() => held.length === 2);
   for (const response of held.splice(0)) response.end('{"ok":true}');
@@ -206,6 +206,43 @@ test("queue timeout is distinct from service refusal and never loses a slot", as
   release();
   await take("later");
   assert.equal(host.turns.active, 1);
+});
+
+// Reported 2026-11-03: eight split-view chats refreshing at once waited out a fixed 15 s queue
+// although turns kept finishing, and 25 background calls failed as "admission is full".
+test("a queue that keeps moving never times out, however long one request waits in it", async t => {
+  const { host, take, release } = scheduler(t, 1);
+  host.queueWaitMs = 60;
+  host.maxQueueWaitMs = 5_000;
+  await take("a");
+  const queued = ["b", "c", "d", "e"].map(owner => take(owner));
+  for (let i = 0; i < queued.length; i += 1) {
+    await new Promise(resolve => setTimeout(resolve, 35));
+    release();
+  }
+  const results = await Promise.allSettled(queued);
+  assert.deepEqual(results.map(result => result.status), ["fulfilled", "fulfilled", "fulfilled", "fulfilled"],
+    "the last waited about 140 ms, past the 60 ms limit, but a turn finished every 35 ms");
+});
+
+test("a request passed over while others finish still fails once it has waited the longest allowed", async t => {
+  const { host, take } = scheduler(t, 2);
+  host.queueWaitMs = 40;
+  host.maxQueueWaitMs = 120;
+  await take("holder");
+  const started = performance.now();
+  const starved = take("starved");
+  const failed = assert.rejects(starved, { code: "HEADLESS_QUEUE_TIMEOUT" });
+  // Controls go first and keep finishing, so the queue never looks stuck.
+  let done = false;
+  failed.finally(() => { done = true; });
+  while (!done) {
+    const control = await take("control", "control");
+    await new Promise(resolve => setTimeout(resolve, 15));
+    host.releaseTurn(control);
+  }
+  await failed;
+  assert.ok(performance.now() - started >= 110, "not before the total limit");
 });
 
 test("control bursts still obey the global limit and have a bounded separate queue", async t => {
