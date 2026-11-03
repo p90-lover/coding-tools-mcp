@@ -300,3 +300,18 @@ test("the shell bridge adapts headless workspaces into the typed page contract",
   assert.equal(page.items[0].id, "b");
   assert.equal(page.nextCursor, null);
 });
+
+// 0.8.75 showed the window's black background under the Chat once the window grew: `.gpb-chat`
+// got its fill rule only from the GPT Browser's stylesheet, which that build did not load, so the
+// Chat stopped at its content's height. The shared tab pane now stretches whatever page it holds.
+test("every tab's page fills the window's height whatever its own stylesheet says", () => {
+  const styles = read("src/styles.css");
+  const pane = /\.surface-pane\s*\{([^}]*)\}/.exec(styles)?.[1] || "";
+  assert.match(pane, /display:\s*flex;/);
+  assert.match(pane, /flex-direction:\s*column;/);
+  assert.match(pane, /height:\s*100%;/);
+  const page = /\.surface-pane > \*\s*\{([^}]*)\}/.exec(styles)?.[1] || "";
+  assert.match(page, /flex:\s*1 1 auto;/, "the pane's page grows to the pane's height");
+  assert.match(page, /min-height:\s*0;/, "and may shrink below its content so it scrolls instead of overflowing");
+  assert.match(read("src/App.tsx"), /<div className="surface-pane" hidden=\{!current\}>/);
+});
