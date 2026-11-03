@@ -6314,9 +6314,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const wakeup = wakeups.get(workspaceId, taskId);
     if (wakeupsDisposed || !wakeup || wakeup.id !== id || waking.has(key)) return;
     if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
+    const current = () => !wakeupsDisposed && wakeups.get(workspaceId, taskId) === wakeup && wakeup.id === id;
+    let consumed = false;
     waking.add(key);
     try {
       const saved = await runs({ workspaceId });
+      if (!current()) return;
+      if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
       const chatRuns = saved.runs.filter(run => run.project_id === taskId);
       const latest = chatRuns.at(-1);
       // The next round of a self-paced /loop: gone with the loop, or once the loop outlived its days.
@@ -6329,6 +6333,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       });
       // It fires when that turn settles (wakeupAfterRun), or at the next look should the settle be missed.
       if (action === "wait") { wakeups.update(workspaceId, taskId, { due: true }); armWakeup(workspaceId, taskId, WAKE_RETRY_MS); return; }
+      consumed = true;
       wakeups.clear(workspaceId, taskId, id);
       wakeFailures.delete(id);
       if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
@@ -6343,12 +6348,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
       logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
     } catch (error) {
+      if (!consumed && !current()) { wakeFailures.delete(id); return; }
+      if (!consumed && wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
       const failures = (wakeFailures.get(id) ?? 0) + 1;
       wakeFailures.set(id, failures);
       logger?.warn?.("ao.wakeup.failed", { workspaceId, taskId, failures, error: String(error?.message || error).slice(0, 200) });
-      if (failures >= WAKE_RETRIES || !wakeups.get(workspaceId, taskId)) { wakeups.clear(workspaceId, taskId, id); wakeFailures.delete(id); }
+      if (consumed || failures >= WAKE_RETRIES) {
+        if (!consumed) wakeups.clear(workspaceId, taskId, id);
+        wakeFailures.delete(id);
+      }
       else armWakeup(workspaceId, taskId, WAKE_RETRY_MS);
-    } finally { waking.delete(key); }
+    } finally {
+      waking.delete(key);
+      const next = wakeups.get(workspaceId, taskId);
+      // A replacement's timer may have fired while this older callback held the chat's lock.
+      if (!wakeupsDisposed && next && next !== wakeup && !wakeTimers.has(key)) armWakeup(workspaceId, taskId);
+    }
   }
   // When a chat's turn settles, a wake-up that came due while it ran fires now.
   async function wakeupAfterRun(workspaceId, runId) {

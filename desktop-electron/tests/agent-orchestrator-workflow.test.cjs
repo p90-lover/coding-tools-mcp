@@ -5471,6 +5471,77 @@ test("the user edits a wake-up's note and minutes: it fires on the new clock wit
   await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "snooze", id }), /edit or cancel/);
 });
 
+for (const change of ["cancel", "postpone", "replace", "dispose"]) {
+  test(`a wake-up honors ${change} while its due read is pending`, async (t) => {
+    const { world, workflow, advance, gate } = wakeChat();
+    t.after(() => workflow.dispose());
+    await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "old note" });
+    const { id } = await wakeupOf(workflow);
+    let release;
+    gate.read = new Promise(resolve => { release = resolve; });
+    await advance(60_000);
+    const before = world.updates.length;
+    if (change === "cancel") {
+      assert.equal((await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "cancel", id })).cancelled, true);
+    } else if (change === "postpone") {
+      await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 2, reason: "new note" });
+    } else if (change === "replace") {
+      gate.read = null;
+      await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 2, reason: "new note" });
+    } else workflow.dispose();
+    gate.read = null;
+    release();
+    await settle();
+    assert.equal(world.updates.length, before, "the old callback cannot send after its owner changed");
+    if (change === "postpone" || change === "replace") {
+      await advance(2 * 60_000);
+      assert.equal(world.updates.length, before + 1, "the current wake-up still fires once at its own time");
+      assert.match(world.edits.at(-1).description, /Your note: new note/);
+    }
+  });
+}
+
+for (const change of ["postpone", "replace"]) {
+  test(`a rejected wake-up read preserves the ${change} timer`, async (t) => {
+    const { workflow, advance, gate, timers } = wakeChat();
+    t.after(() => workflow.dispose());
+    await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "old note" });
+    const { id } = await wakeupOf(workflow);
+    let reject;
+    gate.read = new Promise((_, fail) => { reject = fail; });
+    await advance(60_000);
+    gate.read = null;
+    const current = change === "postpone"
+      ? (await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 10 })).wakeup
+      : await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 10, reason: "new note" });
+    assert.ok([...timers.values()].some(timer => timer.at === current.dueAt));
+    reject(new Error("old read failed"));
+    await settle();
+    assert.ok([...timers.values()].some(timer => timer.at === current.dueAt), "the stale failure cannot replace the new deadline with its retry delay");
+  });
+}
+
+test("a replacement wake-up whose timer fired during an older read is rearmed after that read settles", async (t) => {
+  const { world, workflow, advance, gate } = wakeChat();
+  t.after(() => workflow.dispose());
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "old note" });
+  let release;
+  gate.read = new Promise(resolve => { release = resolve; });
+  await advance(60_000);
+  gate.read = null;
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "replacement note" });
+  const before = world.updates.length;
+  await advance(60_000);
+  assert.equal(world.updates.length, before, "the older read still holds the chat's waking lock");
+  release();
+  await settle();
+  await advance(1);
+  assert.equal(world.updates.length, before + 1);
+  assert.match(world.edits.at(-1).description, /Your note: replacement note/, "only the current wake-up sends");
+  await advance(60_000);
+  assert.equal(world.updates.length, before + 1, "it is sent once");
+});
+
 test("a goal waits for its agent's wake-up instead of starting the next round at once", async () => {
   const { world, workflow, advance } = wakeChat({ goal: true });
   const route = world.runs[0].nodes[0].route;
