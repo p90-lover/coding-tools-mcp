@@ -63,6 +63,23 @@ test("an unanswered session check does not sign in a page that was signed out", 
   assert.equal(state.authenticated, false);
 });
 
+test("the Browser tab's first ChatGPT page is the plain home, even with saved chats off", async () => {
+  const { host, loads } = authFixture("data:text/html,idle");
+  host.getUseSavedChats = () => false;
+  host.view.webContents.loadURL = async (target) => { loads.push(target); host.view.webContents.getURL = () => target; };
+  await host.refreshAuthentication();
+  assert.deepEqual(loads, ["https://chatgpt.com/"]);
+});
+
+test("connector verification on Cloudflare's check page names the check without reloading it", async () => {
+  const { host, loads } = authFixture("https://chatgpt.com/");
+  const reloads = [];
+  host.hardRefreshHome = async () => reloads.push("reload");
+  host.view.webContents.executeJavaScript = async (script) => script.includes("isCloudflareCheckPage") || script.includes("_cf_chl_opt");
+  await assert.rejects(host.refreshChatGptHomeDocument(false), /Cloudflare security check/);
+  assert.deepEqual([...reloads, ...loads], []);
+});
+
 test("refreshing saved-session authentication never replaces the user's conversation with home", async () => {
   const { host, loads } = authFixture();
   const state = await host.refreshAuthentication();
