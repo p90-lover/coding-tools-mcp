@@ -69,6 +69,23 @@ function planText(plan: BrowserAccount["plan"], signedIn?: boolean | null) {
 const TUNNEL_TONE: Record<McpTunnel["state"], string> = { ready: "ok", starting: "idle", stopped: "warn", failed: "error" };
 const TUNNEL_LABEL: Record<McpTunnel["state"], string> = { ready: "Ready", starting: "Starting", stopped: "Stopped", failed: "Failed" };
 
+export function mcpAccountAccess(account: BrowserAccount, accounts: BrowserAccount[], now = Date.now()) {
+  const fresh = (plan: BrowserAccount["plan"]) => Boolean(plan?.planCheckedAt && plan.userId && plan.workspaceId
+    && now >= plan.planCheckedAt && now - plan.planCheckedAt < 300_000);
+  const plan = account.plan;
+  if (!fresh(plan) || !["workspace", "personal"].includes(plan?.workspaceStructure ?? "")
+    || !["account-owner", "account-admin", "standard-user"].includes(plan?.workspaceRole ?? "")) {
+    return { allowed: false, detail: "Refresh this account's workspace details to verify MCP ownership." };
+  }
+  if (plan?.workspaceRole === "account-owner") return { allowed: true, detail: "The verified workspace owner can set up this MCP connector." };
+  if (plan?.workspaceStructure === "workspace" && accounts.some(owner => owner.id !== account.id && owner.signedIn === true
+    && fresh(owner.plan) && owner.plan?.workspaceId === plan.workspaceId && owner.plan?.workspaceStructure === "workspace"
+    && owner.plan?.workspaceRole === "account-owner" && owner.plan?.userId !== plan.userId)) {
+    return { allowed: true, detail: "A signed-in owner of this workspace will create and publish the connector for this account." };
+  }
+  return { allowed: false, detail: "Only the workspace owner can create MCP. Add or sign in to that owner account and refresh its workspace details." };
+}
+
 function connectorText(connector: BrowserAccount["connector"]) {
   if (!connector) return { tone: "idle", label: "Not checked", detail: "Connect MCP to set up and check this account" };
   if (connector.error && (connector.errorAt ?? 0) >= (connector.okAt ?? 0)) {
@@ -206,15 +223,19 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
     try {
       await run("connect-mcp", async () => {
         setConnectionSummary(null);
-        let connected = 0;
+        let connected = 0, skipped = 0;
         for (const account of targets) {
+          const signedIn = signedInOf(account);
+          const access = mcpAccountAccess(account, (accounts?.accounts ?? []).map(entry => ({ ...entry,
+            signedIn: signedInOf(entry) })));
+          if (!signedIn || !access.allowed) { skipped += 1; continue; }
           setConnections(previous => ({ ...previous, [account.id]: { state: "connecting", detail: "Setting up and checking this account's connector", checkedAt: Date.now(), email: account.email } }));
           try {
             const result = await api.createMcpConnector(account.id);
             if (result.connected !== true) throw new Error("ChatGPT did not confirm this account's connector connection.");
             connected += 1;
             const administrator = accounts?.accounts.find(entry => entry.id === result.setupAccountId);
-            const detail = administrator ? `ChatGPT confirmed this account's connection · Set up by ${accountName(administrator)} (${result.setupWorkspaceRole === "account-owner" ? "Owner" : "Admin"})`
+            const detail = administrator ? `ChatGPT confirmed this account's connection · Set up by ${accountName(administrator)} (Owner)`
               : "ChatGPT confirmed this account's connection";
             setConnections(previous => ({ ...previous, [account.id]: { state: "connected", detail, checkedAt: Date.now(), email: account.email,
               userId: result.binding?.userId, workspaceId: result.binding?.workspaceId } }));
@@ -223,7 +244,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
           }
         }
-        setConnectionSummary(`Last connection check: ${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected.${connected < targets.length ? " Check the accounts that need attention below." : ""}`);
+        setConnectionSummary(`Last connection check: ${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected.${skipped ? ` ${skipped} skipped: sign-in and a verified workspace owner are required.` : ""}${connected < targets.length - skipped ? " Check the accounts that need attention below." : ""}`);
         await api.browserAccounts().then(setAccounts).catch(() => {});
         await api.mcpTunnels().then(setTunnels).catch(() => {});
       });
@@ -257,6 +278,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   // A ticked account that has since gone (removed elsewhere) no longer counts.
   const ticked = accounts.accounts.filter(account => selected.has(account.id)).map(account => account.id);
   const signedInOf = (account: BrowserAccount) => accountSignedIn(account, activeId, browser?.authenticated) === true;
+  const mcpAccounts = accounts.accounts.map(account => ({ ...account, signedIn: signedInOf(account) }));
+  const canConnectMcp = mcpAccounts.some(account => account.signedIn && mcpAccountAccess(account, mcpAccounts).allowed);
   const toggle = (id: string, on: boolean) => setSelected(previous => {
     const next = new Set(previous);
     if (on) next.add(id); else next.delete(id);
@@ -303,7 +326,8 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
 
       <div className="cbm-decodo-head">
         <p className="cbm-muted" role="status">{connectionSummary ?? "Set up the configured Coding Tools MCP connector and check its connection in each account."}</p>
-        <button className="cbm-button" disabled={switching || removing || chatRunning || accounts.accounts.length === 0}
+        <button className="cbm-button" disabled={switching || removing || chatRunning || !canConnectMcp}
+          title={canConnectMcp ? "Connect eligible accounts using a verified workspace owner" : "Sign in and refresh workspace details. Only verified workspace owners can create MCP."}
           onClick={() => void connectAccounts(accounts.accounts)} type="button">
           {isRunning("connect-mcp") ? "Connecting accounts…" : "Connect all accounts"}
         </button>
@@ -347,7 +371,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             maxTabs={accounts.maxTabsPerAccount}
             mainTunnelReady={setup.mcpReady}
             proxies={proxies}
-            holders={accounts.accounts}
+            holders={mcpAccounts}
             run={run}
             onOpenBrowser={onOpenBrowser}
             sessions={sessionsOf(account.id)}
@@ -479,12 +503,15 @@ function AccountCard({
   // own saved session (null until read).
   const signedIn = inUse && authenticated ? true : account.signedIn;
   const plan = planText(account.plan, signedIn);
+  const mcpAccess = mcpAccountAccess(account, holders);
   const observedAt = Math.max(account.connector?.okAt ?? 0, account.connector?.errorAt ?? 0);
   const connectionCheck = signedIn !== false && connection && connectionMatchesAccount(connection, account)
     && (connection.state === "connecting" || connection.checkedAt >= observedAt) ? connection : undefined;
   const connector = signedIn === false
     ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
-    : connectionCheck
+    : !mcpAccess.allowed && connectionCheck?.state !== "connected"
+      ? { tone: "warn", label: "Owner required", detail: mcpAccess.detail }
+      : connectionCheck
       ? { tone: connectionCheck.state === "connected" ? "ok" : connectionCheck.state === "failed" ? "error" : "idle",
         label: connectionCheck.state === "connected" ? "Connected" : connectionCheck.state === "failed" ? "Needs attention" : "Connecting…", detail: connectionCheck.detail }
       : connectorText(account.connector);
@@ -688,8 +715,8 @@ function AccountCard({
       </div>
 
       <footer className="cbm-card-actions">
-        <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true || isRunning(`remove:${account.id}`)}
-          onClick={() => void connect()} title={signedIn === true ? "Set up this account's MCP connector. If required, a signed-in owner/admin publishes it to the verified workspace." : "Sign in to this account first"} type="button">
+        <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true || !mcpAccess.allowed || isRunning(`remove:${account.id}`)}
+          onClick={() => void connect()} title={signedIn === true ? mcpAccess.detail : "Sign in to this account first"} type="button">
           {connectionCheck?.state === "connecting" ? "Connecting…" : connectionCheck?.state === "connected" ? "Check connection" : "Connect MCP"}
         </button>
         {!inUse ? (

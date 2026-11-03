@@ -174,47 +174,46 @@ test("subscription inspection can use normal account navigation without lending 
   assert.equal(f.calls.some(call => call[0] === "publish" || call[0] === "create"), false);
 });
 
-test("an owner/admin in another selected workspace is selected and verified by exact workspace id", async () => {
-  const f = fixture();
-  f.profiles["persist:admin"].activeId = otherWorkspace;
-  f.profiles["persist:admin"].memberships[otherWorkspace] = "standard-user";
-  assert.equal((await f.run()).setupAccountId, "admin");
+test("an owner in another selected workspace is selected and verified by exact workspace id", async () => {
+  const f = fixture({ owner: true });
+  f.profiles["persist:owner"].activeId = otherWorkspace;
+  f.profiles["persist:owner"].memberships[otherWorkspace] = "standard-user";
+  assert.equal((await f.run()).setupAccountId, "owner");
   assert(f.calls.some(call => call[0] === "select"));
   assert(f.windows.every(window => window.isDestroyed()));
 });
 
-test("another workspace's admin and another partition of the same member cannot lend authority", async t => {
+test("another workspace's owner and another partition of the same member cannot lend authority", async t => {
   for (const kind of ["unrelated", "same-user", "role-revoked"]) await t.test(kind, async () => {
-    const f = fixture();
+    const f = fixture({ owner: true });
     if (kind === "unrelated") {
-      f.profiles["persist:admin"].activeId = otherWorkspace;
-      f.profiles["persist:admin"].memberships = { [otherWorkspace]: "account-owner" };
-    } else if (kind === "same-user") f.profiles["persist:admin"].userId = "user-member";
-    else f.profiles["persist:admin"].memberships[workspaceId] = "standard-user";
+      f.profiles["persist:owner"].activeId = otherWorkspace;
+      f.profiles["persist:owner"].memberships = { [otherWorkspace]: "account-owner" };
+    } else if (kind === "same-user") f.profiles["persist:owner"].userId = "user-member";
+    else f.profiles["persist:owner"].memberships[workspaceId] = "standard-user";
     await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
     assert.equal(f.calls.some(call => ["create", "publish", "connect-member"].includes(call[0])), false);
     assert(f.windows.every(window => window.isDestroyed()));
   });
 });
 
-test("a delegated member can still create without an administrator account", async () => {
+test("a delegated member cannot create even when ChatGPT exposes an Add control", async () => {
   const f = fixture({ memberCanCreate: true });
-  f.profiles["persist:admin"].memberships[workspaceId] = "standard-user";
-  assert.equal((await f.run()).connected, true);
-  assert.deepEqual(f.calls.filter(call => call[0] === "create"), [["create", "persist:member"]]);
+  await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+  assert.equal(f.calls.some(call => ["create", "publish", "connect-member"].includes(call[0])), false);
 });
 
-test("an available workspace owner cannot displace a delegated member's working tunnel identity", async () => {
+test("a delegated member uses the verified workspace owner instead of creating itself", async () => {
   const f = fixture({ memberCanCreate: true, owner: true });
   assert.equal((await f.run()).connected, true);
-  assert.deepEqual(f.calls.filter(call => call[0] === "create"), [["create", "persist:member"]]);
-  assert.equal(f.calls.some(call => call[0] === "publish"), false);
+  assert.deepEqual(f.calls.filter(call => call[0] === "create"), [["create", "persist:owner"]]);
+  assert.equal(f.calls.some(call => call[0] === "publish"), true);
 });
 
-test("a tunnel-ineligible owner does not hide an eligible workspace admin", async () => {
+test("a tunnel-ineligible owner cannot fall back to a workspace admin", async () => {
   const f = fixture({ owner: true, wrongTunnelOwner: true });
-  assert.equal((await f.run()).setupAccountId, "admin");
-  assert.deepEqual(f.calls.filter(call => call[0] === "create"), [["create", "persist:admin"]]);
+  await assert.rejects(f.run(), /different Platform user/);
+  assert.deepEqual(f.calls.filter(call => call[0] === "create"), []);
 });
 
 test("cached shared provenance cannot reconnect without fresh publisher verification", async () => {
@@ -228,17 +227,17 @@ test("cached shared provenance cannot reconnect without fresh publisher verifica
 
 test("scoped cached hints still require a fresh publisher in the target workspace", async () => {
   const publisher = { userId: "user-admin", workspaceId, name: "Coding Tools", tunnelId: `tunnel_${"a".repeat(32)}`, href: "/plugins/exact-fixture" };
-  const f = fixture({ bindings: { "persist:admin": { ...publisher, workspaceId: otherWorkspace },
+  const f = fixture({ owner: true, bindings: { "persist:admin": { ...publisher, workspaceId: otherWorkspace },
     "persist:member": { ...publisher, userId: "user-member", publisherPartition: "persist:admin", publisherUserId: "user-admin" } }, scopedBindings: {
     [JSON.stringify(["persist:admin", workspaceId, publisher.tunnelId, publisher.name])]: publisher,
   } });
   assert.equal((await f.run()).connected, true);
-  assert(f.calls.some(call => call[0] === "create" && call[1] === "persist:admin"));
+  assert(f.calls.some(call => call[0] === "create" && call[1] === "persist:owner"));
 });
 
 test("an unavailable cached shared plugin reports the publishing action instead of a loading error", async () => {
   const publisher = { userId: "user-admin", workspaceId, name: "Coding Tools", tunnelId: `tunnel_${"a".repeat(32)}`, href: "/plugins/exact-fixture" };
-  const f = fixture({ memberUnavailable: true, bindings: { "persist:admin": publisher,
+  const f = fixture({ owner: true, memberUnavailable: true, bindings: { "persist:admin": publisher,
     "persist:member": { ...publisher, userId: "user-member", publisherPartition: "persist:admin", publisherUserId: "user-admin" } } });
   await assert.rejects(f.run(), error => error.message === PUBLISH_REQUIRED);
 });
@@ -277,19 +276,19 @@ test("plan inspection IPC rejects Zero Risk and targets an inactive account with
   assert.deepEqual(seen, ["persist:other", "persist:other", "persist:other"]);
 });
 
-test("revoked admin authority cannot publish or consent for the member", async () => {
-  const f = fixture({ revokeAdmin: true });
+test("revoked owner authority cannot publish or consent for the member", async () => {
+  const f = fixture({ owner: true, revokeAdmin: true });
   await assert.rejects(f.run(), /context changed/i);
   assert.equal(f.calls.some(call => ["publish", "connect-member"].includes(call[0])), false);
   assert(f.windows.every(window => window.isDestroyed()));
 });
 
 test("creation or publishing is never mistaken for member connection", async () => {
-  const f = fixture({ noPublishControl: true, memberUnavailable: true });
+  const f = fixture({ owner: true, noPublishControl: true, memberUnavailable: true });
   await assert.rejects(f.run(), error => error.message === PUBLISH_REQUIRED);
   assert(f.calls.some(call => call[0] === "create"));
   assert(f.windows.every(window => window.isDestroyed()));
-  const denied = fixture({ serverDenied: true });
+  const denied = fixture({ owner: true, serverDenied: true });
   await assert.rejects(denied.run(), /MCP server denied access/);
   assert.equal(denied.calls.some(call => call[0] === "publish"), false);
 });
