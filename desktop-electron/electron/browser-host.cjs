@@ -164,6 +164,14 @@ function sessionEndpointUrl(url) {
   } catch { return false; }
 }
 const urlWithoutQuery = (url) => { try { const parsed = new URL(url); return parsed.origin + parsed.pathname; } catch { return url ? "(not a URL)" : ""; } };
+/**
+ * Whether the page's session check could not tell: it asked (a status, 0 when the fetch failed) and
+ * got neither the session JSON nor a 401. A signed-out session answers `{}` or 401.
+ */
+function sessionInconclusive(result) {
+  return typeof result?.sessionStatus === "number" && result.sessionStatus !== 401 && result.sessionAnswered !== true;
+}
+
 function authenticatedChatGptSession(payload, now = Date.now()) {
   const user = payload?.user;
   if (!user || typeof user !== "object" || Array.isArray(user) || !Object.keys(user).length) return false;
@@ -3797,10 +3805,11 @@ class BrowserHost {
         };
       };
       const initialSurface = readSurface();
-      let sessionAuthenticated = false;
+      let sessionAuthenticated = false, sessionAnswered = false, sessionStatus;
       if (new URL(initialSurface.url).origin === expectedUrl.origin) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), ${CHATGPT_AUTH_SESSION_TIMEOUT_MS});
+        sessionStatus = 0;
         try {
           const response = await fetch("/api/auth/session", {
             credentials: "include",
@@ -3808,6 +3817,7 @@ class BrowserHost {
             headers: { accept: "application/json" },
             signal: controller.signal,
           });
+          sessionStatus = response.status;
           const responseUrl = new URL(response.url);
           const payload = response.ok
             && responseUrl.origin === expectedUrl.origin
@@ -3815,11 +3825,12 @@ class BrowserHost {
             && response.headers.get("content-type")?.includes("application/json")
             ? await response.json()
             : null;
+          sessionAnswered = payload !== null;
           sessionAuthenticated = (${authenticatedChatGptSession.toString()})(payload);
         } catch {}
         finally { clearTimeout(timeout); }
       }
-      return { ...readSurface(), sessionAuthenticated };
+      return { ...readSurface(), sessionAuthenticated, sessionAnswered, sessionStatus };
     })()`, true).catch(() => ({
       url: "",
       composer: false,
@@ -3869,6 +3880,12 @@ class BrowserHost {
           : { status: "ready", message: "ChatGPT is ready" };
       this.setState({ ...availability, authenticated: true, url: result.url });
       if (!wasAuthenticated) this.logger.info("browser.authenticated", { url: result.url });
+    } else if (this.state.authenticated && sessionInconclusive(result)) {
+      // ChatGPT asked for the session but got no answer (429, 5xx, a challenge page, a timeout): that
+      // says nothing about the sign-in. Read as signed out, the next answer was a fresh sign-in whose
+      // follow-ups (bridge connect, setup) reload the page: more requests, more 429s (2026-11-03).
+      this.logger.warn("browser.session_check_inconclusive", { status: result.sessionStatus });
+      this.setState({ url: result.url || url });
     } else {
       const loaded = result.readyState === "complete";
       this.setState({
