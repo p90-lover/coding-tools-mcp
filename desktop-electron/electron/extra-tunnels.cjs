@@ -323,7 +323,12 @@ class ExtraTunnels {
       do entryId = crypto.randomBytes(4).toString("hex"); while (entries.some(entry => entry.id === entryId));
       const entry = { id: entryId, label: name, tunnelId: id, accountId };
       await writePrivateFileAtomicAsync(this.keyPath(entryId), key);
-      await this.writeEntries([...entries, entry]);
+      const currentEntries = this.entries();
+      if (this.saved === null) {
+        await fs.promises.rm(this.keyPath(entryId), { force: true });
+        throw new Error("Could not read the extra tunnel registry. Try again.");
+      }
+      await this.writeEntries([...currentEntries, entry]);
       try {
         await this.connect(entry, config);
       } catch (error) {
