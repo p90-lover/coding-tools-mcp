@@ -1350,18 +1350,29 @@ function BrowserAddress({ url, copy, disabled, setError }: {
     }
   };
   return (
-    <form className="browser-address" title={url || copy.browserAddress} onSubmit={(event) => void open(event)}>
-      <Icon name="globe" />
+    <form className="gpb-link" title={url || copy.browserAddress} onSubmit={(event) => void open(event)}>
       <input
         aria-label={copy.browserAddress}
         disabled={disabled}
+        inputMode="url"
         onBlur={() => setDraft(null)}
         onChange={(event) => setDraft(event.target.value)}
         onFocus={(event) => { setDraft(url ?? ""); event.target.select(); }}
         onKeyDown={(event) => { if (event.key === "Escape") { setDraft(null); event.currentTarget.blur(); } }}
+        placeholder="Enter a web address, like chatgpt.com"
         spellCheck={false}
+        autoComplete="off"
         value={draft ?? formatBrowserAddress(url, copy)}
       />
+      {/* mousedown would blur the field (dropping the draft) before the submit fires */}
+      <button
+        type="submit"
+        className="button-primary"
+        disabled={disabled || draft === null || !draft.trim()}
+        onMouseDown={(event) => event.preventDefault()}
+      >
+        Go
+      </button>
     </form>
   );
 }
@@ -1394,7 +1405,8 @@ function BrowserSurface({
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
-  const tabLimitReached = (browser?.accountTabs ?? browser?.tabs.filter(tab => tab.id !== "home").length ?? 0) >= (browser?.maxTabs ?? 5);
+  // The + button opens a tab of the person's own: those have their own allowance, apart from Codex tasks'.
+  const tabLimitReached = (browser?.userTabs ?? 0) >= (browser?.maxUserTabs ?? 10);
   const passkeyWaiting = passkeyAvailable
     && operation?.name === "passkey-login"
     && operation.status === "running"
@@ -1409,17 +1421,17 @@ function BrowserSurface({
       setError(messageOf(cause));
     }
   };
-  const zoom = async (action: "in" | "out" | "reset") => {
-    try {
-      await api!.zoomBrowser(action);
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
-  };
   const toggle = async () => {
     try {
       if (visible) await api!.hideBrowser();
       else await api!.showBrowser();
+    } catch (cause) {
+      setError(messageOf(cause));
+    }
+  };
+  const zoom = async (action: "in" | "out" | "reset") => {
+    try {
+      await api!.zoomBrowser(action);
     } catch (cause) {
       setError(messageOf(cause));
     }
@@ -1478,81 +1490,28 @@ function BrowserSurface({
   };
 
   return (
-    <section className="browser-surface">
-      <div className="browser-tab-strip" title={copy.browserTabLimit}>
-        {(browser?.tabs ?? []).filter(tab => !tab.otherAccount).map((tab) => (
-          <div
-            className={`browser-tab${tab.active ? " is-active" : ""}`}
-            key={tab.id}
-            onClick={() => void selectTab(tab.id)}
-            role="tab"
-            aria-selected={tab.active}
-          >
-            <BrandMark small />
-            <span title={[tab.title, tab.threadId && `Codex task: ${tab.threadId}`, tab.conversationUrl && `ChatGPT: ${tab.conversationUrl}`, tab.traceId && `Turn: ${tab.traceId}`].filter(Boolean).join("\n")}>
-              {browserTabTitleFromTitle(tab.title, copy)}
-              {tab.threadId ? ` · ${tab.threadId.slice(0, 8)}` : ""}
-            </span>
-            {tab.loading ? <i className="tab-spinner" /> : <StateDot state={browserTabTone(tab.status)} />}
-            {tab.closable ? (
-              <button
-                aria-label={copy.hideTab}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  void closeTab(tab.id);
-                }}
-                title={copy.hideTab}
-                type="button"
-              >
-                <Icon name="close" />
-              </button>
-            ) : null}
-          </div>
-        ))}
-        <button
-          aria-label={copy.newTab}
-          className="browser-new-tab"
-          disabled={!browser || tabLimitReached}
-          onClick={() => void createTab()}
-          title={copy.newTab}
-          type="button"
-        >
-          <Icon name="plus" />
-        </button>
-        <div className="browser-tab-drag draggable" />
-      </div>
-      <div className="browser-toolbar">
-        <div className="browser-history">
-          <IconButton
-            disabled={navigationLocked || !browser?.canGoBack}
-            icon="back"
-            label={copy.back}
-            onClick={() => void navigate("back")}
-          />
-          <IconButton
-            disabled={navigationLocked || !browser?.canGoForward}
-            icon="forward"
-            label={copy.forward}
-            onClick={() => void navigate("forward")}
-          />
-          <IconButton disabled={navigationLocked || !visible} icon="reload" label={copy.reload} onClick={() => void navigate("reload")} />
-        </div>
+    <section className="gpb-surface browser-surface" aria-label="GPT Browser">
+      {/* The GPT Browser's own bar (2026-11-03: its look came back over the bridge's browser): the
+          account, back, forward, reload and the address. */}
+      <header className="gpb-bar">
+        <strong>GPT Browser</strong>
         {/* Turns keep running on their own accounts across a switch; only a check or test of the shown page holds it. */}
         <BrowserAccountSwitcher api={api!} busy={browser?.status === "testing"} copy={copy} setError={setError} />
+        <span className="gpb-nav">
+          <button type="button" aria-label={copy.back} title={copy.back} disabled={navigationLocked || !browser?.canGoBack} onClick={() => void navigate("back")}>‹</button>
+          <button type="button" aria-label={copy.forward} title={copy.forward} disabled={navigationLocked || !browser?.canGoForward} onClick={() => void navigate("forward")}>›</button>
+          <button type="button" aria-label={copy.reload} title={copy.reload} disabled={navigationLocked || !visible} onClick={() => void navigate("reload")}>⟳</button>
+        </span>
         <BrowserAddress url={browser?.url} copy={copy} disabled={!visible} setError={setError} />
-        <div className="browser-zoom-controls">
-          <IconButton icon="minus" label={copy.zoomOut} onClick={() => void zoom("out")} />
-          <button
-            aria-label={copy.zoomReset}
-            className="browser-zoom-reset"
-            onClick={() => void zoom("reset")}
-            title={copy.zoomReset}
-            type="button"
-          >
+        {browser?.loading ? <span className="gpb-muted">{copy.loading}</span> : null}
+        <span className="gpb-nav gpb-zoom">
+          <button type="button" aria-label={copy.zoomOut} title={copy.zoomOut} onClick={() => void zoom("out")}>−</button>
+          <button type="button" className="gpb-zoom-reset" aria-label={copy.zoomReset} title={copy.zoomReset} onClick={() => void zoom("reset")}>
             {Math.round((browser?.zoomFactor ?? 1) * 100)}%
           </button>
-          <IconButton icon="plus" label={copy.zoomIn} onClick={() => void zoom("in")} />
-        </div>
+          <button type="button" aria-label={copy.zoomIn} title={copy.zoomIn} onClick={() => void zoom("in")}>+</button>
+        </span>
+        <span className="gpb-spacer" />
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
@@ -1565,10 +1524,49 @@ function BrowserSurface({
               : copy.passkeySignIn}
           </button>
         ) : null}
-        <button className="toolbar-text-button" onClick={() => void toggle()} type="button">
-          {visible ? copy.hideBrowser : copy.openChatgpt}
+        {visible ? <button className="button-secondary" onClick={() => void toggle()} type="button">{copy.hideBrowser}</button> : null}
+      </header>
+      {/* Tabs as in any browser: each of the person's own closes, and + opens another on this account.
+          Codex tasks' tabs sit beside them. */}
+      <div className="gpb-tabs" role="tablist" aria-label="Tabs" title={copy.browserTabLimit}>
+        {(browser?.tabs ?? []).filter(tab => !tab.otherAccount).map((tab) => (
+          <div
+            className={`gpb-tab${tab.active ? " is-active" : ""}${tab.threadId ? " is-task" : ""}`}
+            key={tab.id}
+            onClick={() => void selectTab(tab.id)}
+            role="tab"
+            aria-selected={tab.active}
+          >
+            {tab.loading ? <i className="tab-spinner" /> : <StateDot state={browserTabTone(tab.status)} />}
+            <span title={[tab.title, tab.threadId && `Codex task: ${tab.threadId}`, tab.conversationUrl && `ChatGPT: ${tab.conversationUrl}`, tab.traceId && `Turn: ${tab.traceId}`].filter(Boolean).join("\n")}>
+              {browserTabTitleFromTitle(tab.title, copy)}
+              {tab.threadId ? ` · ${tab.threadId.slice(0, 8)}` : ""}
+            </span>
+            {tab.closable ? (
+              <button
+                aria-label={copy.hideTab}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void closeTab(tab.id);
+                }}
+                title={copy.hideTab}
+                type="button"
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+        ))}
+        <button
+          aria-label={copy.newTab}
+          className="gpb-new-tab"
+          disabled={!browser || tabLimitReached}
+          onClick={() => void createTab()}
+          title={tabLimitReached ? copy.browserTabLimit : copy.newTab}
+          type="button"
+        >
+          +
         </button>
-        {browser?.loading ? <i className="browser-loading-line" /> : null}
       </div>
       {selectedManualTab
         && ["awaiting-user", "sent"].includes(selectedManualTab.manualState ?? "") ? (

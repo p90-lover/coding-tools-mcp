@@ -673,6 +673,9 @@ export interface BrowserState {
   /** The shown account's tab limit, and the tabs it holds (tabs of sessions on other accounts show too). */
   maxTabs: number;
   accountTabs?: number;
+  /** The person's own tabs on the shown account, and how many it may hold (apart from Codex tasks' limit). */
+  userTabs?: number;
+  maxUserTabs?: number;
   tabs: BrowserTabState[];
 }
 

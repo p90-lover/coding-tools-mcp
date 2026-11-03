@@ -514,8 +514,11 @@ test("embedded ChatGPT is measured only after its animated surface mounts", () =
 test("native clicks reach browser tabs instead of the window drag region", () => {
   assert.match(appSource, /draggable=\{surface !== "browser"\}/);
   assert.match(appSource, /className=\{`app-titlebar\$\{draggable \? " draggable" : ""\}`\}/);
-  assert.match(stylesSource, /\.browser-tab\s*\{[^}]*-webkit-app-region:\s*no-drag;/s);
-  assert.match(appSource, /className="browser-tab-drag draggable"/);
+  // The GPT Browser's bar drags the window only on its empty stretch; its controls take clicks.
+  const gptBrowserCss = fs.readFileSync(path.join(launcherRoot, "src", "features", "gpt-browser.css"), "utf8");
+  assert.match(gptBrowserCss, /\.gpb-bar > \* \{ -webkit-app-region: no-drag; \}/);
+  assert.match(gptBrowserCss, /\.gpb-spacer \{[^}]*-webkit-app-region: drag;/);
+  assert.match(appSource, /<header className="gpb-bar">[\s\S]*?<span className="gpb-spacer" \/>/);
 });
 
 test("renderer zoom scales the shell without moving or zooming the native ChatGPT surface", () => {

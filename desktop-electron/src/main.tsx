@@ -8,6 +8,8 @@ import "./styles.css";
 // The provider screens' styles. They came in with ProviderHubIntegration, whose Providers row under
 // Connections (and the overlay it opened) left the sidebar on 2026-11-02.
 import "./providers/provider-manager.css";
+// The GPT Browser's bar and tabs, which the browser screen wears.
+import "./features/gpt-browser.css";
 
 installShimmerTicker();
 
