@@ -162,8 +162,7 @@ export function ImagePreviewDialog({ url, name, onClose, onMarkup }: {
     setSending(kind); setError(""); setMenu(null);
     try {
       const bytes = await exportMarkup(shownImage.current, []);
-      await onMarkup({ bytes, preview: URL.createObjectURL(new Blob([bytes as BlobPart], { type: "image/png" })), prompt, label });
-      onClose();
+      await finish({ bytes, preview: URL.createObjectURL(new Blob([bytes as BlobPart], { type: "image/png" })), prompt, label });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not prepare the image. Try again");
       setSending(null);
@@ -175,7 +174,20 @@ export function ImagePreviewDialog({ url, name, onClose, onMarkup }: {
     try { window.localStorage.setItem(TOOLBAR_KEY, JSON.stringify(value)); } catch { /* kept for this preview only */ }
   };
   const busy = Boolean(sending);
-  const finish = async (result: MarkupResult) => { await onMarkup!(result); onClose(); };
+  const finish = async (result: MarkupResult) => {
+    let transferred = false;
+    try {
+      if (!onMarkup) throw new Error("Image editing is unavailable in this chat. Reopen the image and try again");
+      await onMarkup(result);
+      transferred = true;
+    } finally {
+      if (!transferred) {
+        URL.revokeObjectURL(result.preview);
+        if (result.mask) URL.revokeObjectURL(result.mask.preview);
+      }
+    }
+    onClose();
+  };
 
   // On <body>: it opens from inside a transcript, whose contained scroll box would otherwise hold
   // this full-window overlay to the pane.
@@ -346,8 +358,15 @@ function EraseEditor({ url, natural, onBack, onDone }: {
     try {
       const bytes = await exportMarkup(image.current, []);
       const mask = await exportEraseMask(natural.width, natural.height, strokes);
-      const preview = (data: Uint8Array) => URL.createObjectURL(new Blob([data as BlobPart], { type: "image/png" }));
-      await onDone({ bytes, preview: preview(bytes), prompt: ERASE_PROMPT, label: "Erase", mask: { bytes: mask, preview: preview(mask) } });
+      const preview = URL.createObjectURL(new Blob([bytes as BlobPart], { type: "image/png" }));
+      let maskPreview: string;
+      try {
+        maskPreview = URL.createObjectURL(new Blob([mask as BlobPart], { type: "image/png" }));
+      } catch (cause) {
+        URL.revokeObjectURL(preview);
+        throw cause;
+      }
+      await onDone({ bytes, preview, prompt: ERASE_PROMPT, label: "Erase", mask: { bytes: mask, preview: maskPreview } });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not prepare the image. Try again");
       setBusy(false);

@@ -124,9 +124,11 @@ export function ChatTurnStats({ model, models = [], from, rounds, running, onRef
         const value = await getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_turn_stats", arguments: { model: first, models: rest, from } })
           .then((outer) => (outer.result as TurnStats | undefined) ?? null, () => undefined);
         if (!live) return;
+        // A successful empty page can precede CPA logging the turn's requests.
+        const hasNumbers = value?.available && (value.steps ?? 0) > 0;
         // A read that has nothing never blanks numbers already shown: one missed read made the line flicker.
-        if (value !== undefined) setStats((current) => (value?.available || !current?.available ? value : current));
-        if (!running && value?.available) return;
+        if (value !== undefined) setStats((current) => (hasNumbers || !current?.available ? value : current));
+        if (!running && hasNumbers) return;
         if (!running) wait = Math.min(wait * 2, 60_000);
       }
       timer = window.setTimeout(() => void read(), running ? POLL_MS : wait);

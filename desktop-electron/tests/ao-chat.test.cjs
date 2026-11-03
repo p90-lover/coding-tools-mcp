@@ -1291,24 +1291,29 @@ for (const changedWhileSaving of [false, true]) test(`markup replacement preserv
   const initial = Array.from({ length: 8 }, (_, index) => ({ name: `image-${index}.png`, path: `G:/fixtures/image-${index}.png`, image: true, preview: `blob:image-${index}` }));
   const source = initial[3], saved = delayedReply(), updates = [], saves = [];
   const result = { bytes: new Uint8Array([1]), preview: "blob:marked-image", prompt: "Marked instructions" };
-  const setAttachments = update => updates.push(update);
+  let current = initial;
+  const composing = { current: { taskId: "task", cacheKey: "draft", attachments: current } };
+  const setAttachments = update => { updates.push(update); current = update(current); composing.current.attachments = current; };
   const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
     useCallback: callback => callback, setAttachments, saver: { current: input => { saves.push(input); return saved.promise; } },
+    draftKey: "draft", selectedTaskId: "task",
+    flushSync: callback => callback(), composing, alive: { current: true }, CHAT_DRAFTS: new Map([["draft", { attaching: false }]]),
   });
   const onMarkup = rendererCallback("AgentOrchestratorChat.tsx", "jsx:ImagePreviewDialog.onMarkup", {
     saveAttachment: true, attachments: initial, previewing: 3, addMarkup, setAttachments,
   });
-  let current = initial;
   const submitting = onMarkup(result);
   try {
     assert.equal(saves.length, 1);
     assert.equal(saves[0].bytes, result.bytes);
     assert.equal(updates.length, 0, "saving must succeed before changing the attachment list");
-    if (changedWhileSaving) current = [...initial.slice(1), { name: "new-file.txt", path: "G:/fixtures/new-file.txt" }];
+    if (changedWhileSaving) {
+      current = [...initial.slice(1), { name: "new-file.txt", path: "G:/fixtures/new-file.txt" }];
+      composing.current.attachments = current;
+    }
     const others = current.filter(item => item !== source);
     saved.resolve({ path: "G:/fixtures/markup.png" });
     await submitting;
-    for (const update of updates) current = update(current);
     assert.equal(current.length, 8, "replace the original before applying the eight-attachment limit");
     assert.equal(updates.length, 1, "replacement is one atomic functional state update");
     assert.equal(current.includes(source), false);
@@ -1322,9 +1327,12 @@ for (const changedWhileSaving of [false, true]) test(`markup replacement preserv
 test("an image tool's result lands under its own name, and Erase's mask follows as a second image", async () => {
   const saves = [];
   let current = [{ name: "shot.png", path: "G:/fixtures/shot.png", image: true, preview: "blob:shot" }];
+  const composing = { current: { taskId: "task", cacheKey: "draft", attachments: current } };
   const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
-    useCallback: callback => callback, setAttachments: update => { current = update(current); },
+    useCallback: callback => callback, setAttachments: update => { current = update(current); composing.current.attachments = current; },
+    draftKey: "draft", selectedTaskId: "task",
     saver: { current: async input => { saves.push(input.name); return { path: `G:/fixtures/${input.name}` }; } },
+    flushSync: callback => callback(), composing, alive: { current: true }, CHAT_DRAFTS: new Map([["draft", { attaching: false }]]),
   });
   await addMarkup({ bytes: new Uint8Array([1]), preview: "blob:image", prompt: "Remove the area marked in the second image from the first image",
     label: "Erase", mask: { bytes: new Uint8Array([2]), preview: "blob:mask" } }, current[0]);
@@ -1333,6 +1341,96 @@ test("an image tool's result lands under its own name, and Erase's mask follows 
     { name: "Erase", path: "G:/fixtures/markup.png", image: true, preview: "blob:image", markup: "Remove the area marked in the second image from the first image" },
     { name: "Mask", path: "G:/fixtures/mask.png", image: true, preview: "blob:mask" },
   ], "the image it was opened from is replaced; the mask carries no instruction of its own");
+});
+
+for (const [label, count, sourceIndex, allowed] of [
+  ["eight pending attachments", 8, 3, false],
+  ["seven pending attachments without a source", 7, null, false],
+  ["seven pending attachments replacing one", 7, 3, true],
+  ["another image before its source", 2, 1, true],
+]) test(`image tools admit the Erase pair atomically: ${label}`, async () => {
+  const initial = Array.from({ length: count }, (_, index) => ({ name: `image-${index}.png`, path: `G:/fixtures/image-${index}.png`, image: true }));
+  let current = initial;
+  const source = sourceIndex === null ? undefined : initial[sourceIndex], saves = [];
+  const composing = { current: { taskId: "task", cacheKey: "draft", attachments: current } };
+  const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
+    useCallback: callback => callback, flushSync: callback => callback(), composing, alive: { current: true },
+    draftKey: "draft", selectedTaskId: "task",
+    CHAT_DRAFTS: new Map([["draft", { attaching: false }]]),
+    setAttachments: update => { current = update(current); composing.current.attachments = current; },
+    saver: { current: async input => { saves.push(input.name); return { path: `G:/fixtures/${input.name}` }; } },
+  });
+  const submitting = addMarkup({ bytes: new Uint8Array([1]), preview: "blob:erase", prompt: "Erase instructions", label: "Erase",
+    mask: { bytes: new Uint8Array([2]), preview: "blob:mask" } }, source);
+  if (!allowed) {
+    await assert.rejects(submitting, /8 attachments/i);
+    assert.deepEqual(saves, [], "capacity is checked before saving either image");
+    assert.equal(current, initial, "the draft retains every original attachment");
+    return;
+  }
+  await submitting;
+  const others = initial.filter(item => item !== source);
+  assert.deepEqual(plain(current), [
+    { name: "Erase", path: "G:/fixtures/markup.png", image: true, preview: "blob:erase", markup: "Erase instructions" },
+    { name: "Mask", path: "G:/fixtures/mask.png", image: true, preview: "blob:mask" },
+    ...others,
+  ], "the instructed first and second images stay together before all unrelated attachments");
+  for (const item of others) assert.equal(current.filter(value => value === item).length, 1);
+});
+
+for (const change of ["capacity", "upload before saving", "upload during saving", "task", "cache", "source", "unmount"]) {
+  test(`image tools reject a stale or busy draft: ${change}`, async () => {
+    const initial = Array.from({ length: change === "capacity" ? 7 : 1 }, (_, index) => ({ name: `image-${index}.png`, path: `G:/fixtures/image-${index}.png`, image: true }));
+    let current = initial;
+    const source = initial[0], saved = delayedReply(), saves = [];
+    const composing = { current: { taskId: "task", cacheKey: "draft", attachments: current } };
+    const alive = { current: true }, draft = { attaching: change === "upload before saving" };
+    const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
+      useCallback: callback => callback, flushSync: callback => callback(), composing, alive, CHAT_DRAFTS: new Map([["draft", draft]]),
+      draftKey: "draft", selectedTaskId: "task",
+      setAttachments: update => { current = update(current); composing.current.attachments = current; },
+      saver: { current: input => {
+        saves.push(input.name);
+        return saves.length === 1 && change !== "upload before saving" ? saved.promise : Promise.resolve({ path: `G:/fixtures/${input.name}` });
+      } },
+    });
+    const submitting = addMarkup({ bytes: new Uint8Array([1]), preview: "blob:erase", prompt: "Erase instructions", label: "Erase",
+      mask: { bytes: new Uint8Array([2]), preview: "blob:mask" } }, source);
+    try {
+      if (change !== "upload before saving") assert.equal(saves.length, 1);
+      if (change === "capacity") {
+        current = [...current, { name: "new-file.txt", path: "G:/fixtures/new-file.txt" }];
+        composing.current.attachments = current;
+      } else if (change === "upload during saving") draft.attaching = true;
+      else if (change === "task" || change === "cache") {
+        current = [{ name: "other-chat.txt", path: "G:/fixtures/other-chat.txt" }];
+        composing.current = { ...composing.current, [change === "task" ? "taskId" : "cacheKey"]: "other", attachments: current };
+      } else if (change === "source") {
+        current = [];
+        composing.current.attachments = current;
+      } else if (change === "unmount") alive.current = false;
+      const latest = current;
+      saved.resolve({ path: "G:/fixtures/markup.png" });
+      await assert.rejects(submitting, change === "capacity" ? /8 attachments/i : change.startsWith("upload") ? /files.*finish/i : /chat.*changed/i);
+      assert.equal(current, latest, "the latest draft is never truncated or given this image pair");
+      if (change === "upload before saving") assert.deepEqual(saves, [], "an upload already in progress is refused before saving");
+    } finally { saved.resolve({ path: "G:/fixtures/markup.png" }); await Promise.allSettled([submitting]); }
+  });
+}
+
+for (const change of ["taskId", "cacheKey", "source"]) test(`image tools reject stale preview ownership before saving: ${change}`, async () => {
+  const source = { name: "source.png", path: "G:/fixtures/source.png", image: true }, initial = [], saves = [];
+  let current = initial;
+  const composing = { current: { taskId: "task", cacheKey: "draft", attachments: current, ...(change === "source" ? {} : { [change]: "other" }) } };
+  const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
+    useCallback: callback => callback, flushSync: callback => callback(), composing, alive: { current: true },
+    draftKey: "draft", selectedTaskId: "task", CHAT_DRAFTS: new Map([["draft", { attaching: false }]]),
+    setAttachments: update => { current = update(current); },
+    saver: { current: async input => { saves.push(input.name); return { path: `G:/fixtures/${input.name}` }; } },
+  });
+  await assert.rejects(addMarkup({ bytes: new Uint8Array([1]), preview: "blob:marked", prompt: "Instructions" }, change === "source" ? source : undefined), /chat.*changed/i);
+  assert.deepEqual(saves, []);
+  assert.equal(current, initial, "a preview's old callback never adopts its image into this draft");
 });
 
 test("a split pane acknowledges parent selection before reporting its own chat, then reports its first send", () => {
@@ -2159,6 +2257,42 @@ test("the stats line asks again until CPA has the numbers, and a missed read kee
     reply = { available: false };
     running.pulse(); await new Promise(setImmediate);
     assert.equal(running.calls.length, 2); assert.equal(shown.steps, 4, "a missed read keeps the numbers");
+  } finally { running.cleanup?.(); }
+  assert.equal(running.timers.size, 0);
+});
+
+test("the stats line waits for records after a successful empty read", async () => {
+  let reply = { available: true, steps: 0 }, shown = null;
+  const ended = childPoll("ChatTurnStats.tsx", "effect:const [first, ...rest]", {
+    running: false, hidden: false, statsReply: () => reply,
+    setStats: next => { shown = typeof next === "function" ? next(shown) : next; },
+  });
+  try {
+    await new Promise(setImmediate);
+    assert.equal(ended.calls.length, 1);
+    assert.equal(ended.timers.size, 1, "CPA answered, but its request records have not arrived yet");
+    reply = { available: true, steps: 4 };
+    ended.pulse(); await new Promise(setImmediate);
+    assert.equal(shown.steps, 4);
+    assert.equal(ended.calls.length, 2);
+    assert.equal(ended.timers.size, 0, "the ended turn retires once records arrive");
+  } finally { ended.cleanup?.(); }
+  assert.equal(ended.timers.size, 0);
+});
+
+test("the stats line keeps shown numbers when CPA returns a successful empty read", async () => {
+  let reply = { available: true, steps: 4 }, shown = null;
+  const running = childPoll("ChatTurnStats.tsx", "effect:const [first, ...rest]", {
+    running: true, hidden: false, statsReply: () => reply,
+    setStats: next => { shown = typeof next === "function" ? next(shown) : next; },
+  });
+  try {
+    await new Promise(setImmediate);
+    assert.equal(shown.steps, 4);
+    reply = { available: true, steps: 0 };
+    running.pulse(); await new Promise(setImmediate);
+    assert.equal(running.calls.length, 2);
+    assert.equal(shown.steps, 4, "an empty records page never erases known request totals");
   } finally { running.cleanup?.(); }
   assert.equal(running.timers.size, 0);
 });
