@@ -186,14 +186,26 @@ function createAoDependencyLinks({ file, request, logger = console }) {
     const links = mergeManaged(currentLinks, linksWanted, linksBefore, userEntries(currentFarms, farmsBefore));
     const farms = mergeManaged(currentFarms, farmsWanted, farmsBefore, userEntries(currentLinks, linksBefore));
     const changed = !sameList(links.list, currentLinks) || !sameList(farms.list, currentFarms);
+    let linksOwned = linksBefore;
+    let farmsOwned = farmsBefore;
     if (changed) {
+      // Keep old ownership until PUT succeeds, and record additions before they can reach AO.
+      // A rejected response may still have applied remotely; the next sync reconciles the union.
+      linksOwned = [...new Set([...linksBefore, ...links.managed])];
+      farmsOwned = [...new Set([...farmsBefore, ...farms.managed])];
+      if (!sameList(linksOwned, linksBefore) || !sameList(farmsOwned, farmsBefore)) {
+        const latest = load();
+        if (linksOwned.length) latest.projects[projectId] = linksOwned; else delete latest.projects[projectId];
+        if (farmsOwned.length) latest.farms[projectId] = farmsOwned; else delete latest.farms[projectId];
+        save(latest);
+      }
       const { symlinks: _links, hardLinkFarms: _farms, ...rest } = config;
       // AO replaces the whole config, so every other setting is sent back as it was.
       await request("PUT", `/api/v1/projects/${encodeURIComponent(projectId)}/config`, {
         config: { ...rest, ...(links.list.length ? { symlinks: links.list } : {}), ...(farms.list.length ? { hardLinkFarms: farms.list } : {}) },
       });
     }
-    if (!sameList(links.managed, linksBefore) || !sameList(farms.managed, farmsBefore)) {
+    if (!sameList(links.managed, linksOwned) || !sameList(farms.managed, farmsOwned)) {
       const latest = load();
       if (links.managed.length) latest.projects[projectId] = links.managed; else delete latest.projects[projectId];
       if (farms.managed.length) latest.farms[projectId] = farms.managed; else delete latest.farms[projectId];
