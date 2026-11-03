@@ -545,7 +545,11 @@ const BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART = 2;
 let bridgeWatchdogTimer = null;
 let bridgeWatchdogBusy = false;
 let bridgeWatchdogMisses = 0;
-// While another process owns the bridge port, restarts wait (watchdogExternalBackoff).
+// While another process owns the bridge port, or the bridge needs setting up again (its config is
+// for another bridge version), a restart cannot help: restarts wait (watchdogExternalBackoff).
+// 0.8.67 retried "Config requires bridge 5.0.6; bundled bridge is 6.1.17" every 2 min, and each
+// round wrote the ownership marker with an fsync on main (383-724 ms).
+const BRIDGE_WATCHDOG_WAITING_STATUSES = new Set(["external", "needs-setup"]);
 let bridgeWatchdogExternalBackoffMs = 0;
 let bridgeWatchdogQuietUntil = 0;
 function startBridgeWatchdog(logger, stateStore) {
@@ -586,14 +590,15 @@ function startBridgeWatchdog(logger, stateStore) {
       bridgeWatchdogMisses = 0;
       logger.warn("runtime.watchdog_restart", miss);
       const result = await runtimeSupervisor.startIfConfigured();
-      if (result?.status === "external") {
+      const waiting = BRIDGE_WATCHDOG_WAITING_STATUSES.has(result?.status);
+      if (waiting) {
         bridgeWatchdogExternalBackoffMs = watchdogExternalBackoff(bridgeWatchdogExternalBackoffMs);
         bridgeWatchdogQuietUntil = Date.now() + bridgeWatchdogExternalBackoffMs;
       } else {
         bridgeWatchdogExternalBackoffMs = 0;
       }
       logger.info("runtime.watchdog_result", { status: result?.status,
-        ...(result?.status === "external" ? { retryInMinutes: Math.round(bridgeWatchdogExternalBackoffMs / 60_000) } : {}) });
+        ...(waiting ? { retryInMinutes: Math.round(bridgeWatchdogExternalBackoffMs / 60_000) } : {}) });
       // Point Codex back at the bridge once it is running again (a failed launch restores the old route).
       if (result?.status === "ready" || result?.status === "degraded") {
         scheduleCodexBridgeAutoConnect({ logger, stateStore, reason: "watchdog" });
