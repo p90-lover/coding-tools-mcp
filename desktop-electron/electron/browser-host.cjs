@@ -970,6 +970,7 @@ class BrowserHost {
       surfaceId: this.surfaceId,
       userTabs: this.userTabs,
       selectedTabId: this.userTabs.has(this.selectedTabId) ? this.selectedTabId : "home",
+      homeTabClosed: this.homeTabClosed === true,
       chatLifecycleSync: this.chatLifecycleSync,
       lastAuthenticatedAt: this.lastAuthenticatedAt ?? 0,
       viewportCssKey: this.viewportCssKey,
@@ -986,6 +987,7 @@ class BrowserHost {
     this.view = home.view;
     this.surfaceId = home.surfaceId;
     this.userTabs = home.userTabs;
+    this.homeTabClosed = home.homeTabClosed === true;
     this.chatLifecycleSync = home.chatLifecycleSync ?? this.chatLifecycleSync;
     this.lastAuthenticatedAt = home.lastAuthenticatedAt;
     this.viewportCssKey = home.viewportCssKey;
@@ -1230,7 +1232,7 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: newChatUrlFor(this),
+      url: SAVED_CHAT_URL,
       status: "loading",
       loading: true,
       message: "Opening ChatGPT",
@@ -1243,7 +1245,7 @@ class BrowserHost {
     this.bindUserTabContents(tab);
     this.selectedTabId = tab.id;
     this.show();
-    void view.webContents.loadURL(newChatUrlFor(this)).catch((error) => {
+    void view.webContents.loadURL(SAVED_CHAT_URL).catch((error) => {
       if (this.userTabs.get(tab.id) !== tab || view.webContents.isDestroyed()
         || isAbortedNavigationError(error)) return;
       tab.loading = false;
@@ -2028,7 +2030,7 @@ class BrowserHost {
       status: this.state.status,
       loading: this.state.loading === true,
       active: this.selectedTabId === "home",
-      closable: false,
+      closable: true,
     };
     const state = selected
       ? {
@@ -2060,7 +2062,7 @@ class BrowserHost {
         readPageTitle: !manualInteraction,
       }),
       activeTabId: this.selectedTabId,
-      tabs: this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
+      tabs: (this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
         ? [
             // Home is listed while chosen, beside tabs of the user's own, and whenever the chosen
             // tab is a turn on another account (left out of the strip, which would show nothing).
@@ -2069,7 +2071,7 @@ class BrowserHost {
             ...[...this.turnTabs.values()].map((tab) => this.tabSnapshot(tab)),
             ...[...(this.userTabs?.values() ?? [])].map((tab) => this.tabSnapshot(tab)),
           ]
-        : [homeTab],
+        : [homeTab]).filter((tab) => tab.id !== "home" || !this.homeTabClosed),
       // The shown account's limit and the tabs it holds; tabs of sessions on other accounts show too.
       maxTabs: tabLimitOf(this, this.partition),
       accountTabs: tabsOnPartition(this, this.partition),
@@ -2298,7 +2300,7 @@ class BrowserHost {
     // Non-browser launcher pages must never be covered by the native ChatGPT view. Keep the
     // descriptor-owned view attached while the browser page is selected, but fully hide it when
     // the launcher explicitly deactivates the browser surface.
-    if (!this.surfaceActive) {
+    if (!this.surfaceActive || this.homeTabClosed) {
       this.view.setVisible(false);
       return;
     }
@@ -2307,6 +2309,7 @@ class BrowserHost {
   }
 
   activateHomeSurface() {
+    this.homeTabClosed = false;
     this.selectedTabId = "home";
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
@@ -2336,6 +2339,7 @@ class BrowserHost {
   selectTab(tabId) {
     if (tabId !== "home" && !this.turnTabs.has(tabId) && !this.userTabs?.has(tabId)) throw new Error("Browser tab does not exist");
     if (this.authView) this.closeAuthView(this.authView, true);
+    if (tabId === "home") this.homeTabClosed = false;
     this.selectedTabId = tabId;
     this.syncViewVisibility();
     if (this.visible && this.surfaceActive) this.activeView().webContents.focus();
@@ -2457,6 +2461,22 @@ class BrowserHost {
   }
 
   async closeTab(tabId) {
+    if (tabId === "home") {
+      if (this.manualOperation || this.authView) throw new Error("The first tab cannot close during a browser operation");
+      // Keep the descriptor-owned account surface alive, but remove its visible tab. Task tabs
+      // own their own pages: closing this tab must never cancel a turn or delete a saved chat.
+      this.homeTabClosed = true;
+      if (this.selectedTabId === "home") {
+        const turns = [...this.turnTabs.values()].filter((tab) => (tab.partition ?? this.partition) === this.partition);
+        this.selectedTabId = [...turns.map((tab) => tab.id), ...(this.userTabs?.keys() ?? [])].at(-1) || "home";
+        if (this.selectedTabId === "home") this.hide();
+      }
+      this.syncViewVisibility();
+      if (this.visible && this.surfaceActive && this.selectedTabId !== "home") this.activeView().webContents.focus();
+      this.publishState?.(this.snapshot());
+      this.writeDescriptor();
+      return this.snapshot();
+    }
     const userTab = this.userTabs?.get(tabId);
     if (userTab) {
       this.removeUserTab(userTab);
@@ -2682,6 +2702,7 @@ class BrowserHost {
 
   async reveal(inspectSession = true) {
     if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
+    if (this.selectedTabId === "home") this.homeTabClosed = false;
     this.show();
     await this.openHomePage(inspectSession);
     return this.snapshot();
@@ -2692,8 +2713,10 @@ class BrowserHost {
    * account switched to while the Browser tab was hidden stayed blank: only reveal loaded it.
    */
   async openHomePage(inspectSession = true) {
-    if (this.selectedTurnTab() || this.view.webContents.getURL() !== IDLE_BROWSER_URL) return;
-    await this.view.webContents.loadURL(newChatUrlFor(this));
+    if (this.selectedTurnTab() || this.selectedUserTab()) return;
+    const url = this.view.webContents.getURL();
+    if (url !== IDLE_BROWSER_URL && !isTemporaryChatUrl(url)) return;
+    await this.view.webContents.loadURL(SAVED_CHAT_URL);
     if (inspectSession) await this.probeAuthentication();
   }
 
