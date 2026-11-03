@@ -17,6 +17,13 @@
  *   (antigravity-cli.cjs update).
  * - RTK, installed with winget, updates with `winget upgrade` (rtk.cjs upgrade). Its releases are
  *   mostly dev-* prereleases, so both read GitHub's latest stable release.
+ * - Agent Orchestrator is built into the app from a pinned commit of its fork (the manifest.json
+ *   beside the daemon). It is compared with the fork's main branch; a newer AO arrives in an app update.
+ * - Update all installs every update that can be installed here, CPA last: plugin DLLs load when
+ *   CPA starts, so CPA restarts once for all of them (its own update restarts it anyway).
+ * - Auto-update is the person's choice per item (app-plugins.json beside CPA's state folder): a
+ *   check soon after start and then every few hours installs the updates of the items that have it
+ *   on, the same way Update all does. What ships in an app update can't be auto-updated here.
  *
  * Private repositories (the p90-lover plugins) need a GitHub token: GH_TOKEN/GITHUB_TOKEN, or the
  * signed-in `gh` CLI. The token goes only to api.github.com, never to a download host.
@@ -45,11 +52,18 @@ const TOOL_SOURCES = Object.freeze({
   rtk: { name: "RTK", repository: "rtk-ai/rtk", latest: true },
 });
 
+/** Agent Orchestrator's fork: the branch the app's pinned AO commit is built from. */
+const AO_SOURCE = Object.freeze({ repository: "p90-lover/agent-orchestrator", branch: "main" });
+const REPOSITORY = /^[\w.-]+\/[\w.-]+$/u;
+
 const PLUGIN_FILE = /^([a-z0-9][a-z0-9_-]*?)(?:-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?))?\.dll$/i;
 const DOWNLOAD_HOSTS = new Set(["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]);
 const MAX_PLUGIN_BYTES = 128 * 1024 * 1024;
 const CHECK_TTL_MS = 30 * 60_000;
 const UPDATES_FILE = "plugin-updates.json";
+const SETTINGS_FILE = "app-plugins.json";
+const AUTO_FIRST_MS = 5 * 60_000;
+const AUTO_EVERY_MS = 6 * 60 * 60_000;
 
 /** A plugin DLL's id and version, from its file name (`<id>-v<version>.dll` or `<id>.dll`). */
 function parsePluginFile(name) {
@@ -107,6 +121,10 @@ function createAppPlugins({
   // The Antigravity CLI service, made with the backend (null until it starts), and RTK's.
   antigravityCli = () => null,
   rtk = null,
+  // The folder holding AO's daemon and its build manifest.json (null before the backend starts).
+  agentOrchestratorRoot = () => null,
+  // Where the auto-update choices are kept: beside CPA's state folder by default.
+  settingsDir = null,
   logger = console,
   fetchImpl = fetch,
   env = process.env,
@@ -119,11 +137,26 @@ function createAppPlugins({
   const pluginDir = path.join(cpaStateDir, "plugins", "windows", "amd64");
   const releases = new Map();
   const updating = new Set();
+  const settingsFile = path.join(settingsDir || path.dirname(cpaStateDir), SETTINGS_FILE);
   let token;
+  let settings = null;
 
-  async function githubToken() {
-    if (token !== undefined) return token;
-    token = env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || await ghToken(spawnImpl);
+  async function readSettings() {
+    if (settings) return settings;
+    try {
+      const parsed = JSON.parse(await fs.promises.readFile(settingsFile, "utf8"));
+      settings = { schemaVersion: 1, autoUpdate: parsed && typeof parsed.autoUpdate === "object" && parsed.autoUpdate ? parsed.autoUpdate : {} };
+    } catch { settings = { schemaVersion: 1, autoUpdate: {} }; }
+    return settings;
+  }
+
+  /** An item the app can install updates for, so auto-update means something: not one that ships in an app update. */
+  const autoUpdatable = (item) => item.id === "cpa" || item.id === "antigravity-cli" || item.id === "rtk"
+    || (item.kind === "cpa-plugin" && Boolean(PLUGIN_SOURCES[item.id.slice("cpa-plugin:".length)]) && !PLUGIN_SOURCES[item.id.slice("cpa-plugin:".length)].rebuilt);
+
+  // One lookup however many checks ask at once: the list checks every item together.
+  function githubToken() {
+    token ??= Promise.resolve(env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || ghToken(spawnImpl));
     return token;
   }
 
@@ -158,7 +191,27 @@ function createAppPlugins({
           .find((item) => !item.draft && !item.prerelease && String(item.tag_name || "").startsWith(prefix));
       entry = release
         ? { at: now(), tag: release.tag_name, version: release.tag_name.slice(prefix.length).replace(/^v/u, ""), url: release.html_url, assets: release.assets || [] }
-        : { at: now(), error: "No release yet" };
+        : { at: now(), none: true };
+    } catch (error) {
+      entry = { at: now(), error: error instanceof Error ? error.message : String(error) };
+    }
+    releases.set(key, entry);
+    return entry;
+  }
+
+  /** How far `branch` is ahead of `commit`: { head, ahead, url }, or { error }. */
+  async function branchAhead(repository, branch, commit, force) {
+    const key = `${repository}@${branch}..${commit}`;
+    const cached = releases.get(key);
+    if (!force && cached && now() - cached.at < CHECK_TTL_MS) return cached;
+    let entry;
+    try {
+      const head = String((await github(`/repos/${repository}/branches/${encodeURIComponent(branch)}`))?.commit?.sha || "");
+      if (!/^[0-9a-f]{40}$/u.test(head)) throw new Error("GitHub gave no commit for the branch");
+      const ahead = head === commit ? 0
+        : Number((await github(`/repos/${repository}/compare/${commit}...${head}?per_page=1`))?.ahead_by) || 0;
+      entry = { at: now(), head, ahead, url: ahead ? `https://github.com/${repository}/compare/${commit.slice(0, 12)}...${head.slice(0, 12)}`
+        : `https://github.com/${repository}/commit/${commit}` };
     } catch (error) {
       entry = { at: now(), error: error instanceof Error ? error.message : String(error) };
     }
@@ -203,10 +256,28 @@ function createAppPlugins({
     return {
       id: "cpa", kind: "service", name: "CPA (CLIProxyAPI)", repository: "router-for-me/CLIProxyAPI",
       installed, latest, updateAvailable: available, canUpdate: available,
-      note: check?.reason || "Switches to the new version once it passes a health check, or goes back to this one.",
+      note: check?.reason || null,
       error: check?.error || null, updating: updating.has("cpa") || component?.updateOperation?.state === "installing",
       releaseUrl: latest ? `https://github.com/router-for-me/CLIProxyAPI/releases/tag/${check?.tag || `v${latest}`}` : null,
     };
+  }
+
+  async function agentOrchestratorItem(force) {
+    const base = {
+      id: "agent-orchestrator", kind: "service", name: "Agent Orchestrator", repository: AO_SOURCE.repository,
+      installed: null, latest: null, updateAvailable: false, canUpdate: false, note: null, error: null, updating: false, releaseUrl: null,
+    };
+    const root = agentOrchestratorRoot();
+    let manifest = null;
+    try { manifest = root ? JSON.parse(await fs.promises.readFile(path.join(root, "manifest.json"), "utf8")) : null; } catch { /* not built */ }
+    const commit = /^[0-9a-f]{40}$/u.test(String(manifest?.commit || "")) ? manifest.commit : null;
+    if (!commit) return { ...base, note: "Not built into this copy of the app." };
+    const repository = REPOSITORY.test(String(manifest.repository || "")) ? manifest.repository : AO_SOURCE.repository;
+    const item = { ...base, repository, installed: commit.slice(0, 7) };
+    const head = await branchAhead(repository, AO_SOURCE.branch, commit, force);
+    if (head.error) return { ...item, error: head.error };
+    return { ...item, latest: head.head.slice(0, 7), releaseUrl: head.url, updateAvailable: head.ahead > 0, viaAppUpdate: head.ahead > 0,
+      note: head.ahead ? `${head.ahead} new commit${head.ahead === 1 ? "" : "s"} on ${AO_SOURCE.branch}.` : null };
   }
 
   async function pluginItem(plugin, force) {
@@ -219,11 +290,13 @@ function createAppPlugins({
     if (!source) return { ...base, note: "Added by hand; its GitHub repository isn't known." };
     const release = await latestRelease(source, force);
     if (release.error) return { ...base, error: release.error };
+    // Nothing published yet: nothing to compare with, and not a failure.
+    if (release.none) return base;
     const latest = release.version;
     if (source.rebuilt) {
       const newer = Boolean(plugin.version && compare(baseVersion(latest), baseVersion(plugin.version)) > 0);
-      return { ...base, latest, releaseUrl: release.url, updateAvailable: newer,
-        note: newer ? "Built for Coding Tools from this repository: the new version arrives in an app update." : "Built for Coding Tools from this repository." };
+      // Built for Coding Tools from this repository: a newer version arrives in an app update.
+      return { ...base, latest, releaseUrl: release.url, updateAvailable: newer, viaAppUpdate: newer };
     }
     const newer = !plugin.version || compare(latest, plugin.version) > 0;
     const dll = newer ? releaseDll(release, plugin.id) : null;
@@ -254,14 +327,14 @@ function createAppPlugins({
     const installed = current.installed ? current.version : null;
     const item = { ...base, installed, updating: base.updating || Boolean(current.installing) };
     const release = await latestRelease(TOOL_SOURCES["antigravity-cli"], force);
-    if (release.error) return { ...item, error: release.error };
+    if (release.error || release.none) return { ...item, error: release.error || "No release on GitHub yet" };
     const latest = release.version;
     const shown = { ...item, latest, releaseUrl: release.url };
-    if (!installed) return { ...shown, note: "Not installed: install it on the Antigravity CLI page." };
+    if (!installed) return { ...shown, note: "Install it on the Antigravity CLI page." };
     const newer = compare(latest, installed) > 0;
     const target = newer ? antigravityTarget(cli, release) : null;
-    return { ...shown, updateAvailable: newer, canUpdate: Boolean(target),
-      note: newer && !target ? "This release has no build to install here: it arrives in an app update." : null };
+    // A release without a build for this platform arrives in an app update.
+    return { ...shown, updateAvailable: newer, canUpdate: Boolean(target), viaAppUpdate: newer && !target };
   }
 
   /** winget's own install (a Packages folder or its Links shim): the one `winget upgrade` can update. */
@@ -273,18 +346,24 @@ function createAppPlugins({
     const current = await rtk.status();
     const item = { ...base, installed: current.version || null, updating: base.updating || Boolean(current.installing) };
     const release = await latestRelease(TOOL_SOURCES.rtk, force);
-    if (release.error) return { ...item, error: release.error };
+    if (release.error || release.none) return { ...item, error: release.error || "No release on GitHub yet" };
     const shown = { ...item, latest: release.version, releaseUrl: release.url };
-    if (!item.installed) return { ...shown, note: "Not installed: install it on the RTK page." };
+    if (!item.installed) return { ...shown, note: "Install it on the RTK page." };
     const newer = compare(release.version, item.installed) > 0;
     const winget = fromWinget(current.path) && typeof rtk.upgrade === "function";
     return { ...shown, updateAvailable: newer, canUpdate: newer && winget,
-      note: !newer ? null : winget ? "Updates with winget (rtk-ai.rtk)." : "Installed without winget: update it the way you installed it." };
+      note: newer && !winget ? "Installed without winget: update it the way you installed it." : null };
   }
 
+  // Every item is checked at once: one after another, a cold check waited on each GitHub call in turn.
   async function list({ refresh = false } = {}) {
-    const items = [await cpaItem(refresh), await antigravityItem(refresh), await rtkItem(refresh)];
-    for (const plugin of await installedPlugins()) items.push(await pluginItem(plugin, refresh));
+    const plugins = await installedPlugins();
+    const [items, { autoUpdate }] = await Promise.all([Promise.all([cpaItem(refresh), agentOrchestratorItem(refresh), antigravityItem(refresh), rtkItem(refresh),
+      ...plugins.map((plugin) => pluginItem(plugin, refresh))]), readSettings()]);
+    for (const item of items) {
+      item.autoUpdatable = autoUpdatable(item);
+      item.autoUpdate = item.autoUpdatable && autoUpdate[item.id] === true;
+    }
     return { items, checkedAt: new Date(now()).toISOString() };
   }
 
@@ -292,7 +371,7 @@ function createAppPlugins({
     const cli = antigravityCli();
     if (!cli) throw new Error("The Antigravity CLI hasn't started yet");
     const release = await latestRelease(TOOL_SOURCES["antigravity-cli"], true);
-    if (release.error) throw new Error(release.error);
+    if (release.error || release.none) throw new Error(release.error || "No release on GitHub yet");
     const target = antigravityTarget(cli, release);
     if (!target) throw new Error("This release has no build to install here");
     const from = cli.status().version;
@@ -350,12 +429,12 @@ function createAppPlugins({
     throw new Error("Too many redirects");
   }
 
-  async function updatePlugin(id) {
+  async function updatePlugin(id, restart = true) {
     const plugin = (await installedPlugins()).find((item) => item.id === id);
     const source = PLUGIN_SOURCES[id];
     if (!plugin || !source || source.rebuilt) throw new Error("This plugin can't be updated from GitHub");
     const release = await latestRelease(source, true);
-    if (release.error) throw new Error(release.error);
+    if (release.error || release.none) throw new Error(release.error || "No release on GitHub yet");
     if (plugin.version && compare(release.version, plugin.version) <= 0) return;
     const dll = releaseDll(release, id);
     if (!dll) throw new Error("This release has no Windows build to install");
@@ -377,11 +456,11 @@ function createAppPlugins({
     record.plugins[id] = { version: release.version, file: dll.name, sha256: dll.sha256, repository: source.repository, installedAt: new Date(now()).toISOString() };
     await writePluginUpdates(cpaStateDir, record);
     logger.info?.("app-plugins.updated", { plugin: id, from: plugin.version, to: release.version });
-    await restartCpa();
+    if (restart) await restartCpa();
   }
 
-  async function update(itemId) {
-    const key = String(itemId || "");
+  /** Installs one update; a plugin restarts CPA unless `restart` is false (Update all restarts it once). */
+  async function install(key, restart = true) {
     if (updating.has(key)) throw new Error("This update is already running");
     updating.add(key);
     try {
@@ -393,17 +472,98 @@ function createAppPlugins({
       } else if (key === "rtk") {
         await updateRtk();
       } else if (key.startsWith("cpa-plugin:")) {
-        await updatePlugin(key.slice("cpa-plugin:".length));
+        await updatePlugin(key.slice("cpa-plugin:".length), restart);
       } else {
         throw new Error("Unknown app plugin");
       }
     } finally {
       updating.delete(key);
     }
+  }
+
+  async function update(itemId) {
+    await install(String(itemId || ""));
     return list({ refresh: true });
   }
 
-  return { list, update };
+  /**
+   * Every update that can be installed here (or only those `pick` keeps), one at a time, CPA last.
+   * A failure doesn't stop the rest; `results` says what happened to each.
+   */
+  async function updateAll(pick = () => true) {
+    const { items } = await list({ refresh: true });
+    const due = items.filter((item) => item.updateAvailable && item.canUpdate && !item.updating && pick(item))
+      .sort((left, right) => Number(left.id === "cpa") - Number(right.id === "cpa"));
+    const results = [];
+    let pluginsChanged = false;
+    let cpaRestarted = false;
+    for (const item of due) {
+      try {
+        await install(item.id, false);
+        if (item.kind === "cpa-plugin") pluginsChanged = true;
+        if (item.id === "cpa") cpaRestarted = true;
+        results.push({ id: item.id, name: item.name, ok: true, from: item.installed, to: item.latest });
+      } catch (error) {
+        results.push({ id: item.id, name: item.name, ok: false, from: item.installed, to: item.latest, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (pluginsChanged && !cpaRestarted) {
+      try { await restartCpa(); } catch (error) {
+        results.push({ id: "cpa", name: "CPA restart", ok: false, error: `The new plugins load when CPA next starts: ${error instanceof Error ? error.message : String(error)}` });
+      }
+    }
+    return { ...(await list({ refresh: due.length > 0 })), results };
+  }
+
+  /** Turns auto-update on or off for one item. */
+  async function setAutoUpdate(itemId, enabled) {
+    const key = String(itemId || "");
+    const { items } = await list();
+    const item = items.find((entry) => entry.id === key);
+    if (!item) throw new Error("Unknown app plugin");
+    if (!item.autoUpdatable) throw new Error(`${item.name} updates with the app`);
+    const current = await readSettings();
+    const autoUpdate = { ...current.autoUpdate };
+    if (enabled === true) autoUpdate[key] = true; else delete autoUpdate[key];
+    const next = { schemaVersion: 1, autoUpdate };
+    await fs.promises.mkdir(path.dirname(settingsFile), { recursive: true, mode: 0o700 });
+    const staging = `${settingsFile}.${process.pid}.tmp`;
+    await fs.promises.writeFile(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    await fs.promises.rename(staging, settingsFile);
+    settings = next;
+    logger.info?.("app-plugins.auto_update", { plugin: key, enabled: enabled === true });
+    return list();
+  }
+
+  /** One auto-update pass: installs the updates of the items with auto-update on. */
+  async function autoUpdateNow() {
+    const { autoUpdate } = await readSettings();
+    if (!Object.values(autoUpdate).some(Boolean)) return { results: [] };
+    const result = await updateAll((item) => item.autoUpdate);
+    if (result.results.length) logger.info?.("app-plugins.auto_updated", { results: result.results.map(({ id, ok, from, to }) => ({ id, ok, from, to })) });
+    return result;
+  }
+
+  /** Checks soon after start, then every few hours; returns a stop function. Never two passes at once. */
+  function startAutoUpdates({ firstMs = AUTO_FIRST_MS, everyMs = AUTO_EVERY_MS, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+    let timer = null;
+    let stopped = false;
+    const schedule = (ms) => {
+      if (stopped) return;
+      timer = setTimer(run, ms);
+      timer?.unref?.();
+    };
+    async function run() {
+      try { await autoUpdateNow(); } catch (error) {
+        logger.warn?.("app-plugins.auto_update_failed", { message: error instanceof Error ? error.message : String(error) });
+      }
+      schedule(everyMs);
+    }
+    schedule(firstMs);
+    return () => { stopped = true; if (timer) clearTimer(timer); };
+  }
+
+  return { list, update, updateAll: () => updateAll(), setAutoUpdate, autoUpdateNow, startAutoUpdates };
 }
 
 module.exports = { PLUGIN_SOURCES, TOOL_SOURCES, parsePluginFile, readPluginUpdates, baseVersion, createAppPlugins };

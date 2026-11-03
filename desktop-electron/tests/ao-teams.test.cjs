@@ -118,11 +118,11 @@ for (const phase of ["save reply", "refresh reply"]) {
   });
 }
 
-for (const mode of ["automatic", "manual", "default"]) {
+for (const mode of ["automatic", "default"]) {
   test(`team save keeps the normal ${mode} completion and notification`, async () => {
     const ui = await mountedTeams();
     if (mode === "default") { ui.select(ui.other.id); await ui.click("Make default"); }
-    else { ui.edit("Saved edit"); if (mode === "automatic") await ui.autosave(); else await ui.click("Save team"); }
+    else { ui.edit("Saved edit"); await ui.autosave(); }
     assert.equal(ui.find("Team name").props.disabled, mode !== "automatic");
     if (mode === "default") assert.equal(ui.next("team_update").args.change.team.is_default, true);
     await ui.saveReply(); await ui.refreshReply();
@@ -191,13 +191,14 @@ test("the Runtime team manager reuses the overview canvas and hides execution ta
   assert.match(source, /template/);
 });
 
-test("the team page has a left palette of roles and preset workers, and an explicit save beside auto-save", () => {
+test("the team page has a left palette of roles and preset workers, and saves on its own with a retry after a failure", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorTeamsSurface.tsx"), "utf8");
   assert.match(source, /<aside className="ao-teams-palette" aria-label="Add roles">/);
   for (const role of ["worker", "approver", "sub_reviewer", "retry"]) assert.ok(source.includes(`add("${role}")`), role);
   for (const preset of ["Frontend", "Backend", "Tester", "Researcher", "Security auditor", "Docs writer", "DevOps"]) assert.match(source, new RegExp(`roleName: "${preset}"`));
   assert.match(source, /starterSettings\(role, preset\.roleName, preset\.specialty, preset\.roleName\)/, "a preset worker carries its role name, specialty and starter instructions");
-  assert.match(source, /\{saving \? "Saving…" : dirty \? "Save team" : "Saved"\}/);
+  assert.match(source, /saving \|\| dirty && !failed \? "Saving…" : failed && dirty \? "Not saved" : notice \|\| "Saved"/);
+  assert.match(source, /\{failed && dirty \? <button[^>]*onClick=\{\(\) => void save\(\)\}>Save again<\/button> : null\}/);
 });
 
 test("the team page keeps saving after a reload or a save elsewhere, shows no run state, and offers real model tuning", () => {

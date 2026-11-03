@@ -2,11 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { Language, LauncherApi, RegisterStatus } from "../types";
 import "./original-ui.css";
 
+// Register is the reg-machine project's own page, full size: the app adds no bar above it. Until it
+// is ready, one card says where it stands and holds the actions (choose the project, start, retry).
 const labels = {
-  en: { choose: "Choose project", start: "Start service", stop: "Stop service", reload: "Reload view", refresh: "Refresh status", connected: "Connected", offline: "Offline", starting: "Starting", project: "Project", empty: "Register in Coding Tools", hint: "Choose the reg-machine project. Its service starts automatically when you open Register.", maintenance: "Starting the service also runs its background maintenance.", attached: "Using a running service. Coding Tools won't stop it.", loading: "Loading Register…", select: "Choose a project." },
-  "zh-CN": { choose: "选择项目", start: "启动服务", stop: "停止服务", reload: "重新加载", refresh: "刷新状态", connected: "已连接", offline: "离线", starting: "启动中", project: "项目", empty: "Coding Tools 注册工作区", hint: "选择 reg-machine 项目后，打开注册工作区时会自动启动服务。", maintenance: "启动服务也会运行其已配置的后台维护。", attached: "正在使用已有服务，Coding Tools 不会将其停止。", loading: "正在加载注册界面", select: "请选择项目。" },
-  "zh-TW": { choose: "選擇專案", start: "啟動服務", stop: "停止服務", reload: "重新載入", refresh: "重新整理狀態", connected: "已連線", offline: "離線", starting: "啟動中", project: "專案", empty: "Coding Tools 註冊工作區", hint: "選擇 reg-machine 專案後，開啟註冊工作區時會自動啟動服務。", maintenance: "啟動服務也會執行其已設定的背景維護。", attached: "正在使用既有服務，Coding Tools 不會將其停止。", loading: "正在載入註冊介面", select: "請選擇專案。" },
-  ja: { choose: "プロジェクトを選択", start: "サービスを起動", stop: "サービスを停止", reload: "再読み込み", refresh: "状態を更新", connected: "接続済み", offline: "オフライン", starting: "起動中", project: "プロジェクト", empty: "Coding Tools 登録ワークスペース", hint: "reg-machine プロジェクトを選ぶと、登録画面を開いたときにサービスが自動起動します。", maintenance: "起動すると、設定済みのバックグラウンド保守も実行されます。", attached: "既存のサービスに接続しています。Coding Tools はこのサービスを停止しません。", loading: "登録画面を読み込み中", select: "プロジェクトを選択してください。" },
+  en: { choose: "Choose project", other: "Choose another project", start: "Start", retry: "Try again", starting: "Starting Register…", loading: "Loading Register…", stopped: "Register is stopped", empty: "Choose the reg-machine project", hint: "Its service starts when you open Register.", failed: "Register didn't start" },
+  "zh-CN": { choose: "选择项目", other: "选择其他项目", start: "启动", retry: "重试", starting: "正在启动注册服务…", loading: "正在加载注册界面…", stopped: "注册服务已停止", empty: "选择 reg-machine 项目", hint: "打开注册工作区时会自动启动其服务。", failed: "注册服务未能启动" },
+  "zh-TW": { choose: "選擇專案", other: "選擇其他專案", start: "啟動", retry: "重試", starting: "正在啟動註冊服務…", loading: "正在載入註冊介面…", stopped: "註冊服務已停止", empty: "選擇 reg-machine 專案", hint: "開啟註冊工作區時會自動啟動其服務。", failed: "註冊服務未能啟動" },
+  ja: { choose: "プロジェクトを選択", other: "別のプロジェクトを選択", start: "起動", retry: "再試行", starting: "登録サービスを起動中…", loading: "登録画面を読み込み中…", stopped: "登録サービスは停止しています", empty: "reg-machine プロジェクトを選択", hint: "登録画面を開くとサービスが自動起動します。", failed: "登録サービスを起動できませんでした" },
 };
 
 export function RegisterSurface({ api, active, language, setError }: {
@@ -123,34 +125,23 @@ export function RegisterSurface({ api, active, language, setError }: {
     autoStartedProjects.current.add(configured.projectRoot);
     return api.startRegister();
   });
-  const state = status?.starting ? "starting" : ready ? "ready" : "offline";
+  const problem = error || status?.error || "";
+  const project = status?.projectRoot || "";
+  const starting = Boolean(status?.starting) || (busy && !ready);
+  const title = ready ? copy.loading : starting ? copy.starting : problem ? copy.failed : project ? copy.stopped : copy.empty;
 
   return (
-    <section className="original-ui-surface register-surface" aria-label="Register">
-      <header className="original-ui-hostbar">
-        <strong>Register</strong>
-        <span className={`original-ui-status status-${state}`} role="status">
-          {state === "starting" ? copy.starting : ready ? copy.connected : copy.offline}
-        </span>
-        <div className="original-ui-hostbar-actions">
-          <button type="button" disabled={busy || status?.owned || status?.starting} onClick={() => void choose()}>{copy.choose}</button>
-          <button type="button" className="primary" disabled={busy || status?.starting || (!ready && !status?.projectRoot)}
-            onClick={() => void run(() => ready ? api.reloadRegister() : api.startRegister())}>
-            {status?.starting ? copy.starting : ready ? copy.reload : copy.start}
-          </button>
-          <button type="button" disabled={busy || !status?.owned} onClick={() => void run(() => api.stopRegister())}>{copy.stop}</button>
-          <button type="button" disabled={busy} onClick={() => void run(() => api.registerStatus())}>{copy.refresh}</button>
-        </div>
-      </header>
-      <p className="original-ui-note register-project-path">
-        {copy.project}: {status?.projectRoot || copy.select}
-      </p>
-      {error || status?.error ? <p className="original-ui-error" role="alert">{error || status?.error}</p> : null}
-      <p className="original-ui-note">{ready && !status?.owned ? copy.attached : copy.maintenance}</p>
-      <div className="original-ui-frame-shell" ref={setSlot} data-register-slot="true">
-        <div className="original-ui-frame-empty">
-          <strong>{ready ? copy.loading : copy.empty}</strong>
-          {!ready ? <span>{copy.hint}</span> : null}
+    <section className="register-surface" aria-label="Register">
+      <div className="register-dragstrip" aria-hidden="true" />
+      <div className="register-frame" ref={setSlot} data-register-slot="true">
+        <div className={`register-card${starting || ready ? " is-waiting" : ""}`} role="status">
+          <strong>{title}</strong>
+          {problem ? <p className="register-error" role="alert">{problem}</p> : !project ? <p>{copy.hint}</p> : null}
+          {project ? <code title={project}>{project}</code> : null}
+          {!ready && !starting ? <div className="register-actions">
+            {project ? <button type="button" className="is-primary" disabled={busy} onClick={() => void run(() => api.startRegister())}>{problem ? copy.retry : copy.start}</button> : null}
+            <button type="button" className={project ? "" : "is-primary"} disabled={busy || status?.owned} onClick={() => void choose()}>{project ? copy.other : copy.choose}</button>
+          </div> : null}
         </div>
       </div>
     </section>

@@ -32,7 +32,7 @@ export interface RtkStatus {
 }
 /** Connections > App plugins (app-plugins.cjs): CPA, a tool agents run, or a CPA plugin, installed vs. GitHub. */
 export interface AppPlugin {
-  /** "cpa", "antigravity-cli", "rtk", or "cpa-plugin:<plugin id>". */
+  /** "cpa", "agent-orchestrator", "antigravity-cli", "rtk", or "cpa-plugin:<plugin id>". */
   id: string;
   kind: "service" | "tool" | "cpa-plugin";
   name: string;
@@ -45,6 +45,12 @@ export interface AppPlugin {
   updateAvailable: boolean;
   /** The update can be installed from here (a checked Windows build, or CPA's own updater). */
   canUpdate: boolean;
+  /** The newer version can't be installed here: it ships in an app update (AO, a rebuilt plugin). */
+  viaAppUpdate?: boolean;
+  /** The app installs this item's updates itself, so auto-update can be turned on for it. */
+  autoUpdatable?: boolean;
+  /** Auto-update is on: a background check installs new versions. */
+  autoUpdate?: boolean;
   note: string | null;
   error: string | null;
   updating: boolean;
@@ -53,6 +59,15 @@ export interface AppPlugin {
 export interface AppPluginsSnapshot {
   items: AppPlugin[];
   checkedAt: string;
+}
+/** What Update all did to one item. */
+export interface AppPluginUpdateResult {
+  id: string;
+  name: string;
+  ok: boolean;
+  from?: string | null;
+  to?: string | null;
+  error?: string;
 }
 /** rtk's own savings report: `rtk gain` as text, and its JSON export when rtk gives one. */
 export interface RtkGain {
@@ -1146,6 +1161,9 @@ export interface LauncherApi {
   rtkInstall(): Promise<{ code: number | null; output: string; status: RtkStatus }>;
   appPlugins(refresh?: boolean): Promise<AppPluginsSnapshot>;
   updateAppPlugin(id: string): Promise<AppPluginsSnapshot>;
+  /** Installs every update App plugins can install, CPA last. */
+  updateAllAppPlugins(): Promise<AppPluginsSnapshot & { results: AppPluginUpdateResult[] }>;
+  setAppPluginAutoUpdate(id: string, enabled: boolean): Promise<AppPluginsSnapshot>;
   mcpServers(): Promise<McpServerEntry[]>;
   /** `githubCliToken`: the main process adds the GitHub CLI's sign-in as the header (GitHub's MCP server only). */
   saveMcpServer(server: McpServerInput, options?: { githubCliToken?: boolean }): Promise<McpServerEntry[]>;

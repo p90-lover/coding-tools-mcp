@@ -264,6 +264,33 @@ test("App plugins' update runs winget upgrade for rtk-ai.rtk, one winget at a ti
   await assert.rejects(createRtk({ platform: "linux" }).upgrade(), /brew upgrade rtk/);
 });
 
+test("winget's refusal to replace a modified portable rtk is answered once with --force", async () => {
+  const { EventEmitter } = require("node:events");
+  const runs = [];
+  const spawnProcess = (_file, args) => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    runs.push(args);
+    setImmediate(() => {
+      const refused = runs.length === 1;
+      if (refused) child.stdout.emit("data", "Unable to remove Portable package as it has been modified; to override this check use --force\n");
+      child.emit("close", refused ? 2316632151 : 0);
+    });
+    return child;
+  };
+  const rtk = createRtk({ getEnabled: () => true, platform: "win32", spawnProcess,
+    run: (_file, args) => (args[0] === "--version" ? { status: 0, stdout: "rtk 0.50.0\n" } : { status: 1, stdout: "" }),
+    exists: (file) => file === PACKAGED, listDir: () => [path.basename(path.dirname(PACKAGED))],
+    env: { PATH: "C:\\Windows\\System32", LOCALAPPDATA: LOCAL } });
+  const upgraded = rtk.upgrade();
+  assert.equal(rtk.install(), upgraded, "the retry stays inside the one winget turn");
+  const result = await upgraded;
+  assert.equal(runs.length, 2);
+  assert.ok(!runs[0].includes("--force") && runs[1].includes("--force"));
+  assert.equal(result.code, 0);
+  assert.equal((await rtk.status()).installing, false);
+});
+
 test("an automatic install is skipped when rtk is there or off, and a failed one waits a day", async () => {
   for (const options of [{ installed: true }, { enabled: false }]) {
     const { rtk, winget } = machine(options);
