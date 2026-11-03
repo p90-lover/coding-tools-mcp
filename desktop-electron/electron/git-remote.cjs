@@ -1,7 +1,7 @@
 "use strict";
 // A project's git remote for the chat list's project card ("owner/repo", as Codex shows it).
-// Only that short name leaves this module: a remote URL can carry credentials
-// (https://user:token@host/...), so the URL itself is never returned.
+// Remote identities only leave this module: a URL can carry credentials
+// (https://user:token@host/...), so the raw URL itself is never returned.
 const fs = require("node:fs");
 const path = require("node:path");
 const { runOffThread } = require("./off-thread-run.cjs");
@@ -122,4 +122,113 @@ async function readGitInfo(folder, options) {
   return { kind: await samePath(root, local) ? "repo" : "inside", root: toNative(root), mainRepo: null, branch };
 }
 
-module.exports = { readBranch, readGitInfo, readRemote, repoSlug };
+/** A push is an action, not a quoted mention in a search, prompt or file being inspected. */
+function gitPushRequest(command) {
+  if (typeof command !== "string") return null;
+  const wrappedInput = /^permission · [^\r\n]+? · input (\{[\s\S]*\})$/.exec(command);
+  if (wrappedInput) return gitPushRequest(wrappedInput[1]);
+  if (command.trimStart().startsWith("{")) {
+    try { const input = JSON.parse(command); return gitPushRequest(input.command ?? input.cmd); } catch { return null; }
+  }
+  const segments = [[]];
+  let word = "", quote = null;
+  const endWord = () => { if (word) { segments.at(-1).push(word); word = ""; } };
+  for (let at = 0; at < command.length; at++) {
+    const char = command[at];
+    if (quote) {
+      if (char === quote) quote = null;
+      else if (char === "\\" && command[at + 1] === quote) word += command[++at];
+      else word += char;
+    } else if (char === "\"" || char === "'") quote = char;
+    else if (/[;|&\r\n]/.test(char)) { endWord(); if (segments.at(-1).length) segments.push([]); }
+    else if (/\s/.test(char)) endWord();
+    else word += char;
+  }
+  endWord();
+  const requests = [];
+  for (const words of segments.filter(part => part.length)) {
+    const shellFlag = /(?:^|[\\/])(?:bash|sh)(?:\.exe)?$/i.test(words[0]) ? /^-(?:c|lc)$/i
+      : /(?:^|[\\/])(?:pwsh|powershell)(?:\.exe)?$/i.test(words[0]) ? /^-(?:Command|c)$/i
+        : /(?:^|[\\/])cmd(?:\.exe)?$/i.test(words[0]) ? /^\/c$/i : null;
+    if (shellFlag) {
+      const at = words.findIndex((value, index) => index > 0 && shellFlag.test(value));
+      const nested = at > 0 ? gitPushRequest(words.slice(at + 1).join(" ")) : null;
+      // A shell can change repository context; it cannot borrow the outer command's Git facts.
+      if (nested) requests.push(nested.status === "blocked" ? nested
+        : { status: "unknown", reason: "Review publication separately from its shell wrapper" });
+      continue;
+    }
+    if (!/^git(?:\.exe)?$/i.test(words[0])) continue;
+    let index = 1, uncertain = Boolean(quote);
+    while (words[index]?.startsWith("-")) {
+      const option = words[index++];
+      if (option === "-c") {
+        const value = words[index++];
+        if (value !== "credential.helper=" && value !== "credential.helper=!gh auth git-credential") uncertain = true;
+      } else if (option === "-C" || option === "--git-dir" || option === "--work-tree") { index++; uncertain = true; }
+      else uncertain = true;
+    }
+    if (words[index++] !== "push") continue;
+    const rest = words.slice(index);
+    const dangerous = rest.some(value => /^(?:\+|--(?:force(?:-with-lease|-if-includes)?|delete|mirror|all|tags|no-verify)(?:=|$)|-[^-]*[fd])/.test(value));
+    const args = rest.filter(value => !["-u", "--set-upstream", "--dry-run", "-n"].includes(value));
+    const [remote, ...refs] = args;
+    const destinations = refs.map(ref => (ref.includes(":") ? ref.slice(ref.indexOf(":") + 1) : ref).replace(/^refs\/heads\//, ""));
+    const protectedBranch = destinations.some(ref => /^(?:main|master|HEAD)$/.test(ref) || ref.startsWith("refs/") || !ref);
+    if (dangerous || protectedBranch || refs.some(ref => ref.startsWith(":"))) { requests.push({ status: "blocked", reason: "Destructive, broad or protected-branch publication requires a person" }); continue; }
+    const validRef = ref => /^(?:HEAD|[\w./-]+)(?::(?:refs\/heads\/)?[\w./-]+)?$/.test(ref) && !ref.includes("..") && !ref.includes("@{");
+    if (uncertain || !/^[A-Za-z0-9][\w.-]{0,63}$/.test(remote ?? "") || !refs.length || !refs.every(validRef) || args.some(value => value.startsWith("-"))) {
+      requests.push({ status: "unknown", reason: "The publication command's destination or options need checking" }); continue;
+    }
+    requests.push({ status: "review", remote, refs, destinations });
+  }
+  if (!requests.length) return null;
+  if (requests.some(request => request.status === "blocked")) return requests.find(request => request.status === "blocked");
+  if (segments.filter(part => part.length).length !== 1 || requests.length !== 1) return { status: "unknown", reason: "Review publication separately from other shell commands" };
+  return requests[0];
+}
+
+/** A destination identity only: no userinfo, token, query, fragment or remote-helper program. */
+function reviewRemoteIdentity(value) {
+  if (typeof value !== "string" || value.length > 2048 || /[\x00-\x20\x7f]/.test(value)) return null;
+  const scp = /^[\w.-]+@([\w.-]+):([\w./-]+)$/.exec(value);
+  if (scp) return `${scp[1].toLowerCase()}/${scp[2].replace(/\.git\/?$/, "")}`;
+  try {
+    const url = new URL(value);
+    if (!["https:", "ssh:"].includes(url.protocol) || url.search || url.hash || !/^\/[\w./-]+$/.test(url.pathname)) return null;
+    return `${url.host.toLowerCase()}${url.pathname.replace(/\.git\/?$/, "")}`;
+  } catch { return null; }
+}
+
+/** Local, read-only facts for the reviewer; a configured destination is not publication consent. */
+async function readReviewRepository(folder, remote = "origin", options) {
+  const unknown = { status: "unknown" };
+  if (typeof folder !== "string" || !/^[A-Za-z0-9][\w.-]{0,63}$/.test(remote)) return unknown;
+  const local = folder.replace(/^\\\\\?\\/, "");
+  if (!path.isAbsolute(local) || !await isDirectory(local)) return unknown;
+  const output = async args => {
+    const result = await gitResult(local, args, options);
+    return result.ok ? result.stdout.trim() : null;
+  };
+  const [where, fetch, push, head] = await Promise.all([
+    output(["rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"]),
+    output(["remote", "get-url", "--all", remote]),
+    output(["remote", "get-url", "--push", "--all", remote]),
+    output(["symbolic-ref", "--quiet", `refs/remotes/${remote}/HEAD`]),
+  ]);
+  if (!where || !fetch || !push) return unknown;
+  const [root, branch] = where.split(/\r?\n/);
+  if (!root || !branch || /[\x00-\x1f\x7f]/.test(root + branch)) return unknown;
+  const identities = text => {
+    const urls = text.split(/\r?\n/);
+    if (urls.length > 8) return null;
+    const values = urls.map(reviewRemoteIdentity);
+    return values.every(Boolean) ? [...new Set(values)] : null;
+  };
+  const fetchDestinations = identities(fetch), pushDestinations = identities(push);
+  if (!fetchDestinations || !pushDestinations) return unknown;
+  const defaultBranch = head?.startsWith(`refs/remotes/${remote}/`) ? head.slice(`refs/remotes/${remote}/`.length) : null;
+  return { status: "observed", root, branch, remote, defaultBranch, fetchDestinations, pushDestinations };
+}
+
+module.exports = { readBranch, readGitInfo, readRemote, repoSlug, gitPushRequest, reviewRemoteIdentity, readReviewRepository };

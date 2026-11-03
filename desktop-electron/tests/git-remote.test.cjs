@@ -7,9 +7,99 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
-const { readBranch, readGitInfo, readRemote, repoSlug } = require("../electron/git-remote.cjs");
+const { readBranch, readGitInfo, readRemote, repoSlug, gitPushRequest, reviewRemoteIdentity, readReviewRepository } = require("../electron/git-remote.cjs");
 
 const HAS_GIT = (() => { try { execFileSync("git", ["--version"], { stdio: "ignore" }); return true; } catch { return false; } })();
+
+test("publication parsing distinguishes a planned action from quoted diagnostic text", () => {
+  assert.equal(gitPushRequest('node lookup.cjs query "why git push origin main is denied"'), null);
+  assert.equal(gitPushRequest('echo "git push origin main"'), null);
+  for (const command of ['git push origin feat/fix', 'git -c credential.helper= -c "credential.helper=!gh auth git-credential" push origin refs/heads/feat/fix:refs/heads/feat/fix']) {
+    const request = gitPushRequest(command);
+    assert.equal(request.status, "review", command);
+    assert.equal(request.remote, "origin");
+    assert.deepEqual(request.destinations, ["feat/fix"]);
+  }
+});
+
+test("executable shell payloads cannot hide publication behind their wrapper", () => {
+  for (const command of [
+    'bash -lc "git push origin main"',
+    "sh -c 'git push origin main'",
+    'pwsh -NoProfile -Command "git push origin main"',
+    'powershell.exe -Command "git push origin main"',
+    'cmd.exe /d /s /c "git push origin main"',
+  ]) assert.equal(gitPushRequest(command)?.status, "blocked", command);
+  for (const command of [
+    'bash -lc "git push origin feat/fix"',
+    'pwsh -Command "git push origin feat/fix"',
+    'cmd /c git push origin feat/fix',
+  ]) assert.equal(gitPushRequest(command)?.status, "unknown", command);
+  for (const command of [
+    `bash -lc 'printf "%s\\n" "git push origin main"'`,
+    `pwsh -Command "Write-Output 'git push origin main'"`,
+    'cmd /c "echo git push origin main"',
+  ]) assert.equal(gitPushRequest(command), null, command);
+});
+
+test("destructive and protected pushes stay blocked, ambiguous publication needs a person", () => {
+  for (const command of ['git push origin main', 'git push origin HEAD:master', 'git push --force origin feat/fix', 'git push --delete origin feat/fix', 'git push --mirror origin', 'git push origin +feat/fix', 'git push origin :feat/fix', 'git push --no-verify origin feat/fix']) {
+    assert.equal(gitPushRequest(command).status, "blocked", command);
+  }
+  assert.equal(gitPushRequest(JSON.stringify({ cmd: 'cd app\ngit push origin main' })).status, "blocked");
+  for (const command of ['git push', 'git push https://other.test/team/repo feat/fix', 'git -C ../other push origin feat/fix', 'node prepare.cjs; git push origin feat/fix', 'git -c remote.origin.pushurl=https://other.test/team/repo push origin feat/fix']) {
+    assert.equal(gitPushRequest(command).status, "unknown", command);
+  }
+});
+
+test("review destination identities strip credentials and refuse remote helpers and query tokens", () => {
+  assert.equal(reviewRemoteIdentity('https://user:PRIVATE@github.com/team/repo.git'), 'github.com/team/repo');
+  assert.equal(reviewRemoteIdentity('git@github.com:team/repo.git'), 'github.com/team/repo');
+  assert.equal(reviewRemoteIdentity('ssh://git@git.example:2222/group/repo.git'), 'git.example:2222/group/repo');
+  for (const url of ['ext::sh -c bad', 'https://host/team/repo?token=PRIVATE', 'https://host/team/repo#PRIVATE', 'file:///tmp/other', 'not a URL']) assert.equal(reviewRemoteIdentity(url), null);
+});
+
+test("review Git facts read actual push URLs, keep multiple destinations, and fail unknown", async () => {
+  const calls = [];
+  const run = (_file, args, options, callback) => {
+    assert.ok(options.timeout <= 3000);
+    const command = args.slice(2).join(' '); calls.push(command);
+    callback(null, command.startsWith('rev-parse') ? `${os.tmpdir()}\nfeat/fix\n`
+      : command.startsWith('symbolic-ref') ? 'refs/remotes/origin/main\n'
+        : command.includes('--push') ? 'https://user:PRIVATE@github.com/team/repo.git\nhttps://elsewhere.test/team/repo.git\n'
+          : 'git@github.com:team/repo.git\n');
+  };
+  const result = await readReviewRepository(os.tmpdir(), 'origin', { run });
+  assert.equal(result.status, 'observed');
+  assert.equal(result.defaultBranch, 'main');
+  assert.deepEqual(result.pushDestinations, ['github.com/team/repo', 'elsewhere.test/team/repo']);
+  assert.deepEqual(result.fetchDestinations, ['github.com/team/repo']);
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE|user:/);
+  assert.ok(calls.includes('remote get-url --push --all origin'));
+  assert.deepEqual(await readReviewRepository(os.tmpdir(), 'origin', { run: (_c, _a, _o, cb) => cb(new Error('failed')) }), { status: 'unknown' });
+  assert.deepEqual(await readReviewRepository('relative', 'origin', { run }), { status: 'unknown' });
+});
+
+test("review facts follow local Git URL rewrites and pushurl changes without contacting a remote", { skip: !HAS_GIT }, async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'approval-git-'));
+  const git = (...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@example.com', ...args], { stdio: 'ignore' });
+  const facts = () => readReviewRepository(repo, 'origin', { timeoutMs: 15000 });
+  try {
+    git('init', '-q', '-b', 'feat/fix');
+    git('commit', '-q', '--allow-empty', '-m', 'fixture');
+    git('remote', 'add', 'origin', 'https://github.com/team/repo.git');
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/trunk');
+    const initial = await facts();
+    assert.equal(initial.status, 'observed');
+    assert.equal(initial.branch, 'feat/fix');
+    assert.equal(initial.defaultBranch, 'trunk');
+    assert.deepEqual(initial.pushDestinations, ['github.com/team/repo']);
+    git('config', 'url.https://elsewhere.test/.pushInsteadOf', 'https://github.com/');
+    assert.deepEqual((await facts()).pushDestinations, ['elsewhere.test/team/repo']);
+    git('config', 'remote.origin.pushurl', 'https://third.test/team/repo.git');
+    assert.deepEqual((await facts()).pushDestinations, ['third.test/team/repo']);
+  } finally { fs.rmSync(repo, { recursive: true, force: true }); }
+});
 
 test("a git remote becomes owner/repo, and credentials in the URL never come back", () => {
   assert.equal(repoSlug("https://github.com/lxf746/any-auto-register.git"), "lxf746/any-auto-register");
