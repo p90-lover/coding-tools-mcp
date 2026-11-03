@@ -453,13 +453,14 @@ impl EventHub {
         let id = subscription_id(principal, &url, name, &arguments);
         let mut state = self.lock();
         let before = state.subscriptions.len();
-        state
-            .subscriptions
-            .retain(|entry| !(entry.id == id && entry.principal == principal));
-        if state.subscriptions.len() != before {
-            state.deliveries.remove(&id);
-            self.persist(&state)
+        let mut subscriptions = state.subscriptions.clone();
+        subscriptions.retain(|entry| !(entry.id == id && entry.principal == principal));
+        if subscriptions.len() != before {
+            self.file
+                .save(&subscriptions)
                 .map_err(|error| rpc_error(-32603, error))?;
+            state.subscriptions = subscriptions;
+            state.deliveries.remove(&id);
         }
         Ok(json!({}))
     }

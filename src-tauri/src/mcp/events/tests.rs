@@ -397,6 +397,86 @@ async fn unsubscribe_is_idempotent_and_scoped_to_the_principal() {
         .is_empty());
 }
 
+#[test]
+fn unsubscribe_save_failure_preserves_live_state_and_retry_survives_reopen() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("aiTemp/event-unsubscribe-tests");
+    std::fs::create_dir_all(&root).unwrap();
+    let dir = tempfile::tempdir_in(root).unwrap();
+    let file = SubscriptionFile::new(dir.path());
+    let subscriptions: Vec<_> = ["https://x.test/a", "https://x.test/b"]
+        .into_iter()
+        .map(|url| StoredSubscription {
+            id: subscription_id("ws", url, catalog::BRIDGE_DOWN, &Map::new()),
+            principal: "ws".into(),
+            name: catalog::BRIDGE_DOWN.into(),
+            arguments: Map::new(),
+            url: url.into(),
+            secret: SECRET.into(),
+            created_at_ms: 1,
+            refreshed_at_ms: 1,
+            expires_at_ms: now_ms() + 60_000,
+            verified_at_ms: 1,
+        })
+        .collect();
+    file.save(&subscriptions).unwrap();
+    let hub = open_hub(dir.path());
+    for subscription in &subscriptions {
+        hub.lock().deliveries.insert(
+            subscription.id.clone(),
+            DeliveryStatus {
+                at_ms: 123,
+                outcome: "delivered".into(),
+            },
+        );
+    }
+    let params = json!({"name": catalog::BRIDGE_DOWN,
+        "delivery": {"url": subscriptions[0].url}});
+    let before = std::fs::read(file.path()).unwrap();
+    let backup = dir.path().join("before.json");
+    // A directory at the destination forces save's rename to fail on every OS.
+    std::fs::rename(file.path(), &backup).unwrap();
+    std::fs::create_dir(file.path()).unwrap();
+    let result = hub.unsubscribe("ws", &params);
+    std::fs::remove_dir(file.path()).unwrap();
+    std::fs::rename(&backup, file.path()).unwrap();
+    assert_eq!(result.unwrap_err()["code"], -32603);
+    assert_eq!(std::fs::read(file.path()).unwrap(), before);
+    assert_eq!(file.load().unwrap(), subscriptions);
+    {
+        let state = hub.lock();
+        assert_eq!(state.subscriptions, subscriptions);
+        assert_eq!(state.deliveries.len(), 2);
+        for subscription in &subscriptions {
+            let delivery = &state.deliveries[&subscription.id];
+            assert_eq!(delivery.at_ms, 123);
+            assert_eq!(delivery.outcome, "delivered");
+        }
+    }
+
+    assert_eq!(hub.unsubscribe("ws", &params).unwrap(), json!({}));
+    let remaining = &subscriptions[1..];
+    assert_eq!(hub.lock().subscriptions, remaining);
+    assert_eq!(file.load().unwrap(), remaining);
+    assert_eq!(open_hub(dir.path()).lock().subscriptions, remaining);
+    let saved = std::fs::read(file.path()).unwrap();
+    assert_eq!(hub.unsubscribe("ws", &params).unwrap(), json!({}));
+    let other = json!({"name": catalog::BRIDGE_DOWN,
+        "delivery": {"url": subscriptions[1].url}});
+    assert_eq!(hub.unsubscribe("other-ws", &other).unwrap(), json!({}));
+    let invalid = json!({"name": catalog::BRIDGE_DOWN,
+        "delivery": {"url": "not a URL"}});
+    assert_eq!(hub.unsubscribe("ws", &invalid).unwrap(), json!({}));
+    assert_eq!(std::fs::read(file.path()).unwrap(), saved);
+    let state = hub.lock();
+    assert_eq!(state.subscriptions, remaining);
+    assert_eq!(state.deliveries.len(), 1);
+    assert_eq!(state.deliveries[&subscriptions[1].id].at_ms, 123);
+    assert_eq!(state.deliveries[&subscriptions[1].id].outcome, "delivered");
+}
+
 #[tokio::test]
 async fn delivery_honours_filters_workspace_scope_and_incident_dedupe() {
     let dir = tempfile::tempdir().unwrap();
