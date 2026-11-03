@@ -2627,8 +2627,6 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
                 launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
                 canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
-              <button type="button" className="cx-icon-button cx-mic" aria-label="Voice input" title="Voice input isn't available yet" disabled>
-                <ChatGlyph name="mic" size={16} /></button>
               {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
                   nothing typed, Stop shows instead of a disabled Send. It showed only while a card ran, so a step
                   retrying for half an hour had no Stop between its attempts (2026-10-29). */}
@@ -2636,7 +2634,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 ? <button className="cx-send is-stop" type="button" aria-label="Stop (Esc)" title="Stop (Esc)" onClick={() => stop(latest.id)}><span aria-hidden="true" /></button>
                 : <button className="cx-send" type="submit" aria-label={sending ? "Starting…" : steering ? "Steer the agent" : queueing ? "Queue message" : "Send message"}
                   title={steering ? "Steer now (Enter)" : queueing ? "Queue for after this turn (Enter)" : "Send (Enter)"} disabled={!canSend}>
-                    <Icon name="forward" width="18" height="18" /></button>}
+                    <Icon name="forward" width="16" height="16" /></button>}
             </div>
           </div>
         </form>

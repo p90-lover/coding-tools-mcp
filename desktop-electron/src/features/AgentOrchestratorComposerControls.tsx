@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, ReactNode } from "react";
-import { Caret, Icon } from "../icons";
+import { Icon } from "../icons";
 import {
   capabilityText, contextText, harnessLabel, parseTokens, rememberCpaProviders, routeTuning, EFFORTS,
   NATIVE_HARNESS, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, WEB_ROUTE, WEB_TIERS, isWebModel, modelLabel, modelShortLabel, nativePermission, webTier, workerRoute, withTuning,
@@ -149,7 +149,10 @@ export function useComposerPopover() {
 /** The model list's group for the WebGPT tiers, apart from the API models. */
 const WEB_GROUP = "Web GPT Model";
 
-/** One composer chip and the menu it opens: the chip shows what is picked, the menu the choices. */
+/**
+ * One composer chip and the menu it opens: the chip shows what is picked, the menu the choices. No
+ * caret: five of them cost a split pane ~70 px, and the hover tint and tooltip already say it's a menu.
+ */
 function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClass, heading, showHeading = true, onOpen, children }: {
   label: ReactNode; ariaLabel: string; title?: string; disabled: boolean; className?: string; popupClass: string; heading: string;
   /** False: no title bar (the heading stays the menu's accessible name); Escape or a click away closes it. */
@@ -159,7 +162,7 @@ function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClas
   return <div className="ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
     <button type="button" className={`ao-composer-chip ${className}`.trim()} ref={popup.trigger} disabled={disabled} aria-expanded={popup.open}
       aria-haspopup="dialog" aria-label={ariaLabel} title={title} onClick={() => { if (!popup.open) onOpen?.(); popup.setOpen(value => !value); }}>
-      {label}<Caret />
+      {label}
     </button>
     {popup.open ? <section ref={popup.panel} role="dialog" aria-label={heading} className={`ao-composer-popover ${popupClass}`}>
       {showHeading ? <header><h3>{heading}</h3>
