@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { getCodingToolsClient } from "../api/client";
-import { Caret, Icon } from "../icons";
+import { Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
 
@@ -146,7 +146,7 @@ export function ChatBranchBar({ workspaceId, sessionId, inline = false }: { work
         aria-label={`Branch: ${inUse}`} title={data.chatBranch && data.chatBranch !== data.current
           ? `Chat on ${data.chatBranch} · project folder on ${data.current}` : `On ${inUse}`}
         onClick={() => popup.setOpen((value) => !value)}>
-        <Icon name="git" width="14" height="14" /><span>{inUse}</span><Caret />
+        <Icon name="git" width="14" height="14" /><span>{inUse}</span>
       </button>
       {popup.open ? <section ref={popup.panel} role="dialog" aria-label="Branches" className="ao-composer-popover cx-branch-popup">
         <header className="cx-branch-head">

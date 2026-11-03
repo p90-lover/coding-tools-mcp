@@ -16,7 +16,7 @@ export const Attachments = createContext<AttachmentAccess>({});
 /** Share pending reads within a provider; mounted images own the completed full-size data URLs. */
 const PREVIEWS = new WeakMap<NonNullable<AttachmentAccess["preview"]>, Map<string, Promise<string>>>();
 
-export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string) => void }) {
+export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string, name?: string) => void }) {
   const { preview } = useContext(Attachments);
   const [url, setUrl] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
@@ -37,7 +37,7 @@ export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: 
     read.then((value) => { if (current) setUrl(value); }, () => { if (current) setMissing(true); });
     return () => { current = false; };
   }, [item.path, preview]);
-  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url)}>
+  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url, item.path ?? item.name)}>
     {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
   </button>;
 }
@@ -46,9 +46,9 @@ export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: 
  * An image shown full size over the chat (Codex's image preview), with Markup when the chat box
  * can take the result; a click outside it or Escape closes it.
  */
-export function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
+export function ImageLightbox({ url, name, onClose }: { url: string; name?: string; onClose: () => void }) {
   const { markup } = useContext(Attachments);
-  return <ImagePreviewDialog url={url} onClose={onClose} onMarkup={markup} />;
+  return <ImagePreviewDialog url={url} name={name} onClose={onClose} onMarkup={markup} />;
 }
 
 /**
@@ -56,10 +56,10 @@ export function ImageLightbox({ url, onClose }: { url: string; onClose: () => vo
  * size. Render it only once the call's row is open: each thumbnail reads its file from disk.
  */
 export function ToolImages({ paths }: { paths: string[] }) {
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<{ url: string; name?: string } | null>(null);
   return <div className="cx-sent-attachments cx-tool-images">
-    {paths.map((path, index) => <SentImage key={`${path}:${index}`} item={{ image: true, name: path.split(/[\\/]/).pop() || path, path }} onOpen={setOpen} />)}
-    {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
+    {paths.map((path, index) => <SentImage key={`${path}:${index}`} item={{ image: true, name: path.split(/[\\/]/).pop() || path, path }} onOpen={(url, name) => setOpen({ url, name })} />)}
+    {open ? <ImageLightbox url={open.url} name={open.name} onClose={() => setOpen(null)} /> : null}
   </div>;
 }
 

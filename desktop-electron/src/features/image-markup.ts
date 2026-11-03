@@ -130,6 +130,36 @@ export function markupPrompt(marks: MarkupMark[], width: number, height: number)
 /** A sent message shows its pin lines without the coordinates, as Codex shows them ("1. comment"). */
 export const markupReadable = (text: string) => text.replace(/^(\d+)\. \(x: \d{1,3}\.\d%, y: \d{1,3}\.\d%\) /gm, "$1. ");
 
+/** An Erase brush stroke, in the image's natural pixels, as wide as the brush was when drawn. */
+export type EraseStroke = { points: [number, number][]; width: number };
+
+/** Erase's strokes: round, so a tap leaves a dot. */
+export function paintStrokes(ctx: CanvasRenderingContext2D, strokes: EraseStroke[], color: string) {
+  ctx.strokeStyle = color; ctx.lineCap = "round"; ctx.lineJoin = "round";
+  for (const { points, width } of strokes) {
+    if (!points.length) continue;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    if (points.length === 1) ctx.lineTo(points[0][0] + 0.01, points[0][1]);
+    for (const [x, y] of points.slice(1)) ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+}
+
+/** Codex's Erase mask: a PNG the image's size, black, with the strokes white. */
+export async function exportEraseMask(width: number, height: number, strokes: EraseStroke[]): Promise<Uint8Array> {
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Could not prepare the mask. Try again");
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, width, height);
+  paintStrokes(ctx, strokes, "#fff");
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("Could not prepare the mask. Try again");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 /** The image with every mark burned in, at its natural size, as PNG bytes. */
 export async function exportMarkup(image: HTMLImageElement, marks: MarkupMark[]): Promise<Uint8Array> {
   const width = image.naturalWidth, height = image.naturalHeight;
