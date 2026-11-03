@@ -19,7 +19,7 @@ import { ChatPet } from "./ChatPet";
 import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
-import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, type ChatStyle } from "./chat-reply-plan";
+import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -42,6 +42,8 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 };
 /** Text files up to this size are attached inline when their path is unknown. */
 const INLINE_ATTACHMENT_BYTES = 200 * 1024;
+/** Turns a chat draws at first, and how many more each "Show earlier" adds. */
+const TURN_WINDOW = 16;
 
 /**
  * "Retry automatically" on the failed-step card (the user: a launch that timed out waited for a
@@ -2133,18 +2135,25 @@ export function AgentOrchestratorChat({
   const roundFolds = useMemo(() => {
     const foldOf = new Map<number, string>();
     const foldAt = new Map<number, { key: string; first: number; last: number }>();
-    for (const [key, indexes] of foldedRounds(turns)) {
+    const folds = foldedRounds(turns);
+    for (const [key, indexes] of folds) {
       for (const index of indexes) foldOf.set(index, key);
       foldAt.set(indexes[0], { key, first: goalRound(turns, indexes[0])!.round, last: goalRound(turns, indexes[indexes.length - 1])!.round });
     }
-    return { foldOf, foldAt };
+    return { foldOf, foldAt, folds };
   }, [turns]);
   const toggleRounds = (key: string) => setOpenRounds((open) => {
     const next = new Set(open);
     if (!next.delete(key)) next.add(key);
     return next;
   });
+  // Only the newest turns are drawn; a row above them draws more (turnWindowStart). Ten open chats
+  // drew every turn they had, 164k elements, and each new reply restyled all of them.
+  const [shownTurns, setShownTurns] = useState(TURN_WINDOW);
+  useEffect(() => { setShownTurns(TURN_WINDOW); }, [selectedTaskId]);
+  const windowStart = turnWindowStart(turns.length, shownTurns, roundFolds.folds);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
+    if (turnIndex < windowStart) return null;
     const foldKey = roundFolds.foldOf.get(turnIndex);
     const foldRow = roundFolds.foldAt.get(turnIndex);
     const foldToggle = foldRow ? <FoldedRounds key={`fold:${foldRow.key}`} first={foldRow.first} last={foldRow.last}
@@ -2263,7 +2272,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
-    replyStyle, roundFolds, openRounds]);
+    replyStyle, roundFolds, openRounds, windowStart]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>
@@ -2392,6 +2401,9 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                   : <span className="cx-empty-project">{projectName}</span>}</> : null}?</h1>
               </>}
             </div> : null}
+            {windowStart > 0 ? <button type="button" className="cx-round-fold" onClick={() => setShownTurns((shown) => shown + TURN_WINDOW)}>
+              {`Show ${Math.min(windowStart, TURN_WINDOW)} earlier turns · ${windowStart} not shown`}
+            </button> : null}
             {threadTurns}
             {recoveryMessage ? <p className="cx-route-note" role="status">{recoveryMessage}</p> : null}
             {(notice || notStarted) && latest && chat?.status === "queued" && !working ? (
