@@ -364,6 +364,201 @@ fn default_cwd_is_used_by_file_and_native_exec_tools() {
 }
 
 #[test]
+fn patch_check_and_apply_resolve_default_cwd_once() {
+    let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("aiTemp/patch-default-cwd-tests");
+    fs::create_dir_all(&artifacts).unwrap();
+    let fixture = tempfile::tempdir_in(artifacts).unwrap();
+    let root = fixture.path().join("workspace");
+    fs::create_dir_all(root.join("src")).unwrap();
+    let ctx = coding_tools_mcp_desktop_lib::tools::ToolContext::for_test(
+        root.clone(),
+        fixture.path().join("harness"),
+    )
+    .unwrap();
+
+    let root_patch = "*** Begin Patch\n*** Add File: root.txt\n+root\n*** End Patch\n";
+    let checked = invoke(&ctx, "patch_check", json!({"patch":root_patch}));
+    assert_eq!(assert_ok(&checked)["would_create"], json!(["root.txt"]));
+    assert!(!root.join("root.txt").exists());
+    assert_ok(&invoke(&ctx, "apply_patch", json!({"patch":root_patch})));
+    assert_eq!(fs::read_to_string(root.join("root.txt")).unwrap(), "root\n");
+
+    assert_ok(&invoke(&ctx, "set_default_cwd", json!({"path":"src"})));
+    for (patch, before, after) in [
+        (
+            "*** Begin Patch\n*** Add File: local.txt\n+one\n*** End Patch\n",
+            None,
+            "one\n",
+        ),
+        (
+            "*** Begin Patch\n*** Update File: local.txt\n@@\n-one\n+two\n*** End Patch\n",
+            Some("one\n"),
+            "two\n",
+        ),
+        (
+            "--- a/local.txt\n+++ b/local.txt\n@@ -1 +1 @@\n-two\n+three\n",
+            Some("two\n"),
+            "three\n",
+        ),
+    ] {
+        let checked = invoke(&ctx, "patch_check", json!({"patch":patch}));
+        let field = if before.is_some() {
+            "would_modify"
+        } else {
+            "would_create"
+        };
+        assert_eq!(assert_ok(&checked)[field], json!(["src/local.txt"]));
+        assert_eq!(
+            fs::read_to_string(root.join("src/local.txt"))
+                .ok()
+                .as_deref(),
+            before
+        );
+        assert_ok(&invoke(&ctx, "apply_patch", json!({"patch":patch})));
+        assert_eq!(
+            fs::read_to_string(root.join("src/local.txt")).unwrap(),
+            after
+        );
+        assert!(!root.join("src/src/local.txt").exists());
+    }
+
+    // Relocation uses the existing Delete + Add contract, not a new Move directive.
+    let relocate = "*** Begin Patch\n*** Delete File: local.txt\n*** Add File: moved.txt\n+three\n*** End Patch\n";
+    let checked = invoke(&ctx, "patch_check", json!({"patch":relocate}));
+    assert_eq!(
+        assert_ok(&checked)["would_delete"],
+        json!(["src/local.txt"])
+    );
+    assert_eq!(checked["would_create"], json!(["src/moved.txt"]));
+    assert_eq!(
+        fs::read_to_string(root.join("src/local.txt")).unwrap(),
+        "three\n"
+    );
+    assert!(!root.join("src/moved.txt").exists());
+    assert_ok(&invoke(&ctx, "apply_patch", json!({"patch":relocate})));
+    assert!(!root.join("src/local.txt").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("src/moved.txt")).unwrap(),
+        "three\n"
+    );
+
+    let delete = "*** Begin Patch\n*** Delete File: moved.txt\n*** End Patch\n";
+    let checked = invoke(&ctx, "patch_check", json!({"patch":delete}));
+    assert_eq!(
+        assert_ok(&checked)["would_delete"],
+        json!(["src/moved.txt"])
+    );
+    assert!(root.join("src/moved.txt").is_file());
+    assert_ok(&invoke(&ctx, "apply_patch", json!({"patch":delete})));
+    assert!(!root.join("src/moved.txt").exists());
+    assert!(!root.join("src/src").exists());
+}
+
+#[test]
+fn patch_cwd_keeps_absolute_alias_and_explicit_scope_guards() {
+    let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("aiTemp/patch-default-cwd-tests");
+    fs::create_dir_all(&artifacts).unwrap();
+    let fixture = tempfile::tempdir_in(artifacts).unwrap();
+    let root = fixture.path().join("workspace");
+    let linked = fixture.path().join("linked");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("explicit")).unwrap();
+    fs::create_dir_all(linked.join("sub")).unwrap();
+    fs::create_dir_all(root.join(".mcp-paths")).unwrap();
+    let mapping = root.join(".mcp-paths/peer.txt");
+    let mapping_text = format!("name=peer\npath={}\nmode=read-write\n", linked.display());
+    fs::write(&mapping, &mapping_text).unwrap();
+    let outside = fixture.path().join("outside.txt");
+    fs::write(&outside, "outside sentinel\n").unwrap();
+    let ctx = coding_tools_mcp_desktop_lib::tools::ToolContext::for_test(
+        root.clone(),
+        fixture.path().join("harness"),
+    )
+    .unwrap();
+    assert_ok(&invoke(&ctx, "set_default_cwd", json!({"path":"src"})));
+
+    for (path, target, display) in [
+        (
+            root.join("absolute.txt")
+                .to_string_lossy()
+                .replace('\\', "/"),
+            root.join("absolute.txt"),
+            "absolute.txt",
+        ),
+        (
+            "@peer/raw.txt".into(),
+            linked.join("raw.txt"),
+            "@peer/raw.txt",
+        ),
+    ] {
+        let patch = format!("*** Begin Patch\n*** Add File: {path}\n+control\n*** End Patch\n");
+        let checked = invoke(&ctx, "patch_check", json!({"patch":patch}));
+        assert_eq!(assert_ok(&checked)["would_create"], json!([display]));
+        assert!(!target.exists());
+        assert_ok(&invoke(&ctx, "apply_patch", json!({"patch":patch})));
+        assert_eq!(fs::read_to_string(target).unwrap(), "control\n");
+    }
+
+    assert_ok(&invoke(
+        &ctx,
+        "set_default_cwd",
+        json!({"path":"@peer/sub"}),
+    ));
+    let alias_default = "*** Begin Patch\n*** Add File: default.txt\n+alias cwd\n*** End Patch\n";
+    let checked = invoke(&ctx, "patch_check", json!({"patch":alias_default}));
+    assert_eq!(
+        assert_ok(&checked)["would_create"],
+        json!(["@peer/sub/default.txt"])
+    );
+    assert!(!linked.join("sub/default.txt").exists());
+    assert_ok(&invoke(&ctx, "apply_patch", json!({"patch":alias_default})));
+    assert_eq!(
+        fs::read_to_string(linked.join("sub/default.txt")).unwrap(),
+        "alias cwd\n"
+    );
+
+    assert_ok(&invoke(&ctx, "set_default_cwd", json!({"path":"src"})));
+    let explicit = "*** Begin Patch\n*** Add File: selected.txt\n+explicit root\n*** End Patch\n";
+    let args = json!({"patch":explicit,"project_root":"explicit"});
+    let checked = invoke(&ctx, "patch_check", args.clone());
+    assert_eq!(
+        assert_ok(&checked)["would_create"],
+        json!(["explicit/selected.txt"])
+    );
+    assert!(!root.join("explicit/selected.txt").exists());
+    assert_ok(&invoke(&ctx, "apply_patch", args));
+    assert_eq!(
+        fs::read_to_string(root.join("explicit/selected.txt")).unwrap(),
+        "explicit root\n"
+    );
+    assert_eq!(
+        assert_ok(&invoke(&ctx, "get_default_cwd", json!({})))["default_cwd"],
+        "src"
+    );
+
+    for path in [
+        "../outside.txt".to_string(),
+        outside.to_string_lossy().replace('\\', "/"),
+        mapping.to_string_lossy().replace('\\', "/"),
+        ".git/config".to_string(),
+    ] {
+        let patch = format!("*** Begin Patch\n*** Add File: {path}\n+blocked\n*** End Patch\n");
+        assert_err(&invoke(&ctx, "patch_check", json!({"patch":patch})));
+        assert_err(&invoke(&ctx, "apply_patch", json!({"patch":patch})));
+    }
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "outside sentinel\n");
+    assert_eq!(fs::read_to_string(&mapping).unwrap(), mapping_text);
+    assert!(!root.join("src/src").exists());
+    assert!(!root.join("src/.git").exists());
+}
+
+#[test]
 fn git_log_root_does_not_pass_empty_pathspec() {
     let temp = tempfile::tempdir().expect("创建临时目录");
     let workspace = temp.path().join("repo");

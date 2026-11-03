@@ -546,11 +546,6 @@ fn apply_default_cwd(ctx: &ToolContext, name: &str, args: &Value) -> Value {
                 );
             }
         }
-        "apply_patch" | "patch_check" => {
-            if let Some(patch) = effective.get("patch").and_then(Value::as_str) {
-                effective["patch"] = Value::String(prefix_patch_paths(&base, patch));
-            }
-        }
         _ => {}
     }
     effective
@@ -564,33 +559,6 @@ fn prefix_relative_path(base: &str, path: &str) -> String {
         return path.to_string();
     }
     format!("{base}/{}", path.trim_start_matches("./"))
-}
-
-fn prefix_patch_paths(base: &str, patch: &str) -> String {
-    patch
-        .lines()
-        .map(|line| {
-            for marker in [
-                "--- a/",
-                "+++ b/",
-                "*** Add File: ",
-                "*** Update File: ",
-                "*** Delete File: ",
-            ] {
-                if let Some(path) = line.strip_prefix(marker) {
-                    if Path::new(path).is_absolute()
-                        || path.starts_with("..")
-                        || path.starts_with('@')
-                    {
-                        return line.to_string();
-                    }
-                    return format!("{marker}{base}/{}", path.trim_start_matches("./"));
-                }
-            }
-            line.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn requires_write_baseline(name: &str, args: &Value) -> bool {
