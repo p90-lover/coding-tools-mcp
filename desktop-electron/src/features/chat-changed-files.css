@@ -1,0 +1,44 @@
+/* The changed-file list is a hover/focus detail, never a second box in the reply. The native
+   popover keeps the chat palette while escaping scroll clipping and transformed grid cards. */
+.cx-reply-head { container-type: inline-size; }
+.cx-reply-head > .cx-reply-top { flex-wrap: nowrap; gap: 6px; }
+.cx-reply-head .cx-reply-who { flex: 0 1 auto; }
+.cx-reply-head .cx-reply-status, .cx-reply-head .cx-reply-time, .cx-reply-head .cx-reply-mode { flex: none; }
+.cx-reply-head .cx-reply-top:has(> .cx-reply-mode) > .cx-reply-who { display: none; }
+.cx-changed-files { display: inline-flex; flex: none; min-width: 0; }
+.cx-changed-files-trigger { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 2px 5px; border: 0; border-radius: 5px;
+  background: transparent; color: var(--ao-muted); font: inherit; font-size: 12px; white-space: nowrap; cursor: pointer; }
+.cx-changed-files-trigger:hover, .cx-changed-files-trigger[aria-expanded="true"] { background: var(--cx-hover); color: var(--color-text-primary); }
+.cx-file-counts { display: inline-flex; flex: none; align-items: center; gap: 5px; font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cx-file-counts .is-add { color: var(--ao-green); }
+.cx-file-counts .is-del { color: var(--ao-red); }
+.cx-changed-files-popover { position: fixed; inset: auto; box-sizing: border-box; width: min(420px, calc(100vw - 16px)); max-height: 400px; margin: 0; padding: 0;
+  border: 1px solid var(--ao-line); border-radius: 10px; background: var(--color-bg-primary); color: var(--color-text-primary); font-family: inherit;
+  box-shadow: 0 8px 32px rgb(0 0 0 / 18%), 0 2px 6px rgb(0 0 0 / 8%); overflow: hidden; }
+.cx-changed-files-popover:popover-open { display: flex; flex-direction: column; }
+.cx-changed-files-heading { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--ao-line); }
+.cx-changed-files-heading > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cx-changed-files-heading strong { font-size: 13px; font-weight: 600; }
+.cx-changed-files-heading > div > span { color: var(--ao-muted); font-size: 11px; }
+.cx-changed-files-list { flex: 1 1 auto; min-height: 0; margin: 0; padding: 4px; list-style: none; overflow-y: auto; overscroll-behavior: contain; }
+.cx-changed-file { display: flex; align-items: center; justify-content: space-between; gap: 12px; box-sizing: border-box; width: 100%; min-width: 0; padding: 8px 10px;
+  border: 0; border-radius: 5px; background: transparent; color: inherit; font: inherit; text-align: left; }
+button.cx-changed-file { cursor: pointer; }
+button.cx-changed-file:hover { background: var(--cx-hover); }
+.cx-changed-file-path { display: flex; flex: 1 1 auto; flex-direction: column; gap: 3px; min-width: 0; font-family: var(--font-mono, ui-monospace, Consolas, monospace); }
+.cx-changed-file-name { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+.cx-changed-file-dir { color: var(--ao-muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.cx-changed-files-foot { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 14px; border-top: 1px solid var(--ao-line); color: var(--ao-muted); font-size: 10px; }
+.cx-changed-files-foot button { padding: 2px 0; border: 0; background: transparent; color: var(--color-text-primary); font: inherit; font-size: 12px; cursor: pointer; }
+.cx-changed-files-foot button:hover { text-decoration: underline; }
+.cx-changed-files-foot kbd { padding: 1px 4px; border: 1px solid var(--ao-line); border-radius: 3px; font: inherit; }
+.cx-changed-files button:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: -2px; }
+@container (max-width: 320px) {
+  .cx-reply-head > .cx-reply-top { gap: 4px; }
+  .cx-reply-top .cx-reply-mode { padding-inline: 5px; }
+  .cx-reply-top .cx-reply-status { padding-inline: 6px; }
+  .cx-reply-top .cx-reply-time { font-size: 11px; }
+  .cx-changed-files-trigger { gap: 4px; padding-inline: 0; font-size: 11px; }
+  .cx-changed-files-trigger > svg { display: none; }
+  .cx-changed-files-trigger .cx-file-counts { gap: 4px; font-size: 10px; }
+}

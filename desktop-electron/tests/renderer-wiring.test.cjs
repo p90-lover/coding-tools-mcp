@@ -479,7 +479,7 @@ test("packaged runtime is verified before launcher browser surfaces are created"
 
 test("DEV launcher exposes its profile and supervises only its Full-mode MCP runtime", () => {
   assert.match(electronMain, /profile:\s*LAUNCHER_PROFILE\.kind/);
-  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else runtimeStartupInFlight = \(async \(\) => \{/);
+  assert.match(electronMain, /if \(IS_DEV_PROFILE\) \{[\s\S]*?config\?\.mode === "full"[\s\S]*?runtimeSupervisor\.startIfConfigured\(\)[\s\S]*?\} else \{[\s\S]*?runtimeStartupInFlight = startManagedRuntime\(\{ logger, stateStore, startupAuthenticationRefresh \}\)/);
   assert.match(electronMain, /await runtimeSupervisor\?\.shutdown\(\{ cancelActiveTurns: true, force: true \}\)/);
   assert.match(electronMain, /packaged:\s*app\.isPackaged && !IS_DEV_PROFILE/);
   assert.match(electronMain, /IS_DEV_PROFILE && !stateStore\.read\(\)\.onboardingComplete/);
@@ -677,7 +677,10 @@ test("MCP verification proves runtime health before checking the connector", asy
 
 test("saved ChatGPT authentication is refreshed before setup is presented", () => {
   assert.match(electronMain, /browserHost\.refreshAuthentication\(\)/);
-  const productionStartup = electronMain.indexOf("} else runtimeStartupInFlight = (async () => {");
+  assert.match(electronMain, /runtimeStartupInFlight = startManagedRuntime\(\{ logger, stateStore, startupAuthenticationRefresh \}\)/,
+    "launch hands the saved-session refresh to the production startup");
+  const productionStartup = electronMain.indexOf("function startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh }) {");
+  assert.ok(productionStartup >= 0, "production startup exists");
   const refreshBarrier = electronMain.indexOf("await startupAuthenticationRefresh", productionStartup);
   const upgrade = electronMain.indexOf("runtimeHost.upgradeManagedRuntime()", productionStartup);
   const runtimeStart = electronMain.indexOf("runtimeSupervisor.startIfConfigured()", upgrade);

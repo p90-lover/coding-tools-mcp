@@ -111,18 +111,30 @@ export function ChatTurnStats({ model, models = [], from, rounds, running, onRef
   useEffect(() => {
     if (!key || !from) return undefined;
     let live = true;
+    let timer = 0;
+    let wait = POLL_MS;
     const [first, ...rest] = key.split("|");
-    const read = () => {
-      if (!live || hidden()) return;
-      if (!running) window.clearInterval(timer);
-      void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_turn_stats", arguments: { model: first, models: rest, from } })
-        .then((outer) => { if (live) setStats((outer.result as TurnStats | undefined) ?? null); })
-        .catch(() => undefined);
+    // A running turn reads every POLL_MS. An ended one stops at its first read that has numbers: it
+    // stopped after its first read whatever came back, so a chat opened before CPA was up (the app
+    // starting, "CPA is not running") or whose read failed kept "6 rounds" and no details for good
+    // (2026-11-03). Until then it asks again, backing off to a minute. A hidden pane waits for a visible tick.
+    const read = async () => {
+      if (!live) return;
+      if (!hidden()) {
+        const value = await getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "chat_turn_stats", arguments: { model: first, models: rest, from } })
+          .then((outer) => (outer.result as TurnStats | undefined) ?? null, () => undefined);
+        if (!live) return;
+        // A successful empty page can precede CPA logging the turn's requests.
+        const hasNumbers = value?.available && (value.steps ?? 0) > 0;
+        // A read that has nothing never blanks numbers already shown: one missed read made the line flicker.
+        if (value !== undefined) setStats((current) => (hasNumbers || !current?.available ? value : current));
+        if (!running && hasNumbers) return;
+        if (!running) wait = Math.min(wait * 2, 60_000);
+      }
+      timer = window.setTimeout(() => void read(), running ? POLL_MS : wait);
     };
-    // A hidden ended turn waits for a visible tick, then retires its timer after the final read.
-    const timer = window.setInterval(read, POLL_MS);
-    read();
-    return () => { live = false; window.clearInterval(timer); };
+    void read();
+    return () => { live = false; window.clearTimeout(timer); };
   }, [key, from, running, hidden]);
 
   if (!rounds) return null;

@@ -16,7 +16,7 @@ export const Attachments = createContext<AttachmentAccess>({});
 /** Share pending reads within a provider; mounted images own the completed full-size data URLs. */
 const PREVIEWS = new WeakMap<NonNullable<AttachmentAccess["preview"]>, Map<string, Promise<string>>>();
 
-export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string) => void }) {
+export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string, name?: string) => void }) {
   const { preview } = useContext(Attachments);
   const [url, setUrl] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
@@ -37,7 +37,7 @@ export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: 
     read.then((value) => { if (current) setUrl(value); }, () => { if (current) setMissing(true); });
     return () => { current = false; };
   }, [item.path, preview]);
-  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url)}>
+  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url, item.path ?? item.name)}>
     {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
   </button>;
 }
@@ -46,9 +46,9 @@ export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: 
  * An image shown full size over the chat (Codex's image preview), with Markup when the chat box
  * can take the result; a click outside it or Escape closes it.
  */
-export function ImageLightbox({ url, onClose }: { url: string; onClose: () => void }) {
+export function ImageLightbox({ url, name, onClose }: { url: string; name?: string; onClose: () => void }) {
   const { markup } = useContext(Attachments);
-  return <ImagePreviewDialog url={url} onClose={onClose} onMarkup={markup} />;
+  return <ImagePreviewDialog url={url} name={name} onClose={onClose} onMarkup={markup} />;
 }
 
 /**
@@ -56,10 +56,10 @@ export function ImageLightbox({ url, onClose }: { url: string; onClose: () => vo
  * size. Render it only once the call's row is open: each thumbnail reads its file from disk.
  */
 export function ToolImages({ paths }: { paths: string[] }) {
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<{ url: string; name?: string } | null>(null);
   return <div className="cx-sent-attachments cx-tool-images">
-    {paths.map((path, index) => <SentImage key={`${path}:${index}`} item={{ image: true, name: path.split(/[\\/]/).pop() || path, path }} onOpen={setOpen} />)}
-    {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
+    {paths.map((path, index) => <SentImage key={`${path}:${index}`} item={{ image: true, name: path.split(/[\\/]/).pop() || path, path }} onOpen={(url, name) => setOpen({ url, name })} />)}
+    {open ? <ImageLightbox url={open.url} name={open.name} onClose={() => setOpen(null)} /> : null}
   </div>;
 }
 
@@ -84,9 +84,30 @@ export function SecretText({ text }: { text: string }) {
 
 /**
  * A stuck turn's Restart (AgentOrchestratorChat's restartTurn), for a running footer drawn inside a
- * memoized transcript (DshTurnWork) that a prop would not reach.
+ * memoized transcript (DshTurnWork) that a prop would not reach. `onAnswer` brings the request a
+ * turn waits on into view, when the chat shows one; `onContinue` sends "Continue." as a restart.
  */
-export const TurnRestart = createContext<{ onRestart?: () => void; restarting: boolean }>({ restarting: false });
+export const TurnRestart = createContext<{ onRestart?: () => void; restarting: boolean; onAnswer?: () => void; onContinue?: () => void }>({ restarting: false });
+
+/** How long a turn waits for the person with no request shown before Continue is offered (many request polls). */
+const UNSHOWN_REQUEST_MS = 2 * 60_000;
+
+/**
+ * Beside a running turn's "waiting for you": Answer brings the request into view, with its first
+ * choice focused (in a narrow split pane it sat below the fold, so the chat looked stuck on
+ * nothing). With no request shown, the agent's link to AO went while it waited (an AO restart
+ * under the chat): nothing can take an answer, so Continue restarts the agent with "Continue."
+ * and it asks again. Seen live 2026-11-02: two chats "waiting for you" for an hour on requests
+ * the reviewer had already allowed.
+ */
+export function WaitingAnswer({ quietMs }: { quietMs: number }) {
+  const { onAnswer, onContinue } = useContext(TurnRestart);
+  const [continued, setContinued] = useState(false);
+  if (onAnswer) return <button type="button" className="cx-turn-restart cx-turn-answer" onClick={onAnswer} title="Show the request this turn is waiting for">Answer</button>;
+  if (!onContinue || quietMs < UNSHOWN_REQUEST_MS) return null;
+  return <button type="button" className="cx-turn-restart cx-turn-answer" disabled={continued} onClick={() => { setContinued(true); onContinue(); }}
+    title="Its request can't be answered here any more: restart the agent and send “Continue.” so it asks again">{continued ? "Continuing…" : "Continue"}</button>;
+}
 
 /** Who reads the person's steers in this card ("Read by Claude"), from steerReader. */
 export const SteerReader = createContext("Claude");

@@ -11,7 +11,9 @@ const close = /\r?\n\}\r?\n/.exec(source.slice(start));
 const end = close ? start + close.index + close[0].length : -1;
 assert.ok(start > 0 && end > start, "waitForProxyRoute is defined in main.cjs");
 const delay = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
-const waitForProxyRoute = new Function("net", "delay", "process", `${source.slice(start, end)}\nreturn waitForProxyRoute;`)(net, delay, process);
+// No `net` here: the probe connects from a worker, never on the main thread.
+const { probeTcpOffThread } = require("../electron/off-thread-run.cjs");
+const waitForProxyRoute = new Function("probeTcpOffThread", "delay", "process", `${source.slice(start, end)}\nreturn waitForProxyRoute;`)(probeTcpOffThread, delay, process);
 
 function withProxy(value, run) {
   const saved = { HTTPS_PROXY: process.env.HTTPS_PROXY, HTTP_PROXY: process.env.HTTP_PROXY };

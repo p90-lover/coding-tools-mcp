@@ -1639,13 +1639,25 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       : stated.length === tools.length ? Math.max(...stated) + TOOL_STALL_MARGIN_MS : TOOL_STALL_MS;
     return idle > limit ? { idle, toolRunning: tools.length > 0 } : null;
   }
+  // A session waiting on a request nobody can answer: AO still reads it needs_input, but its
+  // controller is gone (AO restarted under the chat while the agent's host lived on), so observe
+  // offers no card for it and nothing ever settles the turn. Seen live 2026-11-02: two chats said
+  // "waiting for you" for over an hour on commands the reviewer had already allowed, and a typed
+  // "keep going" waited behind them for good.
+  const orphanedRequest = observed => observed?.needsInput === true && observed.agentGone === true && !observed.approvals?.length;
+  // What the stall stop may end: a turn with nothing waiting for the person, or one only an orphaned request holds.
+  const nothingToAnswer = observed => !observed?.approvals?.length && (!observed?.needsInput || orphanedRequest(observed));
   /**
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
    */
   async function stopStalledTurn(session, observed, ownership) {
     const { workspaceId, runId, nodeId, turnId, requestKey } = ownership;
-    if (!chatPreferences.get().autoRetry || typeof turnId !== "string" || !turnId || !requestKey
+    // An orphaned request is ended whatever "Retry automatically" says: the person has nothing to
+    // answer, and the stop only lets the turn settle (as interrupted); whether it is retried is still
+    // that setting's.
+    const orphaned = orphanedRequest(observed);
+    if ((!chatPreferences.get().autoRetry && !orphaned) || typeof turnId !== "string" || !turnId || !requestKey
       || observed?.turnId !== turnId || (expectedTurns.has(session) && expectedTurns.get(session) !== turnId)) return false;
     const stalled = stalledTurnInfo(observed);
     const previous = stalledStops.get(session);
@@ -1668,12 +1680,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // interrupted and the step is retried; AO keeps the session, so the retry resumes it.
     // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
     const release = observed.agentGone === true || previous !== undefined;
-    const isStalled = current => !current?.needsInput && !current?.approvals?.length && Boolean(stalledTurnInfo(current));
+    const isStalled = current => nothingToAnswer(current) && Boolean(stalledTurnInfo(current));
     try {
       if (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId, isStalled, escalate: true, ...(release ? { releaseAgent: true } : {}) }) === false) return false;
     }
     catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
-    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release });
+    logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release, orphaned });
     return true;
   }
 
@@ -1710,7 +1722,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      if (!pending.length && !observed.needsInput) await stopStalledTurn(session, observed, ownership);
+      if (!pending.length && nothingToAnswer(observed)) await stopStalledTurn(session, observed, ownership);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -5079,6 +5091,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // steer and nothing to stop. Steering it failed with "the agent controller for this session is
     // not running"; the message goes as the chat's next turn, which starts the agent again.
     if (waiting?.agentGone === true) {
+      // Its turn may still read running, held by a request nobody can answer (orphanedRequest): then
+      // nothing settled it and the message waited behind it for good (seen live 2026-11-02, "yes keep
+      // going" queued for an hour). Asked to restart, or once it has been silent as long as a stuck
+      // turn, its host is shut down so the turn settles and the message goes in; a host still being
+      // reattached right after AO restarts is left alone.
+      const silent = Number.isFinite(waiting.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
+      if (!TERMINAL_TURNS.has(waiting.turnState) && (restart === true || silent > STEER_STALL_MS)) {
+        try {
+          await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true, releaseAgent: true });
+          logger?.info?.("ao.steer_released_orphaned_turn", { idleSeconds: Math.round(silent / 1000), asked: restart === true });
+        } catch (error) {
+          logger?.warn?.("ao.steer_release_failed", { message: publicText(error?.message || error, 200) });
+        }
+      }
       return { ok: true, steered: false, waiting: true, restarted: true,
         reason: "The agent's process had stopped. Your message starts its next turn." };
     }
@@ -6288,9 +6314,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const wakeup = wakeups.get(workspaceId, taskId);
     if (wakeupsDisposed || !wakeup || wakeup.id !== id || waking.has(key)) return;
     if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
+    const current = () => !wakeupsDisposed && wakeups.get(workspaceId, taskId) === wakeup && wakeup.id === id;
+    let consumed = false;
     waking.add(key);
     try {
       const saved = await runs({ workspaceId });
+      if (!current()) return;
+      if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
       const chatRuns = saved.runs.filter(run => run.project_id === taskId);
       const latest = chatRuns.at(-1);
       // The next round of a self-paced /loop: gone with the loop, or once the loop outlived its days.
@@ -6303,6 +6333,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       });
       // It fires when that turn settles (wakeupAfterRun), or at the next look should the settle be missed.
       if (action === "wait") { wakeups.update(workspaceId, taskId, { due: true }); armWakeup(workspaceId, taskId, WAKE_RETRY_MS); return; }
+      consumed = true;
       wakeups.clear(workspaceId, taskId, id);
       wakeFailures.delete(id);
       if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
@@ -6317,12 +6348,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
       logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
     } catch (error) {
+      if (!consumed && !current()) { wakeFailures.delete(id); return; }
+      if (!consumed && wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
       const failures = (wakeFailures.get(id) ?? 0) + 1;
       wakeFailures.set(id, failures);
       logger?.warn?.("ao.wakeup.failed", { workspaceId, taskId, failures, error: String(error?.message || error).slice(0, 200) });
-      if (failures >= WAKE_RETRIES || !wakeups.get(workspaceId, taskId)) { wakeups.clear(workspaceId, taskId, id); wakeFailures.delete(id); }
+      if (consumed || failures >= WAKE_RETRIES) {
+        if (!consumed) wakeups.clear(workspaceId, taskId, id);
+        wakeFailures.delete(id);
+      }
       else armWakeup(workspaceId, taskId, WAKE_RETRY_MS);
-    } finally { waking.delete(key); }
+    } finally {
+      waking.delete(key);
+      const next = wakeups.get(workspaceId, taskId);
+      // A replacement's timer may have fired while this older callback held the chat's lock.
+      if (!wakeupsDisposed && next && next !== wakeup && !wakeTimers.has(key)) armWakeup(workspaceId, taskId);
+    }
   }
   // When a chat's turn settles, a wake-up that came due while it ran fires now.
   async function wakeupAfterRun(workspaceId, runId) {
@@ -6416,19 +6457,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!chatQueue.list(workspaceId, taskId).length) return;
     draining.add(key);
     try {
-      const saved = await runs({ workspaceId });
+      let saved = await runs({ workspaceId });
       // An archived or deleted chat keeps its queue for when it is back.
-      if (taskLifecycle(saved, taskId).visibility !== "active") return;
-      // Read after the runs: a message joined to it meanwhile (chat_queue update) goes along.
-      const [next] = chatQueue.list(workspaceId, taskId);
-      if (!next) return;
-      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (wakeupsDisposed || taskLifecycle(saved, taskId).visibility !== "active") return;
+      if (!chatQueue.list(workspaceId, taskId).length) return;
       // The short compaction watcher can expire while the provider still works. Queue retries
       // reconcile its owned session too, so later completion releases input without an open chat.
       if (sessionCompactions.get(runKey(workspaceId, taskId))?.status === "in_progress") {
         const progress = await compactSession({ workspaceId, taskId, status: true }).catch(() => null);
+        if (wakeupsDisposed) return;
         if (progress?.status !== "completed") { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        // The chat's lifecycle or latest model may have changed while compaction was pending.
+        runReads.delete(JSON.stringify([workspaceId, ""]));
+        try { saved = await runs({ workspaceId }); }
+        catch { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        if (wakeupsDisposed || taskLifecycle(saved, taskId).visibility !== "active") return;
       }
+      // Take the current head after every read: edits and replacement adds keep their order.
+      const [next] = chatQueue.list(workspaceId, taskId);
+      if (!next) return;
+      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
         if (!next.steer) { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }

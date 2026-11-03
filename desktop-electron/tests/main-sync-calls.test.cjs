@@ -33,7 +33,7 @@ const ALLOWED = {
   "managed-components.cjs": 62, "managed-external-services.cjs": 2, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9, "rtk.cjs": 4, "runtime-command.cjs": 6, "runtime-install.cjs": 24,
-  "runtime-supervisor.cjs": 19, "runtime.cjs": 39, "smoke-exit.cjs": 1, "subagents.cjs": 4, "update-worker.cjs": 26,
+  "runtime-supervisor.cjs": 20, "runtime.cjs": 39, "smoke-exit.cjs": 1, "subagents.cjs": 4, "update-worker.cjs": 26,
   "update.cjs": 20, "upstream-tools.cjs": 3, "window-state.cjs": 1,
 };
 

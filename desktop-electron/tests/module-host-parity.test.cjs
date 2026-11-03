@@ -66,17 +66,19 @@ test("Codex route waits for authenticated browser evidence and retries after log
     ["launcher:browser-passkey-login", "openPasskeyLogin"],
   ]) {
     assert.ok(handlers.has(channel), channel);
-    let scheduled = 0;
+    let scheduled = 0, cleared = 0;
     const handler = vm.runInNewContext(`(${handlers.get(channel)})`, {
       browserHost: { [action]: async () => ({ authenticated: true }) },
       stateStore: context.stateStore,
       nextSessionRefreshReminderAt: () => 1,
       send() {},
       scheduleCodexBridgeAutoConnect: () => { scheduled += 1; },
+      signInRetryWait: { clear: () => { cleared += 1; } },
       logger: context.logger,
     });
     await handler();
     assert.equal(scheduled, 1, channel);
+    assert.equal(cleared, 1, `${channel}: the person's own sign-in ends the wait on automatic checks`);
   }
 });
 

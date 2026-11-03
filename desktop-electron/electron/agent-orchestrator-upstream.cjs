@@ -17,7 +17,8 @@ const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
-const { spawnOffThread } = require("./off-thread-run.cjs");
+const { spawnOffThread, fetchOffThread } = require("./off-thread-run.cjs");
+const { redactionLabel } = require("./chat-redaction.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -253,7 +254,7 @@ function chatHostProcesses(dataRoot) {
   });
 }
 
-function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, cpaQuota = null, cpaUsage = null, logger = console,
+function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, fileTools = null, cpaQuota = null, cpaUsage = null, logger = console,
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
   let child = null;
   let gateway = null;
@@ -404,7 +405,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
     const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
-    const response = await fetch(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
+    // From a worker: the chat's session and conversation reads come here 17 times a second with two
+    // chats working, and on main a socket write that a network filter held froze every window.
+    const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}${endpoint}`, { method, headers: { "content-type": "application/json" }, body, redirect: "error", signal: AbortSignal.timeout(waitMs) });
     const text = await response.text();
     // A conversation read is trimmed below before anything uses it, so it may arrive larger; every
     // other AO call keeps the 900 KB limit.
@@ -878,7 +881,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   const REDACT_TOOL = /(^|__)redact_message$/;
   function hiddenSecretsInput(input) {
     const count = Array.isArray(input.secrets) ? input.secrets.length : 0;
-    return { ...(typeof input.label === "string" ? { label: input.label.slice(0, 40) } : {}),
+    return { ...(typeof input.label === "string" ? { label: redactionLabel(input.label, input.secrets) } : {}),
       secrets: `${count} hidden (not shown)` };
   }
   function timelineActivity(activity) {
@@ -1109,6 +1112,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return [];
     }
   }
+  /**
+   * The person's unified-agent-tools server for a chat session that runs a GPT model
+   * (unified-agent-tools.cjs), or null. Never fails a launch or a resume.
+   */
+  async function gptFileServer(agent, model) {
+    if (!fileTools || typeof agent !== "string") return null;
+    try { return (await fileTools.forSession(agent, typeof model === "string" ? model : "")) ?? null; } catch (cause) {
+      logger.warn?.("ao.file_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
+      return null;
+    }
+  }
   // Mission-owned AO calls. The run grant already covers them, so no extra dialog.
   async function internalApi(method, endpoint, body, options) {
     // A write may change what a session read in flight is about to return (sharedObserveRead).
@@ -1206,7 +1220,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * the worktree AO creates for it), or null. Never fails a launch: without them the agent starts
    * without them.
    */
-  async function chatTools(agent, workspaceId, approvalMode, autoReview = false, subagent = false) {
+  async function chatTools(agent, workspaceId, approvalMode, autoReview = false, subagent = false, unifiedFiles = false) {
     if (!agentTools) return null;
     try {
       // The session's permission mode goes with its credential: only a session launched to
@@ -1214,7 +1228,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // one set to "Approve for me" (autoReview) its routine project commands.
       const lease = await agentTools.lease({ agent, workspaceId, ...(approvalMode ? { approvalMode } : {}), ...(autoReview ? { autoReview: true } : {}),
         // A subagent (subagents.cjs) gets the app's tools but no subagents of its own.
-        ...(subagent ? { subagent: true } : {}) });
+        ...(subagent ? { subagent: true } : {}),
+        // With unified-agent-tools beside it, the app's server leaves out its own file tools.
+        ...(unifiedFiles ? { unifiedFiles: true } : {}) });
       return Array.isArray(lease?.servers) && lease.servers.length ? lease : null;
     } catch (cause) {
       logger.warn?.("ao.agent_tools_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
@@ -1262,10 +1278,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const launch = async (mode) => {
         // Chat sessions only: a terminal launch has no controller to attach tool servers to. Each
         // attempt gets its own credential, bound to the session it creates and to nothing else.
-        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true) : null;
+        // A GPT model, on any harness (a CPA model runs as gateway.model), gets the person's file tools.
+        const files = mode === "chat" ? await gptFileServer(agent, gateway?.provider === "cpa" && typeof gateway.model === "string" ? gateway.model : model) : null;
+        const tools = mode === "chat" ? await chatTools(agent, workspaceId, approvalMode, autoReview === true, subagent === true, Boolean(files)) : null;
         let created;
         try {
-          const servers = tools?.servers ?? [];
+          const servers = [...(tools?.servers ?? []), ...(files ? [files] : [])];
           created = await launchSession(mode, mode === "chat" ? [...servers, ...userServers(agent, servers)] : []);
         } catch (error) {
           tools?.release();
@@ -1531,9 +1549,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const restore = async () => {
           // Startup may already own restoration. A conflict is not readiness: wait for this
           // exact session's observable live state, without issuing a second resume or new launch.
-          const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key)).catch(() => null);
+          // The file tools as they are now (the model's, and whether the person still has them on);
+          // the renewed lease hides its own file tools only while these are attached.
+          const files = await gptFileServer(session.harness, session.model);
+          const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key, { unifiedFiles: Boolean(files) })).catch(() => null);
           // AO keeps a session's servers only while its daemon runs, so the person's own go in again too.
-          const servers = [...(renewed?.servers ?? [])];
+          const servers = [...(renewed?.servers ?? []), ...(files ? [files] : [])];
           servers.push(...userServers(session.harness, servers));
           let body = servers.length ? { mcpServers: servers } : {};
           // AO answers only once the agent is up. On a busy disk that took 150-180 s (seen live

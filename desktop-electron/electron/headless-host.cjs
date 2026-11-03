@@ -2,11 +2,10 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const http = require("node:http");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
-const { warmProgram } = require("./off-thread-run.cjs");
+const { warmProgram, fetchOffThread } = require("./off-thread-run.cjs");
 
 const CONTROL_SCHEMA = 1;
 const CONTROL_PROTOCOL_VERSION = 1;
@@ -106,85 +105,70 @@ function safeErrorMessage(error) {
   return message.replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [redacted]").slice(0, 500);
 }
 
-function requestJson({ endpoint, token, localUiToken = null, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS, signal }) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(pathname, endpoint);
-    if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password) {
-      reject(new Error("Refusing a non-loopback headless control endpoint"));
-      return;
-    }
-    const payload = body === null ? null : Buffer.from(JSON.stringify(body), "utf8");
-    const request = http.request({
-      protocol: url.protocol,
-      hostname: url.hostname,
-      port: url.port,
-      path: `${url.pathname}${url.search}`,
+// From a worker (fetchOffThread): made here, the chat's AO reads (11 a second with two chats
+// working) were each a socket write on main, where one a network filter held froze every window.
+async function requestJson({ endpoint, token, localUiToken = null, pathname, method = "POST", body = null, timeout = REQUEST_TIMEOUT_MS, signal,
+  fetchImpl = fetchOffThread }) {
+  const url = new URL(pathname, endpoint);
+  if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password) {
+    throw new Error("Refusing a non-loopback headless control endpoint");
+  }
+  const deadline = AbortSignal.timeout(timeout);
+  let status;
+  let text;
+  try {
+    const response = await fetchImpl(url, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
         ...(localUiToken ? { "x-coding-tools-local-ui": localUiToken } : {}),
         accept: "application/json",
-        ...(payload ? {
-          "content-type": "application/json",
-          "content-length": String(payload.length),
-        } : {}),
+        ...(body === null ? {} : { "content-type": "application/json" }),
       },
-      timeout,
-      ...(signal ? { signal } : {}),
+      ...(body === null ? {} : { body: JSON.stringify(body) }),
+      redirect: "error",
+      maxBytes: MAX_RESPONSE_BYTES,
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
     });
-    const chunks = [];
-    let size = 0;
-    request.on("response", (response) => {
-      response.on("error", (error) => reject(new Error(safeErrorMessage(error))));
-      response.on("data", (chunk) => {
-        size += chunk.length;
-        if (size > MAX_RESPONSE_BYTES) {
-          request.destroy(new Error("Headless response exceeded the local size limit"));
-          return;
-        }
-        chunks.push(chunk);
-      });
-      response.on("end", () => {
-        const text = Buffer.concat(chunks).toString("utf8");
-        let value = {};
-        try {
-          value = text ? JSON.parse(text) : {};
-        } catch {
-          // A refused request body (e.g. an unknown field) comes back as plain text: say so with
-          // the status and the service's own words instead of only "invalid JSON".
-          const status = response.statusCode || 500;
-          const said = text.replace(/\s+/g, " ").trim().slice(0, 200);
-          reject(new Error(status >= 200 && status < 300 ? "Headless service returned invalid JSON"
-            : safeErrorMessage(`Headless service rejected the request (HTTP ${status})${said ? `: ${said}` : ""}`)));
-          return;
-        }
-        if ((response.statusCode || 500) < 200 || (response.statusCode || 500) >= 300) {
-          // Keep the service's own reason, whichever error shape it used, so the UI is not left
-          // with a generic message; fall back to the HTTP status.
-          const message = value?.error?.message
-            || (typeof value?.error === "string" && value.error)
-            || (typeof value?.message === "string" && value.message)
-            || `Headless service rejected the request (HTTP ${response.statusCode || 500})`;
-          const error = new Error(safeErrorMessage(message));
-          error.status = response.statusCode;
-          const code = value?.error?.code;
-          if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,99}$/.test(code)) error.code = code;
-          reject(error);
-          return;
-        }
-        resolve(value);
-      });
-    });
-    request.on("timeout", () => request.destroy(new Error("Headless request timed out")));
-    request.on("error", (error) => reject(signal?.aborted ? abortedRequest() : new Error(safeErrorMessage(error))));
-    if (payload) request.write(payload);
-    request.end();
-  });
+    status = response.status || 500;
+    text = await response.text();
+  } catch (error) {
+    if (signal?.aborted) throw abortedRequest();
+    if (deadline.aborted) throw new Error("Headless request timed out");
+    if (error?.code === "ERR_RESPONSE_TOO_LARGE") throw new Error("Headless response exceeded the local size limit");
+    // fetch says only "fetch failed"; the socket's own error says what (connect ECONNREFUSED ...).
+    throw new Error(safeErrorMessage(error?.cause ?? error));
+  }
+  let value = {};
+  try {
+    value = text ? JSON.parse(text) : {};
+  } catch {
+    // A refused request body (e.g. an unknown field) comes back as plain text: say so with
+    // the status and the service's own words instead of only "invalid JSON".
+    const said = text.replace(/\s+/g, " ").trim().slice(0, 200);
+    throw new Error(status >= 200 && status < 300 ? "Headless service returned invalid JSON"
+      : safeErrorMessage(`Headless service rejected the request (HTTP ${status})${said ? `: ${said}` : ""}`));
+  }
+  if (status < 200 || status >= 300) {
+    // Keep the service's own reason, whichever error shape it used, so the UI is not left
+    // with a generic message; fall back to the HTTP status.
+    const message = value?.error?.message
+      || (typeof value?.error === "string" && value.error)
+      || (typeof value?.message === "string" && value.message)
+      || `Headless service rejected the request (HTTP ${status})`;
+    const error = new Error(safeErrorMessage(message));
+    error.status = status;
+    const code = value?.error?.code;
+    if (typeof code === "string" && /^[A-Z][A-Z0-9_]{0,99}$/.test(code)) error.code = code;
+    throw error;
+  }
+  return value;
 }
 
 class HeadlessHost {
-  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null, warm = warmProgram }) {
+  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null, warm = warmProgram, fetchImpl = fetchOffThread }) {
     this.warm = warm;
+    this.fetchImpl = fetchImpl;
     this.app = app;
     this.logger = logger;
     this.sourceRoot = sourceRoot;
@@ -341,6 +325,7 @@ class HeadlessHost {
           const descriptor = this.readDescriptor(descriptorPath, appDataDir, child.pid);
           const token = this.readToken(descriptor, tokenPath, appDataDir);
           const health = await requestJson({
+            fetchImpl: this.fetchImpl,
             endpoint: descriptor.endpoint,
             token,
             pathname: "/control/v1/health",
@@ -541,6 +526,7 @@ class HeadlessHost {
         if (options.signal?.aborted) throw abortedRequest();
         try {
           return await requestJson({
+            fetchImpl: this.fetchImpl,
             endpoint: control.endpoint,
             token: control.token,
             localUiToken: options.localConfirmation === true ? control.uiToken : null,
@@ -579,6 +565,7 @@ class HeadlessHost {
     if (control && child.exitCode === null) {
       try {
         await requestJson({
+          fetchImpl: this.fetchImpl,
           endpoint: control.endpoint,
           token: control.token,
           pathname: "/control/v1/shutdown",

@@ -279,8 +279,8 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
                 <button type="button" className="cxs-button" disabled={!pages.enabled || pages.pageCount >= CHAT_PAGE_LIMIT}
                   onClick={() => setPagePreference({ pageCount: pages.pageCount + 1 })}>Add page</button>
               </Row>
-              <Row label="Scroll over page tabs to switch" description="The mouse wheel changes pages only over the tabs. Scrolling messages stays unchanged">
-                <Toggle label="Scroll over page tabs to switch" checked={pages.wheel} disabled={!pages.enabled}
+              <Row label="Scroll over the page bar to switch" description="Over the page bar, scroll up for the previous page and down for the next. Scrolling messages stays unchanged">
+                <Toggle label="Scroll over the page bar to switch" checked={pages.wheel} disabled={!pages.enabled}
                   onChange={(wheel) => setPagePreference({ wheel })} />
               </Row>
               <Row label="Page keyboard shortcuts" description="Switch pages without clicking. Shortcuts pause while typing or using a dialog">
@@ -289,11 +289,11 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
               </Row>
               <Row label="Previous page shortcut" description="Focus the shortcut, then press the key combination you want">
                 <PageShortcut label="Previous page shortcut" value={pages.previous} disabled={!pages.enabled || !pages.keyboard}
-                  onChange={(previous) => setPagePreference({ previous })} />
+                  onChange={(previous) => setPagePreference(previous === pages.next ? { previous, next: pages.previous } : { previous })} />
               </Row>
-              <Row label="Next page shortcut" description="Use a different key combination from Previous page">
+              <Row label="Next page shortcut" description="Pressing the previous page's shortcut here swaps the two">
                 <PageShortcut label="Next page shortcut" value={pages.next} disabled={!pages.enabled || !pages.keyboard}
-                  onChange={(next) => setPagePreference({ next })} />
+                  onChange={(next) => setPagePreference(next === pages.previous ? { next, previous: pages.next } : { next })} />
               </Row>
             </Group>
             <Group title="Context">

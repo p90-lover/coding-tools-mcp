@@ -109,6 +109,7 @@ function createHarness(hooks = {}) {
     "./agent-orchestrator-accounting.cjs": require("../electron/agent-orchestrator-accounting.cjs"),
     "./ao-context-breakdown.cjs": require("../electron/ao-context-breakdown.cjs"),
     "./ao-daemon-log.cjs": require("../electron/ao-daemon-log.cjs"),
+    "./chat-redaction.cjs": require("../electron/chat-redaction.cjs"),
     // The launcher's ao.db compaction has its own module; these fixtures have no database.
     "./ao-db-maintenance.cjs": { compactAoDatabase: async () => ({ action: "none" }) },
     "./chat-agent-shell.cjs": require("../electron/chat-agent-shell.cjs"),
@@ -210,10 +211,12 @@ function createHarness(hooks = {}) {
     "./process-tree.cjs": { terminateOwnedProcessTreeAsync: async () => { throw new Error("No process is killed in a fixture"); } },
     // Starting the daemon off the main thread has its own tests (off-thread-spawn.test.cjs); here
     // the start goes to the fixture's spawn, awaited as the real one is.
-    "./off-thread-run.cjs": { spawnOffThread: async (...args) => dependencies["node:child_process"].spawn(...args) },
+    "./off-thread-run.cjs": { spawnOffThread: async (...args) => dependencies["node:child_process"].spawn(...args),
+      // The AO API's requests go out from a worker (off-thread-fetch.test.cjs); here, to the fixture's fetch.
+      fetchOffThread: (...args) => sandbox.fetch(...args) },
   };
   const loadedModule = { exports: {} };
-  vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {
+  const sandbox = {
     module: loadedModule,
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name]; },
     process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value" } },
@@ -245,14 +248,15 @@ function createHarness(hooks = {}) {
       await hooks.readyFetch?.(child);
       return { ok: true, json: async () => { await hooks.readyBody?.(child); return { pid: child.pid, status: "ready" }; } };
     },
-  }, { filename: sourcePath });
+  };
+  vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), sandbox, { filename: sourcePath });
   const controller = loadedModule.exports.createAgentOrchestratorUpstream({
     resourceRoot, dataRoot, WebContentsView: FakeView, getWindow: () => parent,
     getWorkspaces: hooks.getWorkspaces, missionCall: hooks.missionCall,
     confirm: async (request) => hooks.confirm?.(request) ?? true,
     shell: { openExternal: async (url) => { opened.push(url); } },
     openAuth: hooks.openAuth,
-    agentTools: hooks.agentTools,
+    agentTools: hooks.agentTools, fileTools: hooks.fileTools,
     logger: { warn: (...entry) => warnings.push(entry) },
     readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs,
   });
@@ -834,6 +838,51 @@ test("chat launches carry their own tool credential as mcpServers, bound to the 
     assert.equal(Object.hasOwn(launches.at(-1), "mcpServers"), false);
     assert.ok(h.warnings.some(([code]) => code === "ao.agent_tools_unavailable"));
     assert.ok(!JSON.stringify(h.warnings).includes("test-token"), "the token is never logged");
+  } finally { await h.controller.stop(); }
+});
+
+test("a GPT chat launches with unified-agent-tools after the app's server, whose lease leaves out its file tools", async () => {
+  const launches = [], asked = [], models = [];
+  const app = { name: "coding-tools", type: "http", url: "http://127.0.0.1:41234/mcp/ws/key", headers: { Authorization: "Bearer test-token" } };
+  const files = { name: "unified-agent-tools", type: "stdio", command: "node", args: ["server.mjs", "--stdio"], env: { UNIFIED_AGENT_TOOLS_ROOT: "cwd" } };
+  let sessionCount = 0, broken = false;
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    agentTools: { lease: async (request) => { asked.push(request); return { servers: [app], bind: () => true, release() {} }; } },
+    fileTools: { forSession: (agent, model) => {
+      models.push([agent, model]);
+      if (broken) throw new Error("server unreadable");
+      return /^gpt-/.test(model) ? files : null;
+    } },
+    api: async (endpoint, options) => {
+      if (endpoint.pathname === "/api/v1/settings") return { chatHarnesses: ["claude-code", "codex"] };
+      if (endpoint.pathname === "/api/v1/sessions") { launches.push(JSON.parse(options.body)); return { session: { id: `session-${++sessionCount}` } }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "gpt-5.6", prompt: "hello" });
+    assert.deepEqual(launches.at(-1).mcpServers, [app, files]);
+    assert.equal(asked.at(-1).unifiedFiles, true, "the app's server is told to leave out read_file and apply_patch");
+    // A CPA model runs on any harness and is named by the gateway's model.
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "gpt-5.5", gateway: { provider: "cpa", model: "gpt-5.5" }, prompt: "hello" });
+    assert.deepEqual(models.at(-1), ["claude-code", "gpt-5.5"]);
+    assert.deepEqual(launches.at(-1).mcpServers, [app, files]);
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "claude-opus-4-7", gateway: { provider: "cpa", model: "claude-opus-4-7" }, prompt: "hello" });
+    assert.deepEqual(launches.at(-1).mcpServers, [app], "another model gets only the app's server");
+    assert.equal(Object.hasOwn(asked.at(-1), "unifiedFiles"), false, "and keeps its file tools");
+
+    broken = true;
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "codex", model: "gpt-5.6", prompt: "hello" });
+    assert.deepEqual(launches.at(-1).mcpServers, [app], "a broken file server never fails the launch");
+    assert.ok(h.warnings.some(([code]) => code === "ao.file_tools_unavailable"));
+    broken = false;
+
+    const before = models.length;
+    await h.controller.harness.spawn({ workspaceId: "ws", agent: "aider", model: "gpt-5.6", prompt: "hello" });
+    assert.equal(models.length, before, "a terminal launch has no controller to attach it to");
+    assert.equal(Object.hasOwn(launches.at(-1), "mcpServers"), false);
   } finally { await h.controller.stop(); }
 });
 

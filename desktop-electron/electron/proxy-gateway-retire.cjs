@@ -144,6 +144,7 @@ async function retireProxyGateway({
   try {
     routeRestored = restoreRoute(store, settings, logger);
     if (hasProfile) store.removeProxyProfile(GATEWAY_PROFILE_ID);
+    await store.saved?.();
   } catch (error) {
     logger.warn("proxy_gateway.retire_route_failed", { message: error instanceof Error ? error.message : String(error) });
   }

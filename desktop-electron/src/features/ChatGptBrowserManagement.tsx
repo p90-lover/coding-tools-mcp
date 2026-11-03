@@ -20,7 +20,26 @@ const CONCURRENT_TURNS = 5;
 const KEEP_FINISHED_TABS_MINUTES = [5, 10, 20, 30, 60];
 
 const accountName = (account: BrowserAccount) => account.email ?? account.label;
+// A loading/idle page is not a signed-out account. Keep each partition's own sign-in evidence.
+const accountSignedIn = (account: BrowserAccount, activeId: string, authenticated?: boolean | null) =>
+  account.id === activeId && authenticated === true ? true : account.signedIn;
 const proxyAddress = (profile: ProxyProfileRecord) => `${profile.endpoint.host}:${profile.endpoint.port}`;
+
+/** One session read at a time; a late reply from a hidden or superseded page never replaces its data. */
+export function startBrowserThreadPoll(read: () => Promise<{ threads: CodexThreadBinding[] }>,
+  publish: (threads: CodexThreadBinding[]) => void, intervalMs: number): () => void {
+  let live = true, reading = false;
+  const refresh = async () => {
+    if (!live || reading) return;
+    reading = true;
+    try { const result = await read(); if (live) publish(result.threads); }
+    catch { /* keep the last successful read; the next tick retries */ }
+    finally { reading = false; }
+  };
+  void refresh();
+  const timer = intervalMs ? window.setInterval(() => void refresh(), intervalMs) : undefined;
+  return () => { live = false; if (timer !== undefined) window.clearInterval(timer); };
+}
 
 function ago(at: number | null | undefined) {
   if (!at) return "never";
@@ -124,7 +143,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
       let changed = false;
       for (const id of Object.keys(previous)) {
         const account = accounts?.accounts.find(entry => entry.id === id);
-        const signedIn = account?.id === accounts?.activeId ? browser?.authenticated : account?.signedIn;
+        const signedIn = account ? accountSignedIn(account, accounts!.activeId, browser?.authenticated) : undefined;
         if (!account || signedIn === false || !connectionMatchesAccount(previous[id], account)) {
           delete next[id];
           changed = true;
@@ -134,22 +153,15 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
     });
   }, [accounts, browser?.authenticated, connections]);
 
-  // Sessions change when turns start and end: re-read them whenever a tab's status changes.
-  const tabSignature = (browser?.tabs ?? []).map(tab => `${tab.id}:${tab.status}`).join(",");
-  useEffect(() => {
-    let live = true;
-    void api.codexThreads().then(next => { if (live) setThreads(next.threads); }).catch(() => {});
-    return () => { live = false; };
-  }, [api, tabSignature, accounts?.accounts.length]);
-  // A running turn's session keeps using tokens: while one runs, the numbers are read again every 15 s.
+  // Ownership matters as well as count: replacing one account or rebinding a tab must refresh the
+  // sessions too. A running turn refreshes usage every 15 s, with no overlapping/stale reads.
+  const tabSignature = JSON.stringify((browser?.tabs ?? []).map(tab => [tab.id, tab.status, tab.accountId, tab.threadId]));
+  const accountSignature = JSON.stringify(accounts?.accounts.map(account => account.id) ?? []);
   const turnRunning = (browser?.tabs ?? []).some(tab => tab.status === "running");
   useEffect(() => {
-    if (!turnRunning) return;
-    const timer = window.setInterval(() => {
-      void api.codexThreads().then(next => setThreads(next.threads)).catch(() => {});
-    }, 15_000);
-    return () => window.clearInterval(timer);
-  }, [api, turnRunning]);
+    if (!active) return;
+    return startBrowserThreadPoll(() => api.codexThreads(), setThreads, turnRunning ? 15_000 : 0);
+  }, [api, tabSignature, accountSignature, turnRunning, active]);
 
   const run = useCallback(async (key: string, action: () => Promise<unknown>) => {
     setError(null);
@@ -178,7 +190,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
       for (const account of accounts.accounts) {
         if (!live) break;
         const key = `${account.id}:${account.email ?? ""}`;
-        const signedIn = account.id === accounts.activeId ? browser?.authenticated : account.signedIn;
+        const signedIn = accountSignedIn(account, accounts.activeId, browser?.authenticated);
         if (signedIn !== true) { planChecks.current.delete(key); continue; }
         if (planChecks.current.has(key) || (account.plan?.planCheckedAt && Date.now() - account.plan.planCheckedAt < 300_000)) continue;
         planChecks.current.add(key);
@@ -229,7 +241,9 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
 
   const activeId = accounts.activeId;
   const pages = (browser?.tabs ?? []).filter(tab => tab.id !== "home");
-  const tabsOf = (id: string) => pages.filter(tab => (tab.accountId ?? activeId) === id);
+  const tabsOf = (id: string) => pages.filter(tab => (tab.accountId
+    ?? threads.find(thread => thread.threadId === tab.threadId)?.accountId
+    ?? (tab.otherAccount ? null : activeId)) === id);
   const running = pages.filter(tab => tab.status === "running").length;
   const sessionsOf = (id: string) => threads.filter(thread => thread.accountId === id).length;
   const bound = accounts.accounts.filter(account => account.proxyProfileId).length;
@@ -242,7 +256,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   const chatRunning = browser?.status === "running" || running > 0;
   // A ticked account that has since gone (removed elsewhere) no longer counts.
   const ticked = accounts.accounts.filter(account => selected.has(account.id)).map(account => account.id);
-  const signedInOf = (account: BrowserAccount) => (account.id === activeId ? browser?.authenticated === true : account.signedIn === true);
+  const signedInOf = (account: BrowserAccount) => accountSignedIn(account, activeId, browser?.authenticated) === true;
   const toggle = (id: string, on: boolean) => setSelected(previous => {
     const next = new Set(previous);
     if (on) next.add(id); else next.delete(id);
@@ -275,7 +289,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
       </header>
 
       <div className="cbm-stats" role="list" aria-label="Overview">
-        <Stat label="Accounts" value={accounts.accounts.length} detail={`${accounts.accounts.filter(a => (a.id === activeId ? browser?.authenticated === true : a.signedIn)).length} signed in`} />
+        <Stat label="Accounts" value={accounts.accounts.length} detail={`${accounts.accounts.filter(signedInOf).length} signed in`} />
         <Stat label="Tabs open" value={pages.length} detail={`of ${TOTAL_TAB_CEILING} · ${running} running`} />
         <Stat label="Codex sessions" value={threads.length} detail={`${threads.filter(t => t.running).length} running · ${CONCURRENT_TURNS} turns at once`} />
         <Stat
@@ -463,7 +477,7 @@ function AccountCard({
   const runningTabs = tabs.filter(tab => tab.status === "running").length;
   // Every account keeps its own sign-in: the one in use from its live page, the others from their
   // own saved session (null until read).
-  const signedIn = inUse ? authenticated : account.signedIn;
+  const signedIn = inUse && authenticated ? true : account.signedIn;
   const plan = planText(account.plan, signedIn);
   const observedAt = Math.max(account.connector?.okAt ?? 0, account.connector?.errorAt ?? 0);
   const connectionCheck = signedIn !== false && connection && connectionMatchesAccount(connection, account)

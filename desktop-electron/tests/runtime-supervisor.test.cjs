@@ -16,6 +16,8 @@ const {
   RuntimeSupervisor,
   managedTunnelConnectArgs,
   validateConfig,
+  watchdogExternalBackoff,
+  windowsProcessInfo,
 } = require("../electron/runtime-supervisor.cjs");
 
 function tunnelPreparationFixture() {
@@ -299,6 +301,27 @@ test("launcher runtime ownership rejects a different browser descriptor", () => 
   );
 });
 
+test("a descriptor named through a junction is the same browser host", { skip: process.platform !== "win32" }, () => {
+  // The app started with CODING_TOOLS_HOME at G:\AppData\.coding-tools refused a config.json that
+  // named the descriptor through the C:\Users\simon\.coding-tools junction to that folder.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-descriptor-junction-"));
+  try {
+    const home = path.join(root, "real-home");
+    fs.mkdirSync(path.join(home, "runtime"), { recursive: true });
+    const junction = path.join(root, "linked-home");
+    fs.symlinkSync(home, junction, "junction");
+    const throughJunction = path.join(junction, "runtime", "launcher-browser.json");
+    const real = path.join(home, "runtime", "launcher-browser.json");
+    const config = launcherConfig(throughJunction);
+    assert.equal(validateConfig(config, real).browserHostDescriptorPath, throughJunction);
+    assert.equal(validateConfig(launcherConfig(real), throughJunction).browserHostDescriptorPath, real);
+    const other = path.join(root, "other-home", "runtime", "launcher-browser.json");
+    assert.throws(() => validateConfig(config, other), /different launcher browser host/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launcher runtime ownership cannot cross production and DEV profiles", () => {
   const descriptorPath = path.join(os.tmpdir(), "launcher.json");
   const production = { ...launcherConfig(descriptorPath), solAvailable: true };
@@ -418,6 +441,30 @@ test("a process is inspected without blocking the main thread", { skip: process.
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("PowerShell for a process lookup is started off the main thread and its answer parsed", { skip: process.platform !== "win32" }, async () => {
+  // Even execFile's own process start held main 0.4-0.9 s per watchdog check on 0.8.57.
+  const { EventEmitter } = require("node:events");
+  const { PassThrough } = require("node:stream");
+  const starts = [];
+  const fakeStart = (output, code) => async (file, args, options) => {
+    starts.push({ file, args, options });
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.kill = () => true;
+    setImmediate(() => { child.stdout.end(output); child.emit("close", code, null); });
+    return child;
+  };
+  const answer = JSON.stringify({ executablePath: "C:\\bridge\\node.exe", commandLine: "node bridge.js", parentPid: 42 });
+  assert.deepEqual(await windowsProcessInfo(1234, { start: fakeStart(answer, 0) }),
+    { executablePath: "C:\\bridge\\node.exe", commandLine: "node bridge.js", parentPid: 42 });
+  assert.match(starts[0].file, /powershell\.exe$/i);
+  assert.match(starts[0].args.at(-1), /ProcessId=1234/);
+  assert.deepEqual(starts[0].options.stdio, ["ignore", "pipe", "ignore"]);
+  assert.equal(await windowsProcessInfo(1234, { start: fakeStart(answer, 1) }), null, "a failed PowerShell gives no answer");
+  assert.equal(await windowsProcessInfo(1234, { start: fakeStart("", 0) }), null, "an exited process gives no answer");
+  assert.equal(await windowsProcessInfo(1234, { start: async () => { throw new Error("no start"); } }), null);
 });
 
 test("the runtime config is parsed once per change, not on every monitor read", () => {
@@ -2771,4 +2818,17 @@ server.listen(config.port, config.host);
     if (stale.exitCode === null) stale.kill("SIGTERM");
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the watchdog waits longer each time another process still owns the bridge port", () => {
+  // On 0.8.57 a bridge kept from an older version was found every 2 min, and each round read the
+  // ownership marker and ran PowerShell on main.
+  const minutes = [];
+  let backoff = 0;
+  for (let round = 0; round < 5; round += 1) {
+    backoff = watchdogExternalBackoff(backoff);
+    minutes.push(backoff / 60_000);
+  }
+  assert.deepEqual(minutes, [10, 20, 40, 60, 60]);
+  assert.equal(watchdogExternalBackoff(0), 10 * 60_000, "a ready bridge resets it");
 });
