@@ -152,18 +152,6 @@ fn prepare_linked_project(
     Ok((project, mapping_path, content.into_bytes()))
 }
 
-/// Unlinks `alias` from this workspace root by deleting its `.mcp-paths/<alias>.txt` mapping
-/// record. Only the mapping record is removed; the linked folder itself is never touched.
-/// Returns whether a mapping record was found.
-pub fn remove_linked_project_mapping(workspace_root: &Path, alias: &str) -> AppResult<bool> {
-    let mut mappings = MappingEdit::default();
-    let removed = mappings.remove(workspace_root, alias)?;
-    if let Err(error) = mappings.apply() {
-        return Err(mappings.rollback(error));
-    }
-    Ok(removed)
-}
-
 fn mapping_paths(workspace_root: &Path, alias: &str) -> AppResult<Vec<PathBuf>> {
     let alias = alias.trim();
     if alias.is_empty() || alias.contains(['/', '\\']) || alias.chars().any(char::is_control) {
