@@ -108,13 +108,12 @@ test("the chat box's row is one 28 px grid of plain controls, with no carets, bo
   assert.doesNotMatch(css, /\.ao-composer-picker:last-child \{ margin-left: auto; \}/, "the window chip stays beside its effort");
 });
 
-// Reported 2026-11-02: in a ~500 px pane the goal's objective fit on the first row, the state read "F"
-// and the time sat alone on a second row.
-test("a narrow goal bar always breaks before its objective, whatever the pane's width", () => {
+// Asked for 2026-11-03: the goal bar is one row at every width, its objective right after the state.
+test("the goal bar keeps one row at every width: state, objective, then the running time whole", () => {
   const tier = container(560);
-  assert.match(tier, /\.cx-goal::before \{ flex: 0 0 100%; order: 1; content: ""; \}/, "one break after the state and buttons");
-  assert.match(tier, /\.cx-goal-objective \{ order: 2; flex: 1 1 0;/, "the objective starts the second row, from no width");
-  assert.match(tier, /\.cx-goal \.cx-goal-meta \{ order: 3; \}/, "its time beside it");
+  assert.doesNotMatch(tier, /\.cx-goal::before|\.cx-goal \{ flex-wrap: wrap/, "no break before the objective");
+  assert.doesNotMatch(tier, /\.cx-goal-objective \{ order:/);
+  assert.match(rule(".cx-goal-meta, .cx-goal-note"), /flex: 0 0 auto;/, "the time never shrinks");
 });
 
 // Asked for 2026-11-03: the head fades into the chat, so a little more of it shows under the head.
@@ -136,12 +135,13 @@ test("the chat's head floats over the transcript as a thin veil, and the transcr
   assert.match(rule(".cx-scroll"), /padding-top: 48px; scroll-padding-top: 48px;/, "the first line and sticky headers start below the head");
 });
 
-// Asked for the same day: the objective holds one line, fades out into its time, and shrinks with the pane.
-test("the goal's objective is one line that fades out before its time and shrinks with the pane", () => {
+// Asked for 2026-11-03: a long objective ends in "…" (it faded out before), and shrinks with the pane.
+test("the goal's objective is one line that ends in an ellipsis and shrinks with the pane", () => {
   const objective = rule(".cx-goal-objective");
   assert.match(objective, /white-space: nowrap;/);
-  assert.doesNotMatch(objective, /text-overflow: ellipsis/, "a fade, not an ellipsis");
-  assert.match(objective, /mask-image: linear-gradient\(to right, #000 calc\(100% - 32px\), transparent\);/);
+  assert.match(objective, /flex: 1 1 0;/, "it gives up its room first, from none");
+  assert.match(objective, /text-overflow: ellipsis;/);
+  assert.doesNotMatch(objective, /mask-image/, "no fade");
   assert.match(objective, /font-size: clamp\(10px, 1\.6cqi \+ 4px, 12px\);/, "sized by the chat's width, not the window's");
 });
 
@@ -151,4 +151,22 @@ test("Single or Team is one switch whose logos roll over, and stays still for re
   assert.match(css, /\.ao-mode-face \{[^}]*transition: transform/, "the logos move, they don't blink");
   assert.match(css, /prefers-reduced-motion: reduce\) \{ \.ao-workflow \.cx-composer :is\(\.ao-mode-toggle, \.ao-mode-face\) \{ transition: none; \}/);
   assert.doesNotMatch(css, /\.ao-mode-switch/, "the two-button switch is gone");
+});
+
+// Asked for 2026-11-03: requests waiting on the person float over the chat's foot, slim, holding no room.
+test("approval cards float over the bottom of the chat without taking room in the thread", () => {
+  assert.match(chat, /<div className="cx-approval-anchor"><div ref=\{approvalDock\} className=\{`cx-approval-dock/, "the dock rises from an anchor");
+  assert.match(rule(".cx-approval-anchor"), /position: sticky; z-index: 3; bottom: 8px; height: 0;/, "the anchor has no height and sticks to the foot");
+  assert.match(rule(".cx-approval-dock"), /position: absolute; right: 0; bottom: 0; left: 0;/, "the cards are laid over the newest lines");
+  assert.match(rule(".cx-approval-dock"), /max-height: 55vh; overflow-y: auto;/, "a tall request scrolls in its own box");
+  assert.match(rule(".cx-approval-dock .cdx-body"), /padding: 10px 12px 8px;/, "slim");
+  assert.match(rule(".cx-approval-dock .cdx-options"), /flex-flow: row wrap;/, "its choices on one line");
+});
+
+// Asked for the same day: Model judges on the goal bar is a toggle button, explained on hover.
+test("the goal bar's Model judges is a pressed-state icon button with its details in the tooltip", () => {
+  const judges = fs.readFileSync(path.resolve(__dirname, "../src/features/ModelJudgesToggle.tsx"), "utf8");
+  assert.match(judges, /className="cx-goal-icon cx-model-judges-toggle" aria-pressed=\{on === true\} aria-label="Model judges"/);
+  assert.match(judges, /title=\{`Model judges: \$\{on \? "on" : "off"\}\\n\\n\$\{DETAIL\}/, "hovering says what it does");
+  assert.match(rule('.cx-goal .cx-goal-icon.cx-model-judges-toggle[aria-pressed="true"]'), /color: var\(--ao-blue\);/, "lit while on");
 });

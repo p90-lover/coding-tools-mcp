@@ -2436,10 +2436,11 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               </div>
             ) : null}
             {recovering && latest ? <FailedStepCard step={failedStep} notice={notice} busy={retrying} onRetry={() => retryStart(latest.id)} /> : null}
-            {/* The agent's questions and requests end the conversation, right above the chat box, and
-                scroll with it. Docked under the box they took up to 420 px of the pane: in a split pane
-                the conversation had no room left at all (2026-10-31). */}
-            {approvals.length || computerRequests.length ? <div ref={approvalDock} className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+            {/* The agent's questions and requests float over the bottom of the conversation, right
+                above the chat box. Docked under the box they took up to 420 px of the pane (2026-10-31);
+                at the thread's end they still pushed it up by their whole height (2026-11-03). The
+                anchor holds no room: it sticks to the scroller's foot and the cards rise from it. */}
+            {approvals.length || computerRequests.length ? <div className="cx-approval-anchor"><div ref={approvalDock} className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
               {computerRequests.map((request) => <ComputerControlCard key={request.id} request={request} />)}
               {approvals.map(approval => {
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
@@ -2447,7 +2448,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
                 return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
               })}
-            </div> : null}
+            </div></div> : null}
           </div>
           {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
             onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
