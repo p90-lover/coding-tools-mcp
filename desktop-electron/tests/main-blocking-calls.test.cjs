@@ -1,6 +1,8 @@
 "use strict";
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const http = require("node:http");
+const net = require("node:net");
 const path = require("node:path");
 const test = require("node:test");
 const { spawn } = require("node:child_process");
@@ -84,6 +86,66 @@ test("a stall names the blocking call that held main during it", () => {
   monitor.tick();
   assert.equal(events[0][0], "launcher.main_stalled");
   assert.deepEqual(events[0][1].blockedBy, { op: "spawn", target: "powershell.exe", ms: 9000 });
+});
+
+/** A loopback server that answers every HTTP request with "ok". */
+async function httpServer() {
+  const server = http.createServer((request, response) => response.end("ok"));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { port: server.address().port, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+test("a socket call that holds main is named by its endpoint, since Node's own code made it", async (t) => {
+  // On 2026-11-03 main sat 70 s in a native write and 122 s in a close, and the stall probe saw only
+  // Node's frames: these entries carry the address (and an HTTP request's method and path).
+  const server = await httpServer();
+  const watch = installBlockingCallWatch({ now: slowClock() });
+  t.after(async () => { watch.uninstall(); await server.close(); });
+  const sent = [];
+  watch.attach((entry) => sent.push(entry));
+  const body = await new Promise((resolve, reject) => {
+    const request = http.request({ host: "127.0.0.1", port: server.port, path: "/api/v1/ao/read?token=secret", method: "POST", agent: false }, (response) => {
+      let text = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => { text += chunk; });
+      response.on("end", () => resolve(text));
+    });
+    request.on("error", reject);
+    request.end("{}");
+  });
+  assert.equal(body, "ok", "the watched calls still do their work");
+  await new Promise((resolve) => setImmediate(resolve));
+  const of = (op) => sent.find((entry) => entry.op === op && entry.target.includes(`:${server.port}`));
+  assert.equal(of("socket.connect")?.target, `127.0.0.1:${server.port}`);
+  assert.equal(of("socket.write")?.target, `127.0.0.1:${server.port} POST /api/v1/ao/read`, "the path, never its query");
+  assert.equal(of("handle.close")?.target, `127.0.0.1:${server.port}`);
+});
+
+test("socket calls from Node's code alone repeat per endpoint, not as one site", async (t) => {
+  const watch = installBlockingCallWatch({ now: slowClock() });
+  t.after(() => watch.uninstall());
+  const sent = [];
+  watch.attach((entry) => sent.push(entry));
+  // Two sockets without a connection: each write fails at once (ERR_SOCKET_CLOSED), still measured.
+  // Called from the tick queue, as fetch's and an HTTP flush's writes are: no frame of ours.
+  for (const host of ["first.example", "second.example"]) {
+    const socket = new net.Socket();
+    socket._host = host;
+    process.nextTick(socket._writeGeneric.bind(socket), false, "x", "utf8", () => socket.destroy());
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  const writes = sent.filter((entry) => entry.op === "socket.write");
+  assert.deepEqual(writes.map((entry) => [entry.target, entry.caller]), [["first.example", ""], ["second.example", ""]]);
+});
+
+test("uninstall gives back the socket methods", () => {
+  const write = net.Socket.prototype._writeGeneric;
+  const close = Object.getPrototypeOf(Object.getPrototypeOf(process.binding("tcp_wrap").TCP.prototype)).close;
+  const watch = installBlockingCallWatch();
+  assert.notEqual(net.Socket.prototype._writeGeneric, write);
+  watch.uninstall();
+  assert.equal(net.Socket.prototype._writeGeneric, write);
+  assert.equal(Object.getPrototypeOf(Object.getPrototypeOf(process.binding("tcp_wrap").TCP.prototype)).close, close);
 });
 
 test("callers are file:line, without folders", () => {
