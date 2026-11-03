@@ -73,7 +73,7 @@ test("the safety rules read a tool's JSON arguments as the command they carry", 
   // a newline is "\n": "cd app\ngit push" hid git push from the rules' word boundary.
   assert.equal(blockedRequest(JSON.stringify({ cmd: "cd app\ngit push origin main" })), true);
   assert.equal(blockedRequest(`permission · mcp__coding-tools__exec_command · input ${JSON.stringify({ cmd: "echo ok\r\ngit push --force" })}`), true);
-  assert.equal(blockedRequest(JSON.stringify({ cmd: "echo ok\tgit push" })), true);
+  assert.equal(blockedRequest(JSON.stringify({ cmd: "echo ok\tgit push" })), false, "echo's arguments are not a publication action");
   // A workspace approval for a write names its path as a JSON string: the quote hid ".env".
   assert.equal(blockedRequest(JSON.stringify({ path: ".env", content: "TOKEN=x" })), true);
   assert.equal(blockedRequest(JSON.stringify({ cmd: "npm test\ngit status" })), false);

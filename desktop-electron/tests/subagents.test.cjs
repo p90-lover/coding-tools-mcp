@@ -250,6 +250,30 @@ test("requests a subagent raises are answered for it, except what the safety rul
   } finally { w.cleanup(); }
 });
 
+test("unreviewed subagent publications are denied while quoted diagnostics remain harmless", async () => {
+  const w = world();
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "implementer", task: "x" }));
+    const decisions = [{ id: "allow", kind: "allow_once" }, { id: "deny", kind: "reject_once" }];
+    const commands = ["git push", "git push origin feat/fix", 'bash -lc "git push origin main"', "\\git push origin feat/fix",
+      "time git push origin main", "nice -n 10 git push origin main", "custom-runner -- git push origin main",
+      'rg --pre "git push origin main" needle file'];
+    w.sessions.set(id, { turnState: "running", approvals: [
+      ...commands.map((command, index) => ({ approval_id: "push-" + index, kind: "command", tool: "Bash", command, decisions })),
+      { approval_id: "json", kind: "permission", tool: "mcp__coding-tools__run_command",
+        toolInput: JSON.stringify({ cmd: "git push origin feat/fix" }), decisions },
+      { approval_id: "echo", kind: "command", tool: "Bash", command: 'echo "git push origin main"', decisions },
+      { approval_id: "query", kind: "permission", tool: "mcp__coding-tools__run_command",
+        toolInput: JSON.stringify({ cmd: 'rg "why git push origin main is denied" docs' }), decisions },
+    ] });
+    parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.deepEqual(w.resolved, [
+      ...commands.map((_command, index) => [id, "push-" + index, "deny"]),
+      [id, "json", "deny"], [id, "echo", "allow"], [id, "query", "allow"],
+    ]);
+  } finally { w.cleanup(); }
+});
+
 test("limits: running at once, per chat, and the time limit", async () => {
   let clock = 1_000_000;
   const w = world({ settings: { maxConcurrent: 2, maxPerChat: 1, timeoutMinutes: 5 }, now: () => clock });

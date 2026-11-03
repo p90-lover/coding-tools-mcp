@@ -32,6 +32,8 @@ const BACKEND_MODULES = Object.freeze([
   "agent-orchestrator-upstream.cjs",
   "agent-orchestrator-workflow.cjs",
   "agent-orchestrator-workspace.cjs",
+  // Publication review reads verified repository destinations from the same backend bundle.
+  "git-remote.cjs",
   "chat-goals.cjs",
   "chat-wakeups.cjs",
   "chat-loops.cjs",
