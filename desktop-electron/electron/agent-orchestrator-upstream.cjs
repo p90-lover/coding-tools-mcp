@@ -14,6 +14,7 @@ const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
 const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
 const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { withAgentShellCommands, utf8Suffix, CONVERSATION_LIMITS: AGENT_SHELL_CONVERSATION_LIMITS } = require("./chat-agent-shell.cjs");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
@@ -1158,6 +1159,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let contextReadings = null;
   let readingsSaved = "";
   let readingsTimer = null;
+  let readingsWrite = Promise.resolve();
   const readingsFile = () => path.join(dataRoot, "coding-tools-context-readings.json");
   const readings = () => {
     if (contextReadings) return contextReadings;
@@ -1171,15 +1173,22 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     readingsSaved = JSON.stringify(saved);
     return contextReadings;
   };
+  const persistReadings = () => {
+    readingsWrite = readingsWrite.then(async () => {
+      if (!contextReadings) return;
+      // Snapshot when this queued write starts, so a slow write coalesces later polls.
+      const next = JSON.stringify([...contextReadings]);
+      if (next === readingsSaved) return;
+      await writePrivateFileAtomicAsync(readingsFile(), next, { protectDirectory: false });
+      readingsSaved = next;
+    }).catch(() => undefined); // A later poll retries a failed snapshot; no autonomous retry loop.
+    return readingsWrite;
+  };
   const saveReadings = () => {
     if (readingsTimer) return;
     readingsTimer = setTimeout(() => {
       readingsTimer = null;
-      const next = JSON.stringify([...readings()]);
-      if (next === readingsSaved) return;
-      readingsSaved = next;
-      fs.promises.mkdir(dataRoot, { recursive: true, mode: 0o700 })
-        .then(() => fs.promises.writeFile(readingsFile(), next, { mode: 0o600 })).catch(() => undefined);
+      void persistReadings();
     }, 5_000);
     readingsTimer.unref?.();
   };
@@ -2015,12 +2024,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function stop() {
     if (stopping) return stopping;
     lifecycleGeneration += 1;
+    if (readingsTimer) { clearTimeout(readingsTimer); readingsTimer = null; }
+    const pendingReadings = persistReadings();
     hide();
     state = "stopping";
     stopping = (async () => {
       try {
         // Startup owns its pending resources until it observes cancellation.
         await starting?.catch(() => {});
+        await pendingReadings;
         await cleanup();
         state = "stopped"; error = null;
         return snapshot();
@@ -2431,10 +2443,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "chat_context") {
       const ids = Array.isArray(args.sessionIds) ? [...new Set(args.sessionIds.filter((id) => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id)))].slice(0, 8) : [];
       if (state !== "ready" || !ids.length) return { ok: true, sessions: {} };
+      const generation = lifecycleGeneration;
       const number = (value) => (Number.isFinite(value) ? value : null);
       const sessions = {};
       await Promise.all(ids.map(async (id) => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?limit=1`).catch(() => null);
+        if (generation !== lifecycleGeneration || state !== "ready") return;
         if (!conversation || typeof conversation !== "object") return;
         const reported = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
         const compactedAt = typeof conversation.compactedAt === "string" ? conversation.compactedAt : null;
