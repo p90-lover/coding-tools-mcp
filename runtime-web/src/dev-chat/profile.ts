@@ -50,7 +50,7 @@ export function resolveDevProfilePaths({
   const productionHome = resolve(expandUserPath(
     environment.CODING_TOOLS_HOME?.trim() || join(homeDirectory, ".coding-tools"),
   ));
-  if (home === productionHome) {
+  if (process.platform === "win32" ? home.toLowerCase() === productionHome.toLowerCase() : home === productionHome) {
     throw new Error("DEV profile home must differ from the production Coding Tools home");
   }
   const launcherUserData = join(home, "launcher");
