@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 const { ExtraTunnels, aliasOf, parseInventory } = require("../electron/extra-tunnels.cjs");
 const { RuntimeSupervisor } = require("../electron/runtime-supervisor.cjs");
@@ -67,6 +68,101 @@ function setup(options = {}) {
   });
   return { coreHome, config, client, tunnels, changes };
 }
+
+/** The actual class, with an in-memory disk and one key write held at its await boundary. */
+function pendingAdd({ connectFails = false, unreadableAfterWriteFailure = false } = {}) {
+  const coreHome = path.join(__dirname, "../aiTemp/extra-tunnels-memory-only");
+  const registry = path.join(coreHome, "tunnel/extra-tunnels.json");
+  const binaryPath = path.join(coreHome, "bin/tunnel-client.exe");
+  const first = { id: "11111111", label: "Existing", tunnelId: SECOND_ID, accountId: "acct-existing" };
+  const keyFile = path.join(coreHome, "secrets/tunnel-runtime-extra-22222222.key");
+  const files = new Map([[registry, JSON.stringify({ version: 1, tunnels: [first] })], [binaryPath, ""],
+    [path.join(coreHome, "secrets/tunnel-runtime-extra-11111111.key"), "existing-fake-key"]]);
+  let registryWrites = 0;
+  let releaseKey, keyStarted;
+  const held = new Promise(resolve => { releaseKey = resolve; });
+  const reached = new Promise(resolve => { keyStarted = resolve; });
+  const fakeFs = {
+    existsSync: file => files.has(file),
+    readFileSync(file) {
+      if (file === registry && unreadableAfterWriteFailure && registryWrites) throw Object.assign(new Error("fixture registry read denied"), { code: "EACCES" });
+      if (!files.has(file)) throw Object.assign(new Error("missing fixture file"), { code: "ENOENT" });
+      return files.get(file);
+    },
+    rmSync: file => files.delete(file),
+  };
+  const modules = {
+    "node:fs": fakeFs, "node:path": path,
+    "node:crypto": { randomBytes: () => Buffer.from("22222222", "hex") },
+    "./atomic-file.cjs": { async writePrivateFileAtomicAsync(file, content) {
+      if (file === keyFile) { keyStarted(); await held; }
+      if (file === registry && ++registryWrites === 1 && unreadableAfterWriteFailure) {
+        throw Object.assign(new Error("fixture registry write denied"), { code: "EACCES" });
+      }
+      files.set(file, content);
+    } },
+  };
+  const loaded = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/extra-tunnels.cjs"), "utf8"), {
+    module: loaded, Buffer, URL, Error,
+    require(name) { assert.ok(Object.hasOwn(modules, name), `unexpected fixture dependency ${name}`); return modules[name]; },
+    setTimeout() { throw new Error("unexpected fixture polling wait"); },
+  });
+  const client = fakeClient({ connectFails });
+  client.runtimes.set(aliasOf(first.id), "ready");
+  const tunnels = new loaded.exports.ExtraTunnels({ coreHome, runTunnel: client.runTunnel,
+    connectArgs: (_config, tunnel) => ["runtimes", "connect", "--alias", tunnel.alias], absent: output => /not found/.test(output), timing: FAST });
+  tunnels.config = { mode: "full", tunnel: { binaryPath, tunnelId: MAIN_ID, profileDir: "fixture-profile" } };
+  return { tunnels, first, files, keyFile, reached, releaseKey, disk: () => JSON.parse(files.get(registry)).tunnels, registryWrites: () => registryWrites };
+}
+
+for (const change of ["connector", "account unassignment"]) {
+  for (const phase of ["before add", "during key write", "during failed add"]) {
+    test(`add preserves current entries: ${change} ${phase}`, async () => {
+      const fixture = pendingAdd({ connectFails: phase === "during failed add" });
+      const { tunnels, first } = fixture;
+      const binding = { userId: "user-fixture", workspaceId: "11111111-1111-1111-1111-111111111111", tunnelId: first.tunnelId };
+      const edit = async () => {
+        if (change === "connector") await tunnels.setConnector(first.id, "/plugins/updated", binding);
+        else { assert.equal(tunnels.forgetAccount(first.accountId), 1); await tunnels.written(); }
+      };
+      if (phase === "before add") await edit();
+      const adding = tunnels.add({ label: "New", tunnelId: THIRD_ID, runtimeKey: "fake-key", accountId: "acct-new" });
+      await fixture.reached;
+      if (phase !== "before add") await edit();
+      const expected = JSON.parse(JSON.stringify(tunnels.entries().find(entry => entry.id === first.id)));
+      fixture.releaseKey();
+      if (phase === "during failed add") await assert.rejects(adding, /did not connect, so it was not added/);
+      else assert.equal((await adding).state, "ready");
+      await tunnels.written();
+      const current = JSON.parse(JSON.stringify(tunnels.entries()));
+      assert.deepEqual(current.find(entry => entry.id === first.id), expected, "the existing entry keeps the edit in memory");
+      assert.deepEqual(fixture.disk().find(entry => entry.id === first.id), expected, "the same edit is durable");
+      assert.equal(current.length, phase === "during failed add" ? 1 : 2);
+      assert.equal(fixture.files.has(fixture.keyFile), phase !== "during failed add", "failed additions remove only their new key");
+      tunnels.detach();
+      assert.equal(tunnels.monitorTimer, null);
+    });
+  }
+}
+
+test("add refuses an unknown registry after a concurrent write failure and removes only its new key", async () => {
+  const fixture = pendingAdd({ unreadableAfterWriteFailure: true });
+  const { tunnels, first } = fixture;
+  const originalFiles = [...fixture.files];
+  const adding = tunnels.add({ label: "New", tunnelId: THIRD_ID, runtimeKey: "fake-key", accountId: "acct-new" });
+  await fixture.reached;
+  await assert.rejects(tunnels.setConnector(first.id, "/plugins/updated"), /fixture registry write denied/);
+  await tunnels.written();
+  assert.equal(tunnels.saved, null, "the actual failed writeEntries catch invalidates the cache");
+  fixture.releaseKey();
+  await assert.rejects(adding, /Could not read the extra tunnel registry/);
+  assert.equal(tunnels.saved, null, "a denied read is still unknown, not a known empty registry");
+  assert.equal(fixture.registryWrites(), 1, "add never attempts a registry write with unknown entries");
+  assert.deepEqual([...fixture.files], originalFiles, "durable entries and existing keys stay intact; only the new key is removed");
+  assert.equal(tunnels.runtime.has("22222222"), false, "the new tunnel never starts");
+  tunnels.detach();
+});
 
 test("parseInventory maps aliases to state and pid", () => {
   const inventory = parseInventory(JSON.stringify({ entries: [{ alias: "x", runtime_state: "ready", live_runtime: { status: { pid: 7 } } }] }));
