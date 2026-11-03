@@ -3,6 +3,7 @@
 const { execFile, spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
+const net = require("node:net");
 const { PassThrough, Writable } = require("node:stream");
 const { Worker } = require("node:worker_threads");
 
@@ -536,4 +537,120 @@ function resetWatchWorker() {
   watchWorkerBroken = false;
 }
 
-module.exports = { runOffThread, warmProgram, spawnOffThread, resetSpawnWorker, watchOffThread, resetWatchWorker };
+/*
+ * TCP reachability probes. libuv closes a socket on Windows with a synchronous closesocket(), and
+ * closing one whose connect has not finished waits for whatever holds that connect. On 2026-11-03,
+ * a minute after Bitdefender's Virus Shield service crashed and restarted (10:31-10:32), the MCP
+ * events monitor's 30 s probe of the proxy port held the main process 76 s, 122 s and 89 s (0.2 s
+ * of CPU each), every time inside such a close: twice in the one Node makes when the first of the
+ * proxy's two addresses has not answered in 250 ms (happy eyeballs), once in the probe's own close
+ * at its 3 s timeout. The same close takes 0.1 ms otherwise. probeTcpOffThread connects and closes
+ * in a worker and answers here by its deadline even when the worker is held; where no worker can
+ * start, it probes here.
+ */
+const PROBE_ANSWER_GRACE_MS = 1_000;
+
+// A hostname with several addresses fails with an AggregateError whose message is empty; report the
+// per-address codes (for example "EACCES 1.2.3.4") so a blocked or refused proxy is diagnosable from
+// the Proxy page's test.
+function connectErrorText(error) {
+  if (!(error instanceof Error)) return String(error);
+  const attempts = Array.isArray(error.errors)
+    ? error.errors.map((item) => [item?.code, item?.address].filter(Boolean).join(" ")).filter(Boolean)
+    : [];
+  if (attempts.length) return `Connection failed: ${attempts.join(", ")}`;
+  return error.message || error.code || "Connection failed";
+}
+
+/**
+ * The one implementation, run in the worker (as its source) or here as the fallback. Calls `done`
+ * once with { ok: true, latencyMs } or { ok: false, code, message }.
+ */
+function probeTcp({ host, port, timeoutMs }, net, describe, done) {
+  const started = Date.now();
+  let settled = false;
+  let socket = null;
+  const finish = (reply) => {
+    if (settled) return;
+    settled = true;
+    socket?.destroy();
+    done(reply);
+  };
+  try {
+    socket = net.connect({ host, port });
+  } catch (error) {
+    finish({ ok: false, code: error?.code || "EINVAL", message: describe(error) });
+    return;
+  }
+  socket.setTimeout(timeoutMs, () => finish({ ok: false, code: "ETIMEDOUT", message: "Connection timed out" }));
+  socket.once("connect", () => finish({ ok: true, latencyMs: Date.now() - started }));
+  socket.once("error", (error) => finish({ ok: false, code: error?.code || error?.errors?.[0]?.code || "ECONNREFUSED", message: describe(error) }));
+}
+
+const PROBE_WORKER_SOURCE = `
+const { parentPort } = require("node:worker_threads");
+const net = require("node:net");
+const describe = ${connectErrorText.toString()};
+const probeTcp = ${probeTcp.toString()};
+parentPort.on("message", ({ id, request }) => {
+  // A request that waited behind a held close was already answered by the caller: skip its connect.
+  if (Date.now() >= request.deadline) return;
+  probeTcp(request, net, describe, (reply) => parentPort.postMessage({ id, reply }));
+});`;
+
+let probeWorker = null;
+let probeWorkerBroken = false;
+let probeCalls = 0;
+const probes = new Map();
+
+function probeHere(request) {
+  return new Promise((resolve) => probeTcp(request, net, connectErrorText, resolve));
+}
+
+function startProbeWorker(createWorker) {
+  const started = createWorker(PROBE_WORKER_SOURCE, { eval: true });
+  started.on("message", ({ id, reply }) => probes.get(id)?.settle(reply));
+  const stopped = () => {
+    if (probeWorker !== started) return;
+    probeWorker = null;
+    probeWorkerBroken = true;
+    // Whatever it had not answered is probed here.
+    for (const entry of probes.values()) probeHere(entry.request).then(entry.settle);
+  };
+  started.on("error", stopped);
+  started.on("exit", stopped);
+  // After the listeners, which ref it again: each probe's own deadline keeps the process up instead.
+  started.unref();
+  return started;
+}
+
+/**
+ * Connects to `host`:`port` from the probe worker and resolves { ok: true, latencyMs } or
+ * { ok: false, code, message } within `timeoutMs` and a second's grace; it never rejects.
+ */
+function probeTcpOffThread({ host, port, timeoutMs = 3_000 }, { createWorker = (source, options) => new Worker(source, options) } = {}) {
+  const request = { host, port, timeoutMs, deadline: Date.now() + timeoutMs };
+  if (probeWorkerBroken) return probeHere(request);
+  try {
+    probeWorker ??= startProbeWorker(createWorker);
+  } catch {
+    probeWorkerBroken = true;
+    return probeHere(request);
+  }
+  return new Promise((resolve) => {
+    const id = ++probeCalls;
+    // The worker answers by the deadline unless it is held itself, in the close of an earlier probe.
+    const timer = setTimeout(() => settle({ ok: false, code: "ETIMEDOUT", message: "Connection timed out" }), timeoutMs + PROBE_ANSWER_GRACE_MS);
+    const settle = (reply) => {
+      if (!probes.delete(id)) return;
+      clearTimeout(timer);
+      resolve(reply);
+    };
+    probes.set(id, { request, settle });
+    probeWorker.postMessage({ id, request });
+  });
+}
+
+module.exports = {
+  runOffThread, warmProgram, spawnOffThread, resetSpawnWorker, watchOffThread, resetWatchWorker, probeTcpOffThread, connectErrorText,
+};

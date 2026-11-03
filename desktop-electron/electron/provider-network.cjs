@@ -1,8 +1,8 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const net = require("node:net");
 const path = require("node:path");
 const { readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { connectErrorText: tcpErrorText, probeTcpOffThread } = require("./off-thread-run.cjs");
 const {
   CPA_LOGIN_ADAPTERS,
   inspectCpaAccount,
@@ -919,34 +919,11 @@ function proxyUrl(profile, credentials = null) {
   return parsed.toString();
 }
 
-// A hostname with several addresses fails with an AggregateError whose message is empty;
-// report the per-address codes (for example "EACCES 1.2.3.4") so a blocked or refused
-// proxy is diagnosable from the Network Proxy test.
-function tcpErrorText(error) {
-  if (!(error instanceof Error)) return String(error);
-  const attempts = Array.isArray(error.errors)
-    ? error.errors.map((item) => [item?.code, item?.address].filter(Boolean).join(" ")).filter(Boolean)
-    : [];
-  if (attempts.length) return `Connection failed: ${attempts.join(", ")}`;
-  return error.message || error.code || "Connection failed";
-}
-
-function testTcpEndpoint(profile, timeoutMs = 7_000) {
-  return new Promise((resolve) => {
-    const started = Date.now();
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(result);
-    };
-    const socket = net.connect({ host: profile.endpoint.host, port: profile.endpoint.port });
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish({ reachable: true, latencyMs: Date.now() - started }));
-    socket.once("timeout", () => finish({ reachable: false, error: "Connection timed out" }));
-    socket.once("error", (error) => finish({ reachable: false, error: tcpErrorText(error) }));
-  });
+// From a worker: on the main process, closing a connect that a network filter held froze every
+// window (off-thread-run.cjs).
+async function testTcpEndpoint(profile, timeoutMs = 7_000) {
+  const result = await probeTcpOffThread({ host: profile.endpoint.host, port: profile.endpoint.port, timeoutMs });
+  return result.ok ? { reachable: true, latencyMs: result.latencyMs } : { reachable: false, error: result.message };
 }
 
 
