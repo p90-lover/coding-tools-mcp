@@ -239,8 +239,8 @@ function createBackendBundles({
    */
   function watchIncoming(onInstalled) {
     if (incomingTimer) return;
-    incomingTimer = setInterval(async () => {
-      if (applying) return;
+    const timer = incomingTimer = setInterval(async () => {
+      if (incomingTimer !== timer || applying) return;
       // Listed asynchronously: this runs every few seconds while the app is open, and a synchronous
       // listing held the main process (every window) for as long as the app's disk took to answer,
       // up to seconds on a busy hard disk. `applying` also keeps a slow listing from overlapping
@@ -249,13 +249,15 @@ function createBackendBundles({
       let ready;
       try {
         const folders = (await fs.promises.readdir(incomingRoot, { withFileTypes: true })).filter((entry) => entry.isDirectory());
+        if (incomingTimer !== timer) { applying = false; return; }
         const marked = await Promise.all(folders.map((entry) =>
           fs.promises.access(path.join(incomingRoot, entry.name, READY_MARKER)).then(() => true, () => false)));
         ready = folders.filter((_, index) => marked[index]);
       } catch {
         ready = [];
       }
-      if (!ready.length) { applying = false; return; }
+      // Stop/restart invalidates pending discovery; an accepted install below still finishes.
+      if (incomingTimer !== timer || !ready.length) { applying = false; return; }
       const source = path.join(incomingRoot, ready[0].name);
       try {
         const manifest = install(source);
