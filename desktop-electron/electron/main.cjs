@@ -118,6 +118,7 @@ const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
 const { createMainStallMonitor, createMainStallProbe } = require("./main-stall-monitor.cjs");
 const { createDiskHealthMonitor } = require("./disk-health.cjs");
 const { createMemoryWatch } = require("./memory-watch.cjs");
+const { createRuntimeStartupRetry } = require("./runtime-startup-retry.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
   UPDATE_SETTINGS,
@@ -257,6 +258,8 @@ let rtkService = null;
 const QUIT_EXIT_GRACE_MS = 10_000;
 let codexBridgeConnectInFlight = null;
 let runtimeStartupInFlight = null;
+// Launch's runtime start, run once more when its upgrade failed and ChatGPT is signed in (production only).
+let runtimeStartupRetry = null;
 let smokePassedThisSession = false;
 let cdpPort = 0;
 let lastOperation = null;
@@ -998,6 +1001,159 @@ function scheduleCodexBridgeAutoConnect({ logger, stateStore, reason }) {
     const message = error instanceof Error ? error.message : String(error);
     logger.warn("bridge.auto_connect_failed", { reason, message });
     publishOperation({ name: "bridge-connect", status: "failed", message });
+  });
+}
+
+/**
+ * The production runtime start: the release upgrade, the bridge, and Codex's route to it, with the
+ * setup state each outcome leaves. `startupAuthenticationRefresh` settles with the browser's state
+ * (at launch, once the saved-session refresh is done). Launch runs it; runtime-startup-retry.cjs
+ * runs it once more when the upgrade failed and ChatGPT is signed in. A failure ends in the setup
+ * state and a failed "runtime-start" operation, not in a rejection.
+ */
+function startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh }) {
+  return (async () => {
+    // A runtime upgrade probes the ChatGPT browser, so it waits for the saved-session refresh to settle.
+    // Otherwise a slow sign-in or proxy must not hold the Codex bridge down: start it after a bounded wait.
+    if (runtimeHost.managedRuntimeUpgradeRequired()) await startupAuthenticationRefresh;
+    else await Promise.race([startupAuthenticationRefresh, delay(STARTUP_AUTH_WAIT_MS)]);
+    // The upgrade refuses to run while any operation is active, even when none is needed (seen
+    // live: a sign-in's route check made every such launch fail until the watchdog restarted it).
+    const upgrade = await whenRuntimeHostIdle(logger, "upgrade", () => runtimeHost.upgradeManagedRuntime());
+    if (upgrade.updated) {
+      const state = stateStore.update({
+        coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
+        experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
+        zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
+        ...(upgrade.mode === "full" ? {
+          mcpRuntimeInstalled: true,
+          mcpSetupComplete: false,
+          mcpGuideStep: 2,
+        } : {
+          mcpRuntimeInstalled: false,
+          mcpSetupComplete: false,
+          mcpGuideStep: 0,
+        }),
+      });
+      send("launcher:state-changed", state);
+      logger.info("runtime.release_upgraded", {
+        fromVersion: upgrade.fromVersion,
+        toVersion: upgrade.toVersion,
+        mode: upgrade.mode,
+        connectorMigrated: upgrade.connectorMigrated,
+      });
+    }
+    const configuredRuntime = runtimeHost.runtimeConfigSnapshot();
+    if (configuredRuntime.configured) {
+      const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
+      const useSavedChats = configuredRuntime.config?.useSavedChats !== false;
+      const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
+      const saved = stateStore.read();
+      if (saved.experimentalBiggerContext !== enabled
+        || saved.useSavedChats !== useSavedChats
+        || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
+        const state = stateStore.update({ experimentalBiggerContext: enabled, useSavedChats, zeroRiskProEnabled });
+        send("launcher:state-changed", state);
+      }
+    }
+    // "Use Coding Tools in Codex" off: take a leftover route off at every start. This needs neither
+    // the bridge nor ChatGPT, and the connect below waits for both (seen live: deferred until
+    // ChatGPT was ready, so a route an older build had left stayed in Codex's config).
+    if (stateStore.read().codexRoute === false) {
+      await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
+    }
+    // That route check (or a sign-in's) may still be finishing; see whenRuntimeHostIdle.
+    const runtime = await whenRuntimeHostIdle(logger, "start", () => runtimeSupervisor.startIfConfigured());
+    // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
+    if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;
+    const browser = await startupAuthenticationRefresh;
+    if (stateStore.read().browserInteractionMode === "automatic" && browser?.authenticated !== true) {
+      logger.warn("bridge.connect_deferred_until_chatgpt_ready");
+      return { ...runtime, bridgeDeferred: true };
+    }
+    const connected = await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
+    return { ...runtime, bridgeRouteChanged: connected.changed === true, bridgeConnected: connected.connected === true };
+  })().then(async (runtime) => {
+    if (runtime.bridgeDeferred) {
+      const config = runtimeSupervisor.readConfig();
+      const current = stateStore.read();
+      const patch = {
+        coreSetupComplete: true,
+        codexCatalogVerified: false,
+        codexRestartRequired: true,
+        mcpRuntimeInstalled: config.mode === "full",
+        experimentalBiggerContext: config.experimentalBiggerContext === true,
+        useSavedChats: config.useSavedChats !== false,
+        zeroRiskProEnabled: config.zeroRiskProEnabled === true,
+        ...(config.mode === "browser-only" ? { mcpSetupComplete: false, mcpGuideStep: 0 } : {}),
+      };
+      if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
+        const state = stateStore.update(patch);
+        send("launcher:state-changed", state);
+      }
+      return;
+    }
+    if (runtime.status === "ready" || runtime.status === "degraded") {
+      if (!runtime.bridgeConnected) {
+        applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: runtime.bridgeRouteChanged === true });
+      }
+      return;
+    }
+    if (runtime.status === "not-configured") {
+      const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
+      const current = stateStore.read();
+      if (current.coreSetupComplete || current.mcpRuntimeInstalled || current.mcpSetupComplete) {
+        const state = stateStore.update({
+          coreSetupComplete: false,
+          codexCatalogVerified: false,
+          mcpRuntimeInstalled: false,
+          mcpSetupComplete: false,
+          mcpGuideStep: 0,
+        });
+        send("launcher:state-changed", state);
+      }
+      if (routeRecovery.error) {
+        publishOperation({
+          name: "runtime-start",
+          status: "failed",
+          message: `Local runtime is not configured; restoring the previous Codex route also failed: ${routeRecovery.error}`,
+        });
+      }
+      return;
+    }
+    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
+    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
+    send("launcher:state-changed", state);
+    if (runtime.status === "external" || runtime.status === "needs-setup") {
+      const detail = runtime.detail || (
+        runtime.status === "external"
+          ? "Another process owns the configured Coding Tools runtime"
+          : "The installed runtime configuration must be repaired from Setup"
+      );
+      publishOperation({
+        name: "runtime-start",
+        status: "failed",
+        message: routeRecovery.error
+          ? `${detail}; restoring the previous Codex route also failed: ${routeRecovery.error}`
+          : routeRecovery.restored
+            ? `${detail}; the previous Codex route was restored, restart Codex once`
+            : detail,
+      });
+    }
+  }).catch(async (error) => {
+    const primary = error instanceof Error ? error.message : String(error);
+    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
+    const message = routeRecovery.error
+      ? `${primary}; restoring the previous Codex route also failed: ${routeRecovery.error}`
+      : routeRecovery.restored
+        ? `${primary}; the previous Codex route was restored, restart Codex once`
+        : primary;
+    logger.error("runtime.startup_failed", { message });
+    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
+    send("launcher:state-changed", state);
+    publishOperation({ name: "runtime-start", status: "failed", message });
   });
 }
 
@@ -5010,6 +5166,8 @@ async function start() {
         const authenticated = state.authenticated === true;
         const wasAuthenticated = lastPublishedBrowserAuth.partition === host.partition && lastPublishedBrowserAuth.authenticated;
         if (authenticated && !wasAuthenticated) {
+          // A runtime upgrade that failed at launch because ChatGPT was not ready runs again now.
+          runtimeStartupRetry?.browserSignedIn();
           if (stateStore.read().codexRestartRequired === true) {
             queueMicrotask(() => scheduleCodexBridgeAutoConnect({
               logger, stateStore, reason: "browser-authenticated",
@@ -5160,149 +5318,25 @@ async function start() {
         send("launcher:state-changed", failed);
       });
     }
-  } else runtimeStartupInFlight = (async () => {
-    // A runtime upgrade probes the ChatGPT browser, so it waits for the saved-session refresh to settle.
-    // Otherwise a slow sign-in or proxy must not hold the Codex bridge down: start it after a bounded wait.
-    if (runtimeHost.managedRuntimeUpgradeRequired()) await startupAuthenticationRefresh;
-    else await Promise.race([startupAuthenticationRefresh, delay(STARTUP_AUTH_WAIT_MS)]);
-    // The upgrade refuses to run while any operation is active, even when none is needed (seen
-    // live: a sign-in's route check made every such launch fail until the watchdog restarted it).
-    const upgrade = await whenRuntimeHostIdle(logger, "upgrade", () => runtimeHost.upgradeManagedRuntime());
-    if (upgrade.updated) {
-      const state = stateStore.update({
-        coreSetupComplete: true,
-        codexCatalogVerified: false,
-        codexRestartRequired: true,
-        experimentalBiggerContext: runtimeHost.runtimeConfigSnapshot().config?.experimentalBiggerContext === true,
-        zeroRiskProEnabled: runtimeHost.runtimeConfigSnapshot().config?.zeroRiskProEnabled === true,
-        ...(upgrade.mode === "full" ? {
-          mcpRuntimeInstalled: true,
-          mcpSetupComplete: false,
-          mcpGuideStep: 2,
-        } : {
-          mcpRuntimeInstalled: false,
-          mcpSetupComplete: false,
-          mcpGuideStep: 0,
-        }),
-      });
-      send("launcher:state-changed", state);
-      logger.info("runtime.release_upgraded", {
-        fromVersion: upgrade.fromVersion,
-        toVersion: upgrade.toVersion,
-        mode: upgrade.mode,
-        connectorMigrated: upgrade.connectorMigrated,
-      });
-    }
-    const configuredRuntime = runtimeHost.runtimeConfigSnapshot();
-    if (configuredRuntime.configured) {
-      const enabled = configuredRuntime.config?.experimentalBiggerContext === true;
-      const useSavedChats = configuredRuntime.config?.useSavedChats !== false;
-      const zeroRiskProEnabled = configuredRuntime.config?.zeroRiskProEnabled === true;
-      const saved = stateStore.read();
-      if (saved.experimentalBiggerContext !== enabled
-        || saved.useSavedChats !== useSavedChats
-        || saved.zeroRiskProEnabled !== zeroRiskProEnabled) {
-        const state = stateStore.update({ experimentalBiggerContext: enabled, useSavedChats, zeroRiskProEnabled });
-        send("launcher:state-changed", state);
-      }
-    }
-    // "Use Coding Tools in Codex" off: take a leftover route off at every start. This needs neither
-    // the bridge nor ChatGPT, and the connect below waits for both (seen live: deferred until
-    // ChatGPT was ready, so a route an older build had left stayed in Codex's config).
-    if (stateStore.read().codexRoute === false) {
-      await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
-    }
-    // That route check (or a sign-in's) may still be finishing; see whenRuntimeHostIdle.
-    const runtime = await whenRuntimeHostIdle(logger, "start", () => runtimeSupervisor.startIfConfigured());
-    // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
-    if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;
-    const browser = await startupAuthenticationRefresh;
-    if (stateStore.read().browserInteractionMode === "automatic" && browser?.authenticated !== true) {
-      logger.warn("bridge.connect_deferred_until_chatgpt_ready");
-      return { ...runtime, bridgeDeferred: true };
-    }
-    const connected = await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
-    return { ...runtime, bridgeRouteChanged: connected.changed === true, bridgeConnected: connected.connected === true };
-  })().then(async (runtime) => {
-    if (runtime.bridgeDeferred) {
-      const config = runtimeSupervisor.readConfig();
-      const current = stateStore.read();
-      const patch = {
-        coreSetupComplete: true,
-        codexCatalogVerified: false,
-        codexRestartRequired: true,
-        mcpRuntimeInstalled: config.mode === "full",
-        experimentalBiggerContext: config.experimentalBiggerContext === true,
-        useSavedChats: config.useSavedChats !== false,
-        zeroRiskProEnabled: config.zeroRiskProEnabled === true,
-        ...(config.mode === "browser-only" ? { mcpSetupComplete: false, mcpGuideStep: 0 } : {}),
-      };
-      if (Object.entries(patch).some(([key, value]) => current[key] !== value)) {
-        const state = stateStore.update(patch);
-        send("launcher:state-changed", state);
-      }
-      return;
-    }
-    if (runtime.status === "ready" || runtime.status === "degraded") {
-      if (!runtime.bridgeConnected) {
-        applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: runtime.bridgeRouteChanged === true });
-      }
-      return;
-    }
-    if (runtime.status === "not-configured") {
-      const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-      const current = stateStore.read();
-      if (current.coreSetupComplete || current.mcpRuntimeInstalled || current.mcpSetupComplete) {
-        const state = stateStore.update({
-          coreSetupComplete: false,
-          codexCatalogVerified: false,
-          mcpRuntimeInstalled: false,
-          mcpSetupComplete: false,
-          mcpGuideStep: 0,
+  } else {
+    runtimeStartupRetry = createRuntimeStartupRetry({
+      logger,
+      upgradePending: () => runtimeHost.managedRuntimeUpgradeRequired(),
+      signedIn: () => browserHost?.snapshot()?.authenticated === true,
+      // Never under a setup or bridge connect, a sign-in or other manual browser work, a ChatGPT
+      // turn or an account switch: the upgrade restarts the bridge and checks the browser's page.
+      busy: () => Boolean(quitting || shutdownInProgress || runtimeHost.currentOperation() || codexBridgeConnectInFlight
+        || browserHost?.currentOperation() || browserHost?.activeTraceId || browserAccountsStatus().switching),
+      run: () => {
+        runtimeStartupInFlight = startManagedRuntime({
+          logger, stateStore, startupAuthenticationRefresh: Promise.resolve(browserHost.snapshot()),
         });
-        send("launcher:state-changed", state);
-      }
-      if (routeRecovery.error) {
-        publishOperation({
-          name: "runtime-start",
-          status: "failed",
-          message: `Local runtime is not configured; restoring the previous Codex route also failed: ${routeRecovery.error}`,
-        });
-      }
-      return;
-    }
-    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
-    send("launcher:state-changed", state);
-    if (runtime.status === "external" || runtime.status === "needs-setup") {
-      const detail = runtime.detail || (
-        runtime.status === "external"
-          ? "Another process owns the configured Coding Tools runtime"
-          : "The installed runtime configuration must be repaired from Setup"
-      );
-      publishOperation({
-        name: "runtime-start",
-        status: "failed",
-        message: routeRecovery.error
-          ? `${detail}; restoring the previous Codex route also failed: ${routeRecovery.error}`
-          : routeRecovery.restored
-            ? `${detail}; the previous Codex route was restored, restart Codex once`
-            : detail,
-      });
-    }
-  }).catch(async (error) => {
-    const primary = error instanceof Error ? error.message : String(error);
-    const routeRecovery = await restoreCodexRouteAfterRuntimeFailure({ logger, stateStore });
-    const message = routeRecovery.error
-      ? `${primary}; restoring the previous Codex route also failed: ${routeRecovery.error}`
-      : routeRecovery.restored
-        ? `${primary}; the previous Codex route was restored, restart Codex once`
-        : primary;
-    logger.error("runtime.startup_failed", { message });
-    const state = stateStore.update({ coreSetupComplete: false, codexCatalogVerified: false });
-    send("launcher:state-changed", state);
-    publishOperation({ name: "runtime-start", status: "failed", message });
-  });
+        return runtimeStartupInFlight;
+      },
+    });
+    runtimeStartupInFlight = startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh })
+      .then(() => runtimeStartupRetry.startupSettled());
+  }
   // From launch on, keep the bridge and MCP tunnel alive while the app is open; the supervisor
   // coalesces a watchdog start with any launch-time start that is still in flight.
   startBridgeWatchdog(logger, stateStore);
