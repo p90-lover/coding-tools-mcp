@@ -225,9 +225,9 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
         setConnectionSummary(null);
         let connected = 0, skipped = 0;
         for (const account of targets) {
-          const signedIn = signedInOf(account);
+          const signedIn = accountSignedIn(account, accounts?.activeId ?? "", browser?.authenticated) === true;
           const access = mcpAccountAccess(account, (accounts?.accounts ?? []).map(entry => ({ ...entry,
-            signedIn: signedInOf(entry) })));
+            signedIn: accountSignedIn(entry, accounts?.activeId ?? "", browser?.authenticated) === true })));
           if (!signedIn || !access.allowed) { skipped += 1; continue; }
           setConnections(previous => ({ ...previous, [account.id]: { state: "connecting", detail: "Setting up and checking this account's connector", checkedAt: Date.now(), email: account.email } }));
           try {
@@ -507,9 +507,10 @@ function AccountCard({
   const observedAt = Math.max(account.connector?.okAt ?? 0, account.connector?.errorAt ?? 0);
   const connectionCheck = signedIn !== false && connection && connectionMatchesAccount(connection, account)
     && (connection.state === "connecting" || connection.checkedAt >= observedAt) ? connection : undefined;
+  // Losing creation authority does not disconnect a previously confirmed connector.
   const connector = signedIn === false
     ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
-    : !mcpAccess.allowed && connectionCheck?.state !== "connected"
+    : !mcpAccess.allowed && connectionCheck?.state !== "connected" && !account.connector?.okAt
       ? { tone: "warn", label: "Owner required", detail: mcpAccess.detail }
       : connectionCheck
       ? { tone: connectionCheck.state === "connected" ? "ok" : connectionCheck.state === "failed" ? "error" : "idle",

@@ -251,6 +251,26 @@ test("losing creation authority does not relabel an already confirmed connection
   assert.equal(button(card, "Check connection").props.disabled, true, "creation/setup cannot borrow the old connection's authority");
 });
 
+test("a saved successful connection survives reopening the page without creation authority", () => {
+  const ui = fixture();
+  ui.accounts[1].connector = { okAt: Date.now() - 1000 };
+  ui.accounts[1].plan.workspaceRole = "standard-user";
+  const card = ui.card("second");
+  assert.match(text(card), /Previously connected/);
+  assert.doesNotMatch(text(card), /Owner required/);
+  assert.equal(button(card, "Connect MCP").props.disabled, true, "connection history does not authorize creation");
+  assert.deepEqual(ui.calls.connector, [], "the saved status requires no creation attempt");
+});
+
+test("bulk owner setup preserves a saved sign-in while the active page is idle", async () => {
+  const ui = fixture();
+  ui.props.browser.authenticated = false;
+  ui.props.browser.status = "idle";
+  button(ui.page(), "Connect all accounts").props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.connector, ["main", "second", "third"], "the idle active page does not erase its partition's verified sign-in");
+});
+
 test("bulk setup skips nonowners and unverified accounts without calling creation", async () => {
   const ui = fixture();
   ui.accounts[1].plan.workspaceRole = "account-admin";

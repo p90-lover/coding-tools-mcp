@@ -128,6 +128,16 @@ test('publication with unknown, alternate or multiple destinations waits rather 
   }
 });
 
+test('wrapped publication waits for a person instead of taking a model allow', async () => {
+  const world = publicationReviewWorld({ command: 'bash -lc "git push origin feat/fix"' });
+  try {
+    const shown = await world.review();
+    assert.deepEqual(world.resolved, []);
+    assert.deepEqual(world.prompts, [], 'the wrapper cannot prove which repository will publish');
+    assert.equal(shown.pending_approvals[0].recommendation.unresolved, true);
+  } finally { world.workflow.dispose(); }
+});
+
 test('publication verdict caching changes with observed destinations and default branches stay protected', async () => {
   const world = publicationReviewWorld();
   try {

@@ -15,6 +15,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { gitPushRequest } = require("./git-remote.cjs");
 
 const EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
 const PERMISSIONS = new Set(["auto", "full"]);
@@ -286,9 +287,12 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         let decision;
         if (approval.kind === "plan") {
           decision = decisions.find((item) => /acceptEdits/i.test(item.id)) ?? decisions.find((item) => item.kind === "allow_once");
-        } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(request)) {
+        } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(request)
+          || gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)) {
           // Too long to be sure of (AO's upstream cuts a tool's input at 1500 bytes and a command
           // at 4000, so the blocked part may sit past the cut): denied, as "Approve for me" does.
+          // This guard-only path has no repository/model verdict. Publication goes through the
+          // parent's full reviewer; inspect its raw fields, not the human-readable summary above.
           decision = decisions.find((item) => item.kind === "reject_once") ?? decisions.find((item) => item.kind === "reject_always");
           logger?.info?.("subagents.request_denied", { agent: run.agentId, tool: String(approval.tool ?? "").slice(0, 80) });
         } else {

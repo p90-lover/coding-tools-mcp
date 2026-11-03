@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   ExternalServiceConfigurationInput,
   ExternalServiceId,
@@ -128,6 +128,7 @@ export function ExternalServicesSurface({
   const [providers, setProviders] = useState<ProviderNetworkSnapshot>(EMPTY_PROVIDERS);
   const [selectedId, setSelectedId] = useState<ExternalServiceId>("cpa");
   const [draft, setDraft] = useState<ServiceDraft | null>(null);
+  const savedDraft = useRef<ServiceDraft | null>(null);
   const [managedCredential, setManagedCredential] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
@@ -152,7 +153,8 @@ export function ExternalServicesSurface({
     const current = serviceSnapshot.services.find((service) => service.id === "cpa");
     if (current) {
       setSelectedId(current.id);
-      setDraft(draftFrom(current));
+      savedDraft.current = draftFrom(current);
+      setDraft(savedDraft.current);
     }
   };
 
@@ -171,13 +173,20 @@ export function ExternalServicesSurface({
       const current = nextServices.services.find((service) => service.id === "cpa");
       if (current) {
         setSelectedId(current.id);
-        setDraft(draftFrom(current));
+        savedDraft.current = draftFrom(current);
+        setDraft(savedDraft.current);
       }
     }).catch((cause) => setError(messageOf(cause)));
     const unsubscribeServices = api.onExternalServicesChanged((next) => {
       setServices(next);
       const current = next.services.find((service) => service.id === "cpa");
-      if (current) setDraft(draftFrom(current));
+      if (current) {
+        const previous = savedDraft.current;
+        const nextDraft = draftFrom(current);
+        savedDraft.current = nextDraft;
+        // Status notifications update the saved baseline without discarding local edits.
+        setDraft((value) => !value || JSON.stringify(value) === JSON.stringify(previous) ? nextDraft : value);
+      }
     });
     const unsubscribeBootstrap = api.onManagedBootstrapChanged(setBootstrap);
     const unsubscribeProviders = api.onProviderNetworkChanged(setProviders);
@@ -191,7 +200,8 @@ export function ExternalServicesSurface({
 
   useEffect(() => {
     if (selected) {
-      setDraft(draftFrom(selected));
+      savedDraft.current = draftFrom(selected);
+      setDraft(savedDraft.current);
       setManagedCredential("");
       setNotice("");
     }
