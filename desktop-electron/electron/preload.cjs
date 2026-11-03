@@ -114,7 +114,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   chatGptDesktopStatus: () => ipcRenderer.invoke("launcher:chatgpt-desktop-status"),
   openChatGptDesktop: (slotId) => ipcRenderer.invoke("launcher:chatgpt-desktop-open", slotId),
   newChatGptDesktopSignIn: () => ipcRenderer.invoke("launcher:chatgpt-desktop-new-sign-in"),
-  clearChatGptDesktopAccount: () => ipcRenderer.invoke("launcher:chatgpt-desktop-clear"),
+  clearChatGptDesktopAccount: (expectedSlotId) => ipcRenderer.invoke("launcher:chatgpt-desktop-clear", expectedSlotId),
   stopChatGptDesktop: () => ipcRenderer.invoke("launcher:chatgpt-desktop-stop"),
   setChatGptDesktopSurfaceActive: (active) => ipcRenderer.invoke("launcher:chatgpt-desktop-surface-active", active === true),
   chatGptLocalPreview: () => ipcRenderer.invoke("launcher:chatgpt-desktop-local-preview"),
