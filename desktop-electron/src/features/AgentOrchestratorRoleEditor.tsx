@@ -280,7 +280,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   antigravity: "Antigravity", "gemini-cli": "Gemini CLI", gemini: "Gemini", google: "Google", vertex: "Vertex",
   codex: "Codex", openai: "OpenAI", claude: "Claude", anthropic: "Anthropic", "cline-pass": "Cline Pass", cline: "Cline",
   qwen: "Qwen", iflow: "iFlow", kimi: "Kimi", moonshot: "Moonshot", deepseek: "DeepSeek", xai: "xAI", grok: "Grok",
-  zhipu: "Zhipu", glm: "Zhipu", openrouter: "OpenRouter", commandcode: "CommandCode", "commandcode-go": "CommandCode Go",
+  zhipu: "Zhipu", glm: "Zhipu", openrouter: "OpenRouter", commandcode: "CommandCode", "commandcode-go": "CommandCode Go", "opencode-go": "OpenCode Go", stepfun: "StepFun",
 };
 const providerName = (provider: string) => PROVIDER_NAMES[provider.toLowerCase()] ?? provider;
 /** The CPA provider serving a "cpa/<id>" route model (as CPA reported it, else the id's own prefix); null for other models. */

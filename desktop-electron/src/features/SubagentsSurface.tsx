@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { JsonObject } from "../api/contracts";
 import { listAllWorkspaces, moduleCall, watchHarnesses } from "./AgentOrchestratorSurface";
-import { DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, workerRoute,
-  type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute } from "./AgentOrchestratorRoleEditor";
+import { AGENT_DEFAULT_MODEL, DEFAULT_WORKER_HARNESS, NATIVE_HARNESS, modelShortLabel, pickerModels, prettyModelName, rememberCpaProviders, workerRoute,
+  type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./subagents.css";
 
@@ -23,7 +23,53 @@ export function subagentRoute(route: AoRoute): SubagentRoute {
   for (const field of ROUTE_FIELDS) if (route[field as keyof AoRoute] !== undefined && route[field as keyof AoRoute] !== null) kept[field] = route[field as keyof AoRoute];
   return kept as SubagentRoute;
 }
-const pickerRoute = (route: SubagentRoute | null): AoRoute => ({ ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL), ...(route ?? {}) } as AoRoute);
+
+/**
+ * One model list for the whole page. A subagent's agent follows from its model: the list holds every
+ * model any AO agent runs, each once, with the agents that run it (Claude Code first, then Codex,
+ * then opencode). Claude Code alone left out Antigravity's Gemini and Claude models (Antigravity
+ * refuses Claude Code's requests), so with Claude Code as the page's agent Gemini 3.8 Flash was
+ * missing and the saved default showed "no longer listed".
+ */
+export type ModelChoice = { model: string; harnesses: string[]; capabilities: Record<string, AoModelCapabilities | undefined> };
+/** The agents a subagent runs on (subagents.cjs), in the order a model shared by several picks them. */
+const AGENT_ORDER = [DEFAULT_WORKER_HARNESS, "ao:codex", "ao:opencode"];
+const AGENT_NAMES: Record<string, string> = { [DEFAULT_WORKER_HARNESS]: "Claude Code", "ao:codex": "Codex", "ao:opencode": "opencode" };
+const agentRank = (harness: string) => { const at = AGENT_ORDER.indexOf(harness); return at < 0 ? AGENT_ORDER.length : at; };
+export function modelChoices(catalogs: ReadonlyArray<{ harness: string; catalog: AoModelCatalog }>): ModelChoice[] {
+  const byModel = new Map<string, ModelChoice>();
+  for (const { harness, catalog } of [...catalogs].sort((a, b) => agentRank(a.harness) - agentRank(b.harness))) {
+    for (const model of catalog.models) {
+      if (!model || model === AGENT_DEFAULT_MODEL) continue;
+      const choice = byModel.get(model) ?? { model, harnesses: [], capabilities: {} };
+      choice.harnesses.push(harness);
+      choice.capabilities[harness] = catalog.capabilities?.[model];
+      byModel.set(model, choice);
+    }
+  }
+  return [...byModel.values()];
+}
+/** The route a picked model runs on: the agent it is on when that one runs it, else the first that does. */
+export function routeForModel(model: string, choices: readonly ModelChoice[], current?: string): SubagentRoute | null {
+  const choice = choices.find(item => item.model === model);
+  if (!choice) return null;
+  const harness = current && choice.harnesses.includes(current) ? current : choice.harnesses[0];
+  return subagentRoute(workerRoute(harness, model));
+}
+/**
+ * A saved route its agent no longer runs, moved to an agent that does (Gemini saved on Claude Code
+ * goes to Codex, where it starts instead of failing at launch). Its effort stays only where the new
+ * agent offers it. A model no agent lists is left as saved.
+ */
+export function runnableRoute(route: SubagentRoute | null, choices: readonly ModelChoice[]): SubagentRoute | null {
+  if (!route) return route;
+  const choice = choices.find(item => item.model === route.model);
+  if (!choice || choice.harnesses.includes(route.harness_id)) return route;
+  const moved = routeForModel(route.model, choices)!;
+  const efforts = choice.capabilities[moved.harness_id]?.efforts;
+  return route.effort && efforts?.includes(route.effort) ? { ...moved, effort: route.effort } : moved;
+}
+
 /** A new subagent's id: from its name, unique among the others. */
 export function subagentId(name: string, taken: readonly string[]): string {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32) || "subagent";
@@ -57,14 +103,53 @@ function Switch({ checked, onChange, disabled = false, label }: { checked: boole
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`sa-switch${checked ? " is-on" : ""}`}
     disabled={disabled} onClick={() => onChange(!checked)}><span /></button>;
 }
-function Row({ label, body, children }: { label: string; body?: string; children: ReactNode }) {
-  return <div className="sa-row"><div className="sa-row-text"><strong>{label}</strong>{body ? <p>{body}</p> : null}</div><div className="sa-row-control">{children}</div></div>;
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="sa-row"><span className="sa-row-label">{label}</span><div className="sa-row-control">{children}</div></div>;
 }
 function NumberField({ value, min, max, label, unit, onChange }: { value: number; min: number; max: number; label: string; unit?: string; onChange: (value: number) => void }) {
   return <span className="sa-number"><input type="number" min={min} max={max} value={value} aria-label={label}
     onChange={event => onChange(Math.max(min, Math.min(max, Number(event.target.value) || min)))} />{unit ? <small>{unit}</small> : null}</span>;
 }
-const modelName = (route: SubagentRoute | null) => route ? route.model.replace(/^cpa\//, "").replace(/^cline-pass\//, "") : "";
+const modelName = (model: string) => model.startsWith("cpa/") ? modelShortLabel(model).name : prettyModelName(model);
+/**
+ * The list's groups: a CPA model by who serves it ("Gemini", "Claude", "DeepSeek"; "CPA" is all of
+ * them, so it goes), an agent's own model by that agent ("Codex"), so CPA's GPT-6 Luna and Codex's
+ * own no longer read as the same model twice.
+ */
+function modelGroups(choices: readonly ModelChoice[]): Array<[string, ModelChoice[]]> {
+  const groups = new Map<string, ModelChoice[]>();
+  for (const choice of choices) {
+    const group = choice.model.startsWith("cpa/") ? modelShortLabel(choice.model).group.replace(/ · CPA$/, "").replace(/^CPA$/, "") || "Other"
+      : AGENT_NAMES[choice.harnesses[0]] ?? choice.harnesses[0].replace(/^ao:/, "");
+    groups.set(group, [...groups.get(group) ?? [], choice]);
+  }
+  return [...groups.entries()];
+}
+
+/** A model, and its effort when that model offers one. `fallback` is the "Default" option a subagent can keep. */
+function ModelPicker({ label, route, choices, fallback, onChange }: {
+  label: string; route: SubagentRoute | null; choices: ModelChoice[] | null; fallback?: string; onChange: (route: SubagentRoute | null) => void;
+}) {
+  const groups = useMemo(() => modelGroups(choices ?? []), [choices]);
+  const listed = Boolean(route && choices?.some(choice => choice.model === route.model));
+  const efforts = route ? choices?.find(choice => choice.model === route.model)?.capabilities[route.harness_id]?.efforts ?? [] : [];
+  return <span className="sa-model">
+    <select className="sa-select" aria-label={label} value={route?.model ?? ""} disabled={choices === null}
+      onChange={event => onChange(event.target.value ? routeForModel(event.target.value, choices ?? [], route?.harness_id) : null)}>
+      {fallback !== undefined ? <option value="">{fallback}</option> : !route ? <option value="" disabled>Choose a model</option> : null}
+      {choices === null && route ? <option value={route.model}>{modelName(route.model)}</option> : null}
+      {choices !== null && route && !listed ? <option value={route.model}>{modelName(route.model)} (not available)</option> : null}
+      {groups.map(([group, items]) => <optgroup key={group} label={group}>
+        {items.map(choice => <option key={choice.model} value={choice.model}>{modelName(choice.model)}</option>)}
+      </optgroup>)}
+    </select>
+    {route && efforts.length ? <select className="sa-select is-effort" aria-label={`${label} effort`} value={route.effort ?? ""}
+      onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
+      <option value="">Default effort</option>
+      {efforts.map(effort => <option key={effort} value={effort}>{effort}</option>)}
+    </select> : null}
+  </span>;
+}
 
 export function SubagentsSurface({ active = true, setError }: { active?: boolean; setError: (error: string | null) => void }) {
   const [saved, setSaved] = useState<SubagentConfig | null>(null);
@@ -77,6 +162,7 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   const [runs, setRuns] = useState<SubagentRun[]>([]);
   const [openReport, setOpenReport] = useState<string | null>(null);
   const [harnesses, setHarnesses] = useState<AoHarness[]>([]);
+  const [choices, setChoices] = useState<ModelChoice[] | null>(null);
   const [workspaceId, setWorkspaceId] = useState(() => { try { return localStorage.getItem("coding-tools:ao:workspace") || ""; } catch { return ""; } });
 
   // The saved config the draft was last compared with; the page stays mounted between visits.
@@ -126,6 +212,35 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
     return models;
   }, [workspaceId]);
 
+  // The models of every installed agent a subagent runs on, merged into the page's one list. An
+  // agent a saved subagent is on stays in it, so that subagent's model still reads as listed.
+  const savedAgents = [draft?.settings.defaultRoute, ...draft?.agents.map(agent => agent.route) ?? []].flatMap(route => route ? [route.harness_id] : []);
+  const agentIds = harnesses.filter(item => item.runnable && (AGENT_ORDER.includes(item.id) || savedAgents.includes(item.id))).map(item => item.id).join(",");
+  useEffect(() => {
+    if (!active || !agentIds) return undefined;
+    let live = true;
+    void Promise.allSettled(agentIds.split(",").map(harness => pickerModels(harness, loadModels, true).then(catalog => ({ harness, catalog }))))
+      .then(results => {
+        if (!live) return;
+        const catalogs = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+        for (const { catalog } of catalogs) rememberCpaProviders(catalog.capabilities);
+        setChoices(modelChoices(catalogs));
+      });
+    return () => { live = false; };
+  }, [active, agentIds, loadModels]);
+
+  // Saved routes whose agent cannot run their model move to one that can, and save themselves.
+  useEffect(() => {
+    if (!choices?.length) return;
+    setDraft(current => {
+      if (!current) return current;
+      const settings = { ...current.settings, defaultRoute: runnableRoute(current.settings.defaultRoute, choices) };
+      const agents = current.agents.map(agent => ({ ...agent, route: runnableRoute(agent.route, choices) }));
+      const next = { settings, agents };
+      return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+    });
+  }, [choices, saved]);
+
   const dirty = useMemo(() => Boolean(saved && draft) && JSON.stringify(saved) !== JSON.stringify(draft), [saved, draft]);
   const setSettings = (change: Partial<SubagentSettings>) => setDraft(current => current && { ...current, settings: { ...current.settings, ...change } });
   const setAgent = (index: number, change: Partial<Subagent>) => setDraft(current => current && {
@@ -165,135 +280,92 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   if (!draft) return <div className="subagents-page ao-workflow"><p className="sa-empty is-page">Loading…</p></div>;
   const { settings, agents } = draft;
   const missingModel = agents.some(agent => agent.enabled && !agent.route) && !settings.defaultRoute;
-  const enabledCount = agents.filter(agent => agent.enabled).length;
-  const running = runs.filter(run => ["starting", "running"].includes(run.state)).length;
 
   return <div className="subagents-page ao-workflow">
     <div className="subagents-scroll">
       <header className="sa-hero">
-        <div className="sa-hero-text">
-          <h1>Subagents</h1>
-          <div className="sa-hero-stats">
-            <span className={`sa-pill${settings.enabled ? " is-on" : ""}`}>{settings.enabled ? "On for new chats" : "Off"}</span>
-            <span className="sa-pill">{enabledCount} of {agents.length} enabled</span>
-            {running ? <span className="sa-pill is-running">{running} running</span> : null}
-          </div>
-        </div>
+        <h1>Subagents</h1>
+        <Switch label="Let chat agents start subagents" checked={settings.enabled} onChange={enabled => setSettings({ enabled })} />
       </header>
-      {missingModel ? <p className="sa-warning" role="alert">Some subagents have no model. Choose a default model below, or one for each.</p> : null}
+      {missingModel ? <p className="sa-warning" role="alert">Choose a default model, or one for each subagent.</p> : null}
 
-      <section className="sa-section" aria-label="Settings">
-        <h2>General</h2>
-        <div className="sa-panel">
-          <Row label="Let chat agents start subagents">
-            <Switch label="Let chat agents start subagents" checked={settings.enabled} onChange={enabled => setSettings({ enabled })} />
-          </Row>
-          <Row label="Running at once" body="Across all chats">
-            <NumberField label="Running at once" min={1} max={100} value={settings.maxConcurrent} onChange={maxConcurrent => setSettings({ maxConcurrent })} />
-          </Row>
-          <Row label="Per chat">
-            <NumberField label="Per chat" min={1} max={100} value={settings.maxPerChat} onChange={maxPerChat => setSettings({ maxPerChat })} />
-          </Row>
-          <Row label="Time limit">
-            <NumberField label="Time limit in minutes" unit="min" min={1} max={240} value={settings.timeoutMinutes} onChange={timeoutMinutes => setSettings({ timeoutMinutes })} />
-          </Row>
-          <Row label="Permissions">
-            <select className="sa-select" aria-label="Permissions" value={settings.permission} onChange={event => setSettings({ permission: event.target.value as SubagentSettings["permission"] })}>
-              <option value="auto">Approve for me</option>
-              <option value="full">Full access</option>
-            </select>
-          </Row>
-          <Row label="Release agents when done">
-            <Switch label="Release agents when done" checked={settings.releaseWhenDone} onChange={releaseWhenDone => setSettings({ releaseWhenDone })} />
-          </Row>
-        </div>
-      </section>
-
-      <section className="sa-section" aria-label="Default model">
-        <h2>Default model</h2>
-        <div className="sa-panel is-padded">
-          {settings.defaultRoute
-            ? <>
-              <div className="sa-picker">
-                <HarnessPicker route={pickerRoute(settings.defaultRoute)} harnesses={harnesses} loadModels={loadModels} hidePermissionNote agentsOnly compact
-                  onChange={route => setSettings({ defaultRoute: subagentRoute(route) })} />
-              </div>
-              <button type="button" className="sa-text-button" onClick={() => setSettings({ defaultRoute: null })}>Clear default model</button>
-            </>
-            : <button type="button" className="sa-button" onClick={() => setSettings({ defaultRoute: subagentRoute(pickerRoute(null)) })}>Choose a default model</button>}
-        </div>
-      </section>
+      <div className={`sa-panel${settings.enabled ? "" : " is-off"}`} aria-label="Settings">
+        <Row label="Default model">
+          <ModelPicker label="Default model" route={settings.defaultRoute} choices={choices} onChange={defaultRoute => setSettings({ defaultRoute })} />
+        </Row>
+        <Row label="Running at once">
+          <NumberField label="Running at once" min={1} max={100} value={settings.maxConcurrent} onChange={maxConcurrent => setSettings({ maxConcurrent })} />
+        </Row>
+        <Row label="Per chat">
+          <NumberField label="Per chat" min={1} max={100} value={settings.maxPerChat} onChange={maxPerChat => setSettings({ maxPerChat })} />
+        </Row>
+        <Row label="Time limit">
+          <NumberField label="Time limit in minutes" unit="min" min={1} max={240} value={settings.timeoutMinutes} onChange={timeoutMinutes => setSettings({ timeoutMinutes })} />
+        </Row>
+        <Row label="Permissions">
+          <select className="sa-select" aria-label="Permissions" value={settings.permission} onChange={event => setSettings({ permission: event.target.value as SubagentSettings["permission"] })}>
+            <option value="auto">Approve for me</option>
+            <option value="full">Full access</option>
+          </select>
+        </Row>
+        <Row label="Release agents when done">
+          <Switch label="Release agents when done" checked={settings.releaseWhenDone} onChange={releaseWhenDone => setSettings({ releaseWhenDone })} />
+        </Row>
+      </div>
 
       <section className="sa-section" aria-label="Subagents">
         <div className="sa-section-head">
-          <h2>Your subagents <span className="sa-count">{agents.length}</span></h2>
-          <button type="button" className="sa-button" disabled={agents.length >= 24} onClick={addAgent}>+ Add subagent</button>
+          <h2>Agents</h2>
+          <button type="button" className="sa-button" disabled={agents.length >= 24} onClick={addAgent}>Add</button>
         </div>
-        {!agents.length ? <div className="sa-panel is-padded"><p className="sa-empty">No subagents yet.</p></div> : null}
         <div className="sa-agents">
           {agents.map((agent, index) => <article key={index} className={`sa-agent${agent.enabled ? "" : " is-off"}`} aria-label={agent.name || "Subagent"}>
             <header className="sa-agent-head">
-              <span className="sa-avatar" aria-hidden="true">{(agent.name.trim()[0] || "?").toUpperCase()}</span>
-              <div className="sa-agent-title">
-                <input className="sa-agent-name" aria-label="Name" value={agent.name} maxLength={60} placeholder="Name"
-                  onChange={event => setAgent(index, { name: event.target.value })} />
-                <code title="ID chat agents use to start it">{agent.id}</code>
-              </div>
+              <input className="sa-agent-name" aria-label="Name" value={agent.name} maxLength={60} placeholder="Name"
+                onChange={event => setAgent(index, { name: event.target.value })} />
               <Switch label={`${agent.name} enabled`} checked={agent.enabled} onChange={enabled => setAgent(index, { enabled })} />
               <button type="button" className="sa-icon-button" aria-label={`Remove ${agent.name || "subagent"}`} title="Remove" onClick={() => removeAgent(index)}>
                 <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
               </button>
             </header>
-            <label className="sa-field"><span>What it's for</span>
-              <textarea rows={2} maxLength={400} value={agent.description} placeholder="e.g. Reviews changes for bugs and missing tests; changes nothing."
-                onChange={event => setAgent(index, { description: event.target.value })} />
-            </label>
-            <label className="sa-field"><span>Instructions</span>
-              <textarea rows={4} maxLength={8000} value={agent.instructions} placeholder="How it should work and what its report should contain."
-                onChange={event => setAgent(index, { instructions: event.target.value })} />
-            </label>
-            <div className="sa-field">
-              <span>Model</span>
-              <div className="sa-segmented" role="radiogroup" aria-label={`${agent.name} model`}>
-                <button type="button" role="radio" aria-checked={!agent.route} onClick={() => setAgent(index, { route: null })}>
-                  Default{settings.defaultRoute ? <small>{modelName(settings.defaultRoute)}</small> : <small>none chosen</small>}
-                </button>
-                <button type="button" role="radio" aria-checked={Boolean(agent.route)}
-                  onClick={() => { if (!agent.route) setAgent(index, { route: subagentRoute(pickerRoute(settings.defaultRoute)) }); }}>Its own model</button>
-              </div>
-              {agent.route ? <div className="sa-picker"><HarnessPicker route={pickerRoute(agent.route)} harnesses={harnesses} loadModels={loadModels} hidePermissionNote agentsOnly compact
-                onChange={route => setAgent(index, { route: subagentRoute(route) })} /></div> : null}
-            </div>
+            <label className="sa-label">Purpose
+              <textarea className="sa-text" rows={2} maxLength={400} value={agent.description} placeholder="When a chat agent should use it"
+                onChange={event => setAgent(index, { description: event.target.value })} /></label>
+            <label className="sa-label">Instructions
+              <textarea className="sa-text" rows={4} maxLength={8000} value={agent.instructions} placeholder="How it works and what it reports"
+                onChange={event => setAgent(index, { instructions: event.target.value })} /></label>
+            <ModelPicker label={`${agent.name} model`} route={agent.route} choices={choices}
+              fallback={settings.defaultRoute ? `Default · ${modelName(settings.defaultRoute.model)}` : "Default"}
+              onChange={route => setAgent(index, { route })} />
           </article>)}
         </div>
       </section>
 
-      <section className="sa-section" aria-label="Running and recent subagents">
-        <h2>Running and recent</h2>
-        {!runs.length ? <div className="sa-panel is-padded"><p className="sa-empty">None yet.</p></div>
-          : <ul className="sa-runs">
-            {runs.map(run => <li key={run.subagent_id} className={`sa-run is-${run.state}`}>
-              <div className="sa-run-head">
-                <span className="sa-state"><i aria-hidden="true" />{STATE_LABEL[run.state] ?? run.state}</span>
-                <strong>{run.name}</strong>
-                <span className="sa-muted">{elapsed(run.elapsed_seconds)}</span>
-                <span className="sa-run-actions">
-                  {["starting", "running"].includes(run.state) ? <button type="button" className="sa-text-button is-danger" onClick={() => stop(run.subagent_id)}>Stop</button> : null}
-                  {run.report || run.error ? <button type="button" className="sa-text-button" aria-expanded={openReport === run.subagent_id}
-                    onClick={() => setOpenReport(current => current === run.subagent_id ? null : run.subagent_id)}>{openReport === run.subagent_id ? "Hide report" : "Report"}</button> : null}
-                </span>
-              </div>
-              <p className="sa-task">{run.task}</p>
-              {run.error && openReport !== run.subagent_id ? <p className="sa-run-error">{run.error.split("\n")[0]}</p> : null}
-              {openReport === run.subagent_id ? <pre className="sa-report">{[run.error, run.report].filter(Boolean).join("\n\n")}</pre> : null}
-            </li>)}
-          </ul>}
-      </section>
+      {runs.length ? <section className="sa-section" aria-label="Running and recent subagents">
+        <h2>Runs</h2>
+        <ul className="sa-runs">
+          {runs.map(run => <li key={run.subagent_id} className={`sa-run is-${run.state}`}>
+            <div className="sa-run-head">
+              <span className="sa-state"><i aria-hidden="true" />{STATE_LABEL[run.state] ?? run.state}</span>
+              <strong>{run.name}</strong>
+              <span className="sa-muted">{elapsed(run.elapsed_seconds)}</span>
+              <span className="sa-run-actions">
+                {["starting", "running"].includes(run.state) ? <button type="button" className="sa-text-button is-danger" onClick={() => stop(run.subagent_id)}>Stop</button> : null}
+                {run.report || run.error ? <button type="button" className="sa-text-button" aria-expanded={openReport === run.subagent_id}
+                  onClick={() => setOpenReport(current => current === run.subagent_id ? null : run.subagent_id)}>{openReport === run.subagent_id ? "Hide report" : "Report"}</button> : null}
+              </span>
+            </div>
+            <p className="sa-task">{run.task}</p>
+            {run.error && openReport !== run.subagent_id ? <p className="sa-run-error">{run.error.split("\n")[0]}</p> : null}
+            {openReport === run.subagent_id ? <pre className="sa-report">{[run.error, run.report].filter(Boolean).join("\n\n")}</pre> : null}
+          </li>)}
+        </ul>
+      </section> : null}
     </div>
-    {/* Changes save themselves; the bar on the page's bottom edge says where they are. */}
-    <div className={`sa-savebar${saveError ? " is-error" : dirty ? " is-dirty" : ""}`} role="status" aria-label="Save status">
-      <span>{saveError ? `Not saved: ${saveError}` : busy ? "Saving…" : dirty ? "Saving changes…" : "All changes saved"}</span>
+    {/* Changes save themselves; the bar shows only while one is on its way or failed. */}
+    {saveError || busy || dirty ? <div className={`sa-savebar${saveError ? " is-error" : ""}`} role="status" aria-label="Save status">
+      <span>{saveError ? `Not saved: ${saveError}` : "Saving…"}</span>
       {saveError ? <button type="button" className="sa-button is-primary" disabled={busy} onClick={() => { failedDraft.current = ""; void save(draft); }}>Try again</button> : null}
-    </div>
+    </div> : null}
   </div>;
 }

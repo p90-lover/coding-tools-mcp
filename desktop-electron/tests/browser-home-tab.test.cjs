@@ -58,6 +58,17 @@ test("reopening a temporary homepage migrates to normal home, never a saved conv
   assert.deepEqual(calls, []);
 });
 
+test("a home load taken over by a newer navigation still opens the account; a real failure does not", async () => {
+  // Seen 2026-11-03: switching account failed with "(-3) loading 'https://chatgpt.com/'" while the
+  // page went on to Cloudflare's check.
+  const { host, calls } = fixture();
+  host.view.webContents.loadURL = async () => { throw Object.assign(new Error("ERR_ABORTED (-3) loading 'https://chatgpt.com/'"), { code: "ERR_ABORTED", errno: -3 }); };
+  await host.openHomePage();
+  assert.deepEqual(calls, ["probe"], "the switch carries on to its sign-in check");
+  host.view.webContents.loadURL = async () => { throw Object.assign(new Error("ERR_PROXY_CONNECTION_FAILED (-130) loading 'https://chatgpt.com/'"), { code: "ERR_PROXY_CONNECTION_FAILED", errno: -130 }); };
+  await assert.rejects(host.openHomePage(), /ERR_PROXY_CONNECTION_FAILED/);
+});
+
 test("new user tabs default to normal ChatGPT without changing the task privacy setting", () => {
   const { host } = fixture();
   host.show = () => {};
