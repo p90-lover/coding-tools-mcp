@@ -41,7 +41,7 @@ function fakeGitHub({ releases, assets = {} }) {
   return { fetchImpl, calls };
 }
 
-function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null }) {
+function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null, camoufox = null }) {
   const root = tempRoot("app-plugins");
   const stateDir = path.join(root, "cpa");
   const pluginDir = path.join(stateDir, "plugins", "windows", "amd64");
@@ -56,7 +56,7 @@ function setup({ releases, assets, files = {}, cpa = { version: "8.0.46", latest
     updateManagedComponent: async (id, options) => { updates.push([id, options]); return { swapped: true, from: cpa.version, to: cpa.latest }; },
   };
   const plugins = createAppPlugins({
-    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk,
+    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk, camoufox,
     fetchImpl: github.fetchImpl, env: { GH_TOKEN: "ghp_testtoken0123456789abcdef" }, spawnImpl: () => { throw new Error("no gh"); },
     platform: "win32", arch: "x64", logger: { info() {} },
   });
@@ -265,6 +265,53 @@ test("RTK installed without winget isn't upgraded with it, and a winget with not
   // winget's catalog can trail GitHub: no newer rtk there is an error, not "updated".
   const stale = fakeRtk({ upgradeTo: null, code: 0x8A15002B });
   await assert.rejects(setup({ releases, rtk: stale.rtk }).plugins.update("rtk"), /winget didn't update rtk 1\.0\.1 .*No available upgrade found/);
+});
+
+/** camoufox.cjs's service: what's installed, and the zips install() was handed (read while they still exist). */
+function fakeCamoufox({ version = "156.0.1-beta.39", free = 50 * 1024 ** 3 } = {}) {
+  const installs = [];
+  let current = version;
+  const camoufox = {
+    root: path.join(tempRoot("app-plugins-camoufox"), "camoufox"),
+    status: async () => ({ installed: Boolean(current), version: current, installing: false, root: camoufox.root }),
+    freeBytes: async () => free,
+    install: async ({ zip, version: next, sha256 }) => {
+      installs.push({ body: fs.readFileSync(zip, "utf8"), version: next, sha256 });
+      current = next;
+    },
+  };
+  return { camoufox, installs };
+}
+
+test("Camoufox updates to GitHub's latest stable release from its checked Windows zip", async () => {
+  const body = "camoufox 158 zip";
+  const zip = { id: 41, name: "camoufox-158.0.1-beta.41-win.x86_64.zip", size: body.length, digest: `sha256:${sha(body)}` };
+  const { camoufox, installs } = fakeCamoufox();
+  const context = setup({
+    releases: { "daijro/camoufox": [release("v158.0.1-beta.42", [], { prerelease: true }), release("v158.0.1-beta.41", [zip])] },
+    assets: { 41: body },
+    camoufox,
+  });
+  const before = (await context.plugins.list()).items.find((item) => item.id === "camoufox");
+  assert.deepEqual([before.kind, before.installed, before.latest, before.updateAvailable, before.canUpdate],
+    ["browser", "156.0.1-beta.39", "158.0.1-beta.41", true, true]);
+  const { items } = await context.plugins.update("camoufox");
+  assert.deepEqual(installs, [{ body, version: "158.0.1-beta.41", sha256: sha(body) }]);
+  assert.equal(items.find((item) => item.id === "camoufox").updateAvailable, false);
+  // The checked download is removed once installed.
+  assert.deepEqual(fs.readdirSync(camoufox.root), []);
+});
+
+test("Camoufox isn't downloaded without room for its zip, nor installed from a download that doesn't match", async () => {
+  const body = "camoufox 158 zip";
+  const releases = (digest) => ({ "daijro/camoufox": [release("v158.0.1-beta.41", [{ id: 41, name: "camoufox-158.0.1-beta.41-win.x86_64.zip", size: body.length, digest }])] });
+  const full = fakeCamoufox({ free: 1024 });
+  await assert.rejects(setup({ releases: releases(`sha256:${sha(body)}`), assets: { 41: body }, camoufox: full.camoufox }).plugins.update("camoufox"),
+    /needs 0\.5 GB free; 0\.0 GB is free/);
+  const tampered = fakeCamoufox();
+  await assert.rejects(setup({ releases: releases(`sha256:${sha("other")}`), assets: { 41: body }, camoufox: tampered.camoufox }).plugins.update("camoufox"),
+    /doesn't match GitHub's SHA-256/);
+  assert.deepEqual([full.installs, tampered.installs], [[], []]);
 });
 
 test("CPA's start keeps a plugin updated from GitHub while it is newer than the bundled copy",

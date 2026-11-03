@@ -58,6 +58,161 @@ function reconfigureWorld(observation = {status:"needs_input",turnState:"interru
   return {workflow,calls,saved,team};
 }
 
+function publicationReviewWorld({ inspect, verdict = 'allow', command = 'git push origin feat/fix' } = {}) {
+  const folder = path.resolve(require('node:os').tmpdir());
+  const facts = { status: 'observed', root: folder, branch: 'feat/fix', remote: 'origin', defaultBranch: 'main', fetchDestinations: ['github.com/team/project'], pushDestinations: ['github.com/team/project'] };
+  const mission = { id: 'run', workspace_id: 'ws', project_id: 'task', revision: 3, nodes: [{ id: 'worker', role: 'worker', state: 'running', parents: [],
+    route: { harness_id: 'ao:claude-code', model: 'cpa/test-model', approvals_reviewer: 'auto_review', approval_policy: 'on-request' }, receipt: { thread_id: 'session' } }] };
+  const resolved = [], prompts = [];
+  let sequence = 0;
+  let pending;
+  const next = () => { pending = { approval_id: `publication-${++sequence}`, source: 'ao', kind: 'command', command, tool: 'Bash',
+    decisions: [{ id: 'yes', kind: 'allow_once' }, { id: 'no', kind: 'reject_once' }] }; };
+  next();
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: 'http://127.0.0.1:8317', proxyApiKey: 'fixture' }),
+    reviewRepository: async (...args) => inspect ? inspect(facts, ...args) : { ...facts },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'test-model' }] }) };
+      prompts.push(JSON.parse(init.body).messages[0].content);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ outcome: verdict, rationale: 'fixture publication decision' }) } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith('/read') ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+      : { operation: { state: 'completed', result: { ok: true, task: { description: 'Fix this task and publish the scoped branch as a PR to this project repository.' } } } },
+    aoHarness: {
+      sessionWorkspace: async () => ({ projectFolder: folder }),
+      observe: async () => ({ status: 'working', turnId: 'turn', turnState: 'running', approvals: resolved.some(([id]) => id === pending.approval_id) ? [] : [pending] }),
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+  });
+  return { workflow, facts, prompts, resolved, next,
+    review: async () => {
+      await workflow.call('observe', { workspaceId: 'ws', runId: 'run', nodeId: 'worker' });
+      for (let tries = 0; tries < 100; tries++) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+        const shown = await workflow.call('observe', { workspaceId: 'ws', runId: 'run', nodeId: 'worker' });
+        if (resolved.some(([id]) => id === pending.approval_id) || shown.pending_approvals?.some(item => item.recommendation?.action === 'ask')) return shown;
+      }
+      throw new Error('Publication review did not settle');
+    } };
+}
+
+test('an explicitly requested feature publication is model-reviewed with independent repository facts', async () => {
+  for (const verdict of ['allow', 'deny']) {
+    const world = publicationReviewWorld({ verdict, command: 'git -c credential.helper= -c "credential.helper=!gh auth git-credential" push origin refs/heads/feat/fix:refs/heads/feat/fix' });
+    try {
+      await world.review();
+      assert.equal(world.prompts.length, 1);
+      assert.match(world.prompts[0], /Repository facts independently read from local Git/);
+      assert.match(world.prompts[0], /github.com\/team\/project/);
+      assert.match(world.prompts[0], /publish the scoped branch as a PR/);
+      assert.match(world.prompts[0], /configuration alone is not consent/);
+      assert.deepEqual(world.resolved, [['publication-1', verdict === 'allow' ? 'yes' : 'no']]);
+    } finally { world.workflow.dispose(); }
+  }
+});
+
+test('publication with unknown, alternate or multiple destinations waits rather than trusting a model allow', async () => {
+  const variants = [() => ({ status: 'unknown' }), facts => ({ ...facts, defaultBranch: null }),
+    facts => ({ ...facts, pushDestinations: ['elsewhere.test/team/project'] }),
+    facts => ({ ...facts, pushDestinations: [...facts.pushDestinations, 'elsewhere.test/team/project'] }),
+    () => { throw new Error('inspection timed out'); }];
+  for (const inspect of variants) {
+    const world = publicationReviewWorld({ inspect });
+    try {
+      const shown = await world.review();
+      assert.equal(world.resolved.length, 0);
+      assert.equal(world.prompts.length, 0, 'unknown repository facts never become a model allow');
+      assert.equal(shown.pending_approvals[0].recommendation.unresolved, true);
+    } finally { world.workflow.dispose(); }
+  }
+});
+
+test('wrapped publication waits for a person instead of taking a model allow', async () => {
+  const world = publicationReviewWorld({ command: 'bash -lc "git push origin feat/fix"' });
+  try {
+    const shown = await world.review();
+    assert.deepEqual(world.resolved, []);
+    assert.deepEqual(world.prompts, [], 'the wrapper cannot prove which repository will publish');
+    assert.equal(shown.pending_approvals[0].recommendation.unresolved, true);
+  } finally { world.workflow.dispose(); }
+});
+
+test('publication verdict caching changes with observed destinations and default branches stay protected', async () => {
+  const world = publicationReviewWorld();
+  try {
+    await world.review();
+    world.next(); await world.review();
+    assert.equal(world.prompts.length, 1, 'identical observed facts can reuse an allow');
+    world.facts.fetchDestinations = world.facts.pushDestinations = ['github.com/team/new-project'];
+    world.next(); await world.review();
+    assert.equal(world.prompts.length, 2, 'a changed destination requires a fresh model review');
+    world.facts.defaultBranch = 'feat/fix';
+    world.next(); await world.review();
+    assert.equal(world.resolved.at(-1)[1], 'no', 'a custom default branch is not treated as a feature branch');
+    assert.equal(world.prompts.length, 2);
+  } finally { world.workflow.dispose(); }
+});
+
+test('quoted push text in an inspection is not a hard-denied publication action', () => {
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
+  try {
+    assert.equal(workflow.blockedRequest('rg "why git push origin main is denied" docs'), false);
+    assert.equal(workflow.blockedRequest('git push origin main'), true);
+    assert.equal(workflow.blockedRequest('git push --force origin feat/fix'), true);
+  } finally { workflow.dispose(); }
+});
+
+test("wrapped publications never inherit the full-access timeout allow", async () => {
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const command = (approval_id, value) => ({ approval_id, source: "ao", kind: "command", command: value,
+    since: "2000-01-01T00:00:00.000Z", decisions });
+  const requests = [
+    command("shell-main", 'bash -lc "git push origin main"'),
+    command("shell-force", 'cmd.exe /c "git push --force origin feat/fix"'),
+    command("env-feature", "env GIT_TERMINAL_PROMPT=0 git push origin feat/fix"),
+    command("escaped-main", "\\git push origin main"),
+    command("absolute-main", "/usr/bin/git push origin main"),
+    command("time-main", "time git push origin main"),
+    command("nice-main", "nice -n 10 git push origin main"),
+    command("unknown-main", "custom-runner -- git push origin main"),
+    command("rg-pre", 'rg --pre "git push origin main" needle file'),
+    { ...command("tool-json", ""), kind: "permission", command: undefined, tool: "mcp__coding-tools__exec_command",
+      toolInput: JSON.stringify({ cmd: 'sh -c "git push --delete origin feat/fix"' }) },
+    command("diagnostic", 'rg "why git push origin main is denied" docs'),
+    command("echo", 'echo "git push origin main"'),
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single",
+    grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "worker", role: "worker", state: "running", parents: [],
+      route: { harness_id: "ao:claude-code", model: "cpa/test-model", approval_policy: "never", approvals_reviewer: "user" },
+      receipt: { thread_id: "session", request_key: "key" } }] };
+  const resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => Date.parse("2026-11-03T00:00:00.000Z"),
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async endpoint => endpoint.endsWith("/read")
+      ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "turn", turnState: "running",
+        approvals: requests.filter(request => !resolved.some(([id]) => id === request.approval_id)) }),
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.some(([id]) => id === "echo"); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(resolved.some(([id, decision]) => id === "diagnostic" && decision === "yes"), "the real timeout policy ran");
+    assert.ok(resolved.some(([id, decision]) => id === "echo" && decision === "yes"), "quoted diagnostics stay harmless");
+    assert.deepEqual(resolved.filter(([id, decision]) => !["diagnostic", "echo"].includes(id) && decision === "yes"), [],
+      "no wrapped protected, destructive or feature publication is allowed by elapsed time");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("archive and delete ask through confirmRecoverable, so turning the dialogs off in Settings skips them", async()=>{
   for (const action of ["archive_task","delete_task"]) {
     const asked=[];

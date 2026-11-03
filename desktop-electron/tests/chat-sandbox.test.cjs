@@ -46,6 +46,90 @@ function runner(extra = {}) {
   return { sandbox, ...fake, scriptDir, cleanup: () => fs.rmSync(scriptDir, { recursive: true, force: true }) };
 }
 
+test("pre-spawn cancellation rejects before creating a script or child", async () => {
+  const { sandbox, spawned, scriptDir, cleanup } = runner();
+  const controller = new AbortController();
+  const reason = new Error("fixture command cancelled");
+  controller.abort(reason);
+  try {
+    await assert.rejects(sandbox.start({ cmd: "echo cancelled", cwd: "G:/work", writable: "G:/work", signal: controller.signal }),
+      error => error === reason);
+    assert.equal(spawned.length, 0);
+    assert.deepEqual(fs.readdirSync(scriptDir), []);
+  } finally { cleanup(); }
+});
+
+for (const boundary of ["mkdir", "writeFile"]) {
+  test(`pre-spawn cancellation during ${boundary} removes only its generated script`, async (t) => {
+    const { sandbox, spawned, scriptDir, cleanup } = runner();
+    fs.writeFileSync(path.join(scriptDir, "keep.cmd"), "unrelated fixture");
+    const original = fs.promises[boundary];
+    let release, reached;
+    const gate = new Promise(resolve => { release = resolve; });
+    const waiting = new Promise(resolve => { reached = resolve; });
+    t.mock.method(fs.promises, boundary, async (...args) => {
+      const result = await original(...args);
+      reached();
+      await gate;
+      return result;
+    });
+    const controller = new AbortController();
+    const reason = new Error("fixture command cancelled");
+    const starting = sandbox.start({ cmd: "echo cancelled", cwd: "G:/work", writable: "G:/work", signal: controller.signal });
+    try {
+      await waiting;
+      controller.abort(reason);
+      release();
+      await assert.rejects(starting, error => error === reason);
+      assert.equal(spawned.length, 0);
+      assert.deepEqual(fs.readdirSync(scriptDir), ["keep.cmd"], "shared directory and unrelated scripts survive");
+    } finally {
+      release();
+      await starting.catch(() => undefined);
+      cleanup();
+    }
+  });
+}
+
+for (const failure of ["writeFile", "spawn"]) {
+  test(`pre-spawn ${failure} failure preserves its error and removes the owned script`, async (t) => {
+    const reason = new Error(`fixture ${failure} failure`);
+    const { sandbox, spawned, scriptDir, cleanup } = runner(failure === "spawn"
+      ? { spawnProcess: () => { throw reason; } } : {});
+    if (failure === "writeFile") {
+      const write = fs.promises.writeFile;
+      t.mock.method(fs.promises, "writeFile", async (...args) => { await write(...args); throw reason; });
+    }
+    fs.writeFileSync(path.join(scriptDir, "keep.cmd"), "unrelated fixture");
+    try {
+      await assert.rejects(sandbox.start({ cmd: "echo fixture", cwd: "G:/work", writable: "G:/work" }), error => error === reason);
+      assert.equal(spawned.length, 0);
+      assert.deepEqual(fs.readdirSync(scriptDir), ["keep.cmd"]);
+    } finally { cleanup(); }
+  });
+}
+
+test("pre-spawn signal has no effect on an accepted child's lifetime or retained output", async () => {
+  const { sandbox, spawned, cleanup } = runner();
+  const controller = new AbortController();
+  try {
+    const id = await sandbox.start({ cmd: "echo accepted", cwd: "G:/work", writable: "G:/work", signal: controller.signal });
+    const { child } = spawned[0];
+    child.stdout.write("accepted output");
+    controller.abort(new Error("turn ended after acceptance"));
+    const live = sandbox.snapshot(id);
+    assert.equal(live.status, "running");
+    assert.equal(live.command_id, id);
+    assert.equal(live.session_id, id);
+    assert.equal(live.output_refs.stdout, `command:${id}:stdout`);
+    assert.equal(live.stdout, "accepted output");
+    const stopped = await sandbox.kill(id);
+    assert.equal(stopped.termination_reason, "killed", "only the existing explicit stop ends the accepted child");
+    assert.equal(sandbox.read(id, "stdout").content, "accepted output");
+    assert.equal(sandbox.read(id, "stdout").next_read_offset, Buffer.byteLength("accepted output"));
+  } finally { cleanup(); }
+});
+
 test("a command runs under codex sandbox, unelevated, with the worktree and caches writable and the network on", async () => {
   const { sandbox, spawned, cleanup } = runner();
   try {

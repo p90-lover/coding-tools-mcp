@@ -11,7 +11,7 @@ const MAX_RELOADS = 3;
 const RELOAD_DELAY_MS = 1500;
 
 /** The reloads made for render errors in the last two minutes, this one included when `add`. */
-function recentReloads(add: boolean): number {
+function recentReloads(add: boolean): number | null {
   try {
     const now = Date.now();
     const saved: unknown = JSON.parse(sessionStorage.getItem(RELOADS_KEY) || "[]");
@@ -19,7 +19,7 @@ function recentReloads(add: boolean): number {
     if (add) recent.push(now);
     sessionStorage.setItem(RELOADS_KEY, JSON.stringify(recent));
     return recent.length;
-  } catch { return add ? 1 : 0; }
+  } catch { return null; }
 }
 
 type State = { error: Error | null; reloading: boolean };
@@ -36,14 +36,24 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, State> 
     // The main process logs console errors (launcher.renderer_console_error), so this is the record.
     console.error("Coding Tools render error:", error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ""}` : String(error),
       `\nComponent stack:${info.componentStack ?? ""}`);
-    if (recentReloads(false) >= MAX_RELOADS) return;
+    const attempts = recentReloads(false);
+    if (attempts === null || attempts >= MAX_RELOADS) return;
     this.setState({ reloading: true });
-    this.timer = window.setTimeout(() => this.reload(), RELOAD_DELAY_MS);
+    this.timer = window.setTimeout(() => {
+      this.timer = undefined;
+      const recorded = recentReloads(true);
+      if (recorded === null || recorded > MAX_RELOADS) {
+        this.setState({ reloading: false });
+        return;
+      }
+      window.location.reload();
+    }, RELOAD_DELAY_MS);
   }
 
   componentWillUnmount() { window.clearTimeout(this.timer); }
 
   private reload = () => {
+    window.clearTimeout(this.timer);
     recentReloads(true);
     window.location.reload();
   };
@@ -54,10 +64,10 @@ export class AppErrorBoundary extends Component<{ children: ReactNode }, State> 
     return <div role="alert" style={{ position: "fixed", inset: 0, display: "grid", placeItems: "center", padding: 24,
       background: "Canvas", color: "CanvasText", font: "14px/1.5 system-ui, sans-serif" }}>
       <div style={{ maxWidth: 520, display: "grid", gap: 10 }}>
-        <strong style={{ fontSize: 16 }}>{reloading ? "Something went wrong. Reloading…" : "The same error keeps coming back"}</strong>
+        <strong style={{ fontSize: 16 }}>{reloading ? "Something went wrong. Reloading…" : "Something went wrong"}</strong>
         <span style={{ opacity: 0.75 }}>{reloading
           ? "Your chats and running agents are safe. Only this window reloads."
-          : "The window reloaded 3 times and still fails. Reload to try again. Details are in the app log."}</span>
+          : "Reload to try again. Details are in the app log."}</span>
         <code style={{ display: "block", maxHeight: 120, overflow: "auto", padding: 8, borderRadius: 6, background: "color-mix(in srgb, CanvasText 6%, transparent)",
           fontSize: 12, whiteSpace: "pre-wrap" }}>{error.message || error.name}</code>
         <div style={{ display: "flex", gap: 8 }}>

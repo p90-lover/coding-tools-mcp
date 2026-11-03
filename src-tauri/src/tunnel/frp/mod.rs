@@ -166,13 +166,19 @@ fn resolve_frp_token(
 #[allow(dead_code)]
 pub fn build_frpc_toml(config: &FrpServerConfig) -> String {
     let mut lines = vec![
-        format!("serverAddr = \"{}\"", config.server_addr.trim()),
+        format!(
+            "serverAddr = {}",
+            toml::Value::String(config.server_addr.trim().to_owned())
+        ),
         format!("serverPort = {}", config.server_port),
         String::new(),
     ];
     if let Some(token) = config.token.as_ref().filter(|t| !t.trim().is_empty()) {
         lines.push("auth.method = \"token\"".to_string());
-        lines.push(format!("auth.token = \"{}\"", token.trim()));
+        lines.push(format!(
+            "auth.token = {}",
+            toml::Value::String(token.trim().to_owned())
+        ));
         lines.push(String::new());
     }
     lines.push(build_proxy_snippet(&config.proxy));
@@ -190,13 +196,19 @@ pub(crate) fn build_frpc_toml_for_routes(configs: &[FrpServerConfig]) -> String 
     };
 
     let mut lines = vec![
-        format!("serverAddr = \"{}\"", first.server_addr.trim()),
+        format!(
+            "serverAddr = {}",
+            toml::Value::String(first.server_addr.trim().to_owned())
+        ),
         format!("serverPort = {}", first.server_port),
         String::new(),
     ];
     if let Some(token) = first.token.as_ref().filter(|t| !t.trim().is_empty()) {
         lines.push("auth.method = \"token\"".to_string());
-        lines.push(format!("auth.token = \"{}\"", token.trim()));
+        lines.push(format!(
+            "auth.token = {}",
+            toml::Value::String(token.trim().to_owned())
+        ));
         lines.push(String::new());
     }
 
@@ -249,11 +261,14 @@ fn frp_proxy_config(profile: &WorkspaceProfile, kind: TunnelServiceKind) -> FrpP
 fn build_proxy_snippet(proxy: &FrpProxyConfig) -> String {
     [
         "[[proxies]]".to_string(),
-        format!("name = \"{}\"", proxy.proxy_name),
+        format!("name = {}", toml::Value::String(proxy.proxy_name.clone())),
         "type = \"http\"".to_string(),
         "localIP = \"127.0.0.1\"".to_string(),
         format!("localPort = {}", proxy.local_port),
-        format!("subdomain = \"{}\"", proxy.subdomain.trim()),
+        format!(
+            "subdomain = {}",
+            toml::Value::String(proxy.subdomain.trim().to_owned())
+        ),
     ]
     .join("\n")
 }
@@ -276,6 +291,112 @@ mod tests {
     use super::*;
     use crate::settings::FrpProfile;
     use crate::workspace::WorkspaceProfile;
+
+    #[test]
+    fn frpc_renderers_preserve_literal_string_values() {
+        for value in [
+            "ordinary-value",
+            "quoted\"value",
+            r"literal\new-value",
+            "line\nbreak",
+            "control\u{0007}value",
+            "escape\u{001b}value",
+            "nul\0value",
+            "backspace\u{0008}value",
+            "formfeed\u{000c}value",
+            "tab\tvalue",
+            "return\rvalue",
+            "delete\u{007f}value",
+            "合成🔑value",
+            "both'\"quotes",
+            "  surrounding whitespace  ",
+        ] {
+            let config = FrpServerConfig {
+                server_addr: value.into(),
+                server_port: 7000,
+                token: Some(value.into()),
+                proxy: FrpProxyConfig {
+                    proxy_name: value.into(),
+                    local_port: 28766,
+                    subdomain: value.into(),
+                },
+            };
+            for rendered in [
+                build_frpc_toml(&config),
+                build_frpc_toml_for_routes(std::slice::from_ref(&config)),
+            ] {
+                let parsed: toml::Value = toml::from_str(&rendered).unwrap();
+                assert_eq!(parsed["serverAddr"].as_str(), Some(value.trim()));
+                assert_eq!(parsed["auth"]["token"].as_str(), Some(value.trim()));
+                assert_eq!(parsed["auth"]["method"].as_str(), Some("token"));
+                assert_eq!(parsed["serverPort"].as_integer(), Some(7000));
+                assert_eq!(parsed["proxies"][0]["name"].as_str(), Some(value));
+                assert_eq!(
+                    parsed["proxies"][0]["subdomain"].as_str(),
+                    Some(value.trim())
+                );
+                assert_eq!(parsed["proxies"][0]["localPort"].as_integer(), Some(28766));
+                assert_eq!(parsed["proxies"][0]["localIP"].as_str(), Some("127.0.0.1"));
+                assert_eq!(parsed["proxies"][0]["type"].as_str(), Some("http"));
+            }
+            let snippet: toml::Value = toml::from_str(&build_proxy_snippet(&config.proxy)).unwrap();
+            assert_eq!(snippet["proxies"][0]["name"].as_str(), Some(value));
+            assert_eq!(
+                snippet["proxies"][0]["subdomain"].as_str(),
+                Some(value.trim())
+            );
+        }
+    }
+
+    #[test]
+    fn frpc_renderers_keep_normal_output_and_route_order() {
+        let mut config = FrpServerConfig {
+            server_addr: " frp.example.test ".into(),
+            server_port: 7000,
+            token: Some(" ordinary-token ".into()),
+            proxy: FrpProxyConfig {
+                proxy_name: "ws-fixture-mcp".into(),
+                local_port: 28766,
+                subdomain: " fixture ".into(),
+            },
+        };
+        let expected = concat!(
+            "serverAddr = \"frp.example.test\"\nserverPort = 7000\n\n",
+            "auth.method = \"token\"\nauth.token = \"ordinary-token\"\n\n",
+            "[[proxies]]\nname = \"ws-fixture-mcp\"\ntype = \"http\"\n",
+            "localIP = \"127.0.0.1\"\nlocalPort = 28766\nsubdomain = \"fixture\""
+        );
+        assert_eq!(build_frpc_toml(&config), expected);
+        assert_eq!(
+            build_frpc_toml_for_routes(std::slice::from_ref(&config)),
+            expected
+        );
+
+        for token in [None, Some(" \t ".into())] {
+            config.token = token;
+            for rendered in [
+                build_frpc_toml(&config),
+                build_frpc_toml_for_routes(std::slice::from_ref(&config)),
+            ] {
+                let parsed: toml::Value = toml::from_str(&rendered).unwrap();
+                assert!(parsed.get("auth").is_none());
+                assert_eq!(parsed["serverAddr"].as_str(), Some("frp.example.test"));
+                assert_eq!(parsed["proxies"][0]["subdomain"].as_str(), Some("fixture"));
+            }
+        }
+        let mut second = config.clone();
+        second.proxy.local_port = 28767;
+        second.proxy.subdomain = "second".into();
+        let parsed: toml::Value =
+            toml::from_str(&build_frpc_toml_for_routes(&[config, second])).unwrap();
+        let routes = parsed["proxies"].as_array().unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0]["name"].as_str(), Some("ws-fixture-mcp"));
+        assert_eq!(routes[0]["localPort"].as_integer(), Some(28766));
+        assert_eq!(routes[1]["name"].as_str(), Some("ws-fixture-mcp-2"));
+        assert_eq!(routes[1]["localPort"].as_integer(), Some(28767));
+        assert_eq!(routes[1]["subdomain"].as_str(), Some("second"));
+    }
 
     #[test]
     fn mcp_snippet_uses_tunnel_subdomain() {

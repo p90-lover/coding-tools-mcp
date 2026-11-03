@@ -17,6 +17,8 @@
  *   (antigravity-cli.cjs update).
  * - RTK, installed with winget, updates with `winget upgrade` (rtk.cjs upgrade). Its releases are
  *   mostly dev-* prereleases, so both read GitHub's latest stable release.
+ * - Camoufox, the browser the ChatGPT session can run in, installs a release's Windows zip checked
+ *   against GitHub's SHA-256, reusing the installed version's unchanged fonts (camoufox.cjs).
  *
  * Private repositories (the p90-lover plugins) need a GitHub token: GH_TOKEN/GITHUB_TOKEN, or the
  * signed-in `gh` CLI. The token goes only to api.github.com, never to a download host.
@@ -28,6 +30,7 @@ const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { compareVersions } = require("./update.cjs");
 const { releaseManifest, platformAsset } = require("./antigravity-cli.cjs");
+const { releaseAssetName, FREE_MARGIN_BYTES } = require("./camoufox.cjs");
 
 const PLUGIN_SOURCES = Object.freeze({
   "cpa-helper": { name: "CPA Helper", repository: "p90-lover/cpa-helper-plugin" },
@@ -43,11 +46,15 @@ const PLUGIN_SOURCES = Object.freeze({
 const TOOL_SOURCES = Object.freeze({
   "antigravity-cli": { name: "Antigravity CLI", repository: "google-antigravity/antigravity-cli", latest: true },
   rtk: { name: "RTK", repository: "rtk-ai/rtk", latest: true },
+  // Its betas are its releases: GitHub's latest is the newest one not marked prerelease.
+  camoufox: { name: "Camoufox", repository: "daijro/camoufox", latest: true },
 });
 
 const PLUGIN_FILE = /^([a-z0-9][a-z0-9_-]*?)(?:-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?))?\.dll$/i;
 const DOWNLOAD_HOSTS = new Set(["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"]);
 const MAX_PLUGIN_BYTES = 128 * 1024 * 1024;
+// Camoufox's Windows zip is ~1.3 GB.
+const MAX_CAMOUFOX_BYTES = 3 * 1024 ** 3;
 const CHECK_TTL_MS = 30 * 60_000;
 const UPDATES_FILE = "plugin-updates.json";
 
@@ -107,6 +114,8 @@ function createAppPlugins({
   // The Antigravity CLI service, made with the backend (null until it starts), and RTK's.
   antigravityCli = () => null,
   rtk = null,
+  // camoufox.cjs's service: the browser's installed version and its install.
+  camoufox = null,
   logger = console,
   fetchImpl = fetch,
   env = process.env,
@@ -181,12 +190,15 @@ function createAppPlugins({
     return [...byId.values()];
   }
 
-  /** The DLL a release offers for this plugin version, with the digest GitHub computed for it. */
-  function releaseDll(release, id) {
-    const asset = release.assets?.find((item) => item.name === `${id}-v${release.version}.dll`);
+  /** The asset `name` of a release, with the digest GitHub computed for it, if it's at most `maxBytes`. */
+  function releaseAsset(release, name, maxBytes) {
+    const asset = release.assets?.find((item) => item.name === name);
     const sha256 = /^sha256:([a-f0-9]{64})$/u.exec(String(asset?.digest || ""))?.[1];
-    return asset && sha256 && asset.size > 0 && asset.size <= MAX_PLUGIN_BYTES ? { ...asset, sha256 } : null;
+    return asset && sha256 && asset.size > 0 && asset.size <= maxBytes ? { ...asset, sha256, maxBytes } : null;
   }
+
+  /** The DLL a release offers for this plugin version. */
+  const releaseDll = (release, id) => releaseAsset(release, `${id}-v${release.version}.dll`, MAX_PLUGIN_BYTES);
 
   async function cpaItem(force) {
     const component = services()?.managedComponentsSnapshot?.()?.components?.find((item) => item.id === "cpa");
@@ -282,8 +294,27 @@ function createAppPlugins({
       note: !newer ? null : winget ? "Updates with winget (rtk-ai.rtk)." : "Installed without winget: update it the way you installed it." };
   }
 
+  /** Camoufox's Windows x64 zip in a release, or null (another platform, or no such build). */
+  const camoufoxZip = (release) => (platform === "win32" && arch === "x64"
+    ? releaseAsset(release, releaseAssetName(release.version), MAX_CAMOUFOX_BYTES) : null);
+
+  async function camoufoxItem(force) {
+    const base = { ...toolBase("camoufox"), kind: "browser" };
+    if (!camoufox) return { ...base, note: "Starts with the app." };
+    const current = await camoufox.status();
+    const item = { ...base, installed: current.version, updating: base.updating || Boolean(current.installing) };
+    const release = await latestRelease(TOOL_SOURCES.camoufox, force);
+    if (release.error) return { ...item, error: release.error };
+    const shown = { ...item, latest: release.version, releaseUrl: release.url };
+    const newer = !current.version || compare(release.version, current.version) > 0;
+    const zip = newer ? camoufoxZip(release) : null;
+    return { ...shown, updateAvailable: newer, canUpdate: Boolean(zip),
+      note: newer && !zip ? "This release has no Windows x64 build."
+        : `${current.version ? "Installed" : "Installs"} in ${current.root}; an update reuses the fonts it already has.` };
+  }
+
   async function list({ refresh = false } = {}) {
-    const items = [await cpaItem(refresh), await antigravityItem(refresh), await rtkItem(refresh)];
+    const items = [await cpaItem(refresh), await antigravityItem(refresh), await rtkItem(refresh), await camoufoxItem(refresh)];
     for (const plugin of await installedPlugins()) items.push(await pluginItem(plugin, refresh));
     return { items, checkedAt: new Date(now()).toISOString() };
   }
@@ -314,6 +345,30 @@ function createAppPlugins({
     logger.info?.("app-plugins.updated", { plugin: "rtk", from: before.version, to: after });
   }
 
+  async function updateCamoufox() {
+    if (!camoufox) throw new Error("Camoufox hasn't started yet");
+    const release = await latestRelease(TOOL_SOURCES.camoufox, true);
+    if (release.error) throw new Error(release.error);
+    const zip = camoufoxZip(release);
+    if (!zip) throw new Error("This release has no Windows x64 build");
+    const from = (await camoufox.status()).version;
+    if (from && compare(release.version, from) <= 0) return;
+    // The zip lands beside the install; camoufox.install checks the room to unpack once it can read the zip.
+    const free = await camoufox.freeBytes();
+    if (free !== null && free < zip.size + FREE_MARGIN_BYTES) {
+      throw new Error(`Downloading Camoufox ${release.version} needs ${((zip.size + FREE_MARGIN_BYTES) / 1024 ** 3).toFixed(1)} GB free; ${(free / 1024 ** 3).toFixed(1)} GB is free`);
+    }
+    await fs.promises.mkdir(camoufox.root, { recursive: true });
+    const staging = path.join(camoufox.root, `.download-${now()}-${zip.name}.part`);
+    try {
+      await download(TOOL_SOURCES.camoufox.repository, zip, staging);
+      await camoufox.install({ zip: staging, version: release.version, sha256: zip.sha256 });
+    } finally {
+      await fs.promises.rm(staging, { force: true });
+    }
+    logger.info?.("app-plugins.updated", { plugin: "camoufox", from, to: release.version });
+  }
+
   /** Streams one release asset to `target`, following GitHub's redirect without the token. */
   async function download(repository, asset, target) {
     const auth = await githubToken();
@@ -337,7 +392,7 @@ function createAppPlugins({
       try {
         for await (const chunk of response.body) {
           size += chunk.length;
-          if (size > MAX_PLUGIN_BYTES) throw new Error("The download is larger than a plugin can be");
+          if (size > (asset.maxBytes ?? MAX_PLUGIN_BYTES)) throw new Error("The download is larger than this plugin can be");
           hash.update(chunk);
           if (!out.write(chunk)) await new Promise((resolve) => out.once("drain", resolve));
         }
@@ -392,6 +447,8 @@ function createAppPlugins({
         await updateAntigravity();
       } else if (key === "rtk") {
         await updateRtk();
+      } else if (key === "camoufox") {
+        await updateCamoufox();
       } else if (key.startsWith("cpa-plugin:")) {
         await updatePlugin(key.slice("cpa-plugin:".length));
       } else {

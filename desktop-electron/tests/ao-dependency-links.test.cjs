@@ -244,3 +244,170 @@ test("another whole-config write waits for a running sync and runs before the ne
   await assert.rejects(links.exclusive("p1", async () => { throw new Error("nope"); }), /nope/, "its errors reach the caller");
   assert.equal(await links.exclusive("p1", async () => "after"), "after", "a failure does not wedge the queue");
 });
+
+for (const removing of [false, true]) {
+  for (const applied of [false, true]) {
+    test(`ownership survives a rejected ${removing ? "removal" : "addition"} PUT ${applied ? "after" : "before"} applying remotely`, async (t) => {
+      const root = tree(t, ["package.json", "node_modules/"]);
+      const file = path.join(root, "links.json");
+      fs.writeFileSync(file, JSON.stringify({ enabled: !removing, python: false, projects: {},
+        farms: removing ? { reg: ["node_modules"] } : {} }));
+      const ao = aoProject({ workspaceMode: "folder", symlinks: [".env"],
+        hardLinkFarms: removing ? ["user-packages", "node_modules"] : ["user-packages"] });
+      let rejectPut = true;
+      const warnings = [];
+      const request = async (method, endpoint, body) => {
+        if (method === "PUT" && rejectPut) {
+          rejectPut = false;
+          if (applied) await ao.request(method, endpoint, body);
+          throw new Error("fixture lost response");
+        }
+        return ao.request(method, endpoint, body);
+      };
+      let links = createAoDependencyLinks({ file, request, logger: { warn: message => warnings.push(message) } });
+      assert.deepEqual(await links.sync("reg", root), { changed: false });
+      assert.equal(warnings.length, 1);
+      assert.equal(ao.stored().hardLinkFarms.includes("node_modules"), removing !== applied,
+        "fixture distinguishes a rejected request from a lost successful response");
+      // A new process must still know which entry it may remove; in-memory recovery is insufficient.
+      links = createAoDependencyLinks({ file, request, logger: { warn() {} } });
+      if (!removing) links.set({ enabled: false });
+      await links.sync("reg", root);
+      assert.deepEqual(ao.stored(), { workspaceMode: "folder", symlinks: [".env"], hardLinkFarms: ["user-packages"] });
+      assert.deepEqual(readState(file).farms, {});
+    });
+  }
+}
+
+test("ownership save failure prevents the remote addition and permits a later disable", async (t) => {
+  const root = tree(t, ["package.json", "node_modules/"]);
+  const file = path.join(root, "links.json");
+  const ao = aoProject({ workspaceMode: "folder" });
+  const rename = fs.renameSync;
+  let fail = true;
+  t.mock.method(fs, "renameSync", (from, to) => {
+    if (to === file && fail) { fail = false; throw Object.assign(new Error("fixture full disk"), { code: "ENOSPC" }); }
+    return rename(from, to);
+  });
+  const warnings = [];
+  const links = createAoDependencyLinks({ file, request: ao.request, logger: { warn: message => warnings.push(message) } });
+  assert.deepEqual(await links.sync("reg", root), { changed: false });
+  assert.equal(warnings.length, 1);
+  assert.equal(ao.requests.filter(([method]) => method === "PUT").length, 0, "no remote entry without durable ownership");
+  assert.equal(fs.existsSync(file), false);
+  assert.deepEqual(await links.sync("reg", root), { changed: true, symlinks: [], hardLinkFarms: ["node_modules"] });
+  links.set({ enabled: false });
+  await links.sync("reg", root);
+  assert.deepEqual(ao.stored(), { workspaceMode: "folder" });
+  assert.deepEqual(readState(file).farms, {});
+});
+
+test("ownership narrowing failure after removal remains recoverable in a new process", async (t) => {
+  const root = tree(t, ["package.json", "node_modules/"]);
+  const file = path.join(root, "links.json");
+  fs.writeFileSync(file, JSON.stringify({ enabled: false, python: false, projects: {}, farms: { reg: ["node_modules"] } }));
+  const ao = aoProject({ hardLinkFarms: ["node_modules"], env: { KEEP: "yes" } });
+  const rename = fs.renameSync;
+  let fail = true;
+  t.mock.method(fs, "renameSync", (from, to) => {
+    if (to === file && fail) { fail = false; throw new Error("fixture ownership save failed"); }
+    return rename(from, to);
+  });
+  const options = { file, request: ao.request, logger: { warn() {} } };
+  assert.deepEqual(await createAoDependencyLinks(options).sync("reg", root), { changed: false });
+  assert.deepEqual(ao.stored(), { env: { KEEP: "yes" } });
+  assert.deepEqual(readState(file).farms, { reg: ["node_modules"] });
+  const links = createAoDependencyLinks(options);
+  await links.sync("reg", root);
+  assert.deepEqual(readState(file).farms, {});
+  assert.equal(ao.requests.filter(([method]) => method === "PUT").length, 1, "retry only reconciles ownership after acknowledged removal");
+  const count = ao.requests.length;
+  await links.sync("reg", root);
+  assert.equal(ao.requests.length, count);
+});
+
+test("ownership union survives a failed final save when replacing a shared folder with a farm", async (t) => {
+  const root = tree(t, ["package.json", "node_modules/"]);
+  const file = path.join(root, "links.json");
+  fs.writeFileSync(file, JSON.stringify({ enabled: true, python: false, projects: { reg: ["node_modules"] }, farms: {} }));
+  const ao = aoProject({ symlinks: [".env", "node_modules"] });
+  let afterPut = false;
+  let fail = true;
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", (from, to) => {
+    if (to === file && afterPut && fail) { fail = false; throw new Error("fixture final save failed"); }
+    return rename(from, to);
+  });
+  const request = async (...args) => {
+    const result = await ao.request(...args);
+    if (args[0] === "PUT") afterPut = true;
+    return result;
+  };
+  const options = { file, request, logger: { warn() {} } };
+  assert.deepEqual(await createAoDependencyLinks(options).sync("reg", root), { changed: false });
+  assert.deepEqual(ao.stored(), { symlinks: [".env"], hardLinkFarms: ["node_modules"] });
+  assert.deepEqual(readState(file), { enabled: true, python: false,
+    projects: { reg: ["node_modules"] }, farms: { reg: ["node_modules"] } });
+  const links = createAoDependencyLinks(options);
+  links.set({ enabled: false });
+  await links.sync("reg", root);
+  assert.deepEqual(ao.stored(), { symlinks: [".env"] });
+  assert.deepEqual(readState(file), { enabled: false, python: false, projects: {}, farms: {} });
+});
+
+test("ownership preparation and narrowing keep normal additions and removals to one write each", async (t) => {
+  const root = tree(t, ["package.json", "node_modules/"]);
+  const file = path.join(root, "links.json");
+  const ao = aoProject({});
+  const rename = fs.renameSync;
+  let writes = 0;
+  const ownersAtPut = [];
+  t.mock.method(fs, "renameSync", (from, to) => { if (to === file) writes += 1; return rename(from, to); });
+  const links = createAoDependencyLinks({ file, logger: { warn() {} }, request: async (...args) => {
+    if (args[0] === "PUT") ownersAtPut.push(fs.existsSync(file) ? readState(file).farms.reg : undefined);
+    return ao.request(...args);
+  } });
+  await links.sync("reg", root);
+  assert.equal(writes, 1, "addition is saved before PUT, with no duplicate final save");
+  const count = ao.requests.length;
+  await links.sync("reg", root);
+  assert.equal(ao.requests.length, count);
+  assert.equal(writes, 1, "cached sync does not write");
+  links.set({ enabled: false });
+  writes = 0;
+  await links.sync("reg", root);
+  assert.equal(writes, 1, "removal retains the old record until PUT, then narrows once");
+  assert.deepEqual(ownersAtPut, [["node_modules"], ["node_modules"]]);
+});
+
+test("ownership preparation and final narrowing preserve current settings and other projects", async (t) => {
+  const root = tree(t, ["package.json", "node_modules/"]);
+  const file = path.join(root, "links.json");
+  fs.writeFileSync(file, JSON.stringify({ enabled: true, python: false, projects: { reg: ["old-venv"] }, farms: {} }));
+  const ao = aoProject({ symlinks: ["old-venv", ".env"], workspaceMode: "folder" });
+  const links = createAoDependencyLinks({ file, logger: { warn() {} }, request: async (...args) => {
+    const result = await ao.request(...args);
+    const latest = readState(file);
+    if (args[0] === "GET") { latest.python = true; latest.farms.other = ["external/node_modules"]; }
+    if (args[0] === "PUT") { latest.enabled = false; latest.projects.other = [".venv"]; }
+    fs.writeFileSync(file, JSON.stringify(latest));
+    return result;
+  } });
+  await links.sync("reg", root);
+  assert.deepEqual(readState(file), { enabled: false, python: true, projects: { other: [".venv"] },
+    farms: { other: ["external/node_modules"], reg: ["node_modules"] } });
+  assert.deepEqual(ao.stored(), { symlinks: [".env"], workspaceMode: "folder", hardLinkFarms: ["node_modules"] });
+});
+
+test("ownership retry never adopts a pre-existing untracked dependency farm", async (t) => {
+  const root = tree(t, ["package.json", "node_modules/"]);
+  const file = path.join(root, "links.json");
+  const ao = aoProject({ hardLinkFarms: ["node_modules"] });
+  const links = createAoDependencyLinks({ file, request: ao.request, logger: { warn() {} } });
+  await links.sync("reg", root);
+  links.set({ enabled: false });
+  await links.sync("reg", root);
+  assert.deepEqual(ao.stored(), { hardLinkFarms: ["node_modules"] });
+  assert.deepEqual(readState(file).farms, {});
+  assert.equal(ao.requests.filter(([method]) => method === "PUT").length, 0);
+});

@@ -2369,3 +2369,161 @@ test("contentless agent recovery only reads an existing exact accepted turn with
     assert.equal(calls.some(call => /resume|messages|interrupt|queue|steer/.test(call.endpoint)), false);
   });
 });
+
+/** Actual context/stop bodies and atomic writer, with no application filesystem or daemon. */
+function contextPersistenceHarness({ files = new Map(), beforeWrite = async () => {}, beforeRead = async () => {} } = {}) {
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8").replace(/\r\n/g, "\n");
+  const persistence = source.slice(source.indexOf("  let contextReadings ="), source.indexOf("  function rememberLaunchWindow"));
+  const stop = source.slice(source.indexOf("  async function stop()"), source.indexOf("  async function desktopRequest"));
+  const call = source.slice(source.indexOf("  async function call(operation"), source.indexOf("  function aoShimFolder"));
+  const steady = source.slice(source.indexOf("const SNAPSHOT_CONTEXT_TOKENS"), source.indexOf("module.exports ="));
+  const identity = source.match(/const sessionId = [\s\S]+?\n  };/)[0];
+  const file = path.resolve(__dirname, "../../aiTemp/virtual-context-readings/coding-tools-context-readings.json");
+  const timers = new Set(), writes = [];
+  let active = 0, maxActive = 0, reads = 0, directories = 0, reported = 100000;
+  const io = {
+    readFileSync(filename) {
+      assert.equal(filename, file); reads++;
+      if (!files.has(filename)) throw new Error("fixture has no saved context");
+      return files.get(filename);
+    },
+    promises: {
+      async mkdir(directory) { assert.equal(directory, path.dirname(file)); directories++; },
+      async chmod() {},
+      async writeFile(filename, content) {
+        assert.ok(filename === file || filename.startsWith(`${file}.tmp-`));
+        const text = String(content);
+        writes.push(JSON.parse(text)[0]?.[1]?.usage.contextUsed);
+        active++; maxActive = Math.max(maxActive, active);
+        try { await beforeWrite(writes.length); files.set(filename, text); } finally { active--; }
+      },
+      async rename(from, to) { assert.equal(to, file); files.set(to, files.get(from)); files.delete(from); },
+      async rm(filename) { assert.ok(filename.startsWith(`${file}.tmp-`)); files.delete(filename); },
+    },
+  };
+  const schedule = fn => { const timer = { fn, unref() {} }; timers.add(timer); return timer; };
+  const atomic = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/atomic-file.cjs"), "utf8"), {
+    module: atomic, Buffer, process: { pid: 42, platform: process.platform }, setTimeout: schedule,
+    require: name => { assert.ok(["node:fs", "node:path"].includes(name)); return name === "node:fs" ? io : path; },
+  });
+  const context = {
+    state: "ready", lifecycleGeneration: 0, stopping: null, starting: null, error: null,
+    hide() {}, cleanup: async () => {}, snapshot: () => ({ state: context.state }),
+    fs: io, path, dataRoot: path.dirname(file), launchWindows: new Map(),
+    writePrivateFileAtomicAsync: atomic.exports.writePrivateFileAtomicAsync,
+    setTimeout: schedule, clearTimeout: timer => timers.delete(timer),
+    internalApi: async () => {
+      const captured = reported;
+      await beforeRead();
+      return { usage: { contextUsed: captured, contextWindow: 400000 }, compactedAt: null };
+    },
+  };
+  const api = vm.runInNewContext(`${persistence}\n${identity}\n${steady}\n${stop}\n${call}\n({call,stop})`, context);
+  const settle = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
+  return {
+    files, writes, timers, context, settle, stop: api.stop,
+    poll: value => { reported = value; return api.call("chat_context", { sessionIds: ["s"] }); },
+    async fire() { for (const timer of [...timers]) { timers.delete(timer); timer.fn(); } await settle(); },
+    stored: () => files.has(file) ? JSON.parse(files.get(file))[0]?.[1]?.usage.contextUsed : null,
+    counts: () => ({ reads, directories, maxActive }),
+  };
+}
+
+test("context persistence coalesces a debounce burst and skips an unchanged committed snapshot", async () => {
+  const store = contextPersistenceHarness();
+  await store.poll(100000); await store.poll(120000); await store.poll(150000);
+  assert.equal(store.timers.size, 1);
+  await store.fire();
+  assert.deepEqual(store.writes, [150000]);
+  await store.poll(150000); await store.fire();
+  assert.deepEqual(store.writes, [150000], "unchanged committed data needs no further write");
+  assert.equal(store.stored(), 150000);
+});
+
+test("context persistence retries an identical failed save only after another explicit poll", async () => {
+  const store = contextPersistenceHarness({ beforeWrite: async count => { if (count === 1) throw new Error("fixture ENOSPC"); } });
+  await store.poll(100000); await store.fire();
+  assert.equal(store.stored(), null);
+  await store.settle();
+  assert.deepEqual(store.writes, [100000]);
+  assert.equal(store.timers.size, 0, "failure does not start a retry loop");
+  await store.poll(100000); await store.fire();
+  assert.deepEqual(store.writes, [100000, 100000]);
+  assert.equal(store.stored(), 100000);
+  assert.equal(store.files.size, 1, "no partial atomic-write temp survives");
+});
+
+test("context persistence snapshots the latest state when queued work executes", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const store = contextPersistenceHarness({ beforeWrite: count => count === 1 ? gate : Promise.resolve() });
+  try {
+    await store.poll(100000); await store.fire();
+    for (const value of [110000, 120000, 150000]) { await store.poll(value); await store.fire(); }
+    release(); await store.settle();
+    assert.deepEqual(store.writes, [100000, 150000], "one in-flight write plus one latest snapshot, not every intermediate value");
+    assert.equal(store.counts().maxActive, 1);
+    assert.equal(store.stored(), 150000);
+  } finally { release(); await store.settle(); }
+});
+
+test("context persistence stop drains observed data and removes the old owner's timer", async () => {
+  const old = contextPersistenceHarness();
+  await old.poll(100000);
+  await old.stop();
+  const fresh = contextPersistenceHarness({ files: old.files });
+  await fresh.poll(200000); await fresh.fire();
+  await old.fire();
+  assert.equal(old.timers.size, 0);
+  assert.deepEqual(old.writes, [100000]);
+  assert.equal(fresh.stored(), 200000, "stopped owner cannot overwrite its replacement");
+});
+
+test("context persistence stop waits for an in-flight write and its latest queued snapshot", async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const store = contextPersistenceHarness({ beforeWrite: count => count === 1 ? gate : Promise.resolve() });
+  let stopping;
+  try {
+    await store.poll(100000); await store.fire();
+    await store.poll(150000); await store.fire();
+    let finished = false;
+    stopping = store.stop().then(() => { finished = true; });
+    await store.settle();
+    assert.equal(finished, false, "replacement must wait for the old owner's persistence");
+    release(); await stopping;
+    assert.deepEqual(store.writes, [100000, 150000]);
+    assert.equal(store.stored(), 150000);
+  } finally { release(); await stopping; await store.settle(); }
+});
+
+for (const restartSameOwner of [false, true]) {
+  test(`context persistence rejects a late read after stop${restartSameOwner ? " even when the same owner is ready again" : " and replacement"}`, async () => {
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let reads = 0;
+    const old = contextPersistenceHarness({ beforeRead: () => ++reads === 1 ? gate : Promise.resolve() });
+    const pending = old.poll(100000);
+    try {
+      await old.stop();
+      const fresh = restartSameOwner ? old : contextPersistenceHarness({ files: old.files });
+      if (restartSameOwner) { old.context.state = "ready"; old.context.lifecycleGeneration++; }
+      await fresh.poll(200000); await fresh.fire();
+      release(); const stale = await pending;
+      await old.fire();
+      assert.deepEqual(Object.keys(stale.sessions), []);
+      assert.equal(fresh.stored(), 200000);
+      assert.deepEqual(old.writes, restartSameOwner ? [200000] : []);
+    } finally { release(); await pending; }
+  });
+}
+
+test("context persistence stopping an unread cache performs no persistence I/O", async () => {
+  const store = contextPersistenceHarness();
+  await store.stop();
+  assert.deepEqual(store.counts(), { reads: 0, directories: 0, maxActive: 0 });
+  assert.deepEqual(store.writes, []);
+  assert.equal(store.timers.size, 0);
+});

@@ -78,7 +78,9 @@ function resolveLauncherProfile({
     path.join(homeDir, ".coding-tools"),
     homeDir,
   );
-  if (path.resolve(coreHome) === path.resolve(productionHome)) {
+  if (process.platform === "win32"
+    ? path.resolve(coreHome).toLowerCase() === path.resolve(productionHome).toLowerCase()
+    : path.resolve(coreHome) === path.resolve(productionHome)) {
     throw new Error("DEV profile home must differ from the production Coding Tools home");
   }
   return {

@@ -78,6 +78,27 @@ test("DEV launcher refuses an explicit home collision with production", () => {
   }), /must differ from the production Coding Tools home/);
 });
 
+for (const platform of ["win32", "linux", "darwin"]) {
+  test(`DEV launcher home comparison preserves ${platform} case rules`, () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+    const homeDir = path.resolve("/fixture/home");
+    const production = path.join(homeDir, "Production");
+    const alias = path.join(homeDir, "production");
+    const profile = (devHome) => resolveLauncherProfile({ argv: ["electron", "--dev-profile"],
+      env: { CODING_TOOLS_HOME: production, CODING_TOOLS_DEV_HOME: devHome },
+      homeDir, appData: path.join(homeDir, "app-data") });
+    Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+    try {
+      assert.throws(() => profile(production), /must differ from the production Coding Tools home/);
+      assert.equal(profile(path.join(homeDir, "Development")).kind, "development");
+      if (platform === "win32") assert.throws(() => profile(alias), /must differ from the production Coding Tools home/);
+      else assert.equal(profile(alias).coreHome, alias, "case-distinct POSIX homes remain distinct");
+    } finally {
+      Object.defineProperty(process, "platform", descriptor);
+    }
+  });
+}
+
 test("DEV launcher ignores generic production and legacy path overrides", () => {
   const homeDir = path.resolve("/Users/tester");
   const development = resolveLauncherProfile({
