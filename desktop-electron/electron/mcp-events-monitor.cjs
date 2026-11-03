@@ -4,7 +4,7 @@
 // service, whose MCP event hub delivers them as signed webhooks to ChatGPT subscriptions.
 // Each incident is reported once; the same condition re-arms only after it recovered.
 
-const net = require("node:net");
+const { probeTcpOffThread } = require("./off-thread-run.cjs");
 
 const EVENTS = Object.freeze({
   webTurnFailed: "coding_tools.web_turn.failed",
@@ -56,14 +56,11 @@ function proxyTarget(value) {
   }
 }
 
-function tcpProbe({ host, port }, timeoutMs = 3_000) {
-  return new Promise((resolve) => {
-    const socket = net.connect({ host, port });
-    const done = (ok, code) => { socket.destroy(); resolve({ ok, code }); };
-    socket.setTimeout(timeoutMs, () => done(false, "ETIMEDOUT"));
-    socket.once("connect", () => done(true, null));
-    socket.once("error", (error) => done(false, error?.code || "ECONNREFUSED"));
-  });
+// From a worker: on this thread, closing a connect that a network filter held froze every window
+// for up to 122 s (off-thread-run.cjs).
+async function tcpProbe({ host, port }, timeoutMs = 3_000) {
+  const { ok, code } = await probeTcpOffThread({ host, port, timeoutMs });
+  return { ok, code: ok ? null : code };
 }
 
 async function httpProbe(url, timeoutMs = 3_000) {

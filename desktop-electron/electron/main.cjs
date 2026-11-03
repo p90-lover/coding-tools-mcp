@@ -1,7 +1,6 @@
 // First, before any other module: every slow synchronous call on the main thread is named from here on.
 const blockingCalls = require("./main-blocking-calls.cjs").installBlockingCallWatch();
 const fs = require("node:fs");
-const net = require("node:net");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { pathToFileURL } = require("node:url");
@@ -50,6 +49,7 @@ const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-w
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
+const { probeTcpOffThread } = require("./off-thread-run.cjs");
 const { getAutostart, setAutostart } = require("./autostart.cjs");
 const {
   createLogger,
@@ -677,13 +677,8 @@ async function waitForProxyRoute(timeoutMs) {
   const host = target.hostname.replace(/^\[|\]$/g, "");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const open = await new Promise((resolve) => {
-      const socket = net.connect({ host, port });
-      const done = (ok) => { socket.destroy(); resolve(ok); };
-      socket.setTimeout(1_000, () => done(false));
-      socket.once("connect", () => done(true));
-      socket.once("error", () => done(false));
-    });
+    // From a worker: closing a connect a network filter holds would hold every window (off-thread-run.cjs).
+    const { ok: open } = await probeTcpOffThread({ host, port, timeoutMs: 1_000 });
     if (open) return;
     await delay(500);
   }
