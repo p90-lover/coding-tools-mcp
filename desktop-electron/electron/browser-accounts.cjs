@@ -194,6 +194,34 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
       return id;
     },
     /**
+     * Takes in an account the GPT Browser kept (gpt-browser-merge.cjs), under its own id when that is
+     * free so its moved partition keeps its name, else a new one; `taken(id)` says an id is in use
+     * outside the list (a partition folder already there). Returns the id, or null when the list is full.
+     */
+    adopt({ id, label, email } = {}, taken = () => false) {
+      assertWritable();
+      if (state.accounts.length >= MAX_ACCOUNTS) return null;
+      const free = (candidate) => BROWSER_ACCOUNT_ID.test(candidate)
+        && !state.accounts.some((entry) => entry.id === candidate) && !taken(candidate);
+      let next = typeof id === "string" && free(id) ? id : null;
+      while (!next) {
+        const candidate = randomBytes(9).toString("base64url").toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 12);
+        if (free(candidate)) next = candidate;
+      }
+      const entry = normalizeEntry({ id: next, label }, state.accounts.length);
+      entry.email = typeof email === "string" && email.includes("@") ? email.slice(0, 200) : null;
+      state.accounts.push(entry);
+      save();
+      return next;
+    },
+    /** Drops an account adopt() just added, before anything used it; its partition is left alone. */
+    unadopt(id) {
+      assertWritable();
+      if (id === state.activeId || id === FIRST_ACCOUNT_ID) return;
+      state.accounts = state.accounts.filter((entry) => entry.id !== id);
+      save();
+    },
+    /**
      * Adds an account, named after it, for each CPA Codex OAuth sign-in (`entries`: { email, plan })
      * not seen before, while there is room. An email seen once is never added again, so removing
      * its account sticks; an account already signed in to that email counts as seen. Returns the
