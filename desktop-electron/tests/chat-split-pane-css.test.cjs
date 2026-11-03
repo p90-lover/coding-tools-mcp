@@ -39,7 +39,8 @@ test("a narrow chat keeps its buttons whole: they never shrink, and what the hea
   assert.match(css, /\.cx-thread-head > :is\(\.cx-icon-button, \.cx-browser-chip\), \.cx-composer-bar > :is\(\.cx-icon-button, \.cx-send\) \{ flex: none; \}/);
   assert.match(container(560), /\.cx-compact-toggle, \[aria-label="Open Mission Board"\]\) \{ display: none; \}/);
   for (const label of ['label: "Compact activity"', 'label: "Mission Board"']) assert.ok(chat.includes(label), `the More menu has ${label}`);
-  assert.match(container(420), /\.ao-composer-chip > \.ui-caret \{ display: none; \}/, "under 420 px the chips drop their carets, so two rows hold them");
+  assert.match(css, /\n\.ao-workflow :is\(\.cx-composer \.ao-composer-chip, \.cx-branch-chip\) > \.ui-caret \{ display: none; \}/,
+    "no down arrows on the chat box's chips or the branch, at any width (asked for 2026-11-03)");
   for (const px of [560, 400, 300]) assert.doesNotMatch(container(px), /\.ao-composer-controls \{[^}]*(order|flex-basis)/, `no ${px} px tier piles the chips onto rows of their own`);
   assert.match(container(300), /\[aria-label="Preview"\], \[aria-label="Show cards"\], \[aria-label="Show side panel"\]\) \{ display: none; \}/);
   assert.match(chat, /const NARROW_HEAD_PX = 300;/, "the More menu takes them over at the same width");
@@ -49,22 +50,28 @@ test("a narrow chat keeps its buttons whole: they never shrink, and what the hea
 // The same day, after #914: under ~720 px the one-row chat box cut the permission and model names
 // ("Ask fo…", "Opus 4…"), and #914's folding piled the chips onto up to four rows in a 340 px pane.
 // Then two fixed rows left both half empty in a split pane and took two rows even at 700 px (2026-11-03).
-test("a narrow chat box keeps one row while it fits and folds onto a second only what doesn't", () => {
+// Then folding what didn't fit (#962) set side-by-side panes' chips differently, each by its model's
+// name, and the user asked for every pane's on one row, names fading rather than buttons going (2026-11-03).
+test("a narrow chat box keeps one row in every pane: the model's name gives up its room, fading out", () => {
   const tier = container(720);
-  assert.match(tier, /\.cx-composer-bar \{ flex-wrap: wrap;/, "it may fold");
-  assert.match(tier, /\.cx-composer-bar \.ao-composer-controls \{ display: contents; \}/, "chip by chip, not the controls' box as a block");
-  assert.doesNotMatch(tier, /\.cx-composer-bar::before/, "no forced break between two fixed rows");
+  assert.doesNotMatch(tier, /flex-wrap: wrap/, "it never folds");
+  assert.doesNotMatch(tier, /display: contents/, "the controls' box stays one block between attach and Send");
   assert.doesNotMatch(tier, /order: \d/, "the chips stay in reading order");
-  assert.match(tier, /\[aria-label="Choose model"\], \[aria-label="Choose saved team"\]\)\) \{\s*flex: 0 1 auto; min-width: 0; max-width: calc\(100% - 184px\); \}/,
-    "the model keeps its name, never wider than the row less the chips before it: only effort, window and Send can fold, never onto a third row");
-  // Measured in split panes of 250-700 px with GPT-6.1 Sol, Claude Opus and "DeepSeek V4.1 Flash 1017(high)":
-  // two rows at most, one from about 560 px, nothing past the box's edge.
-  const narrow = container(420);
+  assert.match(tier, /\.ao-composer-controls > \* \{ flex: none; \}/, "permissions, Single/Team, the harness and the window keep their size");
+  assert.match(tier, /\[aria-label="Choose model"\], \[aria-label="Choose saved team"\]\)\) \{\s*flex: 0 1 auto; min-width: 40px; \}/, "the model gives up its room first");
+  assert.match(tier, /\[aria-label\^="Reasoning effort"\]\) \{ flex: 0 0\.001 auto; min-width: 34px; \}/,
+    "the effort only once the model is at its least: shrinking together, \"Max\" read \"Ma\"");
+  assert.match(css, /\.ao-composer-chip > span:nth-last-child\(2\), \.ao-workflow \.cx-branch-chip > span:nth-of-type\(1\) \{\s*text-overflow: clip; animation: cx-cut-fade linear both; animation-timeline: scroll\(self inline\); \}/,
+    "a cut name fades out, and only while it overflows (its scroll timeline exists only then)");
+  assert.match(css, /@keyframes cx-cut-fade \{ from, to \{ mask-image: linear-gradient\(to right, #000 calc\(100% - 14px\), transparent\); \} \}/);
+  // Measured live 2026-11-03 in ten split panes 392-513 px wide: one 32 px row each, nothing past the box's edge.
+  const narrow = container(360);
+  assert.match(narrow, /\.cx-composer-bar \{ flex-wrap: wrap; row-gap: 2px; \}/, "a pane too narrow for the row at all takes two");
   assert.match(narrow, /\.cx-composer-bar:has\(\.ao-composer-chip\[aria-label\^="Reasoning effort"\]\)::after \{ flex: 0 0 100%; order: 1; content: ""; \}/,
-    "under 420 px one break, right after the model, and only when there are effort and window chips to put under it");
+    "one break, right after the model, and only when there are effort and window chips to put under it");
   assert.match(narrow, /\[aria-label\^="Reasoning effort"\], \[aria-label\^="Context window"\]\)\),\s*\.cx-composer-bar > \.cx-composer-send \{ order: 2; \}/,
     "effort, window and Send take the second row");
-  assert.match(narrow, /\[aria-label="Choose model"\]\) \{ flex: 1 1 0; max-width: none; \}/, "the model takes what the first row leaves");
+  assert.match(narrow, /\[aria-label="Choose model"\]\) \{ flex: 1 1 0; \}/, "the model takes what the first row leaves");
   assert.match(css, /\n\.cx-composer-send \{ display: flex; flex: none; align-items: center; gap: 6px; margin-left: auto; \}/,
     "Send, the mic and the context ring move as one, at the right end of the row they end on");
   assert.match(chat, /<div className="cx-composer-send">\s*\{selectedTaskId \? <ChatContextMeter/, "the chat box groups them");
@@ -84,10 +91,19 @@ test("a narrow goal bar always breaks before its objective, whatever the pane's 
 });
 
 // Asked for 2026-11-03: the head fades into the chat, so a little more of it shows under the head.
-test("the chat's head floats over the transcript and fades out, and the transcript starts below it", () => {
+// Asked again that day: more transparent still; the title and buttons keep plates so lines under them don't cross them.
+test("the chat's head floats over the transcript as a thin veil, and the transcript starts below it", () => {
   const head = rule(".cx-thread-head");
   assert.match(head, /position: absolute; z-index: 1; top: 0; right: 0; left: 0;/);
-  assert.match(head, /background: linear-gradient\(to bottom, var\(--color-bg-primary\) 50%, transparent\); pointer-events: none;/);
+  assert.match(head, /background: linear-gradient\(to bottom, color-mix\(in srgb, var\(--color-bg-primary\) 72%, transparent\),\s*color-mix\(in srgb, var\(--color-bg-primary\) 40%, transparent\) 55%, transparent\); pointer-events: none;/,
+    "no solid band: the chat shows through all of it");
+  assert.match(css, /\.cx-thread-head h2 \{ border-radius: 6px; background: color-mix\(in srgb, var\(--color-bg-primary\) 92%, transparent\); \}/, "the title's plate");
+  assert.match(css, /\.cx-thread-head > :is\(\.cx-icon-button, \.cx-head-folder\) \{ background-color: color-mix\(in srgb, var\(--color-bg-primary\) 92%, transparent\);/, "the icons' plates");
+  const theme = fs.readFileSync(path.resolve(__dirname, "../src/features/claude-theme.css"), "utf8");
+  assert.doesNotMatch(theme, /\.cx-pane:not\(\[data-focused\]\) \.cx-thread-head > [^{]*\{ opacity: 0;/, "a pane not focused fades its buttons; they don't disappear");
+  assert.match(theme, /\.cx-pane:not\(\[data-focused\]\):not\(:hover\) \.cx-thread-head > \.cx-icon-button \{ color: color-mix\(/, "by colour, so their plates stay whole");
+  assert.match(rule(".cx-column"), /padding: 16px 24px 10px;/, "the last reply sits just above the branch bar");
+  assert.match(theme, /\.ao-workflow \.cx-chat \.cx-column \{ gap: 22px; max-width: 788px; padding: 20px 24px 10px; \}/);
   assert.match(css, /\.cx-thread-head > :not\(\.cx-head-spacer\) \{ pointer-events: auto; \}/, "its buttons and title still take clicks");
   assert.match(rule(".cx-thread"), /position: relative;/, "it floats over its own pane only");
   assert.match(rule(".cx-scroll"), /padding-top: 48px; scroll-padding-top: 48px;/, "the first line and sticky headers start below the head");

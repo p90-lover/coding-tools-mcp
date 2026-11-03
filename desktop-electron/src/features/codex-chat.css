@@ -223,11 +223,20 @@
 /* The head sits under the window's drag strip (.ao-dragstrip, the title bar's height), in a split
    pane too: padding it by the title bar's height again squeezed its 48 px to nothing, and the title
    drew over the chat's first lines.
-   It floats over the transcript, which scrolls on under it: solid behind the title's top half, then
-   fading out, so a little more of the chat shows. Its gaps pass clicks through; its buttons don't. */
+   It floats over the transcript, which scrolls on under it: a thin veil the chat shows through,
+   thinning to nothing at its foot. It was solid behind the title's top half, which hid the lines that
+   just scrolled up (2026-11-03). The title and each icon keep a soft plate of the page's colour, unseen
+   on a bare page, so a line passing under them doesn't run through their letters (a halo alone didn't
+   hold). Its gaps pass clicks through; its buttons don't. */
 .cx-thread-head { position: absolute; z-index: 1; top: 0; right: 0; left: 0; display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 0 16px 0 20px;
-  background: linear-gradient(to bottom, var(--color-bg-primary) 50%, transparent); pointer-events: none; }
+  background: linear-gradient(to bottom, color-mix(in srgb, var(--color-bg-primary) 72%, transparent),
+    color-mix(in srgb, var(--color-bg-primary) 40%, transparent) 55%, transparent); pointer-events: none; }
 .cx-thread-head > :not(.cx-head-spacer) { pointer-events: auto; }
+.cx-thread-head h2 { border-radius: 6px; background: color-mix(in srgb, var(--color-bg-primary) 92%, transparent); }
+.cx-thread-head :is(h2, .cx-status) { box-shadow: 0 0 6px 3px color-mix(in srgb, var(--color-bg-primary) 92%, transparent); }
+/* Side by side, the icons' plates merge into one band: a disc each let words show between them. */
+.cx-thread-head > :is(.cx-icon-button, .cx-head-folder) { background-color: color-mix(in srgb, var(--color-bg-primary) 92%, transparent);
+  box-shadow: 0 0 5px 4px color-mix(in srgb, var(--color-bg-primary) 92%, transparent); }
 .cx-head-folder { display: inline-flex; flex: 0 0 auto; color: var(--ao-muted); }
 .cx-head-team { display: inline-flex; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }
 .cx-head-team select { max-width: 200px; height: 26px; padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 6px;
@@ -424,7 +433,9 @@ a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-dec
      transcript (~35k elements a pane), 157-193 ms a pass; contained, a pass took 1 ms (measured live).
      Overlays drawn from inside a transcript must portal to <body>, as ImageLightbox does. */
   contain: strict; }
-.cx-column { display: flex; flex-direction: column; gap: 18px; width: 100%; max-width: 780px; margin: 0 auto; padding: 16px 24px 32px; }
+/* Its foot is small: the last reply sits just above the branch bar. 32-40 px of empty foot under
+   it took a pane's last lines (2026-11-03); the jump-to-bottom button floats and needs none. */
+.cx-column { display: flex; flex-direction: column; gap: 18px; width: 100%; max-width: 780px; margin: 0 auto; padding: 16px 24px 10px; }
 .cx-empty { display: grid; gap: 6px; margin: 18vh auto 0; text-align: center; }
 .cx-empty h1 { margin: 0; font-size: 26px; font-weight: 400; letter-spacing: -0.01em; }
 /* Codex's new chat: a glyph over the question, the project as an underlined link, and a strip of
@@ -549,30 +560,110 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-sent-file:disabled { cursor: default; }
 .cx-sent-file-icon { flex: none; display: inline-grid; place-items: center; width: 28px; height: 32px; border-radius: 6px; background: var(--cx-active); color: var(--ao-muted); font-size: 9px; font-weight: 600; }
 .cx-sent-file-name { min-width: 0; overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
-/* Codex desktop's image preview (ImagePreview.tsx): black/90 over the window, round 40 px buttons
-   top right, a zoom pill at the bottom; its Markup mode draws on the image. Sizes are Codex's. */
-.cdx-preview { --cdx-surface: var(--color-background-elevated, #fff); --cdx-text: var(--color-text-primary, #0d0d0d);
-  position: fixed; inset: 0; z-index: 1000; width: 100vw; height: 100dvh; background: rgb(0 0 0 / .9); color: var(--cdx-text); }
+/* Codex desktop's image preview (ImagePreview.tsx; 26.1016's ImagePreviewOverlay), its default theme's
+   values: the app dimmed and blurred behind it, a header of translucent 32 px pills, the image with a
+   hairline border and a shadow, and the dark tool bar 16 px off the bottom. Radii are Codex's, ×1.25
+   where corners can be superellipses. Its Markup and Erase modes draw on the image. */
+.cdx-preview { --cdx-surface: #fff; --cdx-text: #1a1c1f; --cdx-text-2: color-mix(in srgb, #1a1c1f 65%, transparent);
+  --cdx-border: rgb(26 28 31 / .078); --cdx-border-subtle: rgb(26 28 31 / .049); --cdx-hover: rgb(26 28 31 / .053);
+  --cdx-control: rgb(255 255 255 / .96); --cdx-control-ring: 0 0 0 1px var(--cdx-border-subtle), 0 4px 16px 0 #0000000d;
+  --cdx-menu: rgb(255 255 255 / .9); --cdx-image-shadow: 0 4px 8px -2px rgb(0 0 0 / .1); --cdx-r-control: 10px; --cdx-r-bar: 12px; --cdx-r-menu: 16px;
+  position: fixed; inset: 0; z-index: 1000; width: 100vw; height: 100dvh; container-type: inline-size;
+  background: #e3e3e380; backdrop-filter: blur(1px); color: var(--cdx-text); font-size: 13px; line-height: 20px;
+  animation: cdx-preview-in .2s linear(0, .086, .2539, .428, .5786, .698, .7879, .8534, .8998, .9323, .9546, .9697, .98, .9868, .9913, .9943, .9963, .9976, .9985, 1); }
+.cdx-preview[data-theme="dark"] { --cdx-surface: rgb(45 45 45); --cdx-text: #dfdfdf; --cdx-text-2: color-mix(in srgb, #dfdfdf 65%, transparent);
+  --cdx-border: rgb(255 255 255 / .084); --cdx-border-subtle: rgb(255 255 255 / .042); --cdx-hover: rgb(255 255 255 / .078);
+  --cdx-control: rgb(45 45 45); --cdx-control-ring: 0 0 0 .5px var(--cdx-border), 0 0 0 .5px var(--cdx-border), 0 8px 16px -4px #0000001f;
+  --cdx-menu: rgb(45 45 45 / .9); --cdx-image-shadow: 0 4px 8px -2px rgb(0 0 0 / .36); background: #00000080; }
+@supports (corner-shape: superellipse(1.5)) {
+  .cdx-preview { --cdx-r-control: 12.5px; --cdx-r-bar: 15px; --cdx-r-menu: 20px; }
+  .cdx-preview :is(.cdx-tools, .cdx-tool, .cdx-menu, .cdx-menu-item) { corner-shape: superellipse(1.5); }
+}
+@keyframes cdx-preview-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .cdx-preview { animation: none; } }
 .cdx-sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-.cdx-preview-column { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; padding: 96px 32px 32px; box-sizing: border-box; }
-.cdx-preview-viewport { display: flex; flex: 1; align-items: flex-start; justify-content: flex-start; width: 100%; min-width: 0; min-height: 0; overflow: auto; touch-action: none; }
-.cdx-preview-viewport img { max-width: 100%; max-height: 100%; margin: auto; border-radius: 8px; object-fit: contain; user-select: none; }
-.cdx-preview-viewport img.is-zoomed { display: block; max-width: none; max-height: none; }
-.cdx-preview-error { margin: auto; color: #fff; font-size: 14px; }
-.cdx-preview-actions { position: absolute; top: 12px; right: 12px; z-index: 10; display: flex; align-items: center; gap: 8px; }
-.cdx-preview-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 40px; min-width: 40px; padding: 0 12px; border: 0;
-  border-radius: 999px; background: var(--cdx-surface); color: var(--cdx-text); box-shadow: 0 4px 6px -1px rgb(0 0 0 / .1), 0 2px 4px -2px rgb(0 0 0 / .1), 0 0 0 1px rgb(0 0 0 / .05);
-  font: inherit; font-size: 14px; cursor: pointer; transition: transform .1s; }
-.cdx-preview-button:hover:not(:disabled) { box-shadow: 0 4px 6px -1px rgb(0 0 0 / .1), 0 0 0 1px var(--color-border-focus, #2563eb); }
-.cdx-preview-button:active:not(:disabled) { transform: scale(.95); }
+/* The header: the file's menu at the left, zoom, Download and Close at the right; its gaps click through. */
+.cdx-viewer-head { position: absolute; top: 0; right: 0; left: 0; z-index: 30; display: flex; align-items: center; gap: 6px; padding: 8px; pointer-events: none; user-select: none; }
+.cdx-viewer-head > *, .cdx-viewer-trail > * { pointer-events: auto; }
+.cdx-viewer-trail { display: flex; align-items: center; gap: 6px; margin-left: auto; pointer-events: none; }
+.cdx-control { position: relative; isolation: isolate; display: inline-flex; flex: none; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border: 0; border-radius: 9999px;
+  background: var(--cdx-control); backdrop-filter: blur(24px); box-shadow: var(--cdx-control-ring); color: var(--cdx-text); font: inherit; font-size: 13px; line-height: 20px; cursor: pointer; }
+.cdx-control::after { position: absolute; inset: 0; z-index: -10; border-radius: inherit; pointer-events: none; content: ""; }
+@media (hover: hover) { .cdx-control:enabled:hover::after { background: var(--cdx-hover); } }
+.cdx-control[aria-expanded="true"]::after { background: var(--cdx-hover); }
+.cdx-control:focus-visible { outline: 2px solid var(--color-border-focus, #2563eb); outline-offset: 2px; }
+.cdx-control.is-dropdown { gap: 4px; padding-right: 6px; }
+.cdx-control.is-zoom { gap: 4px; padding: 0 4px 0 8px; font-variant-numeric: tabular-nums; }
+.cdx-control.is-round { justify-content: center; width: 32px; padding: 0; }
+.cdx-control-title { display: block; max-width: 168px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Menus: frosted, a hairline ring, 4 px inside; rows 5 px by 8 px, their icons 75% until hovered. */
+.cdx-menu-anchor { position: relative; display: inline-flex; }
+.cdx-menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 50; display: flex; flex-direction: column; min-width: 220px; padding: 4px; box-sizing: border-box;
+  border-radius: var(--cdx-r-menu); background: var(--cdx-menu); backdrop-filter: blur(8px); color: var(--cdx-text);
+  box-shadow: 0 0 0 .5px var(--cdx-border), 0 0 0 .5px var(--cdx-border), 0 8px 16px -4px #0000001f; animation: cdx-preview-in .15s ease-out; }
+.cdx-menu.is-end { right: 0; left: auto; }
+.cdx-menu.is-narrow { min-width: 160px; }
+.cdx-menu.is-up { top: auto; bottom: calc(100% + 8px); right: 0; left: auto; }
+.cdx-menu-item { display: flex; align-items: center; gap: 6px; width: 100%; padding: 5px 8px; border: 0; border-radius: var(--cdx-r-bar); background: transparent; color: inherit;
+  font: inherit; font-size: 13px; line-height: 1.43; text-align: left; cursor: pointer; }
+.cdx-menu-item > span:first-of-type { flex: 1 1 auto; }
+.cdx-menu-item > svg { flex: none; opacity: .75; }
+.cdx-menu-item:is(:hover, :focus-visible) { background: var(--cdx-hover); outline: none; }
+.cdx-menu-item:is(:hover, :focus-visible) > svg { opacity: 1; }
+.cdx-menu-sep { height: 1px; margin: 4px 8px; background: var(--cdx-border); }
+.cdx-menu-split { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.cdx-menu-split > span { color: color-mix(in srgb, var(--cdx-text) 50%, transparent); }
+.cdx-file-info { display: flex; align-items: center; gap: 8px; max-width: 340px; padding: 6px 16px 6px 8px; }
+.cdx-file-info > svg { flex: none; align-self: flex-start; }
+.cdx-file-info > span { display: flex; flex-direction: column; min-width: 0; }
+.cdx-file-info strong { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: 430; line-height: 20px; overflow-wrap: anywhere; user-select: text; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.cdx-file-info small { overflow: hidden; color: var(--cdx-text-2); font-size: 12px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+/* The image: under the header, 72 px in from each side, clear of the tool bar. */
+.cdx-preview-viewport { position: absolute; top: 48px; right: 72px; bottom: 96px; left: 72px; display: flex; align-items: flex-start; justify-content: flex-start;
+  min-width: 0; min-height: 0; overflow: auto; touch-action: none; }
+.cdx-preview-viewport img { max-width: 100%; max-height: 100%; margin: auto; box-sizing: border-box; border: 1px solid var(--cdx-border-subtle); box-shadow: var(--cdx-image-shadow);
+  object-fit: contain; user-select: none; }
+.cdx-preview-viewport img.is-zoomed { display: block; max-width: none; max-height: none; cursor: grab; }
+.cdx-preview-viewport img.is-zoomed:active { cursor: grabbing; }
+.cdx-preview-error { margin: auto; color: var(--cdx-text); font-size: 13px; }
+/* The tool bar: dark in either theme (Codex sets data-theme="dark" on it), 2 px around 36 px buttons. */
+.cdx-tools-dock { position: absolute; inset: auto 16px 16px; z-index: 40; display: flex; flex-direction: column-reverse; align-items: center; gap: 8px; pointer-events: none; }
+.cdx-tools { position: relative; display: flex; align-items: center; max-width: 100%; padding: 2px; border-radius: var(--cdx-r-bar); background: rgb(45 45 45); color: #dfdfdf;
+  box-shadow: 0 4px 8px -2px #0000001a; user-select: none; pointer-events: auto; }
+.cdx-tools-scroll { display: flex; align-items: center; min-width: 0; margin: -2px; padding: 2px; overflow-x: auto; scrollbar-width: none; }
+.cdx-tool { display: inline-flex; flex: none; align-items: center; gap: 6px; height: 36px; padding: 0 8px; border: 0; border-radius: var(--cdx-r-control); background: transparent;
+  color: color-mix(in srgb, #dfdfdf 65%, transparent); font: inherit; font-size: 13px; line-height: 20px; white-space: nowrap; cursor: pointer; }
+.cdx-tool:hover:not(:disabled), .cdx-tool[aria-expanded="true"] { background: rgb(255 255 255 / .078); color: #dfdfdf; }
+.cdx-tool:focus-visible { outline: 2px solid #5a9cf8; outline-offset: -2px; }
+.cdx-tool:disabled { opacity: .4; cursor: default; }
+.cdx-tool.is-handle { justify-content: center; width: 24px; height: 28px; padding: 0; cursor: grab; touch-action: none; }
+.cdx-tool.is-handle:active { cursor: grabbing; }
+.cdx-tool.is-icon { justify-content: center; width: 36px; padding: 0; }
+.cdx-tool.is-primary { margin-left: 4px; background: #dfdfdf; color: #1a1c1f; }
+.cdx-tool.is-primary:hover:not(:disabled) { background: #fff; color: #1a1c1f; }
+.cdx-resize-anchor { position: absolute; right: 0; bottom: 0; }
+/* A narrow window keeps the tools' icons; their names stay for screen readers (Codex's 450 px). */
+@container (max-width: 450px) { .cdx-tools-scroll .cdx-tool > span:last-child { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; } }
+.cdx-spinner { width: 16px; height: 16px; box-sizing: border-box; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: cdx-spin .8s linear infinite; }
+@keyframes cdx-spin { to { transform: rotate(360deg); } }
+/* Erase: its hint, the brush size and its buttons in the same dark bar; the strokes in blue at half strength. */
+.cdx-tools.is-erase { gap: 2px; padding: 2px 2px 2px 12px; }
+.cdx-tools-hint { margin-right: 8px; color: color-mix(in srgb, #dfdfdf 65%, transparent); white-space: nowrap; }
+.cdx-brush { display: inline-flex; align-items: center; margin-right: 6px; }
+.cdx-brush input { width: 96px; accent-color: #dfdfdf; }
+.cdx-erase-canvas { position: absolute; inset: 0; color: #0285ff; opacity: .5; outline: none; touch-action: none; cursor: crosshair; }
+.cdx-markup-hint { position: absolute; top: 56px; left: 50%; z-index: 40; margin: 0; padding: 6px 12px; transform: translateX(-50%); border-radius: 9999px;
+  background: var(--cdx-control); box-shadow: var(--cdx-control-ring); color: var(--cdx-text-2); font-size: 13px; pointer-events: none; }
+/* Markup's own Add to chat and Back to image, as the header's pills. */
+.cdx-preview-actions { position: absolute; top: 8px; right: 8px; z-index: 10; display: flex; align-items: center; gap: 6px; }
+.cdx-preview-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 32px; min-width: 32px; padding: 0 12px; border: 0;
+  border-radius: 9999px; background: var(--cdx-control); color: var(--cdx-text); box-shadow: var(--cdx-control-ring); backdrop-filter: blur(24px);
+  font: inherit; font-size: 13px; cursor: pointer; }
+.cdx-preview-button:hover:not(:disabled) { background: linear-gradient(var(--cdx-hover), var(--cdx-hover)), var(--cdx-control); }
 .cdx-preview-button:disabled { opacity: .5; cursor: not-allowed; }
 .cdx-preview-button.is-primary { background: var(--cdx-text); color: var(--cdx-surface); }
-.cdx-preview-bottom { z-index: 10; display: flex; flex-direction: column; align-items: center; gap: 12px; max-width: min(48rem, calc(100vw - 2rem)); margin-top: 20px; }
-.cdx-zoom-pill { display: flex; align-items: center; gap: 4px; padding: 4px; border-radius: 999px; background: var(--cdx-surface); box-shadow: 0 4px 6px -1px rgb(0 0 0 / .1), 0 0 0 1px rgb(0 0 0 / .05); }
-.cdx-zoom-pill button { display: flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 0; border-radius: 50%;
-  background: color-mix(in srgb, var(--cdx-text) 10%, transparent); color: inherit; cursor: pointer; }
-.cdx-zoom-pill button:disabled { opacity: .5; cursor: not-allowed; }
-.cdx-zoom-label { display: flex; align-items: center; justify-content: center; min-width: 64px; padding: 0 8px; font-size: 14px; font-variant-numeric: tabular-nums; }
+.cdx-preview.is-erase .cdx-markup-stage { padding-bottom: 96px; }
+.cdx-preview.is-erase .cdx-markup-surface img { max-height: calc(100dvh - 160px); }
 /* Markup: the tool pill top centre, the image with its drawing canvas, the numbered pins. */
 .cdx-markup { position: absolute; inset: 0; display: flex; flex-direction: column; }
 .cdx-markup-toolbar { position: absolute; top: 8px; left: 50%; z-index: 40; display: flex; align-items: center; gap: 2px; margin: 0; padding: 4px; min-width: 0;
@@ -1053,6 +1144,14 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip > svg:first-child { display: none; }
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-popover { left: auto; right: 0; }
 .ao-chip-effort { color: var(--ao-muted); }
+/* No down arrows on the chat box's chips or the branch: each is still a menu (named on hover), and
+   the row keeps their 16 px each (2026-11-03). */
+.ao-workflow :is(.cx-composer .ao-composer-chip, .cx-branch-chip) > .ui-caret { display: none; }
+/* A name cut short fades out where it is cut, not "…"; one that fits draws whole. The fade runs on
+   the name's own scroll timeline, which exists only while the name overflows its chip. */
+.ao-workflow .cx-composer .ao-composer-chip > span:nth-last-child(2), .ao-workflow .cx-branch-chip > span:nth-of-type(1) {
+  text-overflow: clip; animation: cx-cut-fade linear both; animation-timeline: scroll(self inline); }
+@keyframes cx-cut-fade { from, to { mask-image: linear-gradient(to right, #000 calc(100% - 14px), transparent); } }
 /* The branch bar above the chat box: the branch in use, and every branch of the project. */
 /* In a chat it lines up with the composer column, like the route note; in the new-chat strip it is one chip. */
 .ao-workflow .cx-branch-bar { display: flex; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; max-width: 760px; min-width: 0;
@@ -1865,30 +1964,24 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
    every button with the title, to its 16 px icon (17 px even in a 640 px pane), the permission, model
    and effort chips shrank to nothing, and under ~480 px the head ran over into the next pane, where
    clicks landed on the other chat (2026-11-02). Buttons keep their size now. A narrow chat drops what
-   its More menu repeats, shows chips as icons, and folds the chat box's chips onto a second row only
-   when one row can't hold them. Measured on the thread, not the window: split panes share one window width. */
+   its More menu repeats, shows chips as icons, and keeps the chat box's chips on one row, where names
+   give up their room. Measured on the thread, not the window: split panes share one window width. */
 .cx-thread { container: cx-thread / inline-size; }
 .cx-thread-head > :is(.cx-icon-button, .cx-browser-chip), .cx-composer-bar > :is(.cx-icon-button, .cx-send) { flex: none; }
 @container cx-thread (max-width: 720px) {
-  /* One row while it fits, in reading order: attach, permissions, Single/Team, the harness and model,
-     effort and window, then the Send group at the right end. What doesn't fit moves down, whole and
-     in order: from about 560 px a chat box keeps one row (a long model name may fold window and Send
-     under it). The controls' box steps aside (display: contents), so its chips wrap one by one.
-     Two fixed rows (what runs the chat on top, attach to Send under it) left both half empty in a
-     split pane and took two rows even at 700 px (2026-11-03); kept on one row whatever the width, the
-     names were cut to "Ask fo…" and "Opus 4…"; #914 folded the controls' own box and piled them four
-     rows high at 340 px. */
-  .cx-composer-bar { flex-wrap: wrap; gap: 2px 4px; }
-  .cx-composer-bar .ao-composer-controls { display: contents; }
-  /* A wrapping row places its items at their own widths, so the model (or saved team) keeps its name.
-     Never wider than the row less attach, permissions, Single/Team and the harness (174 px with their
-     carets and gaps; an ellipsis past it), it always fits beside them, so only effort, window and Send
-     can move down: never a third row. */
+  /* One row in every pane, in reading order: attach, permissions, Single/Team, the harness and model,
+     effort and window, then the Send group at the right end. Nothing moves down and nothing steps out:
+     the model's name gives up its room first, then the effort's, each fading out where it is cut.
+     Wrapping while it didn't fit (#962) set every pane's chips differently: side by side, a 392 px pane
+     put effort and window on a row of their own and a 421 px one kept one row, each by its model's
+     name (2026-11-03). Only a pane too narrow for the row at all (360 px and under) takes two. */
+  .cx-composer-bar { gap: 4px; }
+  .ao-workflow .cx-composer .ao-composer-controls > * { flex: none; }
   .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child { margin-left: 0; }
-  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip:is([aria-label="Choose model"], [aria-label="Choose saved team"])) {
-    flex: 0 1 auto; min-width: 0; max-width: calc(100% - 184px); }
-  /* A saved team has no harness chip before it. */
-  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip[aria-label="Choose saved team"]) { max-width: calc(100% - 128px); }
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:has(> .ao-composer-chip:is([aria-label="Choose model"], [aria-label="Choose saved team"])) {
+    flex: 0 1 auto; min-width: 40px; }
+  /* The effort only once the model is down to its least: shrinking with it, "Max" read "Ma". */
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:has(> .ao-composer-chip[aria-label^="Reasoning effort"]) { flex: 0 0.001 auto; min-width: 34px; }
   /* What makes one row hold up to ~720 px: the permission chip shows its level's icon (its name on
      hover; each level has its own icon), and the mic, a placeholder ("isn't available yet"), steps out.
      With both, a 620 px chat box took a second row for Send alone. */
@@ -1905,6 +1998,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   .cx-browser-chip > span:last-child { display: none; }
   .cx-head-team { min-width: 0; }
   .cx-head-team select { min-width: 0; max-width: 120px; }
+  /* Tighter chips keep the model's name longer: 2 px less padding a side and between chips. */
+  .cx-composer-bar { gap: 2px; }
+  .ao-workflow .cx-composer .ao-composer-chip { padding: 0 6px; }
+  .ao-workflow .cx-composer .ao-mode-toggle { margin: 0; }
+  .cx-composer-send { gap: 4px; }
   /* The bars above and below the chat box keep its width, so the goal and queued bars line up with it. */
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 24px); }
   /* The goal bar's objective takes a line of its own under its state and buttons, beside its time:
@@ -1917,22 +2015,23 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   .cx-goal-objective { order: 2; flex: 1 1 0; padding-left: 20px; }
   .cx-goal .cx-goal-meta { order: 3; }
 }
-@container cx-thread (max-width: 420px) {
-  /* Too narrow for one row: two rows, the break right after the model, so a long name ("DeepSeek V4.1
-     Flash") can't fold Send onto a third. On top attach, permissions, Single/Team, the harness and the
-     model, which takes what that row leaves; under it effort and window, Send at the right end. The
-     chips drop their carets (each is still a menu, named on hover). Team mode has no effort or window
-     chip, so nothing breaks its few chips apart. */
-  .ao-workflow .cx-composer .ao-composer-chip > .ui-caret { display: none; }
-  .cx-composer-bar:has(.ao-composer-chip[aria-label^="Reasoning effort"])::after { flex: 0 0 100%; order: 1; content: ""; }
-  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip:is([aria-label^="Reasoning effort"], [aria-label^="Context window"])),
-  .cx-composer-bar > .cx-composer-send { order: 2; }
-  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip[aria-label="Choose model"]) { flex: 1 1 0; max-width: none; }
-  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip[aria-label="Choose saved team"]) { max-width: calc(100% - 104px); }
-}
 @container cx-thread (max-width: 400px) {
   .cx-thread-head > :is(.cx-head-folder, .cx-status) { display: none; }
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 16px); }
+}
+@container cx-thread (max-width: 360px) {
+  /* Too narrow for one row (its chips at their least take ~312 px): two rows, the break right after
+     the model, so a long name can't fold Send onto a third. On top attach, permissions, Single/Team,
+     the harness and the model, which takes what that row leaves; under it effort and window, Send at
+     the right end. Team mode has no effort or window chip, so nothing breaks its few chips apart. */
+  .cx-composer-bar { flex-wrap: wrap; row-gap: 2px; }
+  .cx-composer-bar .ao-composer-controls { display: contents; }
+  .cx-composer-bar:has(.ao-composer-chip[aria-label^="Reasoning effort"])::after { flex: 0 0 100%; order: 1; content: ""; }
+  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip:is([aria-label^="Reasoning effort"], [aria-label^="Context window"])),
+  .cx-composer-bar > .cx-composer-send { order: 2; }
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:has(> .ao-composer-chip[aria-label="Choose model"]) { flex: 1 1 0; }
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:has(> .ao-composer-chip[aria-label^="Reasoning effort"]) { flex: none; }
+  .ao-workflow .cx-composer .ao-composer-picker:has(> .ao-composer-chip[aria-label="Choose saved team"]) { max-width: calc(100% - 104px); }
 }
 /* A window narrowed under split panes squeezes them below the 320 px a dragged divider keeps. Preview
    (or the browser chip), Show cards and Side panel move to the More menu (NARROW_HEAD_PX in

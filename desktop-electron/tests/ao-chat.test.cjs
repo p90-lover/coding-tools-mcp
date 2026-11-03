@@ -1250,6 +1250,24 @@ for (const changedWhileSaving of [false, true]) test(`markup replacement preserv
   } finally { saved.resolve({ path: "G:/fixtures/markup.png" }); await Promise.allSettled([submitting]); }
 });
 
+// The image preview's tools (Codex's Remove BG, Erase, Resize) land in the chat box under their own
+// names with Codex's instruction; Erase's mask follows its image as the second one, as Codex sends it.
+test("an image tool's result lands under its own name, and Erase's mask follows as a second image", async () => {
+  const saves = [];
+  let current = [{ name: "shot.png", path: "G:/fixtures/shot.png", image: true, preview: "blob:shot" }];
+  const addMarkup = rendererCallback("AgentOrchestratorChat.tsx", "addMarkup", {
+    useCallback: callback => callback, setAttachments: update => { current = update(current); },
+    saver: { current: async input => { saves.push(input.name); return { path: `G:/fixtures/${input.name}` }; } },
+  });
+  await addMarkup({ bytes: new Uint8Array([1]), preview: "blob:image", prompt: "Remove the area marked in the second image from the first image",
+    label: "Erase", mask: { bytes: new Uint8Array([2]), preview: "blob:mask" } }, current[0]);
+  assert.deepEqual(saves, ["markup.png", "mask.png"]);
+  assert.deepEqual(plain(current), [
+    { name: "Erase", path: "G:/fixtures/markup.png", image: true, preview: "blob:image", markup: "Remove the area marked in the second image from the first image" },
+    { name: "Mask", path: "G:/fixtures/mask.png", image: true, preview: "blob:mask" },
+  ], "the image it was opened from is replaced; the mask carries no instruction of its own");
+});
+
 test("a split pane acknowledges parent selection before reporting its own chat, then reports its first send", () => {
   for (const requested of [{ workspaceId: "ws", taskId: "" }, { workspaceId: "ws", taskId: "task-b" }, { workspaceId: "other", taskId: "task-b" }]) {
     let parent = { ...requested };
@@ -1940,10 +1958,12 @@ test("with Retry automatically on, opening a project retries a single chat's fai
 });
 
 function childPoll(file, selector, options = {}) {
-  const { hidden: initiallyHidden = true, ...overrides } = options;
+  const { hidden: initiallyHidden = true, statsReply = () => ({ available: true, steps: 1 }), ...overrides } = options;
   let surfaceHidden = initiallyHidden, away = false, timerId = 0;
   const latest = { current: surfaceHidden }, timers = new Map(), focus = new Set(), clicks = new Set(), calls = [];
+  // A timeout sits with the intervals until it fires once (ChatTurnStats schedules each next read).
   const window = { setInterval: fn => { timers.set(++timerId, fn); return timerId; }, clearInterval: id => timers.delete(id),
+    setTimeout: fn => { const id = ++timerId; timers.set(id, () => { timers.delete(id); fn(); }); return id; }, clearTimeout: id => timers.delete(id),
     addEventListener: (_event, fn) => focus.add(fn), removeEventListener: (_event, fn) => focus.delete(fn) };
   const document = { visibilityState: "visible", hasFocus: () => true, documentElement: { hasAttribute: () => away } };
   const visibility = {};
@@ -1956,6 +1976,7 @@ function childPoll(file, selector, options = {}) {
     calls.push(operation);
     if (operation === "chat_processes") return { sessions: [] };
     if (operation === "chat_context") return { sessions: { session: { usage: null } } };
+    if (operation === "chat_turn_stats") return statsReply();
     return { previews: {}, runs: [], timeline: [], entries: [], nextOffset: 0, content: "" };
   };
   const noop = () => {};
@@ -1975,7 +1996,7 @@ function childPoll(file, selector, options = {}) {
     ...overrides,
   };
   for (const name of ["Snapshot", "Quota", "UsageReport", "DaySpend", "MonthSpend", "Breakdown", "Stats", "Commands", "LivePage", "Runs", "Context", "Changes", "Tasks", "Usage", "Items", "Error", "State", "Now", "Selected", "ShowHistory", "Output"])
-    globals[`set${name}`] = noop;
+    if (!(`set${name}` in overrides)) globals[`set${name}`] = noop;
   if (file === "ChatWorkbench.tsx") {
     const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatWorkbench.tsx"), "utf8");
     const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -2050,6 +2071,29 @@ test("ended turn and subagent reads defer while hidden, issue once when shown an
     } finally { f.cleanup?.(); }
     assert.equal(f.timers.size, 0);
   });
+});
+
+// 2026-11-03: chats opened before CPA was up showed "6 rounds" and no details until reopened.
+test("the stats line asks again until CPA has the numbers, and a missed read keeps the numbers shown", async () => {
+  let reply = { available: false, reason: "CPA is not running" }, shown = null;
+  const setStats = next => { shown = typeof next === "function" ? next(shown) : next; };
+  const ended = childPoll("ChatTurnStats.tsx", "effect:const [first, ...rest]", { running: false, hidden: false, statsReply: () => reply, setStats });
+  try {
+    await new Promise(setImmediate);
+    assert.equal(ended.calls.length, 1); assert.equal(ended.timers.size, 1, "an ended chat books another read");
+    reply = { available: true, steps: 4 };
+    ended.pulse(); await new Promise(setImmediate);
+    assert.equal(ended.calls.length, 2); assert.equal(ended.timers.size, 0, "it retires once it has the numbers");
+    assert.equal(shown.steps, 4);
+  } finally { ended.cleanup?.(); }
+  const running = childPoll("ChatTurnStats.tsx", "effect:const [first, ...rest]", { running: true, hidden: false, statsReply: () => reply, setStats });
+  try {
+    await new Promise(setImmediate);
+    reply = { available: false };
+    running.pulse(); await new Promise(setImmediate);
+    assert.equal(running.calls.length, 2); assert.equal(shown.steps, 4, "a missed read keeps the numbers");
+  } finally { running.cleanup?.(); }
+  assert.equal(running.timers.size, 0);
 });
 
 test("a hidden preview still hides its native view and disposes its observer on cleanup", () => {

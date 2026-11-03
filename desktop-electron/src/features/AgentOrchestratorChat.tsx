@@ -655,12 +655,12 @@ const sentMessageView = (text: string) => <SentMessage text={text} />;
  */
 function SentMessage({ text }: { text: string }) {
   const { reveal } = useContext(Attachments);
-  const [open, setOpen] = useState<string | null>(null);
+  const [open, setOpen] = useState<{ url: string; name?: string } | null>(null);
   const parts = chatMessageParts(text);
   return <>
     {parts.attachments.length ? <div className="cx-sent-attachments">
       {parts.attachments.map((item, index) => item.image && item.path
-        ? <SentImage key={`${item.path}:${index}`} item={item} onOpen={setOpen} />
+        ? <SentImage key={`${item.path}:${index}`} item={item} onOpen={(url, name) => setOpen({ url, name })} />
         : <button key={`${item.name}:${index}`} type="button" className="cx-sent-file" disabled={!item.path || !reveal}
           title={item.path ? `${item.path}\nClick to show in folder` : `${item.name} · sent inline`} onClick={() => item.path && reveal?.(item.path)}>
           <span className="cx-sent-file-icon" aria-hidden="true">{/\.pdf$/i.test(item.name) ? "PDF" : "TXT"}</span>
@@ -669,7 +669,7 @@ function SentMessage({ text }: { text: string }) {
     </div> : null}
     {parts.annotations?.length ? <SentAnnotations annotations={parts.annotations} /> : null}
     {parts.text ? <div className="cx-bubble"><p>{hasHiddenSecret(parts.text) ? <SecretText text={markupReadable(parts.text)} /> : markupReadable(parts.text)}</p></div> : null}
-    {open ? <ImageLightbox url={open} onClose={() => setOpen(null)} /> : null}
+    {open ? <ImageLightbox url={open.url} name={open.name} onClose={() => setOpen(null)} /> : null}
   </>;
 }
 
@@ -2091,13 +2091,17 @@ export function AgentOrchestratorChat({
   // The conversation, kept while only the composer changes: each keystroke re-rendered every turn,
   // and a long running turn's hundreds of rows with it, which made typing lag.
   // Markup from an image's preview lands in this chat box as a "Markup" card (Codex's composer row):
-  // the marked image saved for the agent to open, and its pin lines kept for the message.
+  // the marked image saved for the agent to open, and its pin lines kept for the message. The
+  // preview's other tools land the same way under their own names (Remove BG, Erase, Resize), with
+  // Codex's instruction; Erase's mask follows as a second image.
   const saver = useRef(saveAttachment);
   saver.current = saveAttachment;
-  const addMarkup = useCallback(async ({ bytes, preview, prompt }: MarkupResult, source?: ChatAttachment) => {
+  const addMarkup = useCallback(async ({ bytes, preview, prompt, label = "Markup", mask }: MarkupResult, source?: ChatAttachment) => {
     if (!saver.current) throw new Error("Could not prepare markup. Try again");
     const { path } = await saver.current({ name: "markup.png", type: "image/png", bytes });
-    setAttachments((current) => [...current.filter(item => item !== source), { name: "Markup", path, image: true, preview, markup: prompt }].slice(0, 8));
+    const masked = mask ? { name: "Mask", path: (await saver.current({ name: "mask.png", type: "image/png", bytes: mask.bytes })).path, image: true, preview: mask.preview } : null;
+    setAttachments((current) => [...current.filter(item => item !== source), { name: label, path, image: true, preview, markup: prompt },
+      ...(masked ? [masked] : [])].slice(0, 8));
   }, []);
   const attachmentAccess = useMemo(() => ({ preview: attachmentPreview, reveal: revealFile, markup: saveAttachment ? addMarkup : undefined }),
     [attachmentPreview, revealFile, Boolean(saveAttachment), addMarkup]);
@@ -2588,7 +2592,8 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
             </span>)}
             {attachNote ? <span className="cx-attach-note" role="status">{attachNote}</span> : null}
             {attaching ? <span className="cx-attach-note" role="status">Attaching files…</span> : null}
-            {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!} onClose={() => setPreviewing(null)}
+            {previewing !== null && attachments[previewing]?.preview ? <ImagePreviewDialog url={attachments[previewing].preview!}
+              name={attachments[previewing].path ?? attachments[previewing].name} onClose={() => setPreviewing(null)}
               // The marked image takes the place of the one it was drawn on: only it is sent (Codex's).
               onMarkup={saveAttachment ? (result) => addMarkup(result, attachments[previewing]) : undefined} /> : null}
           </div> : null}
