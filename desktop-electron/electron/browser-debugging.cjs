@@ -13,6 +13,9 @@ function prepareBrowserDebugging(app) {
   // Chromium must receive these before startup yields to runtime preparation.
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
   app.commandLine.appendSwitch("remote-debugging-port", "0");
+  // The debugging port alone makes Chromium mark every page as automated (navigator.webdriver is
+  // true), which Cloudflare treats as a bot and answers with its "Just a moment..." check (11-03).
+  app.commandLine.appendSwitch("disable-blink-features", "AutomationControlled");
   return async () => {
     await app.whenReady();
     const deadline = Date.now() + 5_000;

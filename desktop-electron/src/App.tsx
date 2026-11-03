@@ -32,6 +32,7 @@ import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
+import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
@@ -454,6 +455,7 @@ function LauncherShell({
   );
   // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
   // them. The MCP wizard is left out: it seeds its step from how it was opened.
+  const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
   const [visitedSurfaces, setVisitedSurfaces] = useState<ReadonlySet<Surface>>(() => new Set([surface]));
   useEffect(() => {
     setVisitedSurfaces((current) => (current.has(surface) ? current : new Set(current).add(surface)));
@@ -874,7 +876,6 @@ function LauncherShell({
                 <SidebarItem active={surface === "native-codex"} icon="terminal" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
               </SidebarGroup>
               <SidebarGroup label={copy.workspace}>
-                {/* GPT Browser is the one browser: the bridge's, its accounts and its pages (surface "browser"). */}
                 <SidebarItem
                   active={surface === "browser"}
                   badge={needsBrowser
@@ -882,9 +883,17 @@ function LauncherShell({
                     : browser?.status === "error"
                       ? <ActionDot tone="error" />
                       : null}
+                  icon="browser"
+                  label={copy.browser}
+                  onClick={() => navigateSurface("browser")}
+                />
+                {/* The GPT Browser is its own browser again (gpt-browser.cjs): pages you open and look at,
+                    one account at a time, apart from the pages the Codex bridge runs in the background. */}
+                <SidebarItem
+                  active={surface === "gpt-browser"}
                   icon="globe"
                   label="GPT Browser"
-                  onClick={() => navigateSurface("browser")}
+                  onClick={() => navigateSurface("gpt-browser")}
                 />
                 <SidebarItem
                   active={surface === "chatgpt-browser-management"}
@@ -1012,6 +1021,11 @@ function LauncherShell({
                   inspectionDisabled: snapshot.state.browserInteractionMode === "manual" }}
               />
             ))}
+            {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
+            {(surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock
+              standaloneHost={standaloneChatHost} chatHost={null} inChat={false}
+              active={surface === "gpt-browser"} covered={browserCovered}
+              api={api!} setError={setError} /> : null}
             {keepAlive("chatgpt-desktop", () => (
               <ChatGptDesktopSurface
                 active={surface === "chatgpt-desktop" && !sidebarCovers && !biggerContextRecommendationOpen}
@@ -1490,7 +1504,7 @@ function BrowserSurface({
   };
 
   return (
-    <section className="gpb-surface browser-surface" aria-label="GPT Browser">
+    <section className="gpb-surface browser-surface" aria-label="Browser">
       {/* The GPT Browser's own bar (2026-11-03: its look came back over the bridge's browser): the
           account, back, forward, reload and the address. */}
       <header className="gpb-bar">

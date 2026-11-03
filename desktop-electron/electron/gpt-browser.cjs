@@ -51,9 +51,10 @@ function onChatgpt(value) {
   }
 }
 
-// Sign-in pages (Google in particular) refuse browsers that announce themselves as Electron.
+// Sign-in pages (Google in particular) refuse browsers that announce themselves as Electron, and
+// Cloudflare checks a Chrome user agent that names another product ("CodingTools/0.8.81", 11-03).
 function cleanUserAgent(value) {
-  return String(value || "").replace(/\s+(?:Electron|coding-tools[\w.-]*|Coding Tools)\/\S+/gi, "").trim();
+  return String(value || "").replace(/\s+(?:Electron|coding-?tools[\w.-]*|Coding Tools)\/\S+/gi, "").trim();
 }
 
 const partitionFor = (id) => `persist:gpt-browser-${id}`;

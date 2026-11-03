@@ -1,5 +1,8 @@
 "use strict";
 
+// Not called since 0.8.85: the GPT Browser is its own browser again, and gpt-browser-restore.cjs
+// gives back the accounts this moved. Kept for its tests and as the record of what the merge did.
+
 /**
  * GPT Browser and the Browser tab become one browser: the GPT Browser page shows the Browser tab's
  * engine (browser-host.cjs), which the Codex bridge drives. This moves the GPT Browser's own

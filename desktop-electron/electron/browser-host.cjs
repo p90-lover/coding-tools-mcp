@@ -196,7 +196,7 @@ function authenticatedChatGptSession(payload, now = Date.now()) {
 // Cloudflare can put its own check page ("Just a moment...") where ChatGPT should load. Only the
 // person can pass it, and the wait for ChatGPT then ran out as a "login" that was never the problem
 // (seen live 2026-11-03: the bridge upgrade failed this way on two launches in a row).
-const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the GPT Browser, complete the check, then run Setup → Install models.";
+const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.";
 
 /**
  * Runs inside the page (injected with toString, like authenticatedChatGptSession): true while the
@@ -1223,7 +1223,7 @@ class BrowserHost {
     const allTabs = this.turnTabs.size + (this.userTabs?.size ?? 0)
       + [...(this.parkedHomes?.values() ?? [])].reduce((sum, home) => sum + home.userTabs.size, 0);
     if (allTabs >= MAX_TOTAL_BROWSER_TABS) throw new Error(`ChatGPT Web already has ${MAX_TOTAL_BROWSER_TABS} browser tabs; close one before opening another`);
-    if (!this.surfaceActive) throw new Error("Open the GPT Browser before creating a tab");
+    if (!this.surfaceActive) throw new Error("Open the Browser tab before creating a tab");
     if (this.manualOperation) throw new Error(`Browser tabs cannot open during ${this.manualOperation}`);
     // A signed-out account opens tabs too, as in GPT Browser: the new tab is ChatGPT's own sign-in.
     const ordinal = Array.from({ length: MAX_TOTAL_BROWSER_TABS }, (_unused, index) => index + 1)

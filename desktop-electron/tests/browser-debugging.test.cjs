@@ -33,7 +33,8 @@ test("browser debugging switches are configured before waiting for Electron", ()
   assert.deepEqual(calls, [
     ["remote-debugging-address", "127.0.0.1", false],
     ["remote-debugging-port", "0", false],
-  ]);
+    ["disable-blink-features", "AutomationControlled", false],
+  ], "the port, and no automated-page mark for Cloudflare to see");
   assert.equal(app.isReady(), false);
 });
 
