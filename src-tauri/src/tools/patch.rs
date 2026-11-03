@@ -761,7 +761,13 @@ pub(crate) fn commit_staged_bytes(
         backups.insert(
             path.clone(),
             if path.exists() && path.is_file() {
-                Some(fs::read(&path).unwrap_or_default())
+                Some(fs::read(&path).map_err(|error| {
+                    cleanup_staging_roots(&staging_roots);
+                    patch_failed(format!(
+                        "Failed to read backup for {}: {error}",
+                        resolved.display
+                    ))
+                })?)
             } else {
                 None
             },
@@ -976,6 +982,91 @@ mod tests {
         json!({
             "patch": "--- a/main.rs\n+++ b/main.rs\n@@\n-old\n+new\n"
         })
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unreadable_backup_aborts_before_replacing_any_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/patch-backup-read-tests");
+        fs::create_dir_all(&artifacts).unwrap();
+        for blocked_position in [0, 1] {
+            let fixture = tempfile::tempdir_in(&artifacts).unwrap();
+            let ws = Workspace::new(fixture.path().to_path_buf()).unwrap();
+            let staged: HashMap<String, Option<Vec<u8>>> = HashMap::from([
+                ("a.txt".into(), Some(b"replacement a".to_vec())),
+                ("b.txt".into(), Some(b"replacement b".to_vec())),
+            ]);
+            // The helper iterates this same immutable map; insertion order is unspecified.
+            let order: Vec<_> = staged.keys().cloned().collect();
+            for name in &order {
+                fs::write(ws.root().join(name), format!("original {name}")).unwrap();
+            }
+            let blocked = ws.root().join(&order[blocked_position]);
+            // Deny reads while allowing write/delete, so an unreadable snapshot must
+            // refuse the transaction even though replacing this file could succeed.
+            let lock = fs::OpenOptions::new()
+                .write(true)
+                .share_mode(0x2 | 0x4)
+                .open(&blocked)
+                .unwrap();
+            let read_result = fs::read(&blocked);
+            let result = commit_staged_bytes(&ws, &staged);
+            drop(lock);
+
+            let read_error = read_result.expect_err("fixture must prevent reading the backup");
+            let error = result.expect_err("unreadable backup must refuse the transaction");
+            assert!(error.message().contains("Failed to read backup"));
+            assert!(error.message().contains(&read_error.to_string()));
+            for name in &order {
+                assert_eq!(
+                    fs::read(ws.root().join(name)).unwrap(),
+                    format!("original {name}").as_bytes()
+                );
+            }
+            let staging = ws.root().join("aiTemp/staging");
+            if staging.exists() {
+                assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn readable_empty_and_new_file_backups_keep_rollback_semantics() {
+        let artifacts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("aiTemp/patch-backup-read-tests");
+        fs::create_dir_all(&artifacts).unwrap();
+        let fixture = tempfile::tempdir_in(artifacts).unwrap();
+        let ws = Workspace::new(fixture.path().to_path_buf()).unwrap();
+        let existing = ws.root().join("existing.txt");
+        let empty = ws.root().join("empty.txt");
+        let new = ws.root().join("nested/new.txt");
+        fs::write(&existing, b"original").unwrap();
+        fs::write(&empty, b"").unwrap();
+        let staged: HashMap<String, Option<Vec<u8>>> = HashMap::from([
+            ("existing.txt".into(), Some(b"replacement".to_vec())),
+            ("empty.txt".into(), Some(b"filled".to_vec())),
+            ("nested/new.txt".into(), Some(b"new".to_vec())),
+        ]);
+
+        let backups = commit_staged_bytes(&ws, &staged).unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), b"replacement");
+        assert_eq!(fs::read(&empty).unwrap(), b"filled");
+        assert_eq!(fs::read(&new).unwrap(), b"new");
+        assert_eq!(backups[&existing].as_deref(), Some(&b"original"[..]));
+        assert_eq!(backups[&empty].as_deref(), Some(&b""[..]));
+        assert!(backups[&new].is_none());
+
+        restore_backups(&ws, &backups).unwrap();
+        assert_eq!(fs::read(existing).unwrap(), b"original");
+        assert!(fs::read(empty).unwrap().is_empty());
+        assert!(!new.exists());
     }
 
     #[test]
