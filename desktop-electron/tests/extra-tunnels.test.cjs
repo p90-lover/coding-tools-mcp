@@ -90,6 +90,7 @@ function pendingAdd({ connectFails = false, unreadableAfterWriteFailure = false 
       return files.get(file);
     },
     rmSync: file => files.delete(file),
+    promises: { async rm(file) { files.delete(file); } },
   };
   const modules = {
     "node:fs": fakeFs, "node:path": path,
