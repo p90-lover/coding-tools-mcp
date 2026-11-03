@@ -97,8 +97,8 @@ export function splitWeights(saved: readonly number[] | undefined, count: number
 }
 
 export function clampRowSplit(value: number, height: number): number {
-  const least = Math.max(SPLIT_ROW.MIN, height > 0 ? SPLIT_MIN_PX / height : SPLIT_ROW.MIN);
-  return Math.min(SPLIT_ROW.MAX, Math.max(Math.min(least, SPLIT_ROW.MAX), value));
+  const least = Math.min(0.5, Math.max(SPLIT_ROW.MIN, height > 0 ? SPLIT_MIN_PX / height : SPLIT_ROW.MIN));
+  return Math.min(1 - least, Math.max(least, value));
 }
 
 /**
