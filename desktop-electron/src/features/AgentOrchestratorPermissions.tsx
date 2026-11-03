@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Caret, Icon } from "../icons";
+import { Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 import type { ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
@@ -131,11 +131,14 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     } catch (cause) { setFailed(true); setNotice(cause instanceof Error ? cause.message : String(cause)); }
     finally { setSaving(false); }
   };
+  // The chip is its level's icon (each level has its own), its name in the label and tooltip; Full
+  // access is tinted, so the risky level still stands out without its words.
   return <div className="ao-permissions ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
     <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
-      aria-controls="ao-permissions-panel" disabled={busy || saving} title={permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
+      aria-controls="ao-permissions-panel" aria-label={`Permissions: ${active?.label || "Custom"}`} data-danger={active?.danger ? "" : undefined}
+      disabled={busy || saving} title={(active?.label || "Custom") + "\n" + permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
-      <Icon name={active?.icon ?? "shield"} width="16" height="16" /><span>{active?.label || "Custom"}</span><Caret />
+      <Icon name={active?.icon ?? "shield"} width="16" height="16" />
     </button>
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
       <header><h3>How should actions be approved?</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="14" height="14" /></button></header>

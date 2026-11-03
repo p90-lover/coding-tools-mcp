@@ -39,7 +39,6 @@ test("a narrow chat keeps its buttons whole: they never shrink, and what the hea
   assert.match(css, /\.cx-thread-head > :is\(\.cx-icon-button, \.cx-browser-chip\), \.cx-composer-bar > :is\(\.cx-icon-button, \.cx-send\) \{ flex: none; \}/);
   assert.match(container(560), /\.cx-compact-toggle, \[aria-label="Open Mission Board"\]\) \{ display: none; \}/);
   for (const label of ['label: "Compact activity"', 'label: "Mission Board"']) assert.ok(chat.includes(label), `the More menu has ${label}`);
-  assert.match(container(420), /\.ao-composer-chip > \.ui-caret \{ display: none; \}/, "under 420 px the chips drop their carets, so two rows hold them");
   for (const px of [560, 400, 300]) assert.doesNotMatch(container(px), /\.ao-composer-controls \{[^}]*(order|flex-basis)/, `no ${px} px tier piles the chips onto rows of their own`);
   assert.match(container(300), /\[aria-label="Preview"\], \[aria-label="Show cards"\], \[aria-label="Show side panel"\]\) \{ display: none; \}/);
   assert.match(chat, /const NARROW_HEAD_PX = 300;/, "the More menu takes them over at the same width");
@@ -55,8 +54,8 @@ test("a narrow chat box keeps one row while it fits and folds onto a second only
   assert.match(tier, /\.cx-composer-bar \.ao-composer-controls \{ display: contents; \}/, "chip by chip, not the controls' box as a block");
   assert.doesNotMatch(tier, /\.cx-composer-bar::before/, "no forced break between two fixed rows");
   assert.doesNotMatch(tier, /order: \d/, "the chips stay in reading order");
-  assert.match(tier, /\[aria-label="Choose model"\], \[aria-label="Choose saved team"\]\)\) \{\s*flex: 0 1 auto; min-width: 0; max-width: calc\(100% - 184px\); \}/,
-    "the model keeps its name, never wider than the row less the chips before it: only effort, window and Send can fold, never onto a third row");
+  assert.match(tier, /\[aria-label="Choose model"\], \[aria-label="Choose saved team"\]\)\) \{\s*flex: 0 1 auto; min-width: 0; max-width: calc\(100% - 120px\); \}/,
+    "the model keeps its name, never wider than the row less the four squares before it: only effort, window and Send can fold, never onto a third row");
   // Measured in split panes of 250-700 px with GPT-6.1 Sol, Claude Opus and "DeepSeek V4.1 Flash 1017(high)":
   // two rows at most, one from about 560 px, nothing past the box's edge.
   const narrow = container(420);
@@ -65,13 +64,34 @@ test("a narrow chat box keeps one row while it fits and folds onto a second only
   assert.match(narrow, /\[aria-label\^="Reasoning effort"\], \[aria-label\^="Context window"\]\)\),\s*\.cx-composer-bar > \.cx-composer-send \{ order: 2; \}/,
     "effort, window and Send take the second row");
   assert.match(narrow, /\[aria-label="Choose model"\]\) \{ flex: 1 1 0; max-width: none; \}/, "the model takes what the first row leaves");
-  assert.match(css, /\n\.cx-composer-send \{ display: flex; flex: none; align-items: center; gap: 6px; margin-left: auto; \}/,
-    "Send, the mic and the context ring move as one, at the right end of the row they end on");
+  assert.match(css, /\n\.cx-composer-send \{ display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; \}/,
+    "Send and the context ring move as one, at the right end of the row they end on");
   assert.match(chat, /<div className="cx-composer-send">\s*\{selectedTaskId \? <ChatContextMeter/, "the chat box groups them");
   const bar = chat.slice(chat.indexOf('<div className="cx-composer-bar">'), chat.indexOf('<div className="cx-composer-send">'));
   assert.ok(bar.includes("AgentOrchestratorComposerControls") && !bar.includes("cx-head-spacer"), "no spacer splits the row");
-  assert.match(tier, /\.cx-composer-send > \.cx-mic \{ display: none; \}/, "the placeholder mic leaves a narrow chat box");
-  assert.match(tier, /\.ao-permissions > \.ao-composer-chip > span \{ display: none; \}/, "the permission chip is its level's icon, its name on hover");
+});
+
+// Asked for 2026-11-03: the chat box's buttons as clean and as small as they can be. Measured before:
+// four heights (28-32 px), a tinted bordered Single/Team key, five carets, "Ask for approval" (148 px),
+// a mic placeholder, and the window chip apart from its effort.
+const controls = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorComposerControls.tsx"), "utf8");
+const permissions = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorPermissions.tsx"), "utf8");
+const theme = fs.readFileSync(path.resolve(__dirname, "../src/features/claude-theme.css"), "utf8");
+test("the chat box's row is one 28 px grid of plain controls, with no carets, boxes or placeholders", () => {
+  assert.match(css, /\.ao-workflow \.cx-composer :is\(\.ao-composer-chip, \.ao-mode-toggle, \.cx-icon-button\) \{ height: 28px; border: 0; border-radius: 7px; \}/, "one height and corner");
+  assert.match(css, /:is\(\.cx-icon-button, \.ao-permissions > \.ao-composer-chip, \.ao-composer-chip\.is-logo\) \{ justify-content: center; width: 28px; min-width: 28px; padding: 0; \}/,
+    "icon-only controls are 28 px squares");
+  assert.match(rule(".cx-send"), /width: 28px; height: 28px;/);
+  assert.match(theme, /\.ao-workflow \.cx-chat \.cx-send \{ width: 28px; height: 28px;/, "Claude's palette keeps the size");
+  assert.doesNotMatch(theme, /\.cx-composer \.ao-composer-chip \{[^}]*height: 30px/, "no theme brings back the 30 px chips");
+  assert.match(rule(".ao-workflow .cx-composer .ao-mode-toggle"), /background: transparent; color: var\(--ao-muted\);/, "Single/Team is a plain icon, not a tinted key");
+  assert.doesNotMatch(rule(".ao-workflow .cx-composer .ao-mode-toggle"), /border: 1px/);
+  assert.doesNotMatch(controls, /<Caret/, "no carets on the chat box's chips");
+  assert.doesNotMatch(permissions, /<Caret|<span>\{active\?\.label/, "the permission chip is its level's icon");
+  assert.match(permissions, /aria-label=\{`Permissions: \$\{active\?\.label \|\| "Custom"\}`\}/, "its name stays its label");
+  assert.match(css, /\.ao-permissions > \.ao-composer-chip\[data-danger\] \{ color: var\(--ao-red/, "Full access stays tinted");
+  assert.doesNotMatch(chat, /cx-mic|Voice input/, "no placeholder mic");
+  assert.doesNotMatch(css, /\.ao-composer-picker:last-child \{ margin-left: auto; \}/, "the window chip stays beside its effort");
 });
 
 // Reported 2026-11-02: in a ~500 px pane the goal's objective fit on the first row, the state read "F"
