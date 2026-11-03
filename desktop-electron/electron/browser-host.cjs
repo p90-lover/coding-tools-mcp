@@ -2767,7 +2767,12 @@ class BrowserHost {
     if (this.selectedTurnTab() || this.selectedUserTab()) return;
     const url = this.view.webContents.getURL();
     if (url !== IDLE_BROWSER_URL && !isTemporaryChatUrl(url)) return;
-    await this.view.webContents.loadURL(HOME_URL);
+    // A newer navigation that takes over (Cloudflare's check, ChatGPT's own redirect) rejects this
+    // load with ERR_ABORTED while the page goes on opening; an account switch failed on it (11-03).
+    await this.view.webContents.loadURL(HOME_URL).catch((error) => {
+      if (!isAbortedNavigationError(error)) throw error;
+      this.logger.info("browser.home_load_superseded", { url: urlWithoutQuery(this.view.webContents.getURL()) });
+    });
     if (inspectSession) await this.probeAuthentication();
   }
 
