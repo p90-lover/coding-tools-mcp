@@ -30,19 +30,20 @@
     "postinstall": "install-electron --no"
   },
   "dependencies": {
-    "motion": "^12.43.0",
+    "motion": "^14.9.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@types/node": "^22.20.5",
+    "@types/node": "^24.19.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^5.2.0",
+    "@vitejs/plugin-react": "^6.2.1",
     "electron": "45.2.1",
-    "electron-builder": "^26.15.3",
-    "typescript": "^5.9.3",
-    "vite": "^6.4.5"
+    "electron-builder": "^26.18.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.5"
   },
   "overrides": {
     "@xmldom/xmldom": "0.8.15",
