@@ -302,6 +302,8 @@ let upstreamToolController = null;
 let originalUiController = null;
 let appsHost = null;
 let agentOrchestratorUpstream = null;
+// AO's daemon folder (its build manifest.json names the commit), set when the backend starts.
+let agentOrchestratorResourceRoot = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
@@ -3780,6 +3782,16 @@ function registerIpc({ logger, stateStore }) {
     if (!appPluginsService) throw new Error("App plugins are still starting");
     return appPluginsService.update(String(id || ""));
   });
+  handle("launcher:app-plugin-auto-update", async (event, id, enabled) => {
+    assertFocusedMainWindow(event, true);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.setAutoUpdate(String(id || ""), enabled === true);
+  });
+  handle("launcher:app-plugins-update-all", async (event) => {
+    assertFocusedMainWindow(event, true);
+    if (!appPluginsService) throw new Error("App plugins are still starting");
+    return appPluginsService.updateAll();
+  });
   // Plugins > MCPs: the person's own MCP servers for chat agents. Adding, changing or turning one on
   // runs its command (or reaches its address) in every new chat, so it is their own click in the
   // visible app; errors name the field, never a value (env and headers carry tokens).
@@ -4374,8 +4386,11 @@ async function start() {
     restartCpa: () => externalServicesController.restart("cpa"),
     antigravityCli: () => antigravityCliService,
     rtk,
+    agentOrchestratorRoot: () => agentOrchestratorResourceRoot,
     logger,
   });
+  // Auto-update: only the items the person turned it on for; the first pass waits a few minutes.
+  appPluginsService.startAutoUpdates();
   managedBootstrapController = createManagedBootstrap({
     snapshot: () => externalServicesController.snapshot(),
     install: (serviceId) => externalServicesController.installManagedComponent(serviceId),
@@ -4784,12 +4799,13 @@ async function start() {
     const cpaQuota = backendBundles.requireModule(backend, "cpa-quota.cjs").createCpaQuota({
       getConnection: () => externalServicesController?.cpaConnection(), logger,
     });
+    agentOrchestratorResourceRoot = backend.source === "bundle"
+      ? path.join(backend.resourcesRoot, "agent-orchestrator")
+      : app.isPackaged
+        ? path.join(process.resourcesPath, "agent-orchestrator")
+        : path.join(__dirname, "..", "build", "agent-orchestrator");
     agentOrchestratorUpstream = createAgentOrchestratorUpstream({
-      resourceRoot: backend.source === "bundle"
-        ? path.join(backend.resourcesRoot, "agent-orchestrator")
-        : app.isPackaged
-          ? path.join(process.resourcesPath, "agent-orchestrator")
-          : path.join(__dirname, "..", "build", "agent-orchestrator"),
+      resourceRoot: agentOrchestratorResourceRoot,
       dataRoot: aoDataRoot,
       confirm: confirmAoAction, getWindow: () => mainWindow,
       getWorkspaces: listHeadlessWorkspaces,

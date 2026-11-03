@@ -297,50 +297,52 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
     change({ ...draft, nodes: draft.nodes.map(node => node.id === id
       ? { ...node, parents: next.length ? next : planner ? [planner.id] : [] } : node) });
   };
+  // One line says where the team stands: saving, not saved (after an error), or the last notice.
+  const saveState = !draft ? "" : saving || dirty && !failed ? "Saving…" : failed && dirty ? "Not saved" : notice || "Saved";
+  const reload = () => {
+    if (canLeave()) { setLoading(true); void moduleCall("runs", { workspaceId }).then(result => accept(result, draft?.id))
+      .catch(cause => setError(String(cause instanceof Error ? cause.message : cause))).finally(() => setLoading(false)); }
+  };
   return <section className="ao-workflow ao-teams" aria-label="Orchestrator Team">
     <div className="ao-main">
       <div className="ao-dragstrip" aria-hidden="true" />
-      <header className="ao-workspace-head">
-        <div className="ao-workspace-title"><strong>Orchestrator Team</strong><span>Saved role blocks for new chats</span></div>
-        <span className="ao-hint">Teams are shared by every workspace</span>
-      </header>
       <div className="ao-teams-bar">
-        <label>Team<select aria-label="Saved team" value={draft?.id ?? ""} disabled={locked || !draft}
+        <select className="ao-teams-picker" aria-label="Saved team" title="Teams are shared by every workspace" value={draft?.id ?? ""} disabled={locked || !draft}
           onChange={event => { if (canLeave()) { const next = teams.find(team => team.id === event.target.value); if (next) { setDraft(structuredClone(next)); setSelectedId(""); setNotice(""); } } }}>
           {draft && !saved ? <option value={draft.id}>{draft.name || "New team"} (unsaved)</option> : null}
           {teams.map(team => <option key={team.id} value={team.id}>{team.name}{team.id === defaultId ? " · Default" : ""}</option>)}
-        </select></label>
+        </select>
         <button type="button" className="button-secondary" disabled={locked || !workspaceId} onClick={() => {
           if (canLeave()) { const next = freshTeam(workspaceId, !defaultId); next.name = `Team ${teams.length + 1}`; setDraft(next); setSelectedId(""); setNotice(""); }
         }}>New team</button>
         <button type="button" className="button-secondary" disabled={locked || !draft} onClick={() => {
           if (draft && canLeave()) { setDraft(duplicateTeam(draft)); setSelectedId(""); setNotice(""); }
         }}>Duplicate</button>
-        <button type="button" className="button-secondary" disabled={locked || !draft || draft.id === defaultId} onClick={() => void save(true)}>Make default</button>
         <button type="button" className="button-secondary" disabled={locked || saving || !draft || (Boolean(saved) && teams.length < 2)}
-          title={saved && teams.length < 2 ? "Keep at least one team" : "Delete this team. Chats keep their own copy."} onClick={() => void removeTeam()}>Delete team</button>
-        <button type="button" className="button-secondary" disabled={locked || !workspaceId} onClick={() => {
-          if (canLeave()) { setLoading(true); void moduleCall("runs", { workspaceId }).then(result => accept(result, draft?.id))
-            .catch(cause => setError(String(cause instanceof Error ? cause.message : cause))).finally(() => setLoading(false)); }
-        }}>Refresh</button>
-        {/* Changes also save on their own; this saves now and shows the state at a glance. */}
-        <button type="button" className="button-primary" disabled={locked || saving || !dirty || !draft?.name.trim()} onClick={() => void save()}>
-          {saving ? "Saving…" : dirty ? "Save team" : "Saved"}</button>
+          title={saved && teams.length < 2 ? "Keep at least one team" : "Delete this team. Chats keep their own copy."} onClick={() => void removeTeam()}>Delete</button>
+        {draft && draft.id === defaultId ? <span className="ao-teams-default" title="New chats start with this team">Default</span>
+          : <button type="button" className="button-secondary" disabled={locked || !draft} title="New chats start with this team" onClick={() => void save(true)}>Make default</button>}
+        <span className="ao-teams-spacer" />
+        {/* Changes save on their own; after a failed save this tries again now. */}
+        {failed && dirty ? <button type="button" className="button-primary" disabled={locked || saving || !draft?.name.trim()} onClick={() => void save()}>Save again</button> : null}
+        <span role="status" className={`ao-teams-state${failed && dirty ? " is-error" : ""}`}>{showScores ? "" : saveState}</span>
+        <button type="button" className="ao-tool" aria-label="Reload teams" title="Reload teams" disabled={locked || !workspaceId} onClick={reload}>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </button>
         <button type="button" className="button-secondary ao-teams-scores-toggle" aria-pressed={showScores}
           title="Each model's points from finished Team missions" onClick={() => setShowScores(value => !value)}>
           {showScores ? "Back to team" : "Model scores"}</button>
       </div>
       {showScores ? <div className="ao-teams-stage"><ModelScoresPanel setError={setError} /></div> : <>
       {draft ? <div className="ao-teams-settings">
-        <label>Team name<input aria-label="Team name" maxLength={128} value={draft.name} disabled={locked} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
-        <label>Workers at once<input aria-label="Team worker limit" type="number" min={1} max={24} value={draft.worker_limit} disabled={locked}
+        <label>Name<input aria-label="Team name" maxLength={128} value={draft.name} disabled={locked} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
+        <label>Workers<input aria-label="Team worker limit" type="number" min={1} max={24} value={draft.worker_limit} disabled={locked}
           onChange={event => setDraft({ ...draft, worker_limit: Number(event.target.value) })} /></label>
         <label>Review rounds<input aria-label="Team review rounds" type="number" min={1} max={10} value={draft.max_review_rounds ?? 3} disabled={locked}
           onChange={event => setDraft({ ...draft, max_review_rounds: Number(event.target.value) })} /></label>
         <label className="ao-teams-loop" title="When the reviewer asks for changes, the orchestrator plans another round or ends the mission. Review rounds sets the limit.">
           <input type="checkbox" aria-label="Reviewer reports back to the orchestrator" checked={Boolean(draft.review_loop)} disabled={locked}
-            onChange={event => setDraft({ ...draft, review_loop: event.target.checked })} />Reviewer reports back to the orchestrator</label>
-        <span className="ao-hint">{draft.id === defaultId ? "Default for new chats" : "Choose this team when starting a chat"}</span>
+            onChange={event => setDraft({ ...draft, review_loop: event.target.checked })} />Reviewer reports back</label>
       </div> : null}
       <div className="ao-teams-stage" ref={stage}>
         {loading ? <div className="ao-empty-state"><p>Loading teams…</p></div> : draft && mission ? <>
@@ -351,8 +353,10 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
             <button type="button" disabled={locked || subCount >= 8 || draft.nodes.length + (subCount ? 1 : 2) > 24} onClick={() => add("sub_reviewer")}><strong>＋ Sub-reviewer</strong><small>Reviews one part</small></button>
             <button type="button" disabled={locked || full || draft.nodes.some(node => node.role === "retry")} onClick={() => add("retry")}><strong>＋ Retry</strong><small>Recovers failed work</small></button>
             <h3>Quick workers</h3>
-            {QUICK_WORKERS.map(preset => <button key={preset.roleName} type="button" disabled={locked || full}
-              onClick={() => add("worker", preset)}><strong>＋ {preset.roleName}</strong><small>Worker · {preset.specialty}</small></button>)}
+            <div className="ao-teams-quick">
+              {QUICK_WORKERS.map(preset => <button key={preset.roleName} type="button" disabled={locked || full} title={`A worker for ${preset.specialty}`}
+                onClick={() => add("worker", preset)}>{preset.roleName}</button>)}
+            </div>
           </aside>
           <div className="ao-teams-canvas">
             <AgentOrchestratorCanvas key={draft.id} nodes={draft.nodes} levels={aoLevels(mission)} selectedId={selectedId} busy={busy} showState={false}
@@ -378,12 +382,9 @@ export function AgentOrchestratorTeamsSurface({ active = true, setError }: {
               discard={() => { setDraft(saved ? structuredClone(saved) : freshTeam(workspaceId, !defaultId)); setSelectedId(""); }}
               taskName={() => "Team template"} />
           </div> : null}
-          {!inspected ? <p className="ao-teams-hint">Click a block to edit it · Drag to arrange · Shift-click to link or unlink</p> : null}
+          {!inspected ? <p className="ao-teams-hint">Click to edit · Drag to arrange · Shift-click to link</p> : null}
         </> : <div className="ao-empty-state"><p>Add a project in Chat to set up a team.</p></div>}
       </div>
-      {draft ? <footer className="ao-teams-footer">
-        <span role="status" className="ao-hint">{saving || dirty && !failed ? "Saving…" : failed && dirty ? "Not saved. Fix the error above." : notice || "Changes save automatically. Existing chats keep their team."}</span>
-      </footer> : null}
       </>}
     </div>
   </section>;
