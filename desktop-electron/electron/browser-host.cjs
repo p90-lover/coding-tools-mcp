@@ -29,6 +29,9 @@ const {
 
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const SAVED_CHAT_URL = "https://chatgpt.com/";
+// The Browser tab's own page (startup, sign-in, sign-out, a new tab) is ChatGPT's plain home whatever
+// "Save chats in ChatGPT" says; only task turns and connector verification open Temporary Chat.
+const HOME_URL = SAVED_CHAT_URL;
 const SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 // Preserve only a concrete ChatGPT conversation address, never a sign-in page, homepage,
@@ -1231,7 +1234,7 @@ class BrowserHost {
       ordinal,
       label: `ChatGPT ${ordinal}`,
       pageTitle: "ChatGPT",
-      url: initialUrl ?? newChatUrlFor(this),
+      url: initialUrl ?? HOME_URL,
       status: "loading",
       loading: true,
       message: "Opening ChatGPT",
@@ -1941,6 +1944,12 @@ class BrowserHost {
     // existing new-chat document of the requested kind so the helper observes one authoritative
     // SPA bootstrap (and, for verification, the same kind of chat the task turns use).
     const targetUrl = useSavedChats ? SAVED_CHAT_URL : TEMPORARY_CHAT_URL;
+    // Cloudflare's check page reloads itself until it passes; a reload from here only adds a request
+    // and a flash, then times out on the same check. Name the check at once instead.
+    if (await this.cloudflareCheckShown()) {
+      this.logger.warn("browser.cloudflare_check_page", { url: urlWithoutQuery(this.view.webContents.getURL()) });
+      throw new Error(CHATGPT_SECURITY_CHECK_MESSAGE);
+    }
     if (isNewChatUrl(this.view.webContents.getURL(), useSavedChats)) {
       await this.hardRefreshHome();
     } else {
@@ -2665,9 +2674,9 @@ class BrowserHost {
     this.syncViewVisibility();
     this.logger.info("browser.auth_surface_closed");
     if (refreshMain && this.manualOperation === "ChatGPT login" && !this.view.webContents.isDestroyed()) {
-      void this.view.webContents.loadURL(newChatUrlFor(this)).catch((error) => {
+      void this.view.webContents.loadURL(HOME_URL).catch((error) => {
         this.logger.error("browser.auth_refresh_failed", {
-          origin: navigationOriginForLog(newChatUrlFor(this)),
+          origin: navigationOriginForLog(HOME_URL),
           ...navigationErrorForLog(error),
         });
       });
@@ -2719,7 +2728,7 @@ class BrowserHost {
    */
   async openHomePage(inspectSession = true) {
     if (this.selectedTurnTab() || this.view.webContents.getURL() !== IDLE_BROWSER_URL) return;
-    await this.view.webContents.loadURL(newChatUrlFor(this));
+    await this.view.webContents.loadURL(HOME_URL);
     if (inspectSession) await this.probeAuthentication();
   }
 
@@ -3525,7 +3534,7 @@ class BrowserHost {
         this.logger.info("browser.login_opened");
         const current = this.view.webContents.getURL();
         if (!current.startsWith(CHATGPT_ORIGIN)) {
-          await this.view.webContents.loadURL(newChatUrlFor(this));
+          await this.view.webContents.loadURL(HOME_URL);
         }
         await this.probeAuthentication();
         const authenticated = await this.waitForAuthenticated();
@@ -3602,7 +3611,7 @@ class BrowserHost {
   async resetFailedPasskeyLogin() {
     await this.clearOwnedSessionForPasskey();
     const contents = this.view.webContents;
-    await contents.loadURL(newChatUrlFor(this));
+    await contents.loadURL(HOME_URL);
     const browser = await this.probeAuthentication();
     if (browser.authenticated) throw new Error("Partial passkey session remained authenticated after cleanup");
     this.setState({ authenticated: false, loading: false, status: "signed-out", message: "Sign in to ChatGPT" });
@@ -3627,7 +3636,7 @@ class BrowserHost {
       for (const cookie of state.cookies) await contents.session.cookies.set(cookie);
       contents.session.flushStorageData();
       await contents.session.cookies.flushStore();
-      await contents.loadURL(newChatUrlFor(this));
+      await contents.loadURL(HOME_URL);
       if (state.localStorage.length > 0) {
         const entries = javaScriptLiteral(state.localStorage);
         await contents.executeJavaScript(`(() => {
@@ -3636,7 +3645,7 @@ class BrowserHost {
           }
           for (const entry of ${entries}) localStorage.setItem(entry.name, entry.value);
         })()`, true);
-        await contents.loadURL(newChatUrlFor(this));
+        await contents.loadURL(HOME_URL);
       }
       result = await this.waitForAuthenticated(60_000);
       await this.runSessionInspection(false);
@@ -3688,7 +3697,7 @@ class BrowserHost {
         message: "Signing out of ChatGPT",
         status: "loading",
       });
-      await contents.loadURL(newChatUrlFor(this));
+      await contents.loadURL(HOME_URL);
       const browser = await this.probeAuthentication();
       if (browser.authenticated) {
         throw new Error("ChatGPT session remained authenticated after local session data was cleared");
@@ -3708,7 +3717,7 @@ class BrowserHost {
       // Session verification is read-only on an existing ChatGPT page, including saved chats.
       // Only the idle/off-origin document needs to open ChatGPT before it can be inspected.
       if (!this.view.webContents.getURL().startsWith(CHATGPT_ORIGIN + "/")) {
-        await this.view.webContents.loadURL(newChatUrlFor(this));
+        await this.view.webContents.loadURL(HOME_URL);
       }
       const state = await this.probeAuthentication();
       if (state.authenticated) {
@@ -3891,19 +3900,19 @@ class BrowserHost {
       if (authResult.sessionAuthenticated) {
         const completedAuthView = this.authView;
         this.closeAuthView(completedAuthView, true, false);
-        await contents.loadURL(newChatUrlFor(this));
+        await contents.loadURL(HOME_URL);
         if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
         url = contents.getURL();
         result = await probe(contents);
       }
     }
-    // A login ends on the new chat the setting chooses: with saved chats on, a Temporary Chat (where
-    // ChatGPT refuses the connector) is left for the saved home, and the saved home is kept as it is.
+    // A login ends on ChatGPT's home: a Temporary Chat (where ChatGPT also refuses the connector) is
+    // left for it, and the home is kept as it is, with no reload.
     if (this.manualOperation === "ChatGPT login"
       && result.sessionAuthenticated
-      && !isNewChatUrl(result.url ?? url, useSavedChatsFor(this))
+      && !isNewChatUrl(result.url ?? url, true)
       && !this.view.webContents.isDestroyed()) {
-      await contents.loadURL(newChatUrlFor(this));
+      await contents.loadURL(HOME_URL);
       if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
       url = contents.getURL();
       result = await probe(contents);

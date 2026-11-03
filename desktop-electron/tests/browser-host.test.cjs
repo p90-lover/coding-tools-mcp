@@ -1386,9 +1386,10 @@ test("launcher shutdown persists ChatGPT DOM storage and cookies before browser 
 const NEW_CHAT_URL = { saved: "https://chatgpt.com/", temporary: "https://chatgpt.com/?temporary-chat=true" };
 
 for (const saved of [true, false]) {
-  const home = saved ? NEW_CHAT_URL.saved : NEW_CHAT_URL.temporary;
-  const mode = saved ? "saved chats" : "Temporary Chat";
-  test(`OAuth completion is re-proved on the primary new chat surface before login succeeds (${mode})`, async () => {
+  // The Browser tab signs in on ChatGPT's plain home whatever the setting; task turns pick their own chat.
+  const home = NEW_CHAT_URL.saved;
+  const mode = saved ? "saved chats" : "saved chats off";
+  test(`OAuth completion is re-proved on ChatGPT's home before login succeeds (${mode})`, async () => {
     let primaryReady = false;
     const completedAuthView = {
       webContents: {
@@ -1414,8 +1415,8 @@ for (const saved of [true, false]) {
           isDestroyed: () => false,
           executeJavaScript: async () => ({
             composer: primaryReady,
-            temporary: primaryReady && !saved,
-            savedHome: primaryReady && saved,
+            temporary: false,
+            savedHome: primaryReady,
             sessionAuthenticated: primaryReady,
             readyState: "complete",
             url: primaryReady ? home : "https://chatgpt.com/auth/login",
@@ -1443,10 +1444,10 @@ for (const saved of [true, false]) {
   });
 }
 
-// With saved chats on, a login that lands on Temporary Chat (where the connector is refused) moves
-// to the saved home, and one already on the saved home stays there without a reload.
-for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.saved]], [NEW_CHAT_URL.saved, []]]) {
-  test(`a login with saved chats on ends on the saved home (starting on ${start})`, async () => {
+// Whatever the setting, a login that lands on Temporary Chat moves to ChatGPT's home, and one already
+// on the home stays there without a reload.
+for (const saved of [true, false]) for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.saved]], [NEW_CHAT_URL.saved, []]]) {
+  test(`a login ends on ChatGPT's home (saved=${saved}, starting on ${start})`, async () => {
     let currentUrl = start;
     const loadedUrls = [];
     const fixture = {
@@ -1455,7 +1456,7 @@ for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.sav
       authView: null,
       state: { authenticated: false },
       logger: { info() {} },
-      getUseSavedChats: () => true,
+      getUseSavedChats: () => saved,
       view: {
         webContents: {
           getURL: () => currentUrl,
@@ -1480,44 +1481,6 @@ for (const [start, expectedLoads] of [[NEW_CHAT_URL.temporary, [NEW_CHAT_URL.sav
     assert.equal(result.url, NEW_CHAT_URL.saved);
   });
 }
-
-test("a successful primary login redirect is re-proved on Temporary Chat when saved chats are off", async () => {
-  let currentUrl = "https://chatgpt.com/";
-  const loadedUrls = [];
-  const fixture = {
-    activeTraceId: null,
-    manualOperation: "ChatGPT login",
-    authView: null,
-    state: { authenticated: false },
-    logger: { info() {} },
-    getUseSavedChats: () => false,
-    view: {
-      webContents: {
-        getURL: () => currentUrl,
-        isDestroyed: () => false,
-        executeJavaScript: async () => ({
-          composer: true,
-          temporary: currentUrl === NEW_CHAT_URL.temporary,
-          sessionAuthenticated: true,
-          readyState: "complete",
-          url: currentUrl,
-        }),
-        loadURL: async (url) => {
-          loadedUrls.push(url);
-          currentUrl = url;
-        },
-      },
-    },
-    setState(patch) { this.state = { ...this.state, ...patch }; },
-    snapshot() { return this.state; },
-  };
-
-  const result = await BrowserHost.prototype.probeAuthentication.call(fixture);
-
-  assert.deepEqual(loadedUrls, [NEW_CHAT_URL.temporary]);
-  assert.equal(result.authenticated, true);
-  assert.equal(result.url, NEW_CHAT_URL.temporary);
-});
 
 test("an authenticated primary surface closes a stale embedded auth popup", async () => {
   const staleAuthView = {
@@ -1763,7 +1726,9 @@ for (const useSavedChats of [true, false]) test(`verification refresh opens and 
         isDestroyed: () => false,
         getURL: () => currentUrl,
         loadURL: async (url) => { currentUrl = url; calls.push(["navigate", url]); },
-        executeJavaScript: async () => {
+        executeJavaScript: async (script) => {
+          // Cloudflare's check is not shown here; only the session probe counts.
+          if (script.includes("isCloudflareCheckPage")) return false;
           calls.push(["authenticate"]);
           // The page's own probe: a saved-chat home is no Temporary Chat but is a new chat.
           return { sessionAuthenticated: true, composer: true, temporary: !useSavedChats,

@@ -3020,6 +3020,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           <div className="ao-overview-graph" ref={graphRef}>
           {!workspaceId && workspaceReady ? <div className="ao-empty-state"><p>{copy.noWorkspace}</p><button className="button-primary" type="button" onClick={() => setSheet("settings")}>{copy.settings}</button></div>
             : !selectedRun ? <div className="ao-empty-state"><p>{copy.noMissions}</p><button className="button-primary" type="button" disabled={!board} onClick={() => openSheet("mission")}>{copy.newMission}</button></div>
+            // Drawn only while the Mission Board shows, like the board beside it. Hidden behind the chat it
+            // still remounted with each chat opened (keyed by its run) and measured its cards, which laid
+            // out the whole window in the middle of the click.
+            : view !== "overview" ? null
             : <AgentOrchestratorCanvas key={selectedRun.id}
               nodes={visibleNodes}
               levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
