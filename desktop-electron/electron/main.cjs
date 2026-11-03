@@ -2895,11 +2895,14 @@ function registerIpc({ logger, stateStore }) {
     await host.ready;
     return host.newSignIn();
   });
-  handle("launcher:chatgpt-desktop-clear", async (event) => {
+  handle("launcher:chatgpt-desktop-clear", async (event, expectedSlotId) => {
     assertFocusedMainWindow(event, true);
+    if (typeof expectedSlotId !== "string" || !expectedSlotId.trim()) {
+      throw new Error("Confirm the ChatGPT desktop account to clear");
+    }
     const host = getChatGptDesktop(logger);
     await host.ready;
-    return host.clearActive();
+    return host.clearActive(expectedSlotId);
   });
   handle("launcher:chatgpt-desktop-stop", async (event) => {
     assertFocusedMainWindow(event, true);

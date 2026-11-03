@@ -7,11 +7,13 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const Module = require("node:module");
+const vm = require("node:vm");
+const ts = require("typescript");
 const { EventEmitter } = require("node:events");
 
 const { createLocalChatGpt, normalizeLocalMessage, MAX_MESSAGE_CHARS } = require("../electron/chatgpt-desktop-local.cjs");
 const { createWin32Helper, requestLine } = require("../electron/chatgpt-desktop-win32.cjs");
-const { createChatGptDesktopHost } = require("../electron/chatgpt-desktop.cjs");
+const { createChatGptDesktopHost, slotPaths } = require("../electron/chatgpt-desktop.cjs");
 
 // A helper double: answers each op from `answers` (a value or a function of args) and records calls.
 function fakeHelper(answers = {}) {
@@ -254,7 +256,7 @@ test("sending needs the focused main window and only a text field; the preview n
   assert.match(preview, /localPreview\(\)/);
 });
 
-test("the preload exposes the preview and send on their own channels", async () => {
+test("the preload exposes preview, send and targeted Clear on their own channels", async () => {
   const invocations = [];
   const exposed = {};
   const electronMock = {
@@ -276,8 +278,108 @@ test("the preload exposes the preview and send on their own channels", async () 
   }
   await exposed.codexWebLauncher.chatGptLocalPreview();
   await exposed.codexWebLauncher.sendChatGptLocalMessage("hi there");
+  await exposed.codexWebLauncher.clearChatGptDesktopAccount("local-aaaaaa");
   assert.deepEqual(invocations, [
     { channel: "launcher:chatgpt-desktop-local-preview", payload: undefined },
     { channel: "launcher:chatgpt-desktop-local-send", payload: { text: "hi there" } },
+    { channel: "launcher:chatgpt-desktop-clear", payload: "local-aaaaaa" },
   ]);
+});
+
+// Execute the real queue, switch and clear bodies; all native/account/filesystem effects are fake.
+function clearFixture() {
+  const source = fs.readFileSync(path.resolve(__dirname, "../electron/chatgpt-desktop.cjs"), "utf8");
+  const ast = ts.createSourceFile("host.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const extract = (name, kind) => {
+    const matches = [];
+    const visit = (node) => {
+      if (node.kind === kind && node.name?.getText(ast) === name) matches.push(node.getText(ast));
+      ts.forEachChild(node, visit);
+    };
+    visit(ast);
+    assert.equal(matches.length, 1, name);
+    return matches[0];
+  };
+  const state = { active: "local-aaaaaa", local: [{ id: "local-aaaaaa" }, { id: "local-bbbbbb" }] };
+  const instances = new Map(state.local.map(({ id }, i) => [id, { slotId: id, hwnd: i + 1 }]));
+  const effects = [];
+  const context = { state, instances, path, slotPaths, Error, queue: Promise.resolve(), busy: null, lastError: null,
+    dataRoot: path.join(__dirname, "virtual-only-never-created"), platform: "win32", packageInfo: { version: "fixture" },
+    crypto: require("node:crypto"), logger: {}, emit() {},
+    activeInstance: () => instances.get(state.active),
+    accountList: () => state.local.map(({ id }) => ({ slotId: id, disabled: false })),
+    persist: () => record("persist", state.active), placeNow: async () => {}, makeRoom: async () => {},
+    launchInstance: async (slotId) => { record("launch", slotId); return { slotId, hwnd: 3 }; },
+    adopt: async (entry) => instances.set(entry.slotId, entry),
+    stopInstance: async (slotId) => { record("stop", slotId); instances.delete(slotId); },
+    finalSync: (slotId) => record("sync", slotId),
+    fs: { existsSync: () => true, mkdirSync: () => record("mkdir"),
+      renameSync: (from) => record("trash", path.basename(from)) },
+  };
+  const record = (kind, target) => effects.push({ operation: context.busy, kind, target });
+  const functions = ["exclusive", "status", "openSlot", "newLocalSlot", "trashSlot", "knownSlot"]
+    .map((name) => extract(name, ts.SyntaxKind.FunctionDeclaration)).join("\n");
+  const methods = ["open", "clearActive"].map((name) => extract(name, ts.SyntaxKind.MethodDeclaration)).join(",");
+  vm.runInNewContext(`${functions}\nglobalThis.host = {${methods}, status};`, context);
+  return { ...context, effects, clearingEffects: () => effects.filter(({ operation }) => operation === "clearing") };
+}
+
+test("Clear targets the confirmed active slot, even when its CPA account file is gone", async () => {
+  for (const missingAccount of [false, true]) {
+    const fixture = clearFixture();
+    const expectedSlotId = missingAccount ? "cpa-aaaaaa" : "local-aaaaaa";
+    if (missingAccount) {
+      fixture.state.local = [];
+      fixture.state.active = expectedSlotId;
+      fixture.instances.set(expectedSlotId, { slotId: expectedSlotId, hwnd: 3 });
+    }
+    await fixture.host.clearActive(expectedSlotId);
+    assert.deepEqual(fixture.clearingEffects().filter(({ kind }) => kind === "trash").map(({ target }) => target), [expectedSlotId]);
+    assert.ok(fixture.clearingEffects().some(({ kind }) => kind === "launch"), "fresh sign-in still opens");
+  }
+});
+
+test("Clear rejects omitted, invalid and wrong target IDs before any destructive effect", async () => {
+  for (const id of [undefined, null, "", " ", 42, {}, "local-bbbbbb"]) {
+    const fixture = clearFixture();
+    await assert.rejects(fixture.host.clearActive(id), /confirm|changed/i);
+    assert.deepEqual(fixture.clearingEffects(), [], String(id));
+    assert.equal(fixture.state.active, "local-aaaaaa");
+  }
+});
+
+test("Clear rejects a completed switch and a switch queued ahead of confirmation", async () => {
+  for (const completed of [true, false]) {
+    const fixture = clearFixture();
+    const switching = fixture.host.open("local-bbbbbb");
+    if (completed) await switching;
+    assert.equal(fixture.state.active, completed ? "local-bbbbbb" : "local-aaaaaa");
+    const rejected = assert.rejects(fixture.host.clearActive("local-aaaaaa"), /confirm|changed/i);
+    await switching;
+    await rejected;
+    assert.equal(fixture.state.active, "local-bbbbbb");
+    assert.deepEqual(fixture.clearingEffects(), [], "guard runs inside the queue before stop/sync/trash/persist/new slot");
+    await fixture.host.clearActive("local-bbbbbb");
+    assert.deepEqual(fixture.clearingEffects().filter(({ kind }) => kind === "trash").map(({ target }) => target), ["local-bbbbbb"], "reconfirmation succeeds");
+  }
+});
+
+test("the Clear IPC requires a captured ID and forwards it unchanged after readiness", async () => {
+  const main = fs.readFileSync(path.resolve(__dirname, "../electron/main.cjs"), "utf8");
+  const start = main.indexOf('handle("launcher:chatgpt-desktop-clear"');
+  assert.ok(start >= 0);
+  const registration = main.slice(start, main.indexOf("\n  });", start) + 6);
+  const calls = [];
+  let handler;
+  vm.runInNewContext(registration, { Error, logger: {},
+    handle: (_, callback) => { handler = callback; },
+    assertFocusedMainWindow: (event, focused) => { assert.equal(event, "owner"); assert.equal(focused, true); },
+    getChatGptDesktop: () => ({ ready: Promise.resolve(), clearActive: async (id) => calls.push(id) }),
+  });
+  for (const id of [undefined, null, "", " ", 42, {}]) {
+    await assert.rejects(handler("owner", id), /confirm|account/i);
+  }
+  assert.deepEqual(calls, []);
+  await handler("owner", "local-aaaaaa");
+  assert.deepEqual(calls, ["local-aaaaaa"]);
 });

@@ -27,11 +27,12 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
 }) {
   const [status, setStatus] = useState<ChatGptDesktopStatus | null>(null);
   const [selected, setSelected] = useState("");
-  const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmClearSlot, setConfirmClearSlot] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
   // The panel previewing the user's own ChatGPT app; remembered per computer.
   const [localOpen, setLocalOpen] = useState(() => readFlag(LOCAL_PANEL_KEY, true));
   const confirmTimer = useRef<number | undefined>(undefined);
+  const confirmClear = Boolean(confirmClearSlot && confirmClearSlot === status?.activeSlotId);
 
   useEffect(() => {
     let alive = true;
@@ -78,6 +79,10 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
   // Leaving the pane (or unmounting it) must never leave the native window floating.
   useEffect(() => () => { void api.setChatGptDesktopSurfaceActive(false).catch(() => undefined); }, [api]);
   useEffect(() => () => window.clearTimeout(confirmTimer.current), []);
+  useEffect(() => {
+    window.clearTimeout(confirmTimer.current);
+    setConfirmClearSlot(null);
+  }, [status?.activeSlotId]);
 
   const run = useCallback(async (action: () => Promise<ChatGptDesktopStatus>) => {
     setError(null);
@@ -89,14 +94,16 @@ export function ChatGptDesktopSurface({ api, active, setError }: {
   }, [setError]);
 
   const clear = () => {
-    if (!confirmClear) {
-      setConfirmClear(true);
-      confirmTimer.current = window.setTimeout(() => setConfirmClear(false), CONFIRM_WINDOW_MS);
+    const activeSlotId = status?.activeSlotId;
+    if (!activeSlotId) return;
+    window.clearTimeout(confirmTimer.current);
+    if (!confirmClearSlot || confirmClearSlot !== activeSlotId) {
+      setConfirmClearSlot(activeSlotId);
+      confirmTimer.current = window.setTimeout(() => setConfirmClearSlot(null), CONFIRM_WINDOW_MS);
       return;
     }
-    window.clearTimeout(confirmTimer.current);
-    setConfirmClear(false);
-    void run(() => api.clearChatGptDesktopAccount());
+    setConfirmClearSlot(null);
+    void run(() => api.clearChatGptDesktopAccount(confirmClearSlot));
   };
 
   const busy = Boolean(status?.busy);

@@ -11,12 +11,12 @@ const ts = require(require.resolve("typescript", { paths: [root] }));
 const React = require(require.resolve("react", { paths: [root] }));
 const { renderToStaticMarkup } = require(require.resolve("react-dom/server", { paths: [root] }));
 
-const load = (file, modules = {}) => {
+const load = (file, modules = {}, globals = {}) => {
   const exports = {};
   const source = fs.readFileSync(path.resolve(root, "src/features", file), "utf8");
   const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
   const local = (name) => modules[name] ?? require(require.resolve(name, { paths: [root] }));
-  vm.runInNewContext(output, { exports, require: local, console, window: globalThis });
+  vm.runInNewContext(output, { exports, require: local, console, window: globalThis, ...globals });
   return exports;
 };
 const split = load("chat-split.ts");
@@ -75,6 +75,10 @@ test("saved column widths hold while every column keeps 320 px; the row split st
   assert.equal(split.clampRowSplit(0.01, 4000), 0.15);
   assert.equal(split.clampRowSplit(0.99, 4000), 0.85);
   assert.equal(split.clampRowSplit(0.2, 800), 0.4, "each row keeps 320 px");
+  assert.equal(split.clampRowSplit(0.99, 800), 0.6, "the bottom row also keeps 320 px");
+  for (const value of [0.01, 0.5, 0.99]) assert.equal(split.clampRowSplit(value, 500), 0.5, "an undersized host shares the space equally");
+  assert.equal(split.clampRowSplit(0.01, 0), 0.15, "unmeasured height keeps the ratio bounds");
+  assert.equal(split.clampRowSplit(0.99, 0), 0.85);
 });
 
 test("Ctrl+] and Ctrl+[ step through panes by column and row; Ctrl+Alt+Arrow finds the pane that way", () => {
@@ -162,4 +166,127 @@ test("a movable split gives each other pane a Move grip and a corner where divid
   assert.match(html, /class="cx-split-corner" aria-hidden="true" style="left:50%"/, "column 1 is split, so the divider before it has a corner");
   assert.doesNotMatch(render({}), /cx-pane-grip/, "without onMovePane, nothing moves");
   assert.doesNotMatch(render({ panes: [{ ...pane("b", 1, 0), content: "b" }] }), /cx-split-corner/, "no row divider, no corner");
+});
+
+function splitHost(initial = {}) {
+  const slots = [], effects = [], pending = [], listeners = [], rows = [], moves = [], drops = [];
+  let cursor, tree, dirty, size = { width: 1000, height: 800 }, observe;
+  const host = { dataset: {}, getBoundingClientRect: () => ({ left: 0, top: 0, ...size }) };
+  const effect = (work, deps, phase) => {
+    const index = cursor++, before = effects[index];
+    if (!before || deps.some((value, i) => !Object.is(value, before.deps[i]))) pending.push({ phase, work: () => {
+      before?.cleanup?.(); effects[index] = { deps, phase, cleanup: work() };
+    } });
+  };
+  const hooks = { ...React,
+    useState(value) { const index = cursor++; if (!(index in slots)) slots[index] = typeof value === "function" ? value() : value;
+      return [slots[index], next => { const value = typeof next === "function" ? next(slots[index]) : next;
+        if (!Object.is(value, slots[index])) { slots[index] = value; dirty = true; } }]; },
+    useRef: value => slots[cursor++] ??= { current: value },
+    useEffect: (work, deps) => effect(work, deps, 1), useLayoutEffect: (work, deps) => effect(work, deps, 0),
+  };
+  const window = {
+    addEventListener(type, fn, capture = false) { listeners.push({ type, fn, capture }); },
+    removeEventListener(type, fn, capture = false) { const index = listeners.findIndex(item => item.type === type && item.fn === fn && item.capture === capture); if (index >= 0) listeners.splice(index, 1); },
+  };
+  const { ChatSplit } = load("ChatSplit.tsx", { "./chat-split": split, react: hooks }, { window, clearTimeout, setTimeout,
+    ResizeObserver: class { constructor(work) { observe = work; } observe() { observe([{ contentRect: size }]); } disconnect() {} },
+  });
+  const props = { focused: "main", onFocus() {}, rowSplit: 0.85, onRowSplit: value => rows.push(value), maxColumns: 2,
+    onMovePane: (...args) => moves.push(plain(args)), onDropChat: (...args) => drops.push(plain(args)),
+    panes: [{ ...pane("b", 0, 1), content: "b" }], ...initial };
+  const nodes = node => !node || typeof node !== "object" ? [] : Array.isArray(node) ? node.flatMap(nodes) : [node, ...nodes(node.props?.children)];
+  const render = (next = {}) => {
+    Object.assign(props, next);
+    for (let pass = 0; pass < 10; pass++) {
+      cursor = 0; dirty = false; tree = ChatSplit(props); tree.props.ref.current = host;
+      for (const item of pending.splice(0).sort((a, b) => a.phase - b.phase)) item.work();
+      if (!dirty) return tree;
+    }
+    throw new Error("split host hooks did not settle");
+  };
+  const emit = (type, event = {}) => { for (const item of [...listeners]) if (item.type === type && listeners.includes(item)) item.fn(event); };
+  const find = label => nodes(tree).find(node => node.props?.["aria-label"] === label);
+  return { render, find, rows, moves, drops, listeners, emit,
+    resize(height) { size = { ...size, height }; observe([{ contentRect: size }]); return render(); },
+    start(pointerId = 1) { const grip = nodes(tree).find(node => node.props?.className === "cx-pane-grip"); assert.ok(grip);
+      grip.props.onPointerDown({ button: 0, pointerId, clientX: 500, clientY: 650, preventDefault() {},
+        currentTarget: { closest: () => ({ querySelector: () => ({ textContent: "Pane b" }) }) } }); },
+    unmount() { for (const item of effects.filter(Boolean).sort((a, b) => a.phase - b.phase)) { if (item.phase === 1) tree.props.ref.current = null; item.cleanup?.(); } tree.props.ref.current = null; },
+  };
+}
+
+test("a restored row ratio adapts to the measured height for rendering, keys and drop targets", () => {
+  const ui = splitHost();
+  ui.render();
+  assert.equal(ui.resize(4000).props.style["--cx-pane-row"], 0.85, "a tall host keeps its saved ratio");
+  const tree = ui.resize(800);
+  assert.equal(tree.props.style["--cx-pane-row"], 0.6, "a smaller host clamps the saved ratio before drawing");
+  assert.equal(ui.find("Resize pane rows").props["aria-valuenow"], 60);
+  ui.find("Resize pane rows").props.onKeyDown({ key: "ArrowUp", preventDefault() {} });
+  assert.equal(ui.rows.at(-1), 0.59, "keys start from the displayed divider rather than the saved ratio");
+  tree.props.onDrop({ clientX: 450, clientY: 550, preventDefault() {}, dataTransfer: {
+    getData: () => JSON.stringify({ workspaceId: "ws", taskId: "other" }),
+  } });
+  assert.deepEqual(ui.drops, [[{ workspaceId: "ws", taskId: "other" }, { kind: "cell", col: 0, row: 1 }]], "drop geometry uses the displayed lower row");
+  assert.equal(ui.resize(500).props.style["--cx-pane-row"], 0.5);
+  ui.unmount();
+});
+
+test("pane moves release their listeners and never commit after unmount, disabling moves or blur", () => {
+  for (const end of ["unmount", "disabled", "blur"]) {
+    const ui = splitHost(); ui.render(); ui.start();
+    ui.emit("pointermove", { pointerId: 1, clientX: 750, clientY: 650 }); ui.render();
+    assert.equal(ui.listeners.filter(item => item.capture).length, 4, end);
+    if (end === "unmount") ui.unmount();
+    else if (end === "disabled") ui.render({ onMovePane: undefined });
+    else ui.emit("blur");
+    assert.equal(ui.listeners.filter(item => item.capture).length, 0, end);
+    assert.doesNotThrow(() => ui.emit("pointermove", { pointerId: 1, clientX: 780, clientY: 650 }), end);
+    ui.emit("pointerup", { pointerId: 1 });
+    assert.deepEqual(ui.moves, [], end);
+    if (end !== "unmount") ui.unmount();
+  }
+});
+
+test("a second grip press cancels the first move while the current pointer can still commit once", () => {
+  const ui = splitHost(); ui.render(); ui.start();
+  ui.emit("pointermove", { pointerId: 1, clientX: 750, clientY: 650 }); ui.render();
+  ui.start(2);
+  assert.equal(ui.listeners.filter(item => item.capture).length, 4, "only the current gesture owns window listeners");
+  ui.emit("pointerup", { pointerId: 1 });
+  assert.deepEqual(ui.moves, [], "the old pointer cannot commit its captured target");
+  ui.emit("pointermove", { pointerId: 2, clientX: 760, clientY: 650 });
+  ui.emit("pointerup", { pointerId: 2 });
+  ui.emit("pointerup", { pointerId: 2 });
+  assert.deepEqual(ui.moves, [["b", { kind: "column" }]]);
+  assert.equal(ui.listeners.filter(item => item.capture).length, 0);
+  ui.unmount();
+});
+
+test("pane topology changes cancel captured moves while ordinary content renders keep them active", () => {
+  const b = { ...pane("b", 0, 1), content: "b" }, c = { ...pane("c", 1, 0), content: "c" };
+  for (const [name, panes] of [
+    ["dragged pane removed", [c]],
+    ["another pane added", [b, c, { ...pane("d", 1, 1), content: "d" }]],
+    ["another pane removed", [b]],
+    ["pane moved", [{ ...b, col: 1, row: 1 }, c]],
+    ["pane task replaced", [{ ...b, taskId: "new-task" }, c]],
+    ["pane workspace replaced", [{ ...b, workspaceId: "new-workspace" }, c]],
+  ]) {
+    const ui = splitHost({ panes: [b, c] }); ui.render(); ui.start();
+    ui.emit("pointermove", { pointerId: 1, clientX: 750, clientY: 650 }); ui.render();
+    ui.render({ panes });
+    assert.equal(ui.listeners.filter(item => item.capture).length, 0, name);
+    ui.emit("pointerup", { pointerId: 1 });
+    assert.deepEqual(ui.moves, [], name);
+    ui.unmount();
+  }
+  const ui = splitHost({ panes: [b, c] }); ui.render(); ui.start();
+  ui.emit("pointermove", { pointerId: 1, clientX: 750, clientY: 650 }); ui.render();
+  ui.render({ panes: [b, c].map(item => ({ ...item, content: "refreshed content" })) });
+  assert.equal(ui.listeners.filter(item => item.capture).length, 4, "fresh objects and content keep the same topology");
+  ui.emit("pointerup", { pointerId: 1 });
+  assert.equal(ui.moves.length, 1, "the unchanged gesture still commits once");
+  ui.unmount();
 });
