@@ -1109,6 +1109,27 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return [];
     }
   }
+  // CPA lists every model whose id does not start with "claude-" to Claude clients as
+  // "claude-fable-5-dd-" plus the id reversed (CPA's internal/client/claude/models), and
+  // claude-agent-acp keeps only the models that listing names. Seen live 2026-11-03: every Claude
+  // Code chat on "opencode-go/deepseek-v4.1-flash(max)" failed at start ("Invalid value for config
+  // option model"), while the listed spelling started with its "(max)" kept; CPA turns it back into
+  // the real id (and suffix) for routing.
+  const CPA_CLAUDE_ALIAS = "claude-fable-5-dd-";
+  const reversed = text => [...text].reverse().join("");
+  const splitSuffix = id => /^(.*?)(\([^()]*\))?$/.exec(id).slice(1, 3).map(part => part ?? "");
+  /** A CPA model id as CPA lists it to Claude Code. */
+  function cpaClaudeModel(id) {
+    const [base, suffix] = splitSuffix(id);
+    return !base || base.startsWith("claude-") ? id : CPA_CLAUDE_ALIAS + reversed(base) + suffix;
+  }
+  /** The CPA model id behind Claude Code's listed spelling (the id itself when it is not one). */
+  function cpaModelFromClaude(id) {
+    if (typeof id !== "string") return id;
+    const [base, suffix] = splitSuffix(id);
+    return base.startsWith(CPA_CLAUDE_ALIAS) && base.length > CPA_CLAUDE_ALIAS.length
+      ? reversed(base.slice(CPA_CLAUDE_ALIAS.length)) + suffix : id;
+  }
   /**
    * The person's unified-agent-tools server for a chat session that runs a GPT model
    * (unified-agent-tools.cjs), or null. Never fails a launch or a resume.
@@ -1297,18 +1318,21 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (tools && !tools.bind(created?.session?.id)) tools.release();
         return created;
       };
+      // Claude Code through CPA names the model as CPA lists it to Claude clients (cpaClaudeModel).
+      const viaCpa = gateway?.provider === "cpa" && typeof gateway.model === "string";
+      const wire = id => (viaCpa && agentId(agent) === "claude-code" ? cpaClaudeModel(id) : id);
       const launchSession = (mode, mcpServers) => internalApi("POST", "/api/v1/sessions", {
         projectId, kind: "worker", harness: agentId(agent), mode,
         ...(approvalMode ? { approvalMode } : {}),
         ...(brief ? { prompt: mode === "chat" ? brief : `${brief}\n\n${TUI_RESULT_INSTRUCTION}` } : {}),
-        ...(model && model !== "default" ? { model: String(model).slice(0, 256) } : {}),
+        ...(model && model !== "default" ? { model: wire(String(model)).slice(0, 256) } : {}),
         // Through CPA too: the agent sends it in the request body (the workflow's aoLaunchArgs).
         ...(effort ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
         // A single-model chat is a plain assistant: AO adds none of its worker/orchestrator prompt.
         ...(plain ? { plainPrompt: true } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
-        ...(gateway?.provider === "cpa" && typeof gateway.model === "string" ? { gateway: { provider: "cpa", model: gateway.model.slice(0, 256) } } : {}),
+        ...(viaCpa ? { gateway: { provider: "cpa", model: wire(gateway.model).slice(0, 256) } } : {}),
         ...(mcpServers.length ? { mcpServers } : {}),
         // A chat answers as soon as AO has recorded it; its worktree and agent start behind it and
         // the prompt is sent once the agent is up (provisionState; observe() reads it). Waiting for
@@ -1556,7 +1580,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // exact session's observable live state, without issuing a second resume or new launch.
           // The file tools as they are now (the model's, and whether the person still has them on);
           // the renewed lease hides its own file tools only while these are attached.
-          const files = await gptFileServer(session.harness, session.model);
+          const files = await gptFileServer(session.harness, cpaModelFromClaude(session.model));
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key, { unifiedFiles: Boolean(files) })).catch(() => null);
           // AO keeps a session's servers only while its daemon runs, so the person's own go in again too.
           const servers = [...(renewed?.servers ?? []), ...(files ? [files] : [])];
