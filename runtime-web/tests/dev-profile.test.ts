@@ -1,6 +1,8 @@
 import { expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
-import { mkdirSync, mkdtempSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
 import { basename, join, resolve } from "node:path";
 import {
   activateDevProfileEnvironment,
@@ -73,6 +75,60 @@ test("DEV profile path refuses production home reuse", () => {
       CODING_TOOLS_DEV_HOME: shared,
     },
   })).toThrow("must differ from the production Coding Tools home");
+});
+
+for (const platform of ["win32", "linux", "darwin"]) {
+  test(`DEV runtime home comparison preserves ${platform} case rules`, () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const homeDirectory = resolve("/fixture/home");
+    const production = join(homeDirectory, "Production");
+    const alias = join(homeDirectory, "production");
+    const paths = (devHome: string) => resolveDevProfilePaths({ homeDirectory,
+      environment: { CODING_TOOLS_HOME: production, CODING_TOOLS_DEV_HOME: devHome } });
+    Object.defineProperty(process, "platform", { ...descriptor, value: platform });
+    try {
+      expect(() => paths(production)).toThrow("must differ from the production Coding Tools home");
+      expect(paths(join(homeDirectory, "Development")).home).toBe(join(homeDirectory, "Development"));
+      if (platform === "win32") expect(() => paths(alias)).toThrow("must differ from the production Coding Tools home");
+      else expect(paths(alias).home).toBe(alias);
+    } finally {
+      Object.defineProperty(process, "platform", descriptor);
+    }
+  });
+}
+
+test.skipIf(process.platform !== "win32")("Windows case alias cannot pass either DEV resolver or the launcher environment chain", () => {
+  const parent = fileURLToPath(new URL("../../aiTemp/dev-profile-fixtures/", import.meta.url));
+  mkdirSync(parent, { recursive: true });
+  const root = mkdtempSync(join(parent, "case-alias-"));
+  const { resolveLauncherProfile } = createRequire(import.meta.url)("../../desktop-electron/electron/profile.cjs");
+  try {
+    const production = join(root, "Production");
+    const alias = join(root, "production");
+    mkdirSync(production);
+    writeFileSync(join(production, "config.json"), '{"fixture":true}\n');
+    const original = statSync(join(production, "config.json"), { bigint: true });
+    const aliased = statSync(join(alias, "config.json"), { bigint: true });
+    expect(original.ino).not.toBe(0n);
+    expect([aliased.dev, aliased.ino]).toEqual([original.dev, original.ino]);
+    const environment = { CODING_TOOLS_HOME: production, CODING_TOOLS_DEV_HOME: alias };
+    expect(() => resolveDevProfilePaths({ environment, homeDirectory: root }))
+      .toThrow("must differ from the production Coding Tools home");
+    expect(() => resolveLauncherProfile({ env: environment, argv: ["electron", "--dev-profile"],
+      homeDir: root, appData: join(root, "app-data") })).toThrow("must differ from the production Coding Tools home");
+
+    const paths = resolveDevProfilePaths({ homeDirectory: root,
+      environment: { ...environment, CODING_TOOLS_DEV_HOME: join(root, "Development") } });
+    const childEnvironment = devLauncherEnvironment(paths, environment);
+    expect(childEnvironment.CODING_TOOLS_HOME).toBeUndefined();
+    const child = resolveLauncherProfile({ env: childEnvironment, argv: ["electron", "--dev-profile"],
+      homeDir: root, appData: join(root, "app-data") });
+    expect(child.coreHome).toBe(paths.home);
+    expect(child.userData).toBe(paths.launcherUserData);
+    expect(readFileSync(join(production, "config.json"), "utf8")).toBe('{"fixture":true}\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("installed launcher discovery has explicit rebranded platform candidates", () => {
