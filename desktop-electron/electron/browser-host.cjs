@@ -2729,6 +2729,21 @@ class BrowserHost {
     this.setState({ visible: false });
   }
 
+  /**
+   * A still of the page in the window, as a JPEG data URL (null when none is shown). The GPT Browser
+   * page draws it in the view's place while the sidebar slides over it: the native view is drawn
+   * above the whole app page, so it steps aside and left the pane black.
+   */
+  async captureStill() {
+    if (!this.visible || !this.surfaceActive) return null;
+    const contents = this.activeView()?.webContents;
+    if (!contents || contents.isDestroyed()) return null;
+    try {
+      const image = await contents.capturePage();
+      return image.isEmpty() ? null : `data:image/jpeg;base64,${image.toJPEG(80).toString("base64")}`;
+    } catch { return null; }
+  }
+
   setSurfaceActive(active) {
     this.surfaceActive = active === true;
     this.syncViewVisibility();

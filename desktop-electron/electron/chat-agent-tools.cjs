@@ -679,10 +679,10 @@ function scopePath(root, raw, label, { write = false } = {}) {
 const trimWhite = (text) => text.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
 const withoutCr = (line) => line.replace(/\r+$/, "");
 
-/** patch.rs parse_diff_path: trimmed, without an `a/` or `b/` prefix, `/dev/null` as none. */
-function diffPath(raw) {
+/** patch.rs parse_diff_path: only unified headers have `a/` or `b/` markers; `/dev/null` is none. */
+function diffPath(raw, stripDiffPrefix = true) {
   const trimmed = trimWhite(raw);
-  const target = trimmed.startsWith("a/") || trimmed.startsWith("b/") ? trimmed.slice(2) : trimmed;
+  const target = stripDiffPrefix && (trimmed.startsWith("a/") || trimmed.startsWith("b/")) ? trimmed.slice(2) : trimmed;
   return target === "/dev/null" ? "" : target.replace(/\\/g, "/");
 }
 
@@ -717,12 +717,12 @@ function parsePatch(text) {
       const line = withoutCr(raw);
       const header = /^\*\*\* (Add|Update|Delete) File: /.exec(line);
       if (header) {
-        current = { path: diffPath(line.slice(header[0].length)), operation: header[1].toLowerCase() };
+        current = { path: diffPath(line.slice(header[0].length), false), operation: header[1].toLowerCase() };
         files.push(current);
       } else if (line === "*** End Patch") {
         current = null;
       } else if (line.startsWith("*** Move to: ") && current) {
-        current.moveTo = diffPath(line.slice("*** Move to: ".length));
+        current.moveTo = diffPath(line.slice("*** Move to: ".length), false);
       }
     }
     return files;

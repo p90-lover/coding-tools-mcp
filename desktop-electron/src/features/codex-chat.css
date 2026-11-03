@@ -857,9 +857,20 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-edit-file > header { display: flex; align-items: baseline; gap: 6px; margin-bottom: 4px; color: var(--color-text-secondary); font-size: 12px; }
 .cx-diff { max-height: 320px; margin: 0; padding: 6px 0; overflow: auto; border: 1px solid var(--ao-line); border-radius: 8px;
   background: var(--cx-tray, rgb(127 127 127 / 6%)); font-size: 12px; line-height: 1.5; }
-/* Requests waiting on the person: the last thing in the thread, as wide as its messages, and
-   scrolling with it, so a long command never takes the pane from the conversation. */
-.cx-approval-dock { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; width: 100%; min-width: 0; }
+/* Requests waiting on the person float over the conversation's foot, as wide as its messages: the
+   anchor is the thread's last item, has no height and sticks to the scroller's bottom, and the cards
+   rise from it over the newest lines. A long one scrolls in its own box. */
+.cx-approval-anchor { position: sticky; z-index: 3; bottom: 8px; height: 0; min-width: 0; }
+.cx-approval-dock { position: absolute; right: 0; bottom: 0; left: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; width: 100%; min-width: 0;
+  max-height: 55vh; overflow-y: auto; overscroll-behavior: contain; animation: cx-approval-rise .16s cubic-bezier(0.32, 0.72, 0, 1); }
+@keyframes cx-approval-rise { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { .cx-approval-dock { animation: none; } }
+/* Slim, floating: tighter spacing, a short command box, and its choices on one line. */
+.cx-approval-dock .cdx-card { border-radius: 12px; box-shadow: 0 10px 28px rgb(0 0 0 / 22%); }
+.cx-approval-dock .cdx-body { gap: 6px; padding: 10px 12px 8px; }
+.cx-approval-dock pre.cdx-command { max-height: 120px; padding: 6px 8px; }
+.cx-approval-dock .cdx-options { flex-flow: row wrap; gap: 4px; margin-top: 0; }
+.cx-approval-dock .cdx-option { min-height: 24px; padding: 2px 8px; }
 /* The last box under the chat box keeps the gap the box itself keeps from the pane's bottom. */
 .cx-composer ~ .cx-command-card:last-child { margin-bottom: 16px; }
 .cx-approval-dock .ao-msg { max-width: none; margin: 0; }
@@ -1508,10 +1519,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal.is-achieved .cx-goal-state { color: var(--ao-green); }
 .cx-goal.is-stalled .cx-goal-state, .cx-goal.is-limited .cx-goal-state { color: var(--ao-amber); }
 .cx-wakeup-glyph { flex: 0 0 auto; color: var(--ao-blue); font-size: 13px; line-height: 1; }
-/* The objective holds one line and fades out before its time, as a thread title does, and its type
-   shrinks with the pane (12 px from a 500 px chat, 10 px at 375 px and under). */
-.cx-goal-objective { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--color-text-primary); font-size: clamp(10px, 1.6cqi + 4px, 12px); white-space: nowrap;
-  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+/* The objective sits right after the state on the bar's one row and ends in "…" where it is cut;
+   it gives up its room first, from none, so the state and the running time always show whole. Its
+   type shrinks with the pane (12 px from a 500 px chat, 10 px at 375 px and under). */
+.cx-goal-objective { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--color-text-primary); font-size: clamp(10px, 1.6cqi + 4px, 12px);
+  text-overflow: ellipsis; white-space: nowrap; }
 .cx-goal-meta, .cx-goal-note { flex: 0 0 auto; color: var(--ao-muted); }
 .cx-goal-note { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* The goal check's verdict, opened from the goal bar's target: a box of its own on the row above the
@@ -1542,6 +1554,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-goal .cx-goal-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-goal .cx-goal-icon:disabled { background: none; color: var(--ao-muted); opacity: .45; cursor: default; }
 .cx-goal .cx-goal-icon + .cx-goal-icon { margin-left: 4px; }
+/* Model judges: a toggle among the icons, lit while on; its tooltip says what it does. */
+.cx-goal .cx-goal-icon.cx-model-judges-toggle[aria-pressed="true"] { background: color-mix(in srgb, var(--ao-blue) 14%, transparent); color: var(--ao-blue); }
+.cx-goal .cx-goal-icon.cx-model-judges-toggle[aria-pressed="true"]:hover { background: color-mix(in srgb, var(--ao-blue) 22%, transparent); }
 .cx-goal .cx-goal-meta { margin-right: 6px; font-variant-numeric: tabular-nums; }
 /* Edit goal: the goal bar opened up. Its target and title, the objective in a soft box that grows
    with its text (up to 40% of the window), then a hint, Cancel and an ink Save. */
@@ -1989,8 +2004,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
     flex: 0 1 auto; min-width: 40px; }
   /* The effort only once the model is down to its least: shrinking with it, "Max" read "Ma". */
   .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:has(> .ao-composer-chip[aria-label^="Reasoning effort"]) { flex: 0 0.001 auto; min-width: 34px; }
-  /* The goal bar: the round is in its tooltip, and Model judges is its switch alone. */
-  .cx-goal-round, .cx-model-judges.is-compact > span:last-child { display: none; }
+  /* The goal bar: the round is in its tooltip. */
+  .cx-goal-round { display: none; }
 }
 @container cx-thread (max-width: 560px) {
   .cx-thread-head { gap: 4px; padding: 0 10px 0 14px; }
@@ -2005,15 +2020,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   /* The bars above and below the chat box keep its width, so the goal and queued bars line up with it. */
   :is(.cx-composer, .cx-context-strip, .cx-queued, .cx-turn-stats, .cx-command-card, .cx-composer-modes, .cx-goal-edit, .cx-subagent-strip) { width: calc(100% - 24px); }
   .ao-workflow .cx-branch-bar:not(.is-inline) { width: calc(100% - 24px); }
-  /* The goal bar's objective takes a line of its own under its state and buttons, beside its time:
-     on one line it got a few letters, and in a 350 px pane none at all. A break puts it there at every
-     width: left to wrap, in a ~480-560 px pane it fit on the first row, squeezed the state to "F" and
-     pushed the time alone onto the second. */
-  .cx-goal { flex-wrap: wrap; row-gap: 0; }
-  .cx-goal::before { flex: 0 0 100%; order: 1; content: ""; }
-  .cx-goal-state { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cx-goal-objective { order: 2; flex: 1 1 0; padding-left: 20px; }
-  .cx-goal .cx-goal-meta { order: 3; }
 }
 @container cx-thread (max-width: 400px) {
   .cx-thread-head > :is(.cx-head-folder, .cx-status) { display: none; }

@@ -117,7 +117,9 @@ export function compilePlainChatGptWebPrompt(
     goal ||= goalTurn;
     if (text) texts.push(text);
     for (const part of parts) {
-      if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl) || images.length >= CHATGPT_MAX_INPUT_IMAGES) continue;
+      if (part.type !== "image" || isOnePixelPngDataUrl(part.imageUrl)) continue;
+      // Let the full compiler keep the newest images and describe any omitted attachments.
+      if (images.length >= CHATGPT_MAX_INPUT_IMAGES) return undefined;
       images.push({ ref: `codex-input-image-${images.length + 1}`, imageUrl: part.imageUrl, ...(part.detail ? { detail: part.detail } : {}) });
     }
   }

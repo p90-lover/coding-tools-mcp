@@ -3261,6 +3261,21 @@ test("the GPT Browser address bar opens a typed address in the shown tab, or in 
   assert.deepEqual(created, ["https://chatgpt.com/"]);
 });
 
+test("a still of the shown page stands in for it under the sidebar; none while the page is hidden", async () => {
+  const image = { isEmpty: () => false, toJPEG: (quality) => Buffer.from(`jpeg@${quality}`) };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    visible: true,
+    surfaceActive: true,
+    activeView: () => ({ webContents: { isDestroyed: () => false, capturePage: async () => image } }),
+  });
+  assert.equal(await host.captureStill(), `data:image/jpeg;base64,${Buffer.from("jpeg@80").toString("base64")}`);
+  host.surfaceActive = false;
+  assert.equal(await host.captureStill(), null);
+  host.surfaceActive = true;
+  host.activeView = () => ({ webContents: { isDestroyed: () => false, capturePage: async () => { throw new Error("gone"); } } });
+  assert.equal(await host.captureStill(), null);
+});
+
 test("five browser tabs are a hard account-safety limit", async () => {
   const turnTabs = new Map(Array.from({ length: 5 }, (_unused, index) => [
     `tab-${index + 1}`,

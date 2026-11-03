@@ -480,6 +480,9 @@ function LauncherShell({
   const [sidebarPeek, setSidebarPeek] = useState(false);
   // The panel keeps its full layout while it slides shut, so its labels don't vanish mid-way.
   const [sidebarExpanded, setSidebarExpanded] = useState(false);
+  // The docked sidebar sliding shut keeps its full layout until it reaches the rail: switching to the
+  // rail's layout at the first frame cut the panel to the rail at once, and the slide showed nothing.
+  const [sidebarClosing, setSidebarClosing] = useState(false);
   const sidebarPeekTimer = useRef(0);
   // Rarely used surfaces, folded under "More" so the everyday ones stay in view.
   const moreSurfaces = [
@@ -500,13 +503,16 @@ function LauncherShell({
   const [biggerContextRecommendationOpen, setBiggerContextRecommendationOpen] = useState(false);
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
-  const sidebarRail = !compactSidebar && !sidebarOpen;
+  const sidebarRail = !compactSidebar && !sidebarOpen && !sidebarClosing;
   // Native views (browser, ChatGPT, Register) are drawn above the page, so they step aside while
   // a sidebar is laid over them.
   const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarExpanded);
-  const browserSurfaceActive = surface === "browser"
-    && !sidebarCovers
-    && !biggerContextRecommendationOpen;
+  const browserCovered = sidebarCovers || biggerContextRecommendationOpen;
+  const browserSurfaceActive = surface === "browser" && !browserCovered;
+  // A still of the GPT Browser's page, drawn in its slot while the page is off the window for the sidebar.
+  const [browserStill, setBrowserStill] = useState<string | null>(null);
+  // Whether the page is in the window now: only a page being shown has a still to take.
+  const browserShown = useRef(false);
   const needsBrowser = snapshot.state.browserInteractionMode === "automatic"
     && browser?.authenticated !== true;
   const needsSetup = !needsBrowser && !interactionSetupComplete;
@@ -560,6 +566,23 @@ function LauncherShell({
       });
     };
 
+    if (!browserSurfaceActive && surface === "browser" && browserCovered && browserShown.current) {
+      // The native view is drawn above the whole app page, so it must step aside for the sidebar;
+      // it left the pane black. A still of the page takes its place first, then the view goes.
+      void api!.browserStill().catch(() => null).then((url) => {
+        if (cancelled) return;
+        if (url) setBrowserStill(url);
+        requestAnimationFrame(() => {
+          if (cancelled) return;
+          browserShown.current = false;
+          void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
+        });
+      });
+      return () => { cancelled = true; };
+    }
+    browserShown.current = browserSurfaceActive;
+    // The view is back over the still; the still goes once the view has drawn.
+    const clearStill = browserSurfaceActive ? window.setTimeout(() => { if (!cancelled) setBrowserStill(null); }, 250) : 0;
     void api!.setBrowserSurfaceActive(browserSurfaceActive).then(() => {
       if (cancelled || !browserSurfaceActive || !browserSlot) return;
       measure();
@@ -570,11 +593,12 @@ function LauncherShell({
 
     return () => {
       cancelled = true;
+      window.clearTimeout(clearStill);
       cancelAnimationFrame(animationFrame);
       observer?.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [browserSlot, browserSurfaceActive, setError]);
+  }, [browserSlot, browserSurfaceActive, browserCovered, surface, setError]);
 
   useEffect(() => {
     const media = window.matchMedia(COMPACT_SIDEBAR_QUERY);
@@ -667,8 +691,8 @@ function LauncherShell({
       setSidebarExpanded(true);
       return undefined;
     }
-    // Matches the panel's 180 ms slide in styles.css.
-    const timer = window.setTimeout(() => setSidebarExpanded(false), 190);
+    // Matches the panel's 240 ms slide in styles.css.
+    const timer = window.setTimeout(() => setSidebarExpanded(false), 250);
     return () => window.clearTimeout(timer);
   }, [sidebarPeek]);
 
@@ -689,6 +713,7 @@ function LauncherShell({
         .catch((cause) => setError(messageOf(cause)));
       return;
     }
+    if (!next && !compactSidebar) setSidebarClosing(true);
     setSidebarOpen(next);
     if (!compactSidebar) persistSidebar(next);
   };
@@ -814,7 +839,10 @@ function LauncherShell({
         animate={{ width: sidebarOpen ? "var(--sidebar-width)" : compactSidebar ? 0 : "var(--sidebar-rail-width)" }}
         className={`app-sidebar${sidebarRail && sidebarPeek ? " is-peek" : ""}${sidebarRail && sidebarExpanded ? " is-expanded" : ""}`}
         initial={false}
-        transition={{ type: "spring", duration: 0.5, bounce: 0.08 }}
+        // One eased glide each way, the same curve as the rail's slide: the spring's bounce made the
+        // edge overshoot and settle back on every open and close.
+        transition={{ type: "tween", duration: 0.26, ease: [0.32, 0.72, 0, 1] }}
+        onAnimationComplete={() => setSidebarClosing(false)}
       >
         <div className="sidebar-clip">
           <div className="sidebar-content">
@@ -825,9 +853,6 @@ function LauncherShell({
                 {devProfile ? <em className="dev-profile-badge">{copy.devBadge}</em> : null}
               </div>
               <div className="sidebar-brand-actions">
-                {sidebarRail ? (
-                  <IconButton icon="sidebar" label={copy.keepSidebarOpen} onClick={toggleSidebar} releaseFocus />
-                ) : null}
                 <IconButton
                   icon="github"
                   label="GitHub"
@@ -968,6 +993,7 @@ function LauncherShell({
               <BrowserSurface
                 browser={browser}
                 browserSlotRef={browserSlotRef}
+                still={browserStill}
                 copy={copy}
                 interactionMode={snapshot.state.browserInteractionMode}
                 operation={operation}
@@ -1343,6 +1369,7 @@ function BrowserAddress({ url, copy, disabled, setError }: {
 function BrowserSurface({
   browser,
   browserSlotRef,
+  still,
   copy,
   interactionMode,
   operation,
@@ -1351,6 +1378,8 @@ function BrowserSurface({
 }: {
   browser: BrowserState | null;
   browserSlotRef: (node: HTMLDivElement | null) => void;
+  /** A still of the page, shown while the sidebar covers the pane and the page steps aside. */
+  still: string | null;
   copy: Copy;
   interactionMode: BrowserInteractionMode;
   operation: OperationState | null;
@@ -1552,6 +1581,7 @@ function BrowserSurface({
         />
       ) : null}
       <div className="browser-viewport" ref={browserSlotRef}>
+        {still && visible ? <img className="browser-still" src={still} alt="" draggable={false} /> : null}
         {!visible ? (
           <div className="browser-empty">
             <BrandMark />

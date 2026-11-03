@@ -6,9 +6,11 @@ const CONFIRM_WINDOW_MS = 4_000;
 
 const accountName = (account: GptBrowserAccount) => account.email ?? account.label;
 
-export function GptBrowserSurface({ api, active, setError, placement = "standalone" }: {
+export function GptBrowserSurface({ api, active, covered = false, setError, placement = "standalone" }: {
   api: LauncherApi;
   active: boolean;
+  /** Something of the app page is laid over the pane (the sidebar sliding out): the page steps aside for a still of it. */
+  covered?: boolean;
   setError: (error: string | null) => void;
   placement?: "standalone" | "chat";
 }) {
@@ -17,6 +19,10 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
   const [draft, setDraft] = useState<string | null>(null);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [slot, setSlot] = useState<HTMLDivElement | null>(null);
+  // A still of the page, drawn in the slot while the page is off the window for the sidebar.
+  const [still, setStill] = useState<string | null>(null);
+  // Whether the page is in the window now: only a page being shown has a still to take.
+  const pageShown = useRef(false);
   const confirmTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
@@ -33,9 +39,27 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
 
   // The page is a native view pinned over .gpb-slot; it only exists in the window while shown.
   useLayoutEffect(() => {
-    const visible = active && hasAccount;
+    const visible = active && hasAccount && !covered;
+    let live = true;
+    if (!visible && covered && pageShown.current) {
+      // The native view is drawn above the whole app page, so it must step aside for the sidebar;
+      // it left the pane black. A still of the page takes its place first, then the view goes.
+      void api.gptBrowserSnapshot().catch(() => null).then((url) => {
+        if (!live) return;
+        if (url) setStill(url);
+        requestAnimationFrame(() => {
+          if (!live) return;
+          pageShown.current = false;
+          void api.setGptBrowserSurfaceActive(false).catch(() => undefined);
+        });
+      });
+      return () => { live = false; };
+    }
+    pageShown.current = visible;
     void api.setGptBrowserSurfaceActive(visible).catch(() => undefined);
-    if (!visible || !slot) return;
+    if (!visible || !slot) return () => { live = false; };
+    // The view is back over the still; the still goes once the view has drawn.
+    const clearStill = window.setTimeout(() => { if (live) setStill(null); }, 250);
     let frame = 0;
     const measure = () => {
       cancelAnimationFrame(frame);
@@ -49,11 +73,13 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
     observer.observe(slot);
     window.addEventListener("resize", measure);
     return () => {
+      live = false;
+      window.clearTimeout(clearStill);
       cancelAnimationFrame(frame);
       observer.disconnect();
       window.removeEventListener("resize", measure);
     };
-  }, [active, api, hasAccount, slot, placement]);
+  }, [active, covered, api, hasAccount, slot, placement]);
 
   useEffect(() => () => { void api.setGptBrowserSurfaceActive(false).catch(() => undefined); }, [api]);
   useEffect(() => () => window.clearTimeout(confirmTimer.current), []);
@@ -165,7 +191,9 @@ export function GptBrowserSurface({ api, active, setError, placement = "standalo
       </header>
       {hasAccount ? (
         <div className="gpb-stage">
-          <div className="gpb-slot" ref={setSlot} />
+          <div className="gpb-slot" ref={setSlot}>
+            {still ? <img className="gpb-still" src={still} alt="" draggable={false} /> : null}
+          </div>
         </div>
       ) : (
         <div className="gpb-empty">
