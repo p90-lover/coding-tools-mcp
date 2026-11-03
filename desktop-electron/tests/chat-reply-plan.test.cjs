@@ -74,6 +74,16 @@ test("a goal's rounds are numbered from the person's message, and all but the ne
   assert.equal(plan.foldedRounds(turns.slice(0, 4)).size, 0, "two rounds fold nothing");
 });
 
+test("a chat draws only its newest turns, never cutting a folded run of goal rounds", () => {
+  assert.equal(plan.turnWindowStart(5, 16), 0, "a short chat draws everything");
+  assert.equal(plan.turnWindowStart(97, 16), 81);
+  assert.equal(plan.turnWindowStart(97, 32), 65, "each Show earlier adds a window");
+  const folds = new Map([["r1", [70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82]]]);
+  assert.equal(plan.turnWindowStart(97, 16, folds), 70, "a start inside a fold moves to its row");
+  assert.equal(plan.turnWindowStart(97, 30, folds), 67, "a start before the fold stays");
+  assert.equal(plan.turnWindowStart(97, 27, folds), 70, "a start on the fold's row stays");
+});
+
 test("a retried card's attempt counts its earlier attempts, not a reviewer's cycles", () => {
   assert.equal(plan.stepAttempt(undefined), 1);
   assert.equal(plan.stepAttempt({ earlier: [{ label: "Attempt 1", text: "" }, { label: "Attempt 2", text: "" }] }), 3);
