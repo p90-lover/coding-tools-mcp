@@ -333,6 +333,55 @@ test("upstream spawn preserves context and the effort on Chat/TUI fallback, the 
   }
 });
 
+test("Claude Code through CPA starts on the model id CPA lists to Claude clients, its effort suffix kept", async () => {
+  // Seen live 2026-11-03: "opencode-go/deepseek-v4.1-flash(max)" failed every Claude Code start
+  // ("Invalid value for config option model"); CPA lists it as claude-fable-5-dd-<id reversed>.
+  const file = path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs");
+  const source = fs.readFileSync(file, "utf8");
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const parts = [];
+  let method;
+  const helpers = new Set(["CPA_CLAUDE_ALIAS", "reversed", "splitSuffix"]);
+  const visit = node => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(ast) === "spawn") method = node;
+    if (ts.isFunctionDeclaration(node) && ["cpaClaudeModel", "cpaModelFromClaude"].includes(node.name?.getText(ast))) parts.push(node.getText(ast));
+    if (ts.isVariableStatement(node) && node.declarationList.declarations.some(d => helpers.has(d.name.getText(ast)))) parts.push(node.getText(ast));
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.ok(method);
+  assert.equal(parts.length, 5);
+  const bodies = [];
+  const context = vm.createContext({
+    Buffer, projectFor: async () => "project", forgetProject: () => {}, agentId: id => id, sessionId: id => id,
+    utf8Prefix: text => text, TUI_RESULT_INSTRUCTION: "Write fixture result", TRANSIENT_CHAT_START: /timed out/i,
+    CHAT_RETRY_PAUSE_MS: 0, setTimeout, rememberLaunchWindow: () => {}, chatTools: async () => null,
+    userServers: () => [], gptFileServer: async () => null,
+    internalApi: async (verb, endpoint, body) => {
+      if (verb === "GET") return { chatHarnesses: ["claude-code", "codex"] };
+      bodies.push(body);
+      return { session: { id: "session" } };
+    },
+  });
+  vm.runInContext(parts.join("\n"), context);
+  const spawn = vm.runInContext("({" + method.getText(ast) + "}).spawn", context);
+  const start = (agent, model) => spawn({ workspaceId: "ws", agent, model, prompt: "task", gateway: { provider: "cpa", model } });
+  await start("claude-code", "opencode-go/deepseek-v4.1-flash(max)");
+  await start("claude-code", "gpt-6.1-sol");
+  await start("claude-code", "claude-sonnet-4-6(high)");
+  await start("codex", "opencode-go/deepseek-v4.1-flash(max)");
+  assert.deepEqual(bodies.map(body => [body.model, body.gateway.model]), [
+    ["claude-fable-5-dd-hsalf-1.4v-keespeed/og-edocnepo(max)", "claude-fable-5-dd-hsalf-1.4v-keespeed/og-edocnepo(max)"],
+    ["claude-fable-5-dd-los-1.6-tpg", "claude-fable-5-dd-los-1.6-tpg"],
+    ["claude-sonnet-4-6(high)", "claude-sonnet-4-6(high)"],
+    ["opencode-go/deepseek-v4.1-flash(max)", "opencode-go/deepseek-v4.1-flash(max)"],
+  ], "only Claude Code takes CPA's Claude spelling; a claude-… id and other agents keep the id");
+  const back = vm.runInContext("cpaModelFromClaude", context);
+  assert.equal(back("claude-fable-5-dd-hsalf-1.4v-keespeed/og-edocnepo(max)"), "opencode-go/deepseek-v4.1-flash(max)");
+  assert.equal(back("gpt-6.1-sol"), "gpt-6.1-sol");
+  assert.equal(back("claude-fable-5-dd-"), "claude-fable-5-dd-");
+});
+
 test("a CPA model's ceiling is its max context window and its own efforts, up to ultra", async () => {
   const workflow = createAgentOrchestratorWorkflow({
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
