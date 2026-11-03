@@ -9185,7 +9185,7 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("Claude Code CPA effort survives AO in a supported suffix, Codex keeps body effort, and Auto sends none", async () => {
+test("Claude Code and Codex CPA effort survive AO in a supported suffix, and Auto sends none", async () => {
   // AO clears gateway AgentConfig.Effort before Claude Code's ACP driver runs. Preserve the
   // fitted level in the model, but never an unsupported suffix (medium on DeepSeek) or auto.
   const spawned = [];
@@ -9206,8 +9206,8 @@ test("Claude Code CPA effort survives AO in a supported suffix, Codex keeps body
   // Auto: the model's own effort; nothing is sent, and no level saved in the model's name comes back.
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash(high)", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
-  // Codex carries it in the body too (reasoning.effort, through AO's model_reasoning_effort).
-  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "low", "ao:codex"), { model: "cline-pass/glm-5.3-flash", effort: "low" });
+  // Codex also needs the suffix: AO clears model_reasoning_effort for gateway sessions too.
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "low", "ao:codex"), { model: "cline-pass/glm-5.3-flash(low)", effort: "low" });
   workflow.dispose();
 });
 
