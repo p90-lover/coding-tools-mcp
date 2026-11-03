@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent,
+import { useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type PointerEvent as ReactPointerEvent,
   type ReactElement } from "react";
 import { createPortal } from "react-dom";
 
@@ -22,6 +22,7 @@ import { createPortal } from "react-dom";
 // again to the pane you are in. Drop it over another pane's box and it lands there.
 
 import type { PetMood } from "./ao-chat";
+import { SurfaceHiddenContext } from "./page-visibility";
 import { petCall, petFlight, petStage, type PetArrival } from "./chat-pet-stage";
 import { advancePetWalk, petToolSide } from "./chat-pet-motion";
 import { ENTRY, FLOOR_LINE, choreBeats, exitBeats, pickChore, type Chore, type Doing, type HomeBeat, type HomeMemory } from "./chat-pet-home";
@@ -523,6 +524,9 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const walkTarget = useRef(0);
   // Every scheduled behaviour (the next stroll, an arrival, an action's frames), cleared together.
   const plans = useRef<number[]>([]);
+  // Floaters, feeding and returning from the pointer finish independently of mood plans,
+  // but none may outlive this decoration (including when its chat page becomes hidden).
+  const decorationTimers = useRef(new Set<number>());
   const seq = useRef(0);
   // Timers and listeners fire later; they read the state then, not the state they were set up in.
   const atNow = useRef(at);
@@ -555,6 +559,10 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const clawd = useClawdPlayer(still);
 
   const later = (ms: number, run: () => void) => { plans.current.push(window.setTimeout(run, ms)); };
+  const afterDecoration = (ms: number, run: () => void) => {
+    const timer = window.setTimeout(() => { decorationTimers.current.delete(timer); run(); }, ms);
+    decorationTimers.current.add(timer);
+  };
   const stopWalking = () => {
     if (walkFrame.current > 0) window.cancelAnimationFrame(walkFrame.current);
     window.clearTimeout(walkTimer.current);
@@ -585,7 +593,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   const float = (text: string, left = 10 + Math.round(Math.random() * 24)) => {
     const id = ++seq.current;
     setFloaters((current) => [...current, { id, text, offset: left }]);
-    window.setTimeout(() => setFloaters((current) => current.filter((item) => item.id !== id)), 1100);
+    afterDecoration(1100, () => setFloaters((current) => current.filter((item) => item.id !== id)));
   };
   const busyElsewhere = () => asleepNow.current || drag.current !== null || heldNow.current !== null || rideNow.current !== null || homeNow.current
     || doorNow.current || leapNow.current !== null;
@@ -1051,7 +1059,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     const spot = freeNear(nearLap(current, x, atNow.current));
     setPose({ ...REST, arms: "both" });
     setRide((ridden) => ridden && { ...ridden, ...screenAt(spot), mode: "leaving" });
-    window.setTimeout(() => {
+    afterDecoration(still ? 0 : 480, () => {
       atNow.current = spot;
       setAt(spot);
       setRide(null);
@@ -1061,7 +1069,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       poke();
       cancelPlans();
       wander();
-    }, still ? 0 : 480);
+    });
   };
   /** It leaps onto the pointer: for a short hug with hearts, or for a ride of a few seconds. */
   const board = (stay: number) => {
@@ -1260,6 +1268,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
 
   useEffect(() => () => {
     cancelTransitionFrame();
+    decorationTimers.current.forEach((timer) => window.clearTimeout(timer));
+    decorationTimers.current.clear();
     window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current);
     window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); window.clearTimeout(doorTimer.current); window.clearTimeout(leapTimer.current);
     dragEnd.current?.(); cancelPlans();
@@ -1461,7 +1471,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
         window.clearTimeout(clickTimer.current);
         wake();
         setFed((count) => count + 1);
-        float("🍪"); window.setTimeout(() => float("nom"), 250);
+        float("🍪"); afterDecoration(250, () => float("nom"));
         say(fed >= 3 ? "So full. Maybe compact me?" : "Nom. Tokens are tasty", 1600);
         play("boop");
         poke();
@@ -1500,7 +1510,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
  * all the panes, living on one pane's box at a time (chat-pet-stage.ts): every other pane only
  * offers it a seat, its box and its chat's mood, and draws nothing.
  */
-export function ChatPet(props: PetProps) {
+function VisibleChatPet(props: PetProps) {
   const anchor = useRef<HTMLSpanElement>(null);
   // The split pane this box is in, null outside split view. Read from the split grid: opening a
   // split marks the same grid (data-split) without remounting the window's own chat.
@@ -1533,4 +1543,10 @@ export function ChatPet(props: PetProps) {
     {!pane ? <PetBody key="solo" {...props} split={null} />
       : host === pane ? <PetBody key="split" {...props} split={{ pane }} /> : null}
   </>;
+}
+
+/** Hidden pages keep their chats running, but dispose the pet's decorative work and seats. */
+export function ChatPet(props: PetProps) {
+  const hidden = useContext(SurfaceHiddenContext);
+  return hidden ? null : <VisibleChatPet {...props} />;
 }

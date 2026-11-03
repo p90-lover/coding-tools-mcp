@@ -31,6 +31,82 @@ const motion = {};
 vm.runInNewContext(ts.transpileModule(motionSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
   { exports: motion, Number, Math });
 
+const petSource = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+const petFile = ts.createSourceFile("ChatPet.tsx", petSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const petBody = petFile.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "PetBody");
+
+function petTimers() {
+  const declarations = {}, callbacks = {};
+  let cleanup;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node)) declarations[node.name.getText(petFile)] = node.getText(petFile);
+    if (ts.isJsxAttribute(node) && node.name.getText(petFile) === "onDoubleClick") callbacks.feed = node.initializer.expression.getText(petFile);
+    if (ts.isCallExpression(node) && node.expression.getText(petFile) === "useEffect" && ts.isArrowFunction(node.arguments[0])
+      && ts.isArrowFunction(node.arguments[0].body)) cleanup = node.arguments[0].body.getText(petFile);
+    ts.forEachChild(node, visit);
+  };
+  visit(petBody); assert(cleanup && callbacks.feed);
+  const timers = new Map(), plans = { current: [] }; let now = 0, nextId = 0, floaters = [], remembered = 0;
+  const ref = current => ({ current });
+  const context = { exports: {}, useRef: ref, Number, Math, WIDTH: 72, REST: {}, NAP_MS: 45000, fed: 0,
+    window: { setTimeout(fn, ms) { const id = ++nextId; timers.set(id, { fn, at: now + ms }); return id; }, clearTimeout(id) { timers.delete(id); } },
+    plans, seq: ref(0), rideTimer: ref(), clickTimer: ref(), bubbleTimer: ref(), napTimer: ref(), fallTimer: ref(), doorTimer: ref(), leapTimer: ref(), dragEnd: ref(null),
+    rideNow: ref({ mode: "riding", x: 100, y: 100 }), loopNow: ref({ width: 600 }), composer: ref({ getBoundingClientRect: () => ({ left: 0 }) }),
+    pointer: ref({ x: 100 }), atNow: ref(100), moodNow: ref("idle"), drag: ref(null), still: false,
+    cancelTransitionFrame() {}, freeNear: value => value, nearLap: (_, value) => value, screenAt: x => ({ x, y: 0 }),
+    setPose() {}, setAt() {}, setRide() {}, play() {}, wake() {}, setFed() {}, say() {}, setJob() {},
+    remember() { remembered++; }, setFloaters(update) { floaters = update(floaters); },
+    busyElsewhere: () => true, nextSpot: () => 0, walkTo() {}, act() {}, goHome() {},
+    cancelPlans() { plans.current.forEach(id => timers.delete(id)); plans.current = []; },
+  };
+  const names = ["decorationTimers", "afterDecoration", "later", "float", "poke", "wander", "leave"];
+  const code = names.filter(name => declarations[name]).map(name => `const ${declarations[name]};`).join("\n")
+    + `\nexports.float = float; exports.leave = leave; exports.cleanup = ${cleanup}; exports.feed = ${callbacks.feed};`;
+  vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2020 } }).outputText, context);
+  return { ...context.exports, cancelPlans: context.cancelPlans,
+    advance(ms) { const until = now + ms; let turns = 0;
+      for (;;) { const entry = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!entry) break; assert(++turns < 100, "bounded fake clock"); timers.delete(entry[0]); now = entry[1].at; entry[1].fn(); }
+      now = until;
+    },
+    get pending() { return timers.size; }, get floaters() { return floaters.length; }, get remembered() { return remembered; },
+  };
+}
+
+test("hidden chat pages do not mount the pet's decorative subtree", () => {
+  const React = require("react"), { renderToStaticMarkup } = require("react-dom/server"), cache = {};
+  const load = name => {
+    if (cache[name]) return cache[name];
+    const exports = cache[name] = {};
+    const source = fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
+    vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+      { exports, require: name => name === "react" ? React : name === "react-dom" ? require("react-dom") : name === "react/jsx-runtime" ? require("react/jsx-runtime")
+        : load(name.slice(2) + (fs.existsSync(path.resolve(__dirname, "../src/features", name.slice(2) + ".tsx")) ? ".tsx" : ".ts")) });
+    return exports;
+  };
+  const { ChatPet } = load("ChatPet.tsx"), { SurfaceHiddenContext } = load("page-visibility.ts");
+  const render = hidden => renderToStaticMarkup(React.createElement(SurfaceHiddenContext.Provider, { value: hidden },
+    React.createElement(ChatPet, { mood: "working", context: null, onHide() {} })));
+  assert.match(render(false), /Bit the pet/); assert.equal(render(true), ""); assert.match(render(false), /Bit the pet/);
+});
+
+for (const action of ["leave", "float", "feed"]) test(`pet ${action} callbacks cannot recreate work after teardown`, () => {
+  const pet = petTimers(); pet[action]("fixture"); assert(pet.pending > 0);
+  pet.cleanup(); assert.equal(pet.pending, 0);
+  pet.advance(5000); assert.equal(pet.pending, 0); assert.equal(pet.remembered, 0);
+});
+
+test("mood-plan cancellation does not strand temporary pet floaters", () => {
+  const pet = petTimers(); pet.float("fixture"); assert.equal(pet.floaters, 1);
+  pet.cancelPlans(); pet.advance(1100); assert.equal(pet.floaters, 0); assert.equal(pet.pending, 0); pet.cleanup();
+});
+
+test("a visible pet still completes its pointer return before teardown", () => {
+  const pet = petTimers(); pet.leave(); pet.advance(480);
+  assert.equal(pet.remembered, 1); assert(pet.pending > 0, "normal nap/wander resume");
+  pet.cleanup(); assert.equal(pet.pending, 0);
+});
+
 test("Clawd reverses toward a destination moved behind it when the chat box resizes", () => {
   const first = motion.advancePetWalk(100, 180, 12);
   assert.equal(first.position, 112);
