@@ -109,6 +109,7 @@ function createAppsProviderServices({ providerNetworkReady }) {
     if (Object.hasOwn(input, "enabled") && accountId) {
       snapshot = listed.active.store.setAccountEnabled(accountId, input.enabled === true);
     }
+    await listed.active.store.saved?.();
 
     if (input.login && accountId) {
       const result = input.adapterId === undefined
@@ -150,6 +151,7 @@ function createAppsProviderServices({ providerNetworkReady }) {
     const snapshot = args.disableOnly === true
       ? listed.active.store.setAccountEnabled(accountId, false)
       : listed.active.store.archiveAccount(accountId);
+    await listed.active.store.saved?.();
     const accounts = snapshot.accounts.map(publicAccount).filter(Boolean);
     return { ok: true, accountId, accounts, summary: summarize(accounts) };
   }

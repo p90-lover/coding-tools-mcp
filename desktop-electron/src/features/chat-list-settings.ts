@@ -9,6 +9,7 @@ export type ChatListSettings = { visible: number; keepActiveOnTop: boolean };
 export const CHAT_LIST_SETTINGS_KEY = "coding-tools:ao:chat-list-settings";
 export const DEFAULT_CHAT_LIST_SETTINGS: ChatListSettings = { visible: 5, keepActiveOnTop: true };
 const CHANGED = "coding-tools:chat-list-settings";
+let sessionSettings: ChatListSettings | null = null;
 
 export function parseChatListSettings(raw: string | null): ChatListSettings {
   let value: Partial<ChatListSettings> | null = null;
@@ -18,14 +19,18 @@ export function parseChatListSettings(raw: string | null): ChatListSettings {
 }
 
 export function readChatListSettings(): ChatListSettings {
+  if (sessionSettings) return { ...sessionSettings };
   try { return parseChatListSettings(localStorage.getItem(CHAT_LIST_SETTINGS_KEY)); } catch { return { ...DEFAULT_CHAT_LIST_SETTINGS }; }
 }
 
 export function saveChatListSettings(patch: Partial<ChatListSettings>): ChatListSettings {
   const next = parseChatListSettings(JSON.stringify({ ...readChatListSettings(), ...patch }));
-  try { localStorage.setItem(CHAT_LIST_SETTINGS_KEY, JSON.stringify(next)); } catch { /* per-session only */ }
+  try {
+    localStorage.setItem(CHAT_LIST_SETTINGS_KEY, JSON.stringify(next));
+    sessionSettings = null;
+  } catch { sessionSettings = next; /* per-session only */ }
   try { window.dispatchEvent(new Event(CHANGED)); } catch { /* no window (tests) */ }
-  return next;
+  return { ...next };
 }
 
 /** The choices for the archive days (archive_settings takes any whole day from 0 to 365). */
@@ -40,7 +45,9 @@ export const VISIBLE_CHOICES = [3, 5, 8, 10, 15, 20, 30, 50, 100];
 export function onChatListSettings(listener: (settings: ChatListSettings) => void): () => void {
   if (typeof window === "undefined" || typeof window.addEventListener !== "function") return () => {};
   const local = () => listener(readChatListSettings());
-  const storage = (event: StorageEvent) => { if (event.key === CHAT_LIST_SETTINGS_KEY || event.key === null) local(); };
+  const storage = (event: StorageEvent) => {
+    if (event.key === CHAT_LIST_SETTINGS_KEY || event.key === null) { sessionSettings = null; local(); }
+  };
   window.addEventListener(CHANGED, local);
   window.addEventListener("storage", storage);
   return () => { window.removeEventListener(CHANGED, local); window.removeEventListener("storage", storage); };

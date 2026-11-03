@@ -6,7 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const ts = require("typescript");
 
-function fixture(createConnector = async () => ({ created: true, connected: true })) {
+function fixture(createConnector = async () => ({ created: true, connected: true }), { threads = [] } = {}) {
   const accounts = ["main", "second", "third"].map(id => ({ id, label: id, email: `${id}@example.test`,
     proxyProfileId: null, maxTabs: 3, acceptsNewSessions: true,
     plan: { userId: `user-${id}`, workspaceId: `workspace-${id}`, workspaceRole: "account-owner", workspaceStructure: "workspace", planCheckedAt: Date.now() },
@@ -43,7 +43,7 @@ function fixture(createConnector = async () => ({ created: true, connected: true
     },
   });
   function render(type, props, key) {
-    if (!instances.has(key)) instances.set(key, { cursor: 0, values: key === "management" ? [status] : [] });
+    if (!instances.has(key)) instances.set(key, { cursor: 0, values: key === "management" ? [status, null, threads] : [] });
     current = instances.get(key); current.cursor = 0;
     return type(props);
   }
@@ -53,7 +53,7 @@ function fixture(createConnector = async () => ({ created: true, connected: true
   const page = () => render(exports.ChatGptBrowserManagement, props, "management");
   const cardNode = id => nodes(page()).find(node => node.type?.name === "AccountCard" && node.props.account.id === id);
   const card = id => { const node = cardNode(id); assert(node); return render(node.type, node.props, id); };
-  return { accounts, calls, api, page, cardNode, card, render, flush: () => new Promise(resolve => setImmediate(resolve)) };
+  return { accounts, calls, api, props, status, page, cardNode, card, render, flush: () => new Promise(resolve => setImmediate(resolve)) };
 }
 
 function nodes(value) {
@@ -136,6 +136,23 @@ test("account setup preserves bulk removal, the tabs drawer, and opening the Bro
   assert.equal(ui.calls.browserOpened, 1);
 });
 
+test("management keeps partition sign-in evidence when the shown page has no authentication result", () => {
+  const ui = fixture();
+  ui.props.browser.authenticated = false;
+  assert(text(ui.card("main")).includes("Signed in"));
+  assert.equal(button(ui.card("main"), "Connect MCP").props.disabled, false);
+  ui.accounts[0].signedIn = null;
+  assert(text(ui.card("main")).includes("Checking…"), "unknown is not signed out");
+});
+
+test("tabs without an explicit account use their native thread's owner, not the account shown", () => {
+  const ui = fixture(undefined, { threads: [{ threadId: "native-thread", accountId: "second", running: true }] });
+  ui.props.browser.tabs = [{ id: "turn-tab", threadId: "native-thread", title: "Task", status: "running", otherAccount: true },
+    { id: "unknown-tab", title: "Unknown owner", status: "running", otherAccount: true }];
+  assert.equal(ui.cardNode("main").props.tabs.length, 0, "other-account tabs cannot be assigned to main");
+  assert.equal(ui.cardNode("second").props.tabs.length, 1, "the known thread determines the owner");
+});
+
 test("MCP setup waits only for that account's in-flight removal", async () => {
   let finishRemoval;
   const removing = new Promise(resolve => { finishRemoval = resolve; });
@@ -204,6 +221,26 @@ test("losing creation authority does not relabel an already confirmed connection
   const card = ui.card("second");
   assert.match(text(card), /Connected/);
   assert.equal(button(card, "Check connection").props.disabled, true, "creation/setup cannot borrow the old connection's authority");
+});
+
+test("a saved successful connection survives reopening the page without creation authority", () => {
+  const ui = fixture();
+  ui.accounts[1].connector = { okAt: Date.now() - 1000 };
+  ui.accounts[1].plan.workspaceRole = "standard-user";
+  const card = ui.card("second");
+  assert.match(text(card), /Previously connected/);
+  assert.doesNotMatch(text(card), /Owner required/);
+  assert.equal(button(card, "Connect MCP").props.disabled, true, "connection history does not authorize creation");
+  assert.deepEqual(ui.calls.connector, [], "the saved status requires no creation attempt");
+});
+
+test("bulk owner setup preserves a saved sign-in while the active page is idle", async () => {
+  const ui = fixture();
+  ui.props.browser.authenticated = false;
+  ui.props.browser.status = "idle";
+  button(ui.page(), "Connect all accounts").props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.connector, ["main", "second", "third"], "the idle active page does not erase its partition's verified sign-in");
 });
 
 test("bulk setup skips nonowners and unverified accounts without calling creation", async () => {

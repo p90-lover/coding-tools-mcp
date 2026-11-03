@@ -3,6 +3,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const { HeadlessHost } = require("../electron/headless-host.cjs");
+const { fetchOffThread } = require("../electron/off-thread-run.cjs");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
 function fixture(harness = "ao:codex", options = {}) {
@@ -214,6 +215,9 @@ test("a native start response lost after admission is reconciled by its same rec
   t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
   const host = Object.create(HeadlessHost.prototype);
   host.ensureStarted = async () => ({ endpoint: `http://127.0.0.1:${server.address().port}`, token: "fixture" });
+  // Requests go out from a worker thread that the first one starts; in the app, the service's own
+  // health check does. Started here, the 30 ms start below is sent, and only its answer is lost.
+  await (await fetchOffThread(`http://127.0.0.1:${server.address().port}/`, { method: "POST", body: JSON.stringify({ status: "warm" }) })).text();
   const world = fixture("codex-native");
   t.after(() => world.workflow.dispose());
   world.nativeRequest = (endpoint, body) => host.request(endpoint, body, { timeout: body.status ? 1000 : 30 });

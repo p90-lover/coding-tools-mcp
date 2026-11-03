@@ -173,6 +173,25 @@ function authenticatedChatGptSession(payload, now = Date.now()) {
       && Date.parse(payload.expires) > now);
 }
 
+// Cloudflare can put its own check page ("Just a moment...") where ChatGPT should load. Only the
+// person can pass it, and the wait for ChatGPT then ran out as a "login" that was never the problem
+// (seen live 2026-11-03: the bridge upgrade failed this way on two launches in a row).
+const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.";
+
+/**
+ * Runs inside the page (injected with toString, like authenticatedChatGptSession): true while the
+ * document is Cloudflare's check page in place of ChatGPT. `doc` and `win` are the page's document
+ * and window, passed in so the check can be tested without a browser.
+ */
+function isCloudflareCheckPage(doc, win) {
+  // The check page sets _cf_chl_opt and loads Cloudflare's challenge "orchestrate" script, in every
+  // language; its title is translated, and the old #challenge-form markup is gone (checked live).
+  // ChatGPT's own pages load Cloudflare's bot-detection script from /cdn-cgi/challenge-platform/
+  // too (scripts/jsd/), so that folder alone does not mean a check is showing.
+  if (win?._cf_chl_opt && typeof win._cf_chl_opt === "object") return true;
+  return [...(doc?.scripts ?? [])].some((script) => /\/cdn-cgi\/challenge-platform\/.*\/orchestrate\/chl_page\//.test(script.src || ""));
+}
+
 const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const ZOOM_FACTORS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
@@ -1700,6 +1719,9 @@ class BrowserHost {
         this.setState({ url });
         return;
       }
+      // A fresh user/navigation document may try one recovery. The recovery's own reload must
+      // not rearm itself; successful unrelated requests do not prove a challenged endpoint cleared.
+      if (!this.cloudflareChallengeRecovery) this.cloudflareChallengeRecoveryArmed = true;
       this.armHomeNavigationTimeout(contents, url);
       if (this.manualOperation === "ChatGPT login") {
         this.logger.info("browser.auth_navigation_started", {
@@ -1912,12 +1934,15 @@ class BrowserHost {
     if (!isChatGptBackendUrl(details.url)) return false;
 
     if (details.statusCode >= 200 && details.statusCode < 400) {
-      this.cloudflareChallengeRecoveryArmed = true;
+      if (this.cloudflareChallengeRecovery && new URL(details.url).pathname === this.cloudflareChallengeRecoveryPath) {
+        this.cloudflareChallengeRecoverySucceeded = true;
+      }
       return false;
     }
     if (!isChatGptCloudflareChallengeResponse(details)) return false;
     if (this.cloudflareChallengeRecovery) {
       this.cloudflareChallengeRecoveryArmed = false;
+      this.cloudflareChallengeRecoverySucceeded = false;
       return true;
     }
     if (this.activeTraceId || this.manualOperation) {
@@ -1932,10 +1957,14 @@ class BrowserHost {
       return true;
     }
     this.cloudflareChallengeRecoveryArmed = false;
+    this.cloudflareChallengeRecoveryPath = new URL(details.url).pathname;
     this.logger.warn("browser.cloudflare_challenge_detected", { url: details.url });
+    const partition = this.partition, pageUrl = contents.getURL();
     const recovery = this.reloadHomeAfterCloudflareChallenge();
     const tracked = recovery
       .catch((error) => {
+        if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()
+          || contents.getURL() !== pageUrl || this.activeTraceId || this.manualOperation) return;
         const message = error instanceof Error ? error.message : String(error);
         this.logger.error("browser.cloudflare_challenge_recovery_failed", { message });
         this.setState({ status: "error", message, loading: false });
@@ -1949,13 +1978,18 @@ class BrowserHost {
 
   async reloadHomeAfterCloudflareChallenge() {
     const contents = this.view.webContents;
+    const partition = this.partition, originalUrl = contents.getURL();
+    const ownsPage = () => this.view?.webContents === contents && this.partition === partition
+      && !contents.isDestroyed() && contents.getURL() === originalUrl;
+    await sleep(this.cloudflareChallengeRecoveryDelayMs);
+    // A turn, inspection, switch or navigation may have taken the page during the recovery delay.
+    // It owns the page now; a late idle recovery must neither reload it nor overwrite its state.
+    if (!ownsPage() || this.activeTraceId || this.manualOperation) return;
     this.setState({
       status: "loading",
       message: "Refreshing ChatGPT security check",
       loading: true,
     });
-    await sleep(this.cloudflareChallengeRecoveryDelayMs);
-    if (contents.isDestroyed()) throw new Error("ChatGPT browser closed during security-check recovery");
     const url = contents.getURL();
     if (!url.startsWith(CHATGPT_ORIGIN)) {
       throw new Error("ChatGPT security-check recovery lost its owned browser page");
@@ -1963,9 +1997,11 @@ class BrowserHost {
 
     // Only responses from this new document may prove that the challenge cleared.
     this.cloudflareChallengeRecoveryArmed = false;
+    this.cloudflareChallengeRecoverySucceeded = false;
     await contents.loadURL(url);
     await sleep(this.cloudflareChallengeRecoverySettleMs);
-    if (!this.cloudflareChallengeRecoveryArmed) {
+    if (!ownsPage() || this.activeTraceId || this.manualOperation) return;
+    if (!this.cloudflareChallengeRecoverySucceeded) {
       throw new Error("ChatGPT security check is still blocking backend requests. Reload ChatGPT and retry.");
     }
     await this.probeAuthentication();
@@ -3620,7 +3656,9 @@ class BrowserHost {
     if (this.sessionRefreshOperation) return this.sessionRefreshOperation;
     const operation = this.withManualOperation("session refresh", async () => {
       this.setState({ status: "loading", message: "Checking saved ChatGPT session" });
-      if (!isNewChatUrl(this.view.webContents.getURL(), useSavedChatsFor(this))) {
+      // Session verification is read-only on an existing ChatGPT page, including saved chats.
+      // Only the idle/off-origin document needs to open ChatGPT before it can be inspected.
+      if (!this.view.webContents.getURL().startsWith(CHATGPT_ORIGIN + "/")) {
         await this.view.webContents.loadURL(newChatUrlFor(this));
       }
       const state = await this.probeAuthentication();
@@ -3725,7 +3763,10 @@ class BrowserHost {
   async probeAuthentication() {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication probe");
     if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
-    let url = this.view.webContents.getURL();
+    const contents = this.view.webContents, partition = this.partition;
+    let url = contents.getURL();
+    const ownsPage = () => this.view?.webContents === contents && this.partition === partition
+      && !contents.isDestroyed() && contents.getURL() === url;
     if (url === IDLE_BROWSER_URL) {
       this.setState({
         status: this.state.authenticated ? "ready" : "signed-out",
@@ -3786,20 +3827,22 @@ class BrowserHost {
       sessionAuthenticated: false,
       readyState: "unknown",
     }));
-    // Connector verification refreshes onto the saved-chat home when saved chats are on; its
-    // composer proves the session as well as the Temporary Chat one does.
-    const onNewChat = (surface) => surface.temporary || surface.savedHome === true;
-    let result = await probe(this.view.webContents);
-    if (!(result.composer && onNewChat(result) && result.sessionAuthenticated)
+    // Authentication belongs to the session, not to the new-chat composer. Saved conversations
+    // and settings pages can be signed in too; turn preparation checks its own surface separately.
+    let result = await probe(contents);
+    if (!ownsPage()) return this.snapshot();
+    if (!result.sessionAuthenticated
       && this.authView
       && !this.authView.webContents.isDestroyed()) {
       const authResult = await probe(this.authView.webContents);
+      if (!ownsPage()) return this.snapshot();
       if (authResult.sessionAuthenticated) {
         const completedAuthView = this.authView;
         this.closeAuthView(completedAuthView, true, false);
-        await this.view.webContents.loadURL(newChatUrlFor(this));
-        url = this.view.webContents.getURL();
-        result = await probe(this.view.webContents);
+        await contents.loadURL(newChatUrlFor(this));
+        if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
+        url = contents.getURL();
+        result = await probe(contents);
       }
     }
     // A login ends on the new chat the setting chooses: with saved chats on, a Temporary Chat (where
@@ -3808,11 +3851,13 @@ class BrowserHost {
       && result.sessionAuthenticated
       && !isNewChatUrl(result.url ?? url, useSavedChatsFor(this))
       && !this.view.webContents.isDestroyed()) {
-      await this.view.webContents.loadURL(newChatUrlFor(this));
-      url = this.view.webContents.getURL();
-      result = await probe(this.view.webContents);
+      await contents.loadURL(newChatUrlFor(this));
+      if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
+      url = contents.getURL();
+      result = await probe(contents);
     }
-    if (result.composer && onNewChat(result) && result.sessionAuthenticated) {
+    if (!ownsPage()) return this.snapshot();
+    if (result.sessionAuthenticated) {
       if (this.authView && !this.authView.webContents.isDestroyed()) {
         this.closeAuthView(this.authView, true, false);
       }
@@ -3848,7 +3893,19 @@ class BrowserHost {
       if (state.authenticated) return state;
       await sleep(750);
     }
+    if (await this.cloudflareCheckShown()) {
+      this.logger.warn("browser.cloudflare_check_page", { url: urlWithoutQuery(this.view.webContents.getURL()) });
+      throw new Error(CHATGPT_SECURITY_CHECK_MESSAGE);
+    }
     throw new Error("ChatGPT login was not completed before the timeout");
+  }
+
+  /** Whether the shown page is Cloudflare's check instead of ChatGPT (isCloudflareCheckPage). */
+  async cloudflareCheckShown() {
+    const contents = this.view?.webContents;
+    if (!contents || contents.isDestroyed()) return false;
+    return await contents.executeJavaScript(`(${isCloudflareCheckPage.toString()})(document, window)`, true)
+      .then((shown) => shown === true, () => false);
   }
 
   async smokeTest() {
@@ -3945,7 +4002,7 @@ class BrowserHost {
       logger: this.logger,
     });
     const inspected = result?.value;
-    if (!inspected || inspected.authenticated !== true || inspected.temporary !== true || typeof inspected.url !== "string") {
+    if (!inspected || inspected.authenticated !== true || inspected.newChat !== true || typeof inspected.url !== "string") {
       throw new Error("Browser helper returned invalid ChatGPT session evidence");
     }
     if (detectCapabilities
@@ -4156,6 +4213,7 @@ module.exports = {
   parkedHomeToUnload,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
+  isCloudflareCheckPage,
   isTemporaryChatUrl,
   loadCommittedBrowserSurface,
   loadIdleSurfaceWithRetries,

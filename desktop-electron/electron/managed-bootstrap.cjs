@@ -152,9 +152,13 @@ function createManagedBootstrap({
     return "idle";
   }
 
-  function assertHealthyResult(id, result) {
-    if (result?.status === "error") {
-      throw new Error(result.error || `${id} health inspection failed`);
+  function assertHealthyResult(id, result, requireReady = false) {
+    const health = requireReady && !result?.status ? serviceFor(id) : result;
+    if (health?.status === "error") {
+      throw new Error(health.error || `${id} health inspection failed`);
+    }
+    if (requireReady && health?.status !== "ready") {
+      throw new Error(health?.error || `${id} health inspection is not ready (${health?.status || "unknown"})`);
     }
     return result;
   }
@@ -189,12 +193,12 @@ function createManagedBootstrap({
         case "not-installed":
           action = "install";
           updateComponent(id, { status: "installing", action });
-          assertHealthyResult(id, await install(id));
+          assertHealthyResult(id, await install(id), true);
           break;
         case "repair-required":
           action = "repair";
           updateComponent(id, { status: "repairing", action });
-          assertHealthyResult(id, await repair(id));
+          assertHealthyResult(id, await repair(id), true);
           break;
         case "error":
           action = managed.installedAt ? "repair" : "install";
@@ -202,7 +206,7 @@ function createManagedBootstrap({
             status: action === "repair" ? "repairing" : "installing",
             action,
           });
-          assertHealthyResult(id, await (action === "repair" ? repair(id) : install(id)));
+          assertHealthyResult(id, await (action === "repair" ? repair(id) : install(id)), true);
           break;
         case "installed":
           action = "start";
@@ -210,12 +214,12 @@ function createManagedBootstrap({
           assertHealthyResult(id, await start(id));
           action = "inspect";
           updateComponent(id, { status: "starting", action });
-          assertHealthyResult(id, await inspect(id));
+          assertHealthyResult(id, await inspect(id), true);
           break;
         case "external":
           action = "inspect";
           updateComponent(id, { status: "starting", action });
-          assertHealthyResult(id, await inspect(id));
+          assertHealthyResult(id, await inspect(id), true);
           break;
         case "installing":
           updateComponent(id, {

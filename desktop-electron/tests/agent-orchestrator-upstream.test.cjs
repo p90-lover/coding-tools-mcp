@@ -786,7 +786,7 @@ test("only the targeted raw approval read preserves inline-looking input", async
   const requestApi = require("node:vm").runInNewContext(method + "requestApi", {
     Buffer, AbortSignal, state: "ready", daemonPort: 1, AO_RESPONSE_MAX_BYTES: 16 * 1024 * 1024,
     dropInlineBlobs: require("../electron/agent-orchestrator-upstream.cjs").dropInlineBlobs,
-    fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ activities: [{ detail: { input: { command } } }] }) }),
+    fetchOffThread: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ activities: [{ detail: { input: { command } } }] }) }),
   });
   const normal = await requestApi("GET", "/api/v1/sessions/s/conversation?limit=100&trimLargeFields=1");
   assert.match(normal.data.activities[0].detail.input.command, /inline binary data not shown/);

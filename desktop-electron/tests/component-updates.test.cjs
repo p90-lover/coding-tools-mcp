@@ -357,7 +357,7 @@ test("stopping the updater waits for a switch under way and blocks new ones", as
   assert.equal(await updater.trySwap(), null);
 });
 
-function serviceFixture({ healthyVersions, dataRoot: existingDataRoot = null }) {
+async function serviceFixture({ healthyVersions, dataRoot: existingDataRoot = null }) {
   const manifestRoot = temporaryDirectory("coding-tools-cpa-swap-manifests");
   writeJson(path.join(manifestRoot, "cpa.json"), cpaManifest());
   const bundleRoot = temporaryDirectory("coding-tools-cpa-swap-bundle");
@@ -377,6 +377,7 @@ function serviceFixture({ healthyVersions, dataRoot: existingDataRoot = null }) 
     scopes: ["all"],
   });
   store.setGlobalRouting({ enabled: true, profileId: "test" });
+  await store.saved();
   const github = fakeGitHub();
   const spawned = [];
   const running = () => /cpa_(\d+\.\d+\.\d+)_/.exec(spawned.at(-1) || "")?.[1];
@@ -411,7 +412,7 @@ function serviceFixture({ healthyVersions, dataRoot: existingDataRoot = null }) 
 }
 
 test("update switches a running CPA to the new release through the service layer", async () => {
-  const { controller, dataRoot, running } = serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"] });
+  const { controller, dataRoot, running } = await serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"] });
   try {
     await controller.start("cpa");
     assert.equal(running(), "1.0.0");
@@ -427,7 +428,7 @@ test("update switches a running CPA to the new release through the service layer
 });
 
 test("an update that fails its health check rolls back to the running version", async () => {
-  const { controller, running } = serviceFixture({ healthyVersions: ["1.0.0"] });
+  const { controller, running } = await serviceFixture({ healthyVersions: ["1.0.0"] });
   try {
     await controller.start("cpa");
     const result = await controller.updateManagedComponent("cpa");
@@ -443,12 +444,12 @@ test("an update that fails its health check rolls back to the running version", 
 });
 
 test("a pending update met at startup goes through the health check and rolls back when it fails", async () => {
-  const first = serviceFixture({ healthyVersions: ["1.0.0"] });
+  const first = await serviceFixture({ healthyVersions: ["1.0.0"] });
   await first.controller.start("cpa");
   assert.equal((await first.controller.updateManagedComponent("cpa", { swap: false })).staged, true);
   first.controller.dispose();
 
-  const next = serviceFixture({ healthyVersions: ["1.0.0"], dataRoot: first.dataRoot });
+  const next = await serviceFixture({ healthyVersions: ["1.0.0"], dataRoot: first.dataRoot });
   try {
     await next.controller.start("cpa");
     assert.equal(next.running(), "1.0.0", "an unhealthy update kept running after startup");
@@ -462,17 +463,17 @@ test("a pending update met at startup goes through the health check and rolls ba
 });
 
 test("a healthy pending update met at startup runs and is confirmed for later starts", async () => {
-  const first = serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"] });
+  const first = await serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"] });
   await first.controller.start("cpa");
   await first.controller.updateManagedComponent("cpa", { swap: false });
   first.controller.dispose();
 
-  const second = serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"], dataRoot: first.dataRoot });
+  const second = await serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"], dataRoot: first.dataRoot });
   await second.controller.start("cpa");
   assert.equal(second.running(), "1.2.0");
   second.controller.dispose();
 
-  const third = serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"], dataRoot: first.dataRoot });
+  const third = await serviceFixture({ healthyVersions: ["1.0.0", "1.2.0"], dataRoot: first.dataRoot });
   try {
     assert.equal(third.controller.managedComponentsSnapshot().components[0].version, "1.2.0");
     await third.controller.start("cpa");

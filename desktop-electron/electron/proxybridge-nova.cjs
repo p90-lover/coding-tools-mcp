@@ -269,6 +269,7 @@ function createNovaManager({
       const routing = store.snapshot().routing;
       const before = routing.globalEnabled ? store.activeProxy(routing.globalProfileId) : null;
       const result = store.syncSourceProfiles("nova", profileEntries(profile, status), { fallbackId: GATEWAY_PROFILE_ID });
+      await store.saved?.();
       etag = profile.etag;
       const after = store.snapshot().routing;
       const now = after.globalEnabled ? store.activeProxy(after.globalProfileId) : null;
@@ -318,6 +319,7 @@ function createNovaManager({
         store.retargetProxyReferences(from, to);
         store.archiveProxyProfile(from);
       }
+      await store.saved?.();
       await applyGlobalRouting();
     }
     settings.migratedAt = new Date().toISOString();

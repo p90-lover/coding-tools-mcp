@@ -1,8 +1,8 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const net = require("node:net");
 const path = require("node:path");
-const { readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { createStateFileWriter, readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { connectErrorText: tcpErrorText, probeTcpOffThread } = require("./off-thread-run.cjs");
 const {
   CPA_LOGIN_ADAPTERS,
   inspectCpaAccount,
@@ -385,12 +385,29 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       .some(envelope => envelope?.scheme === "aes-256-gcm-v1"),
   });
 
+  // Saves flush on a pool thread, not the main one: synchronously one save held every window
+  // 0.5-1.2 s on the hard disk (2026-11-03), and a Decodo sync saved once per proxy. A burst of
+  // changes is one write plus one with the latest state. Callers that need the file on disk (CPA
+  // reads it to pick its route) await saved(), which also reports a save that failed.
+  let saveError = null;
+  const writer = createStateFileWriter(filePath, { onError: (error) => { saveError = error; } });
+
   function write() {
     if (stateRead.source === "unreadable") {
       recoverState();
       throw new Error("Saved provider settings were unavailable; retry after restoring or reloading them");
     }
-    writeStateFile(filePath, `${JSON.stringify(state, null, 2)}\n`);
+    saveError = null;
+    writer.save(`${JSON.stringify(state, null, 2)}\n`);
+  }
+
+  async function saved() {
+    await writer.saved();
+    if (saveError) {
+      const error = saveError;
+      saveError = null;
+      throw error;
+    }
   }
 
   function publicSnapshot() {
@@ -878,6 +895,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
 
   return {
     snapshot: publicSnapshot,
+    saved,
     saveAccount,
     setDefaultAccount,
     setAccountEnabled,
@@ -919,34 +937,11 @@ function proxyUrl(profile, credentials = null) {
   return parsed.toString();
 }
 
-// A hostname with several addresses fails with an AggregateError whose message is empty;
-// report the per-address codes (for example "EACCES 1.2.3.4") so a blocked or refused
-// proxy is diagnosable from the Network Proxy test.
-function tcpErrorText(error) {
-  if (!(error instanceof Error)) return String(error);
-  const attempts = Array.isArray(error.errors)
-    ? error.errors.map((item) => [item?.code, item?.address].filter(Boolean).join(" ")).filter(Boolean)
-    : [];
-  if (attempts.length) return `Connection failed: ${attempts.join(", ")}`;
-  return error.message || error.code || "Connection failed";
-}
-
-function testTcpEndpoint(profile, timeoutMs = 7_000) {
-  return new Promise((resolve) => {
-    const started = Date.now();
-    let settled = false;
-    const finish = (result) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(result);
-    };
-    const socket = net.connect({ host: profile.endpoint.host, port: profile.endpoint.port });
-    socket.setTimeout(timeoutMs);
-    socket.once("connect", () => finish({ reachable: true, latencyMs: Date.now() - started }));
-    socket.once("timeout", () => finish({ reachable: false, error: "Connection timed out" }));
-    socket.once("error", (error) => finish({ reachable: false, error: tcpErrorText(error) }));
-  });
+// From a worker: on the main process, closing a connect that a network filter held froze every
+// window (off-thread-run.cjs).
+async function testTcpEndpoint(profile, timeoutMs = 7_000) {
+  const result = await probeTcpOffThread({ host: profile.endpoint.host, port: profile.endpoint.port, timeoutMs });
+  return result.ok ? { reachable: true, latencyMs: result.latencyMs } : { reachable: false, error: result.message };
 }
 
 
@@ -1114,7 +1109,9 @@ function createProviderNetworkController({
       for (const endpoint of endpoints) store.saveProxyProfile(endpoint);
       const added = endpoints.filter((endpoint) => !existing.has(endpoint.id)).length;
       logger.info("proxy.decodo_synced", { count: endpoints.length, added });
-      return { added, updated: endpoints.length - added, snapshot: store.recordDecodoSync(null) };
+      const snapshot = store.recordDecodoSync(null);
+      await store.saved();
+      return { added, updated: endpoints.length - added, snapshot };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       store.recordDecodoSync(message);
