@@ -3,7 +3,7 @@
  import { goto } from '$app/navigation';
  import { onMount } from 'svelte';
  import type { Snippet } from 'svelte';
- import { LayoutDashboard, Columns3, Layers, Monitor, Cable, Plug, Plus, Search, Menu, X, ChevronRight, Settings2, ShieldCheck, Github, Command, Cpu, GitBranch, Play, Image as ImageIcon } from '@lucide/svelte';
+ import { LayoutDashboard, Columns3, Layers, Monitor, Cable, Plug, Plus, Search, Menu, X, ChevronRight, Settings2, ShieldCheck, Command, Cpu, GitBranch, Play, Image as ImageIcon, Icon, type IconNode } from '@lucide/svelte';
  import ThemeToggle from './ThemeToggle.svelte';
  import { APP_VERSION } from '$lib/app-version';
  import { REPO_URL } from '$lib/app-links';
@@ -13,6 +13,8 @@
  import { translated } from '$lib/control-center/model';
  interface Props { children:Snippet; sidebar:Snippet; onAddWorkspace?:()=>void|Promise<void>; settingsNav?:Snippet }
  let { children,sidebar,onAddWorkspace,settingsNav }:Props=$props();
+ // Lucide 1.0 dropped its brand icons; this is its last GitHub mark (0.487, ISC), drawn by Lucide's Icon.
+ const githubMark:IconNode=[['path',{d:'M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4'}],['path',{d:'M9 18c-4.51 2-5-2-7-2'}]];
  let menu=$state(false),searchOpen=$state(false),query=$state(''),repoError=$state('');
  let searchInput=$state<HTMLInputElement>();
  const nav=[{path:'/',en:'Overview',zh:'總覽',icon:LayoutDashboard},{path:'/work',en:'Work board',zh:'任務看板',icon:Columns3},{path:'/tasks',en:'Task monitor',zh:'任務監察',icon:Monitor},{path:'/missions',en:'Mission control',zh:'任務協調',icon:Layers},{path:'/image-studio',en:'Image Studio',zh:'圖片工作室',icon:ImageIcon},{path:'/providers',en:'Providers',zh:'供應商',icon:Cpu},{path:'/orchestrators',en:'Orchestrators',zh:'編排器',icon:GitBranch},{path:'/orchestrator-run',en:'Run orchestrator',zh:'執行編排器',icon:Play},{path:'/sessions',en:'Agent sessions',zh:'Agent 會話',icon:Layers},{path:'/computer',en:'Computer control',zh:'電腦操作',icon:Monitor},{path:'/connections',en:'Connections',zh:'連線',icon:Cable},{path:'/integrations',en:'Integrations',zh:'專案整合',icon:Plug}];
@@ -47,7 +49,7 @@
   <div class="cc-workspace-nav">{#if $workspaces.length}{@render sidebar()}{:else}<p class="cc-nav-empty">{translated($locale,'Add your first workspace to get started.','新增第一個工作區以開始使用。')}</p>{/if}</div>
   <div class="cc-nav-bottom">{#if settingsNav}<details><summary><Settings2 size={17}/>{translated($locale,'Settings','設定')}<ChevronRight size={15}/></summary><div class="cc-settings-items">{@render settingsNav()}</div></details>{/if}
    <div class="cc-safe-mode"><ShieldCheck size={17}/><div>{translated($locale,'Local permission boundaries','本機權限邊界')}<small>{translated($locale,'Provider execution needs consent','供應商執行須明確批准')}</small></div></div>
-   <div class="cc-version"><span>v{APP_VERSION}</span><button aria-label="Open GitHub repository" onclick={openRepo}><Github size={16}/></button></div>{#if repoError}<small>{repoError}</small>{/if}
+   <div class="cc-version"><span>v{APP_VERSION}</span><button aria-label="Open GitHub repository" onclick={openRepo}><Icon name="github" iconNode={githubMark} size={16}/></button></div>{#if repoError}<small>{repoError}</small>{/if}
   </div>
  </aside>
  <div class="cc-main">
