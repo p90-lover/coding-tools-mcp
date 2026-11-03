@@ -2671,10 +2671,10 @@ function AppPluginsSurface({ active, setError }: { active: boolean; setError: (e
       <SettingRow body={body} flushAfter={last} key={item.id} label={item.name}>
         <div className="inline-actions">
           {item.updateAvailable && item.canUpdate
-            ? <PrimaryButton disabled={busy || updating !== null} onClick={() => void update(item)}>{busy ? (item.installed ? "Updating…" : "Installing…") : `${item.installed ? "Update to" : "Install"} ${item.latest}`}</PrimaryButton>
+            ? <PrimaryButton disabled={busy || updating !== null} onClick={() => void update(item)}>{busy ? "Updating…" : `Update to ${item.latest}`}</PrimaryButton>
             : <span className={`rtk-chip${item.updateAvailable ? " is-attention" : ""}`}>
-              {item.updateAvailable ? (item.kind === "tool" || item.kind === "browser" ? "Update available" : "Comes with the app")
-                : !item.installed && (item.kind === "tool" || item.kind === "browser") ? "Not installed" : item.latest ? "Up to date" : item.error ? "Not checked" : "…"}
+              {item.updateAvailable ? (item.kind === "tool" ? "Update available" : "Comes with the app")
+                : !item.installed && item.kind === "tool" ? "Not installed" : item.latest ? "Up to date" : item.error ? "Not checked" : "…"}
             </span>}
           {item.releaseUrl ? <IconButton icon="external" label="Open the release on GitHub"
             onClick={() => void api!.openExternal(item.releaseUrl!).catch((cause) => setError(messageOf(cause)))} /> : null}
@@ -2684,7 +2684,6 @@ function AppPluginsSurface({ active, setError }: { active: boolean; setError: (e
   };
   const services = snapshot?.items.filter((item) => item.kind === "service") ?? [];
   const tools = snapshot?.items.filter((item) => item.kind === "tool") ?? [];
-  const browsers = snapshot?.items.filter((item) => item.kind === "browser") ?? [];
   const plugins = snapshot?.items.filter((item) => item.kind === "cpa-plugin") ?? [];
   return (
     <ContentSurface narrow title="App plugins" subtitle="What Coding Tools runs from other projects: the version installed and the newest release on GitHub. Private repositories are read with your GitHub CLI sign-in (gh auth login).">
@@ -2702,10 +2701,6 @@ function AppPluginsSurface({ active, setError }: { active: boolean; setError: (e
         {tools.length ? tools.map((item, index) => row(item, index === tools.length - 1))
           : <p className="surface-empty-note">{snapshot ? "No agent tools." : "Checking…"}</p>}
       </div>
-      {browsers.length ? <>
-        <SectionHeading label="Browser" />
-        <div className="settings-list">{browsers.map((item, index) => row(item, index === browsers.length - 1))}</div>
-      </> : null}
       <SectionHeading label="CPA plugins" />
       <div className="settings-list">
         {plugins.length ? plugins.map((item, index) => row(item, index === plugins.length - 1))

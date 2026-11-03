@@ -77,7 +77,6 @@ const {
 const { createUpdateHealthGate } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { createAppPlugins } = require("./app-plugins.cjs");
-const { createCamoufox } = require("./camoufox.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
@@ -4361,7 +4360,6 @@ async function start() {
     restartCpa: () => externalServicesController.restart("cpa"),
     antigravityCli: () => antigravityCliService,
     rtk,
-    camoufox: createCamoufox({ root: path.join(app.getPath("userData"), "tools", "camoufox"), logger }),
     logger,
   });
   managedBootstrapController = createManagedBootstrap({
