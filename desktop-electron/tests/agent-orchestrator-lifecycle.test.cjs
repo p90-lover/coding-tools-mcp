@@ -211,10 +211,12 @@ function createHarness(hooks = {}) {
     "./process-tree.cjs": { terminateOwnedProcessTreeAsync: async () => { throw new Error("No process is killed in a fixture"); } },
     // Starting the daemon off the main thread has its own tests (off-thread-spawn.test.cjs); here
     // the start goes to the fixture's spawn, awaited as the real one is.
-    "./off-thread-run.cjs": { spawnOffThread: async (...args) => dependencies["node:child_process"].spawn(...args) },
+    "./off-thread-run.cjs": { spawnOffThread: async (...args) => dependencies["node:child_process"].spawn(...args),
+      // The AO API's requests go out from a worker (off-thread-fetch.test.cjs); here, to the fixture's fetch.
+      fetchOffThread: (...args) => sandbox.fetch(...args) },
   };
   const loadedModule = { exports: {} };
-  vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), {
+  const sandbox = {
     module: loadedModule,
     require(name) { assert.ok(Object.hasOwn(dependencies, name), `Unexpected dependency: ${name}`); return dependencies[name]; },
     process: { platform: process.platform, env: { PATH: "fixture", AO_PORT: "1", AO_REMOTE: "inherited-value" } },
@@ -246,7 +248,8 @@ function createHarness(hooks = {}) {
       await hooks.readyFetch?.(child);
       return { ok: true, json: async () => { await hooks.readyBody?.(child); return { pid: child.pid, status: "ready" }; } };
     },
-  }, { filename: sourcePath });
+  };
+  vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), sandbox, { filename: sourcePath });
   const controller = loadedModule.exports.createAgentOrchestratorUpstream({
     resourceRoot, dataRoot, WebContentsView: FakeView, getWindow: () => parent,
     getWorkspaces: hooks.getWorkspaces, missionCall: hooks.missionCall,

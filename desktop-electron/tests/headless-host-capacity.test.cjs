@@ -1,7 +1,6 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { EventEmitter } = require("node:events");
 const http = require("node:http");
 const test = require("node:test");
 const { HeadlessHost } = require("../electron/headless-host.cjs");
@@ -114,47 +113,30 @@ test("a failed request still passes its turn on", async (t) => {
 });
 
 for (const aborted of [true, false]) {
-  test("a headless response " + (aborted ? "abort" : "error") + " releases its queued turn without replay", async (t) => {
+  test("a headless response " + (aborted ? "abort" : "error") + " releases its queued turn without replay", async () => {
     const requests = [];
-    let escaped = null, waiting = null;
+    let waiting = null;
     const host = Object.create(HeadlessHost.prototype);
     host.ensureStarted = async () => ({ endpoint: "http://127.0.0.1:1", token: "synthetic-fixture" });
     host.maxInFlight = 1;
-    t.mock.method(http, "request", (options) => {
-      const request = new EventEmitter();
-      requests.push(options);
-      request.write = () => {};
-      request.destroy = (error) => { if (error) request.emit("error", error); };
-      request.end = () => queueMicrotask(() => {
-        const response = new EventEmitter();
-        response.statusCode = 200;
-        request.emit("response", response);
-        if (options.path === "/first") {
-          waiting = host.turns.waiting.length;
-          response.emit("data", Buffer.from('{"partial":'));
-          if (aborted) response.emit("aborted");
-          const error = Object.assign(new Error(aborted ? "aborted" : "socket failed Bearer synthetic-fixture"), { code: "ECONNRESET" });
-          try {
-            response.emit("error", error);
-          } catch (error) {
-            escaped = error;
-            // Bound the baseline failure and let its waiting request finish before asserting.
-            request.emit("error", error);
-          }
-          response.emit("close");
-        } else {
-          response.emit("data", Buffer.from('{"ok":true}'));
-          response.emit("end");
-        }
-      });
-      return request;
-    });
+    // The request worker reads a response whole, so a body that fails partway rejects the request,
+    // as fetch rejects with the socket's error as its cause.
+    host.fetchImpl = async (url, init) => {
+      const { pathname } = new URL(url);
+      requests.push({ path: pathname, method: init.method });
+      await new Promise((resolve) => queueMicrotask(resolve));
+      if (pathname === "/first") {
+        waiting = host.turns.waiting.length;
+        const cause = Object.assign(new Error(aborted ? "aborted" : "socket failed Bearer synthetic-fixture"), { code: "ECONNRESET" });
+        throw Object.assign(new TypeError("terminated"), { cause });
+      }
+      return new Response('{"ok":true}', { status: 200 });
+    };
 
     const results = await Promise.allSettled([
       host.request("/first", { request_id: "first" }),
       host.request("/next", { request_id: "next" }),
     ]);
-    assert.equal(escaped, null, "the response error must be handled by requestJson");
     assert.equal(waiting, 1, "the next request was waiting when the response failed");
     assert.equal(results[0].status, "rejected");
     assert.match(results[0].reason.message, aborted ? /^aborted$/ : /Bearer \[redacted\]/);
