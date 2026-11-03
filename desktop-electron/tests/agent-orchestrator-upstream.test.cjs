@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const test = require("node:test");
+const { probeTcpOffThread } = require("../electron/off-thread-run.cjs");
 const { createAgentOrchestratorGateway } = require("../electron/agent-orchestrator-gateway.cjs");
 const handler = require("../../app-handler/agent-orchestrator/handler.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
@@ -71,7 +72,7 @@ function observeHarness(context) {
   const shared = helpers.replace(/const TAIL_FRESH_MS = \d+;/, `const TAIL_FRESH_MS = ${Number(context.tailFreshMs ?? 0)};`)
     .replace(/const CHAT_HOST_ALIVE_REUSE_MS = \d+;/, `const CHAT_HOST_ALIVE_REUSE_MS = ${Number(context.hostAliveReuseMs ?? 0)};`);
   return vm.runInNewContext(states + timelineBounds(source) + shared + identity + "({" + method + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null,
     agentTools: null, setTimeout, exitedReleased: new Set(), observeTui: async () => { throw new Error("not a TUI fixture"); },
     logger: { info() {}, warn() {} },
     MAX_RESPONSE_BYTES: require("../electron/ipc-schema.cjs").MAX_RESPONSE_BYTES,
@@ -137,7 +138,7 @@ test("a fresh read of a session's newest 100 items serves the Terminal pane's as
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   const endpoints = [];
   const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, agentTools: null,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, agentTools: null,
     internalApi: async (_method, endpoint) => { endpoints.push(endpoint); return { messages: [], activities: [] }; },
   });
   await conversationTail("s");
@@ -157,7 +158,7 @@ test("a slow tail read is shared while in flight and stays fresh three times as 
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
   let reads = 0, delay = 400;
   const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, agentTools: null,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, agentTools: null,
     internalApi: async () => { reads += 1; await new Promise(resolve => setTimeout(resolve, delay)); return { messages: [], activities: [] }; },
   });
   const first = conversationTail("slow");
@@ -177,7 +178,7 @@ test("chat hosts that outlived the app are counted by whether their loopback add
   const vm = require("node:vm");
   const net = require("node:net");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
-  const start = source.indexOf("  async function survivingChatHosts");
+  const start = source.indexOf("  const CHAT_HOST_ALIVE_REUSE_MS");
   const fn = source.slice(start, source.indexOf("  // continuable() checks in flight", start));
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-chat-hosts-"));
   const live = net.createServer(socket => socket.destroy());
@@ -191,7 +192,7 @@ test("chat hosts that outlived the app are counted by whether their loopback add
     fs.writeFileSync(path.join(dataRoot, "chat-hosts", id, "host.json"), typeof record === "string" ? record : JSON.stringify(record));
   };
   try {
-    const survivingChatHosts = vm.runInNewContext(`${fn}; survivingChatHosts`, { fs, path, net, dataRoot });
+    const survivingChatHosts = vm.runInNewContext(`${fn}; survivingChatHosts`, { fs, path, net, dataRoot, probeTcpOffThread });
     assert.equal(await survivingChatHosts(), 0, "no chat-hosts folder");
     host("alive", { address: `127.0.0.1:${live.address().port}` });
     host("dead", { address: `127.0.0.1:${deadPort}` });
@@ -1061,7 +1062,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   let resumeOk = true, exitOk = true, resumeTimesOut = false, busyAnswers = 0, exitBusy = 0;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(), logger: null, setTimeout: (resolve) => { resolve(); return 0; },
     internalApi: async (method, endpoint, body, options) => {
       calls.push([method, endpoint]);
@@ -1162,7 +1163,7 @@ test("a chat AO could not reconnect after a restart is resumed before a message,
   const posts = [];
   let readiness = "unavailable";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(), logger: null, setTimeout: (resolve) => { resolve(); return 0; },
     internalApi: async (method, endpoint) => {
       if (endpoint === "/api/v1/sessions") return { sessions };
@@ -1203,7 +1204,7 @@ test("stale sessions are this project's live, unpinned, idle ones with no messag
     { id: "no-times", projectId: "proj", status: "exited" },
   ];
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, Set, agentTools: null,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, Set, agentTools: null,
     exitedReleased: new Set(),
     projectFor: async workspaceId => { if (workspaceId === "ws") return "proj"; throw new Error("not a git repository"); },
     internalApi: async (method, endpoint) => {
@@ -1229,7 +1230,7 @@ test("a resumed chat gets the app's tools again, and an AO that refuses them sti
   let status = "exited";
   const servers = [{ name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } }];
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise,
     agentTools: { renew: async id => id === "chat-1" ? { servers } : null },
     internalApi: async (method, endpoint, body) => {
       if (endpoint.endsWith("/resume-agent")) {
@@ -1265,7 +1266,7 @@ test("a resumed chat gets the person's own MCP servers after the app's, for its 
   const app = { name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } };
   const mine = { name: "notes", type: "stdio", command: "notes-mcp" };
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, logger: { warn() {}, info() {} },
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, logger: { warn() {}, info() {} },
     agentTools: { renew: async id => id === "chat-1" ? { servers: [app] } : null }, fileTools: null,
     userMcpServers: { forSession: (agent, taken) => { asked.push([agent, JSON.parse(JSON.stringify(taken.map(server => server.name)))]); if (broken) throw new Error("unreadable"); return [mine]; } },
     internalApi: async (method, endpoint, body) => {
@@ -1298,7 +1299,7 @@ test("a resumed GPT chat gets unified-agent-tools after the app's server, whose 
   const app = { name: "coding-tools", type: "http", url: "http://127.0.0.1:1/mcp/ws/k", headers: { Authorization: "Bearer fixture" } };
   const files = { name: "unified-agent-tools", type: "stdio", command: "node", args: ["server.mjs", "--stdio"] };
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, Date, Math, Number, Promise,
     logger: { warn() {}, info() {} },
     agentTools: { renew: async (id, options) => { renewals.push([id, JSON.parse(JSON.stringify(options))]); return { servers: [app] }; } },
     fileTools: { forSession: (agent, sessionModel) => { asked.push([agent, sessionModel]); return sessionModel.startsWith("gpt-") ? files : null; } },
@@ -1331,7 +1332,7 @@ test("reopening a released chat and sending at once resumes its agent once, and 
   const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
   let status = "exited", resuming = false, resumes = 0, renewals = 0;
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise,
     agentTools: { renew: async () => { renewals += 1; return null; } },
     internalApi: async (method, endpoint) => {
       if (endpoint.endsWith("/resume-agent")) {
@@ -2247,7 +2248,7 @@ test("an exited chat whose agent may live on is exited again once, so AO stops i
   const turns = { leftover: [{ state: "failed", completedAt: ago(360) }], "fresh-exit": [{ state: "completed", completedAt: ago(5) }], gone: [{ state: "failed", completedAt: ago(360) }] };
   const exits = [];
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
-    Buffer, fs, path, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(),
     internalApi: async (method, endpoint) => {
       if (endpoint === "/api/v1/sessions") return { sessions };
