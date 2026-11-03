@@ -572,7 +572,7 @@ test("an app update outranks a GUI-only update, which still installs on its own"
 function autoInstallerFixture(overrides = {}) {
   const calls = { install: 0 };
   const options = {
-    status: "available", enabled: true, idle: 600, busy: false, clock: 0,
+    status: "available", enabled: true, idle: 600, threshold: 600, busy: false, clock: 0,
     install: async () => { calls.install += 1; return true; },
     ...overrides,
   };
@@ -580,6 +580,7 @@ function autoInstallerFixture(overrides = {}) {
     controller: { getState: () => ({ status: options.status, version: "9.9.9", kind: "app", ...options.state }), beginInstall: () => options.install() },
     enabled: () => options.enabled,
     idleSeconds: () => options.idle,
+    idleThreshold: () => options.threshold,
     isBusy: async () => {
       if (options.busy instanceof Error) throw options.busy;
       return options.busy;
@@ -640,6 +641,100 @@ test("a version that failed to apply waits twice as long after each failure, and
   options.clock = 1000 * hour;
   assert.equal(await installer.tick(), false);
   assert.equal(calls.install, 2);
+});
+
+for (const [change, update] of [
+  ["disabled", options => { options.enabled = false; }],
+  ["user active", options => { options.idle = 0; }],
+  ["idle threshold increased", options => { options.threshold = 900; }],
+  ["update unavailable", options => { options.status = "up-to-date"; }],
+  ["apply failures exhausted", options => { options.state = { failedAttempts: AUTO_INSTALL_FAILURE_LIMIT }; }],
+  ["apply retry backoff", options => { options.state = { failedAttempts: 1, failedAt: options.clock }; }],
+]) {
+  test(`automatic update admission rechecks ${change} after a pending busy check`, async () => {
+    let resolveBusy;
+    const busy = new Promise(resolve => { resolveBusy = resolve; });
+    const { installer, calls, options } = autoInstallerFixture({ busy });
+    const pending = installer.tick();
+    await Promise.resolve();
+    update(options);
+    resolveBusy(false);
+    assert.equal(await pending, false);
+    assert.equal(calls.install, 0);
+  });
+}
+
+for (const restart of [false, true]) {
+  test(`automatic update admission rejects a stopped tick${restart ? " after restart" : " without a timer"}`, async () => {
+    let resolveBusy;
+    const busy = new Promise(resolve => { resolveBusy = resolve; });
+    const { installer, calls, options } = autoInstallerFixture({ busy });
+    if (restart) installer.start();
+    try {
+      const pending = installer.tick();
+      await Promise.resolve();
+      installer.stop();
+      if (restart) installer.start();
+      resolveBusy(false);
+      assert.equal(await pending, false);
+      assert.equal(calls.install, 0);
+      options.busy = false;
+      assert.equal(await installer.tick(), true, "a fresh explicit tick still works");
+      assert.equal(calls.install, 1);
+    } finally {
+      installer.stop();
+    }
+  });
+}
+
+test("automatic update admission keeps one pending check and releases it after busy or rejected results", async () => {
+  for (const reject of [false, true]) {
+    let finish;
+    const busy = new Promise((resolve, fail) => { finish = () => reject ? fail(new Error("busy check failed")) : resolve(true); });
+    const { installer, calls, options } = autoInstallerFixture({ busy });
+    const pending = installer.tick();
+    assert.equal(await installer.tick(), false, "the pending check owns the attempt");
+    finish();
+    assert.equal(await pending, false);
+    assert.equal(calls.install, 0);
+    options.busy = false;
+    assert.equal(await installer.tick(), true);
+    assert.equal(calls.install, 1);
+  }
+});
+
+test("automatic update admission evaluates the current available version", async () => {
+  let resolveBusy;
+  const busy = new Promise(resolve => { resolveBusy = resolve; });
+  const { installer, calls, options } = autoInstallerFixture({ busy });
+  const pending = installer.tick();
+  await Promise.resolve();
+  options.state = { kind: "gui", version: "fresh-gui", failedAttempts: AUTO_INSTALL_FAILURE_LIMIT };
+  options.install = async () => {
+    assert.equal(options.state.version, "fresh-gui");
+    calls.install += 1;
+  };
+  resolveBusy(false);
+  assert.equal(await pending, true, "app failure limits do not reject an available GUI update");
+  assert.equal(calls.install, 1);
+});
+
+test("automatic update admission lets an accepted install finish after stop", async () => {
+  let finishInstall, accepted;
+  const started = new Promise(resolve => { accepted = resolve; });
+  const installed = new Promise(resolve => { finishInstall = resolve; });
+  const { installer, calls } = autoInstallerFixture({ install: async () => {
+    calls.install += 1;
+    accepted();
+    await installed;
+  } });
+  const pending = installer.tick();
+  await started;
+  installer.stop();
+  assert.equal(await installer.tick(), false, "accepted installation still owns the attempt");
+  finishInstall();
+  assert.equal(await pending, true);
+  assert.equal(calls.install, 1);
 });
 
 test("the controller reports how often the available version failed to apply", async () => {

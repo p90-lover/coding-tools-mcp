@@ -691,10 +691,12 @@ function createAutoInstaller({
   let timer = null;
   let attempting = false;
   let failedAt = null;
+  let generation = 0;
 
   async function tick() {
     if (attempting || !enabled()) return false;
-    const state = controller.getState();
+    const tickGeneration = generation;
+    let state = controller.getState();
     if (state.status !== "available") return false;
     if (failedAt !== null && now() - failedAt < retryMs) return false;
     if (state.kind === "app" && !applyFailureAllowsRetry(state, now(), retryMs)) return false;
@@ -704,6 +706,11 @@ function createAutoInstaller({
     try {
       // A busy check that cannot answer counts as busy: never restart over work it could not see.
       if (await Promise.resolve().then(isBusy).catch(() => true)) return false;
+      if (tickGeneration !== generation || !enabled()) return false;
+      if (idleSeconds() < (typeof idleThreshold === "function" ? idleThreshold() : idleThreshold)) return false;
+      state = controller.getState();
+      if (state.status !== "available") return false;
+      if (state.kind === "app" && !applyFailureAllowsRetry(state, now(), retryMs)) return false;
       logger?.info("launcher.update_auto_install", { version: state.version ?? null, kind: state.kind ?? null });
       await controller.beginInstall();
       failedAt = null;
@@ -717,7 +724,7 @@ function createAutoInstaller({
     }
   }
 
-  function stop() { if (timer) clearInterval(timer); timer = null; }
+  function stop() { generation += 1; if (timer) clearInterval(timer); timer = null; }
   function start() {
     stop();
     timer = setInterval(() => { void tick(); }, pollMs);
