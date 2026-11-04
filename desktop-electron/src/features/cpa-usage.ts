@@ -4,7 +4,7 @@ import { getCodingToolsClient } from "../api/client";
 // requests and estimated cost over a range, with its quota where one is known. Shared by the bridge
 // to CPA Provider Manager's usage view (cpa-provider-usage-bridge.ts) and the chat's context meter.
 
-export type CpaUsageRange = "24h" | "7d" | "30d" | "all";
+export type CpaUsageRange = "5h" | "24h" | "7d" | "30d" | "all";
 /** Where a cost came from: CPA Helper's price book, the built-in list-price table, or both. */
 export type CpaCostSource = "cpa-helper" | "estimate" | "mixed" | null;
 
@@ -25,7 +25,7 @@ export type CpaUsageModel = CpaUsageCounts & {
   model: string; provider: string | null; cost: number | null; costSource: CpaCostSource; costPartial: boolean; priceLabel: string | null;
 };
 export type CpaUsageAccount = CpaUsageCounts & {
-  id: string; label: string; provider: string | null; disabled: boolean;
+  id: string; label: string; file: string; provider: string | null; disabled: boolean;
   cost: number | null; costSource: CpaCostSource; costPartial: boolean;
   models: CpaUsageModel[]; quota: CpaCodexQuota | CpaClineQuota | null;
 };

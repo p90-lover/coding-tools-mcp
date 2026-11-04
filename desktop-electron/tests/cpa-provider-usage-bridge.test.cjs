@@ -85,6 +85,16 @@ test("supported quotas pass only numbers and safe state, never errors or key nam
   f.dispose();
 });
 
+test("the 5-hour range is served, with each account's auth file name for matching CPA's cards", async () => {
+  const ranges = [];
+  const f = fixture(async (range) => { ranges.push(range); return { available: true, range,
+    accounts: [{ requests: 3, label: "me@example.com", file: "codex-1e3bda98-me@example.com-team", models: [], quota: null }] }; });
+  await f.send({ data: { type: "cpm:usage:read", id: "request-5h", range: "5h" } });
+  assert.deepEqual(ranges, ["5h"]);
+  assert.equal(f.replies[0].m.usage.accounts[0].file, "codex-1e3bda98-me@example.com-team");
+  f.dispose();
+});
+
 test("the host serves usage to the CPA frame and no longer mounts its own strip", () => {
   // CPA Provider Manager v0.2.2+ reads cpm:usage:read and shows accounts and quota itself.
   const ui = fs.readFileSync(path.join(__dirname, "../src/features/OriginalUiSurface.tsx"), "utf8");
