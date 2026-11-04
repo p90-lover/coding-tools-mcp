@@ -10,6 +10,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createStateFileWriter } = require("./durable-state.cjs");
+const { blockChatGptTelemetry } = require("./chatgpt-telemetry-block.cjs");
 
 const HOME_URL = "https://chatgpt.com/";
 const MAX_ACCOUNTS = 12;
@@ -197,6 +198,7 @@ function createGptBrowserHost({
       const partition = partitionFor(id);
       const browserSession = sessionFor(partition);
       browserSession.setUserAgent(cleanUserAgent(browserSession.getUserAgent()));
+      blockChatGptTelemetry(browserSession);
       await prepareSession(browserSession);
       if (pendingPages.get(id) !== pending) throw new Error("GPT Browser page creation was cancelled");
       const view = createView(partition);

@@ -382,7 +382,8 @@ function gptBrowserRecoveryFixture(content = JSON.stringify({
     require: name => name === "node:fs" ? {
       readFileSync: target => read(target, "sync"),
       promises: { readFile: async target => read(target, "async") },
-    } : name === "./durable-state.cjs" ? durable.exports : require(name),
+    } : name === "./durable-state.cjs" ? durable.exports
+      : name === "./chatgpt-telemetry-block.cjs" ? require("../electron/chatgpt-telemetry-block.cjs") : require(name),
     gptBrowser: null, CORE_HOME: captureRoot, session: { fromPartition: world.sessionFor },
     WebContentsView: function (options) { return world.createView(options.webPreferences.partition); },
     mainWindow: null, routeGptBrowserSession: async () => {}, send() {},

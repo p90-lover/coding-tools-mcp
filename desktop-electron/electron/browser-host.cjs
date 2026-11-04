@@ -4,6 +4,7 @@ const { createHash, randomBytes } = require("node:crypto");
 const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
+const { blockChatGptTelemetry } = require("./chatgpt-telemetry-block.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -813,6 +814,7 @@ class BrowserHost {
     keepPageOutOfWindowFrame(view.webContents);
     this.watchCloudflareCheck(view, true);
     signInFriendlyUserAgent(view.webContents);
+    blockChatGptTelemetry(view.webContents.session);
     this.window.contentView.addChildView(view);
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
@@ -1152,6 +1154,7 @@ class BrowserHost {
     keepPageOutOfWindowFrame(view.webContents);
     this.watchCloudflareCheck(view, false);
     signInFriendlyUserAgent(view.webContents);
+    blockChatGptTelemetry(view.webContents.session);
     const tab = {
       id,
       surfaceId,
@@ -1253,6 +1256,7 @@ class BrowserHost {
     keepPageOutOfWindowFrame(view.webContents);
     this.watchCloudflareCheck(view, true);
     signInFriendlyUserAgent(view.webContents);
+    blockChatGptTelemetry(view.webContents.session);
     const tab = {
       id: randomBytes(12).toString("base64url"),
       startedAt: Date.now(),
@@ -1308,6 +1312,7 @@ class BrowserHost {
     keepPageOutOfWindowFrame(view.webContents);
     this.watchCloudflareCheck(view, false);
     signInFriendlyUserAgent(view.webContents);
+    blockChatGptTelemetry(view.webContents.session);
     const tab = {
       id,
       surfaceId: null,
