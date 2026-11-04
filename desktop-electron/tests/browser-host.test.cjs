@@ -1728,7 +1728,7 @@ for (const useSavedChats of [true, false]) test(`verification refresh opens and 
         loadURL: async (url) => { currentUrl = url; calls.push(["navigate", url]); },
         executeJavaScript: async (script) => {
           // Cloudflare's check is not shown here; only the session probe counts.
-          if (script.includes("isCloudflareCheckPage")) return false;
+          if (script.startsWith("(function isCloudflareCheckPage")) return false;
           calls.push(["authenticate"]);
           // The page's own probe: a saved-chat home is no Temporary Chat but is a new chat.
           return { sessionAuthenticated: true, composer: true, temporary: !useSavedChats,
