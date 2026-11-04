@@ -725,12 +725,13 @@ test("the Cline Pass card shows its saved reading at once and keeps it through a
   assert.match(q.header.nextElementSibling.textContent, /main key[\s\S]*58% left/, "a failed read keeps the last good one");
 });
 
-test("the quota script runs only in the managed panel frame", async () => {
+test("the quota and card usage scripts run only in the managed panel frame", async () => {
   const f = fixture();
   f.install();
   const watch = f.webContents.listeners("did-frame-finish-load")[2];
   await watch({}, false, 5, 9);
-  assert.match(f.frame.scripts.at(-1), /QuotaHeader-module__primaryAction/);
+  assert.match(f.frame.scripts.at(-2), /QuotaHeader-module__primaryAction/);
+  assert.match(f.frame.scripts.at(-1), /cpm:usage:read/, "then the Auth Files cards' usage lines");
   const scripts = f.frame.scripts.length;
   f.frame.url = `${ORIGIN}/v0/resource/plugins/cpa-helper/index.html`;
   await watch({}, false, 5, 9);

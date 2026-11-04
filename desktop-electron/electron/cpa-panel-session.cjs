@@ -200,6 +200,11 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     } catch {
       logger?.warn?.("cpa.quota_page_script_failed", { retry: "reopen-cpa-panel" });
     }
+    try {
+      await frame.executeJavaScript(authFilesUsageScript(sessionMarker));
+    } catch {
+      logger?.warn?.("cpa.card_usage_script_failed", { retry: "reopen-cpa-panel" });
+    }
   }
 
   webContents.on("did-frame-finish-load", seedPanelSession);
@@ -751,4 +756,141 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
   })()`;
 }
 
-module.exports = { installCpaPanelSession, panelStorageEntries, autoReviewSignInScript, quotaPageScript, CPA_HELPER_KEY_STORE };
+/**
+ * The panel page script that puts each account's usage on its Auth Files card (#/auth-files): the
+ * requests, tokens and estimated cost of the last 5 hours (a Codex account's 5-hour window) and of
+ * the last 7 days (its weekly window), under the card's size and date line. The numbers come from
+ * the app through the CPA usage bridge (cpa-provider-usage-bridge.ts, which answers this frame and
+ * sends no key or account id), matched to a card by its auth file name. They refresh every 2
+ * minutes while the page is open and shown, and the last answer is kept (localStorage) so a reload
+ * shows it at once. "running" when the page already has it, "unseeded" before the panel session.
+ */
+function authFilesUsageScript(marker) {
+  return `(() => {
+    const marker = ${JSON.stringify(marker)};
+    if (sessionStorage.getItem('coding-tools-cpa-session') !== marker) return 'unseeded';
+    if (window.__codingToolsCardUsage) return 'running';
+    window.__codingToolsCardUsage = true;
+    const SAVED = 'coding-tools-card-usage';
+    const RANGES = [['5h', 'Last 5 h'], ['7d', 'Last 7 days']];
+    const REFRESH_MS = 2 * 60e3;
+    const MONO = 'ui-monospace,SF Mono,Cascadia Mono,JetBrains Mono,Menlo,Consolas,monospace';
+    const read = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } };
+    const write = (key, value) => { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} };
+    const saved = read(SAVED);
+    let byRange = saved && typeof saved === 'object' && saved.byRange ? saved.byRange : {};
+    let loadedAt = Number(saved?.at) || 0;
+    let loading = false;
+
+    const pending = new Map();
+    addEventListener('message', (event) => {
+      const data = event.data;
+      if (event.source !== window.parent || data?.type !== 'cpm:usage:result' || !pending.has(data.id)) return;
+      pending.get(data.id)(data.usage);
+      pending.delete(data.id);
+    });
+    // The app's bridge answers only this frame, at CPA's origin; the app page itself has no origin to name.
+    function ask(range) {
+      return new Promise((resolve) => {
+        const id = 'card-usage-' + range + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+        pending.set(id, resolve);
+        setTimeout(() => { if (pending.delete(id)) resolve(null); }, 30e3);
+        window.parent.postMessage({ type: 'cpm:usage:read', id, range }, '*');
+      });
+    }
+    async function load() {
+      if (loading) return;
+      loading = true;
+      try {
+        const answers = await Promise.all(RANGES.map(([range]) => ask(range)));
+        const next = {};
+        RANGES.forEach(([range], index) => {
+          const usage = answers[index];
+          if (usage?.available && Array.isArray(usage.accounts)) next[range] = usage.accounts.filter((a) => a && a.file)
+            .map((a) => ({ file: a.file, requests: a.requests, failed: a.failed, inputTokens: a.inputTokens, outputTokens: a.outputTokens,
+              cachedTokens: a.cachedTokens, reasoningTokens: a.reasoningTokens, totalTokens: a.totalTokens,
+              cost: a.cost, costSource: a.costSource, costPartial: a.costPartial }));
+          else if (byRange[range]) next[range] = byRange[range];
+        });
+        if (Object.keys(next).length) {
+          byRange = next;
+          loadedAt = Date.now();
+          write(SAVED, { at: loadedAt, byRange });
+        }
+      } finally {
+        loading = false;
+        render();
+      }
+    }
+
+    const compact = (value) => {
+      const n = Number(value) || 0;
+      if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1) + 'B';
+      if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'K';
+      return String(Math.round(n));
+    };
+    // CPA Helper's own prices are exact; the app's list-price table is an estimate (≈); "+" when some models had no price.
+    function money(row) {
+      if (!row.requests && !row.totalTokens) return '$0';
+      if (row.cost === null || row.cost === undefined) return 'cost unknown';
+      const amount = row.cost >= 100 ? row.cost.toFixed(0) : row.cost >= 1 ? row.cost.toFixed(2) : row.cost.toFixed(3);
+      return (row.costSource === 'cpa-helper' ? '' : '≈') + '$' + amount + (row.costPartial ? '+' : '');
+    }
+    function line(label, row) {
+      const div = document.createElement('div');
+      div.style.cssText = 'display:flex;gap:6px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      const name = document.createElement('span');
+      name.style.cssText = 'color:var(--text-tertiary);min-width:76px';
+      name.textContent = label;
+      const value = document.createElement('span');
+      value.style.cssText = 'color:var(--text-secondary,inherit)';
+      const requests = row ? row.requests || 0 : 0;
+      const failed = row?.failed ? ' (' + row.failed + ' failed)' : '';
+      value.textContent = requests ? requests + (requests === 1 ? ' request' : ' requests') + failed + ' · ' + compact(row.totalTokens) + ' tokens · ' + money(row) : 'No requests';
+      if (row) div.title = label + ': in ' + compact(row.inputTokens) + ' · out ' + compact(row.outputTokens) + ' · cached ' + compact(row.cachedTokens)
+        + ' · reasoning ' + compact(row.reasoningTokens) + (row.failed ? ' · ' + row.failed + ' failed' : '');
+      div.append(name, value);
+      return div;
+    }
+    function render() {
+      if (!location.hash.startsWith('#/auth-files') || !Object.keys(byRange).length) return;
+      for (const nameNode of document.querySelectorAll('[class*="AuthFileCard-module__fileName"]')) {
+        const card = nameNode.closest('article') || nameNode.parentElement;
+        const file = nameNode.textContent.trim().replace(/[.]json$/i, '');
+        const key = file + '|' + loadedAt;
+        let box = card.querySelector(':scope > [data-coding-tools-usage]');
+        if (box?.dataset.codingToolsUsage === key) continue;
+        if (!box) {
+          box = document.createElement('div');
+          box.style.cssText = 'display:grid;gap:2px;margin:6px 0 2px;font:11px/1.45 ' + MONO;
+          const anchor = card.querySelector(':scope > [class*="AuthFileCard-module__metaRow"]') || nameNode;
+          anchor.after(box);
+        }
+        box.dataset.codingToolsUsage = key;
+        box.replaceChildren(...RANGES.filter(([range]) => byRange[range])
+          .map(([range, label]) => line(label, byRange[range].find((row) => row.file === file))));
+      }
+    }
+
+    // React re-renders the cards (filters, a refresh, a toggle) and drops the added lines; put them back.
+    let queued = false;
+    new MutationObserver(() => {
+      if (queued) return;
+      queued = true;
+      setTimeout(() => { queued = false; render(); }, 150);
+    }).observe(document.body, { childList: true, subtree: true });
+    function tick() {
+      if (!location.hash.startsWith('#/auth-files') || document.visibilityState !== 'visible') return;
+      render();
+      if (Date.now() - loadedAt > REFRESH_MS) load();
+    }
+    addEventListener('hashchange', tick);
+    document.addEventListener('visibilitychange', tick);
+    setInterval(tick, 15e3);
+    tick();
+    return 'started';
+  })()`;
+}
+
+module.exports = { installCpaPanelSession, panelStorageEntries, autoReviewSignInScript, quotaPageScript, authFilesUsageScript, CPA_HELPER_KEY_STORE };
