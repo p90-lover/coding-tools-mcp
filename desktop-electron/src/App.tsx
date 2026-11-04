@@ -17,6 +17,7 @@ import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
+import { bindSidebarPeek } from "./sidebar-peek";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
@@ -485,7 +486,8 @@ function LauncherShell({
   // The docked sidebar sliding shut keeps its full layout until it reaches the rail: switching to the
   // rail's layout at the first frame cut the panel to the rail at once, and the slide showed nothing.
   const [sidebarClosing, setSidebarClosing] = useState(false);
-  const sidebarPeekTimer = useRef(0);
+  const sidebarPanel = useRef<HTMLDivElement>(null);
+  const sidebarPeekControl = useRef<ReturnType<typeof bindSidebarPeek> | null>(null);
   // Rarely used surfaces, folded under "More" so the everyday ones stay in view.
   const moreSurfaces = [
     { surface: "activity", icon: "activity", label: copy.activity },
@@ -613,7 +615,6 @@ function LauncherShell({
     media.addEventListener("change", apply);
     return () => {
       media.removeEventListener("change", apply);
-      window.clearTimeout(sidebarPeekTimer.current);
     };
   }, []);
 
@@ -647,46 +648,21 @@ function LauncherShell({
       .catch((cause) => setError(messageOf(cause)));
   };
 
-  // The hover panel follows where the pointer is, not which element it is over: the title bar's
-  // buttons sit on the rail's top, and entering and leaving them threw the panel open and shut.
-  // It opens over the rail and stays open until the pointer is clearly past the panel (or leaves
-  // the window). A short delay each way: passing the window's edge doesn't throw it open.
-  const sidebarPeekState = useRef(false);
-  sidebarPeekState.current = sidebarPeek;
+  // Only the visible rail/panel opens a peek. A window-wide coordinate threshold also opened it
+  // over the title bar and held it open past its edge, including after a navigation click.
   useEffect(() => {
-    if (!sidebarRail) return undefined;
-    let pending: boolean | null = null;
-    const settle = (want: boolean) => {
-      if (want === sidebarPeekState.current) {
-        window.clearTimeout(sidebarPeekTimer.current);
-        pending = null;
-        return;
-      }
-      if (pending === want) return;
-      pending = want;
-      window.clearTimeout(sidebarPeekTimer.current);
-      sidebarPeekTimer.current = window.setTimeout(() => {
-        pending = null;
-        setSidebarPeek(want);
-      }, want ? 120 : 200);
-    };
-    const move = (event: PointerEvent) => {
-      if (event.clientX <= SIDEBAR_RAIL_WIDTH) settle(true);
-      else if (event.clientX > sidebarWidth + 16) settle(false);
-      else settle(sidebarPeekState.current);
-    };
-    const leave = () => settle(false);
-    window.addEventListener("pointermove", move, { passive: true });
-    document.documentElement.addEventListener("pointerleave", leave);
-    window.addEventListener("blur", leave);
+    if (!sidebarRail || !sidebarPanel.current) return undefined;
+    const control = bindSidebarPeek(sidebarPanel.current, (open) => {
+      if (open) setSidebarExpanded(true);
+      setSidebarPeek(open);
+    });
+    sidebarPeekControl.current = control;
     return () => {
-      window.removeEventListener("pointermove", move);
-      document.documentElement.removeEventListener("pointerleave", leave);
-      window.removeEventListener("blur", leave);
-      window.clearTimeout(sidebarPeekTimer.current);
+      control.dispose();
+      sidebarPeekControl.current = null;
       setSidebarPeek(false);
     };
-  }, [sidebarRail, sidebarWidth]);
+  }, [sidebarRail]);
 
   useEffect(() => {
     if (sidebarPeek) {
@@ -699,7 +675,7 @@ function LauncherShell({
   }, [sidebarPeek]);
 
   const closeSidebarPeek = () => {
-    window.clearTimeout(sidebarPeekTimer.current);
+    sidebarPeekControl.current?.close();
     setSidebarPeek(false);
   };
 
@@ -846,7 +822,7 @@ function LauncherShell({
         transition={{ type: "tween", duration: 0.26, ease: [0.32, 0.72, 0, 1] }}
         onAnimationComplete={() => setSidebarClosing(false)}
       >
-        <div className="sidebar-clip">
+        <div className="sidebar-clip" ref={sidebarPanel}>
           <div className="sidebar-content">
             <div className="sidebar-brand-row">
               <div className="sidebar-brand-identity">
