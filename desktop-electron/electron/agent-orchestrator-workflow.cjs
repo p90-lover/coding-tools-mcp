@@ -1646,8 +1646,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // "waiting for you" for over an hour on commands the reviewer had already allowed, and a typed
   // "keep going" waited behind them for good.
   const orphanedRequest = observed => observed?.needsInput === true && observed.agentGone === true && !observed.approvals?.length;
-  // What the stall stop may end: a turn with nothing waiting for the person, or one only an orphaned request holds.
-  const nothingToAnswer = observed => !observed?.approvals?.length && (!observed?.needsInput || orphanedRequest(observed));
+  // A request the reviewer already answered is nobody's to answer: AO can keep listing it (and the
+  // session needs_input) after the answer went in, and the chat read "waiting for approval" with
+  // every call allowed while the stall stop, seeing a request, never ended the turn. The user:
+  // "the tools call are approved, but its stuck on waiting approval … it doesnt silently restart".
+  const answered = approval => approverAdvice.get(approval?.approval_id)?.resolved === true;
+  const answeredOnly = observed => Boolean(observed?.approvals?.length) && observed.approvals.every(answered);
+  // What the stall stop may end: a turn with nothing waiting for the person, or one only an orphaned
+  // request or requests already answered hold.
+  const nothingToAnswer = observed => answeredOnly(observed)
+    || (!observed?.approvals?.length && (!observed?.needsInput || orphanedRequest(observed)));
   /**
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
@@ -1723,7 +1731,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
-      if (!pending.length && nothingToAnswer(observed)) await stopStalledTurn(session, observed, ownership);
+      // `pending` is observed.approvals for this card: none, or only ones already answered.
+      if (nothingToAnswer(observed)) await stopStalledTurn(session, observed, ownership);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -3430,7 +3439,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. `partial`: the
    *  request was too long to show whole, and "Let the model judge" has the reviewer judge it anyway. */
-  async function askApprover({ approver, mission, approval, decide = false, partial = false }) {
+  async function askApprover({ approver, mission, approval, decide = false, partial = false, judge = false }) {
     const { baseUrl, key } = connection();
     const catalog = await models();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
@@ -3457,18 +3466,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const request = describeRequest(approval);
     const publication = gitPushRequest(approval.command) ?? gitPushRequest(approval.toolInput);
     let repository = null;
+    // "Let the model judge" (`judge`): a publication the local checks cannot verify goes to the
+    // model with why, instead of to the person. It returned "ask" before any model saw it, so the
+    // judge's forced decision found nothing to decide and denied every such push unreviewed.
+    let unverified = "";
     if (publication) {
-      const unknown = reason => ({ action: "ask", unresolved: true, reason });
-      if (publication.status !== "review") return unknown(publication.reason);
-      repository = await reviewRepository(folder, publication.remote).catch(() => null);
-      // Inspect the actual cwd too: a subfolder can be a different repository or a junction.
-      if (approval.cwd && folder && path.resolve(approval.cwd) !== path.resolve(folder)) {
-        const actual = path.isAbsolute(approval.cwd) ? await reviewRepository(approval.cwd, publication.remote).catch(() => null) : null;
-        if (!actual || actual.root !== repository?.root || JSON.stringify(actual.pushDestinations) !== JSON.stringify(repository?.pushDestinations)) return unknown("The publication's working repository could not be verified");
-      }
-      if (repository?.status !== "observed" || !repository.defaultBranch || repository.fetchDestinations?.length !== 1 || repository.pushDestinations?.length !== 1
-        || repository.fetchDestinations[0] !== repository.pushDestinations[0]) return unknown("The repository's publication destination could not be verified; check it yourself");
-      if (publication.destinations.includes(repository.defaultBranch)) return { action: "deny", reason: "Publishing directly to the repository's default branch requires a person" };
+      const unknown = reason => {
+        if (!judge) return { action: "ask", unresolved: true, reason };
+        unverified = reason;
+        return null;
+      };
+      const checked = async () => {
+        if (publication.status !== "review") return unknown(publication.reason);
+        // `git -C <folder> push`: that folder is the repository, whatever the request's cwd.
+        const where = publication.workdir ?? folder;
+        repository = await reviewRepository(where, publication.remote).catch(() => null);
+        // Inspect the actual cwd too: a subfolder can be a different repository or a junction.
+        if (!publication.workdir && approval.cwd && folder && path.resolve(approval.cwd) !== path.resolve(folder)) {
+          const actual = path.isAbsolute(approval.cwd) ? await reviewRepository(approval.cwd, publication.remote).catch(() => null) : null;
+          if (!actual || actual.root !== repository?.root || JSON.stringify(actual.pushDestinations) !== JSON.stringify(repository?.pushDestinations)) return unknown("The publication's working repository could not be verified");
+        }
+        if (repository?.status !== "observed" || !repository.defaultBranch || repository.fetchDestinations?.length !== 1 || repository.pushDestinations?.length !== 1
+          || repository.fetchDestinations[0] !== repository.pushDestinations[0]) return unknown("The repository's publication destination could not be verified; check it yourself");
+        if (publication.destinations.includes(repository.defaultBranch)) return { action: "deny", reason: "Publishing directly to the repository's default branch requires a person" };
+        return null;
+      };
+      const settled = await checked();
+      if (settled) return settled;
     }
     // A shell command is reviewed as its bare command line, which leaves out the agent's own
     // description of it ("Kill uvicorn backend process tree").
@@ -3493,6 +3517,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       folder ? `Workspace folder (the agent's writable root): ${folder}. Relative paths and a command with no working folder are in it.` : "",
       `Request: ${request}`,
       repository ? `Repository facts independently read from local Git (not evidence of user consent): ${JSON.stringify(repository)}\nRequested feature refspecs: ${JSON.stringify(publication.refs)}` : "",
+      unverified ? `Publication check: the app could not verify this publication locally (${unverified}). Judge it from the request alone; deny unless it is clearly a normal feature-branch push the user's request asks for.` : "",
       purpose ? `The agent describes this request as: ${purpose}` : "",
       approval.permissions ? `Permissions: ${JSON.stringify(approval.permissions).slice(0, 800)}` : "",
       ...scripts.map((script) => `Local script ${script.file} (from the request's working folder${script.truncated ? ", first 4 KB" : ""}):\n${script.text}`),
@@ -3583,7 +3608,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const approval = { kind: "tool", tool: `${APP_TOOL_PREFIX}${clean(tool, 80)}`, thread_id: thread,
       toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
     try {
-      const verdict = await askApprover({ approver, mission: run, approval, decide: judges, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
+      const verdict = await askApprover({ approver, mission: run, approval, decide: judges, judge: judges, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
       return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: approval.tool, message: publicText(error?.message || error, 200) });
@@ -3637,6 +3662,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // is ignored.
   const REVIEW_CONCURRENCY = 4;
   const screening = new Map(); // approval_id -> { at, request } of the screening running for it
+  /**
+   * Whether a request is screened (again): one never screened, or one the reviewer left to the
+   * person before "Let the model judge" was on. Turning the judge on from that request's own card
+   * did nothing: its "ask" was kept, so no pass looked at it again and the turn waited for an hour
+   * (seen live 2026-11-04, a `git -C … push`). A request already judged is not judged again.
+   */
+  const rescreen = (advice) => !advice || (advice.action === "ask" && !advice.judged && !advice.resolved && chatPreferences.get().modelJudges);
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
     const jobs = [];
@@ -3651,7 +3683,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
         const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
-        if (!screened || !approval.approval_id || approverAdvice.has(approval.approval_id) || screening.has(approval.approval_id)) continue;
+        if (!screened || !approval.approval_id || !rescreen(approverAdvice.get(approval.approval_id)) || screening.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         // The same request twice at once (an agent's parallel calls) is reviewed once: the second
@@ -3691,6 +3723,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // "Let the model judge": what the reviewer would hand to the person (a request too long to
     // read whole, a chat whose requests it kept denying) it decides itself, allow or deny.
     const judges = chatPreferences.get().modelJudges;
+    // What this request's screening concluded; judged ones are not screened again (rescreen).
+    const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
     let advice = routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
       : attachedFileRead(approval)
@@ -3698,7 +3732,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : !incomplete && routineAppCommand(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
       : incomplete && !blocked && judges
-      ? await askApprover({ approver, mission, approval, decide: true, partial: true }).then(verdict => ({ ...verdict, reviewed: true }),
+      ? await askApprover({ approver, mission, approval, decide: true, partial: true, judge: true }).then(verdict => ({ ...verdict, reviewed: true }),
         (error) => ({ action: "failed", error }))
       : incomplete && !blocked
       ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
@@ -3716,12 +3750,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
             // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
             // request go to the person, and its card says why.
-            : await askApprover({ approver, mission, approval }).then(verdict => ({ ...verdict, reviewed: true }),
+            : await askApprover({ approver, mission, approval, judge: judges }).then(verdict => ({ ...verdict, reviewed: true }),
               (error) => ({ action: "failed", error }));
     // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
     // doubt), so a request it could read whole no longer waits for the person for want of a decision.
     if (advice.action === "ask" && advice.reviewed) {
-      const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete }).catch(() => null);
+      const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges }).catch(() => null);
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
       // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
       // person's: the request sat on the card though the switch was on.
@@ -3753,7 +3787,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
       advice = { action: "ask", unresolved: true, reason: "Choose one of this request's own answers" };
     }
-    approverAdvice.set(approval.approval_id, advice);
+    keepAdvice(advice);
     if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
     // Each answer stands alone: one the person gave first (or any failure to send it) never
     // touches the other requests; this one just goes to the person.
@@ -3761,7 +3795,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const decision = aoDecision(approval, advice.action === "allow");
       const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
       if (!decision) {
-        approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action,
+        keepAdvice({ action: "ask", unresolved: true, unsent: advice.action,
           reason: `The reviewer's decision is not offered by this request, so choose an answer yourself. It said ${advice.action}: ${advice.reason}` });
         return null;
       }
@@ -3770,7 +3804,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
         return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
-      approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+      keepAdvice({ action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
       return null;
     }
     if (approver.settings?.auto_decide === true && advice.action !== "ask") {
@@ -3783,7 +3817,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
         return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
-      approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+      keepAdvice({ action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
       return null;
     }
     return `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;

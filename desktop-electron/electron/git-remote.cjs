@@ -183,13 +183,21 @@ function gitPushRequest(command) {
       continue;
     }
     // An escaped or absolute executable must not borrow facts read using the app's plain Git.
-    let index = 1, uncertain = !plainGit || Boolean(quote);
+    let index = 1, uncertain = !plainGit || Boolean(quote), workdir = null;
     while (words[index]?.startsWith("-")) {
       const option = words[index++];
       if (option === "-c") {
         const value = words[index++];
         if (value !== "credential.helper=" && value !== "credential.helper=!gh auth git-credential") uncertain = true;
-      } else if (option === "-C" || option === "--git-dir" || option === "--work-tree") { index++; uncertain = true; }
+      } else if (option === "-C") {
+        // One absolute folder names the repository exactly, so its facts are read there (the
+        // reviewer's repository check). Agents push worktrees this way; every such push was
+        // "unknown" and never reached a model. A relative or repeated -C still needs a person.
+        const value = words[index++];
+        if (!workdir && typeof value === "string" && (path.win32.isAbsolute(value) || path.posix.isAbsolute(value))
+          && !/^[\\/]{2}/.test(value) && !/[$`%*?]/.test(value)) workdir = value;
+        else uncertain = true;
+      } else if (option === "--git-dir" || option === "--work-tree") { index++; uncertain = true; }
       else uncertain = true;
     }
     const action = words[index++];
@@ -211,7 +219,7 @@ function gitPushRequest(command) {
     if (uncertain || !/^[A-Za-z0-9][\w.-]{0,63}$/.test(remote ?? "") || !refs.length || !refs.every(validRef) || args.some(value => value.startsWith("-"))) {
       requests.push({ status: "unknown", reason: "The publication command's destination or options need checking" }); continue;
     }
-    requests.push({ status: "review", remote, refs, destinations });
+    requests.push({ status: "review", remote, refs, destinations, ...(workdir ? { workdir } : {}) });
   }
   if (!requests.length) return null;
   if (requests.some(request => request.status === "blocked")) return requests.find(request => request.status === "blocked");
