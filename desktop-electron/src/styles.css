@@ -890,16 +890,6 @@ code {
   background: #ffffff;
 }
 
-.browser-underlay {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  background: #ffffff;
-  color: #777777;
-  font-size: var(--text-sm);
-  place-items: center;
-}
-
 .browser-empty {
   position: absolute;
   inset: 0;

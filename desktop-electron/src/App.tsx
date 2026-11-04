@@ -1621,11 +1621,7 @@ function BrowserSurface({
               ) : null}
             </div>
           </div>
-        ) : (
-          <div className="browser-underlay" aria-hidden="true">
-            <span>{copy.loading}</span>
-          </div>
-        )}
+        ) : null}
       </div>
     </section>
   );
