@@ -213,6 +213,10 @@ function isCloudflareCheckPage(doc, win) {
 }
 
 const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
+// How long a page showing Cloudflare's check renders off-screen, and how many times in a row, before
+// it is left hidden until it is shown or its check clears (startCheckRendering).
+const CHECK_RENDER_MS = 2 * 60_000;
+const CHECK_RENDER_TRIES = 3;
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
 const ZOOM_FACTORS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2];
 const SHELL_ZOOM_LEVEL_STEP = 0.5;
@@ -773,6 +777,10 @@ class BrowserHost {
     // (switchAccount): partition -> { view, surfaceId, userTabs, state, ... }.
     this.parkedHomes = new Map();
     this.recoverySessions = new Set();
+    // Views rendering for Cloudflare's check: view -> { timer, backgroundThrottling }; and how many
+    // times in a row each has (startCheckRendering).
+    this.checkRendering = new Map();
+    this.checkTries = new WeakMap();
     this.view = this.createHomeView(this.partition);
     this.windowVisibilityListener = () => this.syncViewVisibility();
     for (const event of WINDOW_VISIBILITY_EVENTS) {
@@ -803,6 +811,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    this.watchCloudflareCheck(view, true);
     signInFriendlyUserAgent(view.webContents);
     this.window.contentView.addChildView(view);
     view.webContents.setZoomFactor(this.state.zoomFactor);
@@ -989,8 +998,8 @@ class BrowserHost {
       state: Object.fromEntries(HOME_STATE_FIELDS.map((field) => [field, this.state[field]])),
       parkedAt: Date.now(),
     };
-    if (!home.view.webContents.isDestroyed()) home.view.setVisible(false);
-    for (const tab of home.userTabs.values()) tab.view.setVisible(false);
+    if (!home.view.webContents.isDestroyed()) this.hideView(home.view);
+    for (const tab of home.userTabs.values()) this.hideView(tab.view);
     return home;
   }
 
@@ -1141,6 +1150,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    this.watchCloudflareCheck(view, false);
     signInFriendlyUserAgent(view.webContents);
     const tab = {
       id,
@@ -1241,6 +1251,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    this.watchCloudflareCheck(view, true);
     signInFriendlyUserAgent(view.webContents);
     const tab = {
       id: randomBytes(12).toString("base64url"),
@@ -1295,6 +1306,7 @@ class BrowserHost {
       },
     });
     keepPageOutOfWindowFrame(view.webContents);
+    this.watchCloudflareCheck(view, false);
     signInFriendlyUserAgent(view.webContents);
     const tab = {
       id,
@@ -2268,6 +2280,72 @@ class BrowserHost {
     return this.authView || this.selectedTurnTab()?.view || this.selectedUserTab()?.view || this.view;
   }
 
+  // Cloudflare's check runs as script in the page and finishes only in a page that renders. A hidden
+  // view gets no animation frames and its timers run about once a second, so on 2026-11-04 the check
+  // cleared in seconds on the account shown in the Browser tab and retried for good on every other
+  // account (their "Just a moment..." pages measured 0 frames a second). While a page shows the
+  // check (its document answered 403), it renders off-screen and unthrottled; a 2xx document (the
+  // check passed and reloaded) or CHECK_RENDER_MS hides and throttles it again.
+  watchCloudflareCheck(view, backgroundThrottling) {
+    const contents = view.webContents;
+    if (typeof contents?.on !== "function") return;
+    contents.on("did-navigate", (_event, url, httpResponseCode) => {
+      if (!String(url).startsWith(CHATGPT_ORIGIN + "/")) this.endCheckRendering(view);
+      else if (httpResponseCode === 403) this.startCheckRendering(view, backgroundThrottling);
+      else if (httpResponseCode >= 200 && httpResponseCode < 400) this.endCheckRendering(view, { cleared: true });
+    });
+    contents.once?.("destroyed", () => this.endCheckRendering(view, { destroyed: true }));
+  }
+
+  startCheckRendering(view, backgroundThrottling) {
+    const contents = view.webContents;
+    this.checkRendering ??= new Map();
+    this.checkTries ??= new WeakMap();
+    if (contents.isDestroyed() || this.checkRendering.has(view)) return;
+    // The check reloads its page each time it fails; a page that never passes stops here until it
+    // is shown (a shown page renders anyway) or its check clears.
+    const tries = (this.checkTries.get(view) ?? 0) + 1;
+    if (tries > CHECK_RENDER_TRIES) return;
+    this.checkTries.set(view, tries);
+    const timer = setTimeout(() => this.endCheckRendering(view), CHECK_RENDER_MS);
+    timer.unref?.();
+    this.checkRendering.set(view, { timer, backgroundThrottling });
+    contents.setBackgroundThrottling?.(false);
+    this.logger.info("browser.cloudflare_check_rendering", { tries });
+    this.refreshHiddenViews();
+  }
+
+  endCheckRendering(view, { cleared = false, destroyed = false } = {}) {
+    if (cleared) this.checkTries?.delete(view);
+    const state = this.checkRendering?.get(view);
+    if (!state) return;
+    clearTimeout(state.timer);
+    this.checkRendering.delete(view);
+    if (destroyed || view.webContents.isDestroyed()) return;
+    view.webContents.setBackgroundThrottling?.(state.backgroundThrottling);
+    this.logger.info(cleared ? "browser.cloudflare_check_cleared" : "browser.cloudflare_check_render_ended", {});
+    this.refreshHiddenViews();
+  }
+
+  /** Hides a view, or keeps it rendering off-screen while it shows Cloudflare's check. */
+  hideView(view) {
+    if (this.checkRendering?.has(view) && !view.webContents.isDestroyed()) {
+      view.setBounds(this.hiddenTurnBounds());
+      view.setVisible(true);
+      return;
+    }
+    view.setVisible(false);
+  }
+
+  /** Places every view again: the shown account's (syncViewVisibility) and the parked accounts'. */
+  refreshHiddenViews() {
+    this.syncViewVisibility();
+    for (const home of this.parkedHomes.values()) {
+      if (!home.view.webContents.isDestroyed()) this.hideView(home.view);
+      for (const tab of home.userTabs.values()) this.hideView(tab.view);
+    }
+  }
+
   hiddenTurnBounds() {
     const [contentWidth, contentHeight] = this.window.getContentSize();
     const width = Math.max(HIDDEN_TURN_VIEWPORT.width, Math.round(contentWidth || 0));
@@ -2317,7 +2395,8 @@ class BrowserHost {
   presentTurnView(tab, visible) {
     if (tab.interactionMode === "manual") {
       tab.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
-      tab.view.setVisible(visible || tab.status === "running");
+      if (visible || tab.status === "running") tab.view.setVisible(true);
+      else this.hideView(tab.view);
       return;
     }
     if (visible) {
@@ -2344,7 +2423,8 @@ class BrowserHost {
       tab.view.setBounds(bounds);
     }
     this.holdTurnAnimations(tab, !visible);
-    tab.view.setVisible(visible || tab.status === "running");
+    if (visible || tab.status === "running") tab.view.setVisible(true);
+    else this.hideView(tab.view);
   }
 
   presentPrimaryView(visible) {
@@ -2352,7 +2432,7 @@ class BrowserHost {
     // descriptor-owned view attached while the browser page is selected, but fully hide it when
     // the launcher explicitly deactivates the browser surface.
     if (!this.surfaceActive || this.homeTabClosed) {
-      this.view.setVisible(false);
+      this.hideView(this.view);
       return;
     }
     this.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
@@ -2381,8 +2461,12 @@ class BrowserHost {
     }
     for (const tab of this.userTabs?.values() ?? []) {
       const tabVisible = visible && !this.authView && selectedUser?.id === tab.id;
-      if (tabVisible) tab.view.setBounds(this.bounds);
-      tab.view.setVisible(tabVisible);
+      if (tabVisible) {
+        tab.view.setBounds(this.bounds);
+        tab.view.setVisible(true);
+      } else {
+        this.hideView(tab.view);
+      }
     }
     this.authView?.setVisible(visible);
   }
@@ -3841,6 +3925,7 @@ class BrowserHost {
     }
     const result = await Promise.race([
       contents.executeJavaScript(`(async () => {
+        if ((${isCloudflareCheckPage.toString()})(document, window)) return { status: 0 };
         const response = await fetch("/api/auth/session", { credentials: "include", cache: "no-store",
           redirect: "manual", headers: { accept: "application/json" } });
         if (response.status === 401) return { status: 401 };
@@ -3900,7 +3985,10 @@ class BrowserHost {
       };
       const initialSurface = readSurface();
       let sessionAuthenticated = false, sessionAnswered = false, sessionStatus;
-      if (new URL(initialSurface.url).origin === expectedUrl.origin) {
+      // On Cloudflare's check page the session request is itself challenged: it only added failed
+      // requests while the check ran (8 in 6 s, 2026-11-04).
+      const checkShown = (${isCloudflareCheckPage.toString()})(document, window);
+      if (new URL(initialSurface.url).origin === expectedUrl.origin && !checkShown) {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), ${CHATGPT_AUTH_SESSION_TIMEOUT_MS});
         sessionStatus = 0;
@@ -4251,6 +4339,8 @@ class BrowserHost {
     for (const event of WINDOW_VISIBILITY_EVENTS) {
       this.window.off(event, this.windowVisibilityListener);
     }
+    for (const { timer } of this.checkRendering?.values() ?? []) clearTimeout(timer);
+    this.checkRendering?.clear();
     this.closeAuthView(this.authView, true);
     this.clearHomeNavigationTimeout();
     if (this.turnLeaseSweep) clearInterval(this.turnLeaseSweep);
