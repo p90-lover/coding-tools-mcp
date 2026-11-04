@@ -383,6 +383,13 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "  default:",
     "    - models: [{name: \"*\", protocol: \"codex\"}]",
     "      params: {\"reasoning.summary\": \"auto\"}",
+    // Claude Code probes a model with max_tokens 1. CPA hands that to Codex as max_output_tokens,
+    // which OpenAI refuses below 16 ("integer below minimum value"), so every probe of a GPT model
+    // through a Codex account came back HTTP 400 and its chat read "CPA refused the last 4
+    // requests" (seen live 2026-11-04). Only those exact values are raised; a real limit is kept.
+    "  override:",
+    `    - models: [${codexMinimumOutputSelectors()}]`,
+    `      params: {"max_output_tokens": ${CODEX_MIN_OUTPUT_TOKENS}}`,
     "debug: false",
     "request-log: false",
     // No main.log: it took ~10 MB every two days, half of it warnings nobody reads. CPA then logs
@@ -422,7 +429,48 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     if (Object.keys(requests).length) merged.requests = requests;
     else delete merged.requests;
   }
+  mergeManagedPayload(merged, managed.payload);
   return (yaml.stringify ?? yaml.dump)(merged);
+}
+
+const CODEX_MIN_OUTPUT_TOKENS = 16;
+
+/** One CPA payload selector per output limit Codex refuses (1 to 15), as flow YAML. */
+function codexMinimumOutputSelectors() {
+  return Array.from({ length: CODEX_MIN_OUTPUT_TOKENS - 1 }, (_, index) =>
+    `{name: "*", protocol: "codex", match: [{"max_output_tokens": ${index + 1}}]}`).join(", ");
+}
+
+const isPlainObject = (value) => Object.prototype.toString.call(value) === "[object Object]";
+
+/** A payload rule's identity: its models (empty fields dropped, as CPA saves them filled in) and its params' paths. */
+function payloadRuleIdentity(rule) {
+  const filled = (value) => value !== undefined && value !== null && value !== ""
+    && !(Array.isArray(value) && !value.length) && !(isPlainObject(value) && !Object.keys(value).length);
+  const models = (Array.isArray(rule?.models) ? rule.models : []).map((model) =>
+    Object.fromEntries(Object.entries(isPlainObject(model) ? model : {}).filter(([, value]) => filled(value)).sort(([a], [b]) => a.localeCompare(b))));
+  return JSON.stringify([models, Object.keys(isPlainObject(rule?.params) ? rule.params : {}).sort()]);
+}
+
+/**
+ * Puts the app's payload rules in the payload CPA reads. A saved `payload`, or CPA 8's grouped
+ * `requests.payload` that CPA reads over the flat one, used to replace the generated rules whole,
+ * so a rule added by a later build never reached an existing install. Each app rule replaces a
+ * saved rule with the same identity and is otherwise added; the person's own rules stay.
+ */
+function mergeManagedPayload(merged, managedPayload) {
+  if (!isPlainObject(managedPayload)) return;
+  const grouped = isPlainObject(merged.requests) && isPlainObject(merged.requests.payload);
+  const target = grouped ? merged.requests.payload : isPlainObject(merged.payload) ? merged.payload : {};
+  for (const [section, rules] of Object.entries(managedPayload)) {
+    if (!Array.isArray(rules)) continue;
+    const identities = new Set(rules.map(payloadRuleIdentity));
+    const kept = (Array.isArray(target[section]) ? target[section] : []).filter((rule) => !identities.has(payloadRuleIdentity(rule)));
+    target[section] = [...kept, ...rules];
+  }
+  // CPA reads the grouped copy over the flat one, so a flat copy beside it would only mislead.
+  if (grouped) delete merged.payload;
+  else merged.payload = target;
 }
 
 /** Removes the main.log files (current and rotated) CPA wrote before file logging was turned off. */
