@@ -83,6 +83,7 @@ test("usage is grouped per account and model, joined to CPA's accounts and the C
   const [codex, other, quiet] = result.accounts;
   assert.equal(codex.id, "idx-codex");
   assert.equal(codex.label, "me@example.com");
+  assert.equal(codex.file, "codex-me", "the auth file's name as CPA's cards print it, without .json");
   assert.equal(codex.provider, "codex");
   assert.equal(codex.requests, 10);
   assert.equal(codex.totalTokens, 1_100_000);
@@ -191,6 +192,8 @@ test("reads CPA Helper with the management key over a range, splits accounts by 
       "/v0/management/cline-pass-switcher/api/accounts": { body: { mode: "roundrobin", accounts: [{ name: "a", key: "cline-key-should-not-pass", enabled: true }], stats: {} } },
     },
   });
+  // A Codex account's 5-hour window is a range of its own (the CPA Auth Files cards show it).
+  assert.equal(RANGES["5h"], 5 * 60 * 60_000);
   const result = await usage.read({ range: "7d" });
   assert.equal(result.available, true);
   assert.equal(result.range, "7d");

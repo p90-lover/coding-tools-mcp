@@ -31,8 +31,10 @@ const MAX_SPLIT_ACCOUNTS = 24;
  */
 const SPLIT_CONCURRENCY = 3;
 const MAX_MODELS = 12;
-const DAY_MS = 24 * 60 * 60_000;
-const RANGES = Object.freeze({ "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS, all: null });
+const HOUR_MS = 60 * 60_000;
+const DAY_MS = 24 * HOUR_MS;
+// 5h matches a Codex account's 5-hour limit window (the CPA Auth Files cards show both).
+const RANGES = Object.freeze({ "5h": 5 * HOUR_MS, "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS, all: null });
 const DEFAULT_RANGE = "30d";
 /** A turn's request stats are read again after this; the line polls while the chat is open. */
 const TURN_CACHE_MS = 3_000;
@@ -142,6 +144,11 @@ function fileLabel(file) {
   return text(file?.email) || text(file?.account) || text(file?.label) || text(file?.name) || "";
 }
 
+/** The auth file's name as CPA's Auth Files cards print it (no ".json"); emails repeat across files, names do not. */
+function fileName(file) {
+  return text(file?.name, 200).replace(/\.json$/i, "");
+}
+
 /** CPA Helper's label for an account it saw is the usage "source": an email is fine, a key is not. */
 function safeSourceLabel(value) {
   const label = text(value, 120);
@@ -228,7 +235,7 @@ function aggregateUsage({ authRows = [], modelsByAuth = new Map(), modelRows = [
     if (rows.has(id)) return rows.get(id);
     const provider = text(file?.provider ?? file?.type, 40).toLowerCase() || null;
     const row = {
-      id, label: fileLabel(file), provider, disabled: file?.disabled === true,
+      id, label: fileLabel(file), file: fileName(file), provider, disabled: file?.disabled === true,
       ...emptyUsage(), cost: 0, costSource: null, costPartial: false, models: [], quota: null,
     };
     rows.set(id, row);
@@ -395,7 +402,7 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     return { ok: true, available: true, range, from, refreshedAt: now(), source: "CPA Helper", ...result };
   }
 
-  /** Usage for a range ("24h", "7d", "30d" or "all"), cached CACHE_MS; concurrent reads share one load. */
+  /** Usage for a range ("5h", "24h", "7d", "30d" or "all"), cached CACHE_MS; concurrent reads share one load. */
   async function read({ range } = {}) {
     const key = Object.hasOwn(RANGES, range) ? range : DEFAULT_RANGE;
     const hit = cache.get(key);
