@@ -484,8 +484,12 @@ class BrowserHost {
   }
 
   async initializePrimaryView() {
-    this.view.setBounds(this.hiddenTurnBounds());
+    const hiddenBounds = this.hiddenTurnBounds();
+    // Establish a native renderer size before parking: an offscreen-first view can stay 0x0.
+    // No document is loaded until the view is outside the launcher again.
+    this.view.setBounds({ ...hiddenBounds, x: 0, y: 0 });
     this.view.setVisible(true);
+    this.view.setBounds(hiddenBounds);
     try {
       await loadCommittedBrowserSurface(this.view.webContents, IDLE_BROWSER_URL);
       if (browserInteractionModeFor(this) === "automatic") await this.markOwnedSurface();
