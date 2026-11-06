@@ -48,11 +48,11 @@ test("the Browser sidebar still is never covered by a loading panel", () => {
   const surface = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "BrowserSurface");
   assert.ok(surface);
   const jsx = (type, props) => ({ type, props: props || {} }), exports = {};
-  const components = ["BrowserAccountSwitcher", "BrowserAddress", "StateDot", "BrandMark", "PrimaryButton", "SecondaryButton", "ManualTurnGuide"];
+  const components = ["BrowserAccountSwitcher", "BrowserAddressBar", "StateDot", "BrandMark", "PrimaryButton", "SecondaryButton", "ManualTurnGuide"];
   vm.runInNewContext(ts.transpileModule(surface.getText(file) + "\nexports.BrowserSurface = BrowserSurface;", {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, {
-    exports, api: {}, ...Object.fromEntries(components.map(name => [name, name])),
+    exports, api: {}, ...Object.fromEntries(components.map(name => [name, name])), formatBrowserAddress: (url) => url ?? "",
     useState: value => [value, () => {}], useEffect() {},
     require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {},
   });
