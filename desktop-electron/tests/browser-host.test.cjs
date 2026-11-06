@@ -271,7 +271,7 @@ test("manual ChatGPT navigation still fails closed on a real load failure", asyn
   assert.equal(observed.logs.some(([, event]) => event === "browser.manual_tab_navigation_failed"), true);
 });
 
-test("primary browser initialization keeps its view offscreen but visible until ownership is committed", async () => {
+test("primary browser initialization primes native bounds then parks before loading and ownership", async () => {
   const calls = [];
   let currentUrl = "about:blank";
   const contents = new EventEmitter();
@@ -299,14 +299,48 @@ test("primary browser initialization keeps its view offscreen but visible until 
   await BrowserHost.prototype.initializePrimaryView.call(fixture);
 
   assert.deepEqual(calls, [
-    ["bounds", hiddenBounds],
+    ["bounds", { ...hiddenBounds, x: 0, y: 0 }],
     ["visible", true],
+    ["bounds", hiddenBounds],
     ["load", IDLE_BROWSER_URL],
     "owned",
     "sync",
     "descriptor",
     ["browser.initialized", { url: IDLE_BROWSER_URL }],
   ]);
+});
+
+test("new background account home pages have a native viewport before any document loads", async t => {
+  for (const [variant, Host] of [["desktop", BrowserHost], ["standalone", StandaloneBrowserHost]]) {
+    await t.test(variant, async () => {
+      const hidden = { x: 1201, y: 801, width: 1200, height: 800 };
+      let viewport = { width: 0, height: 0 }, bounds, visible = false, url = "about:blank", loads = 0;
+      const contents = new EventEmitter();
+      contents.isDestroyed = () => false;
+      contents.getURL = () => url;
+      contents.stop = () => {};
+      contents.enableDeviceEmulation = () => assert.fail("home bootstrap must use native bounds");
+      contents.loadURL = async target => {
+        assert.ok(viewport.width > 0 && viewport.height > 0, "an offscreen-first home kept a 0x0 renderer even while animation frames ran");
+        assert.deepEqual(bounds, hidden, "park the view before loading any page, including account content");
+        assert.equal(visible, true);
+        url = target; loads++;
+      };
+      const fixture = Object.assign(Object.create(Host.prototype), {
+        view: { webContents: contents, setVisible: value => { visible = value; }, setBounds: value => {
+          bounds = value;
+          // Observed in real Electron: initial in-window bounds establish the renderer size;
+          // first placing the new view outside its hidden parent leaves that size at zero.
+          if (value.x === 0 && value.y === 0) viewport = { width: value.width, height: value.height };
+        } },
+        hiddenTurnBounds: () => hidden, syncViewVisibility() {}, markOwnedSurface: async () => {},
+        writeDescriptor() {}, logger: { info() {} },
+      });
+      await fixture.initializePrimaryView();
+      assert.equal(loads, 1);
+      assert.deepEqual(viewport, { width: 1200, height: 800 });
+    });
+  }
 });
 
 test("a new turn tab that misses its first idle-document window is retried instead of failing the turn", async t => {
