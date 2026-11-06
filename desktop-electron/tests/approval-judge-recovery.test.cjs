@@ -28,7 +28,6 @@ function chat({ command, outcome = "allow", keepListing = false, clock = () => D
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     now: clock,
     fetchImpl: async (url, init) => {
-      // "Approve for me" asks only Codex's review model (#1077), so CPA must list it.
       if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
       prompts.push(JSON.parse(init.body).messages[0].content);
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ outcome, rationale: "a feature-branch push the user asked for" }) } }] }) };
