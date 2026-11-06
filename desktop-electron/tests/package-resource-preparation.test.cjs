@@ -77,9 +77,9 @@ function storedZip(entries) {
 
 function cloudflaredManifest(platform = "windows/amd64") {
   return `${JSON.stringify({
-    version: "2026.7.2",
-    release_url: "https://github.com/cloudflare/cloudflared/releases/tag/2026.7.2",
-    release_commit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+    version: "2026.8.2",
+    release_url: "https://github.com/cloudflare/cloudflared/releases/tag/2026.8.2",
+    release_commit: "733bfb939963e150dcf5c4faddb1603f744fbc98",
     platforms: [platform],
   })}\n`;
 }
@@ -251,8 +251,8 @@ test("composes the exact Windows payload from the official seven-member client a
     binaryName: "cloudflared.exe",
     binarySha256: sha256(Buffer.from("MZfixture-cloudflared")),
     manifestSha256: sha256(Buffer.from(cloudflaredManifest())),
-    version: "2026.7.2",
-    releaseCommit: "8679787525edc8575b2948a7c4a50b6292c6d426",
+    version: "2026.8.2",
+    releaseCommit: "733bfb939963e150dcf5c4faddb1603f744fbc98",
   });
   assert.deepEqual(
     manifest.components.map((component) => component.id),

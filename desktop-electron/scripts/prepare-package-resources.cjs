@@ -7,7 +7,7 @@ const zlib = require("node:zlib");
 const { spawnSync } = require("node:child_process");
 const { TextDecoder } = require("node:util");
 
-const PRODUCT_VERSION = "0.8.52";
+const PRODUCT_VERSION = "0.8.54";
 const PRODUCT_NAME = "Coding Tools";
 const APP_ID = "dev.codingtools.fullharness";
 const SOURCE_REPOSITORY = "p90-lover/coding-tools-mcp";
@@ -20,8 +20,8 @@ const UPSTREAM = Object.freeze({
 });
 const TUNNEL_VERSION = "0.0.16";
 const TUNNEL_REPOSITORY = "openai/tunnel-client";
-const CLOUDFLARED_VERSION = "2026.7.2";
-const CLOUDFLARED_RELEASE_COMMIT = "8679787525edc8575b2948a7c4a50b6292c6d426";
+const CLOUDFLARED_VERSION = "2026.8.2";
+const CLOUDFLARED_RELEASE_COMMIT = "733bfb939963e150dcf5c4faddb1603f744fbc98";
 const MAX_TUNNEL_ARCHIVE_BYTES = 80 * 1024 * 1024;
 const MAX_TUNNEL_MEMBER_BYTES = 64 * 1024 * 1024;
 const MAX_TUNNEL_MEMBERS = 16;

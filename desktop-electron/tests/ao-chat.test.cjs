@@ -251,6 +251,30 @@ test("a compacted chat pairs its newest messages with its newest runs", () => {
   assert.deepEqual(restarted.slice(-2).map(turn => [turn.runId, turn.user?.text ?? null]), [["r5", "one more thing"], ["again", null]]);
 });
 
+test("a chat's runs the project's newest-100 read dropped come back from the chat's own read", () => {
+  // Seen live (2026-11-02): a goal chat on round 69 had 63 runs saved, but the project's read held
+  // only its newest 26, so its earlier replies were gone; chats with none left in it showed no replies.
+  const ids = (runs) => Array.from(runs, (item) => item.id);
+  const mine = (id) => run(id, "chat", []);
+  const theirs = (id) => run(id, "other", []);
+  const recent = [theirs("o1"), mine("c3"), theirs("o2"), mine("c4")];
+  const history = [mine("c1"), mine("c2"), mine("c3"), mine("c4")];
+  assert.deepEqual(ids(chat.chatRunsWithHistory(recent, history)), ["c1", "c2", "o1", "c3", "o2", "c4"],
+    "older runs go first, the read's own order is kept");
+  assert.equal(chat.chatRunsWithHistory(recent, []), recent, "no history: the same list");
+  assert.equal(chat.chatRunsWithHistory(recent, [mine("c3"), mine("c4")]), recent, "nothing older: the same list");
+  // A chat with no run left in the project's read gets all of its own.
+  assert.deepEqual(ids(chat.chatRunsWithHistory([theirs("o1")], [mine("c1"), mine("c2")])), ["c1", "c2", "o1"]);
+  // A run the read leaves out on purpose (a deleted message's, newer than the chat's oldest run in it) stays out.
+  assert.deepEqual(ids(chat.chatRunsWithHistory([mine("c3"), mine("c5")], [mine("c1"), mine("c3"), mine("c4"), mine("c5")])), ["c1", "c3", "c5"]);
+  // The turns then pair every reply again: the compacted chat's summary stays with its own run.
+  const answered = (id) => run(id, "chat", [node("p", "planner", "finished", { receipt: { answer: id } })], { execution_mode: "single" });
+  const all = chat.chatRunsWithHistory([answered("r3"), answered("r4")], ["r1", "r2", "r3", "r4"].map(answered));
+  const description = "Summary of the earlier conversation (compacted 2026-11-02 07:08 UTC):\nwhat happened so far\n\nFollow-up (2026-11-02 07:08 UTC):\ngo on";
+  assert.deepEqual(plain(chat.chatTurns(all, description)).map((turn) => [turn.runId, turn.final?.text ?? null, turn.messageIndex ?? null]),
+    [["r1", "r1", null], ["r2", "r2", null], ["r3", "r3", 0], ["r4", "r4", 1]]);
+});
+
 test("a chat the app restart left behind resumes when its project opens, single or team, within its budget", () => {
   const restarted = { error: "The agent's process ended before it finished (the app restarted); retry this card." };
   const single = (card, extra = {}) => run("r", "t", [card], { execution_mode: "single", ...extra });
@@ -1321,9 +1345,10 @@ test("a chat switch preserves its restored draft if unmount wins the queued stat
 });
 
 test("chat attachment previews stay alive while another draft keeps them", () => {
-  const freed = [], shownPreviews = { current: new Set(["blob:kept", "blob:removed"]) };
-  rendererCallback("AgentOrchestratorChat.tsx", "effect:const now = new Set(attachments", {
-    attachments: [], shownPreviews, CHAT_ATTACHMENTS: new Map([["other-chat", [{ preview: "blob:kept" }]]]), freePreview: value => freed.push(value),
+  const freed = [], shownPreviews = { current: new Set(["blob:kept", "blob:pending", "blob:removed"]) };
+  rendererCallback("AgentOrchestratorChat.tsx", "effect:const now = new Set([...attachments", {
+    attachments: [], preparing: [], shownPreviews, CHAT_DRAFTS: new Map([["saving-chat", { preparing: [{ preview: "blob:pending" }] }]]),
+    CHAT_ATTACHMENTS: new Map([["other-chat", [{ preview: "blob:kept" }]]]), freePreview: value => freed.push(value),
   })();
   assert.deepEqual(freed, ["blob:removed"]);
 });
@@ -1616,7 +1641,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
   const set = key => next => { if (!alive.current) lateSetters++; const apply = () => { if (replayUpdaters && typeof next === "function") next(state[key]); state[key] = typeof next === "function" ? next(state[key]) : next; }; if (defer || (deferDraft && key !== "taskId")) waiting.push(apply); else apply(); };
   const helpers = { draftEntry: rendererCallback("AgentOrchestratorChat.tsx", "draftEntry", maps), trimDraftEntry: rendererCallback("AgentOrchestratorChat.tsx", "trimDraftEntry", maps) };
   const globals = () => ({ ...maps, ...helpers, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, attachments: state.attachments, annotations: state.annotations,
-    setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachNote() {}, setCard: set("card") });
+    setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachmentWork() {}, setAttachNote() {}, setCard: set("card") });
   releaseDraft = rendererCallback("AgentOrchestratorChat.tsx", "releaseDraft", globals());
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8"), tree = ts.createSourceFile("Chat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let assignment; const find = node => { if (ts.isExpressionStatement(node) && node.getText(tree).startsWith("composing.current =") && node.getText(tree).includes("draftOwner.current")) assignment ??= node; ts.forEachChild(node, find); }; find(tree);

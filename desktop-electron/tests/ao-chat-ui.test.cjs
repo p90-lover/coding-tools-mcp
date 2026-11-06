@@ -79,6 +79,40 @@ test("visualize controls appear only in successful native WebGPT final answers",
   }
 });
 
+test("a card's assigned-turn activity reaches the ordinary and DeepSeek renderer before completion", async () => {
+  const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
+  for (const model of ["cpa/gpt-6.1-sol", "cpa/deepseek-v4.1-flash"]) {
+    const run = { id: `scoped:${model}`, workspace_id: "ws", project_id: "task", execution_mode: "single", nodes: [
+      { id: "lead", role: "planner", state: "running", route: { harness_id: "ao:claude-code", model },
+        receipt: { thread_id: "session", turn_id: "assigned", started_at_ms: 1000 } },
+    ] };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async () => ({ ok: true, runs: [run] }),
+      aoHarness: { observe: async (_session, turn) => turn === "assigned"
+        ? { turnId: turn, turnState: "running", timeline: [
+          { id: "message", kind: "message", status: "running", text: "This live response belongs to the assigned turn." },
+        ] }
+        : { turnId: "queued", turnState: "queued", timeline: [] } },
+    });
+    try {
+      const args = { workspaceId: "ws", runId: run.id };
+      await workflow.call("activity", args);
+      await new Promise(resolve => setImmediate(resolve));
+      const frame = await workflow.call("activity", args);
+      const props = { runs: [run], tasks: [{ id: "task", title: "Task", description: "Read the assigned response" }],
+        selectedTaskId: "task", projectId: "ws", busy: false, approvals: [],
+        activity: Object.fromEntries(Object.entries(frame.nodes).map(([id, value]) => [`${run.id}:${id}`, value])),
+        send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
+      const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
+      assert.match(html, /This live response belongs to the assigned turn\./, model);
+      const finished = { ...run, nodes: run.nodes.map(node => ({ ...node, state: "finished",
+        receipt: { ...node.receipt, answer: "The completed response remains readable.", finished_at_ms: 2000 } })) };
+      const reloaded = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, { ...props, runs: [finished], activity: {} }));
+      assert.match(reloaded, /The completed response remains readable\./, `${model} after reload`);
+    } finally { workflow.dispose(); }
+  }
+});
+
 test("a project switch keeps its chat pane readable while loading and offers Retry after a failed read", () => {
   const props = { runs: [], tasks: [], selectedTaskId: "", deciding: true, busy: false, approvals: [],
     loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},

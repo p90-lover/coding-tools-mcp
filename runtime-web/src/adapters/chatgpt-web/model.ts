@@ -17,6 +17,8 @@ export interface ChatGptWebCapabilities {
   solAvailable: boolean;
   extraHighAvailable: boolean;
   proAvailable: boolean;
+  /** The owned native page must prove an upper tier; this does not prove its account budget. */
+  deferUpperTierAdmission?: boolean;
 }
 
 /** The launcher's current account is not authoritative for a native thread's bound account. */
@@ -41,8 +43,9 @@ export function resolveChatGptWebTurnCapabilities(
   return {
     ...configured,
     solAvailable: sol,
-    extraHighAvailable: sol && (configured.extraHighAvailable || tier === 3),
-    proAvailable: sol && (configured.proAvailable || tier === 4),
+    extraHighAvailable: sol && configured.extraHighAvailable,
+    proAvailable: false,
+    ...(sol && (tier === 3 || tier === 4) ? { deferUpperTierAdmission: true } : {}),
   };
 }
 
@@ -93,10 +96,12 @@ export function resolveChatGptWebModelMode(
     case "high":
       return { modelId, effort, displayLabel: "High", uiEffortIndex: 2, thinkEnabled: false, localTools: capabilities.localToolsEnabled };
     case "xhigh":
-      if (!capabilities.extraHighAvailable) throw new Error("ChatGPT Extra High effort is not available for this account");
+      if (!capabilities.extraHighAvailable && !capabilities.proAvailable && !capabilities.deferUpperTierAdmission) {
+        throw new Error("ChatGPT Extra High effort is not available for this account");
+      }
       return { modelId, effort, displayLabel: "Extra High", uiEffortIndex: 3, thinkEnabled: false, localTools: capabilities.localToolsEnabled };
     case "max":
-      if (!capabilities.proAvailable) throw new Error("ChatGPT Pro effort is not available for this account");
+      if (!capabilities.proAvailable && !capabilities.deferUpperTierAdmission) throw new Error("ChatGPT Pro effort is not available for this account");
       return { modelId, effort, displayLabel: "Pro", uiEffortIndex: 4, thinkEnabled: false, localTools: capabilities.localToolsEnabled };
     default:
       throw new Error(`ChatGPT web effort is not supported: ${effort}`);

@@ -68,6 +68,11 @@ const MANUAL_COMPACTION_SUBMIT_TIMEOUT_MS = 120_000;
 const MAX_MANUAL_TERMINAL_SIGNALS = 256;
 const MAX_MANUAL_PROMPT_CHARS = 1_000_000;
 const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
+// The automatic MCP check runs while Codex holds its bridge connections open, so a turn can start
+// in the middle of it: the turn waits for the check (it reloads the page and reads the connector
+// list) rather than failing. Every other manual operation still refuses a turn at once.
+const CONNECTOR_VERIFICATION_OPERATION = "connector verification";
+const CONNECTOR_VERIFICATION_TURN_WAIT_MS = 120_000;
 const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 // These are lease/initialization guards only. They do not limit a live ChatGPT turn: active turns
 // stay alive as long as the helper keeps heartbeating. They only reclaim a blank surface or a turn
@@ -500,6 +505,20 @@ function requireAutomaticBrowserInspection(host, operation) {
   }
 }
 
+/** Waits while the connector check holds the browser, at most `timeoutMs`; the caller re-checks. */
+async function waitForConnectorVerification(host, timeoutMs = CONNECTOR_VERIFICATION_TURN_WAIT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (host.manualOperation === CONNECTOR_VERIFICATION_OPERATION && host.manualOperationSettled
+    && Date.now() < deadline) {
+    let timer;
+    await Promise.race([
+      host.manualOperationSettled,
+      new Promise((resolve) => { timer = setTimeout(resolve, deadline - Date.now()); }),
+    ]);
+    clearTimeout(timer);
+  }
+}
+
 class BrowserTurnCancelledError extends Error {
   constructor(traceId) {
     super(`Browser turn ${traceId} was cancelled by the user`);
@@ -674,6 +693,7 @@ class BrowserHost {
     this.interactionModeOverride = null;
     this.selectedTabId = "home";
     this.manualOperation = null;
+    this.manualOperationSettled = null;
     this.loginOperation = null;
     this.sessionRefreshOperation = null;
     this.cloudflareChallengeRecovery = null;
@@ -1059,7 +1079,7 @@ class BrowserHost {
     return this.userTabs?.get(this.selectedTabId) || null;
   }
 
-  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account = null) {
+  async createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account = null, startRequest = null) {
     // A Codex thread's turns run on the account it is bound to, which need not be this host's.
     const partition = account?.partition ?? this.partition;
     const full = makeTabRoom(this, partition);
@@ -1094,6 +1114,7 @@ class BrowserHost {
       connectorBound: false,
       startedAt: Date.now(),
       helperPid,
+      startRequest,
       view,
       status: "running",
       ordinal,
@@ -1118,6 +1139,10 @@ class BrowserHost {
     view.webContents.setZoomFactor(this.state.zoomFactor);
     this.bindShellZoomShortcuts(view.webContents);
     this.bindTurnContents(tab);
+    const assertCurrent = () => {
+      account?.assertCurrent?.();
+      if (this.turnTabs.get(id) !== tab || tab.startRequest !== startRequest) throw new BrowserTurnCancelledError(traceId);
+    };
     // A new turn tab gets the primary view's retries: one 10 s window failed turns as
     // browser_page on a busy machine. The windows fit the tab's 120 s bootstrap budget. The tab
     // keeps the promise so a repeated start of the same turn waits for it (beginTurn).
@@ -1127,7 +1152,9 @@ class BrowserHost {
         this.bootstrapAttemptsMs ?? PRIMARY_VIEW_BOOTSTRAP_ATTEMPTS_MS,
         (attempt, timeoutMs) => this.logger.warn("browser.tab_initialization_retry", { tabId: tab.id, traceId: tab.traceId, attempt, timeoutMs }),
       );
+      assertCurrent();
       await this.markTurnTabSurface(tab);
+      assertCurrent();
       tab.initializingSurface = false;
       // The helper heartbeats only once its start returns; a slow load must not count against it.
       tab.lastHeartbeatAt = Date.now();
@@ -1141,7 +1168,7 @@ class BrowserHost {
         traceId: tab.traceId,
         message,
       });
-      this.removeTurnTab(tab, true);
+      if (this.turnTabs.get(id) === tab && tab.startRequest === startRequest) this.removeTurnTab(tab, true);
       throw error;
     }
     return tab;
@@ -3060,6 +3087,7 @@ class BrowserHost {
     startRequest = null,
     nativeThreadId,
   ) {
+    await waitForConnectorVerification(this);
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
     }
@@ -3074,6 +3102,17 @@ class BrowserHost {
     const account = nativeThreadId && typeof this.resolveTurnAccount === "function"
       ? await this.resolveTurnAccount(nativeThreadId, { requireRetainedConversation })
       : null;
+    const ownsStart = tab => this.turnTabs.get(tab.id) === tab && tab.startRequest === startRequest;
+    const assertCurrent = tab => {
+      account?.assertCurrent?.();
+      if ((tab && !ownsStart(tab)) || this.userCancelledTurnOwners.has(traceId)) throw new BrowserTurnCancelledError(traceId);
+      if (this.manualOperation) throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+    };
+    assertCurrent();
+    sameTrace = [...this.turnTabs.values()].find(tab => tab.traceId === traceId);
+    if (sameTrace && sameTrace.interactionMode !== "automatic") {
+      throw new Error(`Browser turn ${traceId} already belongs to Zero Risk interaction`);
+    }
     if (account && !isBrowserAccountPartition(this.profile, account.partition)) {
       throw new Error("The Codex thread's ChatGPT account partition does not match this profile");
     }
@@ -3091,9 +3130,8 @@ class BrowserHost {
     if (sameTrace?.status === "running" && sameTrace.initializingSurface && sameTrace.surfaceReady) {
       this.logger.info("browser.tab_reuse_waits_for_surface", { tabId: sameTrace.id, traceId });
       await sameTrace.surfaceReady.catch(() => {});
+      assertCurrent();
       if (this.turnTabs.get(sameTrace.id) !== sameTrace) sameTrace = undefined;
-      if (this.manualOperation) throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
-      if (this.userCancelledTurnOwners.has(traceId)) throw new BrowserTurnCancelledError(traceId);
     }
     const retainedMatches = conversationKey ? [...this.turnTabs.values()].filter((tab) => (
       tab.interactionMode === "automatic"
@@ -3145,6 +3183,7 @@ class BrowserHost {
           evidence: "previous helper exited",
         });
       }
+      assertCurrent();
       existing.helperPid = helperPid;
       if (nativeThreadId) existing.nativeThreadId = nativeThreadId;
       existing.traceId = traceId;
@@ -3164,7 +3203,13 @@ class BrowserHost {
       if (reveal) this.show();
       else this.syncViewVisibility();
       this.publishState?.(this.snapshot());
-      await this.writeDescriptor();
+      try {
+        await this.writeDescriptor();
+        assertCurrent(existing);
+      } catch (error) {
+        if (ownsStart(existing)) this.removeTurnTab(existing, false);
+        throw error;
+      }
       this.logger.info("browser.tab_reused", { tabId: existing.id, traceId });
       const conversationUrl = liveConversationUrl(existing);
       return {
@@ -3181,15 +3226,18 @@ class BrowserHost {
       ? lifecycleSync?.findRetainedConversation?.(nativeThreadId, conversationKey, connectorIdentity)
       : undefined;
     if (savedUrl) {
-      const restored = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account);
+      const restored = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account, startRequest);
       try {
+        assertCurrent(restored);
         await loadCommittedBrowserSurface(restored.view.webContents, savedUrl, 60_000);
+        assertCurrent(restored);
         const location = retainedConversationLocation(restored.view.webContents.getURL(), true);
         if (liveConversationUrl(restored) !== savedUrl || !location) {
           throw new Error("ChatGPT did not restore the verified conversation page");
         }
         // Navigation replaces the document; bind the surface marker to the restored page.
         await this.markTurnTabSurface(restored);
+        assertCurrent(restored);
         restored.retainedLocation = location;
         restored.conversationUrl = savedUrl;
         restored.connectorBound = Boolean(connectorIdentity);
@@ -3200,13 +3248,15 @@ class BrowserHost {
         else this.syncViewVisibility();
         this.publishState?.(this.snapshot());
         await this.writeDescriptor();
+        assertCurrent(restored);
         this.logger.info("browser.tab_conversation_restored", { tabId: restored.id, traceId });
         return {
           surfaceId: restored.surfaceId, tabId: restored.id, reused: true,
           connectorBound: restored.connectorBound, conversationUrl: savedUrl,
         };
       } catch (error) {
-        this.removeTurnTab(restored, false);
+        if (ownsStart(restored)) this.removeTurnTab(restored, false);
+        if (error?.code === "turn_cancelled") throw error;
         const unavailable = new Error("The saved ChatGPT conversation could not be restored");
         unavailable.code = "retained_conversation_unavailable";
         throw unavailable;
@@ -3217,15 +3267,21 @@ class BrowserHost {
       error.code = "retained_conversation_unavailable";
       throw error;
     }
-    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account);
-    tab.startRequest = startRequest;
-    this.selectedTabId = tab.id;
-    if (reveal) this.show();
-    else this.syncViewVisibility();
-    this.publishState?.(this.snapshot());
-    this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
-    await this.writeDescriptor();
-    return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
+    const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, nativeThreadId, account, startRequest);
+    try {
+      assertCurrent(tab);
+      this.selectedTabId = tab.id;
+      if (reveal) this.show();
+      else this.syncViewVisibility();
+      this.publishState?.(this.snapshot());
+      this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
+      await this.writeDescriptor();
+      assertCurrent(tab);
+      return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
+    } catch (error) {
+      if (ownsStart(tab)) this.removeTurnTab(tab, false);
+      throw error;
+    }
   }
 
   /** Whether the running turn's tab was last handed to `startRequest` (no later start of it took it). */
@@ -3835,7 +3891,7 @@ class BrowserHost {
 
   async verifyConnector(appName) {
     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
-    return await this.withManualOperation("connector verification", () => this.runConnectorVerification(appName));
+    return await this.withManualOperation(CONNECTOR_VERIFICATION_OPERATION, () => this.runConnectorVerification(appName));
   }
 
   async runConnectorVerification(appName) {
@@ -3916,6 +3972,8 @@ class BrowserHost {
     }
     this.activateHomeSurface();
     this.manualOperation = name;
+    let settle;
+    this.manualOperationSettled = new Promise((resolve) => { settle = resolve; });
     const contents = this.view?.webContents;
     if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(false);
     try {
@@ -3927,6 +3985,8 @@ class BrowserHost {
     } finally {
       if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);
       this.manualOperation = null;
+      this.manualOperationSettled = null;
+      settle();
     }
   }
 
@@ -4105,4 +4165,5 @@ module.exports = {
   navigationFailurePage,
   navigationOriginForLog,
   TEMPORARY_CHAT_URL,
+  waitForConnectorVerification,
 };

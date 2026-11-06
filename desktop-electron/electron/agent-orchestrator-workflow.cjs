@@ -161,6 +161,9 @@ function agentChatTitle(current, proposed) {
 // The WebGPT tiers the bridge serves; it runs a tier the account lacks at the nearest lower one.
 const WEB_TIERS = ["chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high", "chatgpt-web/pro"];
 const LUNA_TIERS = ["chatgpt-web/luna", "chatgpt-web/think"];
+const NAMED_WEB_MODELS = ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-sol",
+  "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro",
+  "chatgpt-web/gpt-6-pro", "chatgpt-web/gpt-5.6-luna"];
 // AO harness models shown as "cpa/<model>" run that CPA pool model through the local gateway.
 const CPA_MODEL_PREFIX = "cpa/";
 // Agents AO's daemon can point at the CPA gateway, each through its own launch variables
@@ -184,7 +187,7 @@ const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const ANTIGRAVITY_REFUSES_CLAUDE_CODE = "Antigravity refuses Claude Code's requests (it answers \"quota exhausted\", but it is not quota); "
   + "run this model on Native Codex or another agent, or give Claude Code a model from another provider";
 const antigravityRefuses = (agent, capability) => agent === "claude-code" && /antigravity/i.test(String(capability?.provider ?? ""));
-const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model);
+const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
  * The effort a CPA model with none picked starts on when it lists efforts but no "auto" (the
@@ -206,15 +209,17 @@ const webTierName = (model) => {
   return slug === "light" ? "Instant" : slug.split("-").map((part) => part[0].toUpperCase() + part.slice(1)).join(" ");
 };
 
-// The runtime's `catalog ao-web` returns one WebGPT row: High, or Luna on a Luna-only (Free/Go)
-// account that has no Sol tiers. Any tier reuses that row under its own slug; the bridge picks
-// the ChatGPT mode from the slug, not from this entry. Its `available` list holds the WebGPT rows
-// the account's effort picker last offered; a tier outside it still runs (at the nearest lower
-// tier, in the bridge), and its name says so. `available` never reaches Codex.
+// Named models need their exact runtime row: their windows, compaction limits and efforts differ.
+// Older runtimes return only the first High/Luna template; saved legacy tiers retain that fallback.
+// `available` names account tiers for that fallback and never reaches Codex.
 function aoWebCatalogForModel(catalog, model) {
-  if (!/^chatgpt-web\/[a-z-]{1,32}$/.test(model)) throw new Error("AO WebGPT model is invalid");
-  const template = Array.isArray(catalog?.models) && catalog.models.length === 1 ? catalog.models[0] : null;
-  if (typeof template?.slug !== "string" || !/^chatgpt-web\/[a-z-]{1,32}$/.test(template.slug)) {
+  if (!webModel(model)) throw new Error("AO WebGPT model is invalid");
+  const entries = Array.isArray(catalog?.models) ? catalog.models : [];
+  const selected = entries.filter((entry) => entry?.slug === model);
+  if (selected.length === 1) return { models: selected };
+  const template = entries[0];
+  if (selected.length > 1 || NAMED_WEB_MODELS.includes(model)
+    || !["chatgpt-web/high", "chatgpt-web/luna"].includes(template?.slug)) {
     throw new Error("AO WebGPT catalog is unavailable");
   }
   const available = Array.isArray(catalog.available) ? catalog.available.filter((slug) => typeof slug === "string") : null;
@@ -222,7 +227,6 @@ function aoWebCatalogForModel(catalog, model) {
   const runsAs = available && tierIndex > 0 && !available.includes(model)
     ? WEB_TIERS.slice(0, tierIndex).reverse().find((tier) => available.includes(tier))
     : undefined;
-  if (template.slug === model && !runsAs) return { models: catalog.models };
   const tier = webTierName(model);
   const display_name = runsAs
     ? `ChatGPT Web — ${tier} (not offered by this account; runs as ${webTierName(runsAs)})`
@@ -1702,11 +1706,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   // Callers only read what comes back (none changes a run in place), so one response is shared.
-  function runs({ workspaceId, runId } = {}) {
-    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "";
-    const key = JSON.stringify([id, run]);
+  // `taskId` reads one chat's runs: the project's read holds only its newest 100, shared by all of
+  // its chats, so a busy project's other chats opened with few or none of their replies.
+  function runs({ workspaceId, runId, taskId } = {}) {
+    const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "", task = !run && taskId ? clean(taskId, 128) : "";
+    const key = JSON.stringify(task ? [id, run, task] : [id, run]);
     return sharedWorkflowRead(key, async () => {
-      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}) });
+      const response = await requestHeadless("/api/v1/ao/read", { workspace_id: id, ...(run ? { run_id: run } : {}), ...(task ? { task_id: task } : {}) });
       if (response?.ok !== true || !Array.isArray(response.runs)) {
         throw new Error("AO run read failed");
       }
@@ -2012,15 +2018,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // the longest texts are cut first, then tool arguments, output and diffs, and only then the oldest
   // items, so the turn still opens with as many of its tool calls as fit.
   const TIMELINE_RESPONSE_BYTES = 800_000;
-  function fitTimeline(items) {
+  function fitTimeline(items, byteBudget = TIMELINE_RESPONSE_BYTES) {
     const size = () => Buffer.byteLength(JSON.stringify(items));
-    if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+    if (size() <= byteBudget) return items;
     const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
     for (const limit of [16 * 1024, 4096, 1024]) {
       // A steer may contain structured annotations and attachments; keep it whole or let the
       // oldest-item eviction below remove it whole, never leave an unparseable prompt prefix.
       items = items.map(item => item.kind !== "steer" && item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
-      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+      if (size() <= byteBudget) return items;
     }
     // Tool calls keep a shorter input and output before they lose them: with up to 16 KB of output
     // each (READ_TOOL_BYTES), a long turn would otherwise drop every call's details at once.
@@ -2028,11 +2034,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       items = items.map(item => ({ ...item,
         ...(item.input?.length > limit ? { input: cut(item.input, limit) } : {}),
         ...(item.output?.length > limit ? { output: cut(item.output, limit) } : {}) }));
-      if (size() <= TIMELINE_RESPONSE_BYTES) return items;
+      if (size() <= byteBudget) return items;
     }
     items = items.map(({ input: _input, output: _output, files, ...item }) =>
       files ? { ...item, files: files.map(({ diff: _diff, ...file }) => file) } : item);
-    while (items.length > 1 && size() > TIMELINE_RESPONSE_BYTES) items = items.slice(Math.ceil(items.length / 10));
+    // Remove a whole item that cannot fit before evicting older, fitting replies beside it.
+    items = items.filter(item => Buffer.byteLength(JSON.stringify([item])) <= byteBudget);
+    while (items.length > 0 && size() > byteBudget) items = items.slice(Math.ceil(items.length / 10));
     return items;
   }
 
@@ -2150,8 +2158,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               const session = node.receipt?.thread_id;
               if (!session) frame = { ...base, activity: launchStages.get(nodeKey(id, run, node.id))?.text ?? "launching" };
               else {
-                const observed = await harnessService().observe(session);
-                const currentTurn = !node.receipt?.turn_id || observed.turnId === node.receipt.turn_id;
+                // A queued follow-up can be the session's newest turn while this card still owns
+                // another one. Read that turn, as the run loop does, rather than dropping its reply.
+                const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session);
+                const observed = await harnessService().observe(session, expectedTurn);
+                const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
                 frame = { ...base, turn_started: Boolean(observed.turnId),
                   activity: currentTurn ? describeTurn(observed, { mission, node }) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
                   step: publicText(observed.activity || observed.turnState || "working", 120),
@@ -2197,7 +2208,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       nodes[node.id] = { ...(entry.frame || base), state: node.state, pending: Boolean(entry.pending) };
     }
-    return { ok: true, now_ms: Date.now(), nodes };
+    const response = { ok: true, now_ms: Date.now(), nodes };
+    if (Buffer.byteLength(JSON.stringify(response)) > TIMELINE_RESPONSE_BYTES) {
+      const frames = Object.values(nodes).filter(frame => frame.timeline?.length);
+      if (frames.length) {
+        // All nodes share one IPC response. Reserve their output and metadata before fitting
+        // response-owned timelines; trimming the cached frames would lose detail on later reads.
+        const metadata = { ...response, nodes: Object.fromEntries(Object.entries(nodes)
+          .map(([id, frame]) => [id, { ...frame, timeline: [] }])) };
+        const byteBudget = Math.max(2, Math.floor((TIMELINE_RESPONSE_BYTES
+          - Buffer.byteLength(JSON.stringify(metadata))) / frames.length));
+        for (const frame of frames) frame.timeline = fitTimeline(frame.timeline, byteBudget);
+      }
+    }
+    return response;
   }
 
   // A start blocked on the browser is reported as the operation's result: errors thrown across
@@ -6858,10 +6882,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (typeof runId !== "string" || !runId) throw new Error("This message has no reply yet. Delete it after its turn runs.");
     if (!Array.isArray(runIds) || runIds.length > 50) throw new Error("This message's reply was not found; reload the chat");
     const own = [runId, ...runIds].map(value => clean(value, 80));
-    const saved = await runs({ workspaceId: id });
-    const chatRuns = saved.runs.filter(run => run.project_id === task);
+    const saved = await runs({ workspaceId: id, taskId: task });
+    const chatRuns = saved.runs.filter(run => run.workspace_id === id && run.project_id === task);
     const latest = chatRuns.at(-1);
-    if ((latest && !runSettled(latest)) || chatWorking(id, task, saved.runs)) throw new Error("Stop the chat first to delete a message");
+    // The open chat can still show cached replies older than its newest-200 read. Read only
+    // those requested IDs, with the same workspace/task ownership and visibility checks below.
+    for (const requested of new Set(own)) {
+      if (chatRuns.some(run => run.id === requested)) continue;
+      const older = await runs({ workspaceId: id, runId: requested });
+      const found = older.runs.find(run => run.id === requested && run.workspace_id === id && run.project_id === task);
+      if (found) chatRuns.push(found);
+    }
+    if ((latest && !runSettled(latest)) || chatWorking(id, task, chatRuns)
+      || chatRuns.some(run => own.includes(run.id) && !runSettled(run))) throw new Error("Stop the chat first to delete a message");
     const detail = await board({ workspaceId: id, taskId: task });
     if (!detail.task) throw new Error("This chat's task no longer exists");
     // The chat says which of its runs answered this message; each must be one it shows.
@@ -7478,7 +7511,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const saved = await runs(args);
         // A goal whose round settled unwatched (the app was closed meanwhile) is judged now, and a
         // queued message whose chat's settle was missed goes on.
-        if (!args.runId) sweepWorkspace(clean(args.workspaceId, 128), saved);
+        if (!args.runId && !args.taskId) sweepWorkspace(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),

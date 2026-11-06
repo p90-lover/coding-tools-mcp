@@ -430,7 +430,9 @@ export function routeChatGptWebRequest(parsed: CodexParsedRequest, config: AppCo
     localToolsEnabled: config.mode === "full", solAvailable: config.solAvailable,
     extraHighAvailable: config.extraHighAvailable === true, proAvailable: config.proAvailable,
   }, config);
-  const route = requireChatGptWebModelRoute(parsed.modelId, { ...config, ...capabilities }, parsed.options.reasoning);
+  const route = requireChatGptWebModelRoute(parsed.modelId, {
+    ...config, ...capabilities, deferUpperTierAdmission: capabilities.deferUpperTierAdmission === true,
+  }, parsed.options.reasoning);
   logChatGptWebModelFallback(parsed.modelId, route, parsed.options.reasoning);
   if (route.interactionMode === "automatic" && route.modelFamily) parsed._chatgptModelFamily = route.modelFamily;
   else delete parsed._chatgptModelFamily;
@@ -1001,10 +1003,11 @@ export async function compactRequest(
       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
     }
   }
+  const input = Array.isArray(raw.input) ? raw.input : [];
+  const compactBody = { ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] };
   let route: ChatGptWebModelRoute;
   try {
-    route = requireChatGptWebModelRoute(raw.model, config);
-    logChatGptWebModelFallback(raw.model, route);
+    route = routeChatGptWebRequest(parseRequest(expandPreviousResponseInput(compactBody)), config);
   } catch (error) {
     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
   }
@@ -1015,13 +1018,12 @@ export async function compactRequest(
       "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
     );
   }
-  const input = Array.isArray(raw.input) ? raw.input : [];
   const headers = new Headers(req.headers);
   headers.set("content-type", "application/json");
   const internal = new Request("http://127.0.0.1/v1/responses", {
     method: "POST",
     headers,
-    body: JSON.stringify({ ...raw, stream: false, input: [...input, { type: "compaction_trigger" }] }),
+    body: JSON.stringify(compactBody),
     signal: req.signal,
   });
   const response = await responseRequest(internal, config, adapterFactory, options);

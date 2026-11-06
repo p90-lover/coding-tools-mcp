@@ -598,7 +598,82 @@ test("AO WebGPT catalog serves Luna from a Luna-only account's template and rena
   assert.deepEqual(aoWebCatalogForModel({ models: [high] }, "chatgpt-web/extra-high").models[0].display_name, "ChatGPT Web — Extra High");
   assert.throws(() => aoWebCatalogForModel({ models: [high] }, "gpt-5.5"), /invalid/);
   assert.throws(() => aoWebCatalogForModel({ models: [{ slug: "gpt-5.5" }] }, "chatgpt-web/luna"), /unavailable/);
-  assert.throws(() => aoWebCatalogForModel({ models: [high, luna] }, "chatgpt-web/luna"), /unavailable/);
+  assert.deepEqual(aoWebCatalogForModel({ models: [high, luna] }, "chatgpt-web/luna"), { models: [luna] });
+});
+
+test("AO WebGPT catalog preserves each exact named row's context, compaction and efforts", () => {
+  const { aoWebCatalogForModel } = require("../electron/agent-orchestrator-workflow.cjs");
+  const high = { slug: "chatgpt-web/high", display_name: "ChatGPT Web — High",
+    context_window: 270000, max_context_window: 270000, auto_compact_token_limit: 204255,
+    default_reasoning_level: "high", supported_reasoning_levels: [{ effort: "high" }] };
+  const sol = { slug: "chatgpt-web/gpt-6-sol", display_name: "GPT-6 Sol (Web)",
+    context_window: 120000, max_context_window: 120000, auto_compact_token_limit: 93840,
+    default_reasoning_level: "high", supported_reasoning_levels: [{ effort: "medium" }, { effort: "high" }, { effort: "xhigh" }] };
+  const pro = { ...sol, slug: "chatgpt-web/gpt-5.6-pro", display_name: "GPT-5.6 Pro (Web)",
+    default_reasoning_level: "max", supported_reasoning_levels: [{ effort: "max" }] };
+  const catalog = { models: [high, sol, pro], available: [high.slug, sol.slug, pro.slug] };
+  const before = structuredClone(catalog);
+  for (const row of catalog.models) {
+    assert.deepEqual(aoWebCatalogForModel(catalog, row.slug), { models: [row] });
+  }
+  assert.deepEqual(catalog, before, "selecting one row does not alter the shared runtime catalog");
+  for (const model of ["chatgpt-web/gpt-6-sol", "chatgpt-web/gpt-7-sol", "chatgpt-web/unknown"]) {
+    assert.throws(() => aoWebCatalogForModel({ models: [high], available: [model] }, model), /invalid|unavailable/,
+      "an available slug alone cannot supply a named model's budget");
+  }
+  assert.throws(() => aoWebCatalogForModel({ models: [high, sol, { ...sol }] }, sol.slug), /unavailable/);
+  const luna = { slug: "chatgpt-web/luna", context_window: 1050000, default_reasoning_level: "low" };
+  const lunaOnly = { models: [luna, { ...luna, slug: "chatgpt-web/gpt-5.6-luna" }] };
+  assert.deepEqual(aoWebCatalogForModel(lunaOnly, "chatgpt-web/high"), {
+    models: [{ ...luna, slug: "chatgpt-web/high", display_name: "ChatGPT Web — High" }],
+  }, "saved legacy tiers retain the Luna-only account fallback");
+});
+
+test("AO WebGPT connect forwards only the exact canonical named model row", async () => {
+  const { aoWebCatalogForModel } = require("../electron/agent-orchestrator-workflow.cjs");
+  for (const model of ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-sol",
+    "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-5.6-pro",
+    "chatgpt-web/gpt-6-pro", "chatgpt-web/gpt-5.6-luna", "chatgpt-web/gpt-7-sol"]) {
+    const calls = [];
+    const row = { slug: model, context_window: 120000, max_context_window: 120000, auto_compact_token_limit: 93840 };
+    let confirmed = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{
+          id: "run-1", workspace_id: "ws-1", nodes: [{ id: "planner", role: "planner", state: "pending",
+            route: { harness_id: "codex-native", provider_id: "chatgpt-web", account_id: "chatgpt-web",
+              model, permission_profile: ":read-only" } }],
+        }] };
+        calls.push(body);
+        return { ok: true, owned: true, status: { model } };
+      },
+      webBridgeConnection: () => ({ baseUrl: "http://127.0.0.1:17841/v1" }),
+      webBridgeReadiness: async () => ({ authenticated: true, ready: true }),
+      webModelCatalog: async ({ model: selected }) => {
+        assert.equal(confirmed, true, "catalog lookup follows the existing local approval");
+        return aoWebCatalogForModel({ models: [{ slug: "chatgpt-web/high", context_window: 270000 }, row] }, selected);
+      },
+      resolveHarness: async () => ({ executable: "C:\\codex.exe", expected_sha256: "0".repeat(64),
+        codex_home: "C:\\ao-home", model, allow_model_usage: true, allow_command_execution: false,
+        permission_profile: ":read-only", request_limit: 2, lifetime_seconds: 120 }),
+      confirm: async () => { confirmed = true; return true; },
+    });
+    try {
+      const connect = workflow.call("connect_harness", {
+        workspaceId: "ws-1", runId: "run-1", nodeId: "planner", executable: "C:\\codex.exe",
+      });
+      if (model === "chatgpt-web/gpt-7-sol") {
+        await assert.rejects(connect, /route does not match/);
+        assert.equal(calls.length, 0);
+        assert.equal(confirmed, false);
+      } else {
+        await connect;
+        assert.equal(calls.length, 1, model);
+        assert.deepEqual(calls[0].web_model_catalog, { models: [row] }, model);
+        assert.equal(calls[0].connection.allow_command_execution, false);
+      }
+    } finally { workflow.dispose(); }
+  }
 });
 
 test("AO WebGPT catalog names a tier the account no longer offers and keeps `available` from Codex", () => {
@@ -2315,6 +2390,86 @@ test("final review independently returns healthy activity and coalesces a slow o
   } finally { release(); await first; }
 });
 
+for (const count of [1, 3, 24]) {
+  test(`live activity fits the IPC response budget across ${count} node timelines`, async () => {
+    const nodes = Array.from({ length: count }, (_, index) => ({
+      id: `node-${index}`, state: "running", route: { harness_id: "ao:claude-code" },
+      receipt: { request_key: `request-${index}`, thread_id: `session-${index}`, turn_id: "owned" },
+    }));
+    const run = { id: "budget", workspace_id: "ws-1", nodes };
+    const messages = Array.from({ length: 24 }, (_, index) => ({
+      id: `message-${index}`, kind: "message", status: "completed",
+      text: `Visible reply ${index}: ${"中文字🙂".repeat(7000)}`,
+    }));
+    let hold = false, release;
+    const stalled = new Promise(resolve => { release = resolve; });
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: async () => ({ ok: true, runs: [run] }),
+      aoHarness: { observe: async () => {
+        if (hold) await stalled;
+        return { turnId: "owned", turnState: "running", liveOutput: "Current reply 中文🙂".repeat(240), timeline: messages };
+      } },
+    });
+    try {
+      const input = { workspaceId: "ws-1", runId: "budget" };
+      await workflow.call("activity", input);
+      await new Promise(resolve => setImmediate(resolve));
+      hold = true;
+      const frame = await workflow.call("activity", input);
+      const wrapped = { moduleId: "agent-orchestrator", operation: "activity", result: frame };
+      const received = await invokeContract({ invoke: async () => wrapped }, "apps.call", {
+        moduleId: "agent-orchestrator", operation: "activity", arguments: input,
+      });
+      assert.equal(Object.keys(received.result.nodes).length, count);
+      assert.ok(Buffer.byteLength(JSON.stringify(wrapped)) < 1024 * 1024);
+      for (const node of nodes) {
+        const current = received.result.nodes[node.id];
+        assert.match(current.output, /^Current reply 中文🙂/);
+        assert.match(current.timeline.at(-1).text, /^Visible reply 23: 中文字🙂/);
+      }
+      if (count === 24) {
+        const sharedLength = frame.nodes["node-0"].timeline.at(-1).text.length;
+        run.nodes = [nodes[0]];
+        const single = await workflow.call("activity", input);
+        assert.ok(single.nodes["node-0"].timeline.at(-1).text.length > sharedLength,
+          "a shared response budget must not permanently trim the cached frame");
+      }
+      assert.equal(messages[0].text, `Visible reply 0: ${"中文字🙂".repeat(7000)}`);
+    } finally { release(); workflow.dispose(); }
+  });
+}
+
+test("live activity drops an oversized structured steer whole while keeping fitting replies", async () => {
+  const run = { id: "steer-budget", workspace_id: "ws-1", nodes: Array.from({ length: 24 }, (_, index) => ({
+    id: `node-${index}`, state: "running", route: { harness_id: "ao:claude-code" },
+    receipt: { thread_id: `session-${index}`, turn_id: "owned" },
+  })) };
+  const steer = JSON.stringify({ message: "中文字".repeat(7000), annotations: [] });
+  const timeline = [
+    { id: "reply", kind: "message", status: "running", text: "A fitting visible reply" },
+    { id: "steer", kind: "steer", status: "completed", text: steer },
+  ];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => ({ ok: true, runs: [run] }),
+    aoHarness: { observe: async () => ({ turnId: "owned", turnState: "running", timeline }) },
+  });
+  try {
+    const input = { workspaceId: "ws-1", runId: run.id };
+    await workflow.call("activity", input);
+    await new Promise(resolve => setImmediate(resolve));
+    const frame = await workflow.call("activity", input);
+    const received = await invokeContract({ invoke: async () => ({ moduleId: "agent-orchestrator", operation: "activity", result: frame }) },
+      "apps.call", { moduleId: "agent-orchestrator", operation: "activity", arguments: input });
+    for (const current of Object.values(received.result.nodes)) {
+      assert.deepEqual(current.timeline, [timeline[0]]);
+    }
+    assert.equal(JSON.parse(timeline[1].text).message.length, 21000);
+    run.nodes = [run.nodes[0]];
+    const single = await workflow.call("activity", input);
+    assert.deepEqual(single.nodes["node-0"].timeline, timeline, "a small response keeps full structured content");
+  } finally { workflow.dispose(); }
+});
+
 test("final review refreshes an old planner-only APPROVED review for newly failed evidence", async () => {
   const world = failedWorkerReviewWorld();
   world.reviewer.parents = ["planner"];
@@ -2485,6 +2640,31 @@ test("shared workflow reads keep 13 pending callers together and start freshness
     clock = 10_301;
     assert.equal((await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1" })).readId, 2);
   } finally { release(); await Promise.allSettled(pending); workflow.dispose(); }
+});
+
+test("a chat reads its own runs, apart from the project's newest 100 and without sweeping the project", async () => {
+  // Seen live (2026-11-02): four goal chats filled the project's 100-run read, so a 63-run chat
+  // showed its newest 26 replies and the project's other chats opened with none.
+  const reads = [];
+  const chatRun = { id: "old", workspace_id: "ws-1", project_id: "task-1", revision: 1, cancelled: false, nodes: [] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      assert.equal(endpoint, "/api/v1/ao/read");
+      reads.push(structuredClone(body));
+      return { ok: true, runs: body.task_id ? [structuredClone(chatRun)] : [] };
+    },
+  });
+  try {
+    const own = await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" });
+    assert.deepEqual(own.runs.map(run => run.id), ["old"]);
+    await workflow.call("runs", { workspaceId: "ws-1" });
+    await workflow.call("runs", { workspaceId: "ws-1", runId: "run-1", taskId: "task-1" });
+    assert.deepEqual(reads, [
+      { workspace_id: "ws-1", task_id: "task-1" },
+      { workspace_id: "ws-1" },
+      { workspace_id: "ws-1", run_id: "run-1" },
+    ], "a chat's read and the project's are read apart; a run's read stays a run's");
+  } finally { workflow.dispose(); }
 });
 
 test("shared workflow reads coalesce boards without invalidating runs and isolate workspace/task keys", async (t) => {
@@ -6389,6 +6569,45 @@ test("a follow-up that cannot continue its agent says which session and why befo
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
 
+test("activity follows a continued chat's in-memory turn binding before its receipt has a turn ID", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Task", description: "first ask", state: "in_progress", clauses: [] }], runs: [previous] });
+  let current;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/read" && body.run_id) {
+        current ??= { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+          grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+        return { ok: true, runs: [current], worker_capacity: { [body.run_id]: 1 } };
+      }
+      if (endpoint === "/api/v1/ao/grant") return { ok: true, run: current, grant: { executable_sha256: "a".repeat(64) } };
+      if (endpoint === "/api/v1/ao/external/reserve") { current.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "follow-up" }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { current.nodes[0].state = "running"; current.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: current }; }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      continuable: async () => true,
+      send: async () => ({ turnId: "turn-2", state: "running" }),
+      observe: async (_id, expected) => ({ turnId: expected || "turn-1", turnState: "running",
+        liveOutput: expected === "turn-2" ? "The follow-up response" : "The previous response", timeline: [] }),
+    },
+  });
+  try {
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "follow-up", executionMode: "single", singleRoute: route });
+    await until(() => current?.nodes[0].state === "running");
+    assert.equal(current.nodes[0].receipt.turn_id, undefined);
+    const args = { workspaceId: "ws-1", runId: current.id };
+    await workflow.call("activity", args);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal((await workflow.call("activity", args)).nodes.one.output, "The follow-up response");
+  } finally { workflow.dispose(); }
+});
+
 test("steering hands the message to the running AO agent and notes it in the chat", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
@@ -7804,6 +8023,61 @@ test("deleting a chat message removes it and its steers from the task and hides 
   const edits = world.edits.length;
   await assert.rejects(remove(1, "r3"), /Stop the chat first/);
   assert.equal(world.edits.length, edits, "nothing is changed");
+});
+
+test("history deletion validates older displayed replies without crossing ownership or activity boundaries", async (t) => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+  const done = (id, task = "task-1") => ({ id, workspace_id: "ws-1", project_id: task, revision: 1,
+    cancelled: false, nodes: [{ id: "one", role: "planner", state: "finished" }] });
+  for (const scenario of ["project-window", "cached-over-200", "wrong-task", "wrong-workspace", "unknown", "wrong-id", "latest-working", "older-unsettled", "mixed-foreign", "lookup-failure"]) {
+    await t.test(scenario, async () => {
+      const old = done("old"), latest = done("new");
+      if (scenario === "wrong-task") old.project_id = "other";
+      if (scenario === "wrong-workspace") old.workspace_id = "ws-other";
+      if (scenario === "latest-working") latest.nodes[0].state = "running";
+      if (scenario === "older-unsettled") old.nodes[0].state = "pending";
+      const cached = scenario === "cached-over-200" || scenario === "older-unsettled";
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "History", description, state: "in_progress", clauses: [] }],
+        runs: [old, ...Array.from({ length: cached ? 205 : 0 }, (_, i) => done(`mine-${i}`)),
+          ...Array.from({ length: 105 }, (_, i) => done(`other-${i}`, "other")), latest] });
+      const reads = [];
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
+        if (endpoint !== "/api/v1/ao/read") return world.requestHeadless(endpoint, body, options);
+        reads.push(structuredClone(body));
+        if (scenario === "lookup-failure" && body.run_id) throw new Error("Older read unavailable");
+        const scoped = world.runs.filter(run => run.workspace_id === body.workspace_id);
+        // Model the actual API's project/chat windows. Direct reads deliberately return a
+        // foreign/mismatched row too, to prove the caller still checks all three identities.
+        const selected = body.run_id
+          ? scenario === "wrong-id" ? [old] : world.runs.filter(run => run.id === body.run_id)
+          : body.task_id ? scoped.filter(run => run.project_id === body.task_id).slice(-200) : scoped.slice(-100);
+        return { ok: true, runs: structuredClone(selected) };
+      } });
+      try {
+        const input = { workspaceId: "ws-1", taskId: "task-1", index: 0,
+          runId: ["unknown", "wrong-id", "lookup-failure"].includes(scenario) ? "missing" : scenario === "mixed-foreign" ? "new" : "old",
+          ...(scenario === "mixed-foreign" ? { runIds: ["other-0"] } : scenario === "lookup-failure" ? { runIds: ["also-missing"] } : {}) };
+        if (scenario === "project-window" || scenario === "cached-over-200") {
+          const removed = await workflow.call("chat_delete_message", input);
+          assert.deepEqual([...removed.runIds], ["old"]);
+          assert.equal(world.edits.length, 1);
+          assert.equal(world.tasks[0].description, description.slice(description.indexOf("second ask")));
+          assert.ok(!(await workflow.call("runs", { workspaceId: "ws-1", taskId: "task-1" })).runs.some(run => run.id === "old"));
+          if (cached) {
+            assert.equal(reads.filter(body => body.run_id === "old").length, 1, "one bounded lookup restores the cached ID outside 200");
+            await assert.rejects(workflow.call("chat_delete_message", input), /reply was not found/);
+            assert.equal(world.edits.length, 1, "a previously hidden reply stays hidden even after direct lookup");
+          }
+        } else {
+          await assert.rejects(workflow.call("chat_delete_message", input),
+            scenario === "lookup-failure" ? /Older read unavailable/ : scenario === "latest-working" || scenario === "older-unsettled" ? /Stop the chat first/ : /reply was not found/);
+          if (scenario === "lookup-failure") assert.deepEqual(reads.filter(body => body.run_id).map(body => body.run_id), ["missing"], "a failed read stops before requesting the remaining IDs");
+          assert.equal(world.edits.length, 0, "validation fails before editing the task");
+          assert.equal(world.tasks[0].description, description);
+        }
+      } finally { workflow.dispose(); }
+    });
+  }
 });
 
 // The chat's own pairing (ao-chat.ts), to check what a deletion leaves on screen.
