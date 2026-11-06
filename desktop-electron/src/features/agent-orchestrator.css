@@ -423,6 +423,7 @@
 /* A chip shrinks with its picker and cuts its own text short ("Gemini 3.8 Fl…"): the button kept
    its full width inside a shrunken picker and its text ran over the next chip. */
 .ao-workflow .ao-composer-picker { flex: 0 1 auto; }
+.ao-workflow .ao-composer-picker:has(> .ao-composer-chip.is-logo) { flex: none; }
 .ao-workflow .ao-composer-chip { min-width: 0; max-width: min(300px, 100%); overflow: hidden; }
 .ao-workflow .ao-composer-chip > span:nth-last-child(2) { min-width: 0; }
 .ao-workflow .ao-composer-chip.is-logo { padding: 0 6px; gap: 3px; }
@@ -446,7 +447,7 @@
 .ao-workflow .ao-harness-list .ao-harness-option strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .ao-workflow .ao-harness-list .ao-harness-option small { display: inline; flex: none; margin: 0; font-size: 11px; }
 .ao-workflow .ao-harness-list .ao-picker-option:disabled { opacity: 0.55; }
-.ao-workflow .ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
+.ao-workflow .ao-composer-popover.ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
 .ao-workflow .ao-tuning-popup [role="radiogroup"] { display: grid; gap: 2px; }
 .ao-workflow .ao-context-custom { display: flex; gap: 6px; margin-top: 8px; }
 .ao-workflow .ao-context-custom input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px; }
@@ -477,6 +478,9 @@
 .ao-workflow .ao-option-radio { flex: 0 0 14px; width: 14px; height: 14px; border: 1px solid #8496ac; border-radius: 50%; }
 .ao-workflow .ao-picker-option[aria-checked="true"] .ao-option-radio { border-color: #1677ff; box-shadow: inset 0 0 0 3px #fff; background: #1677ff; }
 .ao-workflow .ao-picker-option small { display: block; margin-top: 5px; color: #7b899e; font-size: 11px; }
+.ao-workflow .ao-composer-popover.ao-effort-popup { width: min(220px, calc(100vw - 40px)); padding: 8px 10px; }
+.ao-workflow .ao-effort-popup header { margin-bottom: 6px; }
+.ao-workflow .ao-effort-popup .ao-picker-option { margin: 0; padding: 6px 8px; }
 /* The model list names each provider once, above its models, instead of in every row. */
 .ao-workflow .ao-model-group + .ao-model-group { margin-top: 6px; }
 .ao-workflow .ao-model-group > h4 { margin: 6px 8px 2px; color: #7b899e; font-size: 11px; font-weight: 600; letter-spacing: .02em; }

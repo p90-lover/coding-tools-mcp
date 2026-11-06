@@ -535,19 +535,24 @@ function loadSurface(react = {}, globals = {}, imports = {}) {
   return surface;
 }
 
-function surfaceComposer(seed = {}) {
+function surfaceComposer(seed = {}, options = {}) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").split("export function AgentOrchestratorSurface")[1];
   const names = [...source.matchAll(/const \[([A-Za-z_]+),[^\]]+\] = useState/g)].map(match => match[1]);
   const state = { workspaceReady: true, workspaceId: "w", chatTaskId: "", board: { revision: 1, tasks: [] }, ...seed };
-  const refs = []; let cursor = 0, refCursor = 0;
+  const refNames = [...source.matchAll(/const ([A-Za-z_]+) = useRef/g)].map(match => match[1]);
+  const refs = [], namedRefs = {}, effects = []; let cursor = 0, refCursor = 0;
   const react = {
     useState(initial) {
       const name = names[cursor++]; assert.ok(name, "each Surface state is named");
       if (!(name in state)) state[name] = typeof initial === "function" ? initial() : initial;
       return [state[name], value => { state[name] = typeof value === "function" ? value(state[name]) : value; }];
     },
-    useRef(initial) { return refs[refCursor++] ??= { current: initial }; },
-    useCallback: callback => callback, useMemo: calculate => calculate(), useEffect() {}, useLayoutEffect() {},
+    useRef(initial) {
+      const name = refNames[refCursor], ref = refs[refCursor++] ??= { current: initial };
+      if (name) namedRefs[name] = ref;
+      return ref;
+    },
+    useCallback: callback => callback, useMemo: calculate => calculate(), useEffect(effect) { effects.push(effect); }, useLayoutEffect() {},
   };
   const jsx = (type, props) => ({ type, props: props || {} });
   const featureCache = {};
@@ -564,6 +569,8 @@ function surfaceComposer(seed = {}) {
   const result = { runs: seed.missions || [], teams: seed.savedTeams || [], team: seed.team || null };
   const api = { apps: { call: async input => {
     calls.push(plain(input));
+    const custom = await options.call?.(input);
+    if (custom !== undefined) return { ok: true, result: custom };
     if (input.operation === "chat_send") return { ok: true, result: { ok: true, taskId: "new-task", runId: "new-run", status: "running" } };
     if (input.operation === "runs") return { ok: true, result };
     if (input.operation === "board") return { ok: true, result: { revision: 1, tasks: [] } };
@@ -582,18 +589,26 @@ function surfaceComposer(seed = {}) {
     "./chat-split": feature("chat-split.ts"),
     "./page-visibility": { useSurfaceHidden: () => () => false, pageHidden: () => false, onAoPush: () => () => {} },
   };
-  const surface = loadSurface(react,{ localStorage: { getItem: () => "w", setItem() {} }, structuredClone, crypto: globalThis.crypto }, imports);
+  const storage = options.storage;
+  const surface = loadSurface(react,{ localStorage: { getItem: key => storage ? storage.get(key) ?? null : "w",
+    setItem: (key, value) => storage?.set(key, value) }, structuredClone, crypto: globalThis.crypto, ...options.globals }, imports);
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
-  const render = () => { cursor = 0; refCursor = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
+  const render = () => { cursor = 0; refCursor = 0; effects.length = 0; return surface.AgentOrchestratorSurface({ language: "en", setError() {} }); };
   const currentChat = () => walk(render()).find(item => item.type === "Chat");
-  return { state, calls, render, walk, currentChat };
+  const runEffect = signature => {
+    render();
+    const effect = effects.find(callback => callback.toString().includes(signature));
+    assert.ok(effect, signature);
+    return effect();
+  };
+  return { state, calls, render, walk, currentChat, refs: namedRefs, runEffect };
 }
 
 test("split view: Split view and New chat add panes, the sidebar fills the focused pane, and closing the window's chat promotes the next", () => {
   const fixture = surfaceComposer({ chatTaskId: "t1" });
   const list = () => fixture.walk(fixture.render()).find(item => item.props?.actions?.openSplit);
   const panes = () => plain(fixture.state.splitPanes.map(item => [item.taskId, item.col, item.row]));
-  assert.equal(fixture.currentChat().props.onClosePane, undefined, "one chat alone has no Close split view");
+  assert.equal(typeof fixture.currentChat().props.onClosePane, "function", "the final saved chat remains closable");
 
   list().props.actions.openSplit("w", "t2");
   assert.deepEqual(panes(), [["t2", 1, 0]], "Open in ▸ Split view: a column to the right");
@@ -625,6 +640,153 @@ test("split view: Split view and New chat add panes, the sidebar fills the focus
   assert.deepEqual(panes(), [["t2", 1, 0]]);
   host.props.panes[0].content.props.pane.onClose();
   assert.deepEqual(panes(), [], "closing the last pane leaves one chat");
+});
+
+
+test("last pane: saved chats and blank drafts close without deleting history and reopen only explicitly", () => {
+  for (const taskId of ["saved", ""]) {
+    const savedTask = { id: "saved", title: "Keep this conversation" };
+    const savedRun = run("saved-run", "saved", [node("worker", "worker", "finished")], { workspace_id: "w", execution_mode: "single" });
+    const fixture = surfaceComposer({ chatTaskId: taskId, board: { revision: 1, tasks: [savedTask] }, missions: [savedRun] });
+    const list = () => fixture.walk(fixture.render()).find(item => item.props?.actions?.select);
+    const close = () => {
+      const current = fixture.currentChat();
+      assert.equal(typeof current?.props.onClosePane, "function", taskId ? "saved chat can close" : "unsent draft can close");
+      current.props.onClosePane();
+      assert.equal(fixture.currentChat(), undefined, "the final close removes the composer instead of creating a replacement draft");
+      assert.deepEqual(plain(fixture.state.splitPanes), []);
+      assert.deepEqual(plain(list().props.openTaskIds), [], "no closed chat remains marked open");
+      assert.equal(list().props.selectedTaskId, "", "the closed chat is not selected in the sidebar");
+    };
+    close();
+    assert.deepEqual(plain(fixture.state.board.tasks), [savedTask], "closing a pane does not delete its saved task");
+    assert.deepEqual(plain(fixture.state.missions), [savedRun], "closing a pane does not remove prior runs");
+    assert.equal(fixture.calls.length, 0, "closing only changes the local layout");
+    list().props.actions.newChat();
+    assert.equal(fixture.currentChat()?.props.selectedTaskId, "", "New chat explicitly restores a draft");
+    close();
+    list().props.actions.select("saved");
+    assert.equal(fixture.currentChat()?.props.selectedTaskId, "saved", "the original conversation can be reopened from the sidebar");
+  }
+});
+
+test("last pane: closing the primary chat promotes and removes the remaining blank draft", () => {
+  const fixture = surfaceComposer({ chatTaskId: "saved", splitPanes: [
+    { id: "draft", workspaceId: "w", taskId: "", col: 1, row: 0 },
+  ] });
+  fixture.currentChat().props.onClosePane();
+  assert.equal(fixture.state.chatTaskId, "", "the remaining draft takes the primary place");
+  assert.deepEqual(plain(fixture.state.splitPanes), [], "the promoted blank pane leaves its old grid slot");
+  assert.equal(typeof fixture.currentChat()?.props.onClosePane, "function", "that last draft is still closable");
+  fixture.currentChat().props.onClosePane();
+  assert.equal(fixture.currentChat(), undefined);
+});
+
+test("last pane: opening a saved chat in split view from an empty layout fills the primary pane", () => {
+  const fixture = surfaceComposer({ chatTaskId: "saved" });
+  fixture.currentChat().props.onClosePane();
+  const list = fixture.walk(fixture.render()).find(item => item.props?.actions?.openSplit);
+  list.props.actions.openSplit("w", "saved");
+  assert.equal(fixture.currentChat()?.props.selectedTaskId, "saved");
+  assert.deepEqual(plain(fixture.state.splitPanes), [], "opening the first chat never adds a phantom blank primary pane");
+});
+
+test("last pane: delayed startup restore cannot reopen panes after the final close", () => {
+  const key = "coding-tools:ao:split-view";
+  const savedLayout = JSON.stringify({ panes: [{ workspaceId: "w", taskId: "saved-other", col: 1, row: 0 }] });
+  const storage = () => new Map([["coding-tools:ao:workspace", "w"], [key, savedLayout]]);
+  const startup = surfaceComposer({ chatTaskId: "saved" }, { storage: storage() });
+  startup.runEffect("splitRestored.current");
+  assert.equal(startup.state.splitPanes.length, 1, "positive control: ordinary startup still restores saved panes");
+  const closed = surfaceComposer({ chatTaskId: "saved", workspaceReady: false }, { storage: storage() });
+  assert.equal(typeof closed.currentChat()?.props.onClosePane, "function");
+  closed.currentChat().props.onClosePane();
+  closed.state.workspaceReady = true;
+  closed.runEffect("splitRestored.current");
+  assert.deepEqual(plain(closed.state.splitPanes), [], "a late startup load respects the explicit close");
+  assert.equal(closed.currentChat(), undefined);
+});
+
+test("last pane: latest-chat and pending-selection effects leave an explicitly closed layout empty", () => {
+  const seed = { loadedWorkspace: "w", board: { revision: 1, tasks: [{ id: "saved", title: "Saved" }] },
+    missions: [run("saved-run", "saved", [], { workspace_id: "w" })] };
+  const startup = surfaceComposer({ ...seed, chatTaskId: null });
+  startup.render(); startup.refs.boardWorkspace.current = "w";
+  startup.runEffect("boardWorkspace.current !== workspaceId");
+  assert.equal(startup.state.chatTaskId, "saved", "positive control: startup selects an existing chat once its board loads");
+  const closed = surfaceComposer({ ...seed, chatTaskId: "saved" });
+  closed.render(); closed.refs.boardWorkspace.current = "w";
+  closed.refs.pendingSelect.current = { workspaceId: "w", taskId: "saved" };
+  closed.refs.switchTarget.current = "w";
+  closed.currentChat().props.onClosePane();
+  assert.equal(closed.refs.pendingSelect.current, null, "a pending selection must not resurrect the closed pane");
+  assert.equal(closed.refs.switchTarget.current, "", "a late project read cannot apply its previous selection");
+  closed.runEffect("boardWorkspace.current !== workspaceId");
+  closed.runEffect("pending.workspaceId !== workspaceId");
+  assert.equal(closed.currentChat(), undefined);
+});
+
+test("last pane: Ctrl+Alt+W closes a sole blank draft", () => {
+  const handlers = new Map();
+  const fixture = surfaceComposer({ chatTaskId: "" }, { globals: { window: {
+    addEventListener: (name, handler) => handlers.set(name, handler),
+    removeEventListener: (name, handler) => { if (handlers.get(name) === handler) handlers.delete(name); },
+  } } });
+  const cleanup = fixture.runEffect("AltGraph");
+  let prevented = false;
+  try {
+    handlers.get("keydown")({ key: "w", code: "KeyW", ctrlKey: true, altKey: true, shiftKey: false,
+      getModifierState: () => false, preventDefault() { prevented = true; } });
+    assert.equal(prevented, true, "the close shortcut is handled even without a secondary pane");
+    assert.equal(fixture.currentChat(), undefined);
+  } finally { cleanup(); }
+});
+
+test("last pane: delayed history actions respect a later close or chat selection", async () => {
+  for (const action of ["continue", "fork", "rewind"]) for (const later of ["close", "select"]) {
+    let release;
+    const history = new Promise(resolve => { release = resolve; });
+    const fixture = surfaceComposer({ chatTaskId: "saved" }, { call: input =>
+      input.operation === "board" && input.arguments.taskId ? history : undefined });
+    const list = () => fixture.walk(fixture.render()).find(item => item.props?.actions?.select);
+    if (action === "continue") list().props.actions.continueIn("saved", "w");
+    else if (action === "fork") list().props.actions.fork("saved");
+    else fixture.currentChat().props.thread.rewind(0);
+    if (later === "close") fixture.currentChat().props.onClosePane();
+    else list().props.actions.select("chosen-later");
+    release({ task: { description: "Original message" } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(fixture.state.chatSeed, null, `${action} cannot replace a later ${later} with a draft`);
+    assert.equal(fixture.calls.some(call => call.operation === "chat_send"), false, `${action} cannot dispatch after a later ${later}`);
+    if (later === "close") assert.equal(fixture.currentChat(), undefined, `${action} cannot reopen a closed layout`);
+    else assert.equal(fixture.currentChat().props.selectedTaskId, "chosen-later", `${action} keeps the later selection`);
+  }
+});
+
+test("last pane: Fork explicitly opens a chat from the closed layout", async () => {
+  const fixture = surfaceComposer({ chatTaskId: "saved" }, { call: input =>
+    input.operation === "board" && input.arguments.taskId ? { task: { description: "Original message" } } : undefined });
+  fixture.currentChat().props.onClosePane();
+  const list = fixture.walk(fixture.render()).find(item => item.props?.actions?.fork);
+  list.props.actions.fork("saved");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fixture.currentChat()?.props.selectedTaskId, "new-task");
+  assert.equal(fixture.calls.filter(call => call.operation === "chat_send").length, 1);
+});
+
+test("last pane: a send finishing after close cannot replace a newer blank draft", async () => {
+  let release;
+  const sent = new Promise(resolve => { release = resolve; });
+  const fixture = surfaceComposer({}, { call: input => input.operation === "chat_send" ? sent : undefined });
+  const sending = fixture.currentChat().props.send({ message: "In flight" });
+  await new Promise(resolve => setImmediate(resolve));
+  fixture.currentChat().props.onClosePane();
+  const list = fixture.walk(fixture.render()).find(item => item.props?.actions?.newChat);
+  list.props.actions.newChat();
+  release({ taskId: "older-send", runId: "older-run", status: "running" });
+  await sending;
+  assert.equal(fixture.currentChat()?.props.selectedTaskId, "", "the newly opened draft stays selected");
+  assert.equal(fixture.state.pendingChat, null, "the old completion does not reinsert its pending message");
 });
 
 test("Surface defaults to red Single and sends only one explicit route without saving a reusable team", async () => {
@@ -1025,7 +1187,7 @@ test("an unsent split chat can switch projects and finish choosing its new chat"
   });
   choose("new-project");
   const decide = rendererCallback("AgentOrchestratorSurface.tsx", "effect:const wanted = paneWanted.current", {
-    chatTaskId: null, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
+    chatTaskId: null, chatClosed: false, workspaceId: state.workspaceId, loadedWorkspace: "new-project",
     board: { tasks: [] }, boardWorkspace: { current: "new-project" }, paneWanted, pendingSelect,
     missions: [], taskLifecycle: [], chatSeed: { workspaceId: "new-project", text: "Keep my draft" },
     chatList: chat.chatList, setChatTaskId: id => { state.taskId = id; }, setView() {}, setSelectedRunId() {},
@@ -1148,7 +1310,7 @@ test("late chat creation never overwrites another project, another chat, or an u
     const state = { missions: [], board: { tasks: [] }, chatTaskId: "", selectedRunId: "", notices: {}, autoStatus: "idle" };
     const set = key => value => { state[key] = typeof value === "function" ? value(state[key]) : value; };
     const send = rendererCallback("AgentOrchestratorSurface.tsx", "sendChat", {
-      busy: "", workspaceId: "a", selection, mounted, boardWorkspace: { current: "a" }, board: { tasks: [] },
+      busy: "", workspaceId: "a", selection, mounted, chatSelectionVersion: { current: 0 }, boardWorkspace: { current: "a" }, board: { tasks: [] },
       composerMode: "single", singleRoute: { model: "fixture" }, savedTeams: [], composerTeamId: "",
       run: async (_name, action) => action(), aoChatExecution: () => ({}), executableArg: () => ({}),
       moduleCall: async () => started.promise, rememberChatRoute() {}, startNotice: () => "",

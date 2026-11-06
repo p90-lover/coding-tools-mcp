@@ -8,6 +8,91 @@ const vm = require("node:vm");
 const ts = require("../node_modules/typescript");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
+test("explicit provider effort fields, including empty lists, override plugin and Claude defaults", async () => {
+  const catalog = [
+    { slug: "cline-pass/deepseek-v4.1-flash", supported_reasoning_levels: [], thinking: { levels: ["high"] } },
+    { slug: "commandcode-go/glm-5", thinking: { levels: [] } },
+    { slug: "cline-pass/mimo-v2.6-pro", thinking: { levels: ["high", "low", "high", "unsupported"] } },
+    { slug: "claude-opus-5-5", supported_reasoning_levels: [] },
+  ];
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [] },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code" });
+  for (const id of ["cline-pass/deepseek-v4.1-flash", "commandcode-go/glm-5", "claude-opus-5-5"]) {
+    assert.deepEqual(capabilities["cpa/" + id].efforts, [], id);
+  }
+  assert.deepEqual(capabilities["cpa/cline-pass/mimo-v2.6-pro"].efforts, ["high", "low"]);
+  await assert.rejects(dispatched("claude-code", "cpa/cline-pass/deepseek-v4.1-flash", { effort: "high" }, catalog),
+    /doesn't support the chosen reasoning effort/i);
+});
+
+test("missing effort metadata uses only verified client/plugin support and says where it came from", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [] },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [
+      { slug: "cline-pass/deepseek-v4.1-flash" }, { slug: "claude-opus-5-5" }, { slug: "unknown-model" },
+    ] }) }),
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code" });
+  assert.deepEqual(capabilities["cpa/cline-pass/deepseek-v4.1-flash"].efforts, ["none", "low", "high", "max"]);
+  assert.match(capabilities["cpa/cline-pass/deepseek-v4.1-flash"].effortReason, /omitted.*verified.*plugin/i);
+  assert.deepEqual(capabilities["cpa/claude-opus-5-5"].efforts, ["low", "medium", "high", "max"]);
+  assert.match(capabilities["cpa/claude-opus-5-5"].effortReason, /omitted.*verified.*suffix/i);
+  assert.deepEqual(capabilities["cpa/unknown-model"].efforts, []);
+  assert.equal(capabilities["cpa/unknown-model"].contextLimit, undefined);
+  assert.equal(capabilities["cpa/unknown-model"].contextWindow, undefined, "no guessed provider capacity");
+  assert.match(capabilities["cpa/unknown-model"].contextReason, /provider.*not report/i);
+});
+
+test("recognized Claude budgets preserve compaction, respect capacity and retain the selected outbound window", async () => {
+  const catalog = [
+    { slug: "claude-opus-5-5", max_context_window: 200000, supported_reasoning_levels: ["low", "high"] },
+    { slug: "claude-large", max_context_window: 2000000 },
+    { slug: "claude-small", context_length: 64000 },
+    ...["best", "opusplan", "opusplan(high)"].map(slug => ({ slug, context_window: 200000 })),
+  ];
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [] },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code" });
+  assert.deepEqual(capabilities["cpa/claude-opus-5-5"].contextWindow, { min: 100000, max: 200000, kind: "compaction" });
+  assert.equal(capabilities["cpa/claude-opus-5-5"].contextLimit, 200000);
+  assert.deepEqual(capabilities["cpa/claude-large"].contextWindow, { min: 100000, max: 1000000, kind: "compaction" });
+  assert.equal(capabilities["cpa/claude-large"].contextLimit, 2000000, "a client budget is not the provider's capacity");
+  assert.equal(capabilities["cpa/claude-small"].contextWindow, undefined);
+  for (const id of ["best", "opusplan", "opusplan(high)"]) {
+    assert.deepEqual(capabilities["cpa/" + id].contextWindow, { min: 100000, max: 200000, kind: "compaction" }, id);
+  }
+  const selected = await dispatched("claude-code", "cpa/claude-opus-5-5", { effort: "low", context_window: 150000 }, catalog);
+  assert.deepEqual([selected.model, selected.effort, selected.contextWindow], ["claude-opus-5-5", "low", 150000]);
+  for (const context_window of [99999, 200001]) {
+    await assert.rejects(dispatched("claude-code", "cpa/claude-opus-5-5", { context_window }, catalog), /context.*limit/i);
+  }
+});
+
+test("numeric provider capacity fields stay authoritative for namespaced models", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [] },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [
+      { slug: "cline-pass/deepseek-v4.1-flash", max_context_window: 272000, context_window: 272000 },
+      { slug: "commandcode-go/glm-5", context_window: 272000 },
+      { slug: "provider/custom", context_length: 131072 },
+    ] }) }),
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:codex" });
+  assert.equal(capabilities["cpa/cline-pass/deepseek-v4.1-flash"].contextLimit, 272000);
+  assert.equal(capabilities["cpa/cline-pass/deepseek-v4.1-flash"].contextWindow.max, 272000);
+  assert.equal(capabilities["cpa/commandcode-go/glm-5"].contextLimit, 272000);
+  assert.deepEqual(capabilities["cpa/provider/custom"].contextWindow, { min: 4096, max: 131072, kind: "context" });
+});
+
 test("AO model catalogs retain native efforts and CPA's advertised levels/context without changing stored IDs", async () => {
   const requests = [];
   const workflow = createAgentOrchestratorWorkflow({
@@ -29,10 +114,7 @@ test("AO model catalogs retain native efforts and CPA's advertised levels/contex
   assert.deepEqual(result.capabilities["cpa/gemini-3.8-flash-high"].efforts, ["low", "medium", "high"]);
   assert.equal(result.capabilities["cpa/gemini-3.8-flash-high"].contextLimit, 1048576);
   assert.equal(result.capabilities["cpa/gemini-3.8-flash-high"].contextWindow.max, 1048576);
-  // The one exception to inventing nothing: CPA lists Claude with no levels, but its suffix still
-  // turns thinking on (tried 2026-10-21: "claude-sonnet-4-6(low|medium|high|max)" answered with a
-  // thinking block, the bare name without one).
-  assert.deepEqual(result.capabilities["cpa/claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
+  assert.deepEqual(result.capabilities["cpa/claude-sonnet-4-6"].efforts, [], "an explicit empty provider list stays empty");
 });
 
 test("classic CPA catalog remains usable but absent capabilities are not invented", async () => {
@@ -49,7 +131,26 @@ test("classic CPA catalog remains usable but absent capabilities are not invente
   assert.match(result.capabilities["cpa/plain-model"].effortReason, /advertis|report|unknown/i);
 });
 
-test("all AO harnesses receive truthful tuning outcomes; unsupported transport stays unavailable and Claude models take a window", async () => {
+test("human Claude aliases keep custom-model context settings", async () => {
+  const custom = ["Claude Opus5.5", "Claude Opus 5.5", "custom[1m]"];
+  const native = ["opus[1m]", "claude-sonnet-4-6[1m]", "anthropic/claude-sonnet-4-6"];
+  const catalog = [...custom, ...native].map(slug => ({ slug, context_window: 200000,
+    supported_reasoning_levels: [{ effort: "high" }] }));
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [] },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: catalog }) }),
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code" });
+  for (const id of custom) assert.deepEqual(capabilities["cpa/" + id].contextWindow,
+    { min: 4096, max: 200000, kind: "context" }, id);
+  for (const id of native) assert.deepEqual(capabilities["cpa/" + id].contextWindow,
+    { min: 100000, max: 200000, kind: "compaction" }, id);
+  const selected = await dispatched("claude-code", "cpa/Claude Opus5.5", { effort: "high", context_window: 32768 }, catalog);
+  assert.deepEqual([selected.model, selected.effort, selected.contextWindow], ["Claude Opus5.5", "high", 32768]);
+});
+
+test("all AO harnesses receive truthful tuning outcomes; recognized Claude exposes a compaction budget", async () => {
   const ids = ["aider", "grok", "droid", "agy", "crush", "cursor", "qwen", "copilot", "goose", "auggie", "continue",
     "devin", "cline", "kimi", "muse", "kiro", "kilocode", "vibe", "kimchi", "prime-agent", "autohand", "omp", "amp", "pi", "unreal-agent"];
   const workflow = createAgentOrchestratorWorkflow({
@@ -64,9 +165,7 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport s
     assert.equal(result.capabilities["own-model"].contextWindow, undefined, id);
     assert.match(result.capabilities["own-model"].contextReason, /support|verified|setter/i, id);
   }
-  // Claude Code lists only CPA models; a Claude model through CPA keeps CPA's advertised efforts and
-  // takes a window up to its reported limit (its picker was off). A CPA alias with no reported limit
-  // ("Claude Opus 5.5") offers the client's 2M ceiling, said to be unverified.
+  // Recognized Claude models keep native compaction and accept a budget within provider capacity.
   const claude = createAgentOrchestratorWorkflow({
     aoHarness: { models: async () => { throw Error("Claude Code's own aliases are not listed"); } },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
@@ -76,9 +175,8 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport s
   const catalog = (await claude.call("models", { harness: "ao:claude-code" })).capabilities;
   const caps = catalog["cpa/claude-sonnet-4-6"];
   assert.deepEqual(caps.efforts, ["low", "high"]);
-  assert.deepEqual(caps.contextWindow, { min: 4096, max: 200000, kind: "context" });
-  assert.deepEqual(catalog["cpa/Claude Opus 5.5"].contextWindow, { min: 4096, max: 2000000, kind: "context" });
-  assert.match(catalog["cpa/Claude Opus 5.5"].contextReason, /unverified/);
+  assert.deepEqual(caps.contextWindow, { min: 100000, max: 200000, kind: "compaction" });
+  assert.match(caps.contextReason, /compaction budget/i);
 });
 
 test("Native Codex lists WebGPT even without CPA and never reads AO catalogs", async () => {
@@ -142,7 +240,7 @@ test("CPA effort goes once, in the request body (Claude Code, Codex) or as a ses
   assert.equal(Object.hasOwn(own, "gateway"), false);
 });
 
-test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged", async () => {
+test("Cline DeepSeek V4.1 Flash uses the provider's effort list and forwards selected levels unchanged", async () => {
   const id = "cline-pass/deepseek-v4.1-flash";
   const catalog = [{ slug: id, supported_reasoning_levels: ["low", "medium", "high", "xhigh"] }];
   for (const agent of ["codex", "claude-code", "opencode"]) {
@@ -152,19 +250,19 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
       aoHarness: { models: async () => [] },
     });
     const result = await workflow.call("models", { harness: "ao:" + agent });
-    assert.deepEqual(result.capabilities["cpa/" + id].efforts, ["none", "low", "high", "max"], agent);
+    assert.deepEqual(result.capabilities["cpa/" + id].efforts, ["low", "medium", "high", "xhigh"], agent);
     // Claude Code and Codex carry the effort in the body, opencode in the model's name.
     const body = agent !== "opencode";
-    for (const effort of ["none", "low", "high", "max"]) {
+    for (const effort of ["low", "medium", "high", "xhigh"]) {
       const input = await dispatched(agent, "cpa/" + id + "(high)", { effort }, catalog);
       assert.equal(input.model, body ? id : "openai/" + id + "(" + effort + ")");
       assert.deepEqual(input.gateway, { provider: "cpa", model: body ? id : id + "(" + effort + ")" });
       assert.equal(input.effort, body ? effort : undefined);
     }
-    await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "xhigh" }, catalog), /doesn't support the chosen reasoning effort/i);
+    await assert.rejects(dispatched(agent, "cpa/" + id, { effort: "max" }, catalog), /doesn't support the chosen reasoning effort/i);
     const blank = await dispatched(agent, "cpa/" + id, {}, catalog);
-    assert.deepEqual([blank.gateway.model, blank.effort], body ? [id, "high"] : [id + "(high)", undefined],
-      "None/Low/High/Max has no Auto: a blank card starts on High, not on no effort CPA cannot serve");
+    assert.deepEqual([blank.gateway.model, blank.effort], body ? [id, "medium"] : [id + "(medium)", undefined],
+      "a blank card starts on a level from the advertised list");
   }
 });
 
@@ -226,17 +324,16 @@ test("every provider plugin's model reaches CPA by its bare name, by namespace o
     aoHarness: { models: async () => [] },
   });
   const { capabilities } = await workflow.call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  assert.deepEqual(capabilities["cpa/commandcode-go/deepseek-v4.1-flash"].efforts, ["none", "low", "medium", "high", "max"],
-    "Command Code's plugin reads the suffix");
+  assert.deepEqual(capabilities["cpa/commandcode-go/deepseek-v4.1-flash"].efforts, ["low", "high"],
+    "the advertised list wins over historical plugin defaults");
   assert.deepEqual(capabilities["cpa/kimi-k3"].efforts, [], "cpa/kimi-k3");
   assert.match(capabilities["cpa/kimi-k3"].effortReason, /provider plugin/, "cpa/kimi-k3 says why it takes no level");
   assert.deepEqual(capabilities["cpa/gpt-5.5"].efforts, ["low", "high"]);
 });
 
 test("a blank card on a model whose limit CPA did not report launches at the agent's own window", async () => {
-  // CPA's stock 272K for a plugin model is no limit; a known one still fills the card (above).
   const input = await dispatched("claude-code", "cpa/commandcode-go/glm-5", {},
-    [...DISPATCH_CATALOG, { slug: "commandcode-go/glm-5", context_window: 272000, max_context_window: 272000 }]);
+    [...DISPATCH_CATALOG, { slug: "commandcode-go/glm-5" }]);
   assert.equal(Object.hasOwn(input, "contextWindow"), false);
 });
 

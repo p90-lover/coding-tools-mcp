@@ -743,7 +743,7 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-code pre code { padding: 0; background: transparent; }
 
 /* ---------- Composer ---------- */
-.cx-composer { position: relative; flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 16px; padding: 10px 12px 8px;
+.cx-composer { position: relative; container-type: inline-size; flex: 0 0 auto; width: calc(100% - 48px); max-width: 780px; margin: 0 auto 16px; padding: 10px 12px 8px;
   border: 1px solid color-mix(in srgb, var(--ao-line) 70%, transparent); border-radius: 20px; background: var(--color-bg-primary);
   box-shadow: 0 4px 18px rgb(0 0 0 / 7%); }
 .cx-composer:focus-within { border-color: color-mix(in srgb, var(--color-text-primary) 25%, var(--ao-line)); }
@@ -785,6 +785,19 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-chip > svg:first-child { display: none; }
 .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker:last-child .ao-composer-popover { left: auto; right: 0; }
 .ao-chip-effort { color: var(--ao-muted); }
+/* Reserve both rows in narrow panes so choosing a mode or model never moves the text box. */
+@container (max-width: 500px) {
+  .ao-workflow .cx-composer-bar { flex-wrap: wrap; }
+  .ao-workflow .cx-composer-bar .ao-composer-controls { order: -1; flex: 0 0 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-rows: 30px 30px; gap: 2px; }
+  .ao-workflow .cx-composer-bar .ao-composer-controls + .cx-head-spacer { display: block; }
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-composer-picker { grid-area: 2 / 1 / 3 / -1; margin-left: 0; }
+  .ao-workflow .cx-composer .ao-composer-controls.is-single > .ao-composer-picker:nth-last-child(3) { grid-area: 2 / 1; }
+  .ao-workflow .cx-composer .ao-composer-controls.is-single > .ao-composer-picker:nth-last-child(2) { grid-area: 2 / 2; }
+  .ao-workflow .cx-composer .ao-composer-controls.is-single > .ao-composer-picker:last-child { grid-area: 2 / 3; margin-left: 0; }
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-permissions { grid-area: 1 / 1; }
+  .ao-workflow .cx-composer .ao-composer-controls > .ao-mode-switch { grid-area: 1 / 2; }
+  .ao-workflow .cx-composer .ao-composer-controls.is-single > .ao-composer-picker:has(> .ao-composer-chip.is-logo) { grid-area: 1 / 3; }
+}
 /* The branch bar above the chat box: the branch in use, and every branch of the project. */
 /* In a chat it lines up with the composer column, like the route note; in the new-chat strip it is one chip. */
 .ao-workflow .cx-branch-bar { display: flex; align-items: center; gap: 8px; box-sizing: border-box; width: 100%; max-width: 760px; min-width: 0;
