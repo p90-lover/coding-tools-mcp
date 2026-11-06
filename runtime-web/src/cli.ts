@@ -251,9 +251,10 @@ async function loginCommand(args: string[]): Promise<void> {
 
   const chromeExecutablePath = takeOption(args, "--chrome");
   const storageStatePath = takeOption(args, "--storage-state");
+  const proxyServer = takeOption(args, "--proxy-server");
   assertNoArgs(args);
   authorizeLauncherControl("passkey login");
-  if (process.platform !== "darwin") throw new Error("Passkey sign-in is currently supported only on macOS");
+  if (process.platform !== "darwin" && process.platform !== "win32") throw new Error("Chrome sign-in is supported on Windows and macOS");
   if (!chromeExecutablePath || !isAbsolute(chromeExecutablePath)) {
     throw new Error("Launcher passkey sign-in requires --chrome with an absolute path");
   }
@@ -268,6 +269,7 @@ async function loginCommand(args: string[]): Promise<void> {
       storageStatePath,
     }, {
       continuation: continuation.promise,
+      proxyServer,
       onBrowserReady: () => { stdout.write(`${JSON.stringify({ version: 1, type: "passkey-login-ready" })}\n`); },
     });
   } finally {

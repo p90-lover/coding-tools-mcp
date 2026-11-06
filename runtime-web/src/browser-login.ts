@@ -38,6 +38,7 @@ export interface SystemBrowserLoginCapture {
 
 interface SystemBrowserLoginOptions {
   continuation: Promise<void>;
+  proxyServer?: string;
   timeoutMs?: number;
   onBrowserReady?: () => void;
 }
@@ -214,11 +215,19 @@ export async function captureSystemBrowserLogin(
   config: Pick<AppConfig, "chromeExecutablePath" | "storageStatePath">,
   options: SystemBrowserLoginOptions,
 ): Promise<SystemBrowserLoginCapture> {
-  if (process.platform !== "darwin") {
-    throw new Error("Passkey sign-in is currently supported only on macOS");
+  if (process.platform !== "darwin" && process.platform !== "win32") {
+    throw new Error("Chrome sign-in is supported on Windows and macOS");
   }
   if (!existsSync(config.chromeExecutablePath)) {
     throw new Error(`Google Chrome was not found at ${config.chromeExecutablePath}`);
+  }
+  if (options.proxyServer) {
+    const proxy = new URL(options.proxyServer);
+    if (!["http:", "https:", "socks4:", "socks5:"].includes(proxy.protocol)
+      || !proxy.hostname || proxy.username || proxy.password || proxy.search || proxy.hash
+      || (proxy.pathname !== "" && proxy.pathname !== "/")) {
+      throw new Error("Chrome sign-in requires a proxy endpoint without credentials or a path");
+    }
   }
   const timeoutMs = options.timeoutMs ?? SYSTEM_LOGIN_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
@@ -237,7 +246,7 @@ export async function captureSystemBrowserLogin(
   const profileDir = mkdtempSync(join(profileParent, "login-profile-"));
   try { chmodSync(profileDir, 0o700); } catch {}
   process.stdout.write(
-    "Sign in with your passkey in the dedicated Chrome window. When ChatGPT is ready, return to Codex Web GPT and choose Continue.\n",
+    "Sign in in the dedicated Chrome window. When ChatGPT is ready, close that window, return to Coding Tools and choose Continue.\n",
   );
 
   let capture: SystemBrowserLoginCapture | undefined;
@@ -250,6 +259,7 @@ export async function captureSystemBrowserLogin(
       "--disable-background-mode",
       "--no-first-run",
       "--no-default-browser-check",
+      ...(options.proxyServer ? [`--proxy-server=${options.proxyServer}`] : ["--no-proxy-server"]),
       CHATGPT_NEW_CHAT_URL,
     ], { env: process.env, stdio: "ignore" });
     let continuationRequested = false;
@@ -262,13 +272,21 @@ export async function captureSystemBrowserLogin(
         });
         void options.continuation.then(() => {
           continuationRequested = true;
+          if (process.platform === "win32") {
+            // Closing Chrome normally flushes its cookies; kill() is abrupt on Windows.
+            if (browserProcessExited(loginBrowser)) resolve();
+            return;
+          }
           if (!loginBrowser.kill() && !browserProcessExited(loginBrowser)) {
             reject(new Error("The dedicated Chrome login process refused the Continue request"));
           }
         }, reject);
         loginBrowser.once("error", reject);
         loginBrowser.once("exit", (code, signal) => {
-          if (continuationRequested) resolve();
+          if (process.platform === "win32" && (signal || code !== 0)) {
+            reject(new Error("Dedicated Chrome did not close normally; sign in again before continuing"));
+          } else if (continuationRequested) resolve();
+          else if (process.platform === "win32" && code === 0 && !signal) return;
           else if (signal) reject(new Error(`Dedicated Chrome login exited from signal ${signal}`));
           else if (code === 0) reject(new Error("Dedicated Chrome closed before Continue was selected"));
           else reject(new Error(`Dedicated Chrome login exited with status ${code ?? 1}`));

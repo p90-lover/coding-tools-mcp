@@ -5205,7 +5205,7 @@ async function start() {
       getConnectorName: () => runtimeHost.browserConnectorName(),
       helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
       logger,
-      loginWithPasskey: () => runtimeHost.capturePasskeyLogin(),
+      loginWithPasskey: (_partition, route) => runtimeHost.capturePasskeyLogin(route),
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,
       publishState: (state) => {

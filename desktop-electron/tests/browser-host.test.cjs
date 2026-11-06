@@ -547,7 +547,7 @@ test("browser surface visibility requires both requested and active state", () =
   assert.equal(browserViewVisible(true, true, true), true);
 });
 
-test("descriptor-owned home surface is hidden outside Browser and restored when Browser returns", () => {
+test("descriptor-owned home surface stays drawable offscreen and is restored when Browser returns", () => {
   const calls = [];
   const hiddenBounds = { x: 1201, y: 801, width: 1200, height: 800 };
   const fixture = Object.assign(Object.create(BrowserHost.prototype), {
@@ -570,7 +570,7 @@ test("descriptor-owned home surface is hidden outside Browser and restored when 
   });
 
   BrowserHost.prototype.syncViewVisibility.call(fixture);
-  assert.deepEqual(calls, [["visible", false]]);
+  assert.deepEqual(calls, [["bounds", hiddenBounds], ["visible", true]]);
 
   calls.length = 0;
   fixture.surfaceActive = true;
@@ -733,7 +733,8 @@ test("hidden turn tabs receive an explicit renderer viewport before moving offsc
   BrowserHost.prototype.syncViewVisibility.call(fixture);
 
   assert.deepEqual(events, [
-    ["home-visible", false],
+    ["home-bounds", { x: 1121, y: 721, width: 1120, height: 720 }],
+    ["home-visible", true],
     ["emulate", {
       screenPosition: "desktop",
       screenSize: { width: 1120, height: 720 },

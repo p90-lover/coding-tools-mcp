@@ -5,6 +5,8 @@ const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = re
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
 const { blockChatGptTelemetry } = require("./chatgpt-telemetry-block.cjs");
+const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
+const { runBrowserPageScript } = require("./browser-page-script.cjs");
 const {
   runBrowserHelperOperation,
   verifyConnectorWithBrowserHelper,
@@ -33,6 +35,15 @@ const SAVED_CHAT_URL = "https://chatgpt.com/";
 // The Browser tab's own page (startup, sign-in, sign-out, a new tab) is ChatGPT's plain home whatever
 // "Save chats in ChatGPT" says; only task turns and connector verification open Temporary Chat.
 const HOME_URL = SAVED_CHAT_URL;
+function authenticationContextFor(host, session) {
+  host.authenticationContexts ??= new WeakMap();
+  let context = host.authenticationContexts.get(session);
+  if (!context) {
+    context = { revision: 0, probe: null, probeContents: null, refresh: null };
+    host.authenticationContexts.set(session, context);
+  }
+  return context;
+}
 const SAVED_CONVERSATION_PATH = /^\/c\/[0-9a-f-]{36}$/;
 const CHATGPT_ORIGIN = "https://chatgpt.com";
 // Preserve only a concrete ChatGPT conversation address, never a sign-in page, homepage,
@@ -162,7 +173,6 @@ const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 // took 2.6 s on a busy machine and more than 5 s while a turn had just ended.
 const CHATGPT_AUTH_PAGE_TIMEOUT_MS = 15_000;
 // How long a confirmed ChatGPT session vouches for a check that could not tell.
-const CHATGPT_AUTH_RECENT_MS = 10 * 60_000;
 /**
  * Whether a session check's answer came from the session endpoint itself. Electron's session.fetch
  * can hand back a response with no url: the exact comparison rejected every answer (169 warnings
@@ -712,6 +722,7 @@ class BrowserHost {
       throw new Error("Browser host partition does not match its profile");
     }
     this.partition = resolvedPartition;
+    this.externalLogin = process.platform === "win32";
     this.resolveTurnAccount = resolveTurnAccount;
     this.tabLimitFor = tabLimitFor;
     this.retainedTabTtlMs = retainedTabTtlMs;
@@ -1615,6 +1626,10 @@ class BrowserHost {
     };
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
+        if (this.externalLogin && browserInteractionModeFor(this) === "automatic") {
+          this.requestChromeLogin(contents);
+          return { action: "deny" };
+        }
         return { action: "allow", createWindow: options => this.createAuthView(options, url) };
       }
       let parsed;
@@ -1627,6 +1642,12 @@ class BrowserHost {
         });
       }
       return { action: "deny" };
+    });
+    contents.on("will-navigate", (event, url) => {
+      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url)) {
+        event.preventDefault();
+        this.requestChromeLogin(contents);
+      }
     });
     contents.on("did-start-loading", () => {
       tab.loading = true;
@@ -1768,6 +1789,10 @@ class BrowserHost {
     const on = (event, handler) => contents.on(event, (...args) => { if (shown()) handler(...args); });
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
+        if (this.externalLogin && browserInteractionModeFor(this) === "automatic") {
+          this.requestChromeLogin(contents);
+          return { action: "deny" };
+        }
         return {
           action: "allow",
           createWindow: (options) => this.createAuthView(options, url),
@@ -1785,6 +1810,12 @@ class BrowserHost {
         this.logger.warn("browser.external_url_rejected", { protocol: parsed.protocol });
       }
       return { action: "deny" };
+    });
+    on("will-navigate", (event, url) => {
+      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url)) {
+        event.preventDefault();
+        this.requestChromeLogin(contents);
+      }
     });
     on("did-start-navigation", (_event, url, inPlace, mainFrame) => {
       if (!mainFrame || isFailurePageUrl(url)) return;
@@ -1994,7 +2025,66 @@ class BrowserHost {
     await this.waitForAuthenticated(60_000);
   }
 
+  bindAuthenticationChanges(browserSession) {
+    if (typeof browserSession?.cookies?.on !== "function") return;
+    this.authenticationCookieListeners ??= new Map();
+    if (this.authenticationCookieListeners.has(browserSession)) return;
+    const listener = (_event, cookie, cause, removed) => {
+      if (!cookie?.httpOnly || String(cookie.domain).replace(/^\./, "") !== "chatgpt.com") return;
+      if (removed && (cause === "overwrite" || cause === "expired-overwrite")) return;
+      const context = authenticationContextFor(this, browserSession);
+      if (!removed && context.refresh) return;
+      if (this.view?.webContents?.session !== browserSession) {
+        context.revision++;
+        return;
+      }
+      this.lastAuthenticatedAt = 0;
+      void BrowserHost.prototype.refreshAuthenticationFromSession.call(this, browserSession);
+    };
+    browserSession.cookies.on("changed", listener);
+    this.authenticationCookieListeners.set(browserSession, listener);
+  }
+
+  refreshAuthenticationFromSession(browserSession = this.view?.webContents?.session) {
+    if (this.destroyed || !browserSession || browserInteractionModeFor(this) !== "automatic") return Promise.resolve();
+    const context = authenticationContextFor(this, browserSession);
+    context.revision++;
+    if (context.refresh) return context.refresh;
+    const operation = Promise.resolve().then(async () => {
+      let revision;
+      do {
+        revision = context.revision;
+        const contents = this.view?.webContents;
+        if (this.destroyed || !contents || contents.isDestroyed() || contents.session !== browserSession || browserInteractionModeFor(this) !== "automatic") return;
+        if (context.probe) await context.probe;
+        if (this.destroyed || this.view?.webContents !== contents || contents.session !== browserSession || browserInteractionModeFor(this) !== "automatic") return;
+        if (revision !== context.revision) continue;
+        if (contents.getURL().startsWith(CHATGPT_ORIGIN + "/")) {
+          await this.probeAuthentication();
+        } else {
+          const result = await readChatGptAuthSession(browserSession.fetch.bind(browserSession), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+          if (this.destroyed || this.view?.webContents !== contents || browserInteractionModeFor(this) !== "automatic") return;
+          if (revision !== context.revision) continue;
+          this.setState({ authenticated: result.sessionAuthenticated,
+            ...(this.activeTraceId || this.manualOperation ? {} : result.sessionCheckError
+              ? { status: "error", message: result.sessionCheckError }
+              : result.sessionAuthenticated ? { status: "ready", message: "ChatGPT is ready" }
+                : { status: "signed-out", message: "Sign in to ChatGPT" }) });
+        }
+      } while (revision !== context.revision);
+    });
+    const tracked = operation.catch(() => {
+      if (!this.destroyed && this.view?.webContents?.session === browserSession && browserInteractionModeFor(this) === "automatic") {
+        this.logger?.warn?.("browser.session_refresh_failed");
+        this.setState({ authenticated: false, ...(this.activeTraceId || this.manualOperation ? {} : { status: "error", message: "Could not check the ChatGPT session. Retry the session check." }) });
+      }
+    }).finally(() => { if (context.refresh === tracked) context.refresh = null; });
+    context.refresh = tracked;
+    return tracked;
+  }
+
   bindChatGptBackendRecovery(browserSession = this.view.webContents.session) {
+    BrowserHost.prototype.bindAuthenticationChanges.call(this, browserSession);
     // A session holds one onCompleted listener (another call replaces it): one per account. The
     // handler answers only for the shown account's page.
     if (this.recoverySessions.has(browserSession)) return;
@@ -2438,14 +2528,9 @@ class BrowserHost {
   }
 
   presentPrimaryView(visible) {
-    // Non-browser launcher pages must never be covered by the native ChatGPT view. Keep the
-    // descriptor-owned view attached while the browser page is selected, but fully hide it when
-    // the launcher explicitly deactivates the browser surface.
-    if (!this.surfaceActive || this.homeTabClosed) {
-      this.hideView(this.view);
-      return;
-    }
-    this.view.setBounds(visible ? this.bounds : this.hiddenTurnBounds());
+    // Keep the descriptor's renderer drawable without covering other launcher pages.
+    const onScreen = visible && this.surfaceActive && !this.homeTabClosed;
+    this.view.setBounds(onScreen ? this.bounds : this.hiddenTurnBounds());
     this.view.setVisible(true);
   }
 
@@ -3654,16 +3739,20 @@ class BrowserHost {
 
   openLogin() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT sign-in verification");
+    if (this.externalLogin) return this.openPasskeyLogin();
     if (this.state.authenticated) {
       this.activateHomeSurface();
       this.show();
       return Promise.resolve(this.snapshot());
     }
     if (this.loginOperation) {
-      this.activateHomeSurface();
-      this.show();
+      if (this.loginMode !== "passkey") {
+        this.activateHomeSurface();
+        this.show();
+      }
       return this.loginOperation;
     }
+    this.loginMode = "embedded";
     const operation = (async () => {
       const sessionRefresh = this.sessionRefreshOperation;
       if (sessionRefresh) {
@@ -3674,6 +3763,7 @@ class BrowserHost {
         }
       }
       return await this.withManualOperation("ChatGPT login", async () => {
+        if (this.loginMode === "passkey") return this.runPasskeyLogin();
         this.authNavigationError = null;
         this.show();
         this.logger.info("browser.login_opened");
@@ -3682,13 +3772,14 @@ class BrowserHost {
           await this.view.webContents.loadURL(HOME_URL);
         }
         await this.probeAuthentication();
-        const authenticated = await this.waitForAuthenticated();
+        const authenticated = await this.waitForAuthenticated(180_000, () => this.loginMode === "passkey");
+        if (authenticated === null) return this.runPasskeyLogin();
         await this.runSessionInspection(false);
         return authenticated;
       });
     })();
     const tracked = operation.finally(() => {
-      if (this.loginOperation === tracked) this.loginOperation = null;
+      if (this.loginOperation === tracked) { this.loginOperation = null; this.loginMode = null; }
     });
     this.loginOperation = tracked;
     return tracked;
@@ -3701,7 +3792,11 @@ class BrowserHost {
       this.show();
       return Promise.resolve(this.snapshot());
     }
-    if (this.loginOperation) return this.loginOperation;
+    if (this.loginOperation) {
+      if (this.loginMode === "embedded") this.loginMode = "passkey";
+      return this.loginOperation;
+    }
+    this.loginMode = "passkey";
     const operation = (async () => {
       const sessionRefresh = this.sessionRefreshOperation;
       if (sessionRefresh) {
@@ -3711,24 +3806,47 @@ class BrowserHost {
           // Explicit sign-in is the recovery path after a failed saved-session refresh.
         }
       }
-      return await this.withManualOperation("ChatGPT passkey login", async () => {
-        this.authNavigationError = null;
-        this.setState({
-          authenticated: false,
-          status: "loading",
-          message: "Waiting for passkey sign-in in Chrome",
-          loading: true,
-        });
-        this.logger.info("browser.passkey_login_started");
-        const transfer = await this.loginWithPasskey();
-        return await this.installPasskeyLogin(transfer);
-      });
+      return await this.withManualOperation("ChatGPT passkey login", () => this.runPasskeyLogin());
     })();
     const tracked = operation.finally(() => {
-      if (this.loginOperation === tracked) this.loginOperation = null;
+      if (this.loginOperation === tracked) { this.loginOperation = null; this.loginMode = null; }
     });
     this.loginOperation = tracked;
     return tracked;
+  }
+
+  requestChromeLogin(contents) {
+    // A parked account's page must not open a sign-in for the account now shown.
+    if (this.destroyed || contents?.session !== this.view?.webContents?.session) return;
+    void this.openPasskeyLogin().catch(error => {
+      if (!this.destroyed && contents.session === this.view?.webContents?.session) {
+        this.setState({ authenticated: false, status: "error", loading: false,
+          message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  }
+
+  async runPasskeyLogin() {
+    const contents = this.view?.webContents, partition = this.partition;
+    if (!contents || contents.isDestroyed()) throw new Error("The selected account's browser is unavailable");
+    const routes = await Promise.all(["chatgpt.com", ...AUTH_PROVIDER_HOSTS]
+      .map(host => contents.session.resolveProxy(`https://${host}/`)));
+    if (new Set(routes).size !== 1) {
+      throw new Error("Chrome sign-in cannot preserve different proxy routes for ChatGPT and its sign-in providers. Use one route for this account before signing in.");
+    }
+    if (this.destroyed || this.partition !== partition || this.view?.webContents !== contents) {
+      throw new Error("The browser account changed before Chrome sign-in");
+    }
+    this.authNavigationError = null;
+    if (this.externalLogin) this.hide();
+    this.setState({ authenticated: false, status: "loading", message: "Finish signing in in Chrome, close that dedicated window, then choose Continue", loading: true });
+    this.logger.info("browser.passkey_login_started");
+    const transfer = await this.loginWithPasskey(partition, { proxyRules: routes[0] });
+    if (this.destroyed || this.partition !== partition || this.view?.webContents !== contents || contents?.isDestroyed()) {
+      await transfer?.cleanup?.();
+      throw new Error("The browser account changed during Chrome sign-in. Sign in again on the selected account.");
+    }
+    return this.installPasskeyLogin(transfer);
   }
 
   async clearOwnedSessionForPasskey() {
@@ -3878,14 +3996,15 @@ class BrowserHost {
     return tracked;
   }
 
-  /**
-   * Whether the ChatGPT session can serve a turn. A check that could not tell (Cloudflare answering
-   * the app's own request, then the page's request slower than its limit on a busy machine) read
-   * as "Browser is not ready" while the page was signed in and working. Such an unknown result
-   * stands on a session this browser confirmed recently; a signed-out answer never does.
-   */
+  /** A current session check; an inconclusive result never inherits an earlier success. */
   async authenticationReadiness() {
+    const contents = this.view?.webContents, partition = this.partition;
+    const context = contents ? authenticationContextFor(this, contents.session ?? contents) : null;
+    const revision = context?.revision;
     const result = await this.checkAuthenticationReadiness();
+    if (this.destroyed || this.view?.webContents !== contents || this.partition !== partition || context?.revision !== revision) {
+      return { authenticated: null, ready: false };
+    }
     const now = Date.now();
     if (result?.authenticated === true && result.ready === true) {
       this.lastAuthenticatedAt = now;
@@ -3894,10 +4013,6 @@ class BrowserHost {
     if (result?.authenticated === false) {
       this.lastAuthenticatedAt = 0;
       return result;
-    }
-    if (this.lastAuthenticatedAt && now - this.lastAuthenticatedAt < CHATGPT_AUTH_RECENT_MS) {
-      this.logger?.info?.("browser.readiness_recent", { ageMs: now - this.lastAuthenticatedAt });
-      return { authenticated: true, ready: true, recent: true };
     }
     return result;
   }
@@ -3966,140 +4081,129 @@ class BrowserHost {
 
   async probeAuthentication() {
     requireAutomaticBrowserInspection(this, "ChatGPT authentication probe");
-    if (!this.view || this.view.webContents.isDestroyed()) return this.snapshot();
+    if (this.destroyed || !this.view || this.view.webContents.isDestroyed()) throw new Error("ChatGPT browser is unavailable");
     const contents = this.view.webContents, partition = this.partition;
+    const context = authenticationContextFor(this, contents.session ?? contents);
+    if (context.probe && context.probeContents === contents) return context.probe;
+    const revision = context.revision;
     let url = contents.getURL();
-    const ownsPage = () => this.view?.webContents === contents && this.partition === partition
-      && !contents.isDestroyed() && contents.getURL() === url;
-    if (url === IDLE_BROWSER_URL) {
-      this.setState({
-        status: this.state.authenticated ? "ready" : "signed-out",
-        message: this.state.authenticated ? "No active task" : "Sign in to ChatGPT",
-        url,
-      });
-      return this.snapshot();
-    }
-    if (!url.startsWith(CHATGPT_ORIGIN)) {
-      this.setState({ status: "signed-out", message: "Sign in to ChatGPT", authenticated: false, url });
-      return this.snapshot();
-    }
-    const probe = (contents) => contents.executeJavaScript(`(async () => {
-      const expectedUrl = new URL(${JSON.stringify(TEMPORARY_CHAT_URL)});
-      const readSurface = () => {
-        const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
-        const actualUrl = new URL(location.href);
-        return {
-          url: actualUrl.href,
-          composer: Boolean(composer),
-          temporary: actualUrl.origin === expectedUrl.origin
-            && actualUrl.pathname === expectedUrl.pathname
-            && actualUrl.searchParams.get("temporary-chat") === "true",
-          savedHome: actualUrl.origin === expectedUrl.origin
-            && actualUrl.pathname === "/"
-            && !actualUrl.searchParams.has("temporary-chat"),
-          readyState: document.readyState,
-        };
-      };
-      const initialSurface = readSurface();
-      let sessionAuthenticated = false, sessionAnswered = false, sessionStatus;
-      // On Cloudflare's check page the session request is itself challenged: it only added failed
-      // requests while the check ran (8 in 6 s, 2026-11-04).
-      const checkShown = (${isCloudflareCheckPage.toString()})(document, window);
-      if (new URL(initialSurface.url).origin === expectedUrl.origin && !checkShown) {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), ${CHATGPT_AUTH_SESSION_TIMEOUT_MS});
-        sessionStatus = 0;
-        try {
-          const response = await fetch("/api/auth/session", {
-            credentials: "include",
-            cache: "no-store",
-            headers: { accept: "application/json" },
-            signal: controller.signal,
-          });
-          sessionStatus = response.status;
-          const responseUrl = new URL(response.url);
-          const payload = response.ok
-            && responseUrl.origin === expectedUrl.origin
-            && responseUrl.pathname === "/api/auth/session"
-            && response.headers.get("content-type")?.includes("application/json")
-            ? await response.json()
-            : null;
-          sessionAnswered = payload !== null;
-          sessionAuthenticated = (${authenticatedChatGptSession.toString()})(payload);
-        } catch {}
-        finally { clearTimeout(timeout); }
+    const ownsPage = () => !this.destroyed && this.view?.webContents === contents && this.partition === partition
+      && !contents.isDestroyed() && contents.getURL() === url && context.revision === revision
+      && browserInteractionModeFor(this) === "automatic";
+    const staleResult = () => ({ ...this.snapshot(), authenticated: false, verificationStale: true });
+    const operation = Promise.resolve().then(async () => {
+      if (!ownsPage()) return staleResult();
+      if (url === IDLE_BROWSER_URL) {
+        this.setState({
+          status: this.state.authenticated ? "ready" : "signed-out",
+          message: this.state.authenticated ? "No active task" : "Sign in to ChatGPT",
+          url,
+        });
+        return this.snapshot();
       }
-      return { ...readSurface(), sessionAuthenticated, sessionAnswered, sessionStatus };
-    })()`, true).catch(() => ({
-      url: "",
-      composer: false,
-      temporary: false,
-      sessionAuthenticated: false,
-      readyState: "unknown",
-    }));
-    // Authentication belongs to the session, not to the new-chat composer. Saved conversations
-    // and settings pages can be signed in too; turn preparation checks its own surface separately.
-    let result = await probe(contents);
-    if (!ownsPage()) return this.snapshot();
-    if (!result.sessionAuthenticated
-      && this.authView
-      && !this.authView.webContents.isDestroyed()) {
-      const authResult = await probe(this.authView.webContents);
-      if (!ownsPage()) return this.snapshot();
-      if (authResult.sessionAuthenticated) {
-        const completedAuthView = this.authView;
-        this.closeAuthView(completedAuthView, true, false);
+      if (!url.startsWith(CHATGPT_ORIGIN)) {
+        this.setState({ status: "signed-out", message: "Sign in to ChatGPT", authenticated: false, url });
+        return this.snapshot();
+      }
+      const probe = (contents) => runBrowserPageScript(contents,`(async () => {
+        const expectedUrl = new URL(${JSON.stringify(TEMPORARY_CHAT_URL)});
+        const readSurface = () => {
+          const composer = ${visibleElementScript(COMPOSER_SELECTOR)};
+          const actualUrl = new URL(location.href);
+          return {
+            url: actualUrl.href,
+            composer: Boolean(composer),
+            temporary: actualUrl.origin === expectedUrl.origin
+              && actualUrl.pathname === expectedUrl.pathname
+              && actualUrl.searchParams.get("temporary-chat") === "true",
+            savedHome: actualUrl.origin === expectedUrl.origin
+              && actualUrl.pathname === "/"
+              && !actualUrl.searchParams.has("temporary-chat"),
+            readyState: document.readyState,
+          };
+        };
+        const initialSurface = readSurface();
+        const checkShown = (${isCloudflareCheckPage.toString()})(document, window);
+        const session = new URL(initialSurface.url).origin === expectedUrl.origin && !checkShown
+          ? await (${readChatGptAuthSession.toString()})(fetch.bind(globalThis), expectedUrl.origin, ${CHATGPT_AUTH_SESSION_TIMEOUT_MS})
+          : { sessionAuthenticated: false, sessionCheckError: checkShown ? ${JSON.stringify(CHATGPT_SECURITY_CHECK_MESSAGE)} : null };
+        return { ...readSurface(), ...session };
+      })()`).catch(() => ({
+        url: "",
+        composer: false,
+        temporary: false,
+        sessionAuthenticated: false,
+        readyState: "unknown",
+      }));
+      // Authentication belongs to the session, not to the new-chat composer. Saved conversations
+      // and settings pages can be signed in too; turn preparation checks its own surface separately.
+      let result = await probe(contents);
+      if (!ownsPage()) return staleResult();
+      if (!result.sessionAuthenticated
+        && this.authView
+        && !this.authView.webContents.isDestroyed()) {
+        const authResult = await probe(this.authView.webContents);
+        if (!ownsPage()) return staleResult();
+        if (authResult.sessionAuthenticated) {
+          const completedAuthView = this.authView;
+          this.closeAuthView(completedAuthView, true, false);
+          url = HOME_URL;
+          await contents.loadURL(HOME_URL);
+          if (!ownsPage()) return staleResult();
+          url = contents.getURL();
+          result = await probe(contents);
+        }
+      }
+      // A login ends on ChatGPT's home: a Temporary Chat (where ChatGPT also refuses the connector) is
+      // left for it, and the home is kept as it is, with no reload.
+      if (this.manualOperation === "ChatGPT login"
+        && result.sessionAuthenticated
+        && !isNewChatUrl(result.url ?? url, true)
+        && !this.view.webContents.isDestroyed()) {
+        url = HOME_URL;
         await contents.loadURL(HOME_URL);
-        if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
+        if (!ownsPage()) return staleResult();
         url = contents.getURL();
         result = await probe(contents);
       }
-    }
-    // A login ends on ChatGPT's home: a Temporary Chat (where ChatGPT also refuses the connector) is
-    // left for it, and the home is kept as it is, with no reload.
-    if (this.manualOperation === "ChatGPT login"
-      && result.sessionAuthenticated
-      && !isNewChatUrl(result.url ?? url, true)
-      && !this.view.webContents.isDestroyed()) {
-      await contents.loadURL(HOME_URL);
-      if (this.view?.webContents !== contents || this.partition !== partition || contents.isDestroyed()) return this.snapshot();
-      url = contents.getURL();
-      result = await probe(contents);
-    }
-    if (!ownsPage()) return this.snapshot();
-    if (result.sessionAuthenticated) {
-      if (this.authView && !this.authView.webContents.isDestroyed()) {
-        this.closeAuthView(this.authView, true, false);
+      if (!ownsPage()) return staleResult();
+      if (result.sessionAuthenticated) {
+        if (this.authView && !this.authView.webContents.isDestroyed()) {
+          this.closeAuthView(this.authView, true, false);
+        }
+        const wasAuthenticated = this.state.authenticated;
+        const availability = this.activeTraceId
+          ? { status: "running", message: "ChatGPT is working" }
+          : this.manualOperation
+            ? {}
+            : { status: "ready", message: "ChatGPT is ready" };
+        this.setState({ ...availability, authenticated: true, url: result.url });
+        if (!wasAuthenticated) this.logger.info("browser.authenticated", { url: result.url });
+      } else if (result.sessionCheckError) {
+        this.lastAuthenticatedAt = 0;
+        this.setState({ status: "error", message: result.sessionCheckError, authenticated: false, url: result.url || url });
+      } else {
+        const loaded = result.readyState === "complete";
+        this.setState({
+          status: loaded ? "signed-out" : "loading",
+          message: loaded ? "Sign in to ChatGPT" : "Waiting for ChatGPT",
+          authenticated: false,
+          url: result.url || url,
+        });
       }
-      const wasAuthenticated = this.state.authenticated;
-      const availability = this.activeTraceId
-        ? { status: "running", message: "ChatGPT is working" }
-        : this.manualOperation
-          ? {}
-          : { status: "ready", message: "ChatGPT is ready" };
-      this.setState({ ...availability, authenticated: true, url: result.url });
-      if (!wasAuthenticated) this.logger.info("browser.authenticated", { url: result.url });
-    } else if (this.state.authenticated && sessionInconclusive(result)) {
-      // ChatGPT asked for the session but got no answer (429, 5xx, a challenge page, a timeout): that
-      // says nothing about the sign-in. Read as signed out, the next answer was a fresh sign-in whose
-      // follow-ups (bridge connect, setup) reload the page: more requests, more 429s (2026-11-03).
-      this.logger.warn("browser.session_check_inconclusive", { status: result.sessionStatus });
-      this.setState({ url: result.url || url });
-    } else {
-      const loaded = result.readyState === "complete";
-      this.setState({
-        status: loaded ? "signed-out" : "loading",
-        message: loaded ? "Sign in to ChatGPT" : "Waiting for ChatGPT",
-        authenticated: false,
-        url: result.url || url,
-      });
-    }
-    return this.snapshot();
+      return this.snapshot();
+    });
+    const tracked = operation.finally(() => {
+      if (context.probe === tracked) { context.probe = null; context.probeContents = null; }
+    });
+    context.probe = tracked; context.probeContents = contents;
+    return tracked;
   }
 
-  async waitForAuthenticated(timeoutMs = 180_000) {
+  async waitForAuthenticated(timeoutMs = 180_000, switchToPasskey = () => false) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (switchToPasskey()) return null;
       if (this.authNavigationError) {
         const error = this.authNavigationError;
         this.authNavigationError = null;
@@ -4343,6 +4447,9 @@ class BrowserHost {
   }
 
   destroy() {
+    this.destroyed = true;
+    for (const [browserSession, listener] of this.authenticationCookieListeners ?? []) browserSession.cookies.off?.("changed", listener);
+    this.authenticationCookieListeners?.clear();
     try {
       const current = JSON.parse(fs.readFileSync(this.descriptorPath, "utf8"));
       if (current.pid === process.pid) fs.rmSync(this.descriptorPath, { force: true });
