@@ -93,6 +93,11 @@ test("the error toast says a runtime timeout in words and seconds", () => {
   );
   assert.equal(readableError("PowerShell timed out after 5000 ms"), "PowerShell timed out after 5000 ms", "only operation ids are rewritten");
   assert.equal(readableError("Network unreachable"), "Network unreachable");
+  const login = readableError("passkey-login timed out after 600000ms");
+  assert.match(login, /Chrome sign-in expired after 600 s/);
+  assert.match(login, /Open Browser and start sign-in again/);
+  assert.match(login, /close it, then choose Continue/);
+  assert.doesNotMatch(login, /Passkey login didn't finish/);
   assert.match(app, /<p title=\{message\}>\{readableError\(message\)\}<\/p>/, "the full message stays in the tooltip");
 });
 

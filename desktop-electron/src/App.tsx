@@ -18,6 +18,7 @@ import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { bindSidebarPeek } from "./sidebar-peek";
+import { ChromeLoginNotice, chromeLoginPending } from "./ChromeLoginNotice";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
@@ -509,6 +510,7 @@ function LauncherShell({
   const [biggerContextRecommendationBusy, setBiggerContextRecommendationBusy] = useState(false);
   const browserSlotRef = useCallback((node: HTMLDivElement | null) => setBrowserSlot(node), []);
   const sidebarRail = !compactSidebar && !sidebarOpen && !sidebarClosing;
+  const showChromeLoginNotice = surface !== "browser" && chromeLoginPending(operation, browser?.authenticated);
   // Native views (browser, ChatGPT, Register) are drawn above the page, so they step aside while
   // a sidebar is laid over them.
   const sidebarCovers = (compactSidebar && sidebarOpen) || (sidebarRail && sidebarExpanded);
@@ -977,7 +979,9 @@ function LauncherShell({
         </div>
       </motion.aside>
 
-      <section className="workspace">
+      <section className={`workspace${showChromeLoginNotice ? " has-chrome-login-notice" : ""}`}>
+        <ChromeLoginNotice open={showChromeLoginNotice} operation={operation} language={language}
+          continueLogin={() => api!.continuePasskeyLogin()} openBrowser={() => navigateSurface("browser")} setError={setError} />
         <NativeViewsCoveredContext.Provider value={sidebarCovers || biggerContextRecommendationOpen}>
         <div className="surface-transition">
             {keepAlive("browser", () => (
@@ -3683,6 +3687,7 @@ function readableError(message: string): string {
   const timeout = /^([a-z0-9]+(?:-[a-z0-9]+)+) timed out after (\d+) ?ms\b([\s\S]*)$/.exec(message);
   if (!timeout) return message;
   const [, operation, ms, rest] = timeout;
+  if (operation === "passkey-login") return `Chrome sign-in expired after ${Math.round(Number(ms) / 1000)} s. Open Browser and start sign-in again. Sign in in the dedicated Chrome window, close it, then choose Continue.${rest}`;
   const words = operation.split("-").map((word) => (word === "ao" ? "AO" : word === "cpa" ? "CPA" : word)).join(" ");
   return `${words[0].toUpperCase()}${words.slice(1)} didn't finish within ${Math.round(Number(ms) / 1000)} s${rest}`;
 }
