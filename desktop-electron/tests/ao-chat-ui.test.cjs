@@ -57,7 +57,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./chat-transc
   "./ChatReplyPlan": load("ChatReplyPlan.tsx"),
   "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }),
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
-  "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat }),
+  "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat, "./page-visibility": visibility, "./ChatMenu": menu, "./annotation-layout": load("annotation-layout.ts") }),
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.

@@ -79,21 +79,40 @@ test("preserving steer text still redacts credentials beyond the old 400-charact
 function mountAnnotations(component, props) {
   const states = [];
   let cursor = 0;
+  const effects = [];
+  const anchor = { getBoundingClientRect: () => ({ left: 100, right: 240, top: 400, bottom: 430, width: 140, height: 30 }),
+    closest: () => ({ getBoundingClientRect: () => ({ left: 80, right: 440, top: 0, bottom: 600 }) }), scrollHeight: 100 };
+  const layout = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/annotation-layout.ts"), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS },
+  }).outputText, { exports: layout, window: { innerWidth: 1000, innerHeight: 800 } });
   const react = {
     useState(initial) {
       const at = cursor++;
       if (!(at in states)) states[at] = typeof initial === "function" ? initial() : initial;
       return [states[at], (next) => { states[at] = typeof next === "function" ? next(states[at]) : next; }];
     },
-    useRef: (current) => ({ current }), useEffect() {},
+    useRef: (current) => ({ current: current === null ? anchor : current }), useEffect() {},
+    useLayoutEffect(effect) { effects.push(effect); },
   };
   const jsx = (type, props) => typeof type === "function" ? type(props) : { type, props };
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatAnnotations.tsx"), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText, { exports, window: { clearTimeout() {}, setTimeout: () => 0 },
-    require: (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {} });
-  return () => { cursor = 0; return exports[component](props); };
+  }).outputText, { exports, window: { clearTimeout() {}, setTimeout: () => 0, addEventListener() {}, removeEventListener() {} },
+    ResizeObserver: class { observe() {} disconnect() {} },
+    require: (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
+      : name === "./page-visibility" ? { useSurfaceHidden: () => () => false }
+      : name === "./annotation-layout" ? layout : name === "./ChatMenu" ? { FloatingLayer: ({ children }) => children } : {} });
+  return () => {
+    cursor = 0;
+    exports[component](props);
+    for (const effect of effects.splice(0)) effect();
+    cursor = 0;
+    const result = exports[component](props);
+    effects.length = 0;
+    return result;
+  };
 }
 const walk = (item) => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
 const text = (item) => item == null || typeof item === "boolean" ? "" : typeof item !== "object" ? String(item)

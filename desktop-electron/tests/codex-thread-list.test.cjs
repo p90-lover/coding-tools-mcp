@@ -617,7 +617,7 @@ test("Codex's compose icon and project ellipsis open their working actions", () 
   assert.ok(button("More options for Alpha") && button("More options for Beta"));
   const create = walk(list.render()).find((element) => element.props?.className === "cx-new-chat");
   assert.equal(walk(create).find((element) => element.type === "ChatGlyph").props.name, "compose");
-  create.props.onClick();
+  create.props.onClick({ shiftKey: false });
   const header = projectButton(list.render(), "Alpha");
   const folder = (name) => walk(projectButton(list.render(), name)).find((element) => element.type === "ChatGlyph")?.props.name;
   assert.equal(folder("Alpha"), "folderOpen", "the open project shows an open folder");
@@ -632,8 +632,11 @@ test("Codex's compose icon and project ellipsis open their working actions", () 
   menu.items.find((item) => item.label === "Edit").run();
   // Hovering a project shows Codex's compose button beside the ellipsis: a new chat in that project.
   assert.equal(walk(button("New chat in Alpha")).find((element) => element.type === "ChatGlyph").props.name, "compose");
-  button("New chat in Alpha").props.onClick();
-  assert.deepEqual(calls, [["newChat"], ["newChatIn", "b"], ["editProject", "a"], ["newChatIn", "a"]]);
+  button("New chat in Alpha").props.onClick({ shiftKey: false });
+  assert.deepEqual(calls, [["newChat", false], ["newChatIn", "b"], ["editProject", "a"], ["newChatIn", "a", false]]);
+  create.props.onClick({ shiftKey: true });
+  button("New chat in Beta").props.onClick({ shiftKey: true });
+  assert.deepEqual(calls.slice(-2), [["newChat", true], ["newChatIn", "b", true]], "Shift reaches the page owner from either compose button");
 });
 
 test("archived chats sit in their own section and can be restored", () => {

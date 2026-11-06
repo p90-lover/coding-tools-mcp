@@ -37,7 +37,7 @@ export function projectGitLabel(git: ThreadProjectGit | null | undefined): { tag
 /** Everything a thread list action does; each one is a real operation of the surface. */
 export type ThreadActions = {
   select: (taskId: string) => void;
-  newChat: () => void;
+  newChat: (newScreen?: boolean) => void;
   rename: (taskId: string, title: string) => Promise<void>;
   /** The task lifecycle: a one-time delayed start, archive, recoverable delete and restore. */
   lifecycle: (taskId: string, action: "schedule" | "cancel_schedule" | "archive" | "delete" | "restore") => void;
@@ -50,7 +50,7 @@ export type ThreadActions = {
   openSettings?: () => void;
   openFolder?: (workspace: ThreadWorkspace) => void;
   /** A new chat in that project (the project row's pencil, as in Codex). */
-  newChatIn: (workspaceId: string) => void;
+  newChatIn: (workspaceId: string, newScreen?: boolean) => void;
   /** Opens the Edit project dialog (name and source folders). */
   editProject: (workspaceId: string) => void;
   /** Asks to remove the project from this app's list; its files are never deleted. */
@@ -920,7 +920,7 @@ export function ChatThreadList(props: ThreadListProps) {
   return (
     <aside className="cx-threads" aria-label="Projects and chats" onDragOver={listDragOver} onDrop={listDrop}>
       {/* The Codex sidebar uses the compose glyph for New chat. */}
-      <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={actions.newChat} title="New chat (Ctrl+N)">
+      <button type="button" className="cx-new-chat" aria-pressed={!selectedTaskId} onClick={(event) => actions.newChat(event.shiftKey)} title="New chat (Ctrl+N); Shift+click to open in split view or the next page">
         <span className="cx-new-circle" aria-hidden="true"><ChatGlyph name="compose" size={16} /></span>New chat
       </button>
       <nav className="cx-thread-scroll">
@@ -982,7 +982,7 @@ export function ChatThreadList(props: ThreadListProps) {
                       beside them, as Codex's compose button, so a project's chat is one click away. */}
                   <span className="cx-project-hover">
                     <button type="button" aria-label={`New chat in ${item.name}`} title={`New chat in ${item.name}`}
-                      onClick={() => { setProjectCard(null); actions.newChatIn(item.id); }}>
+                      onClick={(event) => { setProjectCard(null); actions.newChatIn(item.id, event.shiftKey); }}>
                       <ChatGlyph name="compose" size={16} /></button>
                     <button type="button" aria-label={`More options for ${item.name}`} title={`More options for ${item.name}`}
                       onClick={(event) => openMenu(event, projectMenu(item), item.name)}>
@@ -1107,7 +1107,7 @@ export function ChatThreadList(props: ThreadListProps) {
           })()}
           {item.path ? <span className="cx-project-card-line is-path"><ChatGlyph name="folder" size={13} />{item.path}</span> : null}
           <hr />
-          <button type="button" className="cx-project-card-action" onClick={() => { setProjectCard(null); actions.newChatIn(item.id); }}>
+          <button type="button" className="cx-project-card-action" onClick={(event) => { setProjectCard(null); actions.newChatIn(item.id, event.shiftKey); }}>
             <ChatGlyph name="compose" size={13} />New chat</button>
           <button type="button" className="cx-project-card-action" onClick={() => { setProjectCard(null); actions.editProject(item.id); }}>
             <ChatGlyph name="settings" size={13} />Edit project</button>

@@ -9,7 +9,7 @@ import { AgentOrchestratorChat, syncChatQueues, type ChatQueueActions } from "./
 import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
-  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, normalizeSplit, paneOrder, readSplit, relocatePane, spatialNeighbour, splitColumns, splitHasRoom,
+  SPLIT_ROW, SPLIT_STORE, belowPlace, defaultPlace, focusOrder, movePane, newChatPlace, normalizeSplit, paneOrder, readSplit, relocatePane, spatialNeighbour, splitColumns, splitHasRoom,
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
@@ -549,7 +549,7 @@ export type SplitPaneLink = {
   workspaceId: string;
   taskId: string;
   onChat: (workspaceId: string, taskId: string) => void;
-  onNewChat: (workspaceId: string) => void;
+  onNewChat: (workspaceId: string, newScreen?: boolean) => void;
   onClose: () => void;
 };
 
@@ -2006,7 +2006,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       { workspaceId, taskId: chatTaskId ?? "", paneId: "main" },
       ...splitPanes.map((item) => ({ workspaceId: item.workspaceId, taskId: item.taskId, paneId: item.id })),
     ], (id) => { setFocusedPane(id); setView("chat"); setSettingsOpen(false); }, {
-      room: (maxColumns) => splitHasRoom(splitPanes, maxColumns, chatTaskId ?? ""),
+      room: (maxColumns, id, newScreen) => newScreen
+        ? newChatPlace(splitPanes, maxColumns, { workspaceId, taskId: chatTaskId ?? "" }, id) !== null
+        : splitHasRoom(splitPanes, maxColumns, chatTaskId ?? ""),
       wake: () => setPageOpenAsked((count) => count + 1),
     });
   }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, splitPanes]);
@@ -2227,8 +2229,24 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
    * window, so each New chat added one more screen (2026-10-31: the user asked for it to open where
    * they were). Ctrl+Alt+\ / Ctrl+Alt+- and dragging a chat still open more panes.
    */
-  const openNewChat = (id = workspaceId) => {
-    if (pane) { pane.onNewChat(id); return; }
+  const openNewChat = (id = workspaceId, newScreen = false) => {
+    if (pane) { pane.onNewChat(id, newScreen); return; }
+    if (newScreen) {
+      const place = newChatPlace(splitPanes, splitMaxCols, { workspaceId, taskId: chatTaskId ?? "" }, id);
+      if (!place) {
+        if (!pageRegistry?.openElsewhere(pageNumber, { workspaceId: id, taskId: "", maxColumns: splitMaxCols, newScreen: true })) {
+          setError("No free chat screen. Close a pane or add room on another page, then try again.");
+        }
+        return;
+      }
+      setView("chat"); setSheet(""); setSettingsOpen(false);
+      if ("paneId" in place) {
+        // Focus, do not reset: the unsent composer may already hold text, files or annotations.
+        setFocusedPane(place.paneId);
+        if (place.paneId === "main") { focusComposer.current = true; setComposerFocusAsked((count) => count + 1); }
+      } else openInSplit(id, "", place);
+      return;
+    }
     // A full page (its ten screens all chats): the new chat starts on another page, not in one's place.
     if (!splitHasRoom(splitPanes, splitMaxCols, chatTaskId ?? "")
       && pageRegistry?.openElsewhere(pageNumber, { workspaceId: id, taskId: "", maxColumns: splitMaxCols })) return;
@@ -2242,6 +2260,19 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
    * too, it goes on to the next page; with nowhere left it takes the last chat's place, as before.
    */
   const openFromPage = (open: PageOpen) => {
+    if (open.newScreen) {
+      const place = newChatPlace(splitPanes, open.maxColumns, { workspaceId, taskId: chatTaskId ?? "" }, open.workspaceId);
+      if (!place) {
+        if (!pageRegistry?.openElsewhere(pageNumber, open)) setError("No free chat screen. Existing chats and drafts were kept.");
+        return;
+      }
+      setView("chat"); setSheet(""); setSettingsOpen(false);
+      focusComposer.current = true;
+      setComposerFocusAsked((count) => count + 1);
+      if ("paneId" in place) setFocusedPane(place.paneId);
+      else openInSplit(open.workspaceId, "", place);
+      return;
+    }
     if (!splitHasRoom(splitPanes, open.maxColumns, chatTaskId ?? "") && pageRegistry?.openElsewhere(pageNumber, open)) return;
     setView("chat"); setSheet(""); setSettingsOpen(false);
     focusComposer.current = true;
@@ -2796,7 +2827,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     chooseWorkspace, restoreArchived, setArchiveDays, togglePin, markUnread, toggleProjectPin, readProjectGit,
     projectRemote: (folder: string) => window.codexWebLauncher?.projectRemote?.(folder) ?? Promise.resolve(null),
   });
-  const listActions = useStableCalls<ThreadActions>({ select: (taskId) => showChat(workspaceId, taskId), newChat: () => openNewChat(), rename: renameChat,
+  const listActions = useStableCalls<ThreadActions>({ select: (taskId) => showChat(workspaceId, taskId), newChat: (newScreen) => openNewChat(workspaceId, newScreen), rename: renameChat,
     lifecycle: missionAction, archiveAll: archiveAllChats,
     fork: (taskId, from) => forkChat(taskId, from === "first" ? "first" : undefined), copy: copyChat,
     openStructure: (taskId) => selectChat(taskId, "overview"), openBoard: () => { setSheet(""); setView("board"); }, openFolder,
@@ -2804,7 +2835,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     continueIn: continueInProject, share: shareChat, openWindow: openChatWindow,
     openSplit: (id, taskId) => openInSplit(id || workspaceId, taskId),
     // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
-    newChatIn: (id) => openNewChat(id),
+    newChatIn: (id, newScreen) => openNewChat(id, newScreen),
     editProject: (id) => setProjectEdit({ id, step: "edit" }),
     removeProject: (id) => setProjectEdit({ id, step: "remove" }),
     selectIn: (id, taskId) => showChat(id, taskId),
@@ -2980,7 +3011,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
           panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError} pageNumber={pageNumber}
-            pane={{ id: item.id, workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id) => newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
+            pane={{ id: item.id, workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id, newScreen) => newScreen ? openNewChat(id, true) : newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
           !workspaceId && workspaceReady

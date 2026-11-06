@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import type { ChatAnnotation } from "./ao-chat";
+import { FloatingLayer } from "./ChatMenu";
+import { annotationBounds, annotationPosition } from "./annotation-layout";
+import { useSurfaceHidden } from "./page-visibility";
 
 // Annotations, as Codex has them: select words in an answer and an "Add to chat" bar pops up over
 // them; adding one marks the words with a number and opens a small box for an optional comment.
@@ -94,6 +96,7 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
   onAdd: (text: string, anchor?: DraftAnnotation["anchor"]) => number;
   onComment: (id: number, comment: string) => void;
 }) {
+  const hidden = useSurfaceHidden()();
   const [offer, setOffer] = useState<{ text: string; range: Range; anchor?: DraftAnnotation["anchor"] } | null>(null);
   const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
   // Bumped when anything moves (a scroll, a resize, the transcript growing): positions are read again.
@@ -153,29 +156,35 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
   }, [annotations]);
   useEffect(() => {
     const area = root.current;
-    if (!area || (!annotations.length && !offer && !editing)) return undefined;
+    if (hidden || !area || (!annotations.length && !offer && !editing)) return undefined;
     let frame = 0;
     const relayout = () => { if (!frame) frame = window.requestAnimationFrame(() => { frame = 0; setLayout((value) => value + 1); }); };
     window.addEventListener("scroll", relayout, true);
     window.addEventListener("resize", relayout);
     const observer = new MutationObserver(relayout);
     observer.observe(area, { childList: true, subtree: true, characterData: true });
+    const resize = new ResizeObserver(relayout);
+    resize.observe(area.closest(".cx-pane") ?? area);
     return () => {
       window.removeEventListener("scroll", relayout, true);
       window.removeEventListener("resize", relayout);
       observer.disconnect();
+      resize.disconnect();
       if (frame) window.cancelAnimationFrame(frame);
     };
-  }, [root, annotations.length, Boolean(offer), Boolean(editing)]);
+  }, [root, annotations.length, Boolean(offer), Boolean(editing), hidden]);
   useEffect(() => () => { LIVE_RANGES.delete(highlightOwner.current); paintHighlights(); }, []);
 
   const area = root.current;
   // Nothing to place, nothing read: the chat renders on every poll, each just after it changed the
   // transcript, so a bounds read here laid out the whole window each time (82k elements across five
   // panes: 7.4 s of the renderer's 10 s, with not one annotation).
-  if (!area || (!annotations.length && !offer && !editing)) return null;
+  if (hidden || !area || (!annotations.length && !offer && !editing)) return null;
   const bounds = area.getBoundingClientRect();
-  const visible = (rect: DOMRect) => rect.bottom > bounds.top && rect.top < bounds.bottom && (rect.width > 0 || rect.height > 0);
+  const paneBounds = annotationBounds(area);
+  const visible = (rect: DOMRect) => rect.bottom > bounds.top && rect.top < bounds.bottom
+    && rect.right > Math.max(bounds.left, paneBounds.left) && rect.left < Math.min(bounds.right, paneBounds.right)
+    && bounds.width > 0 && bounds.height > 0 && (rect.width > 0 || rect.height > 0);
 
   const add = () => {
     if (!offer) return;
@@ -197,27 +206,27 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
     if (!range) return [];
     const rects = range.getClientRects();
     const last = rects[rects.length - 1];
-    return last && visible(last) ? [{ id: item.id, number: index + 1, x: last.right, y: last.top + last.height / 2 }] : [];
+    return last && visible(last) ? [{ id: item.id, number: index + 1, x: Math.min(last.right, paneBounds.right - 28), y: Math.max(paneBounds.top + 16, Math.min(last.top + last.height / 2, paneBounds.bottom - 16)) }] : [];
   });
   const offerRect = offer?.range.getBoundingClientRect();
   const editItem = editing ? annotations.find((item) => item.id === editing.id) : undefined;
   const editRange = editItem ? rangeFor(area, editItem) : null;
   const editRect = editRange ? editRange.getBoundingClientRect() : undefined;
-  const host = area.closest(".ao-workflow") ?? document.body;
-  const clampX = (x: number, width: number) => Math.max(8, Math.min(window.innerWidth - width - 8, x));
+  const offerPosition = offerRect ? annotationPosition(offerRect, paneBounds, 100, 30) : undefined;
+  const editPosition = annotationPosition(editRect ?? bounds, paneBounds, 294, 36, true);
 
-  return createPortal(<>
+  return <FloatingLayer className="cx-annotation-overlay" style={{}}>
     {marks.map((mark) => <span key={mark.id} className="cx-annotation-mark cx-annotation-ui" aria-hidden="true"
       style={{ left: mark.x, top: mark.y }}>{mark.number}</span>)}
     {offer && offerRect && visible(offerRect) ? <div className="cx-selection-bar cx-annotation-ui" role="toolbar" aria-label="Selected text"
       // Above the words, or below them when they sit at the top of the transcript (30px bar, 8px gap).
-      style={{ left: clampX(offerRect.left + offerRect.width / 2 - 50, 100), top: offerRect.top > bounds.top + 44 ? offerRect.top - 38 : offerRect.bottom + 8 }}
+      style={offerPosition}
       // Pressing on the bar must not clear the selection it acts on.
       onMouseDown={(event) => event.preventDefault()}>
       <button type="button" onClick={add}>Add to chat</button>
     </div> : null}
-    {editing ? <form className="cx-annotation-editor cx-annotation-ui"
-      style={{ left: clampX((editRect?.left ?? bounds.left + 24), 294), top: Math.min(window.innerHeight - 56, (editRect?.bottom ?? bounds.bottom - 60) + 6) }}
+    {editing && bounds.width > 0 && bounds.height > 0 ? <form className="cx-annotation-editor cx-annotation-ui"
+      style={editPosition}
       // React events cross portals: an Enter here must not also submit the chat box it sits under.
       onSubmit={(event) => { event.preventDefault(); event.stopPropagation(); save(); }}>
       <input autoFocus aria-label="Note" placeholder="Add an optional comment…" value={editing.draft} maxLength={2000}
@@ -228,7 +237,7 @@ export function SelectionAnnotator({ root, annotations, onAdd, onComment }: {
         <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 10V2M2.5 5.5L6 2l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
       </button>
     </form> : null}
-  </>, host);
+  </FloatingLayer>;
 }
 
 const plural = (count: number) => `${count} annotation${count === 1 ? "" : "s"}`;
@@ -241,22 +250,52 @@ function AnnotationAttachment({ annotations, onComment, onRemove, onClear, sent 
   onClear?: () => void;
   sent?: boolean;
 }) {
+  const hidden = useSurfaceHidden()();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
   const closer = useRef<number | undefined>(undefined);
+  const tray = useRef<HTMLDivElement>(null);
+  const list = useRef<HTMLOListElement>(null);
+  const [position, setPosition] = useState<ReturnType<typeof annotationPosition> | null>(null);
   useEffect(() => () => window.clearTimeout(closer.current), []);
-  if (!annotations.length) return null;
+  useLayoutEffect(() => {
+    const anchor = tray.current;
+    if (hidden || !open || !annotations.length || !anchor) return;
+    let frame = 0;
+    const place = () => {
+      const rect = anchor.getBoundingClientRect(), bounds = annotationBounds(anchor);
+      if (!rect.width || !rect.height || rect.bottom <= bounds.top || rect.top >= bounds.bottom
+        || rect.right <= bounds.left || rect.left >= bounds.right) { setPosition(null); return; }
+      const next = annotationPosition(rect, bounds, 384, Math.min(320, (list.current?.scrollHeight ?? 318) + 2));
+      setPosition((old) => old && Object.keys(next).every((key) => old[key as keyof typeof old] === next[key as keyof typeof next]) ? old : next);
+    };
+    const relayout = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; place(); }); };
+    place();
+    const observer = new ResizeObserver(relayout);
+    observer.observe(anchor.closest(".cx-pane") ?? anchor);
+    if (list.current) observer.observe(list.current);
+    window.addEventListener("resize", relayout);
+    window.addEventListener("scroll", relayout, true);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", relayout);
+      window.removeEventListener("scroll", relayout, true);
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [open, annotations, Boolean(editing), Boolean(position), hidden]);
+  if (hidden || !annotations.length) return null;
   const show = () => { window.clearTimeout(closer.current); setOpen(true); };
   const hide = () => { closer.current = window.setTimeout(() => { if (!editing) setOpen(false); }, 100); };
   const finish = () => {
     if (editing && annotations.some((item) => item.id === editing.id)) onComment?.(editing.id, editing.draft.trim());
     setEditing(null);
   };
-  return <div className={`cx-annotation-tray cx-annotation-ui${sent ? " cx-sent-annotations" : ""}`}
+  return <div ref={tray} className={`cx-annotation-tray cx-annotation-ui${sent ? " cx-sent-annotations" : ""}`}
     onMouseEnter={show} onMouseLeave={hide} onFocus={show}
-    onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) hide(); }}
+    onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget) && !list.current?.contains(event.relatedTarget)) hide(); }}
     onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setOpen(false); setEditing(null); } }}>
-    {open ? <ol className="cx-annotation-list" aria-label="Annotations">
+    {open && position ? <FloatingLayer className="cx-annotation-popover cx-annotation-ui" style={position} onMouseEnter={show} onMouseLeave={hide}>
+      <ol ref={list} className="cx-annotation-list" aria-label="Annotations" style={{ maxHeight: position.maxHeight }}>
       {annotations.map((item, index) => <li key={item.id ?? index}>
         <span className="cx-annotation-number">{index + 1}.</span>
         <div className="cx-annotation-body">
@@ -279,7 +318,7 @@ function AnnotationAttachment({ annotations, onComment, onRemove, onClear, sent 
           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.7 8.5h5.6l.7-8.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button> : null}
       </li>)}
-    </ol> : null}
+    </ol></FloatingLayer> : null}
     <span className="cx-annotation-chip">
       <button type="button" aria-expanded={open} onClick={show}>
         <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3h10v7H7l-3 3v-3H3z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
