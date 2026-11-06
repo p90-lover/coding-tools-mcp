@@ -6,7 +6,9 @@ function logos() {
   const exports = {}, jsx = (type, props) => ({ type, props });
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(root, "HarnessLogo.tsx"), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-  }).outputText, { exports, require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : { default: name } });
+    // An asset import is an ES module: TypeScript 6 turns esModuleInterop on, and __importDefault
+    // wrapped a plain { default } again, so `src` arrived as an object (CI on #1076).
+  }).outputText, { exports, require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : { __esModule: true, default: name } });
   return exports;
 }
 const harnesses = {
