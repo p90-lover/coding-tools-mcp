@@ -3219,20 +3219,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   /**
    * The models a request is reviewed with, first that answers wins. "Approve for me" uses Codex's
-   * own auto-review model (free on a ChatGPT account through CPA) rather than the worker reviewing
-   * its own request; a team's Command approver card keeps the model it was given. Either falls back
-   * to the next while CPA cannot serve one (e.g. its Codex sign-in has expired).
+   * own auto-review model only: CPA Auto Review serves it on the account the person selected and
+   * then on their own fallback chain (Plugins > Codex Auto Review). A team's Command approver card
+   * tries the model it was given, then the auto-review model. Nothing else ever reviews: when none
+   * answers, the person decides.
    */
   function reviewerModels(approver, catalog, hidden = []) {
     const route = approver.route ?? {};
     const own = route.provider_id === "cliproxyapi-antigravity" ? route.model
       : typeof route.model === "string" && route.model.startsWith(CPA_MODEL_PREFIX) ? route.model.slice(CPA_MODEL_PREFIX.length) : null;
     const card = approver.role === "approver";
-    // A fallback never spends the person's Codex quota: 375 of 1,453 reviews in two days (seen live)
-    // fell back to the chat's own gpt-6.1-sol when codex-auto-review timed out. Only a team's Command
-    // approver card keeps a Codex model it was explicitly given.
-    const fallback = catalog.find(model => model !== AUTO_REVIEW_MODEL && !codexQuotaModel(model));
-    const order = card ? [own, AUTO_REVIEW_MODEL, fallback] : [AUTO_REVIEW_MODEL, own, fallback];
+    // No fallback of the app's own after the plugin's chain. Seen live 2026-11-04: with
+    // codex-auto-review failing, 5,493 reviews in one day went to the chats' own models
+    // (opencode-go/gpt-6-luna, deepseek-v4.1-flash) until OpenCode Go's quota was gone (6,074
+    // 429s), and the "first non-Codex model" fallback was Claude Fable 5.1, billed to an API key.
+    // Earlier, 375 of 1,453 reviews fell back to the chat's own gpt-6.1-sol on the Codex quota.
+    const order = card ? [own, AUTO_REVIEW_MODEL] : [AUTO_REVIEW_MODEL];
     // The review model is one CPA hides from menus (see readCpaCatalog), so it counts when listed hidden.
     return [...new Set(order.filter(model => model && (catalog.includes(model) || (model === AUTO_REVIEW_MODEL && hidden.includes(model)))
       && !(codexQuotaModel(model) && !(card && model === own))))];
@@ -3446,7 +3448,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
     // timeout left only the card's own model for ten minutes.
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
-    if (!candidates.length) throw new Error("CPA has no model for the command approver");
+    if (!candidates.length) throw new Error(`CPA does not serve ${AUTO_REVIEW_MODEL}: sign in to a Codex account in CPA and choose it in Plugins > Codex Auto Review`);
     // This call bypasses the agent gateway: a same-model fallback still needs the card's effort.
     // A different reviewer (notably codex-auto-review) keeps its own default, not the worker's max.
     const route = approver.route ?? {};
