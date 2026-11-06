@@ -238,6 +238,10 @@ code {
   background: rgb(0 0 0 / 32%);
 }
 
+.sidebar-backdrop.is-peek-dismiss {
+  background: transparent;
+}
+
 .app-sidebar {
   position: relative;
   z-index: 1;
@@ -282,6 +286,10 @@ code {
   transition:
     width 240ms cubic-bezier(0.22, 1, 0.36, 1),
     box-shadow 200ms ease-out;
+}
+
+.app-shell.is-sidebar-rail .app-sidebar.is-expanded {
+  z-index: 40;
 }
 
 .app-shell.is-sidebar-rail .app-sidebar.is-expanded .sidebar-clip {
