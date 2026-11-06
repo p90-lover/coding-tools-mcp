@@ -1,10 +1,24 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
-const { BrowserHost } = require("../electron/browser-host.cjs");
+const { BrowserHost, IDLE_BROWSER_URL } = require("../electron/browser-host.cjs");
 
 const HOME = "https://chatgpt.com/";
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+for (const valid of [true, false]) test(`an idle account checks its current session instead of reusing history (valid=${valid})`, async () => {
+  const { host, contents, browserSession } = fixture();
+  host.state.authenticated = !valid;
+  contents.getURL = () => IDLE_BROWSER_URL;
+  contents.executeJavaScript = () => assert.fail("the idle document cannot prove a ChatGPT session");
+  let requests = 0;
+  browserSession.fetch = async url => {
+    assert.equal(url, HOME + "api/auth/session"); requests++;
+    return new Response(JSON.stringify(valid ? { user: { id: "fixture-current-user" } } : {}), { headers: { "content-type": "application/json" } });
+  };
+  assert.equal((await host.probeAuthentication()).authenticated, valid);
+  assert.equal(requests, 1);
+});
 const surface = authenticated => ({ url: HOME, composer: true, savedHome: true, temporary: false, readyState: "complete", sessionAuthenticated: authenticated, sessionAnswered: true, sessionStatus: 200, sessionCheckError: null });
 function session() { return { resolveProxy: async () => "DIRECT", cookies: new EventEmitter(), webRequest: { onCompleted() {} } }; }
 function fixture(browserSession = session()) {

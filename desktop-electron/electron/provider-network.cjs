@@ -9,6 +9,7 @@ const {
   startCpaAccountLogin,
 } = require("./cpa-oauth-adapter.cjs");
 const { fetchDecodoEndpoints, normalizeDecodoSettings } = require("./decodo-proxies.cjs");
+const { createChromeLoginProxy } = require("./chrome-login-proxy.cjs");
 
 const STORE_VERSION = 1;
 const ACCOUNT_AUTH = new Set(["oauth", "api_key", "browser_session", "local_proxy"]);
@@ -1100,6 +1101,29 @@ function createProviderNetworkController({
     return profile?.id ?? null;
   }
 
+  async function withBrowserLoginProxy(partition, route, action) {
+    if (route?.proxyRules === "DIRECT") return action(route);
+    const snapshot = store.snapshot();
+    const profile = boundBrowserProxy(partition)
+      ?? (snapshot.routing.globalEnabled ? store.activeProxy(snapshot.routing.globalProfileId) : null);
+    const match = /^(PROXY|HTTPS|SOCKS5|SOCKS) ([^\s;]+)$/.exec(route?.proxyRules || "");
+    const protocols = { PROXY: "http", HTTPS: "https", SOCKS5: "socks5", SOCKS: "socks4" };
+    let resolved;
+    try { if (match) resolved = new URL(`${protocols[match[1]]}://${match[2]}`); } catch {}
+    const bare = value => String(value).replace(/^\[|\]$/g, "").toLowerCase();
+    if (!profile || !resolved || resolved.protocol !== profile.endpoint.protocol + ":"
+      || bare(resolved.hostname) !== bare(profile.endpoint.host)
+      || Number(resolved.port || (resolved.protocol === "https:" ? 443 : 80)) !== profile.endpoint.port) {
+      throw new Error("The Chrome login route does not match this account's configured proxy");
+    }
+    const credentials = store.proxySecret(profile.id);
+    if (!credentials?.username && !credentials?.password) return action(route);
+    const relay = await createChromeLoginProxy({ endpoint: profile.endpoint, credentials,
+      onAuthenticated: () => logger.info("browser.chrome_proxy_authenticated", { status: 200 }) });
+    try { return await action({ proxyRules: relay.proxyRules }); }
+    finally { await relay.close(); }
+  }
+
   /** Decodo's sticky proxies become proxy profiles; a later sync updates them in place. */
   async function syncDecodo() {
     const settings = store.decodoSettings();
@@ -1662,6 +1686,7 @@ function createProviderNetworkController({
     applyGlobalEnvironment,
     applyGlobalRouting,
     routeBrowserPartition,
+    withBrowserLoginProxy,
     syncDecodo,
     setEnvironmentRoute,
     openProviderLogin,

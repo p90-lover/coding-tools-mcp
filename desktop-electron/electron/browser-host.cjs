@@ -4094,9 +4094,14 @@ class BrowserHost {
     const operation = Promise.resolve().then(async () => {
       if (!ownsPage()) return staleResult();
       if (url === IDLE_BROWSER_URL) {
+        const result = await readChatGptAuthSession(contents.session?.fetch?.bind(contents.session), CHATGPT_ORIGIN, CHATGPT_AUTH_SESSION_TIMEOUT_MS);
+        if (!ownsPage()) return staleResult();
         this.setState({
-          status: this.state.authenticated ? "ready" : "signed-out",
-          message: this.state.authenticated ? "No active task" : "Sign in to ChatGPT",
+          authenticated: result.sessionAuthenticated,
+          ...(this.activeTraceId || this.manualOperation ? {} : {
+            status: result.sessionCheckError ? "error" : result.sessionAuthenticated ? "ready" : "signed-out",
+            message: result.sessionCheckError || (result.sessionAuthenticated ? "No active task" : "Sign in to ChatGPT"),
+          }),
           url,
         });
         return this.snapshot();

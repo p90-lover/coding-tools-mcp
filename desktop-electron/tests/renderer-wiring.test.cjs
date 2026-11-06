@@ -647,7 +647,7 @@ test("Windows and macOS Chrome sign-in uses the owned account route and existing
   assert.match(preloadSource, /openPasskeyLogin:[\s\S]*?launcher:browser-passkey-login/);
   assert.match(preloadSource, /continuePasskeyLogin:[\s\S]*?launcher:browser-passkey-login-continue/);
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
-  assert.match(electronMain, /loginWithPasskey: \(_partition, route\) => runtimeHost\.capturePasskeyLogin\(route\)/);
+  assert.match(electronMain, /loginWithPasskey: async \(partition, route\) =>[\s\S]*?withBrowserLoginProxy\([\s\S]*?runtimeHost\.capturePasskeyLogin\(loginRoute\)/);
   assert.match(browserHostSource, /\["chatgpt\.com", \.\.\.AUTH_PROVIDER_HOSTS\][\s\S]*?contents\.session\.resolveProxy/);
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000\)[\s\S]*?runSessionInspection\(false\)/);
 });
