@@ -80,7 +80,6 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   chatGptLocalPreview: () => ipcRenderer.invoke("launcher:chatgpt-desktop-local-preview"),
   sendChatGptLocalMessage: (text) => ipcRenderer.invoke("launcher:chatgpt-desktop-local-send", { text: String(text ?? "") }),
   registerStatus: () => ipcRenderer.invoke("launcher:register-status"),
-  configureRegister: (projectRoot) => ipcRenderer.invoke("launcher:register-configure", projectRoot),
   startRegister: () => ipcRenderer.invoke("launcher:register-start"),
   stopRegister: () => ipcRenderer.invoke("launcher:register-stop"),
   reloadRegister: () => ipcRenderer.invoke("launcher:register-reload"),

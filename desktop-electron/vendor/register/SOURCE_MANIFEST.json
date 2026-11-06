@@ -1,0 +1,1340 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/lxf746/any-auto-register",
+    "commit": "ba1004241f4be7b0bb11b705b7c88a684e42b3db",
+    "snapshot": "Current local source including uncommitted application fixes, captured 2026-10-23",
+    "license": "AGPL-3.0",
+    "excluded": [
+      ".git",
+      ".env",
+      "databases",
+      "data",
+      "exports",
+      "runtime",
+      "profiles",
+      "diagnostics",
+      "caches",
+      ".venv",
+      "node_modules",
+      "reg-factory",
+      "aiTemp",
+      "Trash"
+    ]
+  },
+  "files": [
+    {
+      "path": "api/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "api/account_checks.py",
+      "upstreamSha256": "2b078940329edba9ef0f8fdc3357962465b0b1e567fbd920d88012ccb4eb0c50",
+      "sha256": "2b078940329edba9ef0f8fdc3357962465b0b1e567fbd920d88012ccb4eb0c50"
+    },
+    {
+      "path": "api/accounts.py",
+      "upstreamSha256": "391f8b15fd3c75cd92cb400e6c7b429efcecbc822b826ee282cca38c0bb31512",
+      "sha256": "391f8b15fd3c75cd92cb400e6c7b429efcecbc822b826ee282cca38c0bb31512"
+    },
+    {
+      "path": "api/actions.py",
+      "upstreamSha256": "23d7e38864eb4327575a858d9c75fd641738617845d8b8e6516713c9af55ee37",
+      "sha256": "23d7e38864eb4327575a858d9c75fd641738617845d8b8e6516713c9af55ee37"
+    },
+    {
+      "path": "api/auth.py",
+      "upstreamSha256": "4cbda2d7562af63a44849aee3747380466a3693c3178657cb00e2119e26c10e3",
+      "sha256": "4cbda2d7562af63a44849aee3747380466a3693c3178657cb00e2119e26c10e3"
+    },
+    {
+      "path": "api/authenticator.py",
+      "upstreamSha256": "5a1e7952cda6bcced48db5e353f5f593a39d5d1c4a61fab3febd155e4bf76f21",
+      "sha256": "5a1e7952cda6bcced48db5e353f5f593a39d5d1c4a61fab3febd155e4bf76f21"
+    },
+    {
+      "path": "api/coding_tools.py",
+      "upstreamSha256": null,
+      "sha256": "c08958ec2f6df755575fe68f1997ce53162cfaa942eaa6c1256861d58ac5d132"
+    },
+    {
+      "path": "api/config.py",
+      "upstreamSha256": "10326ca281a2578417975f0044264f0902c8abc9e1e213205635461e0fbff6bb",
+      "sha256": "10326ca281a2578417975f0044264f0902c8abc9e1e213205635461e0fbff6bb"
+    },
+    {
+      "path": "api/health.py",
+      "upstreamSha256": "4e12b7f6d8caf07db92c0c7f3566c873de379ca5711dd6158140b79083686b2f",
+      "sha256": "0488fc27d029ffbd88b6549968fc3e1b2c4124043d26975a904eb9d2f60112b9"
+    },
+    {
+      "path": "api/lifecycle.py",
+      "upstreamSha256": "6c8f004ec646af4590c0934a7130fe4e68e79a724c7c4d105204697ea2a84990",
+      "sha256": "6c8f004ec646af4590c0934a7130fe4e68e79a724c7c4d105204697ea2a84990"
+    },
+    {
+      "path": "api/platform_capabilities.py",
+      "upstreamSha256": "fd792eb26a89ae14943d815f992fbe778e1106a28c031300753e93ececf9b3f7",
+      "sha256": "fd792eb26a89ae14943d815f992fbe778e1106a28c031300753e93ececf9b3f7"
+    },
+    {
+      "path": "api/platforms.py",
+      "upstreamSha256": "d698d76490e34dd483956aee8a3f18a82f2d8cc52b4b146aee38bd15bced2ec1",
+      "sha256": "d698d76490e34dd483956aee8a3f18a82f2d8cc52b4b146aee38bd15bced2ec1"
+    },
+    {
+      "path": "api/provider_definitions.py",
+      "upstreamSha256": "c9652c9d911e481aa6f16f2da85a13ca164e23443595bffc9f1942ec49c20c7d",
+      "sha256": "c9652c9d911e481aa6f16f2da85a13ca164e23443595bffc9f1942ec49c20c7d"
+    },
+    {
+      "path": "api/provider_settings.py",
+      "upstreamSha256": "2f1ceb2420efa936d8476dd5209f38eee0116247f4a8120391e0f4a3061652e3",
+      "sha256": "2f1ceb2420efa936d8476dd5209f38eee0116247f4a8120391e0f4a3061652e3"
+    },
+    {
+      "path": "api/proxies.py",
+      "upstreamSha256": "cad0786ee1ee0a1ea09bc79cc496d5f0a4bd6d94700bb919f26d5b45f5f5d9d1",
+      "sha256": "cad0786ee1ee0a1ea09bc79cc496d5f0a4bd6d94700bb919f26d5b45f5f5d9d1"
+    },
+    {
+      "path": "api/sms.py",
+      "upstreamSha256": "95ec82d6a393caa06662142a16b04152d0b1b815b512e0191ee586bd5efcfeed",
+      "sha256": "95ec82d6a393caa06662142a16b04152d0b1b815b512e0191ee586bd5efcfeed"
+    },
+    {
+      "path": "api/stats.py",
+      "upstreamSha256": "b8106f43a26c35a51ec1697d6acfc7bcebc122649d957d67bb2e7926efd30cbd",
+      "sha256": "b8106f43a26c35a51ec1697d6acfc7bcebc122649d957d67bb2e7926efd30cbd"
+    },
+    {
+      "path": "api/system.py",
+      "upstreamSha256": "37e33e2f78811a1036d139c5e6f3546325b137685da9dc7e3d1b7e809fc56a1a",
+      "sha256": "37e33e2f78811a1036d139c5e6f3546325b137685da9dc7e3d1b7e809fc56a1a"
+    },
+    {
+      "path": "api/task_commands.py",
+      "upstreamSha256": "d41b9fa5f3a9a784d632ffdf313cbd523ec3a10331055d52edd4326e78bbf430",
+      "sha256": "d41b9fa5f3a9a784d632ffdf313cbd523ec3a10331055d52edd4326e78bbf430"
+    },
+    {
+      "path": "api/task_logs.py",
+      "upstreamSha256": "63eed78d401117e780342fddc2b6accb72b28276183803cb2e2579d51f5a77fc",
+      "sha256": "63eed78d401117e780342fddc2b6accb72b28276183803cb2e2579d51f5a77fc"
+    },
+    {
+      "path": "api/tasks.py",
+      "upstreamSha256": "d38bfe9876ab0967202798b8d07e6a00c45e23a51dbf0a541fb3b047e032d68d",
+      "sha256": "d38bfe9876ab0967202798b8d07e6a00c45e23a51dbf0a541fb3b047e032d68d"
+    },
+    {
+      "path": "application/__init__.py",
+      "upstreamSha256": "60a972bc0bda6b1dcf0d59b88a4ebaad40c70e5ac959b5fcd2c38abf5dea62b1",
+      "sha256": "60a972bc0bda6b1dcf0d59b88a4ebaad40c70e5ac959b5fcd2c38abf5dea62b1"
+    },
+    {
+      "path": "application/account_checks.py",
+      "upstreamSha256": "10c3f187f00c5933b9fa8e1ffb4e5e6490416bd717e90114f436ca9a0aa6bfd3",
+      "sha256": "10c3f187f00c5933b9fa8e1ffb4e5e6490416bd717e90114f436ca9a0aa6bfd3"
+    },
+    {
+      "path": "application/account_exports.py",
+      "upstreamSha256": "a998a1f1fe2ac2a7b8fdaa996a8c7094cc0cc51530e507f5f64de1adb6298f57",
+      "sha256": "a998a1f1fe2ac2a7b8fdaa996a8c7094cc0cc51530e507f5f64de1adb6298f57"
+    },
+    {
+      "path": "application/accounts.py",
+      "upstreamSha256": "aebe71ec42f89aa4abc02b3f6fd5a20092ff89e237bc7ecba52353392e34f7eb",
+      "sha256": "aebe71ec42f89aa4abc02b3f6fd5a20092ff89e237bc7ecba52353392e34f7eb"
+    },
+    {
+      "path": "application/actions.py",
+      "upstreamSha256": "1ebd9e5c5ae91e991c25b03b368655e1695586e9ec07312f66aec199df8ed2bd",
+      "sha256": "1ebd9e5c5ae91e991c25b03b368655e1695586e9ec07312f66aec199df8ed2bd"
+    },
+    {
+      "path": "application/config.py",
+      "upstreamSha256": "d2baf8b862d267e50e21bb452a0b69651cabc3825762d3e44d661092d1187934",
+      "sha256": "d2baf8b862d267e50e21bb452a0b69651cabc3825762d3e44d661092d1187934"
+    },
+    {
+      "path": "application/health.py",
+      "upstreamSha256": "9ef6005ce30f301a5cbf534e1ca90db9bebf441b7313b9384df018e4028f3a3c",
+      "sha256": "9ef6005ce30f301a5cbf534e1ca90db9bebf441b7313b9384df018e4028f3a3c"
+    },
+    {
+      "path": "application/platform_capabilities.py",
+      "upstreamSha256": "c1b8d2cfab4a18d34dfb05e4d144aa89a9cd589292c6e00030d833c3b17ce490",
+      "sha256": "c1b8d2cfab4a18d34dfb05e4d144aa89a9cd589292c6e00030d833c3b17ce490"
+    },
+    {
+      "path": "application/platforms.py",
+      "upstreamSha256": "2a0a8a56d52b76923f9710e5e46efb61c4eb8b04c2e22ce5fa6d89762a00769a",
+      "sha256": "2a0a8a56d52b76923f9710e5e46efb61c4eb8b04c2e22ce5fa6d89762a00769a"
+    },
+    {
+      "path": "application/provider_definitions.py",
+      "upstreamSha256": "ea6963ea99da656a8290165173fccbfef4adafa205f8903dff60d45a960cf408",
+      "sha256": "ea6963ea99da656a8290165173fccbfef4adafa205f8903dff60d45a960cf408"
+    },
+    {
+      "path": "application/provider_settings.py",
+      "upstreamSha256": "7cb835e998dbefbcd67418d02eba5ffa56f0f1dbb83450dcc29cf085b8036449",
+      "sha256": "7cb835e998dbefbcd67418d02eba5ffa56f0f1dbb83450dcc29cf085b8036449"
+    },
+    {
+      "path": "application/proxies.py",
+      "upstreamSha256": "d312247d14813ecc21bd45c5b3acea583d6b5c98bd493fc19eefcfc922dd97f3",
+      "sha256": "d312247d14813ecc21bd45c5b3acea583d6b5c98bd493fc19eefcfc922dd97f3"
+    },
+    {
+      "path": "application/system.py",
+      "upstreamSha256": "d0198f44cdae866c415e0e95fa18b18f8f59ecec917bdd9f60136f0353386310",
+      "sha256": "d0198f44cdae866c415e0e95fa18b18f8f59ecec917bdd9f60136f0353386310"
+    },
+    {
+      "path": "application/task_commands.py",
+      "upstreamSha256": "ef85f0e24418da134c4869038be23b77a74edc3da710fdba110c7abc4a2ae329",
+      "sha256": "ef85f0e24418da134c4869038be23b77a74edc3da710fdba110c7abc4a2ae329"
+    },
+    {
+      "path": "application/task_logs.py",
+      "upstreamSha256": "adfcf7648e16be8161c9f66ba7c78ac8f2272885e8ba8b42b122807caed247e2",
+      "sha256": "adfcf7648e16be8161c9f66ba7c78ac8f2272885e8ba8b42b122807caed247e2"
+    },
+    {
+      "path": "application/tasks_query.py",
+      "upstreamSha256": "52aa6c48ecf0efa347420dff7fc88a028de8a9951f26fef8b2221935f0509890",
+      "sha256": "52aa6c48ecf0efa347420dff7fc88a028de8a9951f26fef8b2221935f0509890"
+    },
+    {
+      "path": "application/tasks.py",
+      "upstreamSha256": "9f4b662bc785f35f9e7cef228f140681b204702a18679d2427bc26793aa7b5e2",
+      "sha256": "9f4b662bc785f35f9e7cef228f140681b204702a18679d2427bc26793aa7b5e2"
+    },
+    {
+      "path": "core/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "core/account_display.py",
+      "upstreamSha256": "775e9f57dd138ec32b1878925b4738e3eeb2093a351b58f9f34ac58946a9de37",
+      "sha256": "775e9f57dd138ec32b1878925b4738e3eeb2093a351b58f9f34ac58946a9de37"
+    },
+    {
+      "path": "core/account_graph.py",
+      "upstreamSha256": "836ac1c0dea32999b063ca30ac7143c7a055b4af46fc4a39fd88320410312cd7",
+      "sha256": "836ac1c0dea32999b063ca30ac7143c7a055b4af46fc4a39fd88320410312cd7"
+    },
+    {
+      "path": "core/any2api_sync.py",
+      "upstreamSha256": "3fac907d3707c0b16a59a9170d8e9b8f4e302e9ab3bf8ce2dd878342c5d452a2",
+      "sha256": "3fac907d3707c0b16a59a9170d8e9b8f4e302e9ab3bf8ce2dd878342c5d452a2"
+    },
+    {
+      "path": "core/auth.py",
+      "upstreamSha256": "45799cf76e21892b8de78462322225d1896bf6ff3f2c4c48dd6d376e77d942b4",
+      "sha256": "45799cf76e21892b8de78462322225d1896bf6ff3f2c4c48dd6d376e77d942b4"
+    },
+    {
+      "path": "core/base_captcha.py",
+      "upstreamSha256": "f27761f5c6e278101b7fdee6a1f3fb9df810d27a309849530e746d8edd273a48",
+      "sha256": "f27761f5c6e278101b7fdee6a1f3fb9df810d27a309849530e746d8edd273a48"
+    },
+    {
+      "path": "core/base_executor.py",
+      "upstreamSha256": "c2096a52964bb8ed949e524e1222bbf202d8f21ac49bb01bba39eb1e76f8d402",
+      "sha256": "c2096a52964bb8ed949e524e1222bbf202d8f21ac49bb01bba39eb1e76f8d402"
+    },
+    {
+      "path": "core/base_identity.py",
+      "upstreamSha256": "4b6cfd27135c3e13e33b7a5522d04377a2b3e7d834f1685c86f0f761b3f33a58",
+      "sha256": "4b6cfd27135c3e13e33b7a5522d04377a2b3e7d834f1685c86f0f761b3f33a58"
+    },
+    {
+      "path": "core/base_mailbox.py",
+      "upstreamSha256": "e38eca82eead05aeef04dfc82542d27c75c6768c83b7444daf6f478afc0d5b04",
+      "sha256": "e38eca82eead05aeef04dfc82542d27c75c6768c83b7444daf6f478afc0d5b04"
+    },
+    {
+      "path": "core/base_platform.py",
+      "upstreamSha256": "7fc7a35eba299c259e1dfb7ee9d8297d8a1b833c580c4f655e5d65a52f2b4d6e",
+      "sha256": "7fc7a35eba299c259e1dfb7ee9d8297d8a1b833c580c4f655e5d65a52f2b4d6e"
+    },
+    {
+      "path": "core/base_sms.py",
+      "upstreamSha256": "9c88b4dd6774171dc8251e0292195839638f1b9e681dae76b8e66c9dea149639",
+      "sha256": "26f2c24d8c58b966b7d1421e3ac4d0287560e3216908030debcdbb85b5edf803"
+    },
+    {
+      "path": "core/capability_registry.py",
+      "upstreamSha256": "9dd9ba561fba24db4788a30ca6859175a96a0255b11de2b8b56171ef5ba52468",
+      "sha256": "9dd9ba561fba24db4788a30ca6859175a96a0255b11de2b8b56171ef5ba52468"
+    },
+    {
+      "path": "core/config_store.py",
+      "upstreamSha256": "98bc988cdb25d4e262f9731242f8b774d0615e8dcc5459fe608806146d8bdd82",
+      "sha256": "98bc988cdb25d4e262f9731242f8b774d0615e8dcc5459fe608806146d8bdd82"
+    },
+    {
+      "path": "core/datetime_utils.py",
+      "upstreamSha256": "92171019fd8d7f460930fcfa0cb8cb30d89507341f7ffb5cb4d361384bb5ffd1",
+      "sha256": "92171019fd8d7f460930fcfa0cb8cb30d89507341f7ffb5cb4d361384bb5ffd1"
+    },
+    {
+      "path": "core/db.py",
+      "upstreamSha256": "b06ce55ab7909a2ddaa9e83cf976c7de1423e8f27b7e80bf398aba022c4a3301",
+      "sha256": "b06ce55ab7909a2ddaa9e83cf976c7de1423e8f27b7e80bf398aba022c4a3301"
+    },
+    {
+      "path": "core/desktop_apps.py",
+      "upstreamSha256": "f6fb16e7669646f22f7ced9af4e8f6d1c2b3b9f0c4b0f5b7bc92244e0c368a24",
+      "sha256": "f6fb16e7669646f22f7ced9af4e8f6d1c2b3b9f0c4b0f5b7bc92244e0c368a24"
+    },
+    {
+      "path": "core/executors/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "core/executors/playwright.py",
+      "upstreamSha256": "e343f0fa74121f38f5cd9e8d6e02c080686a327df76eb861b4f2663ce398ae73",
+      "sha256": "e343f0fa74121f38f5cd9e8d6e02c080686a327df76eb861b4f2663ce398ae73"
+    },
+    {
+      "path": "core/executors/protocol.py",
+      "upstreamSha256": "6bf48b0d4c5a45a3d4a84281f7ad41734189988e8b457d8c7f67cfe57bd85104",
+      "sha256": "6bf48b0d4c5a45a3d4a84281f7ad41734189988e8b457d8c7f67cfe57bd85104"
+    },
+    {
+      "path": "core/generic_http_mailbox.py",
+      "upstreamSha256": "c0ed2ea6ab2e7c5a7f5a89f55f97596ee9012fcb6ae888caf9a34d824781ec7f",
+      "sha256": "c0ed2ea6ab2e7c5a7f5a89f55f97596ee9012fcb6ae888caf9a34d824781ec7f"
+    },
+    {
+      "path": "core/http_client.py",
+      "upstreamSha256": "926167b79ef6123880d97c3a5c26716fdb2da8acd24b86ae0f3814aabd6f129b",
+      "sha256": "926167b79ef6123880d97c3a5c26716fdb2da8acd24b86ae0f3814aabd6f129b"
+    },
+    {
+      "path": "core/lifecycle.py",
+      "upstreamSha256": "29166568c905dc97241130e67eb79a49a8e7f38a9ce6602c25bdd6b625dc6943",
+      "sha256": "d0f13e1031444d1d73d1de32c5b557e8c9fa3f0755cf1670899b2fae2577c39f"
+    },
+    {
+      "path": "core/local_ms_mailbox.py",
+      "upstreamSha256": "68e0d42827dabb7fd587d881885c0e47f76c6c307e1a62fe43ce37077d03242c",
+      "sha256": "fb880f140bd45e7af6b6ea56307a4a8001fa38913880e56f57df60323c7d162f"
+    },
+    {
+      "path": "core/manual_oauth_browser.py",
+      "upstreamSha256": "5c3ebc34b616747f690f00f3c4a2e4992436ddbae1f33c30eb001d17e2a38e85",
+      "sha256": "5c3ebc34b616747f690f00f3c4a2e4992436ddbae1f33c30eb001d17e2a38e85"
+    },
+    {
+      "path": "core/oauth_browser.py",
+      "upstreamSha256": "10805b732402950545daf72c1abd4246f7e9d2363c40ebbd73fb05010ca4fa18",
+      "sha256": "10805b732402950545daf72c1abd4246f7e9d2363c40ebbd73fb05010ca4fa18"
+    },
+    {
+      "path": "core/platform_accounts.py",
+      "upstreamSha256": "6b33957de7d31af44066f56daa8479ebc808088e72f094f951cba63f3ce30f3f",
+      "sha256": "6b33957de7d31af44066f56daa8479ebc808088e72f094f951cba63f3ce30f3f"
+    },
+    {
+      "path": "core/provider_drivers.py",
+      "upstreamSha256": "98ddbedb78e015f32b7aac1bff99a2c35fd98ec28eb433df4d41634f7192f850",
+      "sha256": "98ddbedb78e015f32b7aac1bff99a2c35fd98ec28eb433df4d41634f7192f850"
+    },
+    {
+      "path": "core/proxy_pool.py",
+      "upstreamSha256": "e73d30259c950ebef60ea8f78a3efe812f23286ebd52c4e8f1660aa3c44f2934",
+      "sha256": "e73d30259c950ebef60ea8f78a3efe812f23286ebd52c4e8f1660aa3c44f2934"
+    },
+    {
+      "path": "core/proxy_providers.py",
+      "upstreamSha256": "76a27ec47ccfde3e0b6c120600c69d5c90ee12f1d1cdd429f10c7137bca84e7c",
+      "sha256": "76a27ec47ccfde3e0b6c120600c69d5c90ee12f1d1cdd429f10c7137bca84e7c"
+    },
+    {
+      "path": "core/registration/__init__.py",
+      "upstreamSha256": "c2c918e7488bab591fd19e7d1b25952edfccfa169f3c4da07f16aef174f350d3",
+      "sha256": "c2c918e7488bab591fd19e7d1b25952edfccfa169f3c4da07f16aef174f350d3"
+    },
+    {
+      "path": "core/registration/adapters.py",
+      "upstreamSha256": "a5b80fcb5e400d2f299c6a21dbefc449e2c0fe91ea56859924941e4572446325",
+      "sha256": "a5b80fcb5e400d2f299c6a21dbefc449e2c0fe91ea56859924941e4572446325"
+    },
+    {
+      "path": "core/registration/errors.py",
+      "upstreamSha256": "ebe7876a8f71dc7e1d5d4ae4ba8db3fb97e938c327361e9317823b96a1876871",
+      "sha256": "ebe7876a8f71dc7e1d5d4ae4ba8db3fb97e938c327361e9317823b96a1876871"
+    },
+    {
+      "path": "core/registration/flows.py",
+      "upstreamSha256": "e53a195d803e269f262380fde6095823afc81a50b5fee042c66c6df3a0a05f93",
+      "sha256": "e53a195d803e269f262380fde6095823afc81a50b5fee042c66c6df3a0a05f93"
+    },
+    {
+      "path": "core/registration/helpers.py",
+      "upstreamSha256": "5ffa01b28d10fcf2be1e96b2cbe214e62c84f874ca081597c7bb6c00672aa4b1",
+      "sha256": "5ffa01b28d10fcf2be1e96b2cbe214e62c84f874ca081597c7bb6c00672aa4b1"
+    },
+    {
+      "path": "core/registration/models.py",
+      "upstreamSha256": "7b1d137567ee003ed6346b852cccc92d2439f60c0eb1414c4e485220b55ec8b9",
+      "sha256": "7b1d137567ee003ed6346b852cccc92d2439f60c0eb1414c4e485220b55ec8b9"
+    },
+    {
+      "path": "core/registry.py",
+      "upstreamSha256": "79049e0d6e8a54cb99d8d073f88fa1208b73f8f0b5f72030b120f4d35498777c",
+      "sha256": "79049e0d6e8a54cb99d8d073f88fa1208b73f8f0b5f72030b120f4d35498777c"
+    },
+    {
+      "path": "core/scheduler.py",
+      "upstreamSha256": "cd19f1b836ada088766d95327d8960ade35644c4b0f56fcd1f1c64ffac1ced60",
+      "sha256": "cd19f1b836ada088766d95327d8960ade35644c4b0f56fcd1f1c64ffac1ced60"
+    },
+    {
+      "path": "core/tls.py",
+      "upstreamSha256": "4970a5ebc478c8d6f879db0e0b6170792e1f011399997aeaa752af27e31fc0c9",
+      "sha256": "4970a5ebc478c8d6f879db0e0b6170792e1f011399997aeaa752af27e31fc0c9"
+    },
+    {
+      "path": "core/verification_hold.py",
+      "upstreamSha256": "7ef40d0b9a6219c8b9f10db7eecb0c1e9d44c2e6cf8f0db01a47857c17193f32",
+      "sha256": "7ef40d0b9a6219c8b9f10db7eecb0c1e9d44c2e6cf8f0db01a47857c17193f32"
+    },
+    {
+      "path": "core/version.py",
+      "upstreamSha256": "3a221bddd2d01388cbda27a20761056062bbc04dea9b85efbd3c24971abc7b6a",
+      "sha256": "3a221bddd2d01388cbda27a20761056062bbc04dea9b85efbd3c24971abc7b6a"
+    },
+    {
+      "path": "domain/__init__.py",
+      "upstreamSha256": "80751d6a05f52f066a7aaeb1a61eebfc2aeeb880becee576aa6fd045009fbe47",
+      "sha256": "80751d6a05f52f066a7aaeb1a61eebfc2aeeb880becee576aa6fd045009fbe47"
+    },
+    {
+      "path": "domain/accounts.py",
+      "upstreamSha256": "36e10e8960d2e48a7ea94b58a0c2cfb4f78e80200218365f9fe9c1c173c03763",
+      "sha256": "36e10e8960d2e48a7ea94b58a0c2cfb4f78e80200218365f9fe9c1c173c03763"
+    },
+    {
+      "path": "domain/actions.py",
+      "upstreamSha256": "8b07aeddf04a62f6ae289c3a84c9cdfcdef70da214c133e686911d88a26a2be3",
+      "sha256": "8b07aeddf04a62f6ae289c3a84c9cdfcdef70da214c133e686911d88a26a2be3"
+    },
+    {
+      "path": "domain/platform_caps.py",
+      "upstreamSha256": "a7eb2f6d82fefef6952de04c9789308963a6a890194e208063f49a5eed110a42",
+      "sha256": "a7eb2f6d82fefef6952de04c9789308963a6a890194e208063f49a5eed110a42"
+    },
+    {
+      "path": "domain/platforms.py",
+      "upstreamSha256": "2eced641d003e21cd08bca981f684858dad8df630ca6a4dec525054beeed7219",
+      "sha256": "2eced641d003e21cd08bca981f684858dad8df630ca6a4dec525054beeed7219"
+    },
+    {
+      "path": "domain/proxies.py",
+      "upstreamSha256": "aeb360d59e3e1cd908a69b5733a8b2e748dfeb95278a7457e3f774d3364965ff",
+      "sha256": "aeb360d59e3e1cd908a69b5733a8b2e748dfeb95278a7457e3f774d3364965ff"
+    },
+    {
+      "path": "domain/task_logs.py",
+      "upstreamSha256": "3136e4423ee1ad516d8089d09b52f81bb5d9e220f50d2c7fb81d90d81941e5f0",
+      "sha256": "3136e4423ee1ad516d8089d09b52f81bb5d9e220f50d2c7fb81d90d81941e5f0"
+    },
+    {
+      "path": "domain/tasks.py",
+      "upstreamSha256": "6a33ee5e6e77ac927026a6cd43596743b9c6453d54d50b90d897e48d83f55493",
+      "sha256": "6a33ee5e6e77ac927026a6cd43596743b9c6453d54d50b90d897e48d83f55493"
+    },
+    {
+      "path": "frontend/eslint.config.js",
+      "upstreamSha256": "74bcb49fec61d75ef30542fbfe41f2498961f72a028a827c2091622b06d6921e",
+      "sha256": "74bcb49fec61d75ef30542fbfe41f2498961f72a028a827c2091622b06d6921e"
+    },
+    {
+      "path": "frontend/index.html",
+      "upstreamSha256": "802bff73f103056273b18d331fee9998b84207e96bc5f5d734163163339515c1",
+      "sha256": "802bff73f103056273b18d331fee9998b84207e96bc5f5d734163163339515c1"
+    },
+    {
+      "path": "frontend/package-lock.json",
+      "upstreamSha256": "e1bf8141b036c85032df4306417bdebf356c25c4b0e4202a364ec1a1fe04a4b4",
+      "sha256": "e1bf8141b036c85032df4306417bdebf356c25c4b0e4202a364ec1a1fe04a4b4"
+    },
+    {
+      "path": "frontend/package.json",
+      "upstreamSha256": "72c5983b900f4ba816847dd2e6b55b77600a24c97df193c12c6b4d3bfe9cd34a",
+      "sha256": "72c5983b900f4ba816847dd2e6b55b77600a24c97df193c12c6b4d3bfe9cd34a"
+    },
+    {
+      "path": "frontend/public/favicon.svg",
+      "upstreamSha256": "61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66",
+      "sha256": "61bc9a161de58248288e6905425d7180f0624c2865007b97d763fdac12043a66"
+    },
+    {
+      "path": "frontend/public/icons.svg",
+      "upstreamSha256": "7ca2d67c9c3aebf50cdc8709ee8aacf8cdb8cc7ea6325ea94939caef5da1c53d",
+      "sha256": "7ca2d67c9c3aebf50cdc8709ee8aacf8cdb8cc7ea6325ea94939caef5da1c53d"
+    },
+    {
+      "path": "frontend/src/App.css",
+      "upstreamSha256": "c2571ce7245629994b8adc84f6c48e1920f047a4e7e29c89a4aeb51eeb1b5433",
+      "sha256": "c2571ce7245629994b8adc84f6c48e1920f047a4e7e29c89a4aeb51eeb1b5433"
+    },
+    {
+      "path": "frontend/src/App.tsx",
+      "upstreamSha256": "250f90b41c172b847f590f516b691e085dbde2ab6c4ef0de2108374e0e4272a7",
+      "sha256": "250f90b41c172b847f590f516b691e085dbde2ab6c4ef0de2108374e0e4272a7"
+    },
+    {
+      "path": "frontend/src/assets/hero.png",
+      "upstreamSha256": "72a860570eddf1dd9988f26c7106c67be286bc9f2fd3303c465ce87edb1ae6cd",
+      "sha256": "72a860570eddf1dd9988f26c7106c67be286bc9f2fd3303c465ce87edb1ae6cd"
+    },
+    {
+      "path": "frontend/src/assets/react.svg",
+      "upstreamSha256": "35ef61ed53b323ae94a16a8ec659b3d0af3880698791133f23b084085ab1c2e5",
+      "sha256": "35ef61ed53b323ae94a16a8ec659b3d0af3880698791133f23b084085ab1c2e5"
+    },
+    {
+      "path": "frontend/src/assets/vite.svg",
+      "upstreamSha256": "2f1f6c6f90a0ef7422cbb4cfafcd8ad329c507a18afdc34cc21fa72179b9c54a",
+      "sha256": "2f1f6c6f90a0ef7422cbb4cfafcd8ad329c507a18afdc34cc21fa72179b9c54a"
+    },
+    {
+      "path": "frontend/src/components/settings/AdvancedSettings.tsx",
+      "upstreamSha256": "52cc2a0c35ac5a8e0574974fa720f24879ebeabfb223d8441531c83ea8a59582",
+      "sha256": "52cc2a0c35ac5a8e0574974fa720f24879ebeabfb223d8441531c83ea8a59582"
+    },
+    {
+      "path": "frontend/src/components/settings/ProviderCards.tsx",
+      "upstreamSha256": "66b303530748acb52861daed7f6464453068341f6130bed4d9df2c81dc4bcd05",
+      "sha256": "66b303530748acb52861daed7f6464453068341f6130bed4d9df2c81dc4bcd05"
+    },
+    {
+      "path": "frontend/src/components/tasks/TaskLogPanel.tsx",
+      "upstreamSha256": "1d9e121be38852eb222f4a63a07dc40dd76ee735f8545d8495e40a1a28967cc9",
+      "sha256": "1d9e121be38852eb222f4a63a07dc40dd76ee735f8545d8495e40a1a28967cc9"
+    },
+    {
+      "path": "frontend/src/components/ui/badge.tsx",
+      "upstreamSha256": "d2cc3d85617755290d0e38e59f406b6d2027728e3a0eea517a40f07571fbf5e5",
+      "sha256": "d2cc3d85617755290d0e38e59f406b6d2027728e3a0eea517a40f07571fbf5e5"
+    },
+    {
+      "path": "frontend/src/components/ui/button.tsx",
+      "upstreamSha256": "ae3ba80a9a51380cb2b11579aab68cd7efd878b42182158812f3b44c50918bb5",
+      "sha256": "ae3ba80a9a51380cb2b11579aab68cd7efd878b42182158812f3b44c50918bb5"
+    },
+    {
+      "path": "frontend/src/components/ui/card.tsx",
+      "upstreamSha256": "d97fb66aaac972c98666abc7c365ac0a3079eb143e85f2bb06a688631e00a57d",
+      "sha256": "d97fb66aaac972c98666abc7c365ac0a3079eb143e85f2bb06a688631e00a57d"
+    },
+    {
+      "path": "frontend/src/components/UpdateBanner.tsx",
+      "upstreamSha256": "155c16ec841088664e7b3775066ad431f446f89a4c924592acd4ec8c0c558ead",
+      "sha256": "155c16ec841088664e7b3775066ad431f446f89a4c924592acd4ec8c0c558ead"
+    },
+    {
+      "path": "frontend/src/index.css",
+      "upstreamSha256": "a86fcd0cc260bfef60c682c9e41f301026a7e12a2b9b7607e7ef6ce1f8b9636b",
+      "sha256": "a86fcd0cc260bfef60c682c9e41f301026a7e12a2b9b7607e7ef6ce1f8b9636b"
+    },
+    {
+      "path": "frontend/src/lib/app-data.ts",
+      "upstreamSha256": "e3c7226510bde3585e92eeb6681c8687d44a77de5acc1e607562a7dd6a6a1a01",
+      "sha256": "e3c7226510bde3585e92eeb6681c8687d44a77de5acc1e607562a7dd6a6a1a01"
+    },
+    {
+      "path": "frontend/src/lib/config-options.ts",
+      "upstreamSha256": "6d12f3ad7f581e656dc225df5736dde80e5f12a6bfe084224e59868d9f4def1b",
+      "sha256": "6d12f3ad7f581e656dc225df5736dde80e5f12a6bfe084224e59868d9f4def1b"
+    },
+    {
+      "path": "frontend/src/lib/registration.ts",
+      "upstreamSha256": "2624bed19d63b8a7cbcf4d2e132a84316067190da406385d558c0637604c15b4",
+      "sha256": "2624bed19d63b8a7cbcf4d2e132a84316067190da406385d558c0637604c15b4"
+    },
+    {
+      "path": "frontend/src/lib/tasks.ts",
+      "upstreamSha256": "ae20350ffc5822d685edc1fd3a1cfff41d1089921e96450ae0d6bacb3ea9775a",
+      "sha256": "ae20350ffc5822d685edc1fd3a1cfff41d1089921e96450ae0d6bacb3ea9775a"
+    },
+    {
+      "path": "frontend/src/lib/utils.ts",
+      "upstreamSha256": "b7050dff6aed44ca2ab0a88bd19ffc253fec3a8876ec4f183d9303b7bf909199",
+      "sha256": "b7050dff6aed44ca2ab0a88bd19ffc253fec3a8876ec4f183d9303b7bf909199"
+    },
+    {
+      "path": "frontend/src/main.tsx",
+      "upstreamSha256": "484f93f3048565a86a47e308f5a12ee27aa12f5291f3b52a4bb5dc03d887dbc7",
+      "sha256": "484f93f3048565a86a47e308f5a12ee27aa12f5291f3b52a4bb5dc03d887dbc7"
+    },
+    {
+      "path": "frontend/src/pages/Accounts.tsx",
+      "upstreamSha256": "a82aa15d2c1005e6c64943a1cb67527ba6a92b080265401e18e00895f624d81c",
+      "sha256": "a82aa15d2c1005e6c64943a1cb67527ba6a92b080265401e18e00895f624d81c"
+    },
+    {
+      "path": "frontend/src/pages/Authenticator.tsx",
+      "upstreamSha256": "b3911a67bf4ad11e57aff562f60d0ae1598765ded91f8f6c24bc3a4f1ffedbfa",
+      "sha256": "b3911a67bf4ad11e57aff562f60d0ae1598765ded91f8f6c24bc3a4f1ffedbfa"
+    },
+    {
+      "path": "frontend/src/pages/Dashboard.tsx",
+      "upstreamSha256": "f4f29af06af2c429ae7f6c1eee17fd6d3f4ee16298e2bce4c2374f070ed11e56",
+      "sha256": "f4f29af06af2c429ae7f6c1eee17fd6d3f4ee16298e2bce4c2374f070ed11e56"
+    },
+    {
+      "path": "frontend/src/pages/Proxies.tsx",
+      "upstreamSha256": "1fb054bfa2eb4481a510271a9ff50d50aba9c82dd042a09e72072a0befa42712",
+      "sha256": "1fb054bfa2eb4481a510271a9ff50d50aba9c82dd042a09e72072a0befa42712"
+    },
+    {
+      "path": "frontend/src/pages/Register.tsx",
+      "upstreamSha256": "8d2ca9218ff47bbe2857310045a000b5e2081a3cd983dbb485a3bb3eb80f7f10",
+      "sha256": "8d2ca9218ff47bbe2857310045a000b5e2081a3cd983dbb485a3bb3eb80f7f10"
+    },
+    {
+      "path": "frontend/src/pages/Settings.tsx",
+      "upstreamSha256": "9c894410a3828d3eab7b2c0d46f85506fcb5cc31891a55ce72cd9c0ca9214dde",
+      "sha256": "9c894410a3828d3eab7b2c0d46f85506fcb5cc31891a55ce72cd9c0ca9214dde"
+    },
+    {
+      "path": "frontend/src/pages/SettingsPage.tsx",
+      "upstreamSha256": "32464923c6730e47d4f054cd379322f564f30c7a3a3cce9a79d526a7e1ed3373",
+      "sha256": "32464923c6730e47d4f054cd379322f564f30c7a3a3cce9a79d526a7e1ed3373"
+    },
+    {
+      "path": "frontend/src/pages/TaskHistory.tsx",
+      "upstreamSha256": "364066adac4e5ca89f4d5889faea9b5efb456ea9db0d7667e0a1ee1f19be4de0",
+      "sha256": "364066adac4e5ca89f4d5889faea9b5efb456ea9db0d7667e0a1ee1f19be4de0"
+    },
+    {
+      "path": "frontend/tests/account-modals.test.mjs",
+      "upstreamSha256": "b2609bffd018b9f0ec69e5fffd1cd875eef4fe7c06475a5e2af94b4c7ddfd3a7",
+      "sha256": "b2609bffd018b9f0ec69e5fffd1cd875eef4fe7c06475a5e2af94b4c7ddfd3a7"
+    },
+    {
+      "path": "frontend/tests/accounts-copy.test.mjs",
+      "upstreamSha256": "6a116666f84c40fbffca0dd87dc85f6dfc3e544bcf9766d9084087ec82c336b9",
+      "sha256": "6a116666f84c40fbffca0dd87dc85f6dfc3e544bcf9766d9084087ec82c336b9"
+    },
+    {
+      "path": "frontend/tests/action-menu.test.mjs",
+      "upstreamSha256": "30fc2f310712aaef32d839adc7fc4b14cea82ebbb3656f8fcbb41fe3cd8293e3",
+      "sha256": "30fc2f310712aaef32d839adc7fc4b14cea82ebbb3656f8fcbb41fe3cd8293e3"
+    },
+    {
+      "path": "frontend/tests/app-shell.test.mjs",
+      "upstreamSha256": "891d6f96b27c9fc8ce0d6aa3b21f54fbcfd8037bb4668a25e4d25b513572367b",
+      "sha256": "891d6f96b27c9fc8ce0d6aa3b21f54fbcfd8037bb4668a25e4d25b513572367b"
+    },
+    {
+      "path": "frontend/tests/authenticator-expiry.test.mjs",
+      "upstreamSha256": "42b33811b25043c5aee8dc450ed315bd566e1d443486d61643ca46a5cc86448f",
+      "sha256": "42b33811b25043c5aee8dc450ed315bd566e1d443486d61643ca46a5cc86448f"
+    },
+    {
+      "path": "frontend/tests/bulk-token-refresh.test.mjs",
+      "upstreamSha256": "b04d60eb1a22af11e4a8b2cd3ea776957724ecf737e6530033ff1e86a1221f6f",
+      "sha256": "b04d60eb1a22af11e4a8b2cd3ea776957724ecf737e6530033ff1e86a1221f6f"
+    },
+    {
+      "path": "frontend/tests/dashboard-tasks.test.mjs",
+      "upstreamSha256": "d7aee6966765f89308237f2d8f8ef9a162423d6ebd0cbf29c3bf293eeaee73ce",
+      "sha256": "d7aee6966765f89308237f2d8f8ef9a162423d6ebd0cbf29c3bf293eeaee73ce"
+    },
+    {
+      "path": "frontend/tests/proxy-task.test.mjs",
+      "upstreamSha256": "8190d18f8270ab276d8b858c9d13368c59d00107c2941dcea22c6a1dd54d537d",
+      "sha256": "8190d18f8270ab276d8b858c9d13368c59d00107c2941dcea22c6a1dd54d537d"
+    },
+    {
+      "path": "frontend/tests/register-lifecycle.test.mjs",
+      "upstreamSha256": "c20b14fa991579903641c6c7fca8cb18b6a952d9a5d08be520871a6c8a7dc422",
+      "sha256": "c20b14fa991579903641c6c7fca8cb18b6a952d9a5d08be520871a6c8a7dc422"
+    },
+    {
+      "path": "frontend/tests/register-submit.test.mjs",
+      "upstreamSha256": "5ab092016e7e5bae97447344f50abbfb4d40ad3fe607dd91175b0eebc5022e2b",
+      "sha256": "5ab092016e7e5bae97447344f50abbfb4d40ad3fe607dd91175b0eebc5022e2b"
+    },
+    {
+      "path": "frontend/tests/settings-state.test.mjs",
+      "upstreamSha256": "bbd494003d61d9f360b081cf52eace6f67f9f181c876be7f99ad4bcf0f510858",
+      "sha256": "bbd494003d61d9f360b081cf52eace6f67f9f181c876be7f99ad4bcf0f510858"
+    },
+    {
+      "path": "frontend/tests/task-status.test.mjs",
+      "upstreamSha256": "f75ac128dbd2fe95356a5801f23c65e6e63f3080da946fbd430aff573b5046cd",
+      "sha256": "f75ac128dbd2fe95356a5801f23c65e6e63f3080da946fbd430aff573b5046cd"
+    },
+    {
+      "path": "frontend/tests/version-status.test.mjs",
+      "upstreamSha256": "7fd1a25c9047d38a1dc0a3d61e3a4b1d4a0d31838509e85f98dd7b6b5f0236d0",
+      "sha256": "7fd1a25c9047d38a1dc0a3d61e3a4b1d4a0d31838509e85f98dd7b6b5f0236d0"
+    },
+    {
+      "path": "frontend/tsconfig.app.json",
+      "upstreamSha256": "3696c386aad28c5ec2c08b3ed9838ee0616f7bfd506f687afe211a667c0ef0d5",
+      "sha256": "3696c386aad28c5ec2c08b3ed9838ee0616f7bfd506f687afe211a667c0ef0d5"
+    },
+    {
+      "path": "frontend/tsconfig.json",
+      "upstreamSha256": "ad28d132ee48d6e23917cf5827cace785d0fc01a44ca68b0dda51cc8c3fd3f52",
+      "sha256": "ad28d132ee48d6e23917cf5827cace785d0fc01a44ca68b0dda51cc8c3fd3f52"
+    },
+    {
+      "path": "frontend/tsconfig.node.json",
+      "upstreamSha256": "a6d49d645590cac21c235a0548605d867321b2e1750e99176d2153d702dfa842",
+      "sha256": "a6d49d645590cac21c235a0548605d867321b2e1750e99176d2153d702dfa842"
+    },
+    {
+      "path": "frontend/vite.config.ts",
+      "upstreamSha256": "12906d6e3b4b6f7c9622a57cba20988ea7d5cec06802abd8f4c4daa8ff3af650",
+      "sha256": "12906d6e3b4b6f7c9622a57cba20988ea7d5cec06802abd8f4c4daa8ff3af650"
+    },
+    {
+      "path": "infrastructure/__init__.py",
+      "upstreamSha256": "6fdbd2d68e6f6d96c00653f7f29181f815637045fbb1647b56931fe5dba4c5c7",
+      "sha256": "6fdbd2d68e6f6d96c00653f7f29181f815637045fbb1647b56931fe5dba4c5c7"
+    },
+    {
+      "path": "infrastructure/accounts_repository.py",
+      "upstreamSha256": "b2afe537f896880afd3f79a5c9bf04063b43b221cd27e15b6f49f8c417e8273d",
+      "sha256": "b2afe537f896880afd3f79a5c9bf04063b43b221cd27e15b6f49f8c417e8273d"
+    },
+    {
+      "path": "infrastructure/config_repository.py",
+      "upstreamSha256": "b26efd02fd9e57d52ea55217c6bc13879d456012cc9f37533f03dbe66bb04202",
+      "sha256": "b26efd02fd9e57d52ea55217c6bc13879d456012cc9f37533f03dbe66bb04202"
+    },
+    {
+      "path": "infrastructure/health_runtime.py",
+      "upstreamSha256": "6af1e2b88da0f3686cda92bb5352ebe6aaa130ad4180d00d35e52c8ff66f1016",
+      "sha256": "6af1e2b88da0f3686cda92bb5352ebe6aaa130ad4180d00d35e52c8ff66f1016"
+    },
+    {
+      "path": "infrastructure/platform_caps_repository.py",
+      "upstreamSha256": "32a373059568cd74d42bee6b6c4fe4a12ce1f2d0f0491fce953f02bc2d308f28",
+      "sha256": "32a373059568cd74d42bee6b6c4fe4a12ce1f2d0f0491fce953f02bc2d308f28"
+    },
+    {
+      "path": "infrastructure/platform_runtime.py",
+      "upstreamSha256": "1d75ce4b63c5f8e95583b4ced7646acd615b11959ffc0d4bb00dc31a2d0da53c",
+      "sha256": "1d75ce4b63c5f8e95583b4ced7646acd615b11959ffc0d4bb00dc31a2d0da53c"
+    },
+    {
+      "path": "infrastructure/provider_definitions_repository.py",
+      "upstreamSha256": "e8955b17f4140d38aa44749cd71bcbea9ea6ede0d64f148218525877b4a4c4cf",
+      "sha256": "e8955b17f4140d38aa44749cd71bcbea9ea6ede0d64f148218525877b4a4c4cf"
+    },
+    {
+      "path": "infrastructure/provider_settings_repository.py",
+      "upstreamSha256": "b291a765fe6c6b7a97bbc4b982117c402f0c91a8ec07a1eb72dd4f67d8c536fa",
+      "sha256": "b291a765fe6c6b7a97bbc4b982117c402f0c91a8ec07a1eb72dd4f67d8c536fa"
+    },
+    {
+      "path": "infrastructure/proxies_repository.py",
+      "upstreamSha256": "6b86b3ff869011f22b403e276a83afa8c66f12b7e3892c4addac4121898e94d6",
+      "sha256": "6b86b3ff869011f22b403e276a83afa8c66f12b7e3892c4addac4121898e94d6"
+    },
+    {
+      "path": "infrastructure/system_runtime.py",
+      "upstreamSha256": "03a3b8c86cbe381a72523acc321227150b4c7ea59762ad1a758459298d5752cb",
+      "sha256": "03a3b8c86cbe381a72523acc321227150b4c7ea59762ad1a758459298d5752cb"
+    },
+    {
+      "path": "infrastructure/task_logs_repository.py",
+      "upstreamSha256": "72f67cf13cc67fdb67491fabd924cbaeea5bb8afbc704381d9c487d29c20644f",
+      "sha256": "72f67cf13cc67fdb67491fabd924cbaeea5bb8afbc704381d9c487d29c20644f"
+    },
+    {
+      "path": "infrastructure/tasks_read_repository.py",
+      "upstreamSha256": "448e3db66bf3fbe3e23a88019e6b8ea4fd72528357876fae211e89f2a07c493f",
+      "sha256": "448e3db66bf3fbe3e23a88019e6b8ea4fd72528357876fae211e89f2a07c493f"
+    },
+    {
+      "path": "LICENSE",
+      "upstreamSha256": "e0eedba615d5cd1b986afb6c5b3a4b1ae33713e7e9dc74d19daec5e3221f9d2e",
+      "sha256": "e0eedba615d5cd1b986afb6c5b3a4b1ae33713e7e9dc74d19daec5e3221f9d2e"
+    },
+    {
+      "path": "main.py",
+      "upstreamSha256": "7ceac3e01df7b55012ef2ea2b0f5c2f889941311c54e96a2261f5a16620aa9e1",
+      "sha256": "62d41c40d08e0ef495ecefd515e9c65fd2842dcbbd7f48ee013f4e7a80a4da11"
+    },
+    {
+      "path": "platforms/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/anything/__init__.py",
+      "upstreamSha256": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6",
+      "sha256": "7eb70257593da06f682a3ddda54a9d260d4fc514f645237f5ca74b08f8da61a6"
+    },
+    {
+      "path": "platforms/anything/core.py",
+      "upstreamSha256": "f8e7a5606baa046a1ab2b92219a2b2dfa8250da478780c0fc81cabfe896fc8cc",
+      "sha256": "f8e7a5606baa046a1ab2b92219a2b2dfa8250da478780c0fc81cabfe896fc8cc"
+    },
+    {
+      "path": "platforms/anything/plugin.py",
+      "upstreamSha256": "db5038bd4cc83871b3afcc40a7946c4d5dfc189b1f4d62471b58a529fbe1c727",
+      "sha256": "db5038bd4cc83871b3afcc40a7946c4d5dfc189b1f4d62471b58a529fbe1c727"
+    },
+    {
+      "path": "platforms/anything/protocol_mailbox.py",
+      "upstreamSha256": "c5b1ddff540069656f56e0d456a209cd12c6bf3141b814f81bd053af3e0120a3",
+      "sha256": "c5b1ddff540069656f56e0d456a209cd12c6bf3141b814f81bd053af3e0120a3"
+    },
+    {
+      "path": "platforms/blink/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/blink/core.py",
+      "upstreamSha256": "92c874444955c540fa0215eb193ead45b7a4f19b1ecb55be732833ca1a3b1e5b",
+      "sha256": "92c874444955c540fa0215eb193ead45b7a4f19b1ecb55be732833ca1a3b1e5b"
+    },
+    {
+      "path": "platforms/blink/plugin.py",
+      "upstreamSha256": "d900f9dfad397fb65c46b8252c2a6d4ea10da24e4598f385afd6da997b8bd1b9",
+      "sha256": "d900f9dfad397fb65c46b8252c2a6d4ea10da24e4598f385afd6da997b8bd1b9"
+    },
+    {
+      "path": "platforms/blink/protocol_mailbox.py",
+      "upstreamSha256": "7afc8be5220e21f4ce17ad393db39c67ef5f46c2f00409462992cd5892e368df",
+      "sha256": "7afc8be5220e21f4ce17ad393db39c67ef5f46c2f00409462992cd5892e368df"
+    },
+    {
+      "path": "platforms/cerebras/__init__.py",
+      "upstreamSha256": "fd6fb207b259bca651d7e6dba58abd057698e1f74199f55b005f036e5c445893",
+      "sha256": "fd6fb207b259bca651d7e6dba58abd057698e1f74199f55b005f036e5c445893"
+    },
+    {
+      "path": "platforms/cerebras/core.py",
+      "upstreamSha256": "0e3f0be43995ec8b62f607a182d60f814da646f98f4a23505f43782669ae0fd7",
+      "sha256": "0e3f0be43995ec8b62f607a182d60f814da646f98f4a23505f43782669ae0fd7"
+    },
+    {
+      "path": "platforms/cerebras/plugin.py",
+      "upstreamSha256": "4c8b48cc2dd71512896225ee33d6ed7798cf27af0e42fb881bcb21fc5787f9a9",
+      "sha256": "4c8b48cc2dd71512896225ee33d6ed7798cf27af0e42fb881bcb21fc5787f9a9"
+    },
+    {
+      "path": "platforms/cerebras/protocol_mailbox.py",
+      "upstreamSha256": "bad69a126094540a42a17523eaddd8523387e861d0371f3d13edc1bcd4c0879f",
+      "sha256": "bad69a126094540a42a17523eaddd8523387e861d0371f3d13edc1bcd4c0879f"
+    },
+    {
+      "path": "platforms/chatgpt/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/chatgpt/browser_oauth.py",
+      "upstreamSha256": "9976474038688278a883dd09d73cba4573ff9b86a5fa7b0024a207a939961b4c",
+      "sha256": "9976474038688278a883dd09d73cba4573ff9b86a5fa7b0024a207a939961b4c"
+    },
+    {
+      "path": "platforms/chatgpt/browser_register.py",
+      "upstreamSha256": "a6bef8ed85e1ffdd6f1cf1fdd2064fb21ff193bbed2150419db1d27f9fadd593",
+      "sha256": "a6bef8ed85e1ffdd6f1cf1fdd2064fb21ff193bbed2150419db1d27f9fadd593"
+    },
+    {
+      "path": "platforms/chatgpt/constants.py",
+      "upstreamSha256": "2e7f121433ae5f0d832551c9d43a487bb29f85ea422dc1254e97a78e438b4a04",
+      "sha256": "2e7f121433ae5f0d832551c9d43a487bb29f85ea422dc1254e97a78e438b4a04"
+    },
+    {
+      "path": "platforms/chatgpt/cpa_upload.py",
+      "upstreamSha256": "a7cd75e9e7a78dd6878d1470328bccbb10263d394f45974279dd940b844347e3",
+      "sha256": "a7cd75e9e7a78dd6878d1470328bccbb10263d394f45974279dd940b844347e3"
+    },
+    {
+      "path": "platforms/chatgpt/http_client.py",
+      "upstreamSha256": "6aaabd432d1b6fdbe44d9a7aacf908aa3992cc584e74bc8bf05bafa39f5edfab",
+      "sha256": "6aaabd432d1b6fdbe44d9a7aacf908aa3992cc584e74bc8bf05bafa39f5edfab"
+    },
+    {
+      "path": "platforms/chatgpt/oauth.py",
+      "upstreamSha256": "6ec60fbac0c69ec79d040eba3a796431b9b2d290ffa02071ec37e6e7cf8f0510",
+      "sha256": "6ec60fbac0c69ec79d040eba3a796431b9b2d290ffa02071ec37e6e7cf8f0510"
+    },
+    {
+      "path": "platforms/chatgpt/payment.py",
+      "upstreamSha256": "5506e7b68638085596cb3d0f4752f81d78ba036bcb83679747813d22d8eb3899",
+      "sha256": "5506e7b68638085596cb3d0f4752f81d78ba036bcb83679747813d22d8eb3899"
+    },
+    {
+      "path": "platforms/chatgpt/plugin.py",
+      "upstreamSha256": "a3b1d0504e73ed986927920ace35a68d461c5d98deab57727c4c384638bc5851",
+      "sha256": "a3b1d0504e73ed986927920ace35a68d461c5d98deab57727c4c384638bc5851"
+    },
+    {
+      "path": "platforms/chatgpt/protocol_mailbox.py",
+      "upstreamSha256": "85a3e0e03a0bdfc2dd06fea90681acc3e8a9dc3600d98ef792f92636518949cb",
+      "sha256": "85a3e0e03a0bdfc2dd06fea90681acc3e8a9dc3600d98ef792f92636518949cb"
+    },
+    {
+      "path": "platforms/chatgpt/register.py",
+      "upstreamSha256": "5c419a5c7fd54083ba835e3ee41d2531c9b4d50f4d2d7ee9cca800cc31354804",
+      "sha256": "5c419a5c7fd54083ba835e3ee41d2531c9b4d50f4d2d7ee9cca800cc31354804"
+    },
+    {
+      "path": "platforms/chatgpt/security.py",
+      "upstreamSha256": "ae428315a3e35097908548033a9a1e4970416d35ade7fb116214cd6bb1ce4acd",
+      "sha256": "ae428315a3e35097908548033a9a1e4970416d35ade7fb116214cd6bb1ce4acd"
+    },
+    {
+      "path": "platforms/chatgpt/sentinel_vm.py",
+      "upstreamSha256": "7178cb1070d1f9ce90338bf7c3a95c0cd3b98014af44b8c96fd4f51aae7490df",
+      "sha256": "7178cb1070d1f9ce90338bf7c3a95c0cd3b98014af44b8c96fd4f51aae7490df"
+    },
+    {
+      "path": "platforms/chatgpt/switch.py",
+      "upstreamSha256": "360293e3a592d2f2c617c338b43c82242abe3f0dd793e62b29c1780ad698a650",
+      "sha256": "360293e3a592d2f2c617c338b43c82242abe3f0dd793e62b29c1780ad698a650"
+    },
+    {
+      "path": "platforms/chatgpt/token_refresh.py",
+      "upstreamSha256": "caab4351ee1898eccd1d71415f98b5e08641d556dc479af1263867fdb04627cf",
+      "sha256": "7171a9db7166e5f66becfe01ed646836eda22c4a9009de98177af8ec1dd8df9d"
+    },
+    {
+      "path": "platforms/cursor/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/cursor/browser_oauth.py",
+      "upstreamSha256": "f1311868f9a6cf04604461c18e6278f177d0727bb8dc6aafdac2c053409cbc78",
+      "sha256": "f1311868f9a6cf04604461c18e6278f177d0727bb8dc6aafdac2c053409cbc78"
+    },
+    {
+      "path": "platforms/cursor/browser_register.py",
+      "upstreamSha256": "fb30c36571224f0445ab83c3418e2dd85a93eb76d40366e91f111a4c83f04d5e",
+      "sha256": "fb30c36571224f0445ab83c3418e2dd85a93eb76d40366e91f111a4c83f04d5e"
+    },
+    {
+      "path": "platforms/cursor/core.py",
+      "upstreamSha256": "9c2adac73baa000634c25c05832889defda9a6c1fab3b7c4262e085679f21c5d",
+      "sha256": "9c2adac73baa000634c25c05832889defda9a6c1fab3b7c4262e085679f21c5d"
+    },
+    {
+      "path": "platforms/cursor/plugin.py",
+      "upstreamSha256": "e64217484bc91ad070d6a42105177b46c763b401d60effa5e953fc5b74e6253d",
+      "sha256": "e64217484bc91ad070d6a42105177b46c763b401d60effa5e953fc5b74e6253d"
+    },
+    {
+      "path": "platforms/cursor/protocol_mailbox.py",
+      "upstreamSha256": "0fecfd3035087e544197a4a76eae3e5a19052e3b22557593b237500f318eef54",
+      "sha256": "0fecfd3035087e544197a4a76eae3e5a19052e3b22557593b237500f318eef54"
+    },
+    {
+      "path": "platforms/cursor/switch.py",
+      "upstreamSha256": "045512668cab527f8cac6290fcefdfab384eceb2b0be373ec97bd50b013d8bd7",
+      "sha256": "045512668cab527f8cac6290fcefdfab384eceb2b0be373ec97bd50b013d8bd7"
+    },
+    {
+      "path": "platforms/grok/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/grok/browser_oauth.py",
+      "upstreamSha256": "205c2e88638ef482048638206a46e84ba2749e84503bc547ec4ee29d60dcc650",
+      "sha256": "205c2e88638ef482048638206a46e84ba2749e84503bc547ec4ee29d60dcc650"
+    },
+    {
+      "path": "platforms/grok/browser_register.py",
+      "upstreamSha256": "18f58d3e3255c94f684c816aca7c49f9f52dd46660348fdc0323e5ce03728f03",
+      "sha256": "18f58d3e3255c94f684c816aca7c49f9f52dd46660348fdc0323e5ce03728f03"
+    },
+    {
+      "path": "platforms/grok/core.py",
+      "upstreamSha256": "e7feea2cebbf44f068553f1faa80f076c73f23add55a896b8010a2133013750d",
+      "sha256": "e7feea2cebbf44f068553f1faa80f076c73f23add55a896b8010a2133013750d"
+    },
+    {
+      "path": "platforms/grok/plugin.py",
+      "upstreamSha256": "0fea0ed0c824c62ec3ee097e39c8aad0558a65267d6c79b50acdb4599f40bd96",
+      "sha256": "0fea0ed0c824c62ec3ee097e39c8aad0558a65267d6c79b50acdb4599f40bd96"
+    },
+    {
+      "path": "platforms/grok/protocol_mailbox.py",
+      "upstreamSha256": "3e2ebbf3693fd2bb18e096c1de55f1c252f613037f8da86f30cb1a55ae9984ef",
+      "sha256": "3e2ebbf3693fd2bb18e096c1de55f1c252f613037f8da86f30cb1a55ae9984ef"
+    },
+    {
+      "path": "platforms/kiro/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/kiro/browser_oauth.py",
+      "upstreamSha256": "61e4771a49e08c6bc9928c1916444e30fee6bb3712a9eefa3d88e74a93886d5e",
+      "sha256": "61e4771a49e08c6bc9928c1916444e30fee6bb3712a9eefa3d88e74a93886d5e"
+    },
+    {
+      "path": "platforms/kiro/browser_register.py",
+      "upstreamSha256": "724d78a9758ddbb293f63de77b9cda553e4c281903997f07b2a39c16f7971359",
+      "sha256": "724d78a9758ddbb293f63de77b9cda553e4c281903997f07b2a39c16f7971359"
+    },
+    {
+      "path": "platforms/kiro/core.py",
+      "upstreamSha256": "6ce554753735364acef977d00e834a696b4afd2f481f3b34142648427bd7616a",
+      "sha256": "6ce554753735364acef977d00e834a696b4afd2f481f3b34142648427bd7616a"
+    },
+    {
+      "path": "platforms/kiro/plugin.py",
+      "upstreamSha256": "ec1548e79683db6f1ba6a285aa8bbde8b9b3a78f4b667a521129409c8f2293bc",
+      "sha256": "ec1548e79683db6f1ba6a285aa8bbde8b9b3a78f4b667a521129409c8f2293bc"
+    },
+    {
+      "path": "platforms/kiro/protocol_mailbox.py",
+      "upstreamSha256": "59521f6b724922a10fc61e40ce1716a605fb607dae1b9f2a908ac348c1c3945d",
+      "sha256": "59521f6b724922a10fc61e40ce1716a605fb607dae1b9f2a908ac348c1c3945d"
+    },
+    {
+      "path": "platforms/kiro/switch.py",
+      "upstreamSha256": "c107ef4b069df725ac2c22926331c7c3c268baac10128f7de75f25ce89905061",
+      "sha256": "c107ef4b069df725ac2c22926331c7c3c268baac10128f7de75f25ce89905061"
+    },
+    {
+      "path": "platforms/openblocklabs/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/openblocklabs/browser_oauth.py",
+      "upstreamSha256": "b36faac1c4ad308f0019709a9a9b4285426ea62b88f2463d3ecb16b7563ed28f",
+      "sha256": "b36faac1c4ad308f0019709a9a9b4285426ea62b88f2463d3ecb16b7563ed28f"
+    },
+    {
+      "path": "platforms/openblocklabs/browser_register.py",
+      "upstreamSha256": "25ca44665788e271a3f573c485856ae225d8186af1472e3655b71c724d581760",
+      "sha256": "25ca44665788e271a3f573c485856ae225d8186af1472e3655b71c724d581760"
+    },
+    {
+      "path": "platforms/openblocklabs/core.py",
+      "upstreamSha256": "99b583fa471d9eea94cc937a357c232d01a81467f4bd7eb9ff64e69aa44d9608",
+      "sha256": "99b583fa471d9eea94cc937a357c232d01a81467f4bd7eb9ff64e69aa44d9608"
+    },
+    {
+      "path": "platforms/openblocklabs/plugin.py",
+      "upstreamSha256": "74fb8a755631ab9c45d0eb672270fcdbb553f0ab569b2ed18c45915bb72b5015",
+      "sha256": "74fb8a755631ab9c45d0eb672270fcdbb553f0ab569b2ed18c45915bb72b5015"
+    },
+    {
+      "path": "platforms/openblocklabs/protocol_mailbox.py",
+      "upstreamSha256": "a493415784637470ad5831472eebd4899181588043796588040651dce3fdee5a",
+      "sha256": "a493415784637470ad5831472eebd4899181588043796588040651dce3fdee5a"
+    },
+    {
+      "path": "platforms/tavily/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/tavily/browser_oauth.py",
+      "upstreamSha256": "c5572d1910593fdcd170a31a3754b41a5190ca81b756a14a72b8c4b0bdd0af97",
+      "sha256": "c5572d1910593fdcd170a31a3754b41a5190ca81b756a14a72b8c4b0bdd0af97"
+    },
+    {
+      "path": "platforms/tavily/browser_register.py",
+      "upstreamSha256": "23de2489f094bbdc9fd57f04dc7ecd3add7448f3e9404b41fd28fc96f5b44f80",
+      "sha256": "23de2489f094bbdc9fd57f04dc7ecd3add7448f3e9404b41fd28fc96f5b44f80"
+    },
+    {
+      "path": "platforms/tavily/core.py",
+      "upstreamSha256": "8068df3e076dd02796f3d8a6e9c362b7bff19bc1d3d739a539d0d7481e2eb232",
+      "sha256": "8068df3e076dd02796f3d8a6e9c362b7bff19bc1d3d739a539d0d7481e2eb232"
+    },
+    {
+      "path": "platforms/tavily/plugin.py",
+      "upstreamSha256": "58b5a921592f5e8bd93dcbac5d7125a863ba21b41a0ea68740e7e315f8db07df",
+      "sha256": "58b5a921592f5e8bd93dcbac5d7125a863ba21b41a0ea68740e7e315f8db07df"
+    },
+    {
+      "path": "platforms/tavily/protocol_mailbox.py",
+      "upstreamSha256": "e867f8f6436576248afe23cf137c09ea32512ff3fc335adece04371916585e27",
+      "sha256": "e867f8f6436576248afe23cf137c09ea32512ff3fc335adece04371916585e27"
+    },
+    {
+      "path": "platforms/trae/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "platforms/trae/browser_oauth.py",
+      "upstreamSha256": "261c07bc6002c5cf77276ccb7905260300955fc29e0475c1474f119a421b1123",
+      "sha256": "261c07bc6002c5cf77276ccb7905260300955fc29e0475c1474f119a421b1123"
+    },
+    {
+      "path": "platforms/trae/browser_register.py",
+      "upstreamSha256": "1bfe6728c45246a6e1d427783588c4da4588bfb71607ce846d1947ad94c5b25a",
+      "sha256": "1bfe6728c45246a6e1d427783588c4da4588bfb71607ce846d1947ad94c5b25a"
+    },
+    {
+      "path": "platforms/trae/core.py",
+      "upstreamSha256": "c4b314fc354bb6280016a17e597d6e798466de8f496b4f22365e4a35dc440719",
+      "sha256": "c4b314fc354bb6280016a17e597d6e798466de8f496b4f22365e4a35dc440719"
+    },
+    {
+      "path": "platforms/trae/plugin.py",
+      "upstreamSha256": "2fdebe9907d58a9964587063c3c0903199cb417ae7ec7fd9a1fd8ea558fddd9c",
+      "sha256": "2fdebe9907d58a9964587063c3c0903199cb417ae7ec7fd9a1fd8ea558fddd9c"
+    },
+    {
+      "path": "platforms/trae/protocol_mailbox.py",
+      "upstreamSha256": "42459d5fc313012b22c9dd856c43e9c8f8d05e12d4df9572fd6ca7d9d15e1da2",
+      "sha256": "42459d5fc313012b22c9dd856c43e9c8f8d05e12d4df9572fd6ca7d9d15e1da2"
+    },
+    {
+      "path": "platforms/trae/switch.py",
+      "upstreamSha256": "ed1a9bd8a2a594f4aa47f73cc94760cd6993091051463911a1347f19a9c4803e",
+      "sha256": "ed1a9bd8a2a594f4aa47f73cc94760cd6993091051463911a1347f19a9c4803e"
+    },
+    {
+      "path": "platforms/windsurf/__init__.py",
+      "upstreamSha256": "a55145a1a5b7826d44c81d540728122adb6e5ab6caf9d35088b07709b2dc20e1",
+      "sha256": "a55145a1a5b7826d44c81d540728122adb6e5ab6caf9d35088b07709b2dc20e1"
+    },
+    {
+      "path": "platforms/windsurf/browser_register.py",
+      "upstreamSha256": "2b1712ac349cb18c017c5b0689a512e1e067a70831e0258e0eeeca67223a8a55",
+      "sha256": "2b1712ac349cb18c017c5b0689a512e1e067a70831e0258e0eeeca67223a8a55"
+    },
+    {
+      "path": "platforms/windsurf/core.py",
+      "upstreamSha256": "8fd9268c3f48a1bdad1ef8954463d946d63f953b2cd0b55b4fcf5aac2af1d080",
+      "sha256": "8fd9268c3f48a1bdad1ef8954463d946d63f953b2cd0b55b4fcf5aac2af1d080"
+    },
+    {
+      "path": "platforms/windsurf/plugin.py",
+      "upstreamSha256": "fd411bd9ff5017c653bd57ba0c87180d831a504641be65a896cb34bf0c1fda1f",
+      "sha256": "fd411bd9ff5017c653bd57ba0c87180d831a504641be65a896cb34bf0c1fda1f"
+    },
+    {
+      "path": "platforms/windsurf/protocol_mailbox.py",
+      "upstreamSha256": "53d8a8d1215ffead6f2bc97b83d77d517b6428588ce65829ed0cb611164330a3",
+      "sha256": "53d8a8d1215ffead6f2bc97b83d77d517b6428588ce65829ed0cb611164330a3"
+    },
+    {
+      "path": "platforms/windsurf/switch.py",
+      "upstreamSha256": "7f1471a63f862dcff90ae59078e2e432f95de9387652835217dee2afcf6dd95c",
+      "sha256": "7f1471a63f862dcff90ae59078e2e432f95de9387652835217dee2afcf6dd95c"
+    },
+    {
+      "path": "providers/__init__.py",
+      "upstreamSha256": "8dd34998d6cc83e2558149e7bcda0658865cd70f0bcd0c0967a2f24002ab3133",
+      "sha256": "8dd34998d6cc83e2558149e7bcda0658865cd70f0bcd0c0967a2f24002ab3133"
+    },
+    {
+      "path": "providers/captcha/__init__.py",
+      "upstreamSha256": "45b79e452229175e5d8050065df464ac2601956eb2423405dbdf917a16b97195",
+      "sha256": "45b79e452229175e5d8050065df464ac2601956eb2423405dbdf917a16b97195"
+    },
+    {
+      "path": "providers/captcha/local_solver.py",
+      "upstreamSha256": "6bbaba5ef5813f880a94f7eb398fc98adb49deb906e623504c5d5a4e8164daa1",
+      "sha256": "6bbaba5ef5813f880a94f7eb398fc98adb49deb906e623504c5d5a4e8164daa1"
+    },
+    {
+      "path": "providers/captcha/manual.py",
+      "upstreamSha256": "6bf334f5048b24587c3f0067159e73aa03ab643ad9e39ede074d69221fb2db24",
+      "sha256": "6bf334f5048b24587c3f0067159e73aa03ab643ad9e39ede074d69221fb2db24"
+    },
+    {
+      "path": "providers/captcha/twocaptcha.py",
+      "upstreamSha256": "37023186cd9e0364c159f0ef1288df05125160c58fc2f4c6185c0c3e9fff70b5",
+      "sha256": "37023186cd9e0364c159f0ef1288df05125160c58fc2f4c6185c0c3e9fff70b5"
+    },
+    {
+      "path": "providers/captcha/yescaptcha.py",
+      "upstreamSha256": "4b495450f574ddedf602dd5c2814bf6885d79e0e75c834a62c223008d3f52e8f",
+      "sha256": "4b495450f574ddedf602dd5c2814bf6885d79e0e75c834a62c223008d3f52e8f"
+    },
+    {
+      "path": "providers/mailbox/__init__.py",
+      "upstreamSha256": "dab1fa0564e46d77df63b5e1e77311372741bb8f6d32023e2410ab0448df4b6c",
+      "sha256": "dab1fa0564e46d77df63b5e1e77311372741bb8f6d32023e2410ab0448df4b6c"
+    },
+    {
+      "path": "providers/mailbox/aitre.py",
+      "upstreamSha256": "8c5ecbd0f80512fdd8c2db00433114f276d3408f7911be70c2634d77adf71de9",
+      "sha256": "8c5ecbd0f80512fdd8c2db00433114f276d3408f7911be70c2634d77adf71de9"
+    },
+    {
+      "path": "providers/mailbox/cfworker.py",
+      "upstreamSha256": "edf6eace21e96e83fc7fa256d74802148b8b0eb2e73299cb83d58cad67ac9bf8",
+      "sha256": "edf6eace21e96e83fc7fa256d74802148b8b0eb2e73299cb83d58cad67ac9bf8"
+    },
+    {
+      "path": "providers/mailbox/ddg_email.py",
+      "upstreamSha256": "f3d3ced679db256e2273565b628bbe2c9bffd0385e7610533ec48f1ba4475a55",
+      "sha256": "f3d3ced679db256e2273565b628bbe2c9bffd0385e7610533ec48f1ba4475a55"
+    },
+    {
+      "path": "providers/mailbox/duckmail.py",
+      "upstreamSha256": "41a3e8c174596a36961c595cda43b2d983396ee0659476d3a84bdcf8e916eba3",
+      "sha256": "41a3e8c174596a36961c595cda43b2d983396ee0659476d3a84bdcf8e916eba3"
+    },
+    {
+      "path": "providers/mailbox/freemail.py",
+      "upstreamSha256": "b31fe6e15979180e03bbfe938bb2a33eeabb442188db4f73ad107d3f589da8bf",
+      "sha256": "b31fe6e15979180e03bbfe938bb2a33eeabb442188db4f73ad107d3f589da8bf"
+    },
+    {
+      "path": "providers/mailbox/laoudo.py",
+      "upstreamSha256": "b5e7c982f86d5f6858e98bba379d096816363baa12b6319f4230b9e276245a9e",
+      "sha256": "b5e7c982f86d5f6858e98bba379d096816363baa12b6319f4230b9e276245a9e"
+    },
+    {
+      "path": "providers/mailbox/local_ms_pool.py",
+      "upstreamSha256": "948c376e93f12e00eb15e7de59b83f071c655c77647ee76711dde650850887c1",
+      "sha256": "948c376e93f12e00eb15e7de59b83f071c655c77647ee76711dde650850887c1"
+    },
+    {
+      "path": "providers/mailbox/moemail.py",
+      "upstreamSha256": "f060e3efe5be03a174c20f334089acc72fe1dbedfb5b20bdd199705bd0b367cd",
+      "sha256": "f060e3efe5be03a174c20f334089acc72fe1dbedfb5b20bdd199705bd0b367cd"
+    },
+    {
+      "path": "providers/mailbox/tempmail_lol.py",
+      "upstreamSha256": "63f1bbbb7855ab556dbdb3937add3106ced84cd1cf130bbf4f0353dd7a0d91c4",
+      "sha256": "63f1bbbb7855ab556dbdb3937add3106ced84cd1cf130bbf4f0353dd7a0d91c4"
+    },
+    {
+      "path": "providers/mailbox/tempmail_web.py",
+      "upstreamSha256": "79e7f6f2857419788d4c91f313cdd59ea1eb8fa3c9595e98e4a6599d051087a4",
+      "sha256": "79e7f6f2857419788d4c91f313cdd59ea1eb8fa3c9595e98e4a6599d051087a4"
+    },
+    {
+      "path": "providers/mailbox/testmail.py",
+      "upstreamSha256": "3ec29e898aee251cbacf465d3ce163685b713eb505a03b62826d8143f88bd4b2",
+      "sha256": "3ec29e898aee251cbacf465d3ce163685b713eb505a03b62826d8143f88bd4b2"
+    },
+    {
+      "path": "providers/proxy/__init__.py",
+      "upstreamSha256": "bbf0720bdf6eebc55dc9582fa667dfeed1cd80b542876f16720745171020bb50",
+      "sha256": "bbf0720bdf6eebc55dc9582fa667dfeed1cd80b542876f16720745171020bb50"
+    },
+    {
+      "path": "providers/proxy/api_extract.py",
+      "upstreamSha256": "47b80f273e589dcd8a48a18ed9dac11af0045b8f1a580f54be8ca2ec09fc141d",
+      "sha256": "47b80f273e589dcd8a48a18ed9dac11af0045b8f1a580f54be8ca2ec09fc141d"
+    },
+    {
+      "path": "providers/proxy/rotating_gateway.py",
+      "upstreamSha256": "62f05f67f63306db29d0b379d97a699b6dbf48d4f536c0819198969c3f047f0d",
+      "sha256": "62f05f67f63306db29d0b379d97a699b6dbf48d4f536c0819198969c3f047f0d"
+    },
+    {
+      "path": "providers/registry.py",
+      "upstreamSha256": "e113789e9d28b926445b69a53fa6795705ae93ccae0c3322f6e64fcfde5f185e",
+      "sha256": "e113789e9d28b926445b69a53fa6795705ae93ccae0c3322f6e64fcfde5f185e"
+    },
+    {
+      "path": "providers/sms/__init__.py",
+      "upstreamSha256": "e4228e23df636405570ca813e98d3770851a444050ef38f7409223cfb8d09c4d",
+      "sha256": "e4228e23df636405570ca813e98d3770851a444050ef38f7409223cfb8d09c4d"
+    },
+    {
+      "path": "providers/sms/herosms.py",
+      "upstreamSha256": "09ea50447333b64a3450db59e962921feff9519bc58ae9e2b87d1db61b9bf248",
+      "sha256": "09ea50447333b64a3450db59e962921feff9519bc58ae9e2b87d1db61b9bf248"
+    },
+    {
+      "path": "providers/sms/sms_activate.py",
+      "upstreamSha256": "48be5d4f882a5010713db6ca9b73f149c1c5203f44f8d3116c6bfb0f8e78a8c5",
+      "sha256": "48be5d4f882a5010713db6ca9b73f149c1c5203f44f8d3116c6bfb0f8e78a8c5"
+    },
+    {
+      "path": "providers/sms/smsbower.py",
+      "upstreamSha256": "738918b3c7996ad0b1183384867303340637acfcf6c3b29c83a860d070403542",
+      "sha256": "738918b3c7996ad0b1183384867303340637acfcf6c3b29c83a860d070403542"
+    },
+    {
+      "path": "README_en.md",
+      "upstreamSha256": "772170125f2b0fb582edc65be9acbef31e553e3147db73cc0c7d74162eb9da0b",
+      "sha256": "772170125f2b0fb582edc65be9acbef31e553e3147db73cc0c7d74162eb9da0b"
+    },
+    {
+      "path": "README_vi.md",
+      "upstreamSha256": "11c7442e673b88a3ca5c7676336f2940b3428086bcaea6a3638d0300ddac7932",
+      "sha256": "11c7442e673b88a3ca5c7676336f2940b3428086bcaea6a3638d0300ddac7932"
+    },
+    {
+      "path": "README.md",
+      "upstreamSha256": "da37f0aa5665fc85507317cb10bffd057bcf9c982987ebc411ff50b438bc5dcf",
+      "sha256": "da37f0aa5665fc85507317cb10bffd057bcf9c982987ebc411ff50b438bc5dcf"
+    },
+    {
+      "path": "requirements.txt",
+      "upstreamSha256": "8c4bc49da1041a4e7eb6c3da85a67cb2d80aa281c3a75dd4f5c70465897f260a",
+      "sha256": "8c4bc49da1041a4e7eb6c3da85a67cb2d80aa281c3a75dd4f5c70465897f260a"
+    },
+    {
+      "path": "services/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "services/solver_manager.py",
+      "upstreamSha256": "608b6ca487dc39a9dd132ff5778986323c31b1570e76020f82e6b949c7e86434",
+      "sha256": "608b6ca487dc39a9dd132ff5778986323c31b1570e76020f82e6b949c7e86434"
+    },
+    {
+      "path": "services/task_runtime.py",
+      "upstreamSha256": "d2d886787d1a9193421ae9698a5def9279d1066c8f4e36fadba57b3a2eca2845",
+      "sha256": "d2d886787d1a9193421ae9698a5def9279d1066c8f4e36fadba57b3a2eca2845"
+    },
+    {
+      "path": "services/turnstile_solver/__init__.py",
+      "upstreamSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "services/turnstile_solver/api_solver.py",
+      "upstreamSha256": "ad16a54f759c6ad79c67968c0dfaacb7e4f48775c7daa135143d398115dc1b33",
+      "sha256": "ad16a54f759c6ad79c67968c0dfaacb7e4f48775c7daa135143d398115dc1b33"
+    },
+    {
+      "path": "services/turnstile_solver/browser_configs.py",
+      "upstreamSha256": "296fc8d8879be16f2299038b609524b4b01c8718ccdfa25920672f6f8b55e883",
+      "sha256": "296fc8d8879be16f2299038b609524b4b01c8718ccdfa25920672f6f8b55e883"
+    },
+    {
+      "path": "services/turnstile_solver/db_results.py",
+      "upstreamSha256": "b10368d2f2a2fbf6b3cddf967eb2386df4fa4a845d324e32ce693fcccdd9ff70",
+      "sha256": "b10368d2f2a2fbf6b3cddf967eb2386df4fa4a845d324e32ce693fcccdd9ff70"
+    },
+    {
+      "path": "services/turnstile_solver/start.py",
+      "upstreamSha256": "c470f2dd2a6176900e8498c3c5f416ccb7c476114051e1119008c2b22c7beca3",
+      "sha256": "c470f2dd2a6176900e8498c3c5f416ccb7c476114051e1119008c2b22c7beca3"
+    }
+  ],
+  "buildInputs": {
+    "LICENSE": "e0eedba615d5cd1b986afb6c5b3a4b1ae33713e7e9dc74d19daec5e3221f9d2e",
+    "README.md": "ec8e410466734d95ecefa9550ad9d43ad1f96abc6ed25aa329ea2f569415e61b",
+    "requirements-build.lock.txt": "b50978b1d5cb8cf09de214c1cc8efb54f0f3152ab09d869c1828506b82a72ac1",
+    "BROWSERS.json": "42f88a61038b9f299e411be6a25dee687d498d146300f7834eacd11e3c804cee",
+    "entry.py": "848044482c232ff2a2b681d0c0e74ba8cb296994a1e0161e7b1682e75486493a",
+    "extract_browser.py": "88ae9708afc31af86acd4a15f8c288db86bc008a10a59d78aaa9336f34e36fed"
+  }
+}

@@ -141,5 +141,35 @@
         "size": 7868928
       }
     }
+  },
+  "register_plugins": {
+    "id": "register_plugins",
+    "version": "0.1.0-codingtools.1",
+    "source": {
+      "repository": "https://github.com/p90-lover/coding-tools-mcp",
+      "path": "desktop-electron/vendor/cpa-plugins/register_plugins",
+      "license": "MIT",
+      "abiTemplate": "auth-commandcode (UNICKCHENG/cliproxyapi-plugins)"
+    },
+    "changes": [
+      "Management-only Register console, OAuth import and optional noninteractive token renewal",
+      "Private scoped loopback descriptor; explicit account IDs; no general browser or management credentials",
+      "Automation off by default, source-revision ledger, ownership and CPA-rotation guards, disabled-account preservation"
+    ],
+    "build": {
+      "go": "1.27.3",
+      "cCompiler": "Zig 0.16.0",
+      "mode": "c-shared",
+      "abi": 1,
+      "rpcSchema": 6,
+      "pinnedCPA": "8.0.32"
+    },
+    "platforms": {
+      "win32/x64": {
+        "path": "windows/amd64/register_plugins-v0.1.0-codingtools.1.dll",
+        "sha256": "665a7de68bcead13b5e6fed00b626c0714199502d74c79dfee5caade32d3e060",
+        "size": 7683584
+      }
+    }
   }
 }

@@ -1,0 +1,20 @@
+{
+  "camoufox": {
+    "repository": "https://github.com/daijro/camoufox",
+    "tag": "v158.0-beta.40",
+    "version": "158.0",
+    "build": "beta.40",
+    "assets": {
+      "win32-x64": { "name": "camoufox-158.0-beta.40-win.x86_64.zip", "sha256": "2d3e33207c2d5853e817e8317f0e33124ffb7054bd5102c8b84546e3d15a6447" },
+      "linux-x64": { "name": "camoufox-158.0-beta.40-lin.x86_64.zip", "sha256": "2ead498d4765394addd3278d6a663962f3f99b189a99d3f966de56656cefc823" },
+      "linux-arm64": { "name": "camoufox-158.0-beta.40-lin.arm64.zip", "sha256": "8a4dfdd85dfb5212dae716b4aa8e30041634edbbba6f6177a566a3ee6b1efe8c" },
+      "darwin-x64": { "name": "camoufox-158.0-beta.40-mac.x86_64.zip", "sha256": "cc662b9f4dfe05fcf1c23e874fb28ac0bd8048bceefe38757f8dc589d41de4ed" },
+      "darwin-arm64": { "name": "camoufox-158.0-beta.40-mac.arm64.zip", "sha256": "b8aba26d86f761627651b8e7f0d90ade022a32a3d750e0b68ff5830ebefd3aab" }
+    }
+  },
+  "chromium": {
+    "playwright": "1.62.0",
+    "patchright": "1.63.0",
+    "revisionSource": "The exact package's driver/package/browsers.json; installed by its pinned browser installer"
+  }
+}

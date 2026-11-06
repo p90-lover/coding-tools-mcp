@@ -244,6 +244,10 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     ...(outboundProxyUrl ? [`      proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     "    grok-login-provider:",
     "      enabled: true",
+    "    register_plugins:",
+    "      enabled: true",
+    `      bridge-descriptor: ${yamlString(path.join(process.env.CODEX_CHATGPT_WEB_HOME || state, "runtime", "register-api.json"))}`,
+    `      data-dir: ${yamlString(path.join(state, "register-plugins-data"))}`,
     // Ask OpenAI's Responses models for a reasoning summary. Claude Code never sends the
     // `thinking.display` that would make CPA request one, so its chats showed no reasoning; CPA
     // turns the summary into thinking blocks, which the agent then reports as reasoning. A default

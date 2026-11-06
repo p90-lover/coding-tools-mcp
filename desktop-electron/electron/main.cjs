@@ -30,6 +30,7 @@ const { createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatg
 const { createGptBrowserHost, cleanUserAgent } = require("./gpt-browser.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createRegisterHost } = require("./register-host.cjs");
+const { createRegisterApi } = require("./register-api.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
@@ -112,6 +113,7 @@ const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData"
 const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
 const CORE_HOME = LAUNCHER_PROFILE.coreHome;
 const BROWSER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "launcher-browser.json");
+const REGISTER_DESCRIPTOR_PATH = path.join(CORE_HOME, "runtime", "register-api.json");
 const BROWSER_HELPER_PATH = app.isPackaged
   ? path.join(process.resourcesPath, "runtime", "app", "browser-helper.cjs")
   : path.join(SOURCE_ROOT, ".launcher-runtime", "browser-helper.cjs");
@@ -149,6 +151,8 @@ let chatgptDesktop = null;
 let gptBrowser = null;
 let emailHost = null;
 let registerHost = null;
+let registerApi = null;
+let registerOrigin = "";
 const chatgptDesktopOwners = new WeakSet();
 let runtimeHost = null;
 let headlessHost = null;
@@ -327,13 +331,25 @@ async function fetchThroughLauncherNetwork(url, options) {
 function getRegisterHost(logger) {
   if (registerHost) return registerHost;
   registerHost = createRegisterHost({
-    projectRoot: path.join(app.getPath("documents"), "ChatGPT", "reg-machine"),
-    configPath: path.join(app.getPath("userData"), "runtime-register.json"),
+    runtimeRoot: app.isPackaged
+      ? path.join(process.resourcesPath, "register-runtime")
+      : path.join(SOURCE_ROOT, "aiTemp", "register-runtime"),
+    dataRoot: path.join(CORE_HOME, "register"),
+    origin: registerOrigin,
     isQuitting: () => quitting,
     createView: (partition) => new WebContentsView({
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
     }),
-    prepareSession: (browserSession) => browserSession.setProxy({ mode: "direct" }),
+    prepareSession: async (browserSession, origin, serviceToken) => {
+      await browserSession.setProxy({ mode: "direct" });
+      if (!serviceToken) return;
+      browserSession.webRequest.onBeforeSendHeaders({ urls: ["http://127.0.0.1/*"] }, (details, callback) => {
+        const requestHeaders = { ...details.requestHeaders };
+        if (new URL(details.url).origin === origin) requestHeaders.Authorization = `Bearer ${serviceToken}`;
+        callback({ requestHeaders });
+      });
+      return () => browserSession.webRequest.onBeforeSendHeaders(null);
+    },
     attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
     detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
     openExternal: (url) => openWebUrl(url),
@@ -2035,7 +2051,6 @@ function registerIpc({ logger, stateStore }) {
     return getRegisterHost(logger);
   };
   handle("launcher:register-status", (event) => registerFor(event).status());
-  handle("launcher:register-configure", (event, projectRoot) => registerFor(event, true).configure(projectRoot));
   handle("launcher:register-start", (event) => registerFor(event, true).start());
   handle("launcher:register-stop", (event) => registerFor(event, true).stop());
   handle("launcher:register-reload", (event) => registerFor(event, true).reload());
@@ -2625,6 +2640,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     const step = (name, work, ms) => boundedQuitStep(name, work, { ms,
       onTimeout: (stepName, limit) => quitLogger?.warn("launcher.quit_step_timeout", { step: stepName, ms: limit }) });
     await step("headless", () => headlessHost?.shutdown("launcher-quit"));
+    await step("register-api", () => registerApi?.close());
     await step("register", () => registerHost?.shutdown());
     stopCatalogVerificationMonitor();
     updateController?.stopPeriodicChecks?.();
@@ -2654,6 +2670,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     quitting = false;
     try { await registerHost?.recoverAfterCancelledQuit(); }
     catch { quitLogger?.warn("launcher.register_recovery_failed", { reason: "cancelled-quit" }); }
+    try { await registerApi?.recoverAfterCancelledQuit(); }
+    catch { quitLogger?.warn("launcher.register_api_recovery_failed", { reason: "cancelled-quit" }); }
     showMainWindow();
     publishOperation({ name: "launcher-quit", status: "failed", message });
     return { ok: false, message };
@@ -2701,6 +2719,7 @@ async function start() {
   void pruneOldRuntimes({ app, coreHome: CORE_HOME }).catch(() => undefined);
 
   cdpPort = await findFreePort();
+  registerOrigin = `http://127.0.0.1:${await findFreePort()}`;
   if (process.platform === "linux") {
     app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
   }
@@ -2764,6 +2783,13 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  registerApi = createRegisterApi({
+    host: getRegisterHost(logger),
+    descriptorPath: REGISTER_DESCRIPTOR_PATH,
+    sourceIdPath: path.join(CORE_HOME, "register", "source-id.json"),
+  });
+  try { await registerApi.start(); }
+  catch { logger.warn("launcher.register_api_unavailable", { reason: "startup" }); }
   // A throw in a timer or an event handler, or a promise nobody awaits, used to reach Electron's
   // default handler: a modal "A JavaScript error occurred in the main process" box that holds the
   // whole app until clicked (with the window in the tray it simply looked hung). It is logged

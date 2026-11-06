@@ -588,7 +588,9 @@ export interface ChatGptDesktopAccount {
 }
 
 export interface RegisterStatus {
-  projectRoot: string;
+  managed: boolean;
+  runtimeRoot: string;
+  dataRoot: string;
   origin: string;
   ready: boolean;
   owned: boolean;
@@ -711,7 +713,6 @@ export type ProjectGit = {
 export interface LauncherApi {
   snapshot(): Promise<LauncherSnapshot>;
   registerStatus(): Promise<RegisterStatus>;
-  configureRegister(projectRoot: string): Promise<RegisterStatus>;
   startRegister(): Promise<RegisterStatus>;
   stopRegister(): Promise<RegisterStatus>;
   reloadRegister(): Promise<RegisterStatus>;
