@@ -3257,6 +3257,37 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // Codex's reviewer thinks before it answers (GPT-5.4 Thinking, low): at 25 s it timed out often
   // enough that reviews fell back to a paid model.
   const REVIEW_BUDGET_MS = 45_000;
+  const reviewWindows = new Set();
+  function withinReview(operation, isCurrent = () => true) {
+    const controller = new AbortController();
+    const deadline = now() + REVIEW_BUDGET_MS;
+    let live = true, timer, rejectWindow;
+    const expired = () => new Error("The review attempt timed out or its owner changed; no new decision may be sent from it");
+    const check = () => {
+      if (!live || schedulerDisposed || now() >= deadline || !isCurrent()) throw expired();
+    };
+    const retire = () => {
+      if (!live) return;
+      live = false;
+      const error = expired();
+      controller.abort(error);
+      rejectWindow(error);
+    };
+    const timeout = new Promise((_resolve, reject) => {
+      rejectWindow = reject;
+      timer = setTimer(retire, REVIEW_BUDGET_MS);
+      timer?.unref?.();
+    });
+    reviewWindows.add(retire);
+    const pending = Promise.resolve().then(() => { check(); return operation({ check, signal: controller.signal }); })
+      .then(value => { check(); return value; });
+    return Promise.race([pending, timeout]).finally(() => {
+      live = false;
+      clearTimer(timer);
+      reviewWindows.delete(retire);
+      controller.abort();
+    });
+  }
   const REVIEWER_DOWN_MS = 10 * 60_000;
   // A 404 is a model CPA lists that nothing serves (Cline's "model not found"), not an outage: seen
   // live 2026-10-24, cline-pass/deepseek-v4-flash refused every goal check, each time first, and so
@@ -3448,9 +3479,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. `partial`: the
    *  request was too long to show whole, and "Let the model judge" has the reviewer judge it anyway. */
-  async function askApprover({ approver, mission, approval, decide = false, partial = false, judge = false }) {
+  async function askApprover({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal }) {
+    check();
+    const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
+    check();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
     // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
     // timeout left only the card's own model for ten minutes.
@@ -3469,9 +3503,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? (Array.isArray(takes) ? nearestEffort(picked, takes) : picked) : "";
       return [model, effort];
     }));
-    const deadline = now() + REVIEW_BUDGET_MS;
     const [folder, task, evidence] = await Promise.all([requestFolder(approval, mission), requestTask(mission), requestEvidence(approval)]);
+    check();
     const scripts = await reviewScriptExcerpts(approval, folder);
+    check();
     const request = describeRequest(approval);
     const publication = gitPushRequest(approval.command) ?? gitPushRequest(approval.toolInput);
     let repository = null;
@@ -3501,6 +3536,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return null;
       };
       const settled = await checked();
+      check();
       if (settled) return settled;
     }
     // A shell command is reviewed as its bare command line, which leaves out the agent's own
@@ -3565,10 +3601,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           body: JSON.stringify({ model, temperature: 0, max_tokens: 2000,
             ...(reviewEfforts[model] ? { reasoning_effort: reviewEfforts[model] } : {}),
             messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
-          signal: AbortSignal.timeout(left),
+          signal: signal ?? AbortSignal.timeout(left),
         });
+        check();
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
+        check();
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -3584,6 +3622,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (reviewVerdicts.size > 200) reviewVerdicts.delete(reviewVerdicts.keys().next().value);
         return { action: decision.action, reason };
       } catch (error) {
+        check();
         failure = error;
         reviewerFailed(model, error);
       }
@@ -3607,20 +3646,27 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function reviewToolCall({ workspaceId, session, tool, args, reason = "" } = {}) {
     const judges = chatPreferences.get().modelJudges;
     const id = clean(workspaceId, 128), thread = clean(session, 256);
-    let run;
-    try { ({ run } = await sessionChat(id, thread, "have its screen actions reviewed")); } catch (error) {
-      return { action: "ask", reason: publicText(error?.message || error, 200) };
-    }
-    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
-    const node = (run.nodes || []).find(holds);
-    const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true } };
-    const approval = { kind: "tool", tool: `${APP_TOOL_PREFIX}${clean(tool, 80)}`, thread_id: thread,
-      toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
+    const toolName = `${APP_TOOL_PREFIX}${clean(tool, 80)}`;
     try {
-      const verdict = await askApprover({ approver, mission: run, approval, decide: judges, judge: judges, partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT });
-      return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
+      return await withinReview(async ({ check, signal }) => {
+        let run;
+        try { ({ run } = await sessionChat(id, thread, "have its screen actions reviewed")); } catch (error) {
+          check();
+          return { action: "ask", reason: publicText(error?.message || error, 200) };
+        }
+        check();
+        const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
+        const node = (run.nodes || []).find(holds);
+        const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true } };
+        const approval = { kind: "tool", tool: toolName, thread_id: thread,
+          toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
+        const verdict = await askApprover({ approver, mission: run, approval, decide: judges, judge: judges,
+          partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT, check, signal });
+        check();
+        return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
+      }, () => !sessionStops.has(thread) && !backgroundRuns.get(sessionOwners.get(thread))?.stopped);
     } catch (error) {
-      logger?.warn?.("ao.tool_review_failed", { tool: approval.tool, message: publicText(error?.message || error, 200) });
+      logger?.warn?.("ao.tool_review_failed", { tool: toolName, message: publicText(error?.message || error, 200) });
       return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
     }
   }
@@ -3645,7 +3691,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A review that never came (no run loop to start it, a review pass that hung) hid the request as
     // "being reviewed" with nothing to answer it: a DeepSeek chat sat 85 minutes on one PowerShell
     // request. Past REVIEW_DEADLINE_MS it is the person's, still never answered for them.
-    return advice ? advice.action === "ask" : reviewOverdue(approval);
+    return advice?.action === "ask" || reviewOverdue(approval);
   }
   /** Longer than every review try with its retry wait, plus the decide pass: an unreviewed request past it is stuck. */
   const REVIEW_DEADLINE_MS = REVIEW_TRIES * (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15_000;
@@ -3709,19 +3755,46 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let note = null;
     await Promise.all(jobs.map(async (job) => {
-      const mark = { at: now(), request: job.request };
-      screening.set(job.approval.approval_id, mark);
+      const id = job.approval.approval_id;
+      const owner = JSON.stringify([activityAttempt(workspaceId, runId, job.node), job.node.route, job.node.settings]);
+      const mark = { at: now(), request: job.request, sending: null };
+      const current = () => screening.get(id) === mark && !schedulerDisposed && !mission.cancelled && !mission.paused
+        && job.node.state === "running" && !sessionStops.has(job.approval.thread_id)
+        && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped
+        && JSON.stringify([activityAttempt(workspaceId, runId, job.node), job.node.route, job.node.settings]) === owner;
+      screening.set(id, mark);
       try {
-        const said = await screenOne(workspaceId, runId, mission, job);
+        const said = await withinReview(review => screenOne(workspaceId, runId, mission, job, {
+          ...review, owner, sending: advice => { mark.sending = advice; },
+        }), current);
         if (said) note = said;
+      } catch (error) {
+        if (!current()) return;
+        const why = publicText(error?.message || error, 160);
+        if (mark.sending) {
+          approverAdvice.set(id, { action: "ask", unresolved: true, unsent: mark.sending.action,
+            reason: "The reviewer's answer delivery outcome is unknown. Check this request before answering; it was not automatically replayed." });
+          note = "The reviewer's answer delivery is uncertain; check the pending request";
+        } else {
+          const tries = (reviewFailures.get(id)?.tries ?? 0) + 1;
+          reviewFailures.set(id, { tries, at: now() });
+          if (reviewFailures.size > 500) reviewFailures.delete(reviewFailures.keys().next().value);
+          logger?.warn?.("ao.approval_review_failed", { tries, tool: String(job.approval.tool ?? job.approval.kind ?? "").slice(0, 80), reason: why });
+          if (tries >= REVIEW_TRIES && !chatPreferences.get().modelJudges) {
+            approverAdvice.set(id, { action: "ask", unresolved: true,
+              reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` });
+          }
+          note = tries < REVIEW_TRIES ? "The reviewer timed out; retrying automatically" : "The reviewer could not answer after its bounded retries";
+        }
       } finally {
-        if (screening.get(job.approval.approval_id) === mark) screening.delete(job.approval.approval_id);
+        if (screening.get(id) === mark) screening.delete(id);
       }
     }));
     return note;
   }
   /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
-  async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }) {
+  async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }, { check, signal, owner, sending }) {
+    check();
     // The command advisor must not decide from a truncated command or permission scope.
     const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
     const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
@@ -3734,14 +3807,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const judges = chatPreferences.get().modelJudges;
     // What this request's screening concluded; judged ones are not screened again (rescreen).
     const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
-    let advice = routineAppTool(approval.tool)
+    const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
+    let advice = exhausted
+      ? judges ? { action: "deny", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so it was denied (Let the model judge is on)` }
+        : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
+      : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
       : attachedFileRead(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
       : !incomplete && routineAppCommand(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
       : incomplete && !blocked && judges
-      ? await askApprover({ approver, mission, approval, decide: true, partial: true, judge: true }).then(verdict => ({ ...verdict, reviewed: true }),
+      ? await askApprover({ approver, mission, approval, decide: true, partial: true, judge: true, check, signal }).then(verdict => ({ ...verdict, reviewed: true }),
         (error) => ({ action: "failed", error }))
       : incomplete && !blocked
       ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
@@ -3759,12 +3836,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
             // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
             // request go to the person, and its card says why.
-            : await askApprover({ approver, mission, approval, judge: judges }).then(verdict => ({ ...verdict, reviewed: true }),
+            : await askApprover({ approver, mission, approval, judge: judges, check, signal }).then(verdict => ({ ...verdict, reviewed: true }),
               (error) => ({ action: "failed", error }));
     // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
     // doubt), so a request it could read whole no longer waits for the person for want of a decision.
+    check();
     if (advice.action === "ask" && advice.reviewed) {
-      const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges }).catch(() => null);
+      const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal }).catch(() => null);
+      check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
       // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
       // person's: the request sat on the card though the switch was on.
@@ -3796,8 +3875,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       && !offered.includes(advice.action === "allow" ? "accept" : "decline")) {
       advice = { action: "ask", unresolved: true, reason: "Choose one of this request's own answers" };
     }
+    check();
     keepAdvice(advice);
     if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
+    if (approver.settings?.auto_decide === true && advice.action !== "ask") {
+      const latest = await savedNode(workspaceId, runId, node.id);
+      check();
+      if (latest.mission?.cancelled || latest.mission?.paused || latest.node?.state !== "running"
+        || JSON.stringify([activityAttempt(workspaceId, runId, latest.node), latest.node.route, latest.node.settings]) !== owner) return null;
+    }
     // Each answer stands alone: one the person gave first (or any failure to send it) never
     // touches the other requests; this one just goes to the person.
     if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
@@ -3808,7 +3894,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           reason: `The reviewer's decision is not offered by this request, so choose an answer yourself. It said ${advice.action}: ${advice.reason}` });
         return null;
       }
-      if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false)) {
+      check();
+      sending(advice);
+      const sent = await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false);
+      check();
+      if (sent) {
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
         return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
@@ -3817,10 +3907,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return null;
     }
     if (approver.settings?.auto_decide === true && advice.action !== "ask") {
+      check();
+      sending(advice);
       const sent = await requestHeadless("/api/v1/ao/harness/approval", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: approval.approval_id,
         allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
       }).then(result => result?.ok === true && result.result?.ok === true, () => false);
+      check();
       if (sent) {
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
@@ -7697,6 +7790,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     nativePreviewLeases.clear();
     stopTracking();
     schedulerDisposed = true;
+    for (const retire of reviewWindows) retire();
     sessionOwners.clear();
     idleStopped = true;
     if (idleTimer) clearTimer(idleTimer);
