@@ -1,4 +1,7 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import * as childProcess from "node:child_process";
+import { EventEmitter } from "node:events";
+import { chromium } from "playwright-core";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +14,58 @@ import {
 } from "../src/browser-login";
 import { CHATGPT_NEW_CHAT_URL } from "../src/chatgpt-session";
 import { defaultConfig } from "../src/config";
+
+for (const closeFirst of [true, false]) test(`Windows Chrome capture waits for normal close and Continue (close first=${closeFirst})`, async () => {
+  if (process.platform !== "win32") return;
+  const root = mkdtempSync(join(tmpdir(), "coding-tools-chrome-flow-"));
+  const executable = join(root, "chrome.exe");
+  writeFileSync(executable, "fixture, never executed");
+  const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null, pid: 12345,
+    kill: () => { throw new Error("Windows login must close normally before capture"); } });
+  const launches: string[][] = [];
+  const spawn = spyOn(childProcess, "spawn").mockImplementation((_exe: unknown, args: unknown) => {
+    expect(_exe).toBe(executable);
+    launches.push(args as string[]);
+    queueMicrotask(() => child.emit("spawn"));
+    return child as any;
+  });
+  let offline = false, captured = false;
+  const context = { isClosed: () => false, close: async () => {},
+    setOffline: async (value: boolean) => { offline = value; }, route: async () => {},
+    pages: () => [{ goto: async () => {}, url: () => CHATGPT_NEW_CHAT_URL }],
+    storageState: async () => { expect(offline).toBe(true); captured = true; return { cookies: [
+      { name: "session", value: "fixture", domain: ".chatgpt.com", path: "/", expires: -1, httpOnly: true, secure: true, sameSite: "Lax" },
+      { name: "google", value: "excluded", domain: ".google.com", path: "/", expires: -1, httpOnly: true, secure: true, sameSite: "Lax" },
+    ], origins: [] }; },
+  };
+  const launch = spyOn(chromium, "launchPersistentContext").mockImplementation(async (profile, options) => {
+    expect(profile.startsWith(root)).toBe(true);
+    expect(options?.offline).toBe(true);
+    expect(options?.headless).toBe(true);
+    expect(options?.chromiumSandbox).toBe(true);
+    return context as any;
+  });
+  let continueLogin!: () => void;
+  const continuation = new Promise<void>(resolve => { continueLogin = resolve; });
+  const closeChrome = () => { child.exitCode = 0; child.emit("exit", 0, null); };
+  try {
+    const pending = captureSystemBrowserLogin({ chromeExecutablePath: executable, storageStatePath: join(root, "state.json") }, {
+      continuation, timeoutMs: 1000, ...(closeFirst ? { proxyServer: "http://127.0.0.1:32123" } : {}),
+    });
+    await new Promise(resolve => setTimeout(resolve, 5));
+    if (closeFirst) closeChrome(); else continueLogin();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(captured).toBe(false);
+    if (closeFirst) continueLogin(); else closeChrome();
+    const result = await pending;
+    expect(captured).toBe(true);
+    expect(result.storageState.cookies.map(cookie => cookie.name)).toEqual(["session"]);
+    expect(launches).toHaveLength(1);
+    expect(launches[0]).toContain(closeFirst ? "--proxy-server=http://127.0.0.1:32123" : "--no-proxy-server");
+    expect(launches[0].some(arg => /remote-debugging|enable-automation/.test(arg))).toBe(false);
+    expect(readdirSync(root).filter(name => name.startsWith("login-profile-"))).toEqual([]);
+  } finally { spawn.mockRestore(); launch.mockRestore(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test("login starts with normal Chrome and captures state in a headed Keychain-aware context", async () => {
   if (process.platform === "win32") return;

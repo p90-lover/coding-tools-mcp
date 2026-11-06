@@ -123,7 +123,7 @@ test("closing an inactive first tab leaves the selected user page unchanged", as
   assert.deepEqual(Array.from(host.snapshot().tabs, tab => tab.id), ["user"]);
 });
 
-test("closed home stays hidden after the last user tab closes and can be explicitly selected again", async () => {
+test("closed home stays offscreen after the last user tab closes and can be explicitly selected again", async () => {
   const { host, calls } = fixture();
   host.homeTabClosed = true;
   host.view.webContents.close = () => {};
@@ -132,8 +132,13 @@ test("closed home stays hidden after the last user tab closes and can be explici
   host.selectedTabId = user.id;
   await host.closeTab(user.id);
   assert.equal(host.snapshot().tabs.length, 0);
+  const hiddenBounds = { x: 801, y: 0, width: 800, height: 600 };
+  const bounds = [];
+  host.hiddenTurnBounds = () => hiddenBounds;
+  host.view.setBounds = value => bounds.push(value);
   host.presentPrimaryView(true);
-  assert.deepEqual(calls.at(-1), ["visible", false]);
+  assert.deepEqual(bounds, [hiddenBounds], "the closed tab cannot cover the launcher");
+  assert.deepEqual(calls.at(-1), ["visible", true], "the internal account renderer stays drawable offscreen");
   host.selectTab("home");
   assert.equal(host.snapshot().tabs[0].id, "home");
 });

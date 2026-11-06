@@ -1347,7 +1347,7 @@ function BrowserSurface({
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
   const passkeyAvailable = !manualInteraction
-    && platform === "darwin"
+    && (platform === "darwin" || platform === "win32")
     && browser?.authenticated !== true;
   const selectedManualTab = browser?.tabs.find(tab => tab.active && tab.interactionMode === "manual");
   const navigationLocked = browser?.status === "running" || browser?.status === "testing";
@@ -1547,7 +1547,10 @@ function BrowserSurface({
               ? copy.noActiveTaskBody
               : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
-              <PrimaryButton disabled={passkeyWaiting} onClick={() => void toggle()}>
+              <PrimaryButton disabled={passkeyWaiting} onClick={() => {
+                if (!manualInteraction && browser?.authenticated !== true && platform === "win32") openPasskeyLogin();
+                else void toggle();
+              }}>
                 {manualInteraction || browser?.authenticated ? copy.openChatgpt : copy.signIn}
               </PrimaryButton>
               {passkeyAvailable ? (

@@ -296,15 +296,16 @@ class RuntimeHost {
   }
 
   passkeyChromeExecutable() {
-    if (this.platform !== "darwin") throw new Error("Passkey sign-in is currently supported only on macOS");
+    if (this.platform !== "darwin" && this.platform !== "win32") throw new Error("Chrome sign-in is supported on Windows and macOS");
     const setupConfig = this.supervisor.readSetupConfig
       ? this.supervisor.readSetupConfig()
       : this.supervisor.readConfig();
-    const candidate = setupConfig?.chromeExecutablePath
-      || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
-    if (!usableExecutable(candidate, this.platform)) {
-      throw new Error(`Google Chrome is unavailable at ${candidate}`);
-    }
+    const candidates = [setupConfig?.chromeExecutablePath, ...(this.platform === "win32"
+      ? [process.env.ProgramFiles, process.env["ProgramFiles(x86)"], process.env.LOCALAPPDATA]
+        .filter(Boolean).map(root => path.join(root, "Google", "Chrome", "Application", "chrome.exe"))
+      : ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"])];
+    const candidate = candidates.find(value => value && usableExecutable(value, this.platform));
+    if (!candidate) throw new Error("Google Chrome is unavailable. Install Chrome or configure its executable path.");
     return candidate;
   }
 
@@ -339,9 +340,15 @@ class RuntimeHost {
     });
   }
 
-  async capturePasskeyLogin() {
+  async capturePasskeyLogin({ proxyRules = "DIRECT" } = {}) {
     this.cleanupPasskeyTransfers();
     const chrome = this.passkeyChromeExecutable();
+    let proxyServer;
+    if (proxyRules !== "DIRECT") {
+      const route = /^(PROXY|HTTPS|SOCKS5|SOCKS) ([^\s;]+)$/.exec(proxyRules);
+      if (!route) throw new Error("Chrome sign-in cannot reproduce this account's proxy route. Check its proxy configuration.");
+      proxyServer = `${({ PROXY: "http", HTTPS: "https", SOCKS5: "socks5", SOCKS: "socks4" })[route[1]]}://${route[2]}`;
+    }
     const parent = path.join(this.app.getPath("userData"), "passkey-login");
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(parent, 0o700); } catch {}
@@ -359,11 +366,12 @@ class RuntimeHost {
         chrome,
         "--storage-state",
         storageStatePath,
+        ...(proxyServer ? ["--proxy-server", proxyServer] : []),
       ], {
         embedded: true,
         controlStdin: true,
-        env: this.launcherControlEnvironment(),
-        message: "Sign in with your passkey in Chrome, then return here and choose Continue",
+        env: { ...this.launcherControlEnvironment(), TEMP: transferRoot, TMP: transferRoot },
+        message: "Sign in in Chrome, close the dedicated Chrome window, then return here and choose Continue",
         successMessage: "Passkey session captured for private Launcher verification",
         timeoutMs: PASSKEY_LOGIN_TIMEOUT_MS,
       });

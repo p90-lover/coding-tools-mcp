@@ -1328,7 +1328,7 @@ test("failed terminal migration restores removed launchd ownership before verify
   }
 });
 
-test("macOS passkey capture uses an isolated launcher-controlled transfer", async () => {
+test("Chrome capture keeps the selected account's route and uses an isolated launcher-controlled transfer", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-passkey-runtime-"));
   const chrome = path.join(root, "Google Chrome");
   fs.writeFileSync(chrome, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
@@ -1361,20 +1361,30 @@ test("macOS passkey capture uses an isolated launcher-controlled transfer", asyn
     return { code: 0, stdout: "", stderr: "" };
   };
   try {
-    const transfer = await host.capturePasskeyLogin();
+    const transfer = await host.capturePasskeyLogin({ proxyRules: "PROXY 127.0.0.1:32123" });
     assert.deepEqual(transfer.storageState, { cookies: [], origins: [] });
     assert.equal(invocation.name, "passkey-login");
     assert.deepEqual(invocation.args.slice(0, 4), ["login", "--launcher-control", "--chrome", chrome]);
     assert.equal(invocation.options.embedded, true);
     assert.equal(invocation.options.controlStdin, true);
     assert.equal(invocation.options.timeoutMs, 10 * 60_000);
+    assert.deepEqual(invocation.args.slice(-2), ["--proxy-server", "http://127.0.0.1:32123"]);
     const transferRoot = path.dirname(invocation.args[invocation.args.indexOf("--storage-state") + 1]);
     assert.equal(fs.existsSync(transferRoot), true);
+    assert.equal(invocation.options.env.TEMP, transferRoot);
+    assert.equal(invocation.options.env.TMP, transferRoot);
     await transfer.cleanup();
     assert.equal(fs.existsSync(transferRoot), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Chrome capture refuses an unrepresentable proxy route before opening a browser", async () => {
+  const fixture = hostFor(null).host;
+  fixture.passkeyChromeExecutable = () => "fixture.exe";
+  fixture.run = async () => assert.fail("must not start on a different route");
+  await assert.rejects(fixture.capturePasskeyLogin({ proxyRules: "PROXY proxy.invalid:1234; DIRECT" }), /cannot reproduce/);
 });
 
 test("passkey Continue is delivered only to the active owned login child", async () => {
@@ -1397,8 +1407,16 @@ test("passkey Continue is delivered only to the active owned login child", async
   assert.throws(() => fixture.continuePasskeyLogin(), /No passkey sign-in is waiting/);
 });
 
-test("passkey sign-in is rejected outside macOS even if IPC is invoked directly", () => {
+test("Chrome login accepts a configured Windows executable and refuses unsupported platforms", () => {
   const fixture = hostFor(null).host;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-chrome-login-"));
+  const chrome = path.join(root, "chrome.exe");
+  fs.writeFileSync(chrome, "fixture, never executed");
   fixture.platform = "win32";
-  assert.throws(() => fixture.passkeyChromeExecutable(), /supported only on macOS/);
+  fixture.supervisor.readSetupConfig = () => ({ chromeExecutablePath: chrome });
+  try {
+    assert.equal(fixture.passkeyChromeExecutable(), chrome);
+    fixture.platform = "unsupported";
+    assert.throws(() => fixture.passkeyChromeExecutable(), /Windows and macOS/);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

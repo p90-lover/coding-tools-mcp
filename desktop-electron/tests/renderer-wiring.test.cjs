@@ -637,17 +637,18 @@ test("Save chats in ChatGPT is one settings toggle wired through the runtime set
   assert.match(i18nSource, /savedChatsBody: "[^"]*ChatGPT history[^"]*memory and custom instructions[^"]*Temporary Chat[^"]*tools/);
 });
 
-test("macOS passkey sign-in is additive to the unchanged embedded login action", () => {
+test("Windows and macOS Chrome sign-in uses the owned account route and existing import verification", () => {
   assert.match(appSource, /onAction=\{openLogin\}/);
   assert.match(appSource, /<BrowserSurface[\s\S]*?operation=\{operation\}[\s\S]*?platform=\{snapshot\.platform\}/);
-  assert.match(appSource, /const passkeyAvailable = !manualInteraction[\s\S]*?platform === "darwin"[\s\S]*?browser\?\.authenticated !== true/);
+  assert.match(appSource, /const passkeyAvailable = !manualInteraction[\s\S]*?platform === "darwin" \|\| platform === "win32"[\s\S]*?browser\?\.authenticated !== true/);
   assert.match(appSource, /\{passkeyAvailable \? \([\s\S]*?className="toolbar-text-button"[\s\S]*?copy\.passkeySignIn/);
   assert.match(appSource, /className="browser-empty-actions"[\s\S]*?copy\.passkeySignIn/);
   assert.match(appSource, /passkeyWaiting \? continuePasskeyLogin : openPasskeyLogin/);
   assert.match(preloadSource, /openPasskeyLogin:[\s\S]*?launcher:browser-passkey-login/);
   assert.match(preloadSource, /continuePasskeyLogin:[\s\S]*?launcher:browser-passkey-login-continue/);
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
-  assert.match(electronMain, /loginWithPasskey: \(\) => runtimeHost\.capturePasskeyLogin\(\)/);
+  assert.match(electronMain, /loginWithPasskey: async \(partition, route\) =>[\s\S]*?withBrowserLoginProxy\([\s\S]*?runtimeHost\.capturePasskeyLogin\(loginRoute\)/);
+  assert.match(browserHostSource, /\["chatgpt\.com", \.\.\.AUTH_PROVIDER_HOSTS\][\s\S]*?contents\.session\.resolveProxy/);
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000\)[\s\S]*?runSessionInspection\(false\)/);
 });
 
