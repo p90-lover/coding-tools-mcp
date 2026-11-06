@@ -1732,7 +1732,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
       // `pending` is observed.approvals for this card: none, or only ones already answered.
-      if (nothingToAnswer(observed)) await stopStalledTurn(session, observed, ownership);
+      const stopped = nothingToAnswer(observed) && await stopStalledTurn(session, observed, ownership);
+      if (!stopped) wakeQueueOnAgentReady(workspaceId, mission, node, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -6501,7 +6502,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const draining = new Set();
   const queueFailures = new Map(); // item id -> failed sends
   const steerTries = new Map(); // item id -> steers that found the agent not ready
-  function armQueue(workspaceId, taskId, delay, steer = false) {
+  function armQueue(workspaceId, taskId, delay, steer = false, ready = false) {
     const key = wakeKey(workspaceId, taskId);
     if (queueTimers.has(key)) clearTimer(queueTimers.get(key).handle);
     queueTimers.delete(key);
@@ -6511,7 +6512,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       void drainQueue(workspaceId, taskId, { steer }).catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
     }, Math.max(1, delay));
     handle?.unref?.();
-    queueTimers.set(key, { handle });
+    queueTimers.set(key, { handle, ready });
+  }
+  /** A launch-queued steer goes when its own agent is ready, not at the old retry's deadline. */
+  function wakeQueueOnAgentReady(workspaceId, mission, node, observed) {
+    const taskId = mission?.project_id;
+    if (!taskId || mission.cancelled || !(mission.execution_mode === "single" || node.role === "planner")
+      || observed.turnState !== "running" || observed.agentGone || observed.exited || observed.needsInput || observed.approvals?.length) return;
+    const key = wakeKey(workspaceId, taskId);
+    if (!chatQueue.list(workspaceId, taskId)[0]?.steer || draining.has(key) || queueTimers.get(key)?.ready) return;
+    // Keep this observational path nonblocking. drainQueue re-reads the current head and lifecycle,
+    // and chatSteer checks the agent again before sending; the per-chat draining lock prevents duplicates.
+    armQueue(workspaceId, taskId, 1, true, true);
   }
   /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
   function queuedSelection(item, latest) {
