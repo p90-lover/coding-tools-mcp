@@ -311,7 +311,8 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     try {
       saved = (yaml.parse ?? yaml.load)(savedSource);
       if (Object.prototype.toString.call(saved) !== "[object Object]") throw new Error();
-      for (const value of [saved.plugins, saved.plugins?.configs, saved.oauth]) {
+      for (const value of [saved.plugins, saved.plugins?.configs, saved.oauth,
+        saved.plugins?.configs?.["antigravity-coding-filter"]]) {
         if (value !== undefined && Object.prototype.toString.call(value) !== "[object Object]") throw new Error();
       }
       const apiKeys = saved["api-keys"];
@@ -355,6 +356,12 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "  enabled: true",
     `  dir: ${yamlString(pluginDirectory)}`,
     "  configs:",
+    "    antigravity-coding-filter:",
+    "      enabled: true",
+    "      priority: 1",
+    "      mode: rewrite",
+    "      use_default_keywords: true",
+    "      custom_mappings: {}",
     "    commandcode-go:",
     "      enabled: true",
     "    auth-commandcode:",
@@ -418,6 +425,11 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     ...managed, ...retained,
     plugins: { ...saved.plugins, ...managed.plugins,
       configs: { ...saved.plugins?.configs, ...managed.plugins.configs } },
+  };
+  // The filter's mappings and opt-out are user settings, unlike bundled plugin runtime paths.
+  merged.plugins.configs["antigravity-coding-filter"] = {
+    ...managed.plugins.configs["antigravity-coding-filter"],
+    ...saved.plugins?.configs?.["antigravity-coding-filter"],
   };
   // In v8 api-keys is the upstream provider map; legacy arrays are client keys, now managed above.
   if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = saved["api-keys"];
