@@ -8,6 +8,25 @@ const test = require("node:test");
 
 const desktopRoot = path.resolve(__dirname, "..");
 const network = require("../electron/provider-network.cjs");
+const { createAppsProviderServices } = require("../electron/apps-provider-services.cjs");
+const fixtureRoots = new Set();
+const fixtureStores = new Set();
+
+test.after(async () => {
+  const saves = await Promise.allSettled([...fixtureStores].map(store => store.saved()));
+  const base = path.resolve(desktopRoot, "../aiTemp/rc9-cpa-oauth-tests") + path.sep;
+  for (const root of fixtureRoots) {
+    assert.ok(path.resolve(root).startsWith(base));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  assert.deepEqual(saves.filter(result => result.status === "rejected"), []);
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
 
 function jsonResponse(value, status = 200) {
   return {
@@ -20,6 +39,7 @@ function jsonResponse(value, status = 200) {
 function fixtureRoot() {
   const directory = path.join(desktopRoot, "..", "aiTemp", "rc9-cpa-oauth-tests", crypto.randomUUID());
   fs.mkdirSync(directory, { recursive: true });
+  fixtureRoots.add(directory);
   return directory;
 }
 
@@ -42,6 +62,7 @@ function controllerFixture(fetchImpl, browser = null) {
     oauthPollIntervalMs: 0,
     oauthTimeoutMs: 2_000,
   });
+  fixtureStores.add(controller.store);
   return { controller, opened };
 }
 
@@ -64,6 +85,177 @@ function saveCpaAccount(controller, providerId, adapterId, overrides = {}) {
     ...overrides,
   });
   return snapshot.accounts.find((account) => account.providerId === providerId);
+}
+
+for (const change of ["disable", "disable-enable", "adapter", "archive", "other-account"]) {
+  test(`account ownership fences a native probe after ${change}`, async () => {
+    const gate = deferred();
+    const { controller } = controllerFixture(async () => assert.fail("No CPA request"), {
+      probeAuthentication: () => gate.promise,
+    });
+    const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+    const pending = controller.probeProviderAccount(account.id);
+    if (change === "disable" || change === "disable-enable") controller.store.setAccountEnabled(account.id, false);
+    if (change === "disable-enable") controller.store.setAccountEnabled(account.id, true);
+    if (change === "adapter") saveCpaAccount(controller, "codex-oauth", "cpa-codex", { id: account.id });
+    if (change === "archive") controller.store.archiveAccount(account.id);
+    if (change === "other-account") saveCpaAccount(controller, "claude-oauth", "cpa-claude");
+    const before = controller.store.snapshot().accounts.find(row => row.id === account.id);
+    gate.resolve({ authenticated: true });
+    if (change === "other-account") {
+      await pending;
+      assert.equal(controller.store.snapshot().accounts.find(row => row.id === account.id).status, "connected");
+    } else {
+      await assert.rejects(pending, change === "archive" ? /not found/ : /account changed/i);
+      assert.deepEqual(controller.store.snapshot().accounts.find(row => row.id === account.id), before);
+    }
+  });
+}
+
+for (const login of [false, true]) {
+  test(`account ownership fences rejected ${login ? "login" : "probe"} after disable`, async () => {
+    const gate = deferred();
+    const { controller } = controllerFixture(async () => assert.fail("No CPA request"), {
+      probeAuthentication: () => gate.promise, openLogin: () => gate.promise,
+    });
+    const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+    const pending = login ? controller.openProviderLogin(account.id) : controller.probeProviderAccount(account.id);
+    controller.store.setAccountEnabled(account.id, false);
+    const before = controller.store.snapshot().accounts[0];
+    gate.reject(new Error("late browser failure"));
+    await assert.rejects(pending, /account changed/i);
+    assert.deepEqual(controller.store.snapshot().accounts[0], before);
+  });
+}
+
+test("account ownership skips disabled probes but allows a new explicit login", async () => {
+  let probes = 0, logins = 0;
+  const { controller } = controllerFixture(async () => assert.fail("No CPA request"), {
+    async probeAuthentication() { probes++; return { authenticated: true }; },
+    async openLogin() { logins++; return { authenticated: true }; },
+  });
+  const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+  controller.store.setAccountEnabled(account.id, false);
+  assert.equal((await controller.probeProviderAccount(account.id)).accounts[0].enabled, false);
+  assert.equal(probes, 0);
+  await controller.openProviderLogin(account.id);
+  assert.equal(controller.store.snapshot().accounts[0].enabled, true);
+  assert.equal(logins, 1);
+  await controller.probeProviderAccount(account.id);
+  assert.equal(probes, 1, "completed login releases its ownership");
+});
+
+test("account ownership gives pending login priority over Apps providerStatus", async () => {
+  const gate = deferred();
+  let probes = 0;
+  const { controller } = controllerFixture(async () => assert.fail("No CPA request"), {
+    openLogin: () => gate.promise,
+    async probeAuthentication() { probes++; return { authenticated: false }; },
+  });
+  const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+  const login = controller.openProviderLogin(account.id);
+  const services = createAppsProviderServices({ providerNetworkReady: async () => controller });
+  const status = await services.providerStatus({ accountId: account.id });
+  gate.resolve({ authenticated: true });
+  await login;
+  assert.equal(status.account.status, "pending");
+  assert.equal(probes, 0, "a read-only status call must not replace deliberate login");
+  assert.equal(controller.store.snapshot().accounts[0].status, "connected");
+});
+
+test("account ownership fences native login success after disable", async () => {
+  const gate = deferred();
+  const { controller } = controllerFixture(async () => assert.fail("No CPA request"), { openLogin: () => gate.promise });
+  const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+  const login = controller.openProviderLogin(account.id);
+  controller.store.setAccountEnabled(account.id, false);
+  const before = controller.store.snapshot().accounts[0];
+  gate.resolve({ authenticated: true });
+  await assert.rejects(login, /account changed/i);
+  assert.deepEqual(controller.store.snapshot().accounts[0], before);
+});
+
+test("account ownership stale cleanup leaves a newer pending login owned", async () => {
+  const probeGate = deferred(), loginGate = deferred();
+  let probes = 0;
+  const { controller } = controllerFixture(async () => assert.fail("No CPA request"), {
+    probeAuthentication: () => { probes++; return probeGate.promise; },
+    openLogin: () => loginGate.promise,
+  });
+  const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+  const stale = controller.probeProviderAccount(account.id);
+  const login = controller.openProviderLogin(account.id);
+  probeGate.resolve({ authenticated: false });
+  await assert.rejects(stale, /account changed/i);
+  const services = createAppsProviderServices({ providerNetworkReady: async () => controller });
+  const status = await services.providerStatus({ accountId: account.id });
+  loginGate.resolve({ authenticated: true });
+  await login;
+  assert.equal(status.account.status, "pending");
+  assert.equal(probes, 1, "old finally must not remove the newer login token");
+  assert.equal(controller.store.snapshot().accounts[0].status, "connected");
+});
+
+for (const older of ["probe", "login-success", "login-failure"]) {
+  test(`account ownership rejects older ${older} after a newer login`, async () => {
+    const first = deferred(), second = deferred();
+    let logins = 0;
+    const { controller } = controllerFixture(async () => assert.fail("No CPA request"), {
+      probeAuthentication: () => first.promise,
+      openLogin: () => older === "probe" || logins++ ? second.promise : first.promise,
+    });
+    const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+    const stale = older === "probe" ? controller.probeProviderAccount(account.id) : controller.openProviderLogin(account.id);
+    const current = controller.openProviderLogin(account.id);
+    second.resolve({ authenticated: true });
+    await current;
+    const before = controller.store.snapshot().accounts[0];
+    first.resolve({ authenticated: older === "login-success" });
+    await assert.rejects(stale, /account changed/i);
+    assert.deepEqual(controller.store.snapshot().accounts[0], before);
+  });
+}
+
+test("account ownership lets a newer probe replace an older probe", async () => {
+  const first = deferred(), second = deferred();
+  let probes = 0;
+  const { controller } = controllerFixture(async () => assert.fail("No CPA request"), {
+    probeAuthentication: () => probes++ ? second.promise : first.promise,
+  });
+  const account = saveCpaAccount(controller, "codex-oauth", "native-browser");
+  const stale = controller.probeProviderAccount(account.id);
+  const current = controller.probeProviderAccount(account.id);
+  second.resolve({ authenticated: true });
+  await current;
+  const before = controller.store.snapshot().accounts[0];
+  first.resolve({ authenticated: false });
+  await assert.rejects(stale, /account changed/i);
+  assert.deepEqual(controller.store.snapshot().accounts[0], before);
+});
+
+for (const login of [false, true]) {
+  for (const result of ["connected", "missing", "rejected"]) {
+    test(`account ownership fences CPA ${login ? "login" : "probe"} ${result} after disable`, async () => {
+      const listing = deferred();
+      const { controller } = controllerFixture(async url => {
+        if (new URL(url).pathname === "/v0/management/auth-files") return listing.promise;
+        if (new URL(url).pathname === "/v0/management/auth-files/models") return jsonResponse({ models: [{ id: "fresh-model" }] });
+        assert.fail(`Unexpected CPA request ${url}`);
+      });
+      const account = saveCpaAccount(controller, "gemini-oauth", "cpa-gemini", { identity: "synthetic@example.test" });
+      const pending = login ? controller.openProviderLogin(account.id) : controller.probeProviderAccount(account.id);
+      controller.store.setAccountEnabled(account.id, false);
+      const before = controller.store.snapshot().accounts[0];
+      const secret = controller.store.accountSecret(account.id);
+      if (result === "rejected") listing.reject(new Error("late CPA failure"));
+      else listing.resolve(jsonResponse({ files: result === "missing" ? [] : [{
+        name: "synthetic.json", auth_index: "synthetic-index", provider: "gemini", email: "synthetic@example.test", status: "ready",
+      }] }));
+      await assert.rejects(pending, /account changed/i);
+      assert.deepEqual(controller.store.snapshot().accounts[0], before);
+      assert.deepEqual(controller.store.accountSecret(account.id), secret, "no late auth binding is persisted");
+    });
+  }
 }
 
 test("Codex CPA login completes, stores an encrypted binding, and discovers models", async () => {

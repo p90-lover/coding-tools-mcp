@@ -375,6 +375,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   }, { preserveUnreadable: true });
   let stateRead = readStore();
   let state = stateRead.value || defaultState();
+  const accountOperations = new Map();
   function recoverState() {
     if (stateRead.source !== "unreadable") return;
     const read = readStore();
@@ -392,7 +393,8 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   let saveError = null;
   const writer = createStateFileWriter(filePath, { onError: (error) => { saveError = error; } });
 
-  function write() {
+  function write(accountId) {
+    if (accountId) accountOperations.delete(accountId);
     if (stateRead.source === "unreadable") {
       recoverState();
       throw new Error("Saved provider settings were unavailable; retry after restoring or reloading them");
@@ -427,6 +429,22 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
 
   function findAccount(accountId) {
     return state.accounts.find((account) => account.id === accountId);
+  }
+
+  function beginAccountOperation(accountId, kind) {
+    if (kind === "probe" && accountOperations.get(accountId)?.kind === "login") return null;
+    const token = { kind };
+    accountOperations.set(accountId, token);
+    return {
+      assertCurrent() {
+        const account = findAccount(accountId);
+        if (!account || account.archivedAt) throw new Error("Provider account was not found");
+        if (accountOperations.get(accountId) !== token) throw new Error("Provider account changed while checking; try again");
+      },
+      finish() {
+        if (accountOperations.get(accountId) === token) accountOperations.delete(accountId);
+      },
+    };
   }
 
   function findProxy(profileId) {
@@ -499,7 +517,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       }
     }
     state.accounts = normalizeAccountDefaults(state.accounts);
-    write();
+    write(id);
     return publicSnapshot();
   }
 
@@ -532,7 +550,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
         : "connected";
     }
     state.accounts = normalizeAccountDefaults(state.accounts);
-    write();
+    write(accountId);
     return publicSnapshot();
   }
 
@@ -548,7 +566,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
       updatedAt: now,
     });
     state.accounts = normalizeAccountDefaults(state.accounts);
-    write();
+    write(accountId);
     return publicSnapshot();
   }
 
@@ -896,6 +914,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
   return {
     snapshot: publicSnapshot,
     saved,
+    beginAccountOperation,
     saveAccount,
     setDefaultAccount,
     setAccountEnabled,
@@ -1337,7 +1356,7 @@ function createProviderNetworkController({
     });
   }
 
-  async function startCpaProviderLogin(account, adapterId) {
+  async function startCpaProviderLogin(account, adapterId, assertCurrent) {
     store.updateAccountConnection(account.id, {
       status: "pending",
       loginAdapterId: adapterId,
@@ -1359,6 +1378,7 @@ function createProviderNetworkController({
         boundAuthFileIndex: binding.authIndex,
         reservedAuthFileIds: reservedCpaAuthFileIds(account.id),
       });
+      assertCurrent();
       return {
         opened: result.opened,
         mode: result.mode,
@@ -1367,6 +1387,7 @@ function createProviderNetworkController({
         snapshot: persistCpaBinding(account, adapterId, result),
       };
     } catch (error) {
+      assertCurrent();
       const message = error instanceof Error ? error.message : String(error);
       const snapshot = store.updateAccountConnection(account.id, {
         status: providerSessionFailureStatus(message),
@@ -1379,7 +1400,7 @@ function createProviderNetworkController({
     }
   }
 
-  async function inspectCpaProviderAccount(account, adapterId) {
+  async function inspectCpaProviderAccount(account, adapterId, assertCurrent) {
     const binding = cpaSessionBinding(account);
     try {
       const result = await inspectCpaAccount({
@@ -1392,6 +1413,7 @@ function createProviderNetworkController({
         reservedAuthFileIds: reservedCpaAuthFileIds(account.id),
         requireBound: Boolean(binding.id),
       });
+      assertCurrent();
       if (!binding.id && result.authFile.status !== "connected") {
         return store.updateAccountConnection(account.id, {
           status: result.authFile.status,
@@ -1404,6 +1426,7 @@ function createProviderNetworkController({
       }
       return persistCpaBinding(account, adapterId, result);
     } catch (error) {
+      assertCurrent();
       const message = error instanceof Error ? error.message : String(error);
       // cpa-oauth-adapter's resolveAuthFile: "No <provider> account is available in CPA. …"
       if (!binding.id && /No \S+ account is available in CPA/i.test(message)) {
@@ -1555,14 +1578,18 @@ function createProviderNetworkController({
 
   async function probeProviderAccount(accountId) {
     const account = accountRecord(accountId);
+    if (!account.enabled) return store.snapshot();
+    const operation = store.beginAccountOperation(accountId, "probe");
+    if (!operation) return store.snapshot();
     try {
       const adapterId = defaultLoginAdapter(account);
       if (adapterId && CPA_LOGIN_ADAPTERS[adapterId]) {
-        return await inspectCpaProviderAccount(account, adapterId);
+        return await inspectCpaProviderAccount(account, adapterId, operation.assertCurrent);
       }
       if (adapterId === "native-browser") {
         const browserHost = typeof getBrowserHost === "function" ? getBrowserHost() : null;
         const browser = await browserHost?.probeAuthentication?.();
+        operation.assertCurrent();
         return store.updateAccountConnection(account.id, {
           status: browser?.authenticated === true ? "connected" : "pending",
           loginAdapterId: "native-browser",
@@ -1572,21 +1599,25 @@ function createProviderNetworkController({
       }
       throw new Error("Provider account health probing is not configured for this provider");
     } catch (error) {
+      operation.assertCurrent();
       store.updateAccountConnection(account.id, {
         status: providerSessionFailureStatus(error instanceof Error ? error.message : String(error)),
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
+    } finally {
+      operation.finish();
     }
   }
 
-  async function syncBrowserProviderAccount(account, adapterId = "native-browser") {
+  async function syncBrowserProviderAccount(account, adapterId, assertCurrent) {
     const browserHost = typeof getBrowserHost === "function" ? getBrowserHost() : null;
     if (!browserHost || typeof browserHost.openLogin !== "function") {
       throw new Error("Browser provider login is unavailable");
     }
     store.updateAccountConnection(account.id, { status: "pending", error: undefined });
     const browser = await browserHost.openLogin();
+    assertCurrent();
     if (!browser || browser.authenticated !== true) {
       const snapshot = store.updateAccountConnection(account.id, {
         status: "pending",
@@ -1611,13 +1642,21 @@ function createProviderNetworkController({
   async function openProviderLogin(accountId, requestedAdapterId) {
     const account = accountRecord(accountId);
     const adapterId = requiredLoginAdapter(account, requestedAdapterId);
-    if (CPA_LOGIN_ADAPTERS[adapterId]) {
-      return startCpaProviderLogin(account, adapterId);
+    const operation = store.beginAccountOperation(accountId, "login");
+    try {
+      if (CPA_LOGIN_ADAPTERS[adapterId]) {
+        return await startCpaProviderLogin(account, adapterId, operation.assertCurrent);
+      }
+      if (adapterId === "native-browser") {
+        return await syncBrowserProviderAccount(account, adapterId, operation.assertCurrent);
+      }
+      throw new Error(`Provider login adapter is not configured: ${adapterId}`);
+    } catch (error) {
+      operation.assertCurrent();
+      throw error;
+    } finally {
+      operation.finish();
     }
-    if (adapterId === "native-browser") {
-      return syncBrowserProviderAccount(account, adapterId);
-    }
-    throw new Error(`Provider login adapter is not configured: ${adapterId}`);
   }
 
   async function testProxyProfile(profileId) {
