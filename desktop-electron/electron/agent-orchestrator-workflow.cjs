@@ -6172,7 +6172,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const end = goal.status === "active" ? now() : goal.updatedAt;
     // The app does not count a chat's tokens yet: unknown, not zero.
     return {
-      goal: { objective: goal.objective, status, tokenBudget, tokensUsed: null,
+      goal: { objective: goal.objective, status, tokenBudget, tokensUsed: null, note: publicText(goal.note || "", 1500),
         timeUsedSeconds: Math.max(0, Math.floor((end - goal.startedAt) / 1000)),
         createdAt: Math.floor(goal.startedAt / 1000), updatedAt: Math.floor(goal.updatedAt / 1000) },
       remainingTokens: null,
@@ -6184,10 +6184,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** A chat agent's goal tool call (chat-agent-tools.cjs): its AO `session` names the chat, as for schedule_wakeup. */
   async function goalTool({ workspaceId, session, action, objective, status, tokenBudget } = {}) {
     const id = clean(workspaceId, 128);
-    const { latest } = await sessionChat(id, clean(session, 256), "use a goal");
+    const { run, latest } = await sessionChat(id, clean(session, 256), "use a goal");
     const task = latest.project_id;
     const goal = goals.get(id, task);
     if (action === "get") return codexGoal(goal);
+    if (run.id !== latest.id) throw new Error("A newer turn has started in this chat; only that turn can change its goal. Read the current goal instead.");
     if (action === "create") {
       if (tokenBudget !== undefined && tokenBudget !== null && !(Number.isSafeInteger(tokenBudget) && tokenBudget > 0)) throw new Error("goal budgets must be positive when provided");
       if (goal && goal.status !== "achieved") throw new Error("cannot create a new goal because this thread has an unfinished goal; complete the existing goal first");
@@ -6221,7 +6222,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       Object.assign(change, { status: "paused", note: "Paused at your request; /goal resume picks it up again" });
     }
     if (objective !== undefined || (change.status && change.status !== goal.status)) invalidateGoal(goal);
-    return codexGoal(goals.update(id, task, change));
+    const result = codexGoal(goals.update(id, task, change));
+    if (status !== undefined) {
+      const applied = result.goal.status === status;
+      result.statusUpdate = { requested: status, applied,
+        blockedRounds: goal.agentBlockedRounds ?? 0, requiredBlockedRounds: GOAL_FAILED_ROUNDS,
+        nextAction: applied ? "Report the returned goal status; do not claim unfinished work is complete."
+          : goal.status !== "active" ? `The goal remains ${result.goal.status}; only the user or system can resume it.`
+            : status === "complete" ? "Completion is provisional. End this turn with verification evidence so the independent evaluator can check it."
+              : "This blocker report was recorded. Repeating it in the same turn does not advance the audit. Seek a permitted resolution; if the same blocker persists in the next goal turn, report it there." };
+    }
+    return result;
   }
 
   /**

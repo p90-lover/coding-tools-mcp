@@ -5424,6 +5424,57 @@ function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
 }
 const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
 
+test("goal status updates explain deferred reports instead of silently returning active", async (t) => {
+  const { workflow } = wakeChat();
+  t.after(() => workflow.dispose());
+  const tool = args => workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", ...args });
+  await tool({ action: "create", objective: "verify the approved command executed" });
+  const blocked = await tool({ action: "update", status: "blocked" });
+  assert.equal(blocked.goal.status, "active");
+  assert.equal(blocked.statusUpdate.requested, "blocked");
+  assert.equal(blocked.statusUpdate.applied, false);
+  assert.equal(blocked.statusUpdate.blockedRounds, 1);
+  assert.equal(blocked.statusUpdate.requiredBlockedRounds, 3);
+  assert.match(blocked.statusUpdate.nextAction, /same turn|same round/i);
+  assert.match(blocked.goal.note, /1 of 3/);
+  assert.equal((await tool({ action: "update", status: "blocked" })).statusUpdate.blockedRounds, 1);
+  const done = await tool({ action: "update", status: "complete" });
+  assert.equal(done.statusUpdate.applied, false);
+  assert.match(done.statusUpdate.nextAction, /independent.*verif|evaluator/i);
+  assert.match((await tool({ action: "get" })).goal.note, /independent goal verification/);
+  assert.equal((await tool({ action: "update", status: "paused" })).statusUpdate.applied, true);
+  const paused = await tool({ action: "update", status: "blocked" });
+  assert.equal(paused.goal.status, "paused");
+  assert.equal(paused.statusUpdate.applied, false);
+  assert.match(paused.statusUpdate.nextAction, /paused|resume/i);
+});
+
+test("goal blocker feedback reaches blocked on the third distinct report", async (t) => {
+  const { world, workflow } = wakeChat();
+  t.after(() => workflow.dispose());
+  const tool = args => workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", ...args });
+  await tool({ action: "create", objective: "finish the permitted task" });
+  for (let round = 1; round <= 3; round++) {
+    if (round > 1) world.runs.push({ ...structuredClone(world.runs[0]), id: `r${round}` });
+    const reply = await tool({ action: "update", status: "blocked" });
+    assert.equal(reply.statusUpdate.blockedRounds, round);
+    assert.equal(reply.statusUpdate.applied, round === 3);
+    assert.equal(reply.goal.status, round === 3 ? "blocked" : "active");
+  }
+});
+
+test("an older session cannot mutate the goal after a newer chat turn starts", async (t) => {
+  const { world, workflow } = wakeChat();
+  t.after(() => workflow.dispose());
+  const tool = args => workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", ...args });
+  await tool({ action: "create", objective: "finish the permitted task" });
+  const newer = { ...structuredClone(world.runs[0]), id: "r2" };
+  newer.nodes[0].receipt.thread_id = "sess-2";
+  world.runs.push(newer);
+  await assert.rejects(tool({ action: "update", status: "paused" }), /newer.*turn|newer.*message/i);
+  assert.equal((await tool({ action: "get" })).goal.status, "active");
+});
+
 test("the agent's goal tools keep completion provisional and do not stall on one blocked report", async () => {
   const { workflow } = wakeChat();
   const tool = (args) => workflow.goalTool({ workspaceId: "ws-1", session: "sess-1", ...args });

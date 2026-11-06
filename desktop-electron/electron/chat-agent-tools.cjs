@@ -195,9 +195,9 @@ const GOAL_TOOL_DEFS = Object.freeze([{
   description: "Update the existing goal.\n"
     + "Set status to `paused` only at the user's explicit request to pause this goal, never on your own initiative. Ask if unclear; a later resume revokes that request. Report the returned status and stop goal work. Budget limits take precedence over pausing.\n"
     + "Set status to `complete` only when the objective has actually been achieved and no required work remains.\n"
-    + "Set status to `blocked` only when the same blocking condition has repeated for at least three consecutive goal turns, counting the original/user-triggered turn and any automatic continuations, and the agent cannot make meaningful progress without user input or an external-state change.\n"
-    + "If the user resumes a goal that was previously marked `blocked`, treat the resumed run as a fresh blocked audit. If the same blocking condition then repeats for at least three consecutive resumed goal turns, set status to `blocked` again.\n"
-    + "Once the blocked threshold is satisfied, do not keep reporting that you are still blocked while leaving the goal active; set status to `blocked`.\n"
+    + "Report status `blocked` in each goal turn where you cannot make meaningful progress without user input or an external-state change. The app records the report but leaves the goal active until it has received reports in three consecutive distinct goal turns. Repeated calls in the same turn count only once.\n"
+    + "Read statusUpdate.applied, blockedRounds and nextAction: a recorded report is not an applied status change. If the user resumes a blocked goal, the app starts a fresh blocked audit.\n"
+    + "When the threshold is met, the returned goal.status is `blocked`; report that actual status and the blocker.\n"
     + "Do not use `blocked` merely because the work is hard, slow, uncertain, incomplete, or would benefit from clarification.\n"
     + "Do not mark a goal complete merely because its budget is nearly exhausted or because you are stopping work.\n"
     + "You cannot use this tool to resume, budget-limit, or usage-limit a goal; those status changes are controlled by the user or system.\n"
@@ -207,9 +207,9 @@ const GOAL_TOOL_DEFS = Object.freeze([{
     type: "object", additionalProperties: false,
     properties: {
       status: { type: "string", enum: ["complete", "blocked", "paused"], description: "`paused` requires an explicit user request. Set to "
-        + "`complete` only when the objective is achieved and no required work remains. Set to `blocked` only after the same blocking "
-        + "condition has recurred for at least three consecutive goal turns and the agent is at an impasse. After a previously blocked "
-        + "goal is resumed, the resumed run starts a fresh blocked audit." },
+        + "`complete` only when the objective is achieved and no required work remains. Report `blocked` once per goal turn at an "
+        + "impasse; the app applies it after three consecutive distinct reports. Inspect statusUpdate for the recorded count and "
+        + "whether the change was applied. Resuming a blocked goal starts a fresh audit." },
       objective: { type: "string", description: "The goal's new objective, only when the user asks to change it." },
     },
   },
@@ -362,8 +362,13 @@ const CHAT_DESCRIPTIONS = Object.freeze({
     + "command in the foreground; this tool manages its lifetime. Do not detach it with Start-Process, Start-Job, nohup "
     + "or a background shell. Open its localhost URL with preview_open so the user sees it in this chat. "
     + "On Windows this tool runs cmd.exe: use set for environment variables. For PowerShell syntax, explicitly run "
-    + "powershell.exe -NoProfile -Command followed by a quoted PowerShell command; do not send $env: syntax directly.",
-  read_output: "Read more output from a command started with exec_command (it keeps running in the chat's Terminal pane).",
+    + "powershell.exe -NoProfile -Command followed by a quoted PowerShell command; do not send $env: syntax directly. "
+    + "Pass the shell text as cmd in a JSON object. An approved tool call is not proof the command ran or succeeded: check "
+    + "execution_status, command_ok, exit_code and output. If the outcome is unknown, inspect state before retrying; never "
+    + "repeat a mutating command merely because its reply was lost.",
+  read_output: "Read more output from a command started with exec_command (it keeps running in the chat's Terminal pane). "
+    + "Use the exact output_ref and next_read_offset returned for that stream. If output_gap is true, some earlier bytes "
+    + "expired; report that gap, not a complete transcript. An empty page alone does not mean the command finished.",
   write_stdin: "Type input into a command started with exec_command that is waiting for it.",
   kill_command: "Stop a command started with exec_command (for example a dev server you no longer need).",
 });
@@ -560,11 +565,30 @@ function processWindow(windows, { pid = null, processName = "", titleContains = 
  * it. `seen` is the session's received instruction revisions (see omitSeenInstructions).
  */
 function toolResult(name, args, structured, seen = null) {
+  if (structured === undefined || structured === null) return failedCall("The tool returned no result; its execution outcome is unknown.", {
+    code: "EMPTY_TOOL_RESULT", execution_status: "unknown",
+    next_action: "Inspect the command output or verify the intended state before retrying. Do not blindly repeat a mutating call.",
+  });
   const value = omitSeenInstructions(structured && typeof structured === "object" && !Array.isArray(structured)
-    ? { ...structured } : { value: structured ?? null }, seen);
+    ? { ...structured } : { value: structured }, seen);
+  if (TERMINAL_TOOLS.has(name) && value.ok !== false && typeof value.command_id === "string") {
+    const running = value.finalization_pending === true || ["running", "terminating"].includes(value.status);
+    const failed = !running && (value.command_ok === false || Number.isInteger(value.exit_code) && value.exit_code !== 0);
+    value.execution_status = running ? "running" : failed ? "failed" : "completed";
+    value.next_action = running
+      ? "The command has started, not finished. Read its output with read_output and the returned output_refs; keep its command_id. Do not start it again."
+      : failed ? "The command ran but failed. Inspect exit_code, stdout/stderr and output_refs before choosing a repair; approval was not proof of command success."
+        : "The command finished. Verify its output and the intended result before reporting task completion.";
+  }
   // Headless's own timing, of no use to a chat agent (`seen` marks a chat session's result).
   if (seen) delete value.server_dispatch_ms;
   const isError = value.ok === false;
+  if (isError && ["APPROVAL_REQUIRED", "APPROVAL_DENIED", "PERMISSION_DENIED", "DANGEROUS_OPERATION_REQUIRES_CONFIRMATION"].includes(value.error?.code)) {
+    value.error = { ...value.error,
+      ...(value.error.details && typeof value.error.details === "object" ? { details: { ...value.error.details,
+        suggestion: "The app manages confirmation and scoped grants; request_permissions is not available to chat agents." } } : {}),
+      next_action: "MCP access, command approval and sandbox permissions are separate. Report this gate's reason and obtain the missing permission in the app; do not retry unchanged or supply confirm/approval_token yourself." };
+  }
   // computer_* observations and compare_images' optional diff picture carry an image only sometimes.
   const wantsImage = name.startsWith("computer_") || name === "compare_images"
     ? typeof value.base64 === "string"
@@ -581,8 +605,13 @@ function toolResult(name, args, structured, seen = null) {
   return { content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError };
 }
 
-function failedCall(message) {
-  return { content: [{ type: "text", text: message }], isError: true };
+function failedCall(message, { code = "TOOL_CALL_FAILED", ...details } = {}) {
+  const guidance = [code !== "TOOL_CALL_FAILED" ? `Code: ${code}` : "",
+    details.execution_status ? `Execution: ${details.execution_status}` : "",
+    details.next_action ? `Next: ${details.next_action}` : "",
+    details.request_id ? `Request: ${details.request_id}` : ""].filter(Boolean).join("\n");
+  return { content: [{ type: "text", text: message + (guidance ? `\n\n${guidance}` : "") }],
+    structuredContent: { ok: false, error: { code, message, ...details } }, isError: true };
 }
 
 function inside(base, target) {
@@ -1631,7 +1660,8 @@ function createChatAgentTools({
         return failedCall(`The user could not be asked, so nothing was run: ${errorMessage(error)}`);
       }
       if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
-      if (!approved) return failedCall(declined);
+      if (!approved) return failedCall(declined, { code: "APPROVAL_DECLINED", execution_status: "not_started",
+        next_action: "This approval was declined. Report the reason and wait for new authorization; do not repeat the unchanged call or route around the denial." });
       // An approval sooner than the user could have read the prompt is not one: ask again.
       if (answerClock() - opened >= minAnswerMs) return true;
     }
@@ -1643,9 +1673,12 @@ function createChatAgentTools({
     const stopped = agentTool && unavailable(entry, agentTool, signal);
     if (stopped) return { failed: stopped };
     let response;
+    const requestId = crypto.randomUUID();
+    const unknown = { execution_status: "unknown", request_id: requestId,
+      next_action: "Inspect existing command output or verify the intended state. Do not automatically retry this call: it may already have executed." };
     try {
       response = await requestHeadless("/api/v1/tools/call", {
-        request_id: crypto.randomUUID(), workspace_id: entry.workspaceId, tool: name, arguments: args,
+        request_id: requestId, workspace_id: entry.workspaceId, tool: name, arguments: args,
         // Desktop tools act on the screen, not on files, and computer control is leased to the
         // workspace itself; everything else runs in the session's worktree.
         ...(root ? { root: root.path } : {}),
@@ -1654,12 +1687,17 @@ function createChatAgentTools({
         ...(root?.projectFolder ? { root_kind: "project_folder" } : {}),
       }, { timeout: TOOL_CALL_TIMEOUT_MS });
     } catch (error) {
-      return { failed: failedCall(errorMessage(error)) };
+      return { failed: failedCall(errorMessage(error), { code: "TOOL_TRANSPORT_FAILED", ...unknown }) };
     }
     const operation = response?.operation;
     if (operation?.state !== "completed") {
       return { failed: failedCall(typeof operation?.error === "string" && operation.error
-        ? operation.error.slice(0, 2000) : "The tool call did not complete; its outcome is unknown.") };
+        ? operation.error.slice(0, 2000) : "The tool call did not complete; its outcome is unknown.",
+      { code: "TOOL_OUTCOME_UNKNOWN", ...unknown }) };
+    }
+    if (operation.result === null || operation.result === undefined) {
+      return { failed: failedCall("The tool completed without returning a result; its execution outcome is unknown.",
+        { code: "EMPTY_TOOL_RESULT", ...unknown }) };
     }
     return { result: operation.result };
   }
@@ -2050,7 +2088,15 @@ function createChatAgentTools({
     const signal = entry.lifetime.signal;
     const stopped = unavailable(entry, name, signal);
     if (stopped) return stopped;
-    const given = params.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments) ? params.arguments : {};
+    const inputError = (message) => failedCall(message, { code: "INVALID_ARGUMENTS", execution_status: "not_started",
+      next_action: "Correct the arguments to match this tool's input schema and send one new call. Arguments must be a JSON object, not a JSON-encoded string." });
+    if (params.arguments !== undefined && (!params.arguments || typeof params.arguments !== "object" || Array.isArray(params.arguments))) {
+      return inputError("Tool arguments must be a JSON object; nothing was run.");
+    }
+    const given = params.arguments ?? {};
+    if (name === "exec_command" && (typeof given.cmd !== "string" || !given.cmd.trim())) {
+      return inputError("exec_command needs a nonempty cmd string (not command); nothing was run.");
+    }
     if (entry.previewOnly && group === "preview") {
       if (!entry.aoSession) return failedCall("This native chat's preview is not bound yet.");
       if (["preview_render", "preview_open", "preview_navigate"].includes(name)) {
@@ -2381,6 +2427,10 @@ function createChatAgentTools({
         default: return rpcError(id, -32601, `Method not found: ${method}`);
       }
     } catch (error) {
+      if (method === "tools/call") return { jsonrpc: "2.0", id, result: failedCall(errorMessage(error), {
+        code: "TOOL_EXECUTION_FAILED", execution_status: "unknown",
+        next_action: "Inspect the tool's state before retrying; the error does not prove that nothing ran. Do not repeat a mutating call blindly.",
+      }) };
       return rpcError(id, -32603, errorMessage(error));
     }
   }
