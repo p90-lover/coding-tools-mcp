@@ -28,15 +28,19 @@ const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": mar
 const clawd = load("Clawd.tsx");
 const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts") });
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
+const turnChangesView = load("ChatTurnChanges.tsx");
+const scrollBottom = load("ChatScrollToBottom.tsx");
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
-  "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
+  "./ChatPet": pet, "./ChatScrollToBottom": scrollBottom, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
   // controls and approval cards render only when a composer or an approval is passed.
   "./ChatBranchBar": { ChatBranchBar: () => null },
   "./HarnessLogo": { ModelLogo: () => null },
+  "./AgentOrchestratorRoleEditor": roles,
+  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") }),
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
   "./ChatAnnotations": load("ChatAnnotations.tsx", { "./ao-chat": chat }),
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
@@ -89,6 +93,41 @@ test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group 
   const earlier = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("older"), live: false, expanded: false, useWork: doneWork }));
   assert.match(earlier, /dsh-turn-process-label">Completed<\/span>/, "an earlier turn says Completed");
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
+});
+
+test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
+  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") });
+  const edit = (path, additions, deletions) => ({ id: `${path}${additions}`, kind: "edit", status: "completed", text: "", files: [{ path, additions, deletions }] });
+  // Seven one-line edits of one file read as that file once, with their lines summed.
+  const changes = head.turnChanges([edit("src/aistudio.js", 1, 1), { id: "c", kind: "command", status: "completed", text: "npm test" },
+    edit("src/aistudio.js", 4, 2), edit("tests/aistudio.test.cjs", 2, 0)]);
+  assert.equal(JSON.stringify(changes.map((file) => [file.path, file.additions, file.deletions]).sort()),
+    JSON.stringify([["src/aistudio.js", 5, 3], ["tests/aistudio.test.cjs", 2, 0]]));
+  const single = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: false, name: "GPT-6.1 Sol", tone: "failed",
+    startedAtMs: 1_000, endedAtMs: 155_000, error: { step: "GPT-6.1 Sol", message: "API Error: 400 unknown provider" }, members: [], changes }));
+  assert.match(single, /cx-reply-who-name">GPT-6\.1 Sol</);
+  assert.match(single, /cx-reply-status is-failed">Failed</);
+  assert.match(single, /cx-reply-time[^>]*>2m 34s</, "how long it ran");
+  assert.match(single, /role="alert".*API Error: 400 unknown provider/, "the error leads the reply");
+  assert.match(single, /aria-label="2 files changed, 7 lines added, 3 lines removed"/, "the turn's total change");
+  assert.match(single, /cx-reply-time[^>]*>2m 34s<\/span><span class="cx-changed-files"/, "the file count sits immediately beside runtime");
+  assert.doesNotMatch(single, /cx-reply-files|cx-reply-total/, "no duplicate files box or raw path tooltip");
+  assert.doesNotMatch(single, /cx-reply-roster|cx-reply-mode/, "a single chat has no team");
+  const step = (key, name, extra) => ({ key, nodeId: key, role: "worker", name, detail: "", state: "finished", ...extra });
+  const members = [step("p", "Planner"), step("w", "Worker", { working: { detail: "", stalled: false, activity: "Running npm test" }, state: "running" }),
+    step("r", "Reviewer", { state: "pending" })].map((card) => ({ key: card.key, name: card.name, modelName: "GPT-6.1 Sol", tone: head.cardTone(card),
+    state: card.working?.activity ?? card.state }));
+  const team = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: true, name: "Team", tone: "working", startedAtMs: Date.now() - 5_000,
+    members, changes: [] }));
+  assert.match(team, /cx-reply-mode">Team · 3</);
+  assert.match(team, /cx-reply-member is-done.*Planner.*cx-reply-member is-working.*Running npm test.*cx-reply-member is-queued.*Reviewer/, "each card, in order, with how it stands");
+  assert.doesNotMatch(team, /Changed files/, "no files strip before any edit");
+  // A live turn reads stuck as soon as one card is; an ended one by its failure first, then how the run ended.
+  const turn = (status, steps) => ({ key: "t", runId: "r", status, solo: false, steps });
+  assert.equal(head.replyTone(turn("running", [step("a", "A", { working: { detail: "", stalled: true } })]), true), "stalled");
+  assert.equal(head.replyTone(turn("stopped", [step("a", "A", { error: "boom" })]), false), "failed");
+  assert.equal(head.replyTone(turn("stopped", [step("a", "A")]), false), "stopped");
+  assert.equal(head.replyTone(turn("done", [step("a", "A")]), false), "done");
 });
 
 test("a DeepSeek group's rows read as DeepSeek Harness's: Think, Bash, Edit, and a failed command's exit capsule", () => {

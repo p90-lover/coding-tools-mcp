@@ -320,10 +320,16 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   // A retried single card's earlier attempts come first, folded, as in a team card's row: they were
   // not shown at all here, and the other view drew them under the new attempt's work.
   const earlier = <EarlierRounds rounds={step.earlier} />;
-  if (!work.length) return <>{earlier}{step.hasWork && !step.working ? <p className="dsh-hint">Loading…</p> : null}</>;
-  return <>{earlier}<SteerReader.Provider value={steerReader(step)}>
-    <DshFlow items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} hideReply={answer} />
-  </SteerReader.Provider></>;
+  // A held or retried card can have a reply before its timeline is available, just as a team
+  // card can (DshAgent). Keep that reply, but leave the turn's final answer outside its work.
+  const reply = step.text && step.text.trim() !== answer?.trim() ? step.text : undefined;
+  return <>{earlier}{work.length ? <SteerReader.Provider value={steerReader(step)}>
+    <DshFlow items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} hideReply={reply ?? answer} />
+  </SteerReader.Provider> : !reply ? step.working
+    ? <p className="dsh-hint" role="status">{step.working.activity || "Waiting for the model's first response…"}</p>
+    : step.hasWork ? <p className="dsh-hint">Loading…</p> : null : null}
+    {reply ? <div className="dsh-reply"><ChatMarkdown text={reply} /></div> : null}
+  </>;
 }
 
 /** A team card as one row: its name and what it is doing or how it ended, opening on its own work. */
@@ -384,15 +390,17 @@ const WATCHED = new Set<string>();
 /**
  * `errorShownBelow`: the chat's failed-step card shows this turn's error, so the turn leaves it out.
  * `refusal`: CPA refusing the running turn's model (cpaRefusalNote), said on its "Deep diving" line.
+ * `headed`: the chat's reply head (ChatReplyHead) already says how the turn ended and how long it
+ * took, so the fold reads "Show work" and a failed or stopped turn, always open, has no line at all.
  */
-export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null };
+export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null; headed?: boolean };
 
 /**
  * A DeepSeek turn's work. Running: its work in groups, the last one live, "Deep diving" under them. Ended: "Completed in
  * 1m 4s" heads it, folded unless the chat shows work details; a failed or stopped turn stays open.
  * The chat memoizes it with its own check of what a turn shows.
  */
-export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null }: DshTurnWorkProps) {
+export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null, headed = false }: DshTurnWorkProps) {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   const failed = steps.some((step) => step.error);
   const stopped = turn.status === "stopped";
@@ -412,9 +420,10 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
     : steps.map((step) => <DshAgent key={step.key} step={step} useWork={useWork} answer={step === turn.final ? answer : undefined} />);
   // The end its cards kept, or the moment this window saw it end (cards saved before builds that kept one).
   const ended = turn.endedAtMs ?? ENDED.get(turn.key);
-  const label = stopped ? "Stopped" : failed ? "Failed" : ended && turn.startedAtMs ? "Completed in " : "Completed";
+  const label = headed ? (open ? "Hide work" : "Show work")
+    : stopped ? "Stopped" : failed ? "Failed" : ended && turn.startedAtMs ? "Completed in " : "Completed";
   return <div className="dsh-turn-work">
-    {!live ? <button type="button" className="dsh-turn-process" data-open={open || undefined} disabled={alwaysOpen}
+    {!live && !(headed && alwaysOpen) ? <button type="button" className="dsh-turn-process" data-open={open || undefined} disabled={alwaysOpen}
       aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className="dsh-turn-process-label">{label}{label === "Completed in " ? <span className="dsh-num">{dshDuration(ended! - turn.startedAtMs!)}</span> : null}</span>
       {alwaysOpen ? null : <span className="dsh-turn-process-chevron">{ICON.down}</span>}

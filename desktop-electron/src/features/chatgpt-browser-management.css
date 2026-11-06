@@ -217,6 +217,17 @@
 .cbm-tone.is-error { color: var(--color-text-error); }
 .cbm-tone.is-idle { color: var(--color-text-secondary); }
 
+.cbm-facts .cbm-connector {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.cbm-facts .cbm-connector > .cbm-muted {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .cbm-facts .cbm-proxy {
   flex-direction: column;
   align-items: stretch;

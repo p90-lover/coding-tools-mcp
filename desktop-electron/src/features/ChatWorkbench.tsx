@@ -7,7 +7,7 @@ import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensSh
 import { ChatMarkdown } from "./ChatMarkdown";
 import { petFlight, petOverlaps } from "./chat-pet-stage";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
-import { onWindowFocus, windowUnfocused } from "./page-visibility";
+import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
 
 // The chat's side panel, as Codex shows one beside a thread: tabs for the page the chat's agent
 // opened in its own browser (a native view drawn over the pane's slot), the changes in its
@@ -93,9 +93,26 @@ export function chatProcessRows(commands: Command[], page: LivePage | null): Cha
   return [...rows, ...running.map(row), ...ended.slice(0, OFFLINE_PROCESS_ROWS).map(row)];
 }
 
+// A slow IPC read must finish before another starts. Hidden keep-alive tabs do no work, and
+// returning to the window refreshes immediately instead of waiting for the fallback interval.
+export function startWorkbenchPoll(tick: () => Promise<unknown>, intervalMs: number, hidden: () => boolean): () => void {
+  let live = true, inFlight = false;
+  const refresh = async () => {
+    if (!live || inFlight || hidden()) return;
+    inFlight = true;
+    try { await tick(); } catch { /* the next tick tries again */ }
+    finally { inFlight = false; }
+  };
+  void refresh();
+  const timer = window.setInterval(() => void refresh(), intervalMs);
+  const offFocus = onWindowFocus(() => void refresh());
+  return () => { live = false; window.clearInterval(timer); offFocus(); };
+}
+
 const PROCESSES_POLL_MS = 4000;
 /** The commands this chat's agents and the user ran (chat_processes), read while `wanted` (the details panel is open). */
 export function useChatProcesses(sessionIds: string[], wanted: boolean, workspaceId?: string): Command[] {
+  const hidden = useSurfaceHidden();
   const [commands, setCommands] = useState<Command[]>([]);
   const key = sessionIds.join(",");
   useEffect(() => {
@@ -110,9 +127,8 @@ export function useChatProcesses(sessionIds: string[], wanted: boolean, workspac
         setCommands((current) => (JSON.stringify(current) === JSON.stringify(next) ? current : next));
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), PROCESSES_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
+    const stop = startWorkbenchPoll(tick, PROCESSES_POLL_MS, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, wanted, workspaceId]);
   return commands;
@@ -152,6 +168,7 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
  * once; closing the panel is respected until the agent does something new (see autoOpenTab).
  */
 export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string): LivePage | null {
+  const hidden = useSurfaceHidden();
   // The page an agent's browser shows now, if any: the chat offers it back when the panel is hidden.
   const [livePage, setLivePage] = useState<LivePage | null>(null);
   const seen = useRef(new Set<string>());
@@ -201,11 +218,10 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         if (tab) onOpenNow.current(tab);
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), 4000);
-    return () => { live = false; window.clearInterval(timer); };
+    const stop = startWorkbenchPoll(tick, 4000, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, workspaceId]);
   return livePage;
 }
 
@@ -221,6 +237,7 @@ const SUBAGENTS_POLL_MS = 3000;
  * was working, and its work could not be read.
  */
 export function useChatSubagents(sessionIds: string[], onStarted: () => void): ChatSubagent[] {
+  const hidden = useSurfaceHidden();
   const [runs, setRuns] = useState<ChatSubagent[]>([]);
   const seen = useRef<Set<string> | null>(null);
   const onStartedNow = useRef(onStarted);
@@ -244,10 +261,8 @@ export function useChatSubagents(sessionIds: string[], onStarted: () => void): C
         if (!first && fresh.some(subagentActive)) onStartedNow.current();
       } catch { /* the next tick tries again */ }
     };
-    void tick();
-    const timer = window.setInterval(() => void tick(), SUBAGENTS_POLL_MS);
-    const offFocus = onWindowFocus(() => void tick());
-    return () => { live = false; window.clearInterval(timer); offFocus(); };
+    const stop = startWorkbenchPoll(tick, SUBAGENTS_POLL_MS, hidden);
+    return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
   return runs;
@@ -292,7 +307,9 @@ function since(startedAt: number, now: number) {
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
 }
 
-export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, subagents = [], renderWork }: {
+export type ChangesTarget = { sessionId: string; path?: string; requestId: number };
+
+export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, subagents = [], renderWork, changesTarget }: {
   sessions: ChatAgentSession[];
   /** The chat's workspace: reaches an agent's worktree even when the app holds no lease for it. */
   workspaceId?: string;
@@ -303,8 +320,12 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
   /** The subagents the chat's agents started (useChatSubagents), for the Subagents tab and the Overview. */
   subagents?: ChatSubagent[];
   renderWork?: RenderWork;
+  changesTarget?: ChangesTarget;
 }) {
-  const [sessionId, setSessionId] = useState(sessions[0]?.id ?? "");
+  const [sessionId, setSessionId] = useState(changesTarget?.sessionId ?? sessions[0]?.id ?? "");
+  useEffect(() => {
+    if (changesTarget && sessions.some((session) => session.id === changesTarget.sessionId)) setSessionId(changesTarget.sessionId);
+  }, [changesTarget?.requestId, sessions]);
   // The subagent whose work the Subagents tab shows; none shows the list.
   const [subagentId, setSubagentId] = useState<string | null>(null);
   useEffect(() => {
@@ -405,7 +426,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
         subagents={subagents} onSubagent={(id) => { setSubagentId(id); show("subagents"); }} />
       : current?.kind === "preview" ? <PreviewPane key={sessionId} sessionId={sessionId} />
         : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
-          : current?.kind === "changes" ? <ChangesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
+          : current?.kind === "changes" ? <ChangesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} target={changesTarget?.sessionId === sessionId ? changesTarget : undefined} />
             : current?.kind === "files" ? <FilesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
               : <NewTabPage sessionId={sessionId} onTool={show} />}
   </aside>;
@@ -621,6 +642,7 @@ function SubagentWork({ run, onBack, renderWork }: { run: ChatSubagent; onBack: 
 }
 
 function PreviewPane({ sessionId }: { sessionId: string }) {
+  const hidden = useSurfaceHidden();
   const slot = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<PreviewState | null>(null);
   const [address, setAddress] = useState("");
@@ -629,18 +651,16 @@ function PreviewPane({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     let live = true;
-    const tick = () => void paneCall("chat_preview_state", { sessionIds: [sessionId] })
+    const tick = () => paneCall("chat_preview_state", { sessionIds: [sessionId] })
       .then((result) => {
         if (!live) return;
         const next = (result.previews as Record<string, PreviewState> | undefined)?.[sessionId] ?? null;
         if (next) rememberPage(sessionId, next.url, next.title);
-        setState(next);
-      })
-      .catch(() => undefined);
-    tick();
-    const timer = window.setInterval(tick, PREVIEW_POLL_MS);
-    return () => { live = false; window.clearInterval(timer); };
-  }, [sessionId]);
+        setState((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
+      });
+    const stop = startWorkbenchPoll(tick, PREVIEW_POLL_MS, hidden);
+    return () => { live = false; stop(); };
+  }, [sessionId, hidden]);
   useEffect(() => { if (!editing) setAddress(state?.url && state.url !== "about:blank" ? state.url : ""); }, [state?.url, editing]);
 
   // The page is a native view: keep it on the slot while the pane shows, and take it off after.
@@ -948,8 +968,18 @@ function parseDiff(text: string): DiffFile[] {
   return files;
 }
 
+/** Match a turn's absolute or Windows-style path to the worktree's relative diff path. */
+export function changeTargetPath(path: string, paths: string[]): string {
+  const normalize = (value: string) => value.replace(/\\/g, "/");
+  const wanted = normalize(path);
+  const exact = paths.find((entry) => normalize(entry) === wanted);
+  if (exact) return exact;
+  const suffixes = paths.filter((entry) => wanted.endsWith(`/${normalize(entry)}`));
+  return suffixes.length === 1 ? suffixes[0] : path;
+}
+
 /** The Changes tab: the agent worktree's diff, one file at a time, with every changed file listed. */
-function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) {
+function ChangesPane({ sessionId, workspaceId, target }: { sessionId: string; workspaceId?: string; target?: ChangesTarget }) {
   const [data, setData] = useState<{ branch: string; entries: { path: string; index_status: string; worktree_status: string }[]; diff: string; truncated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -971,6 +1001,11 @@ function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceI
   const listed = [...files.map((file) => ({ path: file.path, added: file.added, removed: file.removed, isNew: false })),
     ...untracked.map((entry) => ({ path: entry.path, added: 0, removed: 0, isNew: true }))]
     .filter((item) => !filter || item.path.toLowerCase().includes(filter.toLowerCase()));
+  useEffect(() => {
+    if (!target) return;
+    setFilter("");
+    setSelected(target.path ? changeTargetPath(target.path, [...files.map((file) => file.path), ...untracked.map((entry) => entry.path)]) : "");
+  }, [target?.requestId, data]);
   const current = files.find((file) => file.path === selected) ?? (selected ? null : files[0] ?? null);
   const totals = files.reduce((sum, file) => ({ added: sum.added + file.added, removed: sum.removed + file.removed }), { added: 0, removed: 0 });
   useEffect(() => {

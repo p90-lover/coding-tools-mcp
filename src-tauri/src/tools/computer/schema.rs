@@ -64,7 +64,8 @@ pub fn input(name: &str) -> Value {
             required.push("request_id");
             if name == "computer_action" {
                 properties["step"] = step();
-                required.push("step");
+                properties["method"] = json!({"type":"string","enum":["get_window","get_window_state","click","press_key","type_text","scroll","set_value","drag","perform_secondary_action","activate_window"],"description":"Installed Codex window2 method. Supply method+params OR the legacy step, never both. The locally approved Window is supplied or verified by the server."});
+                properties["params"] = json!({"type":"object","description":"The documented @oai/sky window2 parameters. A window, if supplied, must match the local grant. No arbitrary JavaScript, app launching or audio capture."});
             } else {
                 properties["steps"] =
                     json!({"type":"array","minItems":1,"maxItems":8,"items":step()});
@@ -119,5 +120,43 @@ pub(super) fn validate(name: &str, args: &Value) -> super::Result<()> {
             ));
         }
     }
+    if name == "computer_action" {
+        let legacy =
+            obj.contains_key("step") && !obj.contains_key("method") && !obj.contains_key("params");
+        let codex =
+            !obj.contains_key("step") && obj.contains_key("method") && obj.contains_key("params");
+        if !legacy && !codex {
+            return Err(super::error(
+                "INVALID_INPUT",
+                "Supply either step or Codex method+params, never both",
+            ));
+        }
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_action_shape_is_additive_and_unambiguous() {
+        assert!(validate(
+            "computer_action",
+            &json!({"session_id":"s","request_id":"r","step":{"action":"key","key":"enter"}})
+        )
+        .is_ok());
+        assert!(validate("computer_action", &json!({"session_id":"s","request_id":"r","method":"drag","params":{"from_x":1,"from_y":2,"to_x":3,"to_y":4}})).is_ok());
+        for params in [
+            json!({}),
+            json!({"method":"click"}),
+            json!({"params":{}}),
+            json!({"step":{},"method":"click","params":{}}),
+        ] {
+            let mut args = json!({"session_id":"s","request_id":"r"});
+            args.as_object_mut()
+                .unwrap()
+                .extend(params.as_object().unwrap().clone());
+            assert!(validate("computer_action", &args).is_err());
+        }
+    }
 }

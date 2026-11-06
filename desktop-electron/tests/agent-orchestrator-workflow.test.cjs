@@ -3177,19 +3177,74 @@ test("CPA's model list leaves out a provider plugin's models when nobody is sign
     { name: "cline-pass-switcher.json", provider: "cline" },
     { name: "commandcode-old.json", provider: "commandcode-go", disabled: true },
   ];
-  // A disabled account's models stay listed (with why they may not run); built-in and API-key
-  // providers are never judged by their owner name.
+  // Explicitly disabled providers leave the picker; API-key providers without auth files stay.
   const listed = await make(signedIn).call("models", {});
-  assert.deepEqual(listed.models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "commandcode-go/deepseek-v4.1-flash", "myclaude/claude-sonnet-5"]);
-  assert.match(listed.held["commandcode-go/deepseek-v4.1-flash"], /CommandCode Go's account is disabled in CPA/);
-  assert.equal(listed.unavailable, undefined);
+  assert.deepEqual(listed.models, ["gpt-5.5", "cline-pass/deepseek-v4-flash", "myclaude/claude-sonnet-5"]);
+  assert.match(listed.unavailable["commandcode-go/deepseek-v4.1-flash"], /CommandCode Go's account is disabled in CPA/);
+  assert.equal(listed.held, undefined);
   assert.equal((await make(null).call("models", {})).models.length, 4, "an unreadable account list hides nothing");
   // A provider nobody ever added stays out of the list, with why, for a refused send.
   const noCline = await make([{ name: "codex-a.json", provider: "codex" }]).call("models", {});
   assert.ok(!noCline.models.includes("cline-pass/deepseek-v4-flash"));
   assert.match(noCline.unavailable["cline-pass/deepseek-v4-flash"], /no Cline Pass account is added in CPA/);
   const agent = await make(signedIn).call("models", { harness: "ao:claude-code", workspaceId: "ws" });
-  assert.match(agent.held["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
+  assert.ok(!agent.models.includes("cpa/commandcode-go/deepseek-v4.1-flash"));
+  assert.match(agent.unavailable["cpa/commandcode-go/deepseek-v4.1-flash"], /disabled in CPA/, "an agent's catalog names it by its CPA route");
+});
+
+test("disabling a CPA provider removes remembered models without hiding enabled Provider Manager upstreams", async () => {
+  let clock = 1_000_000;
+  let disabled = false;
+  let offline = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async url => {
+      if (offline) throw new Error("CPA offline");
+      if (String(url).includes("/auth-files")) return { ok: true, json: async () => ({ files: [
+        { name: "cpa-provider-manager-opencode-go.json", provider: "provider-manager", disabled },
+        { name: "cpa-provider-manager-other.json", provider: "provider-manager" },
+        { name: "cline.json", provider: "cline", disabled },
+        { name: "codex.json", provider: "codex", disabled },
+      ] }) };
+      return { ok: true, json: async () => ({ data: [
+        { id: "other/model", owned_by: "other" },
+        // A plugin may still advertise a disabled model; CPA may omit the others entirely.
+        { id: "cline-pass/model", owned_by: "cline" },
+        ...(!disabled ? [{ id: "opencode-go/model", owned_by: "opencode-go" }, { id: "gpt-5.5", owned_by: "codex" }] : []),
+      ] }) };
+    },
+  });
+  assert.equal((await workflow.call("models", {})).models.length, 4);
+  disabled = true;
+  clock += 60_001;
+  const listed = await workflow.call("models", {});
+  assert.deepEqual(listed.models, ["other/model"], "disabled models are not restored from history");
+  assert.equal(listed.capabilities["opencode-go/model"], undefined);
+  assert.equal(listed.held, undefined);
+  offline = true;
+  clock += 60_001;
+  assert.deepEqual((await workflow.call("models", {})).models, ["other/model"], "a later outage never revives disabled models");
+  offline = false;
+  disabled = false;
+  clock += 60_001;
+  assert.equal((await workflow.call("models", {})).models.length, 4, "re-enabling restores the live models");
+});
+
+test("disabling the last CPA provider returns an empty catalog instead of reviving its models", async () => {
+  let clock = 1_000_000;
+  let disabled = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async url => String(url).includes("/auth-files")
+      ? { ok: true, json: async () => ({ files: [{ name: "codex.json", provider: "codex", disabled }] }) }
+      : { ok: true, json: async () => ({ data: disabled ? [] : [{ id: "gpt-5.5", owned_by: "codex" }] }) },
+  });
+  assert.deepEqual((await workflow.call("models", {})).models, ["gpt-5.5"]);
+  disabled = true;
+  clock += 60_001;
+  assert.deepEqual((await workflow.call("models", {})).models, []);
 });
 
 test("permission capabilities use installed AO adapter modes without fabricating native metadata", async () => {
@@ -7784,10 +7839,9 @@ test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort le
   assert.deepEqual(capabilities["claude-sonnet-4-6"].efforts, ["low", "medium", "high", "max"]);
 });
 
-test("a CPA model's picked effort goes in the request body, never as a model suffix, and Auto sends none", async () => {
-  // A/B against CPA (2026-10-22): a suffix 400ed whenever the plugin lacked the level ("(auto)" on
-  // Cline, "(none)" on MiMo and GLM, "(medium)" on DeepSeek) and Claude Code's retries looked like a
-  // launch stuck for good; the body's output_config.effort was a 200 everywhere and honoured.
+test("Claude Code CPA effort survives AO in a supported suffix, Codex keeps body effort, and Auto sends none", async () => {
+  // AO clears gateway AgentConfig.Effort before Claude Code's ACP driver runs. Preserve the
+  // fitted level in the model, but never an unsupported suffix (medium on DeepSeek) or auto.
   const spawned = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: chatWorld({ tasks: [], runs: [] }).requestHeadless,
     aoHarness: { spawn: async input => { spawned.push({ model: input.model, effort: input.effort }); return `warm-${spawned.length}`; }, warmSessions: async () => [] } });
@@ -7798,11 +7852,11 @@ test("a CPA model's picked effort goes in the request body, never as a model suf
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash", effort: "medium" });
-  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash", effort: "max" });
-  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "medium"), { model: "cline-pass/glm-5.3-flash(medium)", effort: "medium" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "max"), { model: "cline-pass/deepseek-v4.1-flash(max)", effort: "max" });
+  assert.deepEqual(await warm("cpa/commandcode-go/glm-5.3-flash", "high"), { model: "commandcode-go/glm-5.3-flash(high)", effort: "high" });
   // A level the model lacks runs at its nearest one (a tie goes up) instead of a 400.
-  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash", effort: "high" });
+  assert.deepEqual(await warm("cpa/cline-pass/deepseek-v4.1-flash", "medium"), { model: "cline-pass/deepseek-v4.1-flash(high)", effort: "high" });
   // Auto: the model's own effort; nothing is sent, and no level saved in the model's name comes back.
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
   assert.deepEqual(await warm("cpa/cline-pass/glm-5.3-flash(high)", "auto"), { model: "cline-pass/glm-5.3-flash", effort: undefined });
@@ -7833,9 +7887,9 @@ test("a saved effort a plugin model's reported levels lack runs at its nearest o
     for (let tries = 0; tries < 50 && spawned.length === before; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     return spawned.at(-1);
   };
-  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash", effort: "high" });
-  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash", effort: "low" });
-  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3", effort: "max" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "medium"), { model: "opencode-go/glm-5.3-flash(high)", effort: "high" });
+  assert.deepEqual(await warm("cpa/opencode-go/glm-5.3-flash", "low"), { model: "opencode-go/glm-5.3-flash(low)", effort: "low" });
+  assert.deepEqual(await warm("cpa/opencode-go/kimi-k3", "low"), { model: "opencode-go/kimi-k3(max)", effort: "max" });
   // No levels reported (it only switches reasoning on and off): the model's own effort.
   assert.deepEqual(await warm("cpa/opencode-go/qwen3.7-plus", "high"), { model: "opencode-go/qwen3.7-plus", effort: undefined });
   workflow.dispose();

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JsonObject } from "../api/contracts";
 import type { Language, OriginalUiId, OriginalUiSnapshot, OriginalUiCatalog } from "../types";
-import { CpaUsagePanel } from "./CpaUsagePanel";
+import { readCpaUsage } from "./cpa-usage";
+import { attachCpaProviderUsageBridge } from "./cpa-provider-usage-bridge";
 import "./original-ui.css";
 
 interface OriginalUiSurfaceProps {
@@ -62,6 +63,12 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
   const [notice, setNotice] = useState("");
   const [localError, setLocalError] = useState("");
   const [dependency, setDependency] = useState<"postgres" | null>(null);
+  const cpaFrame = useRef<HTMLIFrameElement>(null);
+  useEffect(() => {
+    if (toolId !== "cpa" || !frameUrl) return;
+    return attachCpaProviderUsageBridge({ host: window, frame: () => cpaFrame.current?.contentWindow ?? null,
+      origin: new URL(frameUrl).origin, read: readCpaUsage });
+  }, [toolId, frameUrl, cpaFrameRevision]);
   const autoOpened = useRef(false);
   const lastStatus = useRef("");
   const lastGeneration = useRef(0);
@@ -272,12 +279,11 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
       ) : null}
       {localError || tool.error ? <p className="original-ui-error">{localError || tool.error}</p> : null}
       {notice ? <p className="original-ui-note">{notice}</p> : null}
-      {/* CPA's own panel shows no per-account tokens or cost; the app adds them above it. */}
-      {toolId === "cpa" ? <CpaUsagePanel language={language} /> : null}
 
       <div className="original-ui-frame-shell">
         {frameUrl ? (
           <iframe
+            ref={cpaFrame}
             key={toolId === "cpa" ? cpaFrameRevision : undefined}
             allow="clipboard-read; clipboard-write"
             referrerPolicy="no-referrer"

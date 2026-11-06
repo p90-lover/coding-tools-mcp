@@ -24,6 +24,7 @@ const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancel
 
 // The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
 let openPage = null;
+let workbenchStorage = null;
 // A stuck turn's Restart: its Provider stays in the tree (so a test can read the value the chat
 // gives it), and its value is what TurnRunning reads.
 const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
@@ -54,8 +55,21 @@ function mount(props) {
     frame = `${name}#${seen[name]}`; cursor = 0;
     try { return type(props || {}); } finally { [frame, cursor] = outer; }
   };
+  const timers = { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true,
+    localStorage: {
+      getItem: (key) => workbenchStorage?.get(key) ?? null,
+      setItem: (key, value) => workbenchStorage?.set(key, value),
+      removeItem: (key) => workbenchStorage?.delete(key),
+    } };
+  const changeCard = transpile("ChatTurnChanges.tsx", name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {});
+  const scrollBottom = transpile("ChatScrollToBottom.tsx", name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {});
+  const changedFiles = transpile("ChatChangedFiles.tsx", name => name === "react" ? { ...react, useId: () => "changed-files", useLayoutEffect() {} }
+    : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, { window: timers, clearTimeout() {} });
+  // The reply's head renders inline too, so a turn's who, status and files can be read.
+  const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
+    : name === "./ao-chat" ? chat : name === "./ChatChangedFiles" ? changedFiles : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
+    : name === "./ao-chat" ? chat : name === "./ChatReplyHead" ? replyHead : name === "./ChatScrollToBottom" ? scrollBottom : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
@@ -65,7 +79,7 @@ function mount(props) {
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
               SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart } : {},
-  { window: { setTimeout: () => 0, setInterval: () => 0, clearInterval() {}, confirm: () => true }, document: { querySelector: () => null }, navigator: {} });
+  { window: timers, document: { querySelector: () => null }, navigator: {} });
   return {
     render: (next = {}) => { frame = "root"; cursor = 0; seen = {}; return module.AgentOrchestratorChat({ ...props, ...next }); },
     // The queued-message bar alone, for a queue the chat itself rarely builds (two separate messages).
@@ -606,6 +620,29 @@ test("two queued messages fold into Claude Code's stack: Next: …, then a list 
   assert.equal(cleared, 1);
 });
 
+test("the composer sends annotations and typed text once, together, for both send and steer", async () => {
+  for (const running of [false, true]) {
+    const delivered = [];
+    const taskId = `t-annotation-together-${running}`;
+    const { props } = base({ selectedTaskId: taskId,
+      runs: running ? [run("r1", taskId, [node("w", "planner", "running", { route: { harness_id: "ao:codex", model: "cpa/test" } })], { execution_mode: "single" })] : [],
+      send: async (input) => { delivered.push(input); }, steer: async (input) => { delivered.push(input); return true; } });
+    const view = mount(props);
+    const all = () => walk(view.render());
+    const annotator = () => all().find((element) => typeof element.props?.onAdd === "function");
+    const id = annotator().props.onAdd("the OCR worker count is fixed");
+    annotator().props.onComment(id, "one worker per account");
+    all().find((element) => element.type === "textarea").props.onChange({ target: { value: "Can OCR handle multiple accounts?" } });
+    await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+    assert.equal(delivered.length, 1, "one request, not an annotation-only send followed by the typed text");
+    const parts = chat.chatMessageParts(delivered[0].message);
+    assert.equal(parts.text, "Can OCR handle multiple accounts?");
+    assert.deepEqual(JSON.parse(JSON.stringify(parts.annotations)), [{ text: "the OCR worker count is fixed", comment: "one worker per account" }]);
+    const tray = all().find((element) => Array.isArray(element.props?.annotations) && typeof element.props?.onRemove === "function");
+    assert.equal(tray.props.annotations.length, 0);
+  }
+});
+
 test("Edit in composer gives a queued message's annotations back as the composer's own, not as the block the agent reads", async () => {
   const { props } = base({ selectedTaskId: "t-notes", working: true,
     runs: [run("r1", "t-notes", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
@@ -702,8 +739,9 @@ test("a failed step's card names the step and its error, and its turn leaves the
   assert.ok(card.includes("notice || step?.error ||"), "the reason is the run's notice, else the step's own error");
   assert.ok(card.includes("<span className=\"cx-fail-step\">{step.name}</span>"), "the card names the step");
   assert.ok(source.includes("<FailedStepCard step={failedStep} notice={notice}"));
-  assert.ok(source.includes("errorShownBelow={turn === failedTurn}") && source.includes("prev.errorShownBelow === next.errorShownBelow"),
-    "the failed turn is told, and its memo sees the change");
+  assert.ok(source.includes("errorShownBelow={Boolean(failing)}") && source.includes("prev.errorShownBelow === next.errorShownBelow"),
+    "a failed DeepSeek turn leaves its error to the reply head, and its memo sees the change");
+  assert.ok(source.includes("const headError = failing && turn !== failedTurn"), "the head says the error unless the failed-step card does");
   assert.ok(dsh.includes("{errorShownBelow ? null : steps.filter((step) => step.error)"), "the DeepSeek turn drops its own copy of the error");
   assert.ok(source.includes("<input type=\"checkbox\" role=\"switch\""), "automatic retry is a switch");
 });
@@ -1041,6 +1079,43 @@ test("a hidden agent browser is offered back from the chat header, and opens the
     assert.ok(after.some((element) => element.type === "Workbench" && element.props.tab === "preview"), "the panel opens on the browser");
     assert.ok(!after.some((element) => element.props?.className === "cx-browser-chip"), "no chip while it shows");
   } finally { openPage = null; }
+});
+
+test("a chat keeps its side panel through questions, remounts and chat switches, but respects Hide", () => {
+  workbenchStorage = new Map();
+  try {
+    const { props } = base({ selectedTaskId: "panel-chat", projectId: "project-one" });
+    const view = mount(props);
+    const panel = (tree) => walk(tree).find((element) => element.type === "Workbench");
+    walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick();
+    assert.equal(panel(view.render()).props.tab, "preview");
+    const asking = view.render({ approvals: [{ nodeId: "worker", approval_id: "ask", kind: "question" }] });
+    assert.equal(panel(asking).props.tab, "preview", "asking does not replace or close the panel");
+    assert.ok(walk(asking).some((element) => element.type === "Approval"), "the question is still answerable beside it");
+    assert.equal(panel(mount(props).render()).props.tab, "preview", "a remount restores the chat's panel");
+    assert.equal(panel(view.render({ selectedTaskId: "another-chat" })), undefined, "another chat has its own state");
+    assert.equal(panel(view.render()).props.tab, "preview", "returning restores this chat");
+    assert.equal(panel(view.render({ projectId: "project-two" })), undefined, "matching task ids in other projects stay isolated");
+    panel(view.render()).props.onClose();
+    assert.equal(panel(mount(props).render()), undefined, "an explicit Hide stays hidden after remount");
+  } finally { workbenchStorage = null; }
+});
+
+test("panel persistence tolerates invalid or blocked storage and preserves batched toggles", () => {
+  const { props } = base({ selectedTaskId: "storage-chat", projectId: "storage-project" });
+  const panel = (tree) => walk(tree).find((element) => element.type === "Workbench");
+  workbenchStorage = new Map([[`coding-tools:ao:workbench:${JSON.stringify([props.projectId, props.selectedTaskId])}`, "invalid-tab"]]);
+  try {
+    assert.equal(panel(mount(props).render()), undefined, "malformed saved tabs are ignored");
+    workbenchStorage = { get() { throw new Error("blocked"); }, set() { throw new Error("blocked"); }, delete() { throw new Error("blocked"); } };
+    const view = mount(props);
+    const toggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick;
+    toggle();
+    assert.equal(panel(view.render()).props.tab, "preview", "blocked storage does not stop opening");
+    const batchedToggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick;
+    batchedToggle(); batchedToggle();
+    assert.equal(panel(view.render()).props.tab, "preview", "updaters in one batch see the preceding selection");
+  } finally { workbenchStorage = null; }
 });
 
 test("the chat header has a Preview button that opens the chat's browser with no page open, and closes it again", () => {

@@ -125,9 +125,6 @@
 
 /* The answer: plain text on the page, no card. */
 .ao-workflow .cx-chat .cx-answer { gap: 6px; }
-.ao-workflow .cx-chat .cx-answer-meta { font-size: 12px; color: var(--claude-text-2); }
-.ao-workflow .cx-chat .cx-answer-meta > span:first-child { color: var(--claude-text-2); font-weight: 500; }
-.ao-workflow .cx-chat .cx-answer-meta > .cx-answer-name { color: var(--claude-text-2); font-weight: 500; }
 .ao-workflow .cx-chat .cx-note { color: var(--claude-text-2); font-size: 13px; }
 .ao-workflow .cx-chat .cx-empty h1 { font-weight: 400; letter-spacing: -0.015em; }
 
@@ -296,7 +293,7 @@
 .ao-workflow .cx-chat .cx-slash, .ao-workflow .cx-chat .cx-command-card { border-color: var(--claude-line); background: var(--claude-raised); box-shadow: var(--claude-shadow); }
 .ao-workflow .cx-chat .cx-goal, .ao-workflow .cx-chat .cx-goal-verdict { border-color: var(--claude-line); background: var(--claude-raised); }
 .ao-workflow .cx-chat .cx-plan-chip { background: var(--claude-accent-soft); color: var(--claude-accent-hover); }
-.ao-workflow .cx-chat .cx-to-bottom { border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .cx-to-bottom { border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: none; }
 
 /* Composer popovers (model, permissions) render inside the chat; give them the warm surface. */
 .ao-workflow .cx-chat .ao-composer-popover, .ao-workflow .cx-chat .ao-permissions-panel, .ao-workflow .cx-chat .ao-permission-notice {

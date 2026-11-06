@@ -417,4 +417,78 @@ function createRegisterHost({
   return { status, configure, start, stop, reload, setSurfaceActive, setBounds, shutdown, recoverAfterCancelledQuit };
 }
 
-module.exports = { createRegisterHost };
+// Register already uploads successful registrations when these backend settings are present.
+// Use its authenticated native session so login protection is never bypassed.
+function createRegisterCpaSync({ browserSession, origin, getConnection, onError } = {}) {
+  const endpoint = new URL(origin);
+  if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1"
+    || endpoint.username || endpoint.password || endpoint.pathname !== "/" || endpoint.search || endpoint.hash) {
+    throw new Error("Register requires a loopback HTTP origin");
+  }
+  let disposed = false, pending = null, controller = null, requested = false, configured = null;
+
+  async function update() {
+    const connection = getConnection?.();
+    if (!connection?.managementKey || connection.baseUrl !== "http://127.0.0.1:8317") return;
+    if (configured?.baseUrl === connection.baseUrl && configured?.managementKey === connection.managementKey) return;
+    controller = new AbortController();
+    const timer = setTimeout(() => controller?.abort(), 5000);
+    const options = { credentials: "include", redirect: "error", cache: "no-store", signal: controller.signal };
+    try {
+      const response = await browserSession.fetch(new URL("/api/config", endpoint).href, options);
+      if (disposed || response.status === 401 || response.status === 403) return;
+      if (!response.ok) throw new Error("Register config unavailable");
+      const config = await response.json();
+      if (disposed) return;
+      if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("Invalid Register config");
+      const target = String(config.cpa_api_url || "").trim().replace(/\/+$/, "");
+      // A deliberately configured external CPA belongs to the user, not this integration.
+      if (target && target !== connection.baseUrl) { configured = { ...connection }; return; }
+      if (target !== connection.baseUrl || config.cpa_api_key !== connection.managementKey) {
+        const saved = await browserSession.fetch(new URL("/api/config", endpoint).href, {
+          ...options, method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ data: { cpa_api_url: connection.baseUrl, cpa_api_key: connection.managementKey } }),
+        });
+        if (!saved.ok) throw new Error("Register config update failed");
+      }
+      if (!disposed) configured = { ...connection };
+    } finally {
+      clearTimeout(timer);
+      controller = null;
+    }
+  }
+
+  function sync() {
+    if (disposed) return Promise.resolve();
+    if (pending) { requested = true; return pending; }
+    const work = (async () => {
+      do {
+        requested = false;
+        try { await update(); }
+        catch {
+          if (!disposed) onError?.("Register could not configure automatic account upload to managed CPA.");
+        }
+      } while (requested && !disposed);
+    })().finally(() => { if (pending === work) pending = null; });
+    pending = work;
+    return work;
+  }
+  function changed(_event, cookie, _cause, removed) {
+    if (!removed && cookie?.name === "_auth" && cookie.domain?.replace(/^\./, "") === endpoint.hostname) {
+      configured = null;
+      void sync();
+    }
+  }
+  browserSession.cookies.on("changed", changed);
+  return {
+    sync,
+    dispose() {
+      disposed = true;
+      controller?.abort();
+      browserSession.cookies.removeListener("changed", changed);
+      configured = null;
+    },
+  };
+}
+
+module.exports = { createRegisterHost, createRegisterCpaSync };

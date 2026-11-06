@@ -499,14 +499,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       logger?.info?.("ao.effort_fitted", { model: baseModel.slice(0, 120), effort, fitted: fitted || "auto" });
       effort = fitted;
     }
-    // Claude Code and Codex send the effort in the request body (Claude Code's output_config.effort,
-    // Codex's reasoning.effort), which CPA hands to the provider's own field. A "(level)" model suffix
-    // was refused outright by every Cline Pass model for "(auto)" and for any level outside its list,
-    // while the same levels in the body went through (tried 2026-10-22 on MiMo V2.6 Pro, DeepSeek V4.1
-    // Flash, GLM 5.3 Flash and Gemini 3.8 Flash). opencode has no body transport in AO and keeps it.
+    // Keep the body setting for harnesses that can forward it, but Claude Code also needs the
+    // validated suffix: AO clears AgentConfig.Effort for gateway sessions before its ACP driver
+    // runs, so a bare model lost "max" and DeepSeek requests fell back to "low". CPA's providers
+    // and Provider Manager read the suffix before the translated body's effort. Only a fitted
+    // level goes in the name: never "auto", an unsupported level, or a verbatim plugin's model.
     const bodyEffort = Boolean(viaCpa) && !verbatim && BODY_EFFORT_AGENTS.has(agent);
     let wireModel = viaCpa ? (verbatim || bodyEffort ? baseModel : viaCpa) : viaCpa;
-    if (viaCpa && effort && !verbatim && !bodyEffort) {
+    if (viaCpa && effort && !verbatim && (!bodyEffort || agent === "claude-code")) {
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
@@ -892,7 +892,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!response.ok) return null;
       const listing = await response.json();
       if (!Array.isArray(listing?.files)) return null;
-      const files = listing.files.map(normalizedAuthFile).filter(Boolean);
+      const files = listing.files.map(normalizedAuthFile).filter(Boolean).flatMap(entry => {
+        // Provider Manager registers all upstreams under one auth provider, but each marker's
+        // filename names the upstream that owns its models. Judge those switches separately.
+        const upstream = entry.provider === "provider-manager" && /^cpa-provider-manager-(.+)\.json$/i.exec(entry.name)?.[1];
+        return upstream ? [entry, { ...entry, provider: upstream }] : [entry];
+      });
       const enabled = new Set(files.filter(entry => entry.status !== "disabled").map(entry => entry.provider));
       // Why a provider has none: its accounts are all disabled in CPA, or none was added. The model
       // menu and a refused send say so, instead of only "not offered right now".
@@ -1131,10 +1136,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   // Every model CPA has listed, with its capabilities and when CPA last listed it. CPA leaves a
-  // model out of its list while it cools down after upstream errors (Cline's 502s), while its
-  // account is disabled, or while CPA itself restarts or cannot be reached; the model vanished from
-  // the menu and a chat saved on it showed "not available" and refused to send. A model CPA listed
-  // in the last 30 days stays in the list (its effort and window too), and a send goes to CPA,
+  // model out of its list while it cools down after upstream errors (Cline's 502s), or while CPA
+  // itself restarts or cannot be reached; the model vanished from the menu and a chat saved on it
+  // showed "not available" and refused to send. Unless its provider is explicitly disabled, a model
+  // CPA listed in the last 30 days stays in the list (its effort and window too), and a send goes to CPA,
   // which answers for itself. Saved in the user data folder, so it survives a restart.
   const KNOWN_MODEL_MS = 30 * 24 * 60 * 60_000;
   const KNOWN_MODEL_REFRESH_MS = 24 * 60 * 60_000;
@@ -1219,6 +1224,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
     const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
+    const disabled = (id, provider) => accountProviders?.disabled?.has(provider || owners?.get(id) || knownModels[id]?.capability.provider)
+      || id.includes("/") && accountProviders?.disabled?.has(id.slice(0, id.indexOf("/")));
     const capabilities = Object.create(null);
     const ids = [];
     const plugins = new Set();
@@ -1231,11 +1238,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     for (const entry of rows || []) {
       const id = entry?.slug ?? entry?.id;
       if (entry?.visibility === "hide" && typeof id === "string" && id && id.length <= 128 && !hidden.includes(id)) hidden.push(id);
+      if (typeof id === "string" && id && id.length <= 128 && disabled(id, entry.provider ?? entry.owned_by ?? entry.ownedBy)) {
+        unavailable[id] = pluginUnavailable(owners?.get(id) || entry.provider || knownModels[id]?.capability.provider || id.split("/")[0], accountProviders);
+        continue;
+      }
       if (typeof id === "string" && id && id.length <= 128 && unserved(id)) {
         unavailable[id] = pluginUnavailable(owners.get(id), accountProviders);
-        // A provider whose account is only disabled keeps its models listed, like any model CPA
-        // set aside for a while; one nobody ever added stays hidden (its plugin lists every model).
-        if (!accountProviders.disabled?.has(owners.get(id)) && !knownModels[id]) continue;
+        if (!knownModels[id]) continue;
       }
       if (typeof id !== "string" || !id || id.length > 128 || entry.visibility === "hide" || ids.includes(id)) continue;
       // CPA names the upstream that serves the model (e.g. antigravity, codex, cline-pass).
@@ -1275,12 +1284,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       changed = true;
     }
     for (const [id, entry] of Object.entries(knownModels)) {
-      if (at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
+      // Explicit switches override outage/cooldown history, including when CPA already removed
+      // the disabled provider from its live model list. Do not revive it on a later failed read.
+      if (disabled(id)) unavailable[id] = pluginUnavailable(owners?.get(id) || entry.capability.provider || id.split("/")[0], accountProviders);
+      if (disabled(id) || at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
     }
     rememberedModels(ids, capabilities, plugins, held, id => unavailable[id] || HELD_NOTE, at);
     for (const id of Object.keys(held)) delete unavailable[id];
     if (changed) saveKnownModels();
-    if (!ids.length) throw new Error("CPA has no available models");
+    if (!ids.length && !accountProviders?.disabled?.size) throw new Error("CPA has no available models");
     pluginModels = plugins;
     return { ok: true, models: ids, capabilities, ...(Object.keys(unavailable).length ? { unavailable: { ...unavailable } } : {}),
       ...(Object.keys(held).length ? { held: { ...held } } : {}), ...(hidden.length ? { hidden } : {}) };
@@ -1886,10 +1898,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // TIMELINE_TEXT_BYTES there): every item it built, and a message or thought uncut.
     return (Array.isArray(items) ? items : []).slice(-400).map(item => ({
       id: publicText(item.id, 80), kind: publicText(item.kind, 32), status: publicText(item.status, 32),
-      // Live text keeps what the upstream read kept: a running thought's newest part, and messages
-      // and finished thoughts whole (up to 64 KB).
+      // Steers are the person's whole message too: cutting one to a label split its annotation
+      // block from its typed text, so the chat showed the raw preamble and a second pending bubble.
       text: item.kind === "reasoning" && item.status === "running" ? publicText(item.text, 4096, true)
-        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" ? 64 * 1024 : 400),
+        : publicText(item.text, item.kind === "message" || item.kind === "reasoning" || item.kind === "steer" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
       ...(item.input ? { input: publicText(item.input, toolBytes.input) } : {}),
@@ -1918,7 +1930,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (size() <= TIMELINE_RESPONSE_BYTES) return items;
     const cut = (text, limit) => text.length <= limit ? text : `${text.slice(0, limit).replace(/[\ud800-\udbff]$/, "")}…`;
     for (const limit of [16 * 1024, 4096, 1024]) {
-      items = items.map(item => item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
+      // A steer may contain structured annotations and attachments; keep it whole or let the
+      // oldest-item eviction below remove it whole, never leave an unparseable prompt prefix.
+      items = items.map(item => item.kind !== "steer" && item.text.length > limit ? { ...item, text: cut(item.text, limit) } : item);
       if (size() <= TIMELINE_RESPONSE_BYTES) return items;
     }
     // Tool calls keep a shorter input and output before they lose them: with up to 16 KB of output
@@ -2937,7 +2951,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     .find((decision) => decision.kind === (allow ? "allow_once" : "reject_once"))?.id
     ?? (allow ? null : (approval.decisions || []).find((decision) => decision.kind === "reject_always")?.id) ?? null;
   const withAdvice = (approvals, card = null) => Array.isArray(approvals)
-    ? approvals.map((item) => {
+    // A status read already in flight can return the request after its answer was sent. Do not
+    // offer that answered request again; advice alone (including a failed send) never removes it.
+    ? approvals.filter((item) => !approverAdvice.get(item?.approval_id)?.resolved).map((item) => {
       // Modern native commands carry escalation scope separately from item/permissions requests.
       const request = item?.request;
       const scoped = item?.kind === "command" && request
@@ -3349,6 +3365,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const decision = aoDecision(approval, advice.action === "allow");
           if (!decision) note = `Reviewer suggests ${advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
           else if (await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision).then(() => true, () => false)) {
+            approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
             logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
             note = `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
           } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
@@ -3358,8 +3375,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
           }).then(result => result?.ok === true && result.result?.ok === true, () => false);
           if (sent) logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
-          if (sent) note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
-          else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+          if (sent) {
+            approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+            note = `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
+          } else approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
         } else {
           note = `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
         }

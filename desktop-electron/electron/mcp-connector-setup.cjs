@@ -128,6 +128,21 @@ function extensionHelpersSource() {
     if (!created) throw new Error('ChatGPT did not confirm connector creation.');
     return created;
   }
+  async function connectTunnelConnector(appName) {
+    const card = await waitFor(() => findManagedAppCard(appName), 15000);
+    if (!card) throw new Error('The configured connector did not appear in this account.');
+    const connected = () => observeAppConnection(appName).connectionObserved === true;
+    if (!connected()) {
+      const opened = await openConnectFlow(appName);
+      if (!opened.opened && !connected()) {
+        throw new Error('ChatGPT did not expose a Connect action for the configured connector.');
+      }
+    }
+    if (!await waitFor(connected, 15000)) {
+      throw new Error('ChatGPT has not confirmed this connector is connected. Check this account in the Browser tab and retry.');
+    }
+    return { connected: true };
+  }
   createFormPresent = () => {
     const surface = activeSurface();
     return Boolean(findInput('name', surface) && (findInput('url', surface)
@@ -136,7 +151,7 @@ function extensionHelpersSource() {
   };
   globalThis.__codingToolsConnectorHelpers = Object.freeze({
     activeSurface, acknowledgeCustomServerTrust, allClickable, canonicalAppIdentity,
-    cardDetailUrl, clearPluginSearch, connectControlIn, createTunnelConnector, elementLabels, ensurePersonalView, findClickable, findExactAppNode,
+    cardDetailUrl, clearPluginSearch, connectControlIn, connectTunnelConnector, createTunnelConnector, elementLabels, ensurePersonalView, findClickable, findExactAppNode,
     findGridArticle, findInput, findManagedAppCard, isPersonalPluginsPage, observeAppConnection, personalPluginsLoaded,
     openCreateFormStrict, pluginCardLinks, pointerActivate, setInputValue,
     textMatches, visible, waitFor, waitForPersonalPluginsPage, waitForPluginsPageReady
@@ -148,8 +163,8 @@ function extensionHelpersSource() {
  * Creates the ChatGPT connector for the main tunnel, or with `target` ({ tunnelId, partition }) for
  * an extra tunnel in its account's browser partition; the caller records an extra tunnel's connector.
  */
-async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target }) {
-  const settings = target
+async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target, verifyConnection = false }) {
+  const settings = target?.tunnelId !== undefined
     ? extraConnectorSettings(runtimeHost, target.tunnelId)
     : currentConnectorSettings(runtimeHost);
   const partition = target?.partition ?? browserHost.partition;
@@ -174,7 +189,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     const timer = setTimeout(() => {
       timedOut = true;
       if (!popup.isDestroyed()) popup.destroy();
-    }, 75_000);
+    }, verifyConnection ? 120_000 : 75_000);
     timer.unref?.();
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -195,13 +210,21 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         throw new Error("ChatGPT returned an invalid connector identity.");
       }
       const href = url.pathname + url.search;
+      if (verifyConnection) {
+        await popup.loadURL("https://chatgpt.com/plugins?view=personal");
+        await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
+        const connection = await popup.webContents.executeJavaScript(
+          `globalThis.__codingToolsConnectorHelpers.connectTunnelConnector(${JSON.stringify(settings.name)})`, true,
+        );
+        if (connection?.connected !== true) throw new Error("ChatGPT did not confirm this account's connector connection.");
+      }
       if (result.created && !target) {
         writePrivateFileAtomic(path.join(app.getPath("userData"), "mcp-connector-binding.json"),
           JSON.stringify({ version: 1, name: settings.name, tunnelId: settings.tunnelId, href }));
       }
-      return { created: result.created, name: settings.name, href };
+      return { created: result.created, name: settings.name, href, ...(verifyConnection ? { connected: true } : {}) };
     } catch (error) {
-      if (timedOut) throw new Error("ChatGPT connector setup took too long. Retry from Configuration.");
+      if (timedOut) throw new Error("ChatGPT connector setup took too long. Check the account in the Browser tab and retry.");
       throw error;
     } finally {
       clearTimeout(timer);

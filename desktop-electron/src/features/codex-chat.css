@@ -709,11 +709,90 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
 .cx-answer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.cx-answer-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; color: var(--ao-muted); font-size: 12px; }
-.cx-answer-meta > span:first-child { color: var(--color-text-primary); font-weight: 500; }
-.cx-answer-meta > .cx-answer-name { color: var(--color-text-primary); font-weight: 500; }
-.cx-answer-meta > .ao-model-logo { display: inline-grid; place-items: center; line-height: 0; }
-.cx-answer-mode { padding: 0 6px; border: 1px solid var(--ao-line); border-radius: 9px; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; }
+/* A reply (ChatReplyHead.tsx): one card per turn, its head first — who answered, how it stands and
+   for how long, why it failed, a team's cards and the files it changed — then its work and answer.
+   The card's edge takes the turn's tone, so a failed or stuck reply is seen while scrolling past. */
+/* Live work in its own blue: the Claude palette's accent (--ao-blue there) is orange, next to Failed's red. */
+.cx-chat { --reply-live: #2f6fd6; }
+.ao-workflow[data-theme="dark"] .cx-chat, :root[data-theme="dark"] .cx-chat { --reply-live: #6ea8fe; }
+.cx-reply { --reply-tone: var(--ao-muted); display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 10px 14px 10px;
+  border: 1px solid var(--ao-line); border-left: 3px solid color-mix(in srgb, var(--reply-tone) 70%, var(--ao-line)); border-radius: 10px;
+  background: color-mix(in srgb, var(--color-text-primary) 1.5%, transparent); }
+.cx-reply.is-working, .cx-reply.is-queued { --reply-tone: var(--reply-live); }
+.cx-reply.is-done { --reply-tone: var(--ao-green); }
+.cx-reply.is-failed { --reply-tone: var(--ao-red); }
+.cx-reply.is-stalled, .cx-reply.is-waiting { --reply-tone: var(--ao-amber); }
+.cx-reply.is-stopped { --reply-tone: var(--ao-muted); }
+.cx-reply-head { display: flex; flex-direction: column; gap: 8px; padding-bottom: 9px; border-bottom: 1px solid var(--ao-line); }
+.cx-reply-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; font-size: 13px; line-height: 20px; }
+.cx-reply-who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; color: var(--color-text-primary); font-weight: 600; }
+.cx-reply-who > .ao-model-logo { display: inline-grid; flex: none; place-items: center; line-height: 0; }
+.cx-reply-who-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-reply-mode { padding: 0 7px; border: 1px solid var(--ao-line); border-radius: 9px; color: var(--ao-muted); font-size: 11px; font-weight: 600; line-height: 17px; }
+.cx-reply-status { --tone: var(--ao-muted); display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--tone) 14%, transparent); color: var(--tone); font-size: 11.5px; font-weight: 600; line-height: 19px; white-space: nowrap; }
+.cx-reply-status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.cx-reply-status.is-working, .cx-reply-status.is-queued { --tone: var(--reply-live); }
+.cx-reply-status.is-working::before, .cx-reply-status.is-queued::before { animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-reply-status.is-done { --tone: var(--ao-green); }
+.cx-reply-status.is-failed { --tone: var(--ao-red); }
+.cx-reply-status.is-stalled, .cx-reply-status.is-waiting { --tone: var(--ao-amber); }
+.cx-reply-time { color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cx-reply-spacer { flex: 1 1 0; min-width: 0; }
+.cx-reply-total { color: var(--ao-muted); font-size: 12px; white-space: nowrap; }
+.cx-reply-diff { font-family: var(--font-mono, ui-monospace, Consolas, monospace); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.cx-reply-diff .is-add { color: var(--ao-green); }
+.cx-reply-diff .is-del { color: var(--ao-red); }
+.cx-reply-error { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 7px 10px; border-radius: 7px;
+  background: color-mix(in srgb, var(--ao-red) 9%, transparent); font-size: 12.5px; line-height: 18px; }
+.cx-reply-error-title { color: var(--ao-red); font-weight: 600; }
+.cx-reply-error-text { display: -webkit-box; overflow: hidden; color: var(--color-text-primary); overflow-wrap: anywhere; white-space: pre-wrap;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.cx-reply-roster, .cx-reply-files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.cx-reply-member { --tone: var(--ao-muted); display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; padding: 2px 9px 2px 8px;
+  border: 1px solid var(--ao-line); border-radius: 7px; font-size: 12px; line-height: 18px; }
+.cx-reply-member.is-working, .cx-reply-member.is-queued { --tone: var(--reply-live); }
+.cx-reply-member.is-done { --tone: var(--ao-green); }
+.cx-reply-member.is-failed { --tone: var(--ao-red); border-color: color-mix(in srgb, var(--ao-red) 40%, var(--ao-line)); }
+.cx-reply-member.is-stalled, .cx-reply-member.is-waiting { --tone: var(--ao-amber); }
+.cx-reply-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--tone); }
+.cx-reply-member.is-working .cx-reply-dot { animation: cx-pulse 1.4s ease-in-out infinite; }
+.cx-reply-member-name { flex: none; color: var(--color-text-primary); font-weight: 500; }
+.cx-reply-member-model { flex: none; color: var(--ao-muted); }
+.cx-reply-member-state { min-width: 0; overflow: hidden; color: var(--tone); text-overflow: ellipsis; white-space: nowrap; }
+/* Codex's completed-turn resource card: 12px inset, 8px corners, three 36px rows. */
+.cx-turn-changes { display: flex; flex-direction: column; min-width: 0; max-width: 100%; margin-bottom: 8px; overflow: hidden; border: 1px solid var(--ao-line); border-radius: 8px;
+  background: color-mix(in srgb, var(--color-bg-secondary, var(--color-bg-primary)) 50%, transparent); color: var(--color-text-primary); font-family: inherit; }
+.cx-turn-changes-head { position: relative; display: flex; align-items: center; gap: 10px; min-width: 0; padding: 12px; }
+.cx-turn-changes-open { position: absolute; inset: 0; width: 100%; border: 0; border-radius: 8px; background: transparent; cursor: pointer; }
+.cx-turn-changes-head:has(button:not(:disabled):hover), .cx-turn-changes-head:focus-within { background: color-mix(in srgb, var(--cx-hover) 30%, transparent); }
+.cx-turn-changes-icon { display: grid; flex: none; place-items: center; width: 24px; height: 24px; pointer-events: none; color: var(--color-text-secondary); }
+.cx-turn-changes-heading { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; pointer-events: none; }
+.cx-turn-changes-title { overflow: hidden; font-size: 13px; font-weight: 500; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.cx-turn-changes-totals, .cx-turn-changes-hover { height: 16px; font-size: 12px; line-height: 16px; }
+.cx-turn-changes-hover { display: none; align-items: center; gap: 4px; color: var(--color-text-secondary); }
+.cx-turn-changes-head:has(button:not(:disabled):hover) .cx-turn-changes-totals, .cx-turn-changes-head:focus-within .cx-turn-changes-totals { display: none; }
+.cx-turn-changes-head:has(button:not(:disabled):hover) .cx-turn-changes-hover, .cx-turn-changes-head:focus-within .cx-turn-changes-hover { display: inline-flex; }
+.cx-turn-changes-view { position: relative; flex: none; height: 28px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
+.cx-turn-changes-view:hover:not(:disabled) { background: var(--cx-hover); }
+.cx-turn-changes button:disabled { cursor: default; }
+.cx-turn-changes-files { display: flex; flex-direction: column; min-width: 0; border-top: 1px solid var(--ao-line); }
+.cx-turn-change-file, .cx-turn-changes-more { display: flex; align-items: center; gap: 8px; flex: none; width: 100%; min-width: 0; height: 36px; padding: 4px 12px; border: 0;
+  background: color-mix(in srgb, var(--color-bg-primary) 70%, transparent); color: inherit; font-family: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.cx-turn-change-file:hover:not(:disabled), .cx-turn-changes-more:hover { background: color-mix(in srgb, var(--cx-hover) 60%, transparent); }
+.cx-turn-change-path { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; }
+.cx-turn-change-dir { min-width: 0; overflow: hidden; color: var(--color-text-secondary); text-overflow: ellipsis; white-space: nowrap; }
+.cx-turn-change-name { flex: 0 1 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cx-turn-change-counts { display: inline-flex; flex: none; align-items: center; gap: 4px; font-size: 12px; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.cx-turn-change-counts .is-add { color: var(--color-codex-git-added, var(--ao-green)); }
+.cx-turn-change-counts .is-del { color: var(--color-codex-git-deleted, var(--ao-red)); }
+.cx-turn-changes-more { background: transparent; }
+.cx-turn-changes-more svg { flex: none; }
+.cx-turn-changes-more[aria-expanded="true"] svg { transform: rotate(180deg); }
+.cx-turn-changes button:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: -2px; }
+/* A reply head is the turn's own summary, so the foot's line sits flush with the card's bottom. */
+.cx-reply > .cx-turn-foot { margin-top: 0; }
+@media (prefers-reduced-motion: reduce) { .cx-reply-status::before, .cx-reply-dot { animation: none !important; } }
 .cx-verdict { padding: 1px 7px; border-radius: 9px; background: var(--cx-hover); font-size: 11px; font-weight: 600; }
 .cx-verdict.is-approved { color: var(--ao-green); }
 .cx-verdict.is-changes_required { color: var(--ao-amber); }
@@ -753,8 +832,24 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-model-judges.is-compact { flex: none; gap: 6px; font-size: 11px; white-space: nowrap; }
 .cx-auto-retry:has(input:disabled) { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .cx-switch, .cx-switch::after { transition: none; } }
-.cx-to-bottom { position: sticky; bottom: 12px; left: 50%; display: grid; place-items: center; width: 32px; height: 32px; margin: -44px auto 12px; border: 1px solid var(--ao-line);
-  border-radius: 50%; background: var(--color-bg-primary); box-shadow: 0 4px 14px rgb(0 0 0 / 12%); color: var(--color-text-primary); cursor: pointer; }
+/* Codex B6l/je: anchored outside the scroller, not a sticky item at the end of its content. */
+.cx-scroll-bottom-anchor { position: relative; z-index: 30; flex: 0 0 0; height: 0; min-height: 0; pointer-events: none; }
+.cx-to-bottom { position: absolute; right: 50%; bottom: 24px; display: flex; align-items: center; justify-content: center; box-sizing: border-box; width: 32px; height: 32px; margin: 0; padding: 0;
+  border: 1px solid var(--ao-line); border-radius: 50%; background: var(--color-bg-primary); background-clip: padding-box; box-shadow: none; color: var(--color-text-secondary); cursor: pointer;
+  opacity: 0; pointer-events: none; transform: translateX(50%); transition: opacity 150ms ease-in-out; }
+.cx-to-bottom.is-visible { opacity: 1; pointer-events: auto; }
+.cx-to-bottom:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; }
+.cx-scroll-arrow { flex: none; color: var(--color-text-primary); }
+.cx-scroll-working { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.cx-scroll-working > span { width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: .7; animation: cx-scroll-dot-wave 1.2s ease-in-out infinite; }
+.cx-scroll-working > span:nth-child(2) { animation-delay: .15s; }
+.cx-scroll-working > span:nth-child(3) { animation-delay: .3s; }
+.cx-to-bottom.is-working .cx-scroll-arrow { display: none; }
+.cx-to-bottom:is(:hover, :focus-visible) .cx-scroll-working { display: none; }
+.cx-to-bottom.is-working:is(:hover, :focus-visible) .cx-scroll-arrow { display: block; }
+@keyframes cx-scroll-dot-wave { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .cx-to-bottom { transition: none; } .cx-scroll-working > span { animation: none; } }
+@media print { .cx-scroll-bottom-anchor { display: none; } }
 
 /* Markdown answers */
 .cx-md { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
@@ -1571,24 +1666,33 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 ::highlight(cx-annotation) { background-color: color-mix(in srgb, #2f80ed 24%, transparent); }
 .cx-annotation-ref { display: inline-grid; place-items: center; min-width: 15px; height: 15px; padding: 0 4px; margin: 0 2px; border-radius: 999px; vertical-align: 2px;
   background: #2f80ed; color: #fff; font-size: 10px; font-weight: 700; line-height: 1; }
-.cx-annotation-chip { display: inline-flex; align-items: center; height: 26px; margin-bottom: 6px; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 8px; overflow: hidden; font-size: 12px; }
-.cx-annotation-chip button { display: inline-flex; align-items: center; gap: 6px; height: 100%; padding: 0 8px; border: 0; background: transparent; color: var(--color-text-primary, #1f1e1d); font: inherit; cursor: pointer; }
-.cx-annotation-chip button:hover { background: var(--cx-hover, rgb(0 0 0 / 5%)); }
-.cx-annotation-chip .cx-annotation-clear { padding: 0 7px; color: var(--ao-muted, #748198); }
-.cx-annotation-list { position: absolute; bottom: calc(100% + 8px); left: 0; z-index: 5; display: grid; gap: 2px; width: min(300px, 100%); max-height: 260px; margin: 0; padding: 8px; overflow: auto;
-  list-style: none; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 10px; background: var(--color-bg-primary, #fff); box-shadow: 0 10px 24px rgb(0 0 0 / 12%); animation: cx-annotation-in .12s ease-out; }
-.cx-annotation-list li { display: flex; align-items: flex-start; gap: 6px; padding: 4px; border-radius: 6px; font-size: 12px; }
-.cx-annotation-list li:hover { background: var(--cx-hover, rgb(0 0 0 / 4%)); }
+/* Codex's response-text attachment (Rii/xwd): rounded-full pill, 14px type, 6px/8px
+   padding, and a 384px details popover with numbered selections and comment labels. */
+.cx-annotation-tray { position: relative; display: inline-flex; width: fit-content; max-width: 100%; margin-bottom: 6px; }
+.cx-annotation-chip { position: relative; display: inline-flex; align-items: center; max-width: 320px; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 999px;
+  background: var(--cx-hover, rgb(0 0 0 / 3%)); color: var(--color-text-primary, #1f1e1d); font-size: 14px; line-height: 20px; transition: background-color .15s; }
+.cx-annotation-chip:hover { background: color-mix(in srgb, var(--color-text-primary, #1f1e1d) 7%, transparent); }
+.cx-annotation-chip button { display: inline-flex; align-items: center; gap: 4px; min-width: 0; padding: 6px 12px 6px 8px; border: 0; border-radius: inherit;
+  background: transparent; color: inherit; font: inherit; font-weight: 500; cursor: pointer; }
+.cx-annotation-chip button > svg { flex: none; color: var(--ao-muted, #748198); }
+.cx-annotation-chip button:focus-visible { outline: 2px solid var(--ao-blue, #2f80ed); outline-offset: 2px; }
+.cx-annotation-chip .cx-annotation-clear { position: absolute; top: 50%; right: 4px; width: 20px; height: 20px; justify-content: center; padding: 0; transform: translateY(-50%);
+  background: var(--color-bg-primary, #fff); color: var(--ao-muted, #748198); opacity: 0; pointer-events: none; }
+.cx-annotation-chip:hover .cx-annotation-clear, .cx-annotation-chip:focus-within .cx-annotation-clear { opacity: 1; pointer-events: auto; }
+.cx-annotation-list { position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 70; display: flex; flex-direction: column; width: min(384px, calc(100vw - 48px)); max-height: min(320px, calc(100vh - 32px)); margin: 0; padding: 0; overflow: auto;
+  list-style: none; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 8px; background: var(--color-bg-primary, #fff); box-shadow: 0 10px 24px rgb(0 0 0 / 12%); animation: cx-annotation-in .12s ease-out; }
+.cx-annotation-list li { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; font-size: 14px; line-height: 20px; }
+.cx-annotation-list li + li { border-top: 1px solid var(--ao-line, #e4eaf1); }
 .cx-annotation-number { flex: none; color: var(--ao-muted, #748198); }
-.cx-annotation-body { display: grid; flex: 1; min-width: 0; gap: 2px; }
-.cx-annotation-body small { color: var(--ao-muted, #748198); font-size: 11px; }
-.cx-annotation-quote { display: -webkit-box; overflow: hidden; color: var(--color-text-primary, #1f1e1d); -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-.cx-annotation-comment { color: var(--ao-muted, #748198); font-style: italic; }
+.cx-annotation-body { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 8px; }
+.cx-annotation-body small { display: block; color: var(--ao-muted, #748198); font-size: 12px; font-weight: 500; line-height: 16px; }
+.cx-annotation-quote, .cx-annotation-comment { display: block; margin-top: 2px; overflow-wrap: anywhere; white-space: pre-wrap; color: var(--color-text-primary, #1f1e1d); }
 .cx-annotation-body input { width: 100%; padding: 3px 6px; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 6px; background: transparent; color: inherit; font: inherit; }
 .cx-annotation-list li > button { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted, #748198); cursor: pointer; }
 .cx-annotation-list li > button:hover { background: var(--cx-hover, rgb(0 0 0 / 6%)); color: var(--color-text-primary, #1f1e1d); }
-.cx-sent-annotations { display: inline-flex; align-items: center; gap: 6px; align-self: flex-end; height: 24px; margin-bottom: 4px; padding: 0 8px; border: 1px solid var(--ao-line, #e4eaf1);
-  border-radius: 8px; color: var(--ao-muted, #748198); font-size: 12px; cursor: default; }
+.cx-sent-annotations { align-self: flex-end; }
+.cx-sent-annotations .cx-annotation-list { right: 0; left: auto; }
+@media (hover: none) { .cx-annotation-chip .cx-annotation-clear { position: static; flex: none; margin-right: 4px; opacity: 1; pointer-events: auto; transform: none; } }
 @keyframes cx-annotation-in { from { opacity: 0; transform: translateY(2px); } }
 @media (prefers-reduced-motion: reduce) { .cx-selection-bar, .cx-annotation-editor, .cx-annotation-list { animation: none; } }
 /* Archived (ChatThreadList): a folder per project with its count, "Chats" for chats with no
