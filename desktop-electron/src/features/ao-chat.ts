@@ -781,12 +781,16 @@ export function chatRunStopping<T extends ChatRun>(run: T): T {
  * live 2026-10-23: two rounds started two seconds apart, the newer was stopped and the older retried,
  * and the chat sat on the stopped one for an hour: no Approve or Deny for the request its agent
  * waited on, and every message sent as a new turn and refused ("This chat is still running").
- * A selected run not loaded yet (a send's new run) is kept.
+ * A selected run not loaded yet (a send's new run) is kept, unless `selectedGone`: it has been
+ * missing from the chat's runs too long to be one still loading. Seen live 2026-11-06: two goal
+ * chats sat on the run they were opened on after AO no longer listed it, so their panes polled a
+ * run that did not exist, the newer round's Write request never showed (no box to answer), and
+ * Continue waited on it for good.
  */
-export function chatLiveRun(runs: ChatRun[], taskId: string, selected: string): string {
+export function chatLiveRun(runs: ChatRun[], taskId: string, selected: string, selectedGone = false): string {
   const mine = runs.filter((run) => run.project_id === taskId);
   const current = mine.find((run) => run.id === selected);
-  if (!mine.length || (selected && !current) || (current && chatRunOpen(chatRunStatus(current)))) return selected;
+  if (!mine.length || (selected && !current && !selectedGone) || (current && chatRunOpen(chatRunStatus(current)))) return selected;
   const working = [...mine].reverse().find((run) => chatRunStatus(run) === "running");
   return (working ?? mine[mine.length - 1]).id;
 }

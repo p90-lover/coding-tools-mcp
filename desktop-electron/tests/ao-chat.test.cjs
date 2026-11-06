@@ -2688,6 +2688,12 @@ test("an open chat follows its live run once the selected one has settled", () =
   assert.equal(chat.chatLiveRun([finished, round], "t", "r2"), "r2", "an open run stays selected");
   assert.equal(chat.chatLiveRun([finished], "t", "r1"), "r1", "a settled chat stays on its newest run");
   assert.equal(chat.chatLiveRun([finished], "t", "sent"), "sent", "a send's run not loaded yet is kept");
+  // Seen live 2026-11-06: AO stopped listing the run a goal chat was opened on; the pane polled it
+  // for good and never showed the live round's request.
+  assert.equal(chat.chatLiveRun([working], "t", "pruned", true), "old", "a run gone past its grace gives way to the working one");
+  assert.equal(chat.chatLiveRun([finished], "t", "pruned", true), "r1", "else to the chat's newest");
+  assert.equal(chat.chatLiveRun([working], "t", "pruned"), "pruned", "within the grace it is still waited for");
+  assert.equal(chat.chatLiveRun([working], "other", "x", true), "x", "a chat with no runs listed keeps its selection");
   const held = run("h", "t", [node("a", "planner", "held")]);
   assert.equal(chat.chatLiveRun([working, held], "t", "h"), "h", "a held run needs the person: it stays selected");
   assert.equal(chat.chatLiveRun([working], "other", "x"), "x", "another chat's runs are not this chat's");
