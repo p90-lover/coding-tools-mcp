@@ -42,6 +42,37 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(i18n, /product: "Coding Tools"/);
 });
 
+test("the Browser sidebar still is never covered by a loading panel", () => {
+  const ts = require("typescript"), vm = require("node:vm");
+  const file = ts.createSourceFile("App.tsx", read("src/App.tsx"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const surface = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "BrowserSurface");
+  assert.ok(surface);
+  const jsx = (type, props) => ({ type, props: props || {} }), exports = {};
+  const components = ["BrowserAccountSwitcher", "BrowserAddressBar", "StateDot", "BrandMark", "PrimaryButton", "SecondaryButton", "ManualTurnGuide"];
+  vm.runInNewContext(ts.transpileModule(surface.getText(file) + "\nexports.BrowserSurface = BrowserSurface;", {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, {
+    exports, api: {}, ...Object.fromEntries(components.map(name => [name, name])), formatBrowserAddress: (url) => url ?? "",
+    useState: value => [value, () => {}], useEffect() {},
+    require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {},
+  });
+  const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
+  const still = "data:image/jpeg;base64,AAAA";
+  const render = browser => walk(exports.BrowserSurface({
+    browser: { tabs: [], status: "ready", ...browser }, still, browserSlotRef() {},
+    copy: { loading: "Loading..." }, interactionMode: "automatic", operation: null, platform: "win32", setError() {},
+  }));
+  for (const loading of [false, true]) {
+    const shown = render({ visible: true, loading });
+    assert.ok(shown.some(item => item.type === "img" && item.props.className === "browser-still" && item.props.src === still));
+    assert.ok(!shown.some(item => item.props.className === "browser-underlay"), "an opaque later sibling painted over the still during hover");
+    assert.equal(shown.filter(item => item.type === "span" && item.props.className === "gpb-muted" && item.props.children === "Loading...").length, loading ? 1 : 0, "real navigation keeps its toolbar loading indicator");
+  }
+  const hidden = render({ visible: false });
+  assert.ok(hidden.some(item => item.props.className === "browser-empty"));
+  assert.ok(!hidden.some(item => item.props.className === "browser-still"), "a closed browser never shows an old captured page");
+});
+
 test("the error toast says a runtime timeout in words and seconds", () => {
   // Seen live in 0.8.35: "Something went wrong · ao-web-model-catalog timed out after 20000ms".
   const ts = require("typescript");

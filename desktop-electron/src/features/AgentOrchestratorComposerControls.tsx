@@ -103,9 +103,13 @@ const POPOVER_EDGE = 8;
 function fitInPane(menu: HTMLElement | null) {
   if (!menu?.getBoundingClientRect || typeof getComputedStyle !== "function") return;
   const style = getComputedStyle(menu);
+  const rect = menu.getBoundingClientRect();
+  // Only the two scrollable pickers use this limit; permissions and branch menus keep theirs.
+  if (menu.matches(".ao-harness-popup, .ao-model-popup")) {
+    menu.style.setProperty("--ao-picker-room", `${Math.max(0, Math.floor(Math.min(rect.bottom, window.innerHeight) - POPOVER_EDGE))}px`);
+  }
   if (style.position !== "absolute") return;
   const bounds = (menu.closest(".cx-pane") ?? document.documentElement).getBoundingClientRect();
-  const rect = menu.getBoundingClientRect();
   const over = rect.right - (bounds.right - POPOVER_EDGE);
   const room = rect.left - (bounds.left + POPOVER_EDGE);
   if (over > 0 && room > 0) menu.style.left = `${(Number.parseFloat(style.left) || 0) - Math.min(over, room)}px`;
@@ -123,13 +127,24 @@ export function useComposerPopover() {
   const trigger = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLElement>(null);
   const close = () => { setOpen(false); trigger.current?.focus({ preventScroll: true }); };
+  const focus = (control: HTMLElement) => {
+    control.focus({ preventScroll: true });
+    if (!panel.current?.matches(".ao-harness-popup, .ao-model-popup")) return;
+    const scroller = control.closest<HTMLElement>(".ao-model-options") ?? panel.current;
+    const bounds = scroller.getBoundingClientRect(), rect = control.getBoundingClientRect();
+    if (rect.top < bounds.top) scroller.scrollTop -= bounds.top - rect.top;
+    else if (rect.bottom > bounds.bottom) scroller.scrollTop += rect.bottom - bounds.bottom;
+  };
   useEffect(() => {
     if (!open) return;
     fitInPane(panel.current);
-    panel.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)")?.focus({ preventScroll: true });
+    const first = panel.current?.querySelector<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled)");
+    if (first) focus(first);
+    const fit = () => fitInPane(panel.current);
     const outside = (event: PointerEvent) => { if (!root.current?.contains(event.target as Node)) setOpen(false); };
     document.addEventListener("pointerdown", outside);
-    return () => document.removeEventListener("pointerdown", outside);
+    window.addEventListener("resize", fit);
+    return () => { document.removeEventListener("pointerdown", outside); window.removeEventListener("resize", fit); };
   }, [open]);
   const onKeyDown = (event: KeyboardEvent) => {
     if (!open) return;
@@ -139,8 +154,8 @@ export function useComposerPopover() {
       const controls = Array.from(panel.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select:not(:disabled), summary, [tabindex='0']") ?? []);
       if (!controls.length) return;
       const first = controls[0], last = controls[controls.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus({ preventScroll: true }); }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus({ preventScroll: true }); }
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); focus(last); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); focus(first); }
     }
   };
   return { open, setOpen, root, trigger, panel, close, onKeyDown };
@@ -317,7 +332,7 @@ export function AgentOrchestratorComposerControls({
               close();
             }}>
             <span className={item.runnable ? "ao-harness-option" : "ao-harness-option is-missing"}>
-              <span className="ao-harness-face"><HarnessLogo harnessId={item.id} label={item.label} size={18} />
+              <span className="ao-harness-face"><HarnessLogo harnessId={item.id} label={item.label} size={16} />
                 {!item.runnable ? <i className="ao-harness-missing" aria-hidden="true" />
                   : item.authStatus === "unauthorized" ? <i className="ao-harness-signin" aria-hidden="true" /> : null}</span>
               <strong>{item.label}</strong></span>

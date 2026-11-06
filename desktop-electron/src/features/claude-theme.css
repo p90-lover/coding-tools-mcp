@@ -301,6 +301,8 @@
 /* Composer popovers (model, permissions) render inside the chat; give them the warm surface. */
 .ao-workflow .cx-chat .ao-composer-popover, .ao-workflow .cx-chat .ao-permissions-panel, .ao-workflow .cx-chat .ao-permission-notice {
   border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: var(--claude-shadow); }
+.ao-workflow .cx-chat .ao-composer-popover:is(.ao-harness-popup, .ao-model-popup) {
+  background: color-mix(in srgb, var(--claude-raised) 90%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
 .ao-workflow .cx-chat .ao-composer-popover label, .ao-workflow .cx-chat .ao-permission-option, .ao-workflow .cx-chat .ao-permission-symbol,
 .ao-workflow .cx-chat .ao-permission-option > svg:last-child, .ao-workflow .cx-chat .ao-picker-option { color: var(--claude-text); }
 .ao-workflow .cx-chat .ao-composer-popover .ao-hint, .ao-workflow .cx-chat .ao-popup-muted, .ao-workflow .cx-chat .ao-picker-option small,

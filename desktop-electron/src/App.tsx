@@ -17,6 +17,7 @@ import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
+import { bindSidebarPeek } from "./sidebar-peek";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
@@ -34,6 +35,7 @@ import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
 import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
+import { BrowserAddressBar } from "./features/BrowserAddressBar";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
 import { MCP_CATALOG, catalogServer, isWindows, parseMcpPaste, placeholdersIn, type McpCatalogEntry } from "./features/mcp-catalog";
@@ -485,7 +487,8 @@ function LauncherShell({
   // The docked sidebar sliding shut keeps its full layout until it reaches the rail: switching to the
   // rail's layout at the first frame cut the panel to the rail at once, and the slide showed nothing.
   const [sidebarClosing, setSidebarClosing] = useState(false);
-  const sidebarPeekTimer = useRef(0);
+  const sidebarPanel = useRef<HTMLDivElement>(null);
+  const sidebarPeekControl = useRef<ReturnType<typeof bindSidebarPeek> | null>(null);
   // Rarely used surfaces, folded under "More" so the everyday ones stay in view.
   const moreSurfaces = [
     { surface: "activity", icon: "activity", label: copy.activity },
@@ -613,7 +616,6 @@ function LauncherShell({
     media.addEventListener("change", apply);
     return () => {
       media.removeEventListener("change", apply);
-      window.clearTimeout(sidebarPeekTimer.current);
     };
   }, []);
 
@@ -647,46 +649,21 @@ function LauncherShell({
       .catch((cause) => setError(messageOf(cause)));
   };
 
-  // The hover panel follows where the pointer is, not which element it is over: the title bar's
-  // buttons sit on the rail's top, and entering and leaving them threw the panel open and shut.
-  // It opens over the rail and stays open until the pointer is clearly past the panel (or leaves
-  // the window). A short delay each way: passing the window's edge doesn't throw it open.
-  const sidebarPeekState = useRef(false);
-  sidebarPeekState.current = sidebarPeek;
+  // Only the visible rail/panel opens a peek. A window-wide coordinate threshold also opened it
+  // over the title bar and held it open past its edge, including after a navigation click.
   useEffect(() => {
-    if (!sidebarRail) return undefined;
-    let pending: boolean | null = null;
-    const settle = (want: boolean) => {
-      if (want === sidebarPeekState.current) {
-        window.clearTimeout(sidebarPeekTimer.current);
-        pending = null;
-        return;
-      }
-      if (pending === want) return;
-      pending = want;
-      window.clearTimeout(sidebarPeekTimer.current);
-      sidebarPeekTimer.current = window.setTimeout(() => {
-        pending = null;
-        setSidebarPeek(want);
-      }, want ? 120 : 200);
-    };
-    const move = (event: PointerEvent) => {
-      if (event.clientX <= SIDEBAR_RAIL_WIDTH) settle(true);
-      else if (event.clientX > sidebarWidth + 16) settle(false);
-      else settle(sidebarPeekState.current);
-    };
-    const leave = () => settle(false);
-    window.addEventListener("pointermove", move, { passive: true });
-    document.documentElement.addEventListener("pointerleave", leave);
-    window.addEventListener("blur", leave);
+    if (!sidebarRail || !sidebarPanel.current) return undefined;
+    const control = bindSidebarPeek(sidebarPanel.current, (open) => {
+      if (open) setSidebarExpanded(true);
+      setSidebarPeek(open);
+    });
+    sidebarPeekControl.current = control;
     return () => {
-      window.removeEventListener("pointermove", move);
-      document.documentElement.removeEventListener("pointerleave", leave);
-      window.removeEventListener("blur", leave);
-      window.clearTimeout(sidebarPeekTimer.current);
+      control.dispose();
+      sidebarPeekControl.current = null;
       setSidebarPeek(false);
     };
-  }, [sidebarRail, sidebarWidth]);
+  }, [sidebarRail]);
 
   useEffect(() => {
     if (sidebarPeek) {
@@ -699,7 +676,7 @@ function LauncherShell({
   }, [sidebarPeek]);
 
   const closeSidebarPeek = () => {
-    window.clearTimeout(sidebarPeekTimer.current);
+    sidebarPeekControl.current?.close();
     setSidebarPeek(false);
   };
 
@@ -846,7 +823,7 @@ function LauncherShell({
         transition={{ type: "tween", duration: 0.26, ease: [0.32, 0.72, 0, 1] }}
         onAnimationComplete={() => setSidebarClosing(false)}
       >
-        <div className="sidebar-clip">
+        <div className="sidebar-clip" ref={sidebarPanel}>
           <div className="sidebar-content">
             <div className="sidebar-brand-row">
               <div className="sidebar-brand-identity">
@@ -1341,56 +1318,6 @@ function SidebarItem({
   );
 }
 
-/**
- * The address bar the GPT Browser brought: it shows the page's address and takes one typed in, which
- * opens in a tab of the person's own (never the home page or a Codex turn's tab).
- */
-function BrowserAddress({ url, copy, disabled, setError }: {
-  url: string | undefined;
-  copy: Copy;
-  disabled: boolean;
-  setError: (error: string | null) => void;
-}) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const open = async (event: { preventDefault(): void }) => {
-    event.preventDefault();
-    const value = draft?.trim();
-    if (!value) { setDraft(null); return; }
-    try {
-      await api!.openBrowserUrl(value);
-      setDraft(null);
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
-  };
-  return (
-    <form className="gpb-link" title={url || copy.browserAddress} onSubmit={(event) => void open(event)}>
-      <input
-        aria-label={copy.browserAddress}
-        disabled={disabled}
-        inputMode="url"
-        onBlur={() => setDraft(null)}
-        onChange={(event) => setDraft(event.target.value)}
-        onFocus={(event) => { setDraft(url ?? ""); event.target.select(); }}
-        onKeyDown={(event) => { if (event.key === "Escape") { setDraft(null); event.currentTarget.blur(); } }}
-        placeholder="Enter a web address, like chatgpt.com"
-        spellCheck={false}
-        autoComplete="off"
-        value={draft ?? formatBrowserAddress(url, copy)}
-      />
-      {/* mousedown would blur the field (dropping the draft) before the submit fires */}
-      <button
-        type="submit"
-        className="button-primary"
-        disabled={disabled || draft === null || !draft.trim()}
-        onMouseDown={(event) => event.preventDefault()}
-      >
-        Go
-      </button>
-    </form>
-  );
-}
-
 function BrowserSurface({
   browser,
   browserSlotRef,
@@ -1516,7 +1443,16 @@ function BrowserSurface({
           <button type="button" aria-label={copy.forward} title={copy.forward} disabled={navigationLocked || !browser?.canGoForward} onClick={() => void navigate("forward")}>›</button>
           <button type="button" aria-label={copy.reload} title={copy.reload} disabled={navigationLocked || !visible} onClick={() => void navigate("reload")}>⟳</button>
         </span>
-        <BrowserAddress url={browser?.url} copy={copy} disabled={!visible} setError={setError} />
+        <BrowserAddressBar
+          key={browser?.navigationTargetId ?? browser?.activeTabId}
+          url={browser?.url ?? ""}
+          displayAddress={formatBrowserAddress(browser?.url, copy)}
+          targetId={browser?.navigationTargetId}
+          disabled={navigationLocked || !visible}
+          // Typed addresses open in a tab of the person's own, never the home page or a Codex turn's tab.
+          navigate={input => api!.openBrowserUrl(input.url)}
+          setError={setError}
+        />
         {browser?.loading ? <span className="gpb-muted">{copy.loading}</span> : null}
         <span className="gpb-nav gpb-zoom">
           <button type="button" aria-label={copy.zoomOut} title={copy.zoomOut} onClick={() => void zoom("out")}>−</button>
@@ -1621,11 +1557,7 @@ function BrowserSurface({
               ) : null}
             </div>
           </div>
-        ) : (
-          <div className="browser-underlay" aria-hidden="true">
-            <span>{copy.loading}</span>
-          </div>
-        )}
+        ) : null}
       </div>
     </section>
   );

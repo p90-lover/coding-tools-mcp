@@ -50,7 +50,30 @@ function readBrowserNavigationState(contents, fallback, { readPageTitle = true }
   };
 }
 
+function normalizeBrowserAddress(value) {
+  if (typeof value !== "string" || !value.trim() || value.length > 16384) {
+    throw new Error("Enter a valid HTTP or HTTPS address");
+  }
+  const input = value.trim();
+  const hasScheme = /^[a-z][a-z\d+.-]*:/i.test(input);
+  const hostWithPort = /^[^/:?#\s]+:\d+(?:[/?#]|$)/.test(input);
+  let parsed;
+  try {
+    parsed = new URL(input.startsWith("//") ? `https:${input}`
+      : hasScheme && !hostWithPort ? input : `https://${input}`);
+  } catch {
+    throw new Error("Enter a valid HTTP or HTTPS address");
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) {
+    throw new Error("Browser addresses must use HTTP or HTTPS without embedded credentials");
+  }
+  return parsed.href;
+}
+
 function navigateBrowser(contents, action) {
+  if (action && typeof action === "object" && !Array.isArray(action)) {
+    return contents.loadURL(normalizeBrowserAddress(action.url));
+  }
   const history = contents.navigationHistory;
   if (action === "back") {
     if (history.canGoBack()) history.goBack();

@@ -685,6 +685,8 @@ export interface BrowserState {
   canGoForward: boolean;
   zoomFactor: number;
   activeTabId: string;
+  /** The exact WebContents shown; address submissions must still target it after IPC dispatch. */
+  navigationTargetId?: number;
   /** The shown account's tab limit, and the tabs it holds (tabs of sessions on other accounts show too). */
   maxTabs: number;
   accountTabs?: number;
@@ -1083,7 +1085,7 @@ export interface LauncherApi {
   setBrowserSurfaceActive(active: boolean): Promise<BrowserState | true>;
   showBrowser(): Promise<BrowserState>;
   hideBrowser(): Promise<BrowserState>;
-  navigateBrowser(action: "back" | "forward" | "reload"): Promise<BrowserState>;
+  navigateBrowser(action: "back" | "forward" | "reload" | { url: string; targetId: number }): Promise<BrowserState>;
   zoomBrowser(action: "in" | "out" | "reset"): Promise<BrowserState>;
   createBrowserTab(): Promise<BrowserState>;
   openBrowserUrl(url: string): Promise<BrowserState>;

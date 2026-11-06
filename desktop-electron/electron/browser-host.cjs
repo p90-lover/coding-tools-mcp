@@ -828,8 +828,12 @@ class BrowserHost {
   }
 
   async initializePrimaryView() {
-    this.view.setBounds(this.hiddenTurnBounds());
+    const hiddenBounds = this.hiddenTurnBounds();
+    // Establish a native renderer size before parking: an offscreen-first view can stay 0x0.
+    // No document is loaded until the view is outside the launcher again.
+    this.view.setBounds({ ...hiddenBounds, x: 0, y: 0 });
     this.view.setVisible(true);
+    this.view.setBounds(hiddenBounds);
     try {
       // A busy machine can miss the first window (seen: every start for a day missed 10 s), and
       // the launcher then stayed without its ownership descriptor.
@@ -2127,6 +2131,7 @@ class BrowserHost {
         readPageTitle: !manualInteraction,
       }),
       activeTabId: this.selectedTabId,
+      navigationTargetId: contents?.id,
       tabs: (this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
         ? [
             // Home is listed while chosen, beside tabs of the user's own, and whenever the chosen
@@ -2912,6 +2917,13 @@ class BrowserHost {
       throw new Error(`Browser navigation is locked during ${this.manualOperation}`);
     }
     const contents = this.activeView().webContents;
+    if (action && typeof action === "object") {
+      if (Array.isArray(action) || !Number.isSafeInteger(action.targetId) || action.targetId <= 0
+        || action.targetId !== contents.id || contents.isDestroyed()) {
+        throw new Error("The browser tab or account changed. Enter the address again in the current tab.");
+      }
+      return Promise.resolve(navigateBrowser(contents, action)).then(() => this.snapshot());
+    }
     navigateBrowser(contents, action);
     return this.snapshot();
   }

@@ -10722,7 +10722,7 @@ test("a Team round that settles by itself scores its models once, graded by a fr
 });
 
 /** A Single chat whose agent works on run r1, with the clock and timers in the test's hands. */
-function queueChat({ aoHarness = undefined, state = "running", runReadFreshMs = 0, confirmRecoverable = undefined } = {}) {
+function queueChat({ aoHarness = undefined, state = "running", runReadFreshMs = 0, confirmRecoverable = undefined, readActualRuns = false } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Ship", description: "fix the build", state: "in_progress", clauses: [] }], runs: [
     { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
@@ -10734,6 +10734,8 @@ function queueChat({ aoHarness = undefined, state = "running", runReadFreshMs = 
   const fail = { updates: 0 };
   const requestHeadless = async (endpoint, ...rest) => {
     if (endpoint === "/api/v1/ao/update" && fail.updates > 0) { fail.updates -= 1; throw new Error("AO is busy"); }
+    if (readActualRuns && endpoint === "/api/v1/ao/read") return structuredClone({ ok: true,
+      runs: rest[0]?.run_id ? world.runs.filter(run => run.id === rest[0].run_id) : world.runs, task_lifecycle: world.lifecycle });
     return world.requestHeadless(endpoint, ...rest);
   };
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", aoHarness, runReadFreshMs,
@@ -10923,6 +10925,72 @@ test("a queued message refused for now goes back to the front and is tried again
   assert.equal(world.updates.length, 0, "the plain message still waits for the turn");
   workflow.dispose();
 });
+
+test("a follow-up queued during launch is steered as soon as its agent is observed ready", async (t) => {
+  const steered = [];
+  let ready = false;
+  const { workflow, advance, queue } = queueChat({ readActualRuns: true, aoHarness: {
+    observe: async () => ({ turnId: "turn-1", turnState: ready ? "running" : "queued", approvals: [] }),
+    steer: async (_id, text) => { steered.push(text); return ready ? { steered: true } : { steered: false, starting: true }; },
+  } });
+  t.after(() => workflow.dispose());
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { message: "patch locally and pr", steer: true } });
+  await goalSettle();
+  // The first timer finds the controller still starting and backs off for another 30 seconds.
+  await advance(15_000);
+  assert.equal((await queue()).length, 1);
+  steered.length = 0;
+  ready = true;
+  for (let count = 0; count < 3; count++) await workflow.call("observe", { workspaceId: "ws-1", runId: "r1", nodeId: "one" });
+  await advance(1);
+  assert.deepEqual(steered, ["patch locally and pr"], "readiness wakes the queue without waiting for the old retry or turn completion");
+  assert.deepEqual(await queue(), []);
+  await advance(60_000);
+  assert.deepEqual(steered, ["patch locally and pr"], "the replaced retry cannot deliver twice");
+});
+
+for (const blocked of ["queued", "agent-gone", "approval", "question", "plain-queue", "team-worker", "other-chat"]) {
+  test(`agent readiness leaves queued input alone: ${blocked}`, async (t) => {
+    const steered = [];
+    const { world, workflow, advance, queue } = queueChat({ readActualRuns: true, aoHarness: {
+      observe: async () => ({ turnId: "turn-1", turnState: blocked === "queued" ? "queued" : "running",
+        ...(blocked === "agent-gone" ? { agentGone: true } : {}),
+        ...(blocked === "question" ? { needsInput: true } : {}),
+        approvals: blocked === "approval" ? [{ approval_id: "ask", kind: "command", command: "node build.cjs" }] : [] }),
+      steer: async (_id, text) => { steered.push(text); return { steered: true }; },
+    } });
+    t.after(() => workflow.dispose());
+    if (blocked === "team-worker") { world.runs[0].execution_mode = "team"; world.runs[0].nodes[0].role = "worker"; }
+    const taskId = blocked === "other-chat" ? "task-2" : "task-1";
+    // Give the other chat a busy card so its normal queue does not start a new turn.
+    if (blocked === "other-chat") world.runs.push({ ...structuredClone(world.runs[0]), id: "r2", project_id: taskId });
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId, action: "add", item: { message: "do not interrupt", steer: blocked !== "plain-queue" } });
+    await goalSettle();
+    await workflow.call("observe", { workspaceId: "ws-1", runId: "r1", nodeId: "one" });
+    await advance(1_000);
+    assert.deepEqual(steered, []);
+    assert.equal((await workflow.call("chat_queue", { workspaceId: "ws-1", taskId, action: "list" })).queue.length, 1);
+  });
+}
+
+for (const change of ["edit", "remove"]) {
+  test(`a launch-ready wake uses current queued input: ${change}`, async (t) => {
+    const steered = [];
+    const { workflow, advance, queue } = queueChat({ readActualRuns: true, aoHarness: {
+      observe: async () => ({ turnId: "turn-1", turnState: "running", approvals: [] }),
+      steer: async (_id, text) => { steered.push(text); return { steered: true }; },
+    } });
+    t.after(() => workflow.dispose());
+    const added = await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { message: "original", steer: true } });
+    await goalSettle();
+    await workflow.call("observe", { workspaceId: "ws-1", runId: "r1", nodeId: "one" });
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: change === "edit" ? "update" : "remove",
+      itemId: added.item.id, ids: [added.item.id], message: "edited" });
+    await advance(1);
+    assert.deepEqual(steered, change === "edit" ? ["edited"] : []);
+    assert.deepEqual(await queue(), []);
+  });
+}
 
 test("a steer the agent never read (its turn died first) comes back and goes as the next turn", async () => {
   let timeline = [{ id: "t1", kind: "reasoning", status: "completed", text: "thinking" }, { id: "t2", kind: "steer", status: "completed", text: "keep going" }];

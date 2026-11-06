@@ -1732,7 +1732,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
       // `pending` is observed.approvals for this card: none, or only ones already answered.
-      if (nothingToAnswer(observed)) await stopStalledTurn(session, observed, ownership);
+      const stopped = nothingToAnswer(observed) && await stopStalledTurn(session, observed, ownership);
+      if (!stopped) wakeQueueOnAgentReady(workspaceId, mission, node, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
@@ -2206,7 +2207,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (!entry.pending) {
         entry.pending = (async () => {
-          let frame;
+          let frame, observedTurn;
           try {
             if (externalAgent(node)) {
               const session = node.receipt?.thread_id;
@@ -2214,9 +2215,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               else {
                 // A queued follow-up can be the session's newest turn while this card still owns
                 // another one. Read that turn, as the run loop does, rather than dropping its reply.
-                const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session);
+                const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session) || entry.turnId;
                 const observed = await harnessService().observe(session, expectedTurn);
                 const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
+                if (currentTurn && observed.turnState === "running" && typeof observed.turnId === "string" && observed.turnId) observedTurn = observed.turnId;
                 // Started: an agent took the message (AO starts the turn only then; see describeTurn).
                 frame = { ...base, turn_started: Boolean(observed.turnId) && observed.turnState !== "queued",
                   activity: currentTurn ? describeTurn(observed, { mission, node }) : observed.needsInput ? "waiting for input" : observed.exited ? "exited" : publicText(observed.turnState || "working", 40),
@@ -2251,7 +2253,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               || activityAttempt(id, run, latest.node) !== key) {
               entry.retired = true; entry.frame = null; return;
             }
-            if (!entry.retired && activityFrames.get(key) === entry) entry.frame = { ...frame, pending: false };
+            if (!entry.retired && activityFrames.get(key) === entry) {
+              // A cold spawn records only its session until it ends. Keep its first accepted turn
+              // in this bounded, receipt-checked frame so Recover can inspect it without replay.
+              if (!entry.turnId && observedTurn) entry.turnId = observedTurn;
+              entry.frame = { ...frame, pending: false };
+            }
           } catch (error) {
             if (!entry.retired) entry.frame = { ...(entry.frame || base), pending: false,
               activity: "unknown", error: publicText(error?.message || error, 300) };
@@ -5046,7 +5053,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // observe() may retry failed provisioning or interrupt an orphan; continuable() can drain
         // queued input. Neither is a contentless recovery primitive.
         const inspect = harnessService().recover;
-        result = typeof inspect === "function" ? await inspect(thread, before.card.receipt.turn_id || expectedTurns.get(thread))
+        result = typeof inspect === "function" ? await inspect(thread, before.card.receipt.turn_id || expectedTurns.get(thread)
+          || activityFrames.get(activityAttempt(id, run, before.card))?.turnId)
           : unavailable("The original agent cannot be inspected safely. No input was sent; its session was kept.");
       } else {
         // This status endpoint reads the existing hub only. Receipt-aware reattachment must be
@@ -6503,7 +6511,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const draining = new Set();
   const queueFailures = new Map(); // item id -> failed sends
   const steerTries = new Map(); // item id -> steers that found the agent not ready
-  function armQueue(workspaceId, taskId, delay, steer = false) {
+  function armQueue(workspaceId, taskId, delay, steer = false, ready = false) {
     const key = wakeKey(workspaceId, taskId);
     if (queueTimers.has(key)) clearTimer(queueTimers.get(key).handle);
     queueTimers.delete(key);
@@ -6513,7 +6521,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       void drainQueue(workspaceId, taskId, { steer }).catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
     }, Math.max(1, delay));
     handle?.unref?.();
-    queueTimers.set(key, { handle });
+    queueTimers.set(key, { handle, ready });
+  }
+  /** A launch-queued steer goes when its own agent is ready, not at the old retry's deadline. */
+  function wakeQueueOnAgentReady(workspaceId, mission, node, observed) {
+    const taskId = mission?.project_id;
+    if (!taskId || mission.cancelled || !(mission.execution_mode === "single" || node.role === "planner")
+      || observed.turnState !== "running" || observed.agentGone || observed.exited || observed.needsInput || observed.approvals?.length) return;
+    const key = wakeKey(workspaceId, taskId);
+    if (!chatQueue.list(workspaceId, taskId)[0]?.steer || draining.has(key) || queueTimers.get(key)?.ready) return;
+    // Keep this observational path nonblocking. drainQueue re-reads the current head and lifecycle,
+    // and chatSteer checks the agent again before sending; the per-chat draining lock prevents duplicates.
+    armQueue(workspaceId, taskId, 1, true, true);
   }
   /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
   function queuedSelection(item, latest) {
