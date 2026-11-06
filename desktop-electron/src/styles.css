@@ -789,6 +789,48 @@ code {
   }
 }
 
+.browser-address {
+  display: flex;
+  min-width: 0;
+  height: 28px;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--color-background-control);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.browser-address:hover {
+  border-color: var(--color-border-light);
+  background: var(--color-background-control-hover);
+}
+
+.browser-address svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+}
+
+.browser-address input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-overflow: ellipsis;
+}
+
+.browser-address:focus-within {
+  border-color: var(--color-border-light);
+  color: var(--color-text-primary);
+}
 .toolbar-text-button {
   height: 28px;
   padding: 0 10px;

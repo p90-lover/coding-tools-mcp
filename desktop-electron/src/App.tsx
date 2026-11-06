@@ -35,6 +35,7 @@ import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
 import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
+import { BrowserAddressBar } from "./features/BrowserAddressBar";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
 import { RegisterSurface } from "./features/RegisterSurface";
 import { MCP_CATALOG, catalogServer, isWindows, parseMcpPaste, placeholdersIn, type McpCatalogEntry } from "./features/mcp-catalog";
@@ -1317,56 +1318,6 @@ function SidebarItem({
   );
 }
 
-/**
- * The address bar the GPT Browser brought: it shows the page's address and takes one typed in, which
- * opens in a tab of the person's own (never the home page or a Codex turn's tab).
- */
-function BrowserAddress({ url, copy, disabled, setError }: {
-  url: string | undefined;
-  copy: Copy;
-  disabled: boolean;
-  setError: (error: string | null) => void;
-}) {
-  const [draft, setDraft] = useState<string | null>(null);
-  const open = async (event: { preventDefault(): void }) => {
-    event.preventDefault();
-    const value = draft?.trim();
-    if (!value) { setDraft(null); return; }
-    try {
-      await api!.openBrowserUrl(value);
-      setDraft(null);
-    } catch (cause) {
-      setError(messageOf(cause));
-    }
-  };
-  return (
-    <form className="gpb-link" title={url || copy.browserAddress} onSubmit={(event) => void open(event)}>
-      <input
-        aria-label={copy.browserAddress}
-        disabled={disabled}
-        inputMode="url"
-        onBlur={() => setDraft(null)}
-        onChange={(event) => setDraft(event.target.value)}
-        onFocus={(event) => { setDraft(url ?? ""); event.target.select(); }}
-        onKeyDown={(event) => { if (event.key === "Escape") { setDraft(null); event.currentTarget.blur(); } }}
-        placeholder="Enter a web address, like chatgpt.com"
-        spellCheck={false}
-        autoComplete="off"
-        value={draft ?? formatBrowserAddress(url, copy)}
-      />
-      {/* mousedown would blur the field (dropping the draft) before the submit fires */}
-      <button
-        type="submit"
-        className="button-primary"
-        disabled={disabled || draft === null || !draft.trim()}
-        onMouseDown={(event) => event.preventDefault()}
-      >
-        Go
-      </button>
-    </form>
-  );
-}
-
 function BrowserSurface({
   browser,
   browserSlotRef,
@@ -1492,7 +1443,16 @@ function BrowserSurface({
           <button type="button" aria-label={copy.forward} title={copy.forward} disabled={navigationLocked || !browser?.canGoForward} onClick={() => void navigate("forward")}>›</button>
           <button type="button" aria-label={copy.reload} title={copy.reload} disabled={navigationLocked || !visible} onClick={() => void navigate("reload")}>⟳</button>
         </span>
-        <BrowserAddress url={browser?.url} copy={copy} disabled={!visible} setError={setError} />
+        <BrowserAddressBar
+          key={browser?.navigationTargetId ?? browser?.activeTabId}
+          url={browser?.url ?? ""}
+          displayAddress={formatBrowserAddress(browser?.url, copy)}
+          targetId={browser?.navigationTargetId}
+          disabled={navigationLocked || !visible}
+          // Typed addresses open in a tab of the person's own, never the home page or a Codex turn's tab.
+          navigate={input => api!.openBrowserUrl(input.url)}
+          setError={setError}
+        />
         {browser?.loading ? <span className="gpb-muted">{copy.loading}</span> : null}
         <span className="gpb-nav gpb-zoom">
           <button type="button" aria-label={copy.zoomOut} title={copy.zoomOut} onClick={() => void zoom("out")}>−</button>

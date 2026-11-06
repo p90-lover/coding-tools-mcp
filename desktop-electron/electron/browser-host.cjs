@@ -2127,6 +2127,7 @@ class BrowserHost {
         readPageTitle: !manualInteraction,
       }),
       activeTabId: this.selectedTabId,
+      navigationTargetId: contents?.id,
       tabs: (this.turnTabs.size + (this.userTabs?.size ?? 0) > 0
         ? [
             // Home is listed while chosen, beside tabs of the user's own, and whenever the chosen
@@ -2912,6 +2913,13 @@ class BrowserHost {
       throw new Error(`Browser navigation is locked during ${this.manualOperation}`);
     }
     const contents = this.activeView().webContents;
+    if (action && typeof action === "object") {
+      if (Array.isArray(action) || !Number.isSafeInteger(action.targetId) || action.targetId <= 0
+        || action.targetId !== contents.id || contents.isDestroyed()) {
+        throw new Error("The browser tab or account changed. Enter the address again in the current tab.");
+      }
+      return Promise.resolve(navigateBrowser(contents, action)).then(() => this.snapshot());
+    }
     navigateBrowser(contents, action);
     return this.snapshot();
   }
