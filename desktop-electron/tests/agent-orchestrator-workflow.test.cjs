@@ -73,7 +73,7 @@ function publicationReviewWorld({ inspect, verdict = 'allow', command = 'git pus
     cpaConnection: () => ({ baseUrl: 'http://127.0.0.1:8317', proxyApiKey: 'fixture' }),
     reviewRepository: async (...args) => inspect ? inspect(facts, ...args) : { ...facts },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'test-model' }] }) };
+      if (String(url).endsWith('/models')) return { ok: true, json: async () => ({ data: [{ id: 'test-model' }, { id: 'codex-auto-review' }] }) };
       prompts.push(JSON.parse(init.body).messages[0].content);
       return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify({ outcome: verdict, rationale: 'fixture publication decision' }) } }] }) };
     },
@@ -5971,7 +5971,7 @@ test("a single AO card set to Approve for me has its parked tool requests review
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
       const prompt = JSON.parse(init.body).messages[0].content;
       advised.push(JSON.parse(init.body).model);
       const action = prompt.includes("npm test") ? "allow" : "ask";
@@ -5998,16 +5998,17 @@ test("a single AO card set to Approve for me has its parked tool requests review
   }
   assert.deepEqual(JSON.parse(JSON.stringify(resolved)).sort(), [["session-1", "push", "no"], ["session-1", "safe", "yes"]],
     "allowed once by the reviewer, git push denied by the hard rules, the unclear write left for the person; never an always-grant");
-  assert.ok(advised.length >= 1 && advised.every(model => model === "test-model"), "the card's own CPA model reviews");
+  assert.ok(advised.length >= 1 && advised.every(model => model === "codex-auto-review"), "Codex's review model reviews, never the chat's own model");
   // Its "ask" gets one more review that must choose allow or deny; still undecided, the write waits.
   assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
 });
 
-test("Approve for me is reviewed by codex-auto-review first, the card's model when CPA cannot serve it, and the person when neither answers", async () => {
+test("Approve for me is reviewed by codex-auto-review only, and the person decides when it cannot answer", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
-  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [] } = {}) {
+  // `asks`: how many model calls one review pass makes; the status is read once the pass is over.
+  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [], asks = 1 } = {}) {
     const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
     const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
       { id: "one", role: "planner", state: "running", parents: [], route: { ...route, model }, receipt: { thread_id: "session-1", request_key: "k" } }] };
@@ -6039,7 +6040,7 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
       confirm: async () => true,
     });
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
-    for (let tries = 0; tries < 200 && !resolved.length && asked.length < 2; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    for (let tries = 0; tries < 200 && !resolved.length && asked.length < asks; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     await new Promise(resolve => setTimeout(resolve, 30));
     mission.nodes[0].state = "finished";
     for (let tries = 0; tries < 100; tries++) {
@@ -6055,26 +6056,28 @@ test("Approve for me is reviewed by codex-auto-review first, the card's model wh
   assert.deepEqual(healthy.resolved, ["yes"]);
   // At 400 output tokens a reasoning reviewer could think its whole budget away and answer nothing.
   assert.ok(healthy.caps.every((cap) => cap >= 2000), `room to think before answering (max_tokens ${healthy.caps.join(", ")})`);
-  // An empty answer is a failed review like any other: the next model answers and the request is
-  // answered for the person, not handed to them.
+  // Only codex-auto-review ever reviews: CPA Auto Review picks the person's selected account and their
+  // fallback chain. Seen live 2026-11-04: with it failing, 5,493 reviews in a day went to the chats'
+  // own OpenCode Go models until that quota was gone; the "first other model" was a paid Claude key.
+  const onlyReview = (result) => result.asked.length >= 1 && result.asked.every((model) => model === "codex-auto-review");
+  // An empty answer is a failed review like any other, and the person decides.
   const thoughtOut = await review([], { empty: ["codex-auto-review"] });
-  assert.deepEqual(thoughtOut.asked, ["codex-auto-review", "test-model"]);
-  assert.deepEqual(thoughtOut.resolved, ["yes"]);
-  const allEmpty = await review([], { empty: ["codex-auto-review", "test-model"] });
-  assert.deepEqual(allEmpty.resolved, []);
-  assert.match(allEmpty.detail, /gave no answer \(it ran out of tokens\)/, "and the person sees why, not a JSON parse error");
+  assert.ok(onlyReview(thoughtOut), `never the chat's own model (asked ${thoughtOut.asked.join(", ")})`);
+  assert.deepEqual(thoughtOut.resolved, []);
+  assert.match(thoughtOut.detail, /gave no answer \(it ran out of tokens\)/, "and the person sees why, not a JSON parse error");
   const signedOut = await review(["codex-auto-review"]);
-  assert.deepEqual(signedOut.asked, ["codex-auto-review", "test-model"], "the card's own model takes over");
-  assert.deepEqual(signedOut.resolved, ["yes"]);
-  const down = await review(["codex-auto-review", "test-model"]);
-  assert.deepEqual(down.resolved, [], "nothing is answered for the person when no reviewer answers");
-  assert.match(down.detail, /couldn't answer/, "and the request says why it is waiting for them");
-  // Seen live: 375 of 1,453 reviews in two days fell back to the chat's own gpt-6.1-sol, billed to
-  // the person's Codex quota. A fallback is never a Codex-quota model; another one serves instead.
+  assert.ok(onlyReview(signedOut), `the chat's own model never takes over (asked ${signedOut.asked.join(", ")})`);
+  assert.deepEqual(signedOut.resolved, [], "nothing is answered for the person when the review model cannot answer");
+  assert.match(signedOut.detail, /couldn't answer/, "and the request says why it is waiting for them");
+  // Neither another provider's model listed first nor one of the chat's Codex models stands in.
   const codexCard = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol",
-    catalog: ["gpt-6.1-sol", "codex-auto-review", "cline-pass/deepseek-v4.1-flash"] });
-  assert.deepEqual(codexCard.asked, ["codex-auto-review", "cline-pass/deepseek-v4.1-flash"], "never the chat's Codex model");
-  assert.deepEqual(codexCard.resolved, ["yes"]);
+    catalog: ["cline-pass/deepseek-v4.1-flash", "Claude Fable 5.1", "gpt-6.1-sol", "codex-auto-review"] });
+  assert.ok(onlyReview(codexCard), `no stand-in model (asked ${codexCard.asked.join(", ")})`);
+  assert.deepEqual(codexCard.resolved, []);
+  // Without codex-auto-review at all, no other model is asked and nothing is answered for the person.
+  const unserved = await review([], { catalog: ["test-model", "opencode-go/gpt-6-luna"] });
+  assert.deepEqual(unserved.asked, []);
+  assert.deepEqual(unserved.resolved, []);
   const onlyCodex = await review(["codex-auto-review"], { model: "cpa/gpt-6.1-sol", catalog: ["gpt-6.1-sol", "codex-auto-review"] });
   // Its own retry (REVIEW_RETRY_MS later) may come inside the test's wait on a slow machine; what
   // matters is that only the free review model is ever asked.
@@ -6404,7 +6407,7 @@ test("with \"Let the model judge\" on, a request too long to review whole is jud
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
       prompts.push(JSON.parse(init.body).messages[0].content);
       return { ok: true, json: async () => ({ choices: [{ message: { content: '{"outcome":"allow","rationale":"trains a local model"}' } }] }) };
     },
@@ -6444,7 +6447,7 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     now: () => clock,
     fetchImpl: async (url) => String(url).endsWith("/models")
-      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) } : { ok: false, status: 502, json: async () => ({}) },
+      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) } : { ok: false, status: 502, json: async () => ({}) },
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
     aoHarness: {
       observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
@@ -6493,7 +6496,7 @@ test("Approve for me reviews complete scripts and leaves incomplete or failed re
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-secret" }),
     logger: { info: (event, detail) => events.push([event, detail]) },
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
       const prompt = JSON.parse(init.body).messages[0].content;
       prompts.push(prompt);
       if (prompt.includes("unavailable.py")) return { ok: false, status: 503 };
@@ -6544,7 +6547,7 @@ test("a review that keeps hanging still hands its request to the person at the d
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url) => {
-      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
       reviews++;
       // The reviewer does not answer until the test ends.
       return new Promise(resolve => hung.push(() => resolve({ ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"deny","reason":"fixture"}' } }] }) })));
@@ -6611,7 +6614,7 @@ test("Approve for me answers what the safety rules or its reviewer decide, and l
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
-      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
       const prompt = JSON.parse(init.body).messages[0].content;
       const action = prompt.includes("elsewhere/slow") ? await slowVerdict : "ask";
       return { ok: true, json: async () => ({ choices: [{ message: { content: `{"action":"${action}","reason":"fixture"}` } }] }) };
