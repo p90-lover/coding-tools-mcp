@@ -151,16 +151,16 @@
   "autoReview": {
     "id": "codex-review-account-selector",
     "name": "CPA Auto Review",
-    "version": "0.2.0-codingtools.1",
+    "version": "0.2.1-codingtools.1",
     "source": {
       "repository": "https://github.com/p90-lover/cpa_auto_review",
-      "commit": "52239a513eb14d995d1530ce79e0b30ed6e687ea",
+      "commit": "5ca6362f1a147498d87b427d8f908cf66ab2a535",
       "license": "MIT"
     },
     "changes": [
       "Serves codex-auto-review (Codex's \"Approve for me\" reviewer and Coding Tools' command reviewer) on a chosen Codex account through CPA's native executor",
-      "Falls back, in order, to up to 8 accounts and models from any CPA provider when the chosen account is missing, disabled or unavailable, or its request fails or returns a non-2xx status (a 429 quota error, a 5xx); a streamed review falls back only before its first chunk",
-      "The settings page edits the fallback chain (account and model per row, reorder, remove, add); an earlier {\"selectedAuthId\"} selection still loads"
+      "Always attempts the selected CPA-enabled primary first, deferring transient model-specific eligibility to the pinned native request before walking up to 8 configured account/model fallbacks; a streamed review falls back only before its first chunk",
+      "Searchable CPA-enabled account menus preserve saved choices and show unsaved changes; bounded in-memory review status explains actual primary/fallback attempts without prompts, responses, raw errors or credentials"
     ],
     "build": {
       "go": "1.27.3",
@@ -169,9 +169,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/codex-review-account-selector-v0.2.0-codingtools.1.dll",
-        "sha256": "6db11afab12333a1977d997182115a44a2c11d3b11f7a73f072d25d53cdc7cfa",
-        "size": 3346944
+        "path": "windows/amd64/codex-review-account-selector-v0.2.1-codingtools.1.dll",
+        "sha256": "c274670fba53a131b69b7246bffcae64114fbb24d89f580be0d5c49614746a62",
+        "size": 3384832
       }
     }
   }
