@@ -32,7 +32,8 @@ test("the full switcher and MIT notice are pinned, and its native CPA binary mat
 test("CPA Auto Review ships with its fallback chain and replaces a hand-installed older copy", (t) => {
   const bundle = JSON.parse(fs.readFileSync(path.join(root, "desktop-electron/vendor/bundled/cpa-plugins/BUNDLE.json")));
   assert.equal(bundle.autoReview.id, "codex-review-account-selector");
-  assert.equal(bundle.autoReview.source.commit, "52239a513eb14d995d1530ce79e0b30ed6e687ea");
+  assert.equal(bundle.autoReview.version, "0.2.1-codingtools.1");
+  assert.equal(bundle.autoReview.source.commit, "5ca6362f1a147498d87b427d8f908cf66ab2a535");
   const asset = bundle.autoReview.platforms["win32/x64"];
   const dll = fs.readFileSync(path.join(root, "desktop-electron/vendor/bundled/cpa-plugins", asset.path));
   assert.equal(dll.length, asset.size);
@@ -46,11 +47,18 @@ test("CPA Auto Review ships with its fallback chain and replaces a hand-installe
     const directory = path.join(state, "plugins", "windows", "amd64");
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(path.join(directory, "codex-review-account-selector-v0.1.0-codingtools.5.dll"), "hand-installed 0.1.0");
+    fs.writeFileSync(path.join(directory, "codex-review-account-selector-v0.2.0-codingtools.1.dll"), "previously bundled 0.2.0");
+    const data = path.join(state, "codex-review-account-selector-data");
+    fs.mkdirSync(data, { recursive: true });
+    const selection = JSON.stringify({ selectedAuthId: "primary-fixture", fallbacks: [{ authId: "fallback-fixture", model: "codex-auto-review" }] });
+    fs.writeFileSync(path.join(data, "selection.json"), selection);
     const installed = installBundledCommandCodePlugin(state).find(file => path.basename(file) === path.basename(asset.path));
     assert.ok(installed, "the managed loader installs CPA Auto Review");
     assert.equal(createHash("sha256").update(fs.readFileSync(installed)).digest("hex"), asset.sha256);
     assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith("codex-review-account-selector")), [path.basename(asset.path)],
-      "the one-account 0.1.0 copy is moved aside, so CPA loads only the fallback version");
+      "older copies are moved aside, so CPA loads only the primary-first version");
+    assert.equal(fs.readFileSync(path.join(data, "selection.json"), "utf8"), selection,
+      "bundling the fixed reviewer preserves the user's primary and fallback settings");
   }
 });
 
