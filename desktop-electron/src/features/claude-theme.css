@@ -185,6 +185,11 @@
 .ao-workflow .cx-chat .cx-step-dot, .ao-workflow .cx-chat .cx-tool-dot { width: 6px; height: 6px; }
 
 .ao-workflow .cx-chat .cx-live { gap: 1px; margin: 4px 0 6px; padding: 0; border-left: 0; }
+.ao-workflow .cx-chat .cx-live.is-compact { gap: 12px; }
+.ao-workflow .cx-chat .cx-live.is-compact > .kind-group { padding-left: 0; }
+.ao-workflow .cx-chat .cx-transcript-work > .cx-work-head { margin-bottom: 12px; }
+.ao-workflow .cx-chat .cx-live.is-compact > .kind-message { margin: 0; }
+.ao-workflow .cx-chat .cx-group-verb { color: var(--claude-text-2); font-weight: 400; }
 .ao-workflow .cx-chat .cx-step-body .cx-live { margin-top: 2px; }
 .ao-workflow .cx-chat .cx-live-item { gap: 8px; color: var(--claude-text-2); font-size: 13px; line-height: 1.5; }
 .ao-workflow .cx-chat .cx-live-item > .cx-live-label { color: var(--claude-text-2); font-weight: 500; }

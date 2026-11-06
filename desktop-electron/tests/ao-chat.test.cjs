@@ -2465,7 +2465,7 @@ test("a turn's activity drops answered approvals, keeps every tool call, and fol
     "answered approvals drop; a denied or timed-out one stays; each read_output call keeps its own row");
   const segments = chat.groupTimeline(tidy);
   assert.deepEqual([...segments.map((segment) => segment.kind === "group" ? `group:${segment.items.length}` : segment.item.id)],
-    ["group:4", "7", "8", "group:1", "10", "11"]);
+    ["group:4", "7", "8", "group:1", "10", "group:1"]);
   assert.equal(chat.activitySummary(segments[0].items), "read_output ×3 · 1 thought", "the folded line still tallies them");
   const ls = { id: "c", kind: "command", status: "completed", text: "ls" };
   assert.equal(chat.activitySummary([ls, { ...ls, id: "d" }]), "Ran 2 commands");

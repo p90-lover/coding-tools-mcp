@@ -11,6 +11,7 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import type { AoNode } from "./AgentOrchestratorSurface";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { transcriptCompletion, transcriptParts, transcriptSummary } from "./chat-transcript";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
@@ -30,7 +31,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
+  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
@@ -364,23 +365,9 @@ function EditItem({ item }: { item: ChatLiveItem }) {
     </div> : null}</details>;
 }
 
-/** What a turn's work did, as Claude Code heads it: "Edited 2 files, ran a command" and the line counts. */
+/** Recorded operations and successful file changes, shared by compact groups and completion bars. */
 export function workSummary(items: ChatLiveItem[]): { text: string; additions: number; deletions: number } {
-  const edits = items.filter((item) => item.kind === "edit");
-  const files = new Set(edits.flatMap((item) => (item.files ?? []).map((file) => file.path)));
-  const commands = items.filter((item) => item.kind === "command").length;
-  const tools = items.filter((item) => item.kind === "tool").length;
-  const parts = [
-    files.size ? `edited ${files.size === 1 ? "a file" : `${files.size} files`}` : "",
-    commands ? `ran ${commands === 1 ? "a command" : `${commands} commands`}` : "",
-    tools ? `used ${tools === 1 ? "a tool" : `${tools} tools`}` : "",
-  ].filter(Boolean);
-  const text = parts.length ? parts.join(", ") : "Worked";
-  return {
-    text: text[0].toUpperCase() + text.slice(1),
-    additions: edits.reduce((sum, item) => sum + (item.files ?? []).reduce((total, file) => total + file.additions, 0), 0),
-    deletions: edits.reduce((sum, item) => sum + (item.files ?? []).reduce((total, file) => total + file.deletions, 0), 0),
-  };
+  return transcriptSummary(items);
 }
 
 /** Compact activity: runs of tool calls and thinking fold into one line each (the chat's toggle). */
@@ -442,28 +429,30 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
 
 /**
  * A run of tool calls and thinking as one line, as Codex, Cursor and Claude Code fold them:
- * "Explored · Ran a command, read_output ×7 · 3 thoughts". While the agent is in it, its latest
- * step shows underneath; a click opens every step.
+ * "Read a file, ran a command". The current operation stays one quiet line; a click exposes
+ * each recorded call without obscuring the assistant's surrounding narrative.
  */
-function ActivityGroup({ items, live }: { items: ChatLiveItem[]; live: boolean }) {
-  const [open, setOpen] = useState(false);
-  const latest = items[items.length - 1];
-  const title = live ? dshLiveTitle(items).label : dshProcessTitle(items);
+function ActivityGroup({ items, live, expanded = false }: { items: ChatLiveItem[]; live: boolean; expanded?: boolean }) {
+  const [chosen, setOpen] = useState<boolean | null>(null);
+  const open = chosen ?? expanded;
+  const summary = transcriptSummary(items);
+  const hasCalls = items.some((item) => ["command", "tool", "edit"].includes(item.kind));
+  const active = live && items.some((item) => /^(running|pending|in_progress)$/.test(item.status));
+  const title = active ? dshLiveTitle(items).label : hasCalls ? summary.text : "Thought";
   return <div className={`cx-group${live ? " is-live" : ""}`}>
     <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)} title={activitySummary(items)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
-      <span className={`cx-group-verb${live ? " cx-shimmer" : ""}`}>{title}</span>
+      <span className={`cx-group-verb${active ? " cx-shimmer" : ""}`}>{title}</span>
     </button>
-    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol>
-      : live && latest ? <ol className="cx-live cx-group-now"><LiveRow item={latest} /></ol> : null}
+    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol> : null}
   </div>;
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false, finished = false, reply, collapsed = false }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string; collapsed?: boolean }) {
+function LiveTimeline({ items, live = false, finished = false, reply, collapsed = false, expanded = false, joinedReply = false }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string; collapsed?: boolean; expanded?: boolean; joinedReply?: boolean }) {
   const compact = useContext(CompactActivity);
-  // A message the reply below already holds is not shown twice (withoutReplied).
-  const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), reply)
+  const normalized = tidyTimeline(steerReceipts(items, finished));
+  const tidy = (joinedReply ? withoutReplied(normalized, reply) : transcriptParts(normalized, reply).items)
     // Fold tools and thoughts, never what the assistant or person said. Tidy first so messages
     // separated by a tool retain their original boundaries even while that tool is folded.
     .filter((item) => !collapsed || item.kind === "message" || item.kind === "steer" || item.answered)
@@ -473,7 +462,7 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
     {segments.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} />
-      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup items={segment.items} live={live && index === segments.length - 1} /></li>)}
+      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup items={segment.items} live={live && index === segments.length - 1} expanded={expanded} /></li>)}
   </ol>;
 }
 
@@ -486,7 +475,24 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
  */
 const CHAT_WORK = new Map<string, ChatLiveItem[]>();
 const CHAT_WORK_LIVE = new Set<string>();
+const CHAT_WORK_READ = new Map<string, Promise<ChatLiveItem[]>>();
 type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
+
+/** The summary, narrative and details share one read, including the final live-to-ended refresh. */
+function readStepWork(step: ChatStep, runId: string, loadWork: LoadWork): Promise<ChatLiveItem[]> {
+  const key = stepWorkKey(step);
+  const pending = CHAT_WORK_READ.get(key);
+  if (pending) return pending;
+  const settled = !step.working;
+  const read = loadWork(runId, step.nodeId).then((items) => {
+    const merged = mergeTimeline(CHAT_WORK.get(key), items, { cap: Infinity });
+    CHAT_WORK.set(key, merged);
+    if (settled) CHAT_WORK_LIVE.delete(key);
+    return merged;
+  }).finally(() => { CHAT_WORK_READ.delete(key); });
+  CHAT_WORK_READ.set(key, read);
+  return read;
+}
 // Kept per attempt: a retried card starts again (a new start time) with nothing of the last one.
 const stepWorkKey = (step: ChatStep) => `${step.key}@${step.startedAtMs ?? ""}`;
 /** Whether the chat details panel is open, kept across chats and restarts. */
@@ -512,11 +518,7 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   const settled = !step.working;
   useEffect(() => {
     if (!wanted || !step.hasWork || !loadWork || (known && !(settled && CHAT_WORK_LIVE.has(workKey)))) return;
-    CHAT_WORK_LIVE.delete(workKey);
-    void loadWork(runId, step.nodeId).then((items) => {
-      if (!items.length) return;
-      // A finished turn read back whole keeps every entry; only live polls are capped.
-      CHAT_WORK.set(workKey, mergeTimeline(CHAT_WORK.get(workKey), items, { cap: Infinity }));
+    void readStepWork(step, runId, loadWork).then(() => {
       // Folding can finish before this read does. Its speech still belongs on the mounted row;
       // only leaving that row (or moving to another attempt) makes this notification obsolete.
       if (mounted.current && currentKey.current === workKey) setLoaded((count) => count + 1);
@@ -525,12 +527,12 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   return known;
 }
 
-function StepRow({ step, runId, loadWork, folded = false, reply = step.text }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string }) {
+function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joinedReply = false }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string; joinedReply?: boolean }) {
   // A failed step opens on its error and a working one on its live turn, as Codex shows them;
   // once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
   const open = !folded && (chosen ?? Boolean(step.error || step.working?.timeline?.length));
-  const work = useStepWork(step, runId, open, loadWork);
+  const work = useStepWork(step, runId, !joinedReply || open, loadWork);
   const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
   // One line from its dot: the card's name, then how it runs (harness · provider · model · effort ·
@@ -553,38 +555,44 @@ function StepRow({ step, runId, loadWork, folded = false, reply = step.text }: {
           failed attempt showed under the new attempt's work, as if it came after it. */}
       {open ? <EarlierRounds rounds={step.earlier} /> : null}
       {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={reply} collapsed={!open} />
+        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={reply} collapsed={!open} joinedReply={joinedReply} />
       </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
-      {step.text ? <ChatMarkdown text={step.text} /> : null}
+      {step.text ? <ChatMarkdown text={joinedReply ? step.text : transcriptParts(tidyTimeline(work ?? []), step.text).answer} /> : null}
     </div>
   </li>;
 }
 
 /**
  * The work behind an answer that closes its turn itself (a single model's, a solo orchestrator's):
- * folded under "Worked" as Claude Code keeps it, its thinking and tool calls a click away.
+ * with its narrative always readable and its tool details a click away.
  */
-function AnswerWork({ step, runId, expanded, loadWork }: { step: ChatStep; runId: string; expanded: boolean; loadWork?: LoadWork }) {
+function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { step: ChatStep; turn: ChatTurn; expanded: boolean; loadWork?: LoadWork; joinedReply?: boolean }) {
   const [chosen, setChosen] = useState<boolean | null>(null);
   const open = chosen ?? expanded;
-  const work = useStepWork(step, runId, open, loadWork);
-  if (!work?.length && !step.hasWork) return null;
+  const work = useStepWork(step, turn.runId, !joinedReply || open, loadWork);
   const summary = workSummary(work ?? []);
-  return <div className="cx-work">
+  return <div className="cx-work cx-transcript-work">
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span>{summary.text}</span>
+      <span className="cx-work-state">{transcriptCompletion(turn)}</span>
+      <span className="cx-work-summary">{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
     {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} collapsed={!open} />
-    </SteerReader.Provider> : open ? <p className="cx-tool-empty">Loading…</p> : null}
+      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={joinedReply && !open} joinedReply={joinedReply} />
+    </SteerReader.Provider> : null}
   </div>;
 }
 
-type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork; workRevision?: number };
+function TranscriptAnswer({ step, runId, loadWork, onVisualize, plain = false }: { step: ChatStep; runId: string; loadWork?: LoadWork;
+  onVisualize?: () => void; plain?: boolean }) {
+  const work = useStepWork(step, runId, !plain, loadWork);
+  return <ChatMarkdown text={plain ? step.text ?? "" : transcriptParts(tidyTimeline(work ?? []), step.text).answer} onVisualize={onVisualize} />;
+}
+
+type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork; workRevision?: number; joinedReply?: boolean };
 
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
@@ -609,7 +617,7 @@ const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.stat
  * the page for up to a second each time; only the live turn needs the work.
  */
 export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
-  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork || prev.workRevision !== next.workRevision) return false;
+  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork || prev.workRevision !== next.workRevision || prev.joinedReply !== next.joinedReply) return false;
   if (prev.turn === next.turn) return true;
   if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
   return sameTurnWork(prev.turn, next.turn);
@@ -620,14 +628,32 @@ const WorkGroup = memo(WorkGroupView, sameWork);
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live && prev.headed === next.headed
   && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
-function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkGroupProps) {
+function TurnWorkSummary({ turn, loadWork }: { turn: ChatTurn; loadWork?: LoadWork }) {
+  const [, setLoaded] = useState(0);
+  const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
+  useEffect(() => {
+    if (!loadWork) return;
+    let mounted = true;
+    const reads = steps.filter((step) => step.hasWork && !step.working
+      && (!CHAT_WORK.has(stepWorkKey(step)) || CHAT_WORK_LIVE.has(stepWorkKey(step))));
+    if (reads.length) void Promise.allSettled(reads.map((step) => readStepWork(step, turn.runId, loadWork)))
+      .then(() => { if (mounted) setLoaded((value) => value + 1); });
+    return () => { mounted = false; };
+  }, [turn, loadWork]);
+  const unknown = steps.some((step) => step.hasWork && !CHAT_WORK.has(stepWorkKey(step)));
+  const items = steps.flatMap((step) => (CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])
+    .map((item) => ({ ...item, id: `${step.key}:${item.id}` })));
+  return <span className="cx-work-summary">{unknown ? "Activity not loaded yet" : workSummary(items).text}</span>;
+}
+
+function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedReply = false }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
   // Live and failed work opens by itself, and finished work too when the chat shows its details
   // (single-model chats by default); a toggle on the turn itself holds over both.
   const [chosen, setChosen] = useState<boolean | null>(null);
   const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
-    if (turn.final) return <AnswerWork step={turn.final} runId={turn.runId} expanded={expanded} loadWork={loadWork} />;
+    if (turn.final) return <AnswerWork step={turn.final} turn={turn} expanded={joinedReply ? expanded : false} loadWork={loadWork} joinedReply={joinedReply} />;
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
@@ -640,11 +666,12 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork }: WorkG
   // Once done it folds under "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span>{`Worked · ${rows.length} ${rows.length === 1 ? "step" : "steps"}`}</span>
+      <span className="cx-work-state">{transcriptCompletion(turn)}</span>
+      <TurnWorkSummary turn={turn} loadWork={loadWork} />
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>}
     <ol className="cx-steps">{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
-      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} />)}</ol>
+      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} />)}</ol>
   </div>;
 }
 
@@ -1184,7 +1211,7 @@ export function AgentOrchestratorChat({
     () => setWorkbench((open) => (open === null || open === "overview" || open === "new" ? "subagents" : open)));
   const subagentLine = useMemo(() => (subagents.some(subagentActive) ? subagentsSummary(subagents) : null), [subagents]);
   const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
-    <LiveTimeline items={items} live={live} finished={!live} reply={reply} />, []);
+    <LiveTimeline items={items} live={live} finished={!live} reply={reply} joinedReply />, []);
   // The details panel's Outputs and Sources, and each reply head's changed files: the cards' work
   // this window has seen (CHAT_WORK holds live polls and turns read back), plus the newest turns'
   // finished cards, read back once each. Older turns count once their work is opened in the chat.
@@ -1194,13 +1221,11 @@ export function AgentOrchestratorChat({
     for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
       for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
         const key = stepWorkKey(step);
-        if (!step.hasWork || step.working || CHAT_WORK.has(key) || DETAILS_READ.has(key)) continue;
+        if (!step.hasWork || step.working || (CHAT_WORK.has(key) && !CHAT_WORK_LIVE.has(key)) || DETAILS_READ.has(key)) continue;
         DETAILS_READ.add(key);
-        void loadWork(turn.runId, step.nodeId).then((items) => {
-          if (!items.length) return;
-          CHAT_WORK.set(key, mergeTimeline(CHAT_WORK.get(key), items, { cap: Infinity }));
+        void readStepWork(step, turn.runId, loadWork).then(() => {
           setDetailsWorkTick((tick) => tick + 1);
-        }).catch(() => undefined);
+        }).catch(() => { DETAILS_READ.delete(key); });
       }
     }
   }, [loadWork, turns]);
@@ -2276,7 +2301,7 @@ export function AgentOrchestratorChat({
               {feedback ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
                 stamp={turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null} /> : null}
               {!hasReply ? <>{userMessage}{savedSteers}</> : null}
-              {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} aria-label="Reply">
+              {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} data-transcript={!dsh && replyStyle === "transcript" ? "codex" : undefined} aria-label="Reply">
               {userMessage}{savedSteers}
               {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
               <ReplyPlanView plan={plan} style={replyStyle} live={live} />
@@ -2285,7 +2310,7 @@ export function AgentOrchestratorChat({
                 ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
                   errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
                   beforeStatus={live ? steerViews.get(turnIndex) : undefined} headed />
-                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} workRevision={detailsWorkTick} />}
+                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} workRevision={detailsWorkTick} joinedReply={replyStyle === "focus"} />}
               {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
@@ -2293,7 +2318,7 @@ export function AgentOrchestratorChat({
               {turn.final && !(dsh && turn.final.working) ? <div className={`cx-answer${turn.final.verdict ? " has-verdict" : ""}`} role="region" aria-label="Answer">
                 {/* Who answered and its verdict are in the summary below; a finished reviewer's earlier cycles stay above its answer (DeepSeek's row shows them). */}
                 {dsh ? null : <EarlierRounds rounds={turn.final.earlier} />}
-                <ChatMarkdown text={turn.final.text ?? ""} onVisualize={turn.status === "done" && !turn.final.working
+                <TranscriptAnswer step={turn.final} runId={turn.runId} loadWork={loadWork} plain={dsh || replyStyle === "focus"} onVisualize={turn.status === "done" && !turn.final.working
                   && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
                     && node.route?.harness_id === "codex-native" && node.route.model.startsWith("chatgpt-web/"))
                   ? () => setWorkbench("preview") : undefined} />

@@ -802,8 +802,17 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live-item code { min-width: 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .cx-live-text { min-width: 0; overflow-wrap: anywhere; }
 /* Compact activity (Codex / Cursor / Claude Code): no rail, a run of tool calls and thinking is one
-   line ("Explored · read_output ×7 · 3 thoughts"), messages and edits stay in full. */
-.cx-live.is-compact { gap: 4px; padding-left: 0; border-left: 0; }
+   line ("Read a file, ran a command"); assistant messages stay in full between groups. */
+.cx-live.is-compact { gap: 12px; padding-left: 0; border-left: 0; }
+.cx-live.is-compact > .kind-message { font-size: 14px; line-height: 1.65; }
+.cx-live.is-compact > .kind-message > :first-child { margin-top: 0; }
+.cx-live.is-compact > .kind-message > :last-child { margin-bottom: 0; }
+.cx-transcript-work > .cx-work-head { display: flex; flex-wrap: wrap; width: 100%; text-align: left; margin-bottom: 12px; }
+.cx-work-state { flex: 0 1 auto; font-weight: 500; }
+.cx-work-summary { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.cx-transcript-work > .cx-work-head > svg { flex: none; margin-left: auto; }
+.cx-work-head:focus-visible { outline: 2px solid var(--color-focus, var(--ao-blue)); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) { .cx-work-head svg, .cx-activity-head svg { transition: none; } }
 .cx-live-item.kind-group { display: block; }
 .cx-activity-head { display: flex; align-items: center; gap: 7px; max-width: 100%; padding: 3px 6px 3px 2px; border: 0; border-radius: 6px; background: transparent;
   color: var(--ao-muted); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background .12s ease, color .12s ease; }
@@ -928,6 +937,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-reply { --reply-tone: var(--ao-muted); display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 10px 14px 10px;
   border: 1px solid var(--ao-line); border-left: 3px solid color-mix(in srgb, var(--reply-tone) 70%, var(--ao-line)); border-radius: 10px;
   background: color-mix(in srgb, var(--color-text-primary) 1.5%, transparent); }
+.cx-reply[data-transcript="codex"] { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.cx-reply[data-transcript="codex"] > .cx-answer { border-top: 0; padding-top: 0; }
 .cx-reply.is-working, .cx-reply.is-queued { --reply-tone: var(--reply-live); }
 .cx-reply.is-done { --reply-tone: var(--ao-green); }
 .cx-reply.is-failed { --reply-tone: var(--ao-red); }

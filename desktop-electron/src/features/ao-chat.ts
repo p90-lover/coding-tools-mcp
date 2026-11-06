@@ -362,7 +362,7 @@ export function mergeTimeline(known: ChatLiveItem[] | null | undefined, latest: 
 
 /** A stretch of a turn: a message, steer or edit on its own, or a run of tool calls and thinking. */
 export type ChatLiveSegment = { kind: "item"; item: ChatLiveItem } | { kind: "group"; key: string; items: ChatLiveItem[] };
-const GROUPED = new Set(["tool", "command", "reasoning"]);
+const GROUPED = new Set(["tool", "command", "edit", "reasoning"]);
 
 /** Runs of tool calls and thinking fold into one group each, as Codex, Cursor and Claude Code show them. */
 export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
