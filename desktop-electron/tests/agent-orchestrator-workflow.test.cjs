@@ -10755,6 +10755,41 @@ test("a reviewer's deny tells the agent why, and that the user did not refuse it
   assert.equal(none, "", "an allowed call needs no explanation");
 });
 
+test("a deny the person gives on the request's card tells the agent it was theirs", async () => {
+  // Claude Code reports the person's deny with the same stock line as a reviewer's, so the agent
+  // could not tell the two apart.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1" } }] };
+  const plan = { approval_id: "plan", source: "ao", kind: "plan", tool: "ExitPlanMode", plan: "1. Add /register",
+    decisions: [{ id: "acceptEdits", kind: "allow_always", label: "Yes, and accept edits" }, { id: "keep", kind: "reject_once", label: "No, keep planning" }] };
+  const command = { approval_id: "req", source: "ao", kind: "command", tool: "Bash", command: "git push --force",
+    decisions: [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }] };
+  const resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+      : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
+    confirm: async () => true,
+    aoHarness: {
+      observe: async () => ({ status: "needs_input", turnState: "running", approvals: [command, plan] }),
+      resolveApproval: async (_session, request, decision, message) => { resolved.push([request, decision, message]); return { ok: true }; },
+    },
+  });
+  const input = { workspaceId: "ws", runId: "run", nodeId: "one" };
+  await workflow.call("approve_harness", { ...input, approvalId: "req", allow: false });
+  await workflow.call("approve_harness", { ...input, approvalId: "req", allow: true });
+  await workflow.call("approve_harness", { ...input, approvalId: "plan", decisionId: "keep" });
+  const [[, denied, why], [, allowed, none], [, kept, planWords]] = resolved;
+  assert.equal(denied, "no");
+  assert.equal(typeof why, "string");
+  assert.match(why, /\bby the user\b/i, "the agent reads that the person denied it");
+  assert.doesNotMatch(why, /not by the user|auto-reviewer/i, "and not that a reviewer did");
+  assert.equal(allowed, "yes");
+  assert.equal(none, "", "an allowed call needs no explanation");
+  assert.equal(kept, "keep");
+  assert.equal(planWords, "", "a plan's \"No, keep planning\" keeps the adapter's own words");
+});
+
 test("parallel tool requests are reviewed at the same time with one lookup of where the agent works", async () => {
   // Reviews ran one after another (each up to a whole review budget), and a request that arrived
   // meanwhile waited for the whole pass; each review also looked up the agent's folder again.

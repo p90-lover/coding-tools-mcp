@@ -269,8 +269,10 @@ export function withoutReplied(items: ChatLiveItem[], reply?: string): ChatLiveI
   return items.filter((item) => item.kind !== "message" || item.answered || !flat(item.text ?? "") || !said.includes(flat(item.text)));
 }
 
-// claude-agent-acp answers every denied request with this one line, whoever denied it and why.
-const STOCK_REFUSAL = /^(?:Error: )?User refused permission to run tool\.?$/i;
+// claude-agent-acp answers a denied request with this one line, whoever denied it and why, unless the
+// app told the agent the reviewer did (reviewerDenial in agent-orchestrator-workflow.cjs): either is
+// the agent's copy of a verdict the card shows in fewer words.
+const STOCK_REFUSAL = /^(?:Error: )?(?:User refused permission to run tool\.?|Denied by the auto-reviewer that answers tool requests for the user\b[\s\S]*)$/i;
 
 /**
  * A call the reviewer or "Approve for me" denied shows their verdict ("Denied by the reviewer: …")

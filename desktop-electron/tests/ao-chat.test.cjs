@@ -2327,6 +2327,22 @@ test("a call the reviewer denied shows its verdict, not the adapter's stock refu
     ["5", refused]], "a folded or kept denial replaces the stock line; the person's own deny keeps it");
 });
 
+test("a reviewer's deny the agent was told about in full still shows the card's short verdict", () => {
+  // Since the agent reads who denied a call and why, its copy is the long note written for it.
+  const told = 'Denied by the auto-reviewer that answers tool requests for the user ("Approve for me"), not by the user: '
+    + "it deletes the build folder. The user has not seen or refused this request. Try a safer way to reach the goal, or ask the user if only this will do.";
+  const userNote = "Denied by the user on the request's card.";
+  const tidy = chat.tidyTimeline([
+    { id: "1", kind: "command", status: "failed", text: "rm -rf build", output: told },
+    { id: "2", kind: "approval", status: "completed", text: "Bash", approval: "Denied by the reviewer: it deletes the build folder" },
+    { id: "3", kind: "command", status: "failed", text: "rm -rf dist", output: `Error: ${userNote}` },
+    { id: "4", kind: "approval", status: "completed", text: "Bash", approval: "Denied" },
+  ]);
+  assert.deepEqual([...tidy.map((item) => [item.id, item.output ?? null])], [
+    ["1", "Denied by the reviewer: it deletes the build folder"], ["3", `Error: ${userNote}`]],
+  "the reviewer's note folds to its verdict; the person's own deny keeps what the agent was told");
+});
+
 test("an edit's diff is numbered from its hunk header, old lines on the left and new on the right", () => {
   const rows = (diff) => [...chat.numberedDiff(diff).map((line) => [line.kind, line.old ?? null, line.new ?? null, line.text])];
   assert.deepEqual(rows("@@ -98,4 +98,4 @@\n line 97\n-line 98\n+changed 98\n line 99\n line 100"), [

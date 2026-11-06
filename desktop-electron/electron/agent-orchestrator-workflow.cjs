@@ -2577,7 +2577,9 @@ Node: ${node}
 Tool: ${pending.tool}
 ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pending.path}` : `Request: ${pending.summary}`}`,
       })) return { ok: false, cancelled: true };
-      await harnessService().resolveApproval(pending.thread_id, approval, decision);
+      // A plan's "No, keep planning" keeps the adapter's own words; any other deny says it was the person's.
+      const why = approving || pending.kind === "plan" ? "" : userDenial(approverAdvice.get(approval));
+      await harnessService().resolveApproval(pending.thread_id, approval, decision, why);
       // The person has looked at this chat's requests: the next one is the reviewer's again.
       reviewDenials.delete(pending.thread_id);
       rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
@@ -3764,11 +3766,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /**
    * What an agent reads as the result of a call the reviewer or "Approve for me" denied. Claude Code
    * otherwise reports "User refused permission to run tool", and the agent took it as the person's
-   * own refusal and guessed at why.
+   * own refusal: on 2026-11-03 one stopped working, sure the person had declined its command.
    */
   const reviewerDenial = (reason) =>
-    `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
-    + "Try a safer way to reach the goal, or ask the user if only this will do.";
+    `Denied by the auto-reviewer that answers tool requests for the user ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
+    + "The user has not seen or refused this request. Try a safer way to reach the goal, or ask the user if only this will do.";
+  /**
+   * What an agent reads as the result of a call the person denied on its card. `advice` is the
+   * reviewer's earlier verdict on this request when it had one (it passed the request to the person
+   * with "ask", or its answer couldn't be sent), else undefined: "Ask for approval" has no reviewer.
+   * Claude Code's own "User refused permission to run tool" reads like a reviewer's deny once the
+   * agent has seen one of those, so the person's answer says it is theirs.
+   */
+  function userDenial(advice) {
+    // TODO(human)
+  }
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
