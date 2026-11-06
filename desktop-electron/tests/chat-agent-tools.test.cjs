@@ -1938,6 +1938,125 @@ test("the agent can never give consent itself: confirm and approval_token are st
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("empty tool results are errors, not successful null responses", () => {
+  for (const result of [null, undefined]) {
+    const reply = toolResult("exec_command", {}, result);
+    assert.equal(reply.isError, true);
+    assert.equal(reply.structuredContent.ok, false);
+    assert.equal(reply.structuredContent.error.code, "EMPTY_TOOL_RESULT");
+    assert.match(reply.structuredContent.error.next_action, /inspect|verify/i);
+  }
+});
+
+for (const agent of ["codex", "claude-code", "opencode"]) {
+  test(`${agent} rejects malformed tool input before approval or dispatch`, async () => {
+    const tree = tempTree();
+    const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true });
+    try {
+      const { url, auth } = await session(tools, { agent });
+      for (const args of ['{"cmd":"echo test"}', [], null, 7, { command: "echo test" }, { cmd: " " }]) {
+        const reply = await callTool(url, auth, "exec_command", args);
+        assert.equal(reply.isError, true, JSON.stringify(args));
+        assert.equal(reply.structuredContent.error.code, "INVALID_ARGUMENTS");
+        assert.equal(reply.structuredContent.error.execution_status, "not_started");
+      }
+      assert.equal(confirmations.length, 0);
+      assert.equal(calls.filter(call => call.body?.tool === "exec_command").length, 0);
+    } finally { await tools.close(); tree.cleanup(); }
+  });
+}
+
+test("approved MCP calls distinguish missing results and unknown outcomes without replaying", async () => {
+  const tree = tempTree();
+  let outcome = { state: "completed" };
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true,
+    results: { exec_command: () => outcome } });
+  try {
+    const { url, auth } = await session(tools);
+    for (const state of ["empty", "running", "transport"]) {
+      outcome = state === "empty" ? { state: "completed" } : state === "running" ? { state: "running" } : new Error("connection closed");
+      const before = calls.filter(call => call.body?.tool === "exec_command").length;
+      const reply = await callTool(url, auth, "exec_command", { cmd: "echo approved" });
+      assert.equal(reply.isError, true);
+      assert.equal(reply.structuredContent.error.execution_status, "unknown");
+      assert.match(reply.structuredContent.error.next_action, /do not.*repeat|do not.*retry/i);
+      assert.ok(reply.content[0].text.includes(reply.structuredContent.error.next_action), "text-only clients receive the same recovery guidance");
+      assert.match(reply.content[0].text, /Execution: unknown/);
+      assert.equal(calls.filter(call => call.body?.tool === "exec_command").length, before + 1, "unknown outcomes are never automatically replayed");
+    }
+    assert.equal(confirmations.length, 3);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("a tool service exception returns a tool error, not a JSON-RPC protocol failure", async () => {
+  const tree = tempTree();
+  const { tools } = fixture({ root: tree.root, subagents: { enabled: () => true, describe: () => "", call: async () => { throw new Error("worker unavailable"); } } });
+  try {
+    const { url, auth } = await session(tools);
+    const reply = await post(url, { jsonrpc: "2.0", id: 501, method: "tools/call", params: { name: "subagent_list", arguments: {} } }, auth);
+    assert.equal(reply.body.error, undefined);
+    assert.equal(reply.body.result.isError, true);
+    assert.equal(reply.body.result.structuredContent.error.code, "TOOL_EXECUTION_FAILED");
+    assert.match(reply.body.result.content[0].text, /worker unavailable/);
+    const unknown = await post(url, { jsonrpc: "2.0", id: 502, method: "unknown" }, auth);
+    assert.equal(unknown.body.error.code, -32601, "protocol errors remain protocol errors");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("terminal results retain their handles and distinguish command failure from approval failure", () => {
+  const failed = toolResult("exec_command", {}, { ok: true, command_id: "job-1", status: "exited", exit_code: 7,
+    command_ok: false, stdout: "partial output", output_refs: { stdout: "command:job-1:stdout" } });
+  assert.equal(failed.structuredContent.command_id, "job-1");
+  assert.equal(failed.structuredContent.stdout, "partial output");
+  assert.equal(failed.structuredContent.execution_status, "failed");
+  assert.match(failed.structuredContent.next_action, /exit|output/i);
+  const running = toolResult("exec_command", {}, { ok: true, command_id: "job-2", status: "running", command_ok: null });
+  assert.equal(running.structuredContent.execution_status, "running");
+  assert.match(running.structuredContent.next_action, /read_output/);
+});
+
+for (const agent of ["codex", "claude-code", "opencode"]) {
+  test(`${agent} executes a scoped approved command once and never executes a declined command`, async () => {
+    const tree = tempTree();
+    let approved = true, executions = 0;
+    const { tools, calls } = fixture({ root: tree.root, terminal: () => true, confirm: async () => approved, results: {
+      exec_command: body => {
+        if (!body.arguments.approval_token) return { state: "completed", result: { ok: false, error: {
+          code: "APPROVAL_REQUIRED", details: { request_id: "req-1", risk: "routine_mutation" } } } };
+        executions += 1;
+        return { state: "completed", result: { ok: true, command_id: "job-1", status: "exited", exit_code: 0, command_ok: true, stdout: "done" } };
+      },
+      request_permissions: { state: "completed", result: { ok: true, approval_token: "one-use-token" } },
+    } });
+    try {
+      const { url, auth } = await session(tools, { agent });
+      const reply = await callTool(url, auth, "exec_command", { cmd: "echo permitted" });
+      assert.equal(reply.isError, false);
+      assert.equal(reply.structuredContent.execution_status, "completed");
+      assert.equal(reply.structuredContent.stdout, "done");
+      assert.equal(executions, 1);
+      assert.ok(!JSON.stringify(reply).includes("one-use-token"));
+      approved = false;
+      const before = calls.length;
+      const denied = await callTool(url, auth, "exec_command", { cmd: "echo declined" });
+      assert.equal(denied.isError, true);
+      assert.equal(denied.structuredContent.error.code, "APPROVAL_DECLINED");
+      assert.equal(denied.structuredContent.error.execution_status, "not_started");
+      assert.equal(calls.length, before, "declining command approval prevents even the headless preflight");
+      assert.equal(executions, 1);
+    } finally { await tools.close(); tree.cleanup(); }
+  });
+}
+
+test("a remaining workspace approval gate never tells a chat model to issue its own grant", () => {
+  const reply = toolResult("exec_command", {}, { ok: false, error: { code: "APPROVAL_REQUIRED", message: "still requires permission",
+    details: { request_id: "gate-2", risk: "network", suggestion: "Call request_permissions" } } });
+  assert.equal(reply.isError, true);
+  assert.match(reply.structuredContent.error.next_action, /permissions are separate/);
+  assert.match(reply.structuredContent.error.details.suggestion, /not available to chat agents/);
+  assert.equal(reply.structuredContent.error.details.risk, "network");
+});
+
 test("APPROVAL_REQUIRED goes to the user; on yes the endpoint obtains a one-use grant and retries once, on no it refuses", async () => {
   const tree = tempTree();
   let approve = true;
