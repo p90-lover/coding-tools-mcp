@@ -45,6 +45,15 @@ export function splitHasRoom(panes: readonly SplitPane[], maxColumns: number, ma
   return !mainTaskId || panes.some((pane) => !pane.taskId) || !("replace" in defaultPlace(panes, maxColumns));
 }
 
+/** Shift+New chat may focus an unsent chat in this project, but never replace another project's draft. */
+export function newChatPlace(panes: readonly SplitPane[], maxColumns: number, main: { workspaceId: string; taskId: string }, workspaceId: string): PanePos | { paneId: string } | null {
+  if (!main.taskId && main.workspaceId === workspaceId) return { paneId: "main" };
+  const unsent = panes.find((pane) => !pane.taskId && pane.workspaceId === workspaceId);
+  if (unsent) return { paneId: unsent.id };
+  const place = defaultPlace(panes, maxColumns);
+  return "replace" in place ? null : place;
+}
+
 /** "New session below": the focused pane's column gets a bottom row when it has none. */
 export function belowPlace(panes: readonly SplitPane[], focused: PanePos, maxColumns: number): PanePos | { replace: string } {
   return taken(panes, focused.col, 1) ? defaultPlace(panes, maxColumns) : { col: focused.col, row: 1 };

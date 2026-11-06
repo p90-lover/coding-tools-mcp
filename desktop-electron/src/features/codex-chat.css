@@ -1974,9 +1974,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-annotation-chip .cx-annotation-clear { position: absolute; top: 50%; right: 4px; width: 20px; height: 20px; justify-content: center; padding: 0; transform: translateY(-50%);
   background: var(--color-bg-primary, #fff); color: var(--ao-muted, #748198); opacity: 0; pointer-events: none; }
 .cx-annotation-chip:hover .cx-annotation-clear, .cx-annotation-chip:focus-within .cx-annotation-clear { opacity: 1; pointer-events: auto; }
-.cx-annotation-list { position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 70; display: flex; flex-direction: column; width: min(384px, calc(100vw - 48px)); max-height: min(320px, calc(100vh - 32px)); margin: 0; padding: 0; overflow: auto;
+.cx-annotation-popover { position: fixed; z-index: 70; }
+.cx-annotation-editor, .cx-selection-bar, .cx-annotation-list { box-sizing: border-box; }
+.cx-annotation-list { display: flex; flex-direction: column; width: 100%; margin: 0; padding: 0; overflow: auto; overscroll-behavior: contain;
   list-style: none; border: 1px solid var(--ao-line, #e4eaf1); border-radius: 8px; background: var(--color-bg-primary, #fff); box-shadow: 0 10px 24px rgb(0 0 0 / 12%); animation: cx-annotation-in .12s ease-out; }
-.cx-annotation-list li { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; font-size: 14px; line-height: 20px; }
+.cx-annotation-list li { display: flex; flex: none; align-items: flex-start; gap: 8px; padding: 8px 10px; font-size: 14px; line-height: 20px; }
 .cx-annotation-list li + li { border-top: 1px solid var(--ao-line, #e4eaf1); }
 .cx-annotation-number { flex: none; color: var(--ao-muted, #748198); }
 .cx-annotation-body { display: flex; flex-direction: column; flex: 1; min-width: 0; gap: 8px; }
@@ -1986,7 +1988,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-annotation-list li > button { display: grid; place-items: center; flex: none; width: 22px; height: 22px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted, #748198); cursor: pointer; }
 .cx-annotation-list li > button:hover { background: var(--cx-hover, rgb(0 0 0 / 6%)); color: var(--color-text-primary, #1f1e1d); }
 .cx-sent-annotations { align-self: flex-end; }
-.cx-sent-annotations .cx-annotation-list { right: 0; left: auto; }
 @media (hover: none) { .cx-annotation-chip .cx-annotation-clear { position: static; flex: none; margin-right: 4px; opacity: 1; pointer-events: auto; transform: none; } }
 @keyframes cx-annotation-in { from { opacity: 0; transform: translateY(2px); } }
 @media (prefers-reduced-motion: reduce) { .cx-selection-bar, .cx-annotation-editor, .cx-annotation-list { animation: none; } }

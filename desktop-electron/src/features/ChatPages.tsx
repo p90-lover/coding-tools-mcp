@@ -38,10 +38,24 @@ export function ChatPages({ language, setError }: { language: Language; setError
     count: () => latest.current.enabled ? latest.current.pageCount : 0,
     canAdd: () => latest.current.enabled && latest.current.pageCount < CHAT_PAGE_LIMIT,
     add: () => {
-      try { saveChatPagePreferences({ pageCount: latest.current.pageCount + 1 }); return true; }
-      catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false; }
+      try {
+        const pageCount = latest.current.pageCount + 1;
+        saveChatPagePreferences({ pageCount });
+        latest.current = { ...latest.current, pageCount };
+        return true;
+      } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false; }
+    },
+    enable: () => {
+      try {
+        saveChatPagePreferences({ enabled: true });
+        latest.current = { ...latest.current, enabled: true };
+        return true;
+      } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false; }
     },
   }), [selectPage]);
+  useEffect(() => {
+    tabs.current?.querySelector<HTMLButtonElement>(`[data-page="${active}"]`)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [active, preferences.enabled, preferences.pageCount]);
   const navigate = (direction: number) => {
     const page = adjacentChatPage(active, direction, preferences.pageCount);
     selectPage(page);
@@ -64,7 +78,7 @@ export function ChatPages({ language, setError }: { language: Language; setError
     const element = bar.current;
     if (!element || !preferences.enabled || !preferences.wheel || preferences.pageCount < 2) return;
     const wheel = (event: WheelEvent) => {
-      if (hidden() || covered || event.ctrlKey || event.metaKey) return;
+      if (hidden() || covered || event.defaultPrevented || event.ctrlKey || event.metaKey) return;
       const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
       if (!delta) return;
       event.preventDefault();
@@ -86,7 +100,8 @@ export function ChatPages({ language, setError }: { language: Language; setError
   };
   const pages = Array.from({ length: preferences.pageCount }, (_, index) => index + 1);
   return <div className="cx-chat-pages" ref={host}>
-    {preferences.enabled ? <nav className="cx-pages-bar" aria-label="Chat pages" ref={bar}>
+    {preferences.enabled ? <nav className="cx-pages-bar" aria-label="Chat pages" ref={bar}
+      title={preferences.wheel ? "Scroll up for the previous page; scroll down for the next page" : undefined}>
       <button type="button" className="cx-page-step" aria-label="Previous chat page" aria-keyshortcuts={preferences.keyboard ? preferences.previous : undefined}
         title={preferences.keyboard ? `Previous page (${preferences.previous})` : "Previous page"} disabled={preferences.pageCount < 2} onClick={() => navigate(-1)}>‹</button>
       <div className="cx-page-tabs" ref={tabs} role="tablist" aria-label="Chat pages" onKeyDown={(event) => {

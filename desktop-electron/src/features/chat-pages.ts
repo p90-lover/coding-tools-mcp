@@ -128,15 +128,15 @@ export function overflowPage(from: number, count: number, hasRoom: (page: number
 }
 
 /** A chat ("" a new one) to start on another page because its own page had no screen for it. */
-export type PageOpen = PageSelection & { maxColumns: number; tried: number[] };
+export type PageOpen = PageSelection & { maxColumns: number; tried: number[]; newScreen?: boolean };
 type PageChat = PageSelection & { paneId: string };
-type PageRoom = { room?: (maxColumns: number) => boolean; wake?: () => void };
+type PageRoom = { room?: (maxColumns: number, workspaceId: string, newScreen?: boolean) => boolean; wake?: () => void };
 /**
  * One displayed owner for a chat across all pages, including their split panes. With `layout` a
  * full page hands a chat on to another (`openElsewhere`), which takes it once it has loaded.
  */
 export function createChatPageRegistry(selectPage: (page: number) => void,
-  layout?: { count: () => number; canAdd: () => boolean; add: () => boolean }) {
+  layout?: { count: () => number; canAdd: () => boolean; add: () => boolean; enable?: () => boolean }) {
   const pages = new Map<number, { chats: PageChat[]; focus: (paneId: string) => void } & PageRoom>();
   const waiting = new Map<number, PageOpen>();
   const owner = (from: number, workspaceId: string, taskId: string) => {
@@ -166,13 +166,17 @@ export function createChatPageRegistry(selectPage: (page: number) => void,
      * page takes it. Pages already tried are skipped, so a request passed on never comes back.
      */
     openElsewhere(from: number, open: Omit<PageOpen, "tried"> & { tried?: number[] }) {
-      const count = layout?.count() ?? 0;
-      if (!layout || count < 1) return false;
+      if (!layout) return false;
+      if (layout.count() < 1 && (!open.newScreen || !layout.enable?.())) return false;
+      const count = layout.count();
+      if (count < 1) return false;
       const tried = [...(open.tried ?? []), from];
-      const target = overflowPage(from, count, (page) => !tried.includes(page) && (pages.get(page)?.room?.(open.maxColumns) ?? true), layout.canAdd());
+      const target = overflowPage(from, count, (page) => !tried.includes(page) && !waiting.has(page)
+        && (pages.get(page)?.room?.(open.maxColumns, open.workspaceId, open.newScreen) ?? true), layout.canAdd());
       if (target === null || !Number.isInteger(target) || target < 1 || target > count + 1 || tried.includes(target)) return false;
       if (target === count + 1 && !layout.add()) return false;
-      waiting.set(target, { workspaceId: open.workspaceId, taskId: open.taskId, maxColumns: open.maxColumns, tried });
+      waiting.set(target, { workspaceId: open.workspaceId, taskId: open.taskId, maxColumns: open.maxColumns, tried,
+        ...(open.newScreen ? { newScreen: true } : {}) });
       selectPage(target);
       pages.get(target)?.wake?.();
       return true;

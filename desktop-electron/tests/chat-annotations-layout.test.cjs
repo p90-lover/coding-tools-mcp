@@ -9,9 +9,11 @@ const ts = require("typescript");
 // only what the component reads while it renders.
 const react = { useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}], useEffect() {}, useRef: (current) => ({ current }) };
 const annotations = {};
+let hidden = false;
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatAnnotations.tsx"), "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText, { exports: annotations, document: { body: {} }, window: { innerWidth: 1000, innerHeight: 800 }, require: (name) => name === "react" ? react : name === "react-dom" ? { createPortal: (node) => node }
+  : name === "./page-visibility" ? { useSurfaceHidden: () => () => hidden }
   : name === "react/jsx-runtime" ? { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }), Fragment: "Fragment" } : {} });
 
 // Seen 2026-10-28 on 0.8.29: with no annotation in any chat, SelectionAnnotator read the
@@ -23,4 +25,12 @@ test("with nothing to show, a render reads no layout", () => {
   const view = annotations.SelectionAnnotator({ root: { current: area }, annotations: [], onAdd: () => 0, onComment() {} });
   assert.equal(view, null);
   assert.equal(reads, 0, "no getBoundingClientRect while there is no annotation, selection bar or note editor");
+});
+
+test("hidden pages render no annotation portal and read no layout even with saved annotations", () => {
+  hidden = true;
+  try {
+    const area = { getBoundingClientRect() { throw new Error("Hidden annotation must not read layout"); } };
+    assert.equal(annotations.SelectionAnnotator({ root: { current: area }, annotations: [{ id: 1, text: "quote", comment: "note" }], onAdd() {}, onComment() {} }), null);
+  } finally { hidden = false; }
 });
