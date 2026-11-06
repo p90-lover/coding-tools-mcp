@@ -22,7 +22,7 @@ export function CpaPreviewSpend({ active, zh = false }: { active: boolean; zh?: 
   }, [active, range, hidden]);
   const totals = usage?.available ? usage.totals : undefined;
   const amount = totals && totals.cost !== null && Number.isFinite(totals.cost) ? costLabel(totals.cost, totals.costPartial)
-    : !active ? zh ? "離線" : "Offline" : !usage ? zh ? "讀取中…" : "Loading…" : zh ? "價格不可用" : "Cost unavailable";
+    : !active ? zh ? "離線" : "Offline" : !usage ? zh ? "讀取中…" : "Loading…" : "Null";
   return <div className="original-ui-spend" aria-label={zh ? "CPA 使用成本" : "CPA usage cost"}>
     <label>{zh ? "API 估算成本" : "API-price estimate"} <select value={range} aria-label={zh ? "成本期間" : "Cost period"}
       onChange={(event) => setRange(event.target.value as CpaUsageRange)}>

@@ -35,7 +35,7 @@ test("partial pricing is visibly marked and unknown pricing is not zero dollars"
   assert.match(render({ available: true, totals: { cost: 2, costSource: "mixed", costPartial: true } }), /~\$2\.00\+/);
   for (const report of [{ available: false }, { available: true, totals: { cost: null } }, { available: true, totals: { cost: Infinity } }]) {
     const html = render(report);
-    assert.match(html, /Cost unavailable/);
+    assert.match(html, /<strong[^>]*>Null<\/strong>/);
     assert.doesNotMatch(html, /\$0\.00/);
   }
 });
@@ -44,7 +44,7 @@ test("an actual recorded zero differs from loading, offline and unknown cost", (
   assert.match(render({ available: true, totals: { cost: 0, costSource: null, costPartial: false } }), /\$0\.00/);
   assert.match(render(null), /Loading…/);
   assert.match(render(null, false), /Offline/);
-  assert.match(render({ available: false }, true, true), /價格不可用/);
+  assert.match(render({ available: false }, true, true), /<strong[^>]*>Null<\/strong>/);
 });
 
 test("CPA preview cost stays outside the plugin frame and only on CPA", () => {
