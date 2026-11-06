@@ -1409,7 +1409,9 @@ test("passkey Continue is delivered only to the active owned login child", async
 
 test("Chrome login accepts a configured Windows executable and refuses unsupported platforms", () => {
   const fixture = hostFor(null).host;
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-chrome-login-"));
+  const scratch = path.resolve(__dirname, "../../aiTemp/windows-chrome-login-tests");
+  fs.mkdirSync(scratch, { recursive: true });
+  const root = fs.mkdtempSync(path.join(scratch, "executable-"));
   const chrome = path.join(root, "chrome.exe");
   fs.writeFileSync(chrome, "fixture, never executed");
   fixture.platform = "win32";

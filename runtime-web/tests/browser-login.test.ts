@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import * as childProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chromium } from "playwright-core";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,7 +17,9 @@ import { defaultConfig } from "../src/config";
 
 for (const closeFirst of [true, false]) test(`Windows Chrome capture waits for normal close and Continue (close first=${closeFirst})`, async () => {
   if (process.platform !== "win32") return;
-  const root = mkdtempSync(join(tmpdir(), "coding-tools-chrome-flow-"));
+  const scratch = join(import.meta.dir, "../../aiTemp/windows-chrome-login-tests");
+  mkdirSync(scratch, { recursive: true });
+  const root = mkdtempSync(join(scratch, "profile-"));
   const executable = join(root, "chrome.exe");
   writeFileSync(executable, "fixture, never executed");
   const child = Object.assign(new EventEmitter(), { exitCode: null as number | null, signalCode: null, pid: 12345,

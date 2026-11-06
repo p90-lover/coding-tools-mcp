@@ -1,7 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
-const os = require("node:os");
 const path = require("node:path");
 const http = require("node:http");
 const net = require("node:net");
@@ -24,7 +23,9 @@ async function fixture(t) {
     socket.on("data", data => socket.write(data));
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "chrome-login-proxy-"));
+  const scratch = path.resolve(__dirname, "../../aiTemp/chrome-login-proxy-tests");
+  fs.mkdirSync(scratch, { recursive: true });
+  const root = fs.mkdtempSync(path.join(scratch, "proxy-"));
   const controller = createProviderNetworkController({ app: {}, browserPartition: "fixture-account",
     getBrowserHost: () => ({ partition: "fixture-account" }), getBrowserProxyBinding: () => "bound",
     logger: { info() {}, warn() {} }, safeStorage: null, session: {}, shell: {}, userData: root });
