@@ -7815,6 +7815,74 @@ test("a chat opened while the tools start is warmed once they listen, and a miss
   workflow.dispose();
 });
 
+test("prewarm disposal fences pending work and preserves accepted spawns", async t => {
+  for (const stage of ["normal", "before", "catalog", "sweep", "accepted", "read", "queued", "eviction"]) {
+    await t.test(stage, async t => {
+      let resume, entered, disposed = false;
+      const held = new Promise(resolve => { resume = resolve; });
+      const reached = new Promise(resolve => { entered = resolve; });
+      const timers = new Map(), calls = [];
+      const schedule = (run, delay) => { const timer = { unref() {} }; timers.set(timer, { run, delay }); return timer; };
+      const clear = timer => timers.delete(timer);
+      t.mock.method(global, "setTimeout", schedule);
+      t.mock.method(global, "clearTimeout", clear);
+      const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+      const route = { harness_id: "ao:fixture", model: "fixture-model" };
+      const runs = ["one", "two"].map(id => ({ id, workspace_id: "ws", project_id: id, execution_mode: "single", cancelled: true,
+        nodes: [{ id, role: "planner", state: "cancelled", parents: [], route, receipt: { thread_id: id } }] }));
+      const workflow = createAgentOrchestratorWorkflow({ setTimer: schedule, clearTimer: clear,
+        requestHeadless: async endpoint => {
+          assert.equal(endpoint, "/api/v1/ao/read");
+          if (stage === "read") { entered(); await held; }
+          return { ok: true, runs };
+        },
+        fetchImpl: async () => assert.fail("No network is allowed"),
+        aoHarness: {
+          models: async () => { if (stage === "catalog") { entered(); await held; } return [{ id: route.model }]; },
+          warmSessions: async () => { if (stage === "sweep") { entered(); await held; return ["unused"]; } return []; },
+          spawn: async input => {
+            calls.push({ operation: "spawn", afterDispose: disposed });
+            if (stage === "accepted" || stage === "eviction" && input.workspaceId === "ws") { entered(); await held; }
+            return `warm-${input.workspaceId}`;
+          },
+          kill: async () => { calls.push({ operation: "kill", afterDispose: disposed }); },
+          continuable: async session => {
+            calls.push({ operation: "continuable", afterDispose: disposed });
+            if (stage === "queued" && session === "one") { entered(); await held; }
+            return true;
+          },
+        },
+      });
+      const stop = () => { disposed = true; workflow.dispose(); };
+      const warm = (workspaceId = "ws", taskId) => workflow.call("chat_prewarm", {
+        workspaceId, executionMode: "single", singleRoute: route, ...(taskId ? { taskId } : {}),
+      });
+      try {
+        if (stage === "before") stop();
+        const first = warm("ws", ["read", "queued"].includes(stage) ? "one" : undefined);
+        let second;
+        if (!["normal", "before"].includes(stage)) {
+          await reached;
+          if (stage === "queued") { second = warm("ws", "two"); await flush(); }
+          if (stage === "eviction") { await warm("other"); await flush(); await warm("third"); await flush(); }
+          stop(); resume();
+        }
+        await first; await second; await flush();
+        assert.deepEqual(calls.filter(call => call.afterDispose), [], "no new harness dispatch after disposal");
+        if (stage === "normal") {
+          assert.equal(calls.filter(call => call.operation === "spawn").length, 1);
+          assert.deepEqual([...timers.values()].map(timer => timer.delay), [15 * 60_000]);
+          await warm(); assert.equal(calls.length, 1, "a ready warm entry is reused");
+        } else {
+          assert.equal(timers.size, 0, "no expiry or replacement timer is resurrected");
+          if (stage === "accepted") assert.deepEqual(calls, [{ operation: "spawn", afterDispose: false }], "accepted work is not killed");
+          assert.equal((await warm()).warmed, false, "late settlement cannot leave a usable warm entry");
+        }
+      } finally { stop(); resume(); await flush(); assert.equal(timers.size, 0); }
+    });
+  }
+});
+
 test("pre-warming skips a team without an orchestrator and native Codex routes", async () => {
   const world = chatWorld();
   const spawned = [];

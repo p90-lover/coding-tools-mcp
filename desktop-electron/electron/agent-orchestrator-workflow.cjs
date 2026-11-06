@@ -645,6 +645,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   let sweep = null;
   const sweepStaleWarm = () => sweep ??= (async () => {
     const stale = await harnessService().warmSessions?.(WARM_NAME).catch(() => []) ?? [];
+    if (idleStopped) return;
     for (const id of stale) void harnessService().kill?.(id).catch(() => undefined);
   })();
   // A chat opened while the app's tools were still starting asked once and was told no; nothing
@@ -693,6 +694,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const busy = deferred();
     if (busy) return busy;
     const args = aoLaunchArgs(workspaceId, node, plain, ...await Promise.all([defaultContextWindow(workspaceId, node), defaultEffort(workspaceId, node)]));
+    if (idleStopped) return { ok: true, warmed: false, reason: "The backend was replaced" };
     if (warm.has(key)) return { ok: true, warmed: true };
     const busyNow = deferred();
     if (busyNow) return busyNow;
@@ -702,12 +704,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       clearTimeout(oldest.timer);
       warmLog("evicted", { model: oldest.route?.model ?? null, ready: Boolean(oldest.session) });
       // One still starting is ended the moment its start returns (AO cannot cancel a start).
-      void oldest.promise.then(session => harnessService().kill?.(session)).catch(() => undefined);
+      void oldest.promise.then(session => { if (!idleStopped) return harnessService().kill?.(session); }).catch(() => undefined);
     }
     const entry = { workspaceId, plain: Boolean(plain), tools: toolsKey(workspaceId),
       route: Object.fromEntries(ROUTE_IDENTITY.map(field => [field, route?.[field] ?? null])), started: now() };
     const settled = () => { warmSpawning.delete(entry); startDeferredWarm(workspaceId); };
-    entry.promise = sweepStaleWarm().then(() => harnessService().spawn({ ...args, prompt: "", warm: true })).then(session => {
+    entry.promise = sweepStaleWarm().then(() => {
+      // A sweep can finish after disposal; reject before another call restarts the old harness.
+      if (idleStopped) throw new Error("The backend was replaced");
+      return harnessService().spawn({ ...args, prompt: "", warm: true });
+    }).then(session => {
       entry.session = session;
       warmLog("ready", { model: entry.route.model, readyMs: now() - entry.started });
       settled();
@@ -753,7 +759,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // own chat at once; the queued pre-warm then finds that agent live.
   let prewarmChecks = Promise.resolve();
   function prewarmCheck(session) {
-    const check = () => continuableSession(session);
+    const check = () => idleStopped ? false : continuableSession(session);
     const turn = prewarmChecks.then(check, check);
     prewarmChecks = turn.catch(() => undefined);
     return turn;
@@ -858,9 +864,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
 
   /** chat_prewarm: keep an agent ready for the new chat's selected model, or its team's orchestrator. */
   async function chatPrewarm({ workspaceId, executionMode, singleRoute, teamId, taskId } = {}) {
+    if (idleStopped) return { ok: true, warmed: false, reason: "The backend was replaced" };
     const id = clean(workspaceId, 128);
     const task = taskId ? clean(taskId, 128) : "";
     const saved = executionMode !== "single" || task ? await runs({ workspaceId: id }) : null;
+    if (idleStopped) return { ok: true, warmed: false, reason: "The backend was replaced" };
     if (executionMode === "single") {
       if (!singleRoute || typeof singleRoute !== "object") throw new Error("Choose a model route to pre-warm");
       // An open chat whose next message continues its agent needs no new one; this also brings back
