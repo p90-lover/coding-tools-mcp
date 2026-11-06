@@ -10,7 +10,7 @@ async function waitFor(check) {
 }
 
 function world(stage = "response", { alwaysBroken = false, verdict = "allow" } = {}) {
-  let clock = Date.parse("2026-11-06T12:00:00Z"), broken = true, entered = 0, interrupted = false;
+  let clock = Date.parse("2026-11-06T12:00:00Z"), broken = true, entered = 0, interrupted = false, observations = 0;
   const timers = new Set(), releases = [], models = [], signals = [], resolved = [], deliveries = [], events = [];
   const pending = () => new Promise(resolve => { entered++; releases.push(resolve); });
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
@@ -46,7 +46,7 @@ function world(stage = "response", { alwaysBroken = false, verdict = "allow" } =
       return healthyReply();
     },
     requestHeadless: async (endpoint) => {
-      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [structuredClone(mission)], worker_capacity: { run: 1 } };
       if (endpoint === "/api/v1/tools/call") {
         if (stage === "context" && broken) return pending();
         return { ok: true, operation: { state: "completed", result: { ok: true, task: { description: "Run this project's tests." } } } };
@@ -57,8 +57,11 @@ function world(stage = "response", { alwaysBroken = false, verdict = "allow" } =
     },
     aoHarness: {
       sessionWorkspace: async () => stage === "folder" && broken ? pending() : { projectFolder: "G:/fixture/workspace" },
-      observe: async () => ({ status: interrupted ? "idle" : "working", turnId: node.receipt.turn_id, turnState: interrupted ? "interrupted" : "running", lastActivityAt: clock,
-        needsInput: !interrupted, timeline: [], approvals: interrupted || resolved.some(([id]) => id === approval.approval_id) ? [] : [approval] }),
+      observe: async () => {
+        if (stage === "driver" && observations++ === 0) return pending();
+        return { status: interrupted ? "idle" : "working", turnId: node.receipt.turn_id, turnState: interrupted ? "interrupted" : "running", lastActivityAt: clock,
+          needsInput: !interrupted, timeline: [], approvals: interrupted || resolved.some(([id]) => id === approval.approval_id) ? [] : [approval] };
+      },
       resolveApproval: async (_session, id, decision) => {
         deliveries.push([id, decision]);
         if (stage === "delivery" && broken) await pending();
@@ -104,6 +107,18 @@ for (const stage of ["folder", "catalog", "context", "response", "body"]) {
     } finally { await state.close(); }
   });
 }
+
+test("the approval observer can review while the run driver's observation is stuck", async () => {
+  const state = world("driver");
+  try {
+    await state.workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await waitFor(() => state.entered > 0);
+    await state.observe();
+    await waitFor(() => state.resolved.length > 0);
+    assert.deepEqual(state.resolved, [["review-one", "yes"]]);
+    assert.equal(state.models.length, 1);
+  } finally { await state.close(); }
+});
 
 test("a model that ignores abort cannot deliver its late decision after the review was retired", async () => {
   const state = world("response");
@@ -174,19 +189,35 @@ test("a direct tool review also has a deadline before catalog and response setup
   } finally { await state.close(); }
 });
 
-test("unknown answer delivery times out visibly and is not automatically replayed", async () => {
-  const state = world("delivery");
+test("a direct review rejects a late decision after its cloned owner snapshot changes", async () => {
+  const state = world("response");
   try {
-    await state.observe(); await waitFor(() => state.entered > 0);
-    await state.expire(); state.healthy();
-    for (let i = 0; i < 4; i++) { await state.observe(); await tick(); }
-    const shown = await state.status();
-    assert.equal(shown.awaiting_review, undefined);
-    assert.equal(shown.recommendation.action, "ask");
-    assert.match(shown.recommendation.reason, /sent|deliver|outcome|unknown/i);
-    assert.equal(state.deliveries.length, 1);
+    const pending = state.workflow.reviewToolCall({ workspaceId: "ws", session: "session", tool: "computer_action", args: { action: "click" } });
+    await waitFor(() => state.entered > 0);
+    state.node.receipt = { ...state.node.receipt, request_key: "replacement", turn_id: "new-turn" };
+    state.release();
+    assert.notEqual((await pending).action, "allow");
+    assert.ok(!state.events.some(([name]) => name === "ao.approval_reviewed"));
   } finally { await state.close(); }
 });
+
+for (const mode of ["normal", "judge", "enable judge after timeout"]) {
+  test(`unknown answer delivery times out visibly and is not replayed (${mode})`, async () => {
+    const state = world("delivery");
+    try {
+      if (mode === "judge") await state.workflow.call("chat_model_judges", { enabled: true });
+      await state.observe(); await waitFor(() => state.entered > 0);
+      await state.expire(); state.healthy();
+      if (mode === "enable judge after timeout") await state.workflow.call("chat_model_judges", { enabled: true });
+      for (let i = 0; i < 4; i++) { await state.observe(); await tick(); }
+      assert.equal(state.deliveries.length, 1, "an outcome-unknown delivery must never be resent automatically");
+      const shown = await state.status();
+      assert.equal(shown.awaiting_review, undefined);
+      assert.equal(shown.recommendation.action, "ask");
+      assert.match(shown.recommendation.reason, /sent|deliver|outcome|unknown/i);
+    } finally { await state.close(); }
+  });
+}
 
 for (const change of ["stop", "owner", "dispose"]) {
   test(`a late reviewer cannot answer after ${change}`, async () => {
@@ -198,6 +229,7 @@ for (const change of ["stop", "owner", "dispose"]) {
       else state.workflow.dispose();
       state.release(); await tick(); await tick();
       assert.deepEqual(state.deliveries, []);
+      assert.ok(!state.events.some(([name]) => name === "ao.approval_reviewed"), "obsolete responses do not populate the verdict cache");
     } finally { await state.close(); }
   });
 }

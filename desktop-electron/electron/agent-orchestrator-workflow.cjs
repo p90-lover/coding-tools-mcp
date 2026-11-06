@@ -2472,17 +2472,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // "Approve for me" reviewed a card's requests only from its run's loop, so a card whose loop had
   // ended (an app restart past the resume window, a loop that died) kept them waiting for the
   // person. Seen live: a reviewer's routine `ao report --done` sat "awaiting review" for 33 hours.
-  // Whoever observes such a card (the chat's approvals poll) has its requests reviewed here, one
-  // review per run at a time; a run a loop drives is left to its loop.
+  // Whoever observes such a card (the chat's approvals poll) can keep its reviewer alive even while
+  // the run's driver waits on an observation. The screening map deduplicates both paths.
   const undrivenScreens = new Set();
   function screenUndriven(workspaceId, runId, found, result) {
     if (!result?.pending_approvals?.length || !found?.mission || !found?.node) return;
     const key = runKey(workspaceId, runId);
     const state = backgroundRuns.get(key);
-    if (state?.driving || state?.starting || undrivenScreens.has(key) || !cardApprover(found.mission, found.node)) return;
+    if (state?.stopped || undrivenScreens.has(key) || !cardApprover(found.mission, found.node)) return;
     undrivenScreens.add(key);
     void screenApprovals(workspaceId, runId, found.mission, [found.node], [result])
-      .then((note) => { if (note) logger?.info?.("ao.undriven_screened", { note: publicText(note, 200) }); }, () => undefined)
+      .then((note) => {
+        if (!note) return;
+        if (state && backgroundRuns.get(key) === state && !state.stopped) state.detail = note;
+        logger?.info?.("ao.undriven_screened", { note: publicText(note, 200) });
+      }, () => undefined)
       .finally(() => undrivenScreens.delete(key));
   }
 
@@ -3479,7 +3483,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. `partial`: the
    *  request was too long to show whole, and "Let the model judge" has the reviewer judge it anyway. */
-  async function askApprover({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal }) {
+  async function askApprover({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }) {
     check();
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
@@ -3579,6 +3583,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // same chat still costs one review. Only an allow is reused: a request refused or unclear on
     // what the turn showed then is reviewed again on what it shows now.
     const verdictKey = createHash("sha256").update(instructions).update(prompt).update(JSON.stringify(reviewEfforts)).digest("hex");
+    await verifyCurrent();
+    check();
     const known = reviewVerdicts.get(verdictKey);
     if (known && now() - known.at < REVIEW_CACHE_MS && (known.action === "allow" || !evidence)) {
       logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
@@ -3613,6 +3619,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
+        await verifyCurrent();
+        check();
         reviewerAnswered(model);
         const reason = String(decision.reason || "").slice(0, 300);
         // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
@@ -3622,6 +3630,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (reviewVerdicts.size > 200) reviewVerdicts.delete(reviewVerdicts.keys().next().value);
         return { action: decision.action, reason };
       } catch (error) {
+        check();
+        await verifyCurrent();
         check();
         failure = error;
         reviewerFailed(model, error);
@@ -3647,9 +3657,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const judges = chatPreferences.get().modelJudges;
     const id = clean(workspaceId, 128), thread = clean(session, 256);
     const toolName = `${APP_TOOL_PREFIX}${clean(tool, 80)}`;
+    let owned = true;
     try {
       return await withinReview(async ({ check, signal }) => {
         let run;
+        runReads.delete(JSON.stringify([id, ""]));
         try { ({ run } = await sessionChat(id, thread, "have its screen actions reviewed")); } catch (error) {
           check();
           return { action: "ask", reason: publicText(error?.message || error, 200) };
@@ -3657,14 +3669,27 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         check();
         const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
         const node = (run.nodes || []).find(holds);
+        if (!node) return { action: "ask", reason: "The current review owner could not be verified" };
+        const owner = reviewAttempt(run, node);
+        const verifyCurrent = async () => {
+          check();
+          runReads.delete(JSON.stringify([id, ""]));
+          let latest;
+          try { ({ run: latest } = await sessionChat(id, thread, "have its screen actions reviewed")); }
+          catch { owned = false; check(); }
+          check();
+          const current = (latest.nodes || []).find(holds);
+          if (!current || reviewAttempt(latest, current) !== owner) { owned = false; check(); }
+        };
         const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true } };
         const approval = { kind: "tool", tool: toolName, thread_id: thread,
           toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
         const verdict = await askApprover({ approver, mission: run, approval, decide: judges, judge: judges,
-          partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT, check, signal });
+          partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT, check, signal, verifyCurrent });
+        await verifyCurrent();
         check();
         return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
-      }, () => !sessionStops.has(thread) && !backgroundRuns.get(sessionOwners.get(thread))?.stopped);
+      }, () => owned && !sessionStops.has(thread) && !backgroundRuns.get(sessionOwners.get(thread))?.stopped);
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: toolName, message: publicText(error?.message || error, 200) });
       return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
@@ -3676,6 +3701,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const teamHasApprover = mission.nodes.some((node) => node.role === "approver");
     return teamApprover ?? (!teamHasApprover && own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
       ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
+  }
+  function reviewAttempt(mission, node) {
+    const approver = cardApprover(mission, node);
+    return JSON.stringify([activityAttempt(mission.workspace_id, mission.id, node), node.state, node.route, node.settings,
+      approver?.route, approver?.settings, Boolean(mission.cancelled), Boolean(mission.paused)]);
   }
   /** Whether a pending request waits on the person, not on a reviewer that answers it for them. */
   function approvalNeedsPerson(mission, node, approval) {
@@ -3721,9 +3751,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * Whether a request is screened (again): one never screened, or one the reviewer left to the
    * person before "Let the model judge" was on. Turning the judge on from that request's own card
    * did nothing: its "ask" was kept, so no pass looked at it again and the turn waited for an hour
-   * (seen live 2026-11-04, a `git -C … push`). A request already judged is not judged again.
+   * (seen live 2026-11-04, a `git -C … push`). A request already judged, or whose answer could
+   * not be sent, is not judged again.
    */
-  const rescreen = (advice) => !advice || (advice.action === "ask" && !advice.judged && !advice.resolved && chatPreferences.get().modelJudges);
+  const rescreen = (advice) => !advice || (advice.action === "ask" && !advice.judged && !advice.resolved && !advice.unsent && chatPreferences.get().modelJudges);
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
     const jobs = [];
@@ -3756,17 +3787,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let note = null;
     await Promise.all(jobs.map(async (job) => {
       const id = job.approval.approval_id;
-      const owner = JSON.stringify([activityAttempt(workspaceId, runId, job.node), job.node.route, job.node.settings]);
-      const mark = { at: now(), request: job.request, sending: null };
-      const current = () => screening.get(id) === mark && !schedulerDisposed && !mission.cancelled && !mission.paused
+      const owner = reviewAttempt(mission, job.node);
+      const mark = { at: now(), request: job.request, sending: null, retired: false };
+      const current = () => !mark.retired && screening.get(id) === mark && !schedulerDisposed && !mission.cancelled && !mission.paused
         && job.node.state === "running" && !sessionStops.has(job.approval.thread_id)
         && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped
-        && JSON.stringify([activityAttempt(workspaceId, runId, job.node), job.node.route, job.node.settings]) === owner;
+        && reviewAttempt(mission, job.node) === owner;
       screening.set(id, mark);
       try {
-        const said = await withinReview(review => screenOne(workspaceId, runId, mission, job, {
-          ...review, owner, sending: advice => { mark.sending = advice; },
-        }), current);
+        const said = await withinReview(review => {
+          const verifyCurrent = async () => {
+            review.check();
+            runReads.delete(JSON.stringify([workspaceId, runId]));
+            const latest = await savedNode(workspaceId, runId, job.node.id);
+            review.check();
+            if (latest.mission?.cancelled || latest.mission?.paused || latest.node?.state !== "running"
+              || reviewAttempt(latest.mission, latest.node) !== owner) {
+              mark.retired = true;
+              review.check();
+            }
+          };
+          return screenOne(workspaceId, runId, mission, job, {
+            ...review, verifyCurrent, sending: advice => { mark.sending = advice; },
+          });
+        }, current);
         if (said) note = said;
       } catch (error) {
         if (!current()) return;
@@ -3793,7 +3837,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return note;
   }
   /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
-  async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }, { check, signal, owner, sending }) {
+  async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }, { check, signal, verifyCurrent, sending }) {
     check();
     // The command advisor must not decide from a truncated command or permission scope.
     const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
@@ -3818,7 +3862,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : !incomplete && routineAppCommand(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_command", reason: routineAppCommand(approval) }
       : incomplete && !blocked && judges
-      ? await askApprover({ approver, mission, approval, decide: true, partial: true, judge: true, check, signal }).then(verdict => ({ ...verdict, reviewed: true }),
+      ? await askApprover({ approver, mission, approval, decide: true, partial: true, judge: true, check, signal, verifyCurrent }).then(verdict => ({ ...verdict, reviewed: true }),
         (error) => ({ action: "failed", error }))
       : incomplete && !blocked
       ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
@@ -3836,13 +3880,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
             // A reviewer that cannot answer is asked again (see REVIEW_TRIES); only then does the
             // request go to the person, and its card says why.
-            : await askApprover({ approver, mission, approval, judge: judges, check, signal }).then(verdict => ({ ...verdict, reviewed: true }),
+            : await askApprover({ approver, mission, approval, judge: judges, check, signal, verifyCurrent }).then(verdict => ({ ...verdict, reviewed: true }),
               (error) => ({ action: "failed", error }));
     // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
     // doubt), so a request it could read whole no longer waits for the person for want of a decision.
     check();
     if (advice.action === "ask" && advice.reviewed) {
-      const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal }).catch(() => null);
+      const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal, verifyCurrent }).catch(() => null);
       check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
       // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
@@ -3850,6 +3894,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       else if (judges) advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
       else advice = { ...advice, unresolved: true };
     }
+    await verifyCurrent();
+    check();
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
       reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
       if (reviewDenials.size > 500) reviewDenials.delete(reviewDenials.keys().next().value);
@@ -3878,12 +3924,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     check();
     keepAdvice(advice);
     if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
-    if (approver.settings?.auto_decide === true && advice.action !== "ask") {
-      const latest = await savedNode(workspaceId, runId, node.id);
-      check();
-      if (latest.mission?.cancelled || latest.mission?.paused || latest.node?.state !== "running"
-        || JSON.stringify([activityAttempt(workspaceId, runId, latest.node), latest.node.route, latest.node.settings]) !== owner) return null;
-    }
     // Each answer stands alone: one the person gave first (or any failure to send it) never
     // touches the other requests; this one just goes to the person.
     if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {

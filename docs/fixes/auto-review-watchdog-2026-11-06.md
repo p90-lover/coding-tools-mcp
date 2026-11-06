@@ -12,6 +12,9 @@ Read-only AO sampling found a separate approval with a 253.1-minute pending inte
 2. A hung review can pin a screening slot; a run without a driver also holds its undriven-screen latch until the promise settles. Retrying only on thrown errors does not revive a promise that never finishes.
 3. The stale-screen pass deletes its map entry but does not fence every late continuation in the original screening. A late reviewer can still populate advice/cache or attempt an answer after replacement or Stop.
 4. Advice is saved before delivering the verdict. If delivery never settles, advice exists but is not resolved, so the renderer can keep hiding it as awaiting_review without the no-advice overdue fallback.
+5. Backend run reads are cloned snapshots. Checking only a captured node misses later ownership/rule changes; fresh checks now precede model/cache/advice side effects and answer delivery.
+6. The observer deferred to a run marked driving/starting even when that driver was blocked. It can now keep review progressing independently; the shared screening map prevents duplicate review jobs and a stopped run remains excluded.
+7. An uncertain delivery leaves unresolved advice. Judge-mode rescreening did not exclude that advice and could send the decision twice, including when judge mode was enabled after the timeout. The retry predicate now preserves unsent advice for reconciliation instead of resending it.
 
 ## Acceptance contract
 
@@ -24,9 +27,9 @@ Read-only AO sampling found a separate approval with a 253.1-minute pending inte
 
 ## Verification
 
-- All **14 focused watchdog tests passed**. Before the patch, the suite reproduced absent watchdogs, indefinite latches and late sends after owner change/disposal. The Stop fixture explicitly confirms host shutdown rather than assuming an interrupt ended the agent.
-- All **732 checks passed** across the full workflow, approval-judge, exact-turn recovery, compaction, lifecycle and long-horizon terminal/MCP suites, with no skips.
-- Controlled timers cover catalog/folder/context/fetch/body stalls, retry success without user input, exhaustion, conservative model-judge denial, stale replacement, direct tool review, uncertain delivery and Stop/owner/disposal precedence. Shared catalog/folder reads may wait for their existing one-minute cache TTL before a new lookup is attempted; no worker command is replayed.
+- All **18 focused watchdog tests passed**. Before the patch, the suite reproduced absent watchdogs, indefinite latches and late sends after owner change/disposal. Both judge-mode uncertain-delivery cases also failed before the no-resend guard. The Stop fixture explicitly confirms host shutdown rather than assuming an interrupt ended the agent.
+- The exact final candidate passed **736 checks** across the full workflow, approval-judge, exact-turn recovery, compaction, lifecycle and long-horizon terminal/MCP suites, with no skips. It includes cloned backend snapshots, rejection before late verdict caching, blocked-driver observer recovery, preserved retry/failure feedback and judge-mode no-resend safety.
+- Controlled timers cover catalog/folder/context/fetch/body stalls, retry success without user input, exhaustion, conservative model-judge denial, stale replacement, direct tool review, uncertain delivery in normal/judge mode and after enabling judge mode, and Stop/owner/disposal precedence. Shared catalog/folder reads may wait for their existing one-minute cache TTL before a new lookup is attempted; no worker command is replayed.
 - Syntax and whitespace checks pass. No live model requests or approval mutations were used in tests.
 
 Live recovery of the exact screenshot chat remains unverified until a normal update ships; no live patch, installation or restart was performed.
