@@ -30,17 +30,18 @@ test("a verified saved ChatGPT conversation stays signed in without navigating",
 });
 
 for (const [label, answer] of [["a 429", { sessionStatus: 429 }], ["a 5xx", { sessionStatus: 502 }], ["a failed fetch", { sessionStatus: 0 }],
-  ["a challenge page", { sessionStatus: 403 }]]) test(`${label} from the session check keeps a signed-in page signed in`, async () => {
+  ["a challenge page", { sessionStatus: 403 }]]) test(`${label} from the session check cannot inherit an earlier authenticated state`, async () => {
   const { host, loads } = authFixture();
   host.state = { authenticated: true, status: "ready" };
   host.view.webContents.executeJavaScript = async () => ({ url: savedUrl, composer: true, sessionAuthenticated: false,
-    sessionAnswered: false, readyState: "complete", ...answer });
+    sessionAnswered: false, sessionCheckError: "ChatGPT session verification failed. Retry the check.", readyState: "complete", ...answer });
   const flips = [];
   host.setState = function (patch) { if ("authenticated" in patch) flips.push(patch.authenticated); this.state = { ...this.state, ...patch }; };
   const state = await host.probeAuthentication();
-  assert.equal(state.authenticated, true);
-  assert.equal(state.status, "ready");
-  assert.deepEqual(flips, [], "no signed-out flip, so no sign-in follow-ups reload the page");
+  assert.equal(state.authenticated, false);
+  assert.equal(state.status, "error");
+  assert.match(state.message, /verification failed/);
+  assert.deepEqual(flips, [false], "a failed fresh check cannot reuse cached authentication");
   assert.deepEqual(loads, []);
 });
 
@@ -89,9 +90,11 @@ test("refreshing saved-session authentication never replaces the user's conversa
 
 test("a late authentication probe cannot write another account's state after switching pages", async () => {
   const { host } = authFixture("https://chatgpt.com/");
-  let finish;
-  host.view.webContents.executeJavaScript = () => new Promise(resolve => { finish = resolve; });
+  let finish, started;
+  const entered = new Promise(resolve => { started = resolve; });
+  host.view.webContents.executeJavaScript = () => new Promise(resolve => { finish = resolve; started(); });
   const pending = host.probeAuthentication();
+  await entered;
   host.partition = "persist:two";
   host.view = { webContents: { getURL: () => "https://chatgpt.com/", isDestroyed: () => false } };
   host.state = { authenticated: false, status: "signed-out", url: "https://chatgpt.com/" };
