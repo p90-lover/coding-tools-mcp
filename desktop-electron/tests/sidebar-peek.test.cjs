@@ -139,6 +139,46 @@ test("explicit close and disposal cancel pending opens and release every listene
   assert.deepEqual(f.changes, []);
 });
 
+test("only an open hover peek catches pointer movement before an embedded page can swallow it", () => {
+  const app = fs.readFileSync(path.join(__dirname, "../src/App.tsx"), "utf8");
+  const file = ts.createSourceFile("App.tsx", app, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let backdrop;
+  const visit = node => {
+    if (ts.isJsxSelfClosingElement(node) && node.attributes.properties.some(property => ts.isJsxAttribute(property)
+      && property.name.text === "className" && property.initializer?.text === "sidebar-backdrop is-peek-dismiss")) backdrop = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  assert.ok(backdrop, "the hover peek has its own transparent pointer-catching surface");
+  let expression = backdrop.parent;
+  while (ts.isParenthesizedExpression(expression)) expression = expression.parent;
+  assert.ok(ts.isConditionalExpression(expression), "the surface only exists while a hover peek is open");
+  const module = {};
+  const jsx = (type, props) => ({ type, props });
+  vm.runInNewContext(ts.transpileModule(`exports.view = (sidebarRail, sidebarPeek, closeSidebarPeek) => (${expression.getText(file)});`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
+  }).outputText, { exports: module, require: () => ({ jsx, jsxs: jsx }) });
+  let dismissals = 0;
+  const close = () => { dismissals++; };
+  for (const [rail, peek] of [[false, false], [false, true], [true, false]]) assert.equal(module.view(rail, peek, close), null, "pinned, compact and closed sidebars do not intercept the page");
+  const surface = module.view(true, true, close);
+  assert.equal(surface.props["aria-hidden"], "true");
+  assert.equal(surface.props.tabIndex, undefined, "the mouse dismiss surface adds no keyboard stop");
+  assert.equal(surface.props.onPointerEnter, undefined, "mounting beneath a still pointer must not dismiss keyboard navigation");
+  assert.equal(surface.props.onPointerMove, close);
+  assert.equal(surface.props.onPointerDown, close);
+  surface.props.onPointerMove();
+  surface.props.onPointerDown();
+  assert.equal(dismissals, 2);
+});
+
+test("hover dismissal stays transparent and below the sidebar rather than covering its navigation", () => {
+  const css = fs.readFileSync(path.join(__dirname, "../src/styles.css"), "utf8");
+  assert.match(css, /\.sidebar-backdrop\.is-peek-dismiss\s*\{[^}]*background:\s*transparent/);
+  assert.match(css, /\.app-shell\.is-sidebar-rail \.app-sidebar\.is-expanded\s*\{[^}]*z-index:\s*40/);
+  assert.match(css, /\.sidebar-backdrop\s*\{[^}]*z-index:\s*30/);
+});
+
 test("shell binds the visible clip only in rail mode and labels use reversible reduced-motion-aware transitions", () => {
   const app = fs.readFileSync(path.join(__dirname, "../src/App.tsx"), "utf8");
   const css = fs.readFileSync(path.join(__dirname, "../src/styles.css"), "utf8");

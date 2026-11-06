@@ -805,6 +805,11 @@ function LauncherShell({
         toggleSidebar={toggleSidebar}
       />
 
+      {/* Embedded pages do not bubble pointer movement to this window. Catch the hover exit here. */}
+      {sidebarRail && sidebarPeek ? (
+        <div aria-hidden="true" className="sidebar-backdrop is-peek-dismiss" onPointerMove={closeSidebarPeek} onPointerDown={closeSidebarPeek} />
+      ) : null}
+
       {compactSidebar && sidebarOpen ? (
         <button
           aria-label={copy.hideSidebar}
