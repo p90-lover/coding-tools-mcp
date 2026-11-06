@@ -303,6 +303,8 @@ function useStableCalls<T extends Record<string, ((...args: any[]) => any) | und
 // A run's status and its cards' harness status are read the same way, by every pane of that run on
 // each tick and on each AO push.
 const SHARED_READS = new Set(["runs", "board", "run_status", "harness_status"]);
+/** How long an open chat waits for its selected run to appear in the runs list (three refreshes). */
+const SELECTED_RUN_GRACE_MS = 15_000;
 const readsInFlight = new Map<string, Promise<Record<string, unknown>>>();
 export function moduleCall(operation: string, args: JsonObject = {}): Promise<Record<string, unknown>> {
   if (!SHARED_READS.has(operation)) return callWithRoom(operation, args);
@@ -1284,11 +1286,26 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // An open chat follows its live run (chatLiveRun): a round its goal, wakeup or loop started, or an
   // older run retried after a newer one stopped. Its approvals, working state and steers come from
   // the selected run, and the run it was opened on stayed selected after it settled.
+  // A selected run missing from the chat's runs is waited for (a send's run loads with the next
+  // refresh), but not for good: past SELECTED_RUN_GRACE_MS it is gone (AO stopped listing it) and
+  // the chat follows its live run, else it polled a run that no longer exists.
+  const missingRun = useRef<{ id: string; since: number } | null>(null);
+  const [missingTick, setMissingTick] = useState(0);
   useEffect(() => {
     if (view !== "chat" || !chatTaskId) return;
-    const live = chatLiveRun(missions.filter((mission) => mission.workspace_id === workspaceId), chatTaskId, selectedRunId);
-    if (live !== selectedRunId) setSelectedRunId(live);
-  }, [view, chatTaskId, missions, workspaceId, selectedRunId]);
+    const here = missions.filter((mission) => mission.workspace_id === workspaceId);
+    const missing = Boolean(selectedRunId) && here.some((mission) => mission.project_id === chatTaskId)
+      && !here.some((mission) => mission.id === selectedRunId);
+    if (!missing) missingRun.current = null;
+    else if (missingRun.current?.id !== selectedRunId) missingRun.current = { id: selectedRunId, since: Date.now() };
+    const waited = missingRun.current ? Date.now() - missingRun.current.since : 0;
+    const live = chatLiveRun(here, chatTaskId, selectedRunId, missing && waited >= SELECTED_RUN_GRACE_MS);
+    if (live !== selectedRunId) { missingRun.current = null; setSelectedRunId(live); return; }
+    // The runs list may not change again; look once more when the grace period ends.
+    if (!missing) return;
+    const timer = setTimeout(() => setMissingTick((tick) => tick + 1), SELECTED_RUN_GRACE_MS - waited + 50);
+    return () => clearTimeout(timer);
+  }, [view, chatTaskId, missions, workspaceId, selectedRunId, missingTick]);
   const currentRun = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.runId === selectedRunId;
   const savedMissionTeam = savedTeams.find(item => item.id === selectedRun?.team?.id) ?? team;
   const missionTeam = missionTeamId ? savedTeams.find(item => item.id === missionTeamId) ?? null : team;
