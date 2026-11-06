@@ -40,7 +40,7 @@ function fixture({ decisions, failSend = false, review = false } = {}) {
   const workflow = createAgentOrchestratorWorkflow({ now: () => clock,
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "test-key" }),
     fetchImpl: async url => ({ ok: true, json: async () => String(url).endsWith("/models")
-      ? { data: [{ id: "test-model" }] } : { choices: [{ message: { content: JSON.stringify({ action: "ask", reason: "Insufficient context" }) } }] } }),
+      ? { data: [{ id: "test-model" }, { id: "codex-auto-review" }] } : { choices: [{ message: { content: JSON.stringify({ action: "ask", reason: "Insufficient context" }) } }] } }),
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [run] }
       : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run },
     aoHarness: {
