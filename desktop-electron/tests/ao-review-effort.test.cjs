@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
-async function reviewRequests({ model = "opencode-go/deepseek-v4.1-flash", effort = "max", levels = ["low", "high", "max"], failReview = false, secondEffort, team = false } = {}) {
+async function reviewRequests({ model = "opencode-go/deepseek-v4.1-flash", effort = "max", levels = ["low", "high", "max"], failReview = false, failOwn = false, secondEffort, team = false } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/" + model,
     effort, native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const node = { id: "one", role: "planner", state: "running", parents: [], route,
@@ -27,7 +27,7 @@ async function reviewRequests({ model = "opencode-go/deepseek-v4.1-flash", effor
       ] }) };
       const body = JSON.parse(init.body);
       bodies.push(body);
-      if (failReview && body.model === "codex-auto-review") return { ok: false, status: 503 };
+      if ((failReview && body.model === "codex-auto-review") || (failOwn && body.model === model)) return { ok: false, status: 503 };
       return { ok: true, json: async () => ({ choices: [{ message: { content: '{"outcome":"allow","rationale":"fixture"}' } }] }) };
     },
     requestHeadless: async endpoint => endpoint.endsWith("/read")
@@ -62,13 +62,14 @@ for (const [model, effort, levels] of [
   ["opencode-go/deepseek-v4.1-flash", "max", ["low", "high", "max"]],
   ["cline-pass/glm-5.3-flash", "xhigh", ["low", "high", "xhigh", "max"]],
 ]) {
-  test(`command-review fallback preserves ${model}'s selected ${effort}`, async () => {
-    const bodies = await reviewRequests({ model, effort, levels, failReview: true });
-    const own = bodies.find(body => body.model === model);
-    assert.ok(own, "the selected fallback was requested");
-    assert.equal(own.reasoning_effort, effort);
-    assert.equal(bodies[0].model, "codex-auto-review");
-    assert.equal(bodies[0].reasoning_effort, undefined, "a different reviewer keeps its own default, not the worker's max");
+  // Since #1077 only a team's Command approver card reviews with its own model (then Codex's);
+  // "Approve for me" asks Codex's review model alone, so these effort rules live on the card.
+  test(`a command approver card sends ${model}'s selected ${effort}, and Codex's reviewer its own default`, async () => {
+    const bodies = await reviewRequests({ model, effort, levels, team: true, failOwn: true });
+    assert.equal(bodies[0].model, model, "the card's own model is asked first");
+    assert.equal(bodies[0].reasoning_effort, effort);
+    assert.equal(bodies[1].model, "codex-auto-review");
+    assert.equal(bodies[1].reasoning_effort, undefined, "a different reviewer keeps its own default, not the worker's max");
   });
 }
 
@@ -83,21 +84,21 @@ test("a team's Sol command approver sends its selected xhigh", async () => {
 });
 
 test("same-model reviews fit a stale effort and omit one the model cannot take", async () => {
-  const fitted = await reviewRequests({ effort: "medium", failReview: true });
+  const fitted = await reviewRequests({ effort: "medium", team: true });
   assert.equal(fitted.find(body => body.model === "opencode-go/deepseek-v4.1-flash").reasoning_effort, "high");
   for (const options of [{ levels: [] }, { model: "grok/custom", levels: ["max"] }]) {
-    const bodies = await reviewRequests({ ...options, failReview: true });
+    const bodies = await reviewRequests({ ...options, team: true });
     assert.ok(bodies.every(body => body.reasoning_effort === undefined));
   }
 });
 
-test("Auto is not sent as an explicit effort by a same-model review fallback", async () => {
-  const bodies = await reviewRequests({ effort: "auto", failReview: true });
+test("Auto is not sent as an explicit effort by a same-model review", async () => {
+  const bodies = await reviewRequests({ effort: "auto", team: true, failOwn: true });
   assert.ok(bodies.length >= 2);
   assert.ok(bodies.every(body => body.reasoning_effort === undefined));
 });
 
 test("changing the selected review effort invalidates its cached verdict", async () => {
-  const bodies = await reviewRequests({ effort: "high", failReview: true, secondEffort: "max" });
+  const bodies = await reviewRequests({ effort: "high", team: true, secondEffort: "max" });
   assert.deepEqual(bodies.filter(body => body.model === "opencode-go/deepseek-v4.1-flash").map(body => body.reasoning_effort), ["high", "max"]);
 });
