@@ -44,7 +44,7 @@ const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
-const { createConfiguredConnector, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { createConfiguredConnector, currentConnectorSettings, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
@@ -1010,13 +1010,24 @@ function lifecycleSyncFor(accountId, logger) {
 
 // The account a Codex thread's turn runs on: the one it is bound to, or (first turn, or its account
 // was removed) the one new sessions start on, which it is then bound to.
-async function resolveThreadAccount(threadId, logger) {
+async function resolveThreadAccount(threadId, logger, { requireRetainedConversation = false } = {}) {
+  const bound = threadAccounts && isThreadId(threadId) ? threadAccounts.accountFor(threadId) : null;
+  if (requireRetainedConversation && (!bound || !browserAccountExists(bound))) {
+    const error = new Error("The retained ChatGPT conversation's original account binding is no longer available");
+    error.code = "retained_conversation_unavailable";
+    throw error;
+  }
   if (!threadAccounts || !isThreadId(threadId)) return null;
-  const bound = threadAccounts.accountFor(threadId);
   const accountId = bound && browserAccountExists(bound) ? bound : newSessionAccount();
   threadAccounts.bind(threadId, accountId);
   const partition = browserAccounts.partitionOf(accountId);
   await routeIdleAccountPartition(partition, logger);
+  // Routing can yield before a running tab prevents the thread from being moved or forgotten.
+  if (requireRetainedConversation && (!browserAccountExists(accountId) || threadAccounts?.accountFor(threadId) !== accountId)) {
+    const error = new Error("The retained ChatGPT conversation's account binding changed while routing");
+    error.code = "retained_conversation_unavailable";
+    throw error;
+  }
   return { accountId, partition, chatLifecycleSync: lifecycleSyncFor(accountId, logger) };
 }
 
@@ -3055,8 +3066,8 @@ function registerIpc({ logger, stateStore }) {
     const operationBrowser = browserHost, operationPartition = operationBrowser?.partition;
     const extraTunnels = runtimeSupervisor?.extraTunnels;
     const tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
-    const id = tunnel?.id, tunnelId = tunnel?.tunnelId;
-    const missingTunnel = new Error("Assign an existing account-owned MCP tunnel in More tunnels, then retry this account.");
+    const id = tunnel?.id;
+    let primarySettings = null, tunnelId = tunnel?.tunnelId;
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
@@ -3069,14 +3080,25 @@ function registerIpc({ logger, stateStore }) {
       if (!connectorConfirmed && (operationBrowser.activeTraceId || (operation && (!creating || operation !== "MCP connector creation")))) {
         throw new Error("MCP connector setup is busy");
       }
-      if (!id) throw missingTunnel;
-      if (!extraTunnels.status().some(current => current.id === id && current.accountId === accountId
-        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))) {
+      if (tunnel ? !id || !extraTunnels.status().some(current => current.id === id && current.accountId === accountId
+        && current.tunnelId === tunnelId && (!requireReady || current.state === "ready"))
+        : extraTunnels?.status().some(current => current.accountId === accountId)) {
         throw new Error("The account's MCP tunnel changed or is not ready.");
+      }
+      if (!tunnel) {
+        const current = currentConnectorSettings(runtimeHost);
+        if (current.name !== primarySettings.name || current.tunnelId !== tunnelId) {
+          throw new Error("The MCP configuration changed during setup.");
+        }
       }
     };
     publishOperation({ name: "mcp-connector-create", status: "running", message: "Connecting this account's MCP connector" });
     try {
+      // The main tunnel is a candidate; the helper must still prove its fresh account/workspace ownership.
+      if (!tunnel) {
+        primarySettings = currentConnectorSettings(runtimeHost);
+        tunnelId = primarySettings.tunnelId;
+      }
       assertCurrent();
       await runtimeStartupInFlight;
       assertCurrent();
@@ -3089,7 +3111,7 @@ function registerIpc({ logger, stateStore }) {
       }
       await routeIdleAccountPartition(partition, logger);
       assertCurrent();
-      if (tunnel.state !== "ready") {
+      if (tunnel && tunnel.state !== "ready") {
         await extraTunnels.reconnect(id);
         assertCurrent();
       }
@@ -3115,14 +3137,14 @@ function registerIpc({ logger, stateStore }) {
           }
           return candidates;
         },
-        target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel.connectorBindings },
+        target: { partition, requireTunnelMatch: true, tunnelId, connectorBindings: tunnel?.connectorBindings },
         });
       } finally { creating = false; }
       if (result.connected !== true || result.binding?.tunnelId !== tunnelId) throw new Error("ChatGPT did not confirm the exact connector state.");
       // The helper has released browser admission; new work cannot undo its verified connection.
       connectorConfirmed = true;
       assertCurrent();
-      await extraTunnels.setConnector(id, result.href, result.binding);
+      if (tunnel) await extraTunnels.setConnector(id, result.href, result.binding);
       assertCurrent();
       const recorded = await browserAccounts.recordConnector(accountId, { bound: true });
       assertCurrent();
@@ -3130,7 +3152,7 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "completed", message: "This account's MCP connector is connected" });
       return result;
     } catch (error) {
-      const failure = error === missingTunnel ? { code: "configuration_required", message: missingTunnel.message } : mcpConnectorCommandFailure(error);
+      const failure = mcpConnectorCommandFailure(error);
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
@@ -4889,7 +4911,7 @@ async function start() {
       getBrowserInteractionMode: () => stateStore.read().browserInteractionMode,
       getUseSavedChats: () => savedChatsInUse(),
       // Each Codex thread runs on the ChatGPT account it is bound to, whichever one this host shows.
-      resolveTurnAccount: (threadId) => resolveThreadAccount(threadId, logger),
+      resolveTurnAccount: (threadId, options) => resolveThreadAccount(threadId, logger, options),
       tabLimitFor: (partition) => browserAccounts.tabLimitForPartition(partition),
       retainedTabTtlMs: () => browserAccounts.settings().keepFinishedTabsMinutes * 60_000,
       // What turns and inspections show about each account, for ChatGPT browser management.
