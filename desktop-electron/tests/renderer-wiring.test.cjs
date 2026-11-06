@@ -161,15 +161,17 @@ test("Register keeps its Connections destination and native overlay visibility g
 
 test("a hidden docked sidebar folds to an icon rail that shows the whole panel on hover", () => {
   assert.match(appSource, /animate=\{\{ width: sidebarOpen \? "var\(--sidebar-width\)" : compactSidebar \? 0 : "var\(--sidebar-rail-width\)" \}\}/);
-  // The hover panel follows the pointer's position, not enter/leave on the aside: the title bar's
-  // buttons sit over the rail's top and flipped it open and shut (2026-11-02).
+  // No React enter/leave on the aside: the title bar's buttons sit over the rail's top and flipped it
+  // open and shut (2026-11-02). Since #1069 the hover panel is bound to the visible panel itself
+  // (sidebar-peek.ts, with its own tests), not to a strip of window coordinates past its edge.
   assert.doesNotMatch(appSource, /onPointerEnter=\{\(\) => peekSidebar|onPointerLeave=\{\(\) => peekSidebar/);
-  assert.match(appSource, /if \(event\.clientX <= SIDEBAR_RAIL_WIDTH\) settle\(true\);\s*else if \(event\.clientX > sidebarWidth \+ 16\) settle\(false\);\s*else settle\(sidebarPeekState\.current\);/);
+  assert.match(appSource, /const control = bindSidebarPeek\(sidebarPanel\.current, \(open\) => \{/);
   assert.match(appSource, /"--sidebar-rail-width": `\$\{SIDEBAR_RAIL_WIDTH\}px`/);
   // Every native view steps aside while the hover panel or the compact drawer covers it, and stays
   // aside until the panel has slid shut.
   assert.match(appSource, /const sidebarCovers = \(compactSidebar && sidebarOpen\) \|\| \(sidebarRail && sidebarExpanded\);/);
-  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.sidebar-clip \{[^}]*transition:\s*width 240ms cubic-bezier\(0\.32, 0\.72, 0, 1\)/);
+  // #1069's softer ease-out for the rail (reduced motion turns it off).
+  assert.match(stylesSource, /\.app-shell\.is-sidebar-rail \.sidebar-clip \{[^}]*transition:\s*width 240ms cubic-bezier\(0\.22, 1, 0\.36, 1\)/);
   assert.match(appSource, /setTimeout\(\(\) => setSidebarExpanded\(false\), 250\)/);
   assert.doesNotMatch(appSource, /!\(compactSidebar && sidebarOpen\)/);
   assert.equal((appSource.match(/!sidebarCovers/g) || []).length, 2);
