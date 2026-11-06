@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { JsonObject } from "../api/contracts";
 import type { Language, OriginalUiId, OriginalUiSnapshot, OriginalUiCatalog } from "../types";
 import { readCpaUsage } from "./cpa-usage";
+import { CpaPreviewSpend } from "./CpaPreviewSpend";
 import { attachCpaProviderUsageBridge } from "./cpa-provider-usage-bridge";
 import "./original-ui.css";
 
@@ -279,8 +280,8 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
       ) : null}
       {localError || tool.error ? <p className="original-ui-error">{localError || tool.error}</p> : null}
       {notice ? <p className="original-ui-note">{notice}</p> : null}
-      {/* CPA's per-account tokens, cost and quota are shown by CPA Provider Manager inside the frame,
-          which reads them through the bridge above (cpm:usage:read). */}
+      {toolId === "cpa" ? <CpaPreviewSpend active={ready} zh={language === "zh-TW" || language === "zh-CN"} /> : null}
+      {/* Per-account details remain inside CPA Provider Manager (cpm:usage:read). */}
 
       <div className="original-ui-frame-shell">
         {frameUrl ? (

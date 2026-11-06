@@ -42,7 +42,7 @@ const clawd = load("Clawd.tsx");
 const petHome = load("chat-pet-home.ts");
 const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts"), "./chat-pet-home": petHome, "./page-visibility": visibility });
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
-const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
+const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./chat-transcript": load("chat-transcript.ts", { "./ao-chat": chat }), "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./image-markup": load("image-markup.ts"),
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
@@ -233,7 +233,7 @@ test("ordinary model activity uses specific DeepSeek headings rather than unexpl
   }));
   assert.match(html, /cx-group-verb cx-shimmer">Reading files · README\.md</);
   assert.doesNotMatch(html, /cx-group-verb[^>]*>Working</);
-  assert.match(html, /cx-live-text">README\.md</, "the tool summary shows its path, not Read · Read");
+  assert.doesNotMatch(html, /cx-group-now|cx-tool-io/, "the active tool stays compact until its group is opened");
 });
 
 test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
@@ -559,7 +559,8 @@ test("a folded edit draws its numbered lines only once it is opened", () => {
     tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", busy: false, approvals: [],
     loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} };
   const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props));
-  assert.match(html, /<details class="cx-tool cx-edit tone-ok"><summary>.*app\.ts.*<\/summary><\/details>/, "the row and its counts show, folded");
+  assert.match(html, /cx-group-verb[^>]*>Edited a file</, "the edit is summarized in its compact activity group");
+  assert.match(html, /1 file changed, 1 lines added, 1 lines removed/, "the file totals remain available outside the tool body");
   assert.equal(html.includes("cx-edit-num"), false, "no numbered lines until it opens");
   assert.equal(html.includes("new line"), false, "nor the changed text");
 });
