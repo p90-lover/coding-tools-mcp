@@ -1,0 +1,12 @@
+.workspace.has-chrome-login-notice { display: flex; flex-direction: column; }
+.workspace.has-chrome-login-notice > .surface-transition { flex: 1; min-height: 0; height: 0; }
+.chrome-login-notice { display: flex; flex: none; align-items: center; flex-wrap: wrap; gap: 8px 16px;
+  padding: calc(var(--height-titlebar) + 8px) 16px 10px; border-bottom: 1px solid var(--color-border);
+  background: var(--color-background-control); color: var(--color-text-primary); font-size: 12px; line-height: 1.5; }
+.chrome-login-notice > span { flex: 1 1 260px; }
+.chrome-login-notice strong { display: block; font-weight: 600; }
+.chrome-login-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.chrome-login-actions button { padding: 5px 10px; border: 1px solid var(--color-border); border-radius: 6px;
+  background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.chrome-login-actions button:hover:not(:disabled) { background: var(--color-background-control-hover); }
+.chrome-login-actions button:disabled { cursor: default; opacity: .6; }

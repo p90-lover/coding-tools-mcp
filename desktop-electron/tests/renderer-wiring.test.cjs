@@ -185,7 +185,8 @@ test("a hidden docked sidebar folds to an icon rail that shows the whole panel o
   assert.match(appSource, /if \(!next && !compactSidebar\) setSidebarClosing\(true\);/);
   // AO's view (its own UI, the project board, the Antigravity terminal) steps aside the same way:
   // it covered the hover panel's labels from the rail's edge (2026-11-01).
-  assert.match(appSource, /<section className="workspace">\s*<NativeViewsCoveredContext\.Provider value=\{sidebarCovers \|\| biggerContextRecommendationOpen\}>/);
+  assert.match(appSource, /<section className=\{`workspace\$\{showChromeLoginNotice \? " has-chrome-login-notice" : ""\}`\}>/);
+  assert.match(appSource, /<NativeViewsCoveredContext\.Provider value=\{sidebarCovers \|\| biggerContextRecommendationOpen\}>/);
   const aoViewSource = fs.readFileSync(path.join(launcherRoot, "src", "features", "AgentOrchestratorOriginalSurface.tsx"), "utf8");
   assert.match(aoViewSource, /const covered = laidOver \|\| tabHidden;/);
   assert.match(aoViewSource, /useEffect\(\(\) => \{\s*if \(covered\) return;/);
