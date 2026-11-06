@@ -323,7 +323,7 @@ test("the installed plugin's own name gets the same sign-in, and neither name re
     top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
   const requestHeaders = { Authorization: `Bearer ${marker}` };
   const swapped = { requestHeaders: { Authorization: `Bearer ${SECRET}` } };
-  for (const [path, method] of [["settings", "GET"], ["settings", "PUT"], ["accounts", "GET"]]) {
+  for (const [path, method] of [["settings", "GET"], ["settings", "PUT"], ["accounts", "GET"], ["all-accounts", "GET"], ["review-status", "GET"]]) {
     assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-review-account-selector/${path}`, method, requestHeaders }),
       swapped, `${method} ${path}`);
   }

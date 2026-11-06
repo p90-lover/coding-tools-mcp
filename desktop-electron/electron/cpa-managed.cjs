@@ -221,7 +221,7 @@ const COMMANDCODE_PLUGINS = [
   // falls back to other accounts and models when that one is out of quota. It was installed by hand
   // (0.1.0, one account, no fallback), so an update never brought the fallback version; an older copy
   // under the same id is moved to Trash like the others.
-  { id: "codex-review-account-selector", file: "codex-review-account-selector-v0.2.0-codingtools.1.dll", sha256: "6db11afab12333a1977d997182115a44a2c11d3b11f7a73f072d25d53cdc7cfa" },
+  { id: "codex-review-account-selector", file: "codex-review-account-selector-v0.2.1-codingtools.1.dll", sha256: "c274670fba53a131b69b7246bffcae64114fbb24d89f580be0d5c49614746a62" },
 ];
 
 /** Plugins updated from GitHub by App plugins (app-plugins.cjs), by id; {} when there are none. */
