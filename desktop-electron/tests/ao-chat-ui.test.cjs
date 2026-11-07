@@ -17,7 +17,9 @@ function load(file, imports = {}) {
   return exports;
 }
 const chat = load("ao-chat.ts");
-const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat, "./model-scores": load("model-scores.ts") });
+// The model picker draws logos; markup tests stand them in.
+const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat, "./model-scores": load("model-scores.ts"),
+  "./HarnessLogo": { GroupLogo: () => null, HarnessLogo: () => null, ModelLogo: () => null } });
 const markdown = load("ChatMarkdown.tsx", { "./chat-markdown": load("chat-markdown.ts") });
 
 test("visualize references are inert Markdown unless a completed answer supplies its Preview action", () => {
