@@ -32,6 +32,7 @@ for (const closeFirst of [true, false]) test(`Windows Chrome capture waits for n
     return child as any;
   });
   let offline = false, captured = false;
+  const phases: string[] = [];
   const context = { isClosed: () => false, close: async () => {},
     setOffline: async (value: boolean) => { offline = value; }, route: async () => {},
     pages: () => [{ goto: async () => {}, url: () => CHATGPT_NEW_CHAT_URL }],
@@ -52,15 +53,18 @@ for (const closeFirst of [true, false]) test(`Windows Chrome capture waits for n
   const closeChrome = () => { child.exitCode = 0; child.emit("exit", 0, null); };
   try {
     const pending = captureSystemBrowserLogin({ chromeExecutablePath: executable, storageStatePath: join(root, "state.json") }, {
-      continuation, timeoutMs: 1000, ...(closeFirst ? { proxyServer: "http://127.0.0.1:32123" } : {}),
+      continuation, timeoutMs: 1000, onProgress: phase => phases.push(phase),
+      ...(closeFirst ? { proxyServer: "http://127.0.0.1:32123" } : {}),
     });
     await new Promise(resolve => setTimeout(resolve, 5));
     if (closeFirst) closeChrome(); else continueLogin();
     await new Promise(resolve => setTimeout(resolve, 5));
     expect(captured).toBe(false);
+    expect(phases).toEqual(closeFirst ? [] : ["waiting-for-browser-close"]);
     if (closeFirst) continueLogin(); else closeChrome();
     const result = await pending;
     expect(captured).toBe(true);
+    expect(phases).toEqual(closeFirst ? ["capturing"] : ["waiting-for-browser-close", "capturing"]);
     expect(result.storageState.cookies.map(cookie => cookie.name)).toEqual(["session"]);
     expect(launches).toHaveLength(1);
     expect(launches[0]).toContain(closeFirst ? "--proxy-server=http://127.0.0.1:32123" : "--no-proxy-server");

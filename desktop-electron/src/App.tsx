@@ -18,7 +18,7 @@ import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { bindSidebarPeek } from "./sidebar-peek";
-import { ChromeLoginNotice, chromeLoginPending } from "./ChromeLoginNotice";
+import { ChromeLoginNotice, chromeLoginPending, chromeLoginContinuationPending, chromeLoginWaitingForClose } from "./ChromeLoginNotice";
 import { NetworkProxySurface } from "./features/NetworkProxySurface";
 import { McpTunnelsPanel } from "./features/McpTunnelsPanel";
 import { ExternalServicesSurface } from "./features/ExternalServicesSurface";
@@ -1348,6 +1348,10 @@ function BrowserSurface({
   setError: (error: string | null) => void;
 }) {
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  const passkeyContinuationPending = passkeyContinuationRequested || chromeLoginContinuationPending(operation);
+  const passkeyWaitingForClose = chromeLoginWaitingForClose(operation);
+  const passkeyContinuationLabel = passkeyWaitingForClose ? copy.passkeyWaitingForClose
+    : passkeyContinuationPending ? copy.passkeyImporting : copy.passkeyContinue;
   const visible = browser?.visible === true;
   const manualInteraction = interactionMode === "manual";
   const passkeyAvailable = !manualInteraction
@@ -1414,7 +1418,7 @@ function BrowserSurface({
     void api!.openPasskeyLogin().catch(cause => setError(messageOf(cause)));
   };
   const continuePasskeyLogin = async () => {
-    if (!passkeyWaiting || passkeyContinuationRequested) return;
+    if (!passkeyWaiting || passkeyContinuationPending) return;
     setPasskeyContinuationRequested(true);
     setError(null);
     try {
@@ -1474,12 +1478,12 @@ function BrowserSurface({
         {passkeyAvailable ? (
           <button
             className="toolbar-text-button"
-            disabled={passkeyWaiting && passkeyContinuationRequested}
+            disabled={passkeyWaiting && passkeyContinuationPending}
             onClick={() => void (passkeyWaiting ? continuePasskeyLogin() : openPasskeyLogin())}
             type="button"
           >
             {passkeyWaiting
-              ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
+              ? passkeyContinuationLabel
               : copy.passkeySignIn}
           </button>
         ) : null}
@@ -1549,7 +1553,7 @@ function BrowserSurface({
               ? copy.stepAccountBody
               : browser?.authenticated
               ? copy.noActiveTaskBody
-              : passkeyWaiting ? copy.passkeyContinueBody : copy.stepAccountBody}</p>
+              : passkeyWaiting ? passkeyWaitingForClose ? copy.passkeyWaitingForCloseBody : copy.passkeyContinueBody : copy.stepAccountBody}</p>
             <div className="browser-empty-actions">
               <PrimaryButton disabled={passkeyWaiting} onClick={() => {
                 if (!manualInteraction && browser?.authenticated !== true && platform === "win32") openPasskeyLogin();
@@ -1559,11 +1563,11 @@ function BrowserSurface({
               </PrimaryButton>
               {passkeyAvailable ? (
                 <SecondaryButton
-                  disabled={passkeyWaiting && passkeyContinuationRequested}
+                  disabled={passkeyWaiting && passkeyContinuationPending}
                   onClick={passkeyWaiting ? continuePasskeyLogin : openPasskeyLogin}
                 >
                   {passkeyWaiting
-                    ? passkeyContinuationRequested ? copy.passkeyImporting : copy.passkeyContinue
+                    ? passkeyContinuationLabel
                     : copy.passkeySignIn}
                 </SecondaryButton>
               ) : null}

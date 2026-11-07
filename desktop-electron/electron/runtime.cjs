@@ -323,20 +323,25 @@ class RuntimeHost {
     this.publishOperation?.({
       name: "passkey-login",
       status: "running",
-      message: "Capturing and verifying the passkey session",
+      message: this.platform === "win32"
+        ? "Waiting for the dedicated Chrome window to close before importing"
+        : "Capturing and verifying the Chrome session",
     });
     return new Promise((resolve, reject) => {
-      child.stdin.write(
-        `${JSON.stringify({ version: 1, type: "passkey-login-continue" })}\n`,
-        error => {
-          if (error) {
-            this.passkeyContinuationRequested = false;
-            reject(error);
-          } else {
-            resolve(true);
-          }
-        },
-      );
+      const failed = error => {
+        if (this.active === "passkey-login" && this.activeChild === child) {
+          this.passkeyContinuationRequested = false;
+          this.publishOperation?.({ name: "passkey-login", status: "running",
+            message: "Sign in in Chrome, close the dedicated Chrome window, then return here and choose Continue" });
+        }
+        reject(error);
+      };
+      try {
+        child.stdin.write(
+          `${JSON.stringify({ version: 1, type: "passkey-login-continue" })}\n`,
+          error => { if (error) failed(error); else resolve(true); },
+        );
+      } catch (error) { failed(error); }
     });
   }
 
