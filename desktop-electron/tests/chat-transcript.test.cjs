@@ -56,11 +56,19 @@ test("answered questions and steers are not treated as assistant answer duplicat
   assert.deepEqual(Array.from(transcript.transcriptParts(items, "Yes").items, row => row.id), ["question", "steer"]);
 });
 
-test("completion summary names MCP tools and counts invocations, not polls or approvals", () => {
+test("completion summary counts invocations, not polls or approvals", () => {
   const read = item("read", "tool", "mcp__coding-tools__read_file source.ts");
   const summary = transcript.transcriptSummary([read, read, item("cmd", "tool", "exec_command git status"),
     item("output", "tool", "read_output"), item("search", "tool", "Grep"), item("approve", "approval", "Allowed")]);
-  assert.equal(summary.text, "Ran a command, read a file, searched code, read_output");
+  assert.equal(summary.text, "Ran a command, read a file, searched code, used a tool");
+});
+
+test("the one-line summary counts other tools instead of naming them, and says only how many failed", () => {
+  const summary = transcript.transcriptSummary([item("list", "tool", "ListAgents"),
+    ...[1, 2, 3, 4].map((n) => item(`send${n}`, "tool", "SendMessage", n === 4 ? { status: "failed" } : {})),
+    item("denied", "command", "git push", { approval: "Denied by the reviewer" })]);
+  assert.equal(summary.text, "Ran a command, used 5 tools · 2 failed");
+  assert.doesNotMatch(summary.text, /listagents|sendmessage|×|denied/i, "no raw tool names, tallies or 'failed or denied'");
 });
 
 test("successful file metadata counts even on an MCP tool; failed edits do not", () => {
