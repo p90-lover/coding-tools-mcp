@@ -21,6 +21,9 @@ const ALLOWED = {
   "agent-orchestrator-workflow.cjs": 10, "agent-orchestrator-workspace.cjs": 1, "antigravity-cli.cjs": 19,
   "ao-db-maintenance.cjs": 3, "ao-dependency-links.cjs": 7, "app-handler-paths.cjs": 1, "app-plugins.cjs": 10, "app-update-worker.cjs": 50,
   "app-update.cjs": 19, "atomic-file.cjs": 11, "autostart.cjs": 2, "backend-bundle.cjs": 18, "browser-accounts.cjs": 1,
+  // createBrowserAccountMcpSync (#1089) is a factory named for the account MCP sync, not a synchronous call:
+  // its one match here and its one in main.cjs (counted there) do no disk or process work.
+  "browser-account-mcp.cjs": 1,
   // The prior port record is captured before the first await; ready apps are rejected before IO.
   "browser-debugging.cjs": 1,
   "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 10, "chat-archive.cjs": 4, "chat-edits.cjs": 4,
@@ -29,7 +32,7 @@ const ALLOWED = {
   "codex-thread-accounts.cjs": 2, "codex-thread-stats.cjs": 1, "computer-control.cjs": 4, "cpa-antigravity-reauth.cjs": 4,
   "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 45, "durable-state.cjs": 5, "external-services.cjs": 27,
   "extra-tunnels.cjs": 5, "gpt-browser.cjs": 1, "gui-update.cjs": 12, "headless-host.cjs": 13, "in-use-files.cjs": 4,
-  "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1, "main.cjs": 23,
+  "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1, "main.cjs": 24,
   "managed-components.cjs": 62, "managed-external-services.cjs": 2, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9, "rtk.cjs": 4, "runtime-command.cjs": 6, "runtime-install.cjs": 24,
