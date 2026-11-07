@@ -48,11 +48,13 @@ test("the Browser sidebar still is never covered by a loading panel", () => {
   const surface = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "BrowserSurface");
   assert.ok(surface);
   const jsx = (type, props) => ({ type, props: props || {} }), exports = {};
-  const components = ["BrowserAccountSwitcher", "BrowserAddressBar", "StateDot", "BrandMark", "PrimaryButton", "SecondaryButton", "ManualTurnGuide"];
+  const components = ["BrowserAccountSwitcher", "BrowserAddressBar", "StateDot", "BrandMark", "PrimaryButton", "SecondaryButton", "ManualTurnGuide", "ChromeLoginNotice"];
+  // ChromeLoginNotice.tsx's helpers (#1095): no Chrome sign-in is under way here.
+  const chromeLogin = { chromeLoginPending: () => false, chromeLoginContinuationPending: () => false, chromeLoginWaitingForClose: () => false };
   vm.runInNewContext(ts.transpileModule(surface.getText(file) + "\nexports.BrowserSurface = BrowserSurface;", {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, {
-    exports, api: {}, ...Object.fromEntries(components.map(name => [name, name])), formatBrowserAddress: (url) => url ?? "",
+    exports, api: {}, ...Object.fromEntries(components.map(name => [name, name])), ...chromeLogin, formatBrowserAddress: (url) => url ?? "",
     useState: value => [value, () => {}], useEffect() {},
     require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {},
   });
