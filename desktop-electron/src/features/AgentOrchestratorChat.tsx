@@ -578,7 +578,7 @@ function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { s
   return <div className="cx-work cx-transcript-work">
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       <span className="cx-work-state">{transcriptCompletion(turn)}</span>
-      <span className="cx-work-summary">{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
+      <span className="cx-work-summary" title={work?.length ? summary.text : undefined}>{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
@@ -646,7 +646,9 @@ function TurnWorkSummary({ turn, loadWork }: { turn: ChatTurn; loadWork?: LoadWo
   const unknown = steps.some((step) => step.hasWork && !CHAT_WORK.has(stepWorkKey(step)));
   const items = steps.flatMap((step) => (CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])
     .map((item) => ({ ...item, id: `${step.key}:${item.id}` })));
-  return <span className="cx-work-summary">{unknown ? "Activity not loaded yet" : workSummary(items).text}</span>;
+  const text = unknown ? "Activity not loaded yet" : workSummary(items).text;
+  // One line that ends in an ellipsis when the row is narrow; the whole summary is its tooltip.
+  return <span className="cx-work-summary" title={unknown ? undefined : text}>{text}</span>;
 }
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedReply = false }: WorkGroupProps) {

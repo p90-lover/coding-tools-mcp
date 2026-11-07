@@ -25,8 +25,7 @@ const noun = (count: number, one: string, many = `${one}s`) => `${count === 1 ? 
 export function transcriptSummary(items: ChatLiveItem[]) {
   const unique = [...new Map(items.map((item) => [item.id, item])).values()];
   const files = new Map<string, { path: string; additions: number; deletions: number }>();
-  const tools = new Map<string, number>();
-  let commands = 0, reads = 0, searches = 0, edits = 0, failed = 0;
+  let commands = 0, reads = 0, searches = 0, edits = 0, toolCalls = 0, failed = 0;
   for (const item of unique) {
     if (!["command", "tool", "edit"].includes(item.kind)) continue;
     const bad = FAILED.test(item.status) || /^Denied\b/i.test(item.approval ?? "");
@@ -38,7 +37,7 @@ export function transcriptSummary(items: ChatLiveItem[]) {
     else if (activity === "read") reads++;
     else if (activity === "search") searches++;
     else if (activity === "edit" || activity === "write") edits++;
-    else tools.set(name || "tool", (tools.get(name || "tool") ?? 0) + 1);
+    else toolCalls++;
     // A path in an input is not proof an edit happened. Only successful recorded file metadata is.
     if (bad || !SUCCEEDED.test(item.status)) continue;
     for (const file of item.files ?? []) {
@@ -54,10 +53,11 @@ export function transcriptSummary(items: ChatLiveItem[]) {
     commands ? `ran ${noun(commands, "command")}` : "",
     reads ? `read ${noun(reads, "file")}` : "",
     searches ? `${searches === 1 ? "searched code" : `searched code ${searches} times`}` : "",
-    ...[...tools].slice(0, 3).map(([name, count]) => count > 1 ? `${name} ×${count}` : name),
-    tools.size > 3 ? `${tools.size - 3} more tools` : "",
+    // Other tools are counted, not named: raw names ("listagents, sendmessage ×4") read as noise in
+    // a one-line summary. The row's tooltip (activitySummary) and its open list still name each one.
+    toolCalls ? `used ${noun(toolCalls, "tool")}` : "",
   ].filter(Boolean);
-  const text = [parts.join(", ") || "No tool calls", failed ? `${failed} failed or denied` : ""].filter(Boolean).join(" · ");
+  const text = [parts.join(", ") || "No tool calls", failed ? `${failed} failed` : ""].filter(Boolean).join(" · ");
   const changed = [...files.values()];
   return { text: text[0].toUpperCase() + text.slice(1), files: changed, failed,
     additions: changed.reduce((total, file) => total + file.additions, 0),
