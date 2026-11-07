@@ -203,7 +203,7 @@ test("a custom context window is set without a nested form, so it never submits 
   assert.deepEqual([clicked, stopped, prevented], [1, 1, 1], "Enter applies the size and goes no further");
 });
 
-test("the harness menu is slim: no state words on rows, missing harnesses fold under +N, the pick stays in view", () => {
+test("the harness menu is a strip of logos: no names or state words on rows, every harness in one scrolling column, the pick up top", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const route = { harness_id: "ao:aider", model: "", permission_profile: ":ao-default" };
   const harnesses = [
@@ -216,16 +216,32 @@ test("the harness menu is slim: no state words on rows, missing harnesses fold u
   const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses, loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
   const menu = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState([])), "Harness");
   const list = menu.props.children(() => {});
-  assert.doesNotMatch(text(list), /not installed|sign in/i, "no state words on the rows");
+  assert.equal(text(list), "", "no names or state words on the rows: a logo's name shows in a bubble on hover");
   const rows = optionsIn(menu);
-  assert.deepEqual(rows.map(row => row.props.title), ["Claude Code", "Codex", "Aider · not installed", "Amp · not installed", "Cline · not installed"],
-    "a missing harness says so on hover; one that needs a sign-in shows only its dot; the picked missing harness stays up top");
+  assert.deepEqual(rows.map(row => row.props.ariaLabel), ["Claude Code", "Codex", "Aider · not installed", "Amp · not installed", "Cline · not installed"],
+    "each logo is named for assistive tech and the bubble; the picked missing harness stays up top");
+  assert.ok(rows.every(row => row.props.title === undefined), "no native tooltip on top of the bubble");
   assert.equal(menu.props.showHeading, false, "no Harness title over the list");
   assert.equal(elements(list, item => item.props?.className === "ao-harness-signin").length, 1, "a sign-in dot on the one harness that needs it");
   assert.equal(elements(list, item => item.props?.className === "ao-harness-missing").length, 3, "a red dot on each missing harness");
-  const fold = elements(list, item => item.type === "details")[0];
-  assert.equal(elements(fold, item => item.type === "summary")[0].props["aria-label"], "2 more, not installed", "the other two missing harnesses fold under +2");
-  assert.equal(elements(fold, item => typeof item.type === "function" && item.type.name === "Option").length, 2);
+  assert.equal(elements(list, item => item.type === "details" || item.type === "summary").length, 0, "nothing folds under +N");
+  const column = elements(list, item => item.props?.className === "ao-harness-list")[0];
+  assert.equal(elements(column, item => typeof item.type === "function" && item.type.name === "Option").length, 5, "every harness is in the one column");
+  assert.equal(typeof column.props.onScroll, "function", "scrolling re-marks which ends fade");
+});
+
+test("the harness column fades only the ends with more logos past them", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const list = (scrollTop, clientHeight, scrollHeight) => ({ scrollTop, clientHeight, scrollHeight, dataset: {} });
+  const fade = (...size) => { const item = list(...size); view.exports.fadeEdges(item); return item.dataset.fade; };
+  assert.equal(fade(0, 280, 1086), "bottom", "at the top, only the bottom fades");
+  assert.equal(fade(400, 280, 1086), "both");
+  assert.equal(fade(806, 280, 1086), "top", "at the end, only the top fades");
+  assert.equal(fade(0, 280, 280), "", "a list that fits fades nowhere");
+  assert.doesNotThrow(() => view.exports.fadeEdges(null));
+  const css = fs.readFileSync(path.resolve(__dirname, "../src/features/agent-orchestrator.css"), "utf8");
+  for (const end of ["top", "bottom", "both"]) assert.match(css, new RegExp(`\\.ao-harness-list\\[data-fade="${end}"\\]\\s*\\{\\s*mask-image:`), end);
+  assert.match(css, /\.ao-composer-popover\.ao-harness-popup\s*\{[^}]*overflow:\s*visible/, "the panel never clips the name bubble; the column scrolls");
 });
 
 test("unpicked, the effort chip names the model's own effort and the model chip shows no provider", () => {
