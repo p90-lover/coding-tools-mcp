@@ -1387,6 +1387,150 @@ test("Chrome capture refuses an unrepresentable proxy route before opening a bro
   await assert.rejects(fixture.capturePasskeyLogin({ proxyRules: "PROXY proxy.invalid:1234; DIRECT" }), /cannot reproduce/);
 });
 
+function heldFolderError(target) {
+  // The shape Node reports when Windows refuses to delete a folder another process holds open.
+  return Object.assign(new Error(`EPERM, Permission denied: ${target}`), { code: "EPERM", path: target });
+}
+
+async function passkeyTransferFixture(name) {
+  const root = path.resolve(__dirname, "../../aiTemp/passkey-transfer-tests", `${name}-${process.pid}`);
+  fs.rmSync(root, { recursive: true, force: true });
+  const parent = path.join(root, "passkey-login");
+  fs.mkdirSync(parent, { recursive: true });
+  const warnings = [];
+  const host = new RuntimeHost({
+    app: { getPath: () => root, isPackaged: false },
+    logger: { info() {}, warn: (event, details) => warnings.push({ event, details }), error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: path.join(root, "launcher-browser.json"),
+    platform: "darwin",
+    supervisor: { readConfig: () => ({}), readSetupConfig: () => ({}) },
+  });
+  await host.startupPasskeyCleanup;
+  host.passkeyChromeExecutable = () => "fixture-chrome";
+  host.launcherControlEnvironment = () => ({});
+  const writeCapture = (args) => {
+    const statePath = args[args.indexOf("--storage-state") + 1];
+    fs.writeFileSync(statePath, `${JSON.stringify({ cookies: [], origins: [] })}\n`);
+    fs.writeFileSync(`${statePath}.verified.json`, `${JSON.stringify({
+      version: 1,
+      captureComplete: true,
+      source: "isolated-normal-browser-profile",
+      capturedAt: new Date().toISOString(),
+    })}\n`);
+    return path.dirname(statePath);
+  };
+  return { root, parent, host, warnings, writeCapture };
+}
+
+async function withHeldFolders(isHeld, body) {
+  const realRm = fs.promises.rm;
+  const calls = [];
+  fs.promises.rm = async (target, options) => {
+    calls.push({ target, options });
+    if (isHeld(target)) throw heldFolderError(target);
+    return realRm(target, options);
+  };
+  try {
+    return await body(calls);
+  } finally {
+    fs.promises.rm = realRm;
+  }
+}
+
+test("a second Chrome sign-in while one is open says so and leaves the open attempt's folder alone", async () => {
+  const { root, parent, host } = await passkeyTransferFixture("second-attempt");
+  const openAttempt = path.join(parent, "transfer-OpenOne");
+  fs.mkdirSync(path.join(openAttempt, "login-profile-abc"), { recursive: true });
+  host.active = "passkey-login";
+  host.run = async () => assert.fail("must not start a second dedicated Chrome");
+  try {
+    await withHeldFolders(target => target === openAttempt, async (calls) => {
+      await assert.rejects(host.capturePasskeyLogin(), (error) => {
+        assert.match(error.message, /Chrome sign-in is already open/);
+        assert.doesNotMatch(error.message, /EPERM/);
+        return true;
+      });
+      assert.deepEqual(calls, []);
+    });
+    assert.equal(fs.existsSync(openAttempt), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a held leftover transfer folder never blocks a new Chrome sign-in", async () => {
+  const { root, parent, host, warnings, writeCapture } = await passkeyTransferFixture("held-leftover");
+  const leftover = path.join(parent, "transfer-Omtvex");
+  fs.mkdirSync(path.join(leftover, "login-profile-1e6tgF"), { recursive: true });
+  let transferRoot;
+  host.run = async (_name, args) => {
+    transferRoot = writeCapture(args);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  try {
+    await withHeldFolders(target => target === leftover, async (calls) => {
+      const transfer = await host.capturePasskeyLogin();
+      assert.deepEqual(transfer.storageState, { cookies: [], origins: [] });
+      const leftoverCall = calls.find(call => call.target === leftover);
+      assert.equal(leftoverCall.options.maxRetries > 0, true, "a briefly held folder is retried");
+      assert.equal(warnings.some(warning => warning.event === "runtime.passkey_transfer_cleanup_deferred"
+        && warning.details.code === "EPERM"), true);
+      await transfer.cleanup();
+    });
+    assert.equal(fs.existsSync(transferRoot), false);
+    assert.equal(fs.existsSync(leftover), true, "the held folder waits for the next sign-in or app start");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed Chrome sign-in reports its own error, not EPERM from a still-held folder", async () => {
+  const { root, host, warnings } = await passkeyTransferFixture("failed-attempt");
+  let transferRoot;
+  host.run = async (_name, args) => {
+    transferRoot = path.dirname(args[args.indexOf("--storage-state") + 1]);
+    throw new Error("Dedicated Chrome did not close normally; sign in again before continuing");
+  };
+  try {
+    await withHeldFolders(target => target === transferRoot, async () => {
+      await assert.rejects(host.capturePasskeyLogin(), /Dedicated Chrome did not close normally/);
+    });
+    assert.equal(warnings.some(warning => warning.event === "runtime.passkey_transfer_cleanup_deferred"), true);
+    // The next attempt removes the folder once Windows lets go of it.
+    host.run = async () => { throw new Error("stop after cleanup"); };
+    await assert.rejects(host.capturePasskeyLogin(), /stop after cleanup/);
+    assert.equal(fs.existsSync(transferRoot), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("removing a held transfer after an import explains the hold instead of a raw EPERM", async () => {
+  const { root, host, writeCapture } = await passkeyTransferFixture("held-after-import");
+  let transferRoot;
+  host.run = async (_name, args) => {
+    transferRoot = writeCapture(args);
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  try {
+    const transfer = await host.capturePasskeyLogin();
+    // Another account's sign-in starting before this import finishes must not take the folder.
+    host.run = async () => { throw new Error("second account stops after cleanup"); };
+    await assert.rejects(host.capturePasskeyLogin(), /second account stops after cleanup/);
+    assert.equal(fs.existsSync(path.join(transferRoot, "storage-state.json")), true);
+    await withHeldFolders(target => target === transferRoot, async () => {
+      await assert.rejects(transfer.cleanup(), (error) => {
+        assert.match(error.message, /^Windows is still using the temporary Chrome sign-in folder/);
+        assert.equal(error.code, "EPERM");
+        return true;
+      });
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("passkey Continue is delivered only to the active owned login child", async () => {
   const fixture = hostFor(null).host;
   let written = "";
