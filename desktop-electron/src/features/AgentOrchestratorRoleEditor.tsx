@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 import { chatWorkingDetail, type ChatActivity } from "./ao-chat";
-import { bestScored, scoreBadge, scoreText, SCORE_CATEGORY_LABELS, type ModelScoreHint } from "./model-scores";
+import { scoreBadge, type ModelScoreHint } from "./model-scores";
+import { GroupLogo, HarnessLogo, ModelLogo } from "./HarnessLogo";
 
 export type RoleSettings = { name: string; specialty: string; instructions: string; expected_output: string; working_directory: string; revision: number; auto_decide?: boolean; role_name?: string };
 export type AoTeam = { id: string; workspace_id: string; name: string; revision: number; worker_limit: number; max_review_rounds?: number; review_loop?: boolean; link_points?: Record<string, { x: number; y: number }>; is_default?: boolean; editable_graph?: boolean; nodes: AoNode[]; permission_selections?: Record<string, { permission_profile?: string; approval_policy?: string; approvals_reviewer?: string }> };
@@ -281,6 +282,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   codex: "Codex", openai: "OpenAI", claude: "Claude", anthropic: "Anthropic", "cline-pass": "Cline Pass", cline: "Cline",
   qwen: "Qwen", iflow: "iFlow", kimi: "Kimi", moonshot: "Moonshot", deepseek: "DeepSeek", xai: "xAI", grok: "Grok",
   zhipu: "Zhipu", glm: "Zhipu", openrouter: "OpenRouter", commandcode: "CommandCode", "commandcode-go": "CommandCode Go", "opencode-go": "OpenCode Go", stepfun: "StepFun",
+  minimax: "MiniMax", mistral: "Mistral",
 };
 const providerName = (provider: string) => PROVIDER_NAMES[provider.toLowerCase()] ?? provider;
 /** The CPA provider serving a "cpa/<id>" route model (as CPA reported it, else the id's own prefix); null for other models. */
@@ -408,69 +410,102 @@ export async function pickerModels(harness: string, loadModels: AoModelLoader, a
   return { ...catalog, models: [...new Set([...catalog.models, ...webItems])].filter(model => !agentsOnly || !isWebModel(model)) };
 }
 
+/** The agents a model several of them run is put on, after the card's own agent: Native Codex last. */
+const PICKER_ORDER = [DEFAULT_WORKER_HARNESS, "ao:codex", "ao:opencode"];
+/** One model in the card's list, with every agent that runs it and what each says it takes. */
+export type PickerChoice = { model: string; harnesses: string[]; capabilities: Record<string, AoModelCapabilities | undefined> };
+
 /**
- * Under the model picker: how the chosen model scored in finished Team rounds, and the listed models
- * that scored best, each one click away. Nothing until some model has been scored.
+ * One model list across every installed agent, as the Subagents page has it: one agent's list
+ * alone left out Antigravity's Gemini models unless that agent was picked first. Each model is
+ * listed once, with the agents that run it, the card's own agent first. Native Codex adds its
+ * WebGPT models; its CPA pool ids (bare names) only when the card is on it, or they'd repeat every
+ * "cpa/" model.
  */
-function ModelScoreNote({ model, models, scores, disabled, onPick }: {
-  model: string; models: string[]; scores: Record<string, ModelScoreHint> | undefined; disabled: boolean; onPick: (model: string) => void;
-}) {
-  const best = bestScored(models, scores);
-  if (!best.length) return null;
-  const own = scores?.[model];
-  return <p className="ao-hint ao-wide ao-score-note" role="note">
-    {own && own.overall !== null
-      ? <>Team score {scoreText(own.overall)}/10 over {own.missions} mission{own.missions === 1 ? "" : "s"} (recent {scoreText(own.recent)})
-        {own.strengths.length ? `, strongest at ${own.strengths.map(category => SCORE_CATEGORY_LABELS[category]).join(" and ")}` : ""}. </>
-      : <>{modelLabel(model) || "This model"} has no Team score yet. </>}
-    {best.some(entry => entry.model !== model) ? <>Best scored here:{" "}
-      {best.filter(entry => entry.model !== model).map(entry => <button key={entry.model} type="button" className="button-secondary ao-score-pick" disabled={disabled}
-        title={`${modelLabel(entry.model)}: average ${scoreText(entry.hint.overall)}, recent ${scoreText(entry.hint.recent)}, ${entry.hint.missions} missions`}
-        onClick={() => onPick(entry.model)}>{modelShortLabel(entry.model).name} ★ {scoreText(entry.hint.recent ?? entry.hint.overall)}</button>)}</> : null}
-  </p>;
+export function pickerChoices(current: string, catalogs: ReadonlyArray<{ harness: string; catalog: AoModelCatalog }>): PickerChoice[] {
+  const rank = (harness: string) => harness === current ? -1 : harness === NATIVE_HARNESS ? PICKER_ORDER.length + 1
+    : PICKER_ORDER.includes(harness) ? PICKER_ORDER.indexOf(harness) : PICKER_ORDER.length;
+  const byModel = new Map<string, PickerChoice>();
+  for (const { harness, catalog } of [...catalogs].sort((a, b) => rank(a.harness) - rank(b.harness))) {
+    for (const model of catalog.models) {
+      if (!model || model === AGENT_DEFAULT_MODEL) continue;
+      if (harness === NATIVE_HARNESS && current !== NATIVE_HARNESS && !isWebModel(model)) continue;
+      const choice = byModel.get(model) ?? { model, harnesses: [], capabilities: {} };
+      if (!choice.harnesses.includes(harness)) choice.harnesses.push(harness);
+      choice.capabilities[harness] = catalog.capabilities?.[model];
+      byModel.set(model, choice);
+    }
+  }
+  return [...byModel.values()];
 }
 
-/** Harness + model pickers shared by the inspector, New mission and Add worker sheets. */
-export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, hidePermissionNote = false, agentsOnly = false, compact = false }: {
+/** A list row: the group it sits under (who serves it) and the model's own name. */
+export function pickerRow(model: string, harness: string, harnesses: AoHarness[]): { group: string; name: string } {
+  if (isWebModel(model)) return { group: "Web GPT", name: modelLabel(model.replace(/^cpa\//, "")) };
+  const short = modelShortLabel(model, harness === NATIVE_HARNESS);
+  if (short.group) return { group: short.group.replace(/ · CPA$/, "").replace(/^CPA$/, "Other"), name: short.name };
+  return { group: harnessLabel(harness, harnesses), name: prettyModelName(model) };
+}
+
+const effortName = (effort: string) => effort ? effort[0].toUpperCase() + effort.slice(1) : effort;
+
+/**
+ * A card's model: one button with the model's logo that opens the list of every agent's models,
+ * then its effort and context window as two slim boxes, offered only where the model takes them.
+ * A model more than one agent runs shows those agents' logos to switch between; the picked model
+ * otherwise runs on the card's agent, or on the first agent that lists it. Shared by the role
+ * editor, the Team page's cards and the New mission and Add worker sheets.
+ */
+export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled = false, hideModel = false, agentsOnly = false }: {
   route: AoRoute; harnesses: AoHarness[]; disabled?: boolean; hideModel?: boolean; hidePermissionNote?: boolean; agentsOnly?: boolean;
-  /** Model rows by their name only (no "CPA · provider ·" or capability text) and no tuning fine print. */
+  /** Kept for callers; the list always shows names only. */
   compact?: boolean;
   loadModels: AoModelLoader;
   onChange: (route: AoRoute) => void;
 }) {
-  const [models, setModels] = useState<string[] | null>(null);
-  const [capabilities, setCapabilities] = useState<{ harness: string; models: Record<string, AoModelCapabilities> } | null>(null);
-  const [scores, setScores] = useState<Record<string, ModelScoreHint> | undefined>(undefined);
-  const [notice, setNotice] = useState("");
   const harness = route.harness_id;
+  const native = harness === NATIVE_HARNESS;
+  // Every runnable agent's list, the card's own agent always among them, and Native Codex's for
+  // WebGPT (the Subagents page, agents only, leaves Native Codex out).
+  const agents = [...new Set([harness, ...harnesses.filter(item => item.runnable).map(item => item.id), NATIVE_HARNESS])]
+    .filter(id => !agentsOnly || id !== NATIVE_HARNESS);
+  const agentsKey = agents.join(",");
+  const [catalogs, setCatalogs] = useState<Array<{ harness: string; catalog: AoModelCatalog }> | null>(null);
+  const [notice, setNotice] = useState("");
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   useEffect(() => {
     let live = true;
-    setModels(null); setCapabilities(null); setScores(undefined); setNotice("");
-    pickerModels(harness, loadModels, agentsOnly).then(catalog => {
-      if (!live) return;
-      setModels(catalog.models);
-      setCapabilities({ harness, models: catalog.capabilities ?? {} });
-      setScores(catalog.scores);
-      rememberCpaProviders(catalog.capabilities);
-    })
-      .catch(cause => { if (live) { setModels([]); setNotice(cause instanceof Error ? cause.message : String(cause)); } });
+    setNotice("");
+    void Promise.allSettled(agents.map(id => loadModels(id).then(items => ({ harness: id, catalog: Array.isArray(items) ? { models: items } : items }))))
+      .then(results => {
+        if (!live) return;
+        const loaded = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
+        for (const { catalog } of loaded) rememberCpaProviders(catalog.capabilities);
+        const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+        // Only the card's own agent failing is worth a word: the others just add fewer models.
+        if (failed && !loaded.some(item => item.harness === harness)) setNotice(failed.reason instanceof Error ? failed.reason.message : String(failed.reason));
+        setCatalogs(loaded);
+      });
     return () => { live = false; };
-  }, [harness, loadModels, agentsOnly]);
-  const [query, setQuery] = useState("");
-  // The current model always stays listed, whatever the search.
-  const shown = (models ?? []).filter(model => model === route.model || !query.trim()
-    || `${model} ${modelLabel(model, harness === NATIVE_HARNESS && !isWebModel(model))}`.toLowerCase().includes(query.trim().toLowerCase()));
-  const known = harnesses.some(item => item.id === harness);
-  const native = harness === NATIVE_HARNESS;
-  const capability = capabilities?.harness === harness ? capabilities.models[route.model] : undefined;
-  // A saved model the harness no longer lists: nothing about it can be verified, so say why
-  // instead of offering only a disabled "unverified" effort.
-  const missing = !native && models !== null && models.length > 0 && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !models.includes(route.model);
+  }, [agentsKey, loadModels]);
+  const choices = catalogs ? pickerChoices(harness, catalogs) : null;
+  const catalogOf = (id: string) => catalogs?.find(item => item.harness === id)?.catalog;
+  // Capabilities only from the card's own agent once it answered: another agent's never authorize it.
+  const own = catalogOf(harness);
+  const listed = own?.capabilities;
+  const capability = listed?.[route.model];
+  const scores = Object.assign({}, ...(catalogs ?? []).map(item => item.catalog.scores ?? {})) as Record<string, ModelScoreHint>;
+  // A saved model the card's agent no longer lists: say so, and offer the same model elsewhere.
+  const missing = !native && Boolean(own?.models.length) && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !own!.models.includes(route.model);
   const { efforts, nativeMax, context, fullLimit, presets, fixed } = routeTuning(route, capability);
-  // Only WebGPT has Native Codex's own efforts; a CPA model there shows what CPA advertised, as on an agent.
   const webEffort = native && isWebModel(route.model);
-  // The catalog a new model is picked from, so the carried window fits it (withTuning).
-  const listed = capabilities?.harness === harness ? capabilities.models : undefined;
+  const pick = (model: string, agent?: string) => {
+    const choice = choices?.find(item => item.model === model);
+    const next = agent ?? (choice && !choice.harnesses.includes(harness) ? choice.harnesses[0] : harness);
+    onChange(withTuning(workerRoute(next, model, nativePermission(route)), route, catalogOf(next)?.capabilities));
+    setOpen(false); setQuery("");
+  };
   // What is being typed stays local until it is a whole number in range: a half-typed "1" of
   // "1000000" would otherwise reach the route (and a saved team's autosave) and be refused.
   const [contextDraft, setContextDraft] = useState<string | null>(null);
@@ -491,76 +526,84 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
     if (settled !== route.context_window) onChange({ ...route, context_window: settled });
   };
   const presetsId = `context-presets-${harness}-${route.model}`.replace(/[^\w-]/g, "-");
-  return <>
-    <label>Harness<select value={harness} disabled={disabled || isWebModel(route.model)} title={isWebModel(route.model) ? "WebGPT requires Native Codex" : undefined} onChange={event => {
-      // Start each harness on an explicit model; an agent without a known one shows "Choose a model".
-      const next = event.target.value;
-      const model = next === NATIVE_HARNESS ? WEB_ROUTE.model : next === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
-      onChange(withTuning(workerRoute(next, model, nativePermission(route)), route));
-    }}>
-      {!known ? <option value={harness}>{harnessLabel(harness, harnesses)}</option> : null}
-      {harnesses.map(item => <option key={item.id} value={item.id} disabled={!item.runnable}>
-        {item.label}{!item.runnable ? " · not installed" : item.authStatus === "unauthorized" ? " · sign in" : item.chat === false ? " · terminal" : ""}
-      </option>)}
-    </select></label>
-    {!hideModel && (models?.length ?? 0) > 6 ? <label>Find a model<input type="search" aria-label="Search models" placeholder="Search models…"
-      value={query} onChange={event => setQuery(event.target.value)} /></label> : null}
-    {!hideModel ? <label>Model<select value={route.model} disabled={disabled || models === null} onChange={event => onChange(withTuning(workerRoute(route.harness_id, event.target.value, nativePermission(route)), route, listed))}>
-      {!route.model || route.model === AGENT_DEFAULT_MODEL
-        ? <option value={route.model} disabled>Choose a model{route.model ? " (\"default\" is not allowed)" : ""}</option>
-        : models && !models.includes(route.model) ? <option value={route.model}>{route.model} (no longer listed)</option> : null}
-      {models === null ? <option value={route.model}>{route.model || "Loading"}</option> : null}
-      {shown.map(model => <option key={model} value={model}>
-        {compact ? modelShortLabel(model, native && !isWebModel(model)).name
-          : <>{modelLabel(model, native && !isWebModel(model))}{harness !== NATIVE_HARNESS && isWebModel(model) ? " · switches to Native Codex"
-            : capabilities?.harness === harness && capabilityText(capabilities.models[model], native && isWebModel(model)) ? ` · ${capabilityText(capabilities.models[model], native && isWebModel(model))}` : ""}</>}
-        {scoreBadge(scores?.[model]) ? ` · ${scoreBadge(scores?.[model])}` : ""}
-      </option>)}
-    </select></label> : null}
-    {!hideModel && !compact ? <ModelScoreNote model={route.model} models={models ?? []} scores={scores} disabled={disabled}
-      onPick={model => onChange(withTuning(workerRoute(route.harness_id, model, nativePermission(route)), route, listed))} /> : null}
-    {!hidePermissionNote ? harness === NATIVE_HARNESS ? <p className="ao-hint">Native permission: {nativePermission(route) || "Unknown"}. Change it in the chat composer's permissions menu.</p>
-      : <p className="ao-hint">WebGPT runs only on Native Codex. Choosing a WebGPT model switches to it, and other models run here. Native permissions don't apply on this agent.</p> : null}
-    <fieldset className="ao-route-tuning"><legend>Model tuning</legend>
-    <label title={webEffort ? "Reasoning effort for this card" : capability?.effortReason || (efforts ? efforts.length ? "Efforts this model supports" : "This model has no effort setting" : "Model capabilities unknown")}>Reasoning effort
-      <select value={route.effort ?? ""} disabled={disabled || !efforts?.length} aria-invalid={!webEffort && Boolean(route.effort) && Boolean(efforts) && !efforts?.includes(route.effort!)}
+  const chosen = route.model && route.model !== AGENT_DEFAULT_MODEL ? pickerRow(route.model, harness, harnesses).name : "";
+  const runners = choices?.find(item => item.model === route.model)?.harnesses ?? [];
+  const search = query.trim().toLowerCase();
+  const groups = new Map<string, PickerChoice[]>();
+  for (const choice of choices ?? []) {
+    const row = pickerRow(choice.model, choice.harnesses[0], harnesses);
+    if (search && !`${choice.model} ${row.name} ${row.group}`.toLowerCase().includes(search)) continue;
+    groups.set(row.group, [...groups.get(row.group) ?? [], choice]);
+  }
+  // The why of a disabled or limited box is in its tooltip, not printed under it.
+  const effortTitle = webEffort ? "Reasoning effort" : capability?.effortReason || (efforts ? efforts.length ? "Reasoning effort" : "This model has no effort setting" : "Model capabilities unknown");
+  const contextTitle = fixed ? capability?.contextReason || "WebGPT's window is the Codex bridge's"
+    : native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})`
+    : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit"
+      : `Client context budget in tokens${capability?.contextLimit ? `, up to ${tokensLabel(capability.contextLimit)}` : ""}` : "This agent can't set a context window");
+  return <div className="ao-route-picker ao-wide">
+    <div className="ao-route-bar">
+      {!hideModel ? <button type="button" className={`ao-route-model${missing ? " is-warning" : ""}`} aria-label="Model" aria-haspopup="listbox" aria-expanded={open}
+        title={route.model ? [modelLabel(route.model, native && !isWebModel(route.model)), route.model].join("\n") : undefined}
+        disabled={disabled} onClick={() => setOpen(value => !value)}>
+        {chosen ? <ModelLogo model={route.model} label={chosen} size={14} /> : null}
+        <span>{chosen || (choices === null ? "Loading…" : "Choose a model")}</span>
+        <i className="ao-route-caret" aria-hidden="true" />
+      </button> : null}
+      {runners.length > 1 ? <span className="ao-route-agents" role="radiogroup" aria-label="Runs on">
+        {runners.map(id => <button key={id} type="button" role="radio" aria-checked={id === harness} aria-label={harnessLabel(id, harnesses)}
+          title={harnessLabel(id, harnesses)} disabled={disabled} onClick={() => { if (id !== harness) pick(route.model, id); }}>
+          <HarnessLogo harnessId={id} label={harnessLabel(id, harnesses)} size={14} /></button>)}
+      </span> : null}
+      {efforts?.length || route.effort !== undefined ? <select className="ao-route-effort" aria-label="Reasoning effort" title={effortTitle}
+        value={route.effort ?? ""} disabled={disabled || !efforts?.length}
+        aria-invalid={!webEffort && Boolean(route.effort) && Boolean(efforts) && !efforts?.includes(route.effort!)}
         onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
-        <option value="">{webEffort ? "Model default" : efforts ? efforts.length ? "Model default" : "Not supported" : missing ? "Choose a listed model" : "Capabilities unverified"}</option>
-        {!webEffort && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{route.effort} (saved, unverified or unsupported)</option> : null}
-        {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effort}</option>)}
-      </select></label>
-    <label title={fixed ? capability?.contextReason || "WebGPT's window is the Codex bridge's" : native ? `Context window in tokens (4,096 to ${nativeMax.toLocaleString("en-US")})` : capability?.contextReason || (context ? context.kind === "compaction" ? "Client compaction threshold in tokens, not the model context limit" : "Client context budget in tokens, not a larger provider limit" : "This agent can't set a context window")}>Context window
-      {/* Typed freely: 272000, 272,000, 272k or 1m; the list offers sizes the model takes. */}
-      <input type="text" inputMode="numeric" list={presets.length ? presetsId : undefined} disabled={disabled || !context || Boolean(fixed)}
-        placeholder={fixed ? `Codex bridge · ${contextText(fixed)}` : !context ? "No verified override" : native ? "Model default"
-          : fullLimit ? `Full model limit · ${contextText(fullLimit)}` : `Agent default${context.max ? ` · up to ${contextText(context.max)}${capability?.contextLimit ? "" : " (limit not reported)"}` : ""}`}
-        value={contextDraft ?? (route.context_window !== undefined ? contextText(route.context_window) : "")}
-        aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(parseTokens(contextDraft) ?? Number.NaN)
-          || !native && Boolean(context) && route.context_window !== undefined && !inRange(route.context_window)}
-        onChange={event => typeContext(event.target.value)}
-        // Leaving the field settles a value outside the model's range to the nearest limit.
-        onBlur={settleContext} />
-      {presets.length ? <datalist id={presetsId}>{presets.map(tokens => <option key={tokens} value={contextText(tokens)} />)}</datalist> : null}</label>
-    {/* A CPA model on Native Codex can hold an effort it does not take, behind a disabled select. */}
-    {(!native || !webEffort && route.effort !== undefined) && (route.effort !== undefined || route.context_window !== undefined) ? <button type="button" className="button-secondary ao-wide"
-      disabled={disabled} title="Clear effort and context window" onClick={() => {
-        const next = { ...route }; delete next.effort; delete next.context_window; onChange(next);
-      }}>Model defaults</button> : null}
-    {missing ? <p className="ao-hint ao-wide" role="status">{modelLabel(route.model)} is no longer listed for this agent. A task with its effort or context window set won't start.
-      {sameModelElsewhere(route.model, models ?? []).map(other => <button key={other} type="button" className="button-secondary" disabled={disabled}
-        onClick={() => onChange(withTuning(workerRoute(route.harness_id, other, nativePermission(route)), route, listed))}>Use {modelLabel(other)}</button>)}</p> : null}
-    {compact ? null : <p className="ao-hint ao-wide">{fixed
-      ? `Context window: ${fixed.toLocaleString("en-US")} tokens, the Codex bridge's (ChatGPT's own limit).`
-      : native
-      ? `${!webEffort && !efforts?.length ? `${capability?.effortReason || "This model has no effort setting."} ` : ""}Context window: 4,096–${nativeMax.toLocaleString("en-US")} tokens${capability?.contextLimit ? ", this model's limit" : ""}. Blank uses the model default.`
-      : [capability?.effortReason || (!efforts ? "Effort support is unknown." : !efforts.length ? "This model has no effort setting." : ""),
-          capability?.contextReason || (!context ? "This agent can't set a context window." : context.kind === "compaction"
-            ? "Context sets the client compaction threshold, not a thinking budget or output limit."
-            : "Context sets the client budget, not a thinking budget or a larger provider limit."),
-          capability?.contextLimit ? `Model context limit: ${tokensLabel(capability.contextLimit)} tokens.` : ""].filter(Boolean).join(" ")}</p>}
-    </fieldset>
+        <option value="">Effort</option>
+        {!webEffort && route.effort && !efforts?.includes(route.effort) ? <option value={route.effort} disabled>{effortName(route.effort)} (not offered)</option> : null}
+        {(efforts ?? []).map(effort => <option key={effort} value={effort}>{effortName(effort)}</option>)}
+      </select> : null}
+      {context || fixed || route.context_window !== undefined ? <>
+        {/* Typed freely: 272000, 272,000, 272k or 1m; the list offers sizes the model takes. */}
+        <input className="ao-route-context" type="text" inputMode="numeric" aria-label="Context window" title={contextTitle}
+          list={presets.length ? presetsId : undefined} disabled={disabled || !context || Boolean(fixed)}
+          placeholder={fixed ? contextText(fixed) : fullLimit ? contextText(fullLimit) : "Context"}
+          value={contextDraft ?? (route.context_window !== undefined ? contextText(route.context_window) : "")}
+          aria-invalid={contextDraft !== null && contextDraft.trim() !== "" && !inRange(parseTokens(contextDraft) ?? Number.NaN)
+            || !native && Boolean(context) && route.context_window !== undefined && !inRange(route.context_window)}
+          onChange={event => typeContext(event.target.value)}
+          // Leaving the field settles a value outside the model's range to the nearest limit.
+          onBlur={settleContext} />
+        {presets.length ? <datalist id={presetsId}>{presets.map(tokens => <option key={tokens} value={contextText(tokens)} />)}</datalist> : null}
+      </> : null}
+      {/* A CPA model on Native Codex can hold an effort it does not take, behind a disabled select. */}
+      {(!native || !webEffort && route.effort !== undefined) && (route.effort !== undefined || route.context_window !== undefined)
+        ? <button type="button" className="ao-route-reset" aria-label="Model defaults" title="Clear effort and context window" disabled={disabled}
+          onClick={() => { const next = { ...route }; delete next.effort; delete next.context_window; onChange(next); }}>↺</button> : null}
+    </div>
+    {open && !hideModel ? <div className="ao-route-list" role="listbox" aria-label="Models">
+      {(choices?.length ?? 0) > 8 ? <input type="search" className="ao-route-search" aria-label="Search models" placeholder="Search"
+        value={query} onChange={event => setQuery(event.target.value)} /> : null}
+      {choices === null ? <p className="ao-route-empty" role="status">Loading…</p> : [...groups].map(([group, items]) => <div key={group} className="ao-route-group" role="group" aria-label={group}>
+        <h4><GroupLogo group={group} />{group}</h4>
+        {items.map(choice => {
+          const row = pickerRow(choice.model, choice.harnesses[0], harnesses);
+          const badge = scoreBadge(scores[choice.model]);
+          return <button key={choice.model} type="button" role="option" aria-selected={choice.model === route.model} className="ao-route-option" data-model={choice.model}
+            title={[modelLabel(choice.model, choice.harnesses[0] === NATIVE_HARNESS && !isWebModel(choice.model)), choice.model,
+              capabilityText(choice.capabilities[choice.harnesses[0]], choice.harnesses[0] === NATIVE_HARNESS && isWebModel(choice.model))].filter(Boolean).join("\n")}
+            disabled={disabled} onClick={() => pick(choice.model)}>
+            <ModelLogo model={choice.model} label={row.name} size={14} /><span>{row.name}</span>{badge ? <small>{badge}</small> : null}
+          </button>;
+        })}
+      </div>)}
+      {choices !== null && !groups.size ? <p className="ao-route-empty" role="status">No models</p> : null}
+    </div> : null}
+    {missing ? <p className="ao-hint" role="status">Not on this agent.
+      {sameModelElsewhere(route.model, own?.models ?? []).map(other => <button key={other} type="button" className="button-secondary ao-score-pick" disabled={disabled}
+        onClick={() => pick(other, harness)}>Use {modelLabel(other)}</button>)}</p> : null}
     {notice ? <p className="ao-hint" role="status">{notice}</p> : null}
-  </>;
+  </div>;
 }
 
 export function AgentOrchestratorRoleEditor({ node, mission, draft, harnesses, loadModels, busy = false, change, apply, status, discard, taskName, template = false, activity }: {

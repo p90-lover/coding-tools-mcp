@@ -81,16 +81,20 @@ test("a WebGPT model always gets the Native Codex route", () => {
   assert.equal(editor.isWebModel("gpt-5.5"), false);
 });
 
-// The model list on every other harness also offers WebGPT (from Native Codex's list), so a
-// WebGPT model can be picked anywhere and the card then moves to Native Codex.
-test("every harness lists the WebGPT models and marks that they switch to Native Codex", () => {
-  assert.match(source, /loadModels\(NATIVE_HARNESS\)\.then\(items => \(Array\.isArray\(items\) \? items : items\.models\)\.filter\(isWebModel\)/);
-  assert.match(source, /models: \[\.\.\.new Set\(\[\.\.\.catalog\.models, \.\.\.webItems\]\)\]/, "no duplicate WebGPT rows");
-  assert.match(source, /isWebModel\(model\) \? " · switches to Native Codex"/);
-  assert.match(source, /WebGPT runs only on Native Codex\. Choosing a WebGPT model switches to it/);
-  // The model select routes the pick through workerRoute (which forces Native Codex for WebGPT),
-  // keeping the card's effort and context where they apply.
-  assert.match(source, /onChange=\{event => onChange\(withTuning\(workerRoute\(route\.harness_id, event\.target\.value, nativePermission\(route\)\), route(?:, listed)?\)\)\}/);
+// The card's model list merges every agent's list (Antigravity's Gemini included) with Native
+// Codex's WebGPT models, so a WebGPT model can be picked anywhere and the card then moves to Native Codex.
+test("every harness lists every agent's models and the WebGPT models, each once", () => {
+  const choices = plain(editor.pickerChoices("ao:claude-code", [
+    { harness: "codex-native", catalog: { models: ["chatgpt-web/high", "gpt-5.5"] } },
+    { harness: "ao:opencode", catalog: { models: ["cpa/gemini-3.8-pro", "cpa/gpt"] } },
+    { harness: "ao:claude-code", catalog: { models: ["cpa/gpt", "default"] } },
+  ]));
+  assert.deepEqual(choices.map(item => [item.model, item.harnesses]), [
+    ["cpa/gpt", ["ao:claude-code", "ao:opencode"]], ["cpa/gemini-3.8-pro", ["ao:opencode"]], ["chatgpt-web/high", ["codex-native"]],
+  ], "the card's agent first; Native Codex's pool ids and the agent default are not repeated");
+  assert.equal(editor.pickerRow("chatgpt-web/high", "codex-native", []).group, "Web GPT");
+  // A pick goes through workerRoute (which forces Native Codex for WebGPT), keeping effort and context where they apply.
+  assert.match(source, /onChange\(withTuning\(workerRoute\(next, model, nativePermission\(route\)\), route, catalogOf\(next\)\?\.capabilities\)\)/);
 });
 
 test("effort and context window carry over only where the new route applies them", () => {
@@ -131,8 +135,10 @@ test("new non-WebGPT picks default to Claude Code, stay on Native Codex there, a
     assert.equal(editor.workerRoute("codex-native", model).harness_id, "codex-native");
   }
   assert.equal(editor.workerRoute("ao:opencode", "gpt-6-luna").harness_id, "ao:opencode", "explicit valid harness choice is retained");
-  assert.match(source, /disabled=\{disabled \|\| isWebModel\(route\.model\)\}/, "WebGPT disables harness switching");
-  assert.match(source, /WebGPT requires Native Codex/);
+  // Only Native Codex lists WebGPT models, so a WebGPT card shows no other agent to switch to.
+  assert.deepEqual(plain(editor.pickerChoices("codex-native", [{ harness: "ao:codex", catalog: { models: ["cpa/gpt"] } },
+    { harness: "codex-native", catalog: { models: ["chatgpt-web/high"] } }]).find(item => item.model === "chatgpt-web/high").harnesses), ["codex-native"]);
+  assert.match(source, /runners\.length > 1 \? <span className="ao-route-agents"/);
 });
 
 test("CPA models are labelled CPA, then their provider, then the model name", () => {

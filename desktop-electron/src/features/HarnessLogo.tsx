@@ -30,6 +30,9 @@ import primeAgentLogo from "../assets/harness/prime-agent.png";
 import claudeLogo from "../assets/models/claude.svg";
 import deepseekLogo from "../assets/models/deepseek.svg";
 import grokLogo from "../assets/models/grok.svg";
+import minimaxLogo from "../assets/models/minimax.svg";
+import stepfunLogo from "../assets/models/stepfun.svg";
+import zhipuLogo from "../assets/models/zhipu.svg";
 
 // The mark shown beside each harness in the composer, so a harness reads at a glance the way
 // Claude Code's own picker does. Claude Code, Codex (Native Codex too), Antigravity (agy) and
@@ -93,16 +96,33 @@ export function HarnessLogo({ harnessId, label, size = 16 }: { harnessId: string
   return <span className="ao-harness-logo">{harnessMark(harnessId, label)(size)}</span>;
 }
 
-// The model lists show the maker's mark for DeepSeek, GPT (WebGPT too), Claude and Grok; any other
-// model gets a lettered badge. The marks are LobeHub's brand icons (MIT); Grok's is a black glyph.
+const OWN_MARKS = new Set(["claude-code", "codex", "agy", "antigravity", "opencode", "gemini"]);
+/**
+ * A model-list group's mark: the agent's, as AO shows it (Antigravity, Claude Code, Native Codex),
+ * else the maker's (Claude, Zhipu); none rather than a lettered badge for a group no brand fits.
+ */
+export function GroupLogo({ group, size = 12 }: { group: string; size?: number }) {
+  const key = group.trim().toLowerCase();
+  const id = ["web gpt", "openai", "native codex"].includes(key) ? "codex" : key.replace(/\s+/g, "-");
+  const mark = OWN_MARKS.has(id) || HARNESS_BRANDS[id] || HARNESS_BRANDS[key] ? harnessMark(id, group)
+    : MODEL_BRANDS.find(([pattern]) => pattern.test(key))?.[1];
+  return mark ? <span className="ao-harness-logo">{mark(size)}</span> : null;
+}
+
+// The model lists show the maker's mark: DeepSeek, GPT (WebGPT too), Claude, Grok, Gemini, GLM
+// (Zhipu), Kimi, Qwen, MiniMax, StepFun, Mistral and Llama; any other model gets a lettered badge.
+// The marks are LobeHub's brand icons (MIT); Grok's is a black glyph.
 const MODEL_BRANDS: [RegExp, Mark][] = [
   [/^deepseek/, image(deepseekLogo)], [/^(?:gpt|o\d|codex|chatgpt)/, openaiMark],
-  [/^claude|^(?:opus|sonnet|haiku)\b/, image(claudeLogo)], [/^grok/, image(grokLogo, true)], [/^gemini/, gemini],
+  [/^claude|^(?:opus|sonnet|haiku)\b/, image(claudeLogo)], [/^grok/, image(grokLogo, true)], [/^(?:gemini|gemma)/, gemini],
+  [/^(?:glm|chatglm|zhipu|codegeex)/, image(zhipuLogo)], [/^(?:kimi|moonshot)/, HARNESS_BRANDS.kimi], [/^(?:qwen|qwq)/, HARNESS_BRANDS.qwen],
+  [/^(?:minimax|abab)/, image(minimaxLogo)], [/^step/, image(stepfunLogo, true)],
+  [/^(?:mistral|codestral|devstral|magistral|ministral|mixtral)/, HARNESS_BRANDS.vibe], [/^llama/, HARNESS_BRANDS.muse],
 ];
 
 /** The mark for a model id ("cpa/deepseek-v4.1-flash", "chatgpt-web/high", "claude-opus-4-6"): its maker's, else a lettered badge. */
 export function modelMark(model: string, label = model): Mark {
-  if (model.startsWith("chatgpt-web/")) return openaiMark;
+  if (model.replace(/^cpa\//, "").startsWith("chatgpt-web/")) return openaiMark;
   const own = (model.split("/").pop() ?? model).toLowerCase();
   return MODEL_BRANDS.find(([pattern]) => pattern.test(own))?.[1] ?? badge(label);
 }
