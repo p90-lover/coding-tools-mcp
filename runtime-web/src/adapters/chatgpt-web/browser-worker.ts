@@ -3554,7 +3554,7 @@ export class ChatGptBrowserWorker {
 
   /**
    * Put every browser operation on one fully hydrated, empty new chat. Task turns follow
-   * useSavedChats; account inspection and smoke pass false so they leave no history.
+   * useSavedChats; account inspection and smoke choose their own maintenance chat kind.
    */
   private async prepareChatSurface(
     page: Page,
@@ -5117,8 +5117,8 @@ export class ChatGptBrowserWorker {
     proAvailable?: boolean;
   }> {
     const page = await this.ensurePage();
-    // Account inspection sends nothing, so it stays in Temporary Chat and leaves no history.
-    await this.prepareChatSurface(page, undefined, false);
+    // Inspection submits nothing; keep the person's Browser on normal home without creating history.
+    await this.prepareChatSurface(page, undefined, true);
     const url = page.url();
     if (!detectCapabilities) return { authenticated: true, newChat: true, url };
     // Setup and sign-in refresh the model-list hint too, not only the booleans they return.
