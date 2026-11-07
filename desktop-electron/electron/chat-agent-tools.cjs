@@ -297,8 +297,20 @@ function redactToolDefs(list) {
 }
 // Opt-in: commands start in the worktree but are not confined to it.
 const TERMINAL_TOOLS = new Set([
-  "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment",
+  "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment", "list_commands",
 ]);
+const COMMAND_LIST_DEFS = Object.freeze([{
+  name: "list_commands", title: "List this chat's known commands",
+  description: "List command handles already tracked by this chat, including after a reply was lost. Read-only: starts, stops and probes nothing. "
+    + "States are last-observed, not fresh process checks; use read_output or an empty write_stdin on the returned command_id for current output. "
+    + "No raw commands or other chats' handles are included. An empty list is not proof that an unobserved operation never ran; do not blindly relaunch it. "
+    + "Handles belong to the current app runtime, not restart-surviving jobs.",
+  inputSchema: { type: "object", additionalProperties: false, properties: {
+    offset: { type: "integer", minimum: 0, default: 0 },
+    limit: { type: "integer", minimum: 1, maximum: 200, default: 40 },
+  } },
+  annotations: { readOnlyHint: true },
+}]);
 // Opt-in: these see the screen and drive the mouse and keyboard, outside any worktree.
 const DESKTOP_TOOLS = new Set([
   "computer_status", "computer_route", "computer_snapshot", "computer_list_windows", "computer_select_window",
@@ -358,7 +370,8 @@ const CHAT_DESCRIPTIONS = Object.freeze({
   exec_command: "Run a shell command in this chat's Terminal pane (the user's terminal/backend terminal for this chat), "
     + "starting in the worktree. Use it for dev servers, backends, installs, builds and tests, and whenever the user asks to "
     + "run something in the terminal or sandbox. A long-running process (a dev server) keeps running: pass a short "
-    + "yield_time_ms, then use read_output to see more of its output and write_stdin to type into it. Keep the server "
+    + "yield_time_ms, then use read_output to see more of its output and write_stdin to type into it. If a reply was lost, "
+    + "use list_commands to recover this chat's known handles; a tool timeout is not proof the command stopped. Keep the server "
     + "command in the foreground; this tool manages its lifetime. Do not detach it with Start-Process, Start-Job, nohup "
     + "or a background shell. Open its localhost URL with preview_open so the user sees it in this chat. "
     + "On Windows this tool runs cmd.exe: use set for environment variables. For PowerShell syntax, explicitly run "
@@ -1553,7 +1566,7 @@ function createChatAgentTools({
     if (entry.previewOnly) return allowed(entry, "preview") ? [...PREVIEW_TOOL_DEFS] : [];
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
-    const own = [...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
+    const own = [...COMMAND_LIST_DEFS, ...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
       ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
@@ -1562,7 +1575,8 @@ function createChatAgentTools({
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"), ...own]
+        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
+        && tool?.name !== "list_commands"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -2144,6 +2158,20 @@ function createChatAgentTools({
       if (error instanceof ScopeError) return failedCall(error.message);
       throw error;
     }
+    if (name === "list_commands") {
+      const offset = args.offset ?? 0, limit = args.limit ?? 40;
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+        return failedCall("offset must be a nonnegative safe integer and limit must be an integer from 1 to 200");
+      }
+      const known = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
+      const commands = known.slice(offset, offset + limit).map(command => ({
+        command_id: command.id, session_id: command.id, started_at_ms: command.startedAt,
+        last_observed_status: command.status, exit_code: command.exitCode ?? null,
+        output_refs: { stdout: `command:${command.id}:stdout`, stderr: `command:${command.id}:stderr` },
+      }));
+      return plainResult({ ok: true, commands, offset, next_offset: offset + commands.length < known.length ? offset + commands.length : null,
+        status_source: "last observed by this chat; not a fresh process probe", safe_to_retry: false });
+    }
     // With RTK on, a command runs as its compact rtk equivalent ("git status" -> "rtk git status"),
     // whichever agent sent it. It is rewritten before anything reviews it, so an approval (the
     // person's or the reviewer's) is for the command that actually runs.
@@ -2177,12 +2205,12 @@ function createChatAgentTools({
       if (name !== "exec_command" && name !== "check_exec_environment") {
         const id = commandIdOf(name, args);
         if (!entry.commands.get(id)?.sandboxed) {
-          return failedCall("That sandboxed command is not available in this chat. It may belong to another chat or have ended when the app restarted. Start a new command in this chat.");
+          return failedCall("That sandboxed command is not available in this chat. It may belong to another chat or have ended when the app restarted. Use list_commands for this chat's known handles; check the original outcome before deciding whether to launch a new command.");
         }
         let owned = false;
         try { owned = Boolean(sandbox?.owns(id)); } catch { owned = false; }
         if (!owned) {
-          return failedCall("That sandboxed command has ended or its output expired, possibly because the app restarted. Start a new command in this chat; its old command_id cannot be resumed.");
+          return failedCall("That sandboxed command handle is unavailable or its output expired, possibly because the app restarted. Its old command_id cannot be resumed here. Use list_commands and verify the original process or effects before deciding whether to launch a new command.");
         }
       }
       if (!entry.bypass && !reviewedUpstream(entry)) {
@@ -2326,7 +2354,7 @@ function createChatAgentTools({
       if (name === "exec_command") {
         const workdir = typeof args.workdir === "string" ? args.workdir : typeof args.cwd === "string" ? args.cwd : ".";
         const id = await sandbox.start({ cmd: String(args.cmd ?? ""), cwd: path.resolve(root.path, workdir), writable: root.path,
-          stdin: typeof args.stdin === "string" ? args.stdin : "", signal });
+          stdin: typeof args.stdin === "string" ? args.stdin : "", signal, timeoutMs: args.timeout_ms ?? null });
         track(entry, name, args, toolResult(name, args, { ok: true, command_id: id, status: "running" }), true);
         await sandbox.wait(id, yieldOf(args.yield_time_ms, 1000));
         const result = toolResult(name, args, sandbox.snapshot(id, args.max_output_bytes ?? 65_536));
@@ -2357,24 +2385,6 @@ function createChatAgentTools({
     }
   }
 
-  /** Whether one of the session's running commands printed this origin's port: its own dev server. */
-  async function servedHere(entry, origin, signal) {
-    const { hostname, port } = new URL(origin);
-    const number = port || (origin.startsWith("https:") ? "443" : "80");
-    // The same host (localhost, 127.0.0.1 and [::1] count as one), then the port.
-    const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const hosts = ["localhost", "127.0.0.1", "[::1]"].includes(hostname) ? ["localhost", "127.0.0.1", "[::1]"] : [hostname];
-    const mention = new RegExp(`(?<![\\w.-])(?:${hosts.map(escape).join("|")}):${number}(?![0-9])`, "i");
-    for (const command of entry.commands.values()) {
-      if (command.status !== "running") continue;
-      for (const stream of ["stdout", "stderr"]) {
-        const read = await invoke(entry, "read_output", { output_ref: `command:${command.id}:${stream}`, offset: 0, limit: MAX_PANE_READ_BYTES }, entry.root, "preview_open", signal);
-        if (mention.test(String(read.result?.content ?? ""))) return true;
-      }
-    }
-    return false;
-  }
-
   /**
    * Whether this chat may open `origin` in its preview for the first time: true, or the refusal to
    * return to the agent. Once allowed, an origin stays allowed for the session.
@@ -2384,8 +2394,7 @@ function createChatAgentTools({
     if (stopped) return stopped;
     if (entry.origins.has(origin)) return true;
     const reviewed = reviewedUpstream(entry);
-    const decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed,
-      servedHere: entry.bypass || reviewed ? false : await servedHere(entry, origin, signal).catch(() => false) });
+    const decision = previewOriginDecision({ origin, bypass: entry.bypass, reviewed });
     if (decision !== "allow") {
       const answer = await ask("A chat agent wants to open a page in its preview",
         dialogText([...who(entry), "Address: ", { value: origin }, "\n\nThe chat's own browser would load this page served on this computer; the\n"

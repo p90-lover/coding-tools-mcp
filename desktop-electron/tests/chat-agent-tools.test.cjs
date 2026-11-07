@@ -997,6 +997,102 @@ function fakeSandbox({ installed = true } = {}) {
   };
 }
 
+test("list_commands recovers accepted handles after a lost yield without relaunch or cross-chat exposure", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  let terminal = true;
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => terminal, sandbox });
+  try {
+    const client = await session(tools, { id: "command-list-owner", approvalMode: "bypass-permissions" });
+    const catalog = await post(client.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, client.auth);
+    const definition = catalog.body.result.tools.find(tool => tool.name === "list_commands");
+    assert.equal(definition?.annotations?.readOnlyHint, true);
+    const wait = sandbox.wait;
+    sandbox.wait = async () => { throw new Error("fixture lost yield reply"); };
+    assert.equal((await callTool(client.url, client.auth, "exec_command", { cmd: "echo fixture-private-marker", yield_time_ms: 0 })).isError, true);
+    sandbox.wait = wait;
+    for (let i = 0; i < 2; i++) await callTool(client.url, client.auth, "exec_command", { cmd: `echo fixture ${i}`, yield_time_ms: 0 });
+    const page = await callTool(client.url, client.auth, "list_commands", { limit: 2 });
+    assert.equal(page.isError, false);
+    assert.equal(page.structuredContent.commands.length, 2);
+    assert.equal(page.structuredContent.next_offset, 2);
+    const rest = (await callTool(client.url, client.auth, "list_commands", { offset: 2, limit: 2 })).structuredContent;
+    const known = [...page.structuredContent.commands, ...rest.commands];
+    assert.equal(new Set(known.map(item => item.command_id)).size, 3);
+    assert.equal(rest.next_offset, null);
+    assert.ok(known.every(item => item.last_observed_status === "running"));
+    assert.ok(known.every(item => item.output_refs.stdout === `command:${item.command_id}:stdout`));
+    assert.ok(!JSON.stringify(page).includes("fixture-private-marker"), "listing never exposes raw command strings");
+    const resumed = await callTool(client.url, client.auth, "write_stdin", { command_id: "sbx-1", chars: "", yield_time_ms: 0 });
+    assert.equal(resumed.isError, false);
+    assert.equal(sandbox.started.length, 3, "observing an accepted command never launches a replacement");
+    const other = await session(tools, { id: "command-list-other", approvalMode: "bypass-permissions" });
+    assert.deepEqual((await callTool(other.url, other.auth, "list_commands")).structuredContent.commands, []);
+    assert.equal((await callTool(other.url, other.auth, "write_stdin", { command_id: "sbx-1", chars: "" })).isError, true);
+    assert.equal(calls.filter(call => call.body?.tool === "list_commands").length, 0, "listing is answered from owned metadata, not headless or inference");
+    terminal = false;
+    assert.equal((await callTool(client.url, client.auth, "list_commands")).isError, true);
+    assert.ok(!(await listed(client.url, client.auth)).includes("list_commands"));
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("list_commands validates pagination and reports headless handles without probing output", async () => {
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, results: {
+    exec_command: { state: "completed", result: { ok: true, command_id: "headless-known", status: "running" } },
+  } });
+  try {
+    const client = await session(tools, { approvalMode: "bypass-permissions" });
+    await callTool(client.url, client.auth, "exec_command", { cmd: "echo fixture" });
+    const page = (await callTool(client.url, client.auth, "list_commands")).structuredContent;
+    assert.equal(page.commands[0].command_id, "headless-known");
+    assert.equal(page.commands[0].last_observed_status, "running");
+    for (const args of [{ limit: 0 }, { limit: 201 }, { offset: -1 }, { offset: 0.5 }]) assert.equal((await callTool(client.url, client.auth, "list_commands", args)).isError, true);
+    assert.equal(calls.filter(call => call.body?.tool === "read_output").length, 0);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("sandbox exec forwards the caller's explicit deadline instead of silently ignoring it", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    const client = await session(tools, { approvalMode: "bypass-permissions" });
+    for (const timeout of [undefined, null, 0, 50, 7 * 24 * 60 * 60 * 1000]) {
+      const result = await callTool(client.url, client.auth, "exec_command", { cmd: "echo fixture", yield_time_ms: 0,
+        ...(timeout === undefined ? {} : { timeout_ms: timeout }) });
+      assert.equal(result.isError, false);
+      assert.equal(sandbox.started.at(-1).timeoutMs, timeout ?? null);
+    }
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("preview consent performs no ignored terminal probes and still asks for an unreviewed origin", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  let allow = true;
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox,
+    confirm: () => allow, previews: { close() {}, call: async (_owner, _name, args, { permit }) => {
+      const answer = await permit(new URL(args.url).origin);
+      return answer === true ? { isError: false, structuredContent: { ok: true } } : answer;
+    } },
+  });
+  try {
+    const client = await session(tools);
+    await callTool(client.url, client.auth, "exec_command", { cmd: "echo http://127.0.0.1:5173", yield_time_ms: 0 });
+    const opened = await callTool(client.url, client.auth, "preview_open", { url: "http://127.0.0.1:5173/" });
+    assert.equal(opened.isError, false);
+    assert.equal(confirmations.length, 2, "the command and the unreviewed origin each require consent");
+    assert.equal(calls.filter(call => call.body?.tool === "read_output").length, 0, "output is not trusted as approval evidence and need not be read");
+    allow = false;
+    const other = await session(tools, { id: "other-preview-owner" });
+    const refused = await callTool(other.url, other.auth, "preview_open", { url: "http://127.0.0.1:5173/" });
+    assert.equal(refused.isError, true, "another chat cannot inherit this origin's consent");
+    assert.match(refused.content[0].text, /did not allow/);
+    assert.equal(confirmations.length, 3);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("pre-spawn cancellation forwards the captured turn signal and the next turn gets a fresh signal", async () => {
   const tree = tempTree();
   const sandbox = fakeSandbox();

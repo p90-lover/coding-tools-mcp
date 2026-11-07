@@ -152,11 +152,25 @@ function outputPageEnd(bytes, limit, complete) {
   return end;
 }
 
+/** A bounded suffix starts after, never inside, a valid UTF-8 scalar. */
+function outputTailStart(bytes, limit) {
+  const start = Math.max(0, bytes.length - limit);
+  for (let lead = Math.max(0, start - 3); lead < start; lead += 1) {
+    const byte = bytes[lead];
+    const width = byte >= 0xc2 && byte <= 0xdf ? 2 : byte >= 0xe0 && byte <= 0xef ? 3 : byte >= 0xf0 && byte <= 0xf4 ? 4 : 0;
+    if (!width || lead + width <= start || lead + width > bytes.length) continue;
+    try { new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(lead, lead + width)); }
+    catch { continue; }
+    return lead + width;
+  }
+  return start;
+}
+
 function createSandboxRunner({
   // Where command scripts go: a folder on the app data drive. No default: the system temp folder is
   // on C:, which holds no app storage (AGENTS.md).
   locate = findCodexSandbox, roots = cacheRoots, scriptDir,
-  env = process.env, spawnProcess = spawn, logger = console, now = Date.now, platform = process.platform,
+  env = process.env, spawnProcess = spawn, execFileProcess = execFile, logger = console, now = Date.now, platform = process.platform,
   // Folders put first on a command's PATH, e.g. the one AO keeps `ao` in for its own sessions.
   extraPath = () => [],
   // Plain variables every command gets (rtk.cjs commandEnvironment); never a private name or PATH.
@@ -199,6 +213,11 @@ function createSandboxRunner({
       const dropped = buffer.chunks.shift();
       buffer.size -= dropped.length;
     }
+    if (buffer.size > STREAM_LIMIT) {
+      const chunk = buffer.chunks[0];
+      buffer.chunks[0] = Buffer.from(chunk.subarray(outputTailStart(chunk, STREAM_LIMIT)));
+      buffer.size = buffer.chunks[0].length;
+    }
   }
 
   function prune() {
@@ -215,8 +234,12 @@ function createSandboxRunner({
    * The script is written without blocking: on the app's busy hard disk, writing it synchronously
    * held every window for 0.5 s on an agent's command (2026-10-31).
    */
-  async function start({ cmd, cwd, writable, stdin = "", signal }) {
+  async function start({ cmd, cwd, writable, stdin = "", signal, timeoutMs = null }) {
     signal?.throwIfAborted();
+    if (timeoutMs !== null && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0)) {
+      throw new Error("timeout_ms must be null or a nonnegative safe integer");
+    }
+    const runtimeLimit = timeoutMs === 0 ? null : timeoutMs;
     const found = sandbox();
     if (!found) throw new Error("Codex's Windows sandbox is not installed");
     if (typeof cmd !== "string" || !cmd.trim() || cmd.includes("\0")) throw new Error("A command is required");
@@ -253,12 +276,14 @@ function createSandboxRunner({
     const record = {
       id, cmd, cwd, startedAt: now(), status: "running", exitCode: null, child, script, stdinOpen: true,
       streams: { stdout: { chunks: [], size: 0, total: 0 }, stderr: { chunks: [], size: 0, total: 0 } },
-      exited: null, outputComplete: false,
+      exited: null, outputComplete: false, timeoutMs: runtimeLimit, deadlineTimer: null,
     };
     record.exited = new Promise((resolve) => {
       child.on("close", (code, signal) => {
         // Node emits close after all stdio closes; killed/spawn_failed alone is not stream EOF.
         record.outputComplete = true;
+        clearTimeout(record.deadlineTimer);
+        record.deadlineTimer = null;
         if (record.status === "running") record.status = "exited";
         record.exitCode = Number.isInteger(code) ? code : record.exitCode;
         record.signal = signal ?? null;
@@ -277,6 +302,20 @@ function createSandboxRunner({
     if (stdin) child.stdin.write(stdin);
     processes.set(id, record);
     prune();
+    if (runtimeLimit !== null) {
+      const checkDeadline = () => {
+        if (record.status !== "running") return;
+        const remaining = runtimeLimit - (now() - record.startedAt);
+        if (remaining <= 0) {
+          void kill(id, "timed_out").catch(() => logger.warn?.("chat_sandbox.timeout_stop_failed", { id }));
+          return;
+        }
+        // Node overflows longer delays into a one-millisecond timer.
+        record.deadlineTimer = setTimeout(checkDeadline, Math.min(remaining, 2_147_483_647));
+        record.deadlineTimer.unref?.();
+      };
+      checkDeadline();
+    }
     logger.info?.("chat_sandbox.started", { id, cwd });
     return id;
   }
@@ -298,18 +337,28 @@ function createSandboxRunner({
   const text = (buffer) => Buffer.concat(buffer.chunks).toString("utf8");
   const tail = (buffer, max) => {
     const all = Buffer.concat(buffer.chunks);
-    return all.length > max ? all.subarray(all.length - max).toString("utf8") : all.toString("utf8");
+    const start = outputTailStart(all, max);
+    return { content: all.subarray(start).toString("utf8"), truncated: start > 0 || buffer.total > all.length };
   };
 
   /** What the command did so far, shaped like headless's exec_command result. */
   function snapshot(id, maxOutputBytes = 65_536) {
     const record = get(id);
-    const max = Math.max(0, Math.min(Number(maxOutputBytes) || 0, 1_048_576));
+    const max = Math.max(0, Math.min(Math.trunc(Number(maxOutputBytes) || 0), 1_048_576));
+    const stdout = tail(record.streams.stdout, max), stderr = tail(record.streams.stderr, max);
     return {
       ok: true, command_id: id, session_id: id, status: record.status === "running" ? "running" : "exited",
       termination_reason: record.status, exit_code: record.exitCode,
-      command_ok: record.status === "running" ? null : record.exitCode === 0,
-      stdin_open: record.stdinOpen, stdout: tail(record.streams.stdout, max), stderr: tail(record.streams.stderr, max),
+      command_ok: !record.outputComplete ? null : record.status === "exited" && record.exitCode === 0,
+      finalization_pending: record.status !== "running" && !record.outputComplete,
+      stdin_open: record.stdinOpen, stdout: stdout.content, stderr: stderr.content,
+      stdout_truncated: stdout.truncated, stderr_truncated: stderr.truncated,
+      max_runtime_ms: record.timeoutMs, safe_to_retry: false,
+      ...(record.stopError ? { stop_error: record.stopError } : {}),
+      supervision_scope: "current app runtime; no automatic replay after restart",
+      ...(record.status === "running" ? { next_action: { tool: "write_stdin", arguments: {
+        command_id: id, chars: "", yield_time_ms: 1000, max_output_bytes: 16384 },
+        instruction: "Poll this command handle. Do not relaunch it merely because it is quiet or a tool call timed out." } } : {}),
       stdout_total_bytes: record.streams.stdout.total, stderr_total_bytes: record.streams.stderr.total,
       elapsed_ms: now() - record.startedAt,
       output_refs: { stdout: `command:${id}:stdout`, stderr: `command:${id}:stderr` },
@@ -361,15 +410,29 @@ function createSandboxRunner({
   }
 
   /** Ends the command and every process it started. */
-  async function kill(id) {
+  async function kill(id, reason = "killed") {
     const record = get(id);
     if (record.status !== "running") return snapshot(id, 0);
-    record.status = "killed";
+    record.status = reason;
+    clearTimeout(record.deadlineTimer);
+    record.deadlineTimer = null;
     const pid = record.child.pid;
+    let stopError = null;
     await new Promise((resolve) => {
-      if (!Number.isInteger(pid)) { try { record.child.kill(); } catch { /* gone */ } resolve(); return; }
-      execFile("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true }, () => resolve());
+      if (!Number.isInteger(pid)) {
+        try { if (record.child.kill() === false) stopError = new Error("stop failed"); } catch (error) { stopError = error; }
+        resolve(); return;
+      }
+      try {
+        execFileProcess("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true }, (error) => { stopError = error; resolve(); });
+      } catch (error) { stopError = error; resolve(); }
     });
+    if (stopError && !record.outputComplete) {
+      record.status = "running";
+      record.stopError = "The process tree could not stop. It may still be running; use this command_id to inspect it and retry Stop explicitly, not to relaunch it.";
+      throw new Error(record.stopError);
+    }
+    record.stopError = null;
     await wait(id, 3000);
     return snapshot(id, 0);
   }
