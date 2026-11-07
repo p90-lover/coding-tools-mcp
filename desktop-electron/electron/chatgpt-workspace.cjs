@@ -278,7 +278,7 @@ async function createWorkspaceConnector(options) {
       throw error;
     }
     return { ...result, setupAccountId: admin.id, setupWorkspaceRole: admin.context.workspaceRole };
-  });
+  }, { preserveSurface: options.preserveSurface === true });
 }
 
 module.exports = { ADMIN_REQUIRED, PUBLISH_REQUIRED, CONTEXT_CHANGED, isWorkspaceAdmin, workspaceUiScript, inspectChatGptAccount, createWorkspaceConnector };

@@ -194,8 +194,8 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
 
 test("account setup keeps its captured account and tunnel across awaited workspace setup", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  const start = source.indexOf('  handle("launcher:mcp-create-connector",');
-  const end = source.indexOf('\n  handle("launcher:doctor",', start);
+  const start = source.indexOf('  const connectAccountMcp =');
+  const end = source.indexOf('\n  let accountMcpConfig =', start);
   for (const scenario of [
     { name: "an unconfigured primary cannot be borrowed", missing: true },
     { name: "a global switch during readiness aborts", readySwitch: true },
@@ -265,8 +265,8 @@ test("account setup keeps its captured account and tunnel across awaited workspa
 
 test("account setup verifies the configured main tunnel without an extra assignment", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  const start = source.indexOf('  handle("launcher:mcp-create-connector",');
-  const end = source.indexOf('\n  handle("launcher:doctor",', start);
+  const start = source.indexOf('  const connectAccountMcp =');
+  const end = source.indexOf('\n  let accountMcpConfig =', start);
   assert(start >= 0 && end > start);
   const { currentConnectorSettings } = require("../electron/mcp-connector-setup.cjs");
   for (const scenario of [

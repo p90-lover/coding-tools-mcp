@@ -727,7 +727,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
  * an extra tunnel in its account's browser partition; the caller records an extra tunnel's connector.
  */
 async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target, assertCurrent,
-  operationHeld = false, expectedContext, selectWorkspace = false, shared, onContext }) {
+  operationHeld = false, expectedContext, selectWorkspace = false, shared, onContext, preserveSurface = false }) {
   requireAutomaticConnectorSetup(runtimeHost, browserHost);
   if (operationHeld && browserHost.currentOperation?.() !== "MCP connector creation") throw new Error("MCP connector setup is busy");
   const extra = target?.tunnelId !== undefined;
@@ -981,7 +981,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       }
     }
   };
-  return operationHeld ? run() : browserHost.withManualOperation("MCP connector creation", run);
+  return operationHeld ? run() : browserHost.withManualOperation("MCP connector creation", run, { preserveSurface });
 }
 
 async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtimeHost, partition = browserHost.partition }) {
