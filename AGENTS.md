@@ -71,9 +71,11 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 
 ## GitHub delivery
 
-- Whenever a task changes tracked project files, commit the task's changes, push them to GitHub, and open or update a pull request before reporting the task as complete, unless the user explicitly asks otherwise.
-- Keep the PR scoped to the task: do not include unrelated edits or commits from the shared checkout. Do not merge the PR unless asked.
-- If verification, authentication, permissions, or another blocker prevents PR delivery, report the blocker and what remains instead of claiming completion.
+- **Standing user authorization:** unless the user explicitly asks otherwise, deliver installer-affecting changes end to end: verify → commit → push → pull request → passing applicable checks → merge to `main` → new version/build → verified published release. Do not ask the user to repeat permission for this normal delivery sequence.
+- **Do not stop at “PR open”, “CI running” or “build queued”.** Those are progress updates, not completion. Continue through publication and verify the release tag, exact source, downloadable assets and checksums; report the release/installer URL. If work is genuinely blocked, name the blocker and save a resumable checkpoint instead of claiming success.
+- Keep each PR scoped to its task. Do not merge unrelated, unverified or another owner's unfinished work, and never publish credentials or temporary artifacts. Coordinate one release owner and batch compatible verified merges into one build rather than creating competing releases.
+- Follow the detailed delivery workflow below, including its docs-only exception. Documentation/instruction-only changes still require a PR and merge, but do not need a redundant installer rebuild when packaged code is unchanged.
+- CI, authentication, disabled Actions, permissions and billing failures are real blockers, not permission to force-merge, skip verification, change account settings or report a release that does not exist. An already-successful build may be published only after verifying its exact source provenance and asset checksums. Installation, patching or restarting the user's running app still requires their separate request.
 
 ## Storage: never the C: drive
 
@@ -94,7 +96,7 @@ Every agent working in this repository follows this: Claude Code, Codex, opencod
      - `gh pr list --state open --search "release: in:title"`
      - `gh run list --workflow electron-windows-release.yml --limit 3`
 
-     If a release PR is open or a `workflow_dispatch` run is in progress, stop: that release includes everything on `main` at its commit.
+     If a release PR is open or a `workflow_dispatch` run is in progress, do not start a competing release. Coordinate with its owner and verify that your change is actually included in the pinned build commit. An unrelated or older release is not a reason to abandon delivery; queue changes that miss the cutoff for the next release and report their true state.
    - Open a version-bump PR titled `release: 0.8.x`. It changes the version line in `desktop-electron/electron/product.cjs`, `desktop-electron/package.json`, `desktop-electron/scripts/prepare-package-resources.cjs`, `desktop-electron/scripts/verify-package.cjs`, `desktop-electron/tests/product-identity.test.cjs` and `desktop-electron/tests/rc12-release-identity.test.cjs`, plus new notes in `docs/releases/v0.8.x.md` (English and 繁體中文). Search `desktop-electron` for the old version to catch every line, but leave the `@xmldom/xmldom` override in `package.json` alone. Merge it once green.
    - Publish from CI: `gh workflow run electron-windows-release.yml --ref main -f publish=true`. CI builds, verifies and publishes the installer. Don't build a release installer locally.
    - Merges that land close together share one release.
