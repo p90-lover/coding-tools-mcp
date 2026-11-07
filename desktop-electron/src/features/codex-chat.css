@@ -776,6 +776,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step.tone-stalled .cx-step-meta { color: var(--ao-amber); }
 .cx-step.tone-error .cx-step-meta { color: var(--ao-red); }
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
+/* A turn's only card has no head: its work sits in the reply's own column, as Codex shows one agent. */
+.cx-steps.is-solo { padding-left: 0; border-left: 0; }
+.cx-step.is-solo > .cx-step-body { margin-left: 0; }
 .cx-step-detail { margin: 0 0 4px; color: var(--ao-muted); font-size: 12px; overflow-wrap: anywhere; }
 .cx-step-error { margin: 0; color: var(--ao-red); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A tool call that timed out while the chat carries on: one red line in the conversation. */
@@ -943,6 +946,15 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-reply.is-stalled, .cx-reply.is-waiting { --reply-tone: var(--ao-amber); }
 .cx-reply.is-stopped { --reply-tone: var(--ao-muted); }
 .cx-reply-head { display: flex; flex-direction: column; gap: 8px; padding-top: 9px; border-top: 1px solid var(--ao-line); }
+/* A single chat's reply closes on one quiet grey line, as Codex's does: model · time · files, then copy and retry. */
+.cx-reply-head.is-quiet { padding-top: 0; border-top: 0; }
+.cx-reply-head.is-quiet > .cx-reply-top { gap: 6px; color: var(--ao-muted); font-size: 12px; line-height: 26px; }
+.cx-reply-head.is-quiet .cx-reply-who { color: var(--ao-muted); font-weight: 400; }
+.cx-reply-head.is-quiet .cx-reply-top > * + *:not(.cx-msg-actions)::before { content: "·"; margin-right: 6px; color: var(--ao-muted); }
+.cx-reply-head.is-quiet .cx-reply-status { padding: 0; border-radius: 0; background: none; }
+.cx-reply-head.is-quiet .cx-reply-status::before { display: none; }
+.cx-reply-head.is-quiet .cx-msg-actions { margin-left: 2px; }
+.cx-reply:hover .cx-reply-head.is-quiet .cx-msg-actions { opacity: 1; }
 .cx-reply-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; font-size: 13px; line-height: 20px; }
 .cx-reply-who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; color: var(--color-text-primary); font-weight: 600; }
 .cx-reply-who > .ao-model-logo { display: inline-grid; flex: none; place-items: center; line-height: 0; }
@@ -985,7 +997,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   text-overflow: ellipsis; white-space: nowrap; }
 .cx-reply-file.is-more { color: var(--ao-muted); }
 /* A reply head is the turn's own summary, so the foot's line sits flush with the card's bottom. */
-.cx-reply > .cx-turn-foot { margin-top: 0; }
 @media (prefers-reduced-motion: reduce) { .cx-reply-status::before, .cx-reply-dot { animation: none !important; } }
 .cx-reply-attempt { padding: 0 7px; border-radius: 9px; background: color-mix(in srgb, var(--ao-amber) 14%, transparent); color: var(--ao-amber);
   font-size: 11px; font-weight: 600; line-height: 17px; white-space: nowrap; }
@@ -1145,13 +1156,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   background: var(--ao-green, #2e9d5b); content: ""; animation: cx-pulse 1.4s ease-in-out infinite; }
 @keyframes cx-turn-stats-in { from { opacity: 0; transform: translateY(-3px); } }
 @media (prefers-reduced-motion: reduce) { .cx-turn-stats, .cx-turn-stats.is-running span:first-child::before { animation: none; } }
-/* An ended turn's foot (TurnFoot): how long it worked and its own requests, quiet under its answer. */
-.cx-turn-foot { display: flex; flex-wrap: wrap; margin: 6px 0 0; padding: 0; color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.cx-turn-foot.is-empty { height: 1px; margin: 0; }
-.cx-turn-foot span { padding: 0 8px; white-space: nowrap; transition: color .15s ease; }
-.cx-turn-foot span:first-child { padding-left: 0; }
-.cx-turn-foot span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
-.cx-turn-foot span:hover { color: var(--color-text-primary); }
 /* The chat box's row on one 28 px grid: every control 28 px tall with 7 px corners, icons in 28 px
    squares, Send a 28 px circle. No carets and no boxes: a control is its icon or its word, and the
    hover tint says it opens. In reading order: attach, permissions, Single/Team, then the harness's

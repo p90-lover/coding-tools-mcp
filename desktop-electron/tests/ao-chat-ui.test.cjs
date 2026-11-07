@@ -53,7 +53,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./chat-transc
   "./ChatBranchBar": { ChatBranchBar: () => null },
   "./HarnessLogo": { ModelLogo: () => null },
   "./AgentOrchestratorRoleEditor": roles,
-  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") }),
+  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx"), "./ChatTurnStats": { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } }),
   "./ChatReplyPlan": load("ChatReplyPlan.tsx"),
   "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }),
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
@@ -237,7 +237,7 @@ test("ordinary model activity uses specific DeepSeek headings rather than unexpl
 });
 
 test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
-  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") });
+  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx"), "./ChatTurnStats": { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } });
   const edit = (path, additions, deletions) => ({ id: `${path}${additions}`, kind: "edit", status: "completed", text: "", files: [{ path, additions, deletions }] });
   // Seven one-line edits of one file read as that file once, with their lines summed.
   const changes = head.turnChanges([edit("src/aistudio.js", 1, 1), { id: "c", kind: "command", status: "completed", text: "npm test" },
@@ -246,7 +246,7 @@ test("a reply's head says who answered, how it stands, why it failed, a team's c
     JSON.stringify([["src/aistudio.js", 5, 3], ["tests/aistudio.test.cjs", 2, 0]]));
   const single = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: false, name: "GPT-6.1 Sol", tone: "failed",
     startedAtMs: 1_000, endedAtMs: 155_000, members: [], changes }));
-  assert.match(single, /^<footer class="cx-reply-head">/, "the summary closes the reply, under the answer");
+  assert.match(single, /^<footer class="cx-reply-head is-quiet">/, "a single chat's summary is one quiet line under the answer");
   assert.match(single, /cx-reply-who-name">GPT-6\.1 Sol</);
   assert.match(single, /cx-reply-status is-failed">Failed</);
   assert.match(single, /cx-reply-time[^>]*>2m 34s</, "how long it ran");
@@ -398,7 +398,9 @@ test("the first prompt and its attachments stay inside the agent reply, exactly 
         assert.match(reply, /cx-sent-attachments/, "its attachment stays with it");
         assert.equal(html.split(prompt).length - 1, 1, "no duplicate outside bubble");
         assert.doesNotMatch(reply, /Attached image:/, "the attachment is rendered, not printed as a raw path");
-        assert.ok(reply.indexOf(prompt) < reply.indexOf("cx-reply-head"), "the request precedes the agent summary");
+        // A running single chat has no summary yet: its running line says who works and for how long.
+        if (reply.includes("cx-reply-head")) assert.ok(reply.indexOf(prompt) < reply.indexOf("cx-reply-head"), "the request precedes the agent summary");
+        else assert.ok(mode === "single" && state !== "finished", `${model} ${mode} ${state}: only a running single chat leaves the summary out`);
         assert.match(reply, /Copy message/, "message actions stay inside the card");
       }
     }

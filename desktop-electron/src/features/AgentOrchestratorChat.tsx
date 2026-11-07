@@ -18,7 +18,7 @@ import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
-import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
+import { ChatTurnStats } from "./ChatTurnStats";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
@@ -527,11 +527,13 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   return known;
 }
 
-function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joinedReply = false }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string; joinedReply?: boolean }) {
+function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joinedReply = false, solo = false }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string; joinedReply?: boolean;
+  /** The turn's only card: no head of its own, so its request, steers and work read as one column. */
+  solo?: boolean }) {
   // A failed step opens on its error and a working one on its live turn, as Codex shows them;
   // once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
-  const open = !folded && (chosen ?? Boolean(step.error || step.working?.timeline?.length));
+  const open = !folded && (solo || (chosen ?? Boolean(step.error || step.working?.timeline?.length)));
   const work = useStepWork(step, runId, !joinedReply || open, loadWork);
   const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
@@ -541,8 +543,8 @@ function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joi
   const state = step.working ? (step.working.stalled ? "may be stuck" : "")
     : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state);
   if (folded && !step.text && !step.error && !work?.some((item) => item.kind === "message" || item.kind === "steer" || item.answered)) return null;
-  return <li className={`cx-step tone-${stepTone(step)}`}>
-    {!folded ? <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
+  return <li className={`cx-step tone-${stepTone(step)}${solo ? " is-solo" : ""}`}>
+    {solo ? null : !folded ? <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
       title={step.working?.detail || step.detail || undefined}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
@@ -581,7 +583,8 @@ function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { s
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
     {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={joinedReply && !open} joinedReply={joinedReply} />
+      {/* Folded, the work keeps what the agent said on the way and hides its tool calls, as Codex does. */}
+      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={!open} joinedReply={joinedReply} />
     </SteerReader.Provider> : null}
   </div>;
 }
@@ -670,8 +673,8 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedR
       <TurnWorkSummary turn={turn} loadWork={loadWork} />
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>}
-    <ol className="cx-steps">{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
-      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} />)}</ol>
+    <ol className={`cx-steps${rows.length === 1 ? " is-solo" : ""}`}>{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
+      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} solo={rows.length === 1} />)}</ol>
   </div>;
 }
 
@@ -2268,6 +2271,11 @@ export function AgentOrchestratorChat({
     // Focus keeps the work behind Show work whatever the chat's setting: its progress line says where the turn is.
     const turnWork = replyStyle === "focus" ? false : showWork;
     const hasReply = Boolean(turn.runId && (cards.length || live));
+    const answerActions = turn.final ? <MessageActions text={turn.final.text ?? ""}>
+      {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
+    </MessageActions> : null;
+    // A single chat's ended answer keeps copy and retry on its quiet line, as Codex does; a team's stay under the answer.
+    const quietLine = !teamAnswer && !live && !dsh;
     // The request belongs to its agent's card, like a steer. Before a run exists it stays visible
     // on its own; constructing it once keeps the attachments and message actions identical.
     // Its read receipt leads the actions, as on a steer: "Sending…" while an agent comes up for it,
@@ -2322,22 +2330,18 @@ export function AgentOrchestratorChat({
                   && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
                     && node.route?.harness_id === "codex-native" && node.route.model.startsWith("chatgpt-web/"))
                   ? () => setWorkbench("preview") : undefined} />
-                <MessageActions text={turn.final.text ?? ""}>
-                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
-                </MessageActions>
+                {quietLine ? null : answerActions}
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
-              {/* The reply's summary closes it, under the answer: the files it changed, a team's cards,
-                  who answered, how it stands and for how long. */}
+              {/* The reply's summary closes it, under the answer: a team's cards, then one quiet line of
+                  who answered, how long it worked and the files it changed. A single chat's running
+                  turn keeps only its files: its running line (TurnRunning) says who and how long. */}
               <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
                 startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
-                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes} />
-              {/* How long it worked is in the summary; the foot keeps the turn's model requests. */}
-              {turn.runId && turn.startedAtMs && !liveTurn(turn)
-                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={false}
-                  to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
+                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes}
+                requestModels={turn.runId && !live ? turn.cpaModels : undefined} actions={quietLine ? answerActions : undefined} />
               </section> : null}
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;

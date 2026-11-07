@@ -94,10 +94,12 @@ test("no tools and unverified edits do not invent changed files", () => {
 
 test("completed turn is distinct from achieved goal and preserves non-success states", () => {
   const base = { steps: [], status: "done", startedAtMs: 1000, endedAtMs: 4000 };
-  assert.equal(transcript.transcriptCompletion(base), "Turn completed · 3s");
-  for (const [status, expected] of [["stopped", "Stopped"], ["attention", "Waiting for input"], ["paused", "Waiting for input"], ["running", "Working"]]) {
-    assert.equal(transcript.transcriptCompletion({ ...base, status }).split(" · ")[0], expected);
+  // Codex's words for folded work.
+  assert.equal(transcript.transcriptCompletion(base), "Worked for 3s");
+  assert.equal(transcript.transcriptCompletion({ ...base, endedAtMs: undefined }), "Worked");
+  for (const [status, expected] of [["stopped", "Stopped after 3s"], ["attention", "Waiting for input · 3s"], ["paused", "Waiting for input · 3s"], ["running", "Working"]]) {
+    assert.equal(transcript.transcriptCompletion({ ...base, status }), expected);
   }
-  assert.match(transcript.transcriptCompletion({ ...base, steps: [{ error: "Blocked by quota" }] }), /^Failed/);
+  assert.equal(transcript.transcriptCompletion({ ...base, steps: [{ error: "Blocked by quota" }] }), "Failed after 3s");
   assert.doesNotMatch(transcript.transcriptCompletion(base), /Goal completed|Task completed/);
 });
