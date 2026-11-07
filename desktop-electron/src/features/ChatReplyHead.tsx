@@ -1,15 +1,16 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ModelLogo } from "./HarnessLogo";
 import { ChatChangedFiles } from "./ChatChangedFiles";
+import { useTurnRequests } from "./ChatTurnStats";
 import { dshDuration, type ChatLiveItem, type ChatStep, type ChatTurn } from "./ao-chat";
 
 /**
- * A reply's summary: what a turn came to. Who answered (a single chat's model, or the team and
- * every card on it), how it stands and for how long, and which files it changed. Each of these sat
- * somewhere else, in grey 12px text: the model's name above the answer, the time at the foot, the
- * files only as one "Edited x.js +1 −1" row per edit, and a team's cards only once its work was
- * opened. It closes the reply, under the answer, where the reading ends (Codex's changed-files
- * card sits there too); only a failure (ReplyError) still leads the reply.
+ * A reply's summary: what a turn came to, under the answer, where the reading ends.
+ * A single chat closes as Codex closes a reply: one quiet grey line, its model, how long it worked
+ * and the files it changed, beside the answer's copy and retry. Its status is said only when it is
+ * news (failed, stopped, needs you): a green "Done" pill on every reply was noise, and the turn's
+ * model requests (steps, LLM time, tokens, cache) are the time's tooltip, not a second row.
+ * A team keeps its roster of cards above that line. Only a failure (ReplyError) leads the reply.
  */
 
 export type ReplyTone = "working" | "stalled" | "waiting" | "queued" | "done" | "failed" | "stopped";
@@ -96,6 +97,10 @@ export type ReplyHeadProps = {
   members: ReplyMember[];
   changes: ChangedFile[];
   onOpenChanges?: (path?: string) => void;
+  /** The ended turn's CPA models, read for the time's tooltip (useTurnRequests). */
+  requestModels?: string[];
+  /** The answer's copy and retry, at the line's end. */
+  actions?: ReactNode;
 };
 
 /** Why a turn failed, at the top of its reply: the one part of the summary read before the work. */
@@ -106,13 +111,22 @@ export function ReplyError({ team, error }: { team: boolean; error: { step: stri
   </p>;
 }
 
-export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, attempt = 1, members, changes, onOpenChanges }: ReplyHeadProps) {
+export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, verdict, attempt = 1, members, changes, onOpenChanges, requestModels, actions }: ReplyHeadProps) {
   const live = tone === "working" || tone === "stalled" || tone === "queued";
   const now = useNow(live);
-  const end = live ? now : endedAtMs;
+  const requests = useTurnRequests({ from: startedAtMs, to: live ? undefined : endedAtMs, models: requestModels });
+  // A turn saved without its end time ends at its last model request, when the next turn bounds it.
+  const end = live ? now : endedAtMs && endedAtMs > (startedAtMs ?? 0) ? endedAtMs : requests.lastAt;
   const time = startedAtMs && end && end > startedAtMs ? dshDuration(end - startedAtMs) : "";
-  // The file list is available on demand beside the runtime, not repeated inside the reply.
-  return <footer className="cx-reply-head">
+  const timeTitle = [startedAtMs ? `Started ${new Date(startedAtMs).toLocaleString()}` : "", requests.summary].filter(Boolean).join("\n") || undefined;
+  // "Done" is what a reply under an answer already says; any other state is news.
+  const status = tone === "done" && !team ? null : tone;
+  // A single chat's running turn says who works and for how long on its running line (TurnRunning);
+  // here it keeps only the files changed so far, and nothing at all before the first edit.
+  if (live && !team) return changes.length ? <footer className="cx-reply-head is-quiet">
+    <div className="cx-reply-top"><ChatChangedFiles files={changes} onOpen={onOpenChanges} /></div>
+  </footer> : null;
+  return <footer ref={requests.ref} className={`cx-reply-head${team ? "" : " is-quiet"}`}>
     {members.length ? <ul className="cx-reply-roster" aria-label="Team">
       {members.map((member) => <li key={member.key} className={`cx-reply-member is-${member.tone}`} title={member.model || undefined}>
         <span className="cx-reply-dot" aria-hidden="true" />
@@ -122,16 +136,17 @@ export function ReplyHead({ team, name, model, tone, startedAtMs, endedAtMs, ver
       </li>)}
     </ul> : null}
     <div className="cx-reply-top">
-      <span className="cx-reply-who" title={team ? `${members.length} ${members.length === 1 ? "card" : "cards"}` : name}>
-        {!team && model ? <ModelLogo model={model} label={name} size={15} /> : null}
+      <span className="cx-reply-who" title={team ? `${members.length} ${members.length === 1 ? "card" : "cards"}` : model || name}>
+        {team && model ? <ModelLogo model={model} label={name} size={15} /> : null}
         <span className="cx-reply-who-name">{name}</span>
       </span>
       {team ? <span className="cx-reply-mode">Team · {members.length}</span> : null}
-      <span className={`cx-reply-status is-${tone}`} role={live ? "status" : undefined}>{TONE_LABEL[tone]}</span>
-      {time ? <span className="cx-reply-time" title={startedAtMs ? `Started ${new Date(startedAtMs).toLocaleString()}` : undefined}>{time}</span> : null}
+      {status ? <span className={`cx-reply-status is-${status}`} role={live ? "status" : undefined}>{TONE_LABEL[status]}</span> : null}
+      {time ? <span className="cx-reply-time" title={timeTitle}>{time}</span> : null}
       <ChatChangedFiles files={changes} onOpen={onOpenChanges} />
       {attempt > 1 ? <span className="cx-reply-attempt" title={`${attempt - 1} earlier ${attempt === 2 ? "attempt" : "attempts"} folded under the work`}>Attempt {attempt}</span> : null}
       {verdict ? <span className={`cx-verdict is-${verdict.toLowerCase()}`}>{verdict}</span> : null}
+      {actions}
     </div>
   </footer>;
 }
