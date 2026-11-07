@@ -4699,6 +4699,8 @@ async function start() {
         computerControl,
         // Every call that sees or drives the screen goes to the chat's reviewer first (Codex's auto-review).
         reviewCall: (input) => missionWorkflowRuntime?.reviewToolCall?.(input) ?? { action: "ask", reason: "" },
+        // The model a chat runs on, named on the computer-control pill.
+        sessionModel: (input) => missionWorkflowRuntime?.sessionModel?.(input) ?? null,
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         // The workflow running now: these tools outlive the backend start that created them, and

@@ -1317,6 +1317,8 @@ function createChatAgentTools({
   // Codex's auto-review of one call that sees or drives the screen (the workflow's reviewToolCall):
   // ({ workspaceId, session, tool, args }) => { action: "allow" | "deny" | "ask", reason }.
   reviewCall = null,
+  // The model a chat runs on ({ workspaceId, session } → "cpa/gpt-6.1-sol" or null), named on the computer-control pill.
+  sessionModel = null,
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
   statePath = null,
   worktreesRoot = null,
@@ -1759,6 +1761,19 @@ function createChatAgentTools({
       `The user declined ${name}.`, tooLongToShow(name), { entry, tool: name, signal });
   }
 
+  /**
+   * The model this chat runs on, for the control pill: looked up at most every 30 s, and never
+   * holding up the step for more than 400 ms (a slow lookup leaves the last one known).
+   */
+  async function pillModel(entry) {
+    if (typeof sessionModel !== "function" || !entry.aoSession) return null;
+    const known = entry.pillModel;
+    if (known && now() - known.at < 30_000) return known.model;
+    const lookup = Promise.resolve().then(() => sessionModel({ workspaceId: entry.workspaceId, session: entry.aoSession }))
+      .then((model) => { entry.pillModel = { model: typeof model === "string" ? model : null, at: now() }; return entry.pillModel.model; })
+      .catch(() => known?.model ?? null);
+    return Promise.race([lookup, new Promise((resolve) => { setTimeout(() => resolve(known?.model ?? null), 400).unref?.(); })]);
+  }
   const agentName = (entry) => AGENT_NAMES[entry.agent] ?? (String(entry.agent || "The agent").charAt(0).toUpperCase() + String(entry.agent || "the agent").slice(1));
   const plainResult = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError: false });
 
@@ -1798,7 +1813,7 @@ function createChatAgentTools({
         return args.session_id ? null : plainResult({ ...current, app: target.appName, note: "Control is already on for this window; use this session_id." });
       }
       try {
-        const status = await computerControl.start({ workspaceId: entry.workspaceId, target });
+        const status = await computerControl.start({ workspaceId: entry.workspaceId, target, agent: agentName(entry), model: await pillModel(entry) });
         return plainResult({ ...status, app: target.appName, note: "Control is on for this window; use this session_id with the other computer_* tools." });
       } catch (error) { return failedCall(`Control did not start: ${errorMessage(error)}`); }
     }
@@ -2287,6 +2302,10 @@ function createChatAgentTools({
     }
     const rooted = group === "desktop" ? null : root;
     if (name === "exec_command") entry.commandState.pending = (entry.commandState.pending ?? 0) + 1;
+    // The control pill names the step a computer_* call takes while it runs (computer-control.cjs).
+    const shown = computerControl && name.startsWith("computer_") && computerControl.controlled?.()
+      ? computerControl.activity?.({ agent: agentName(entry), model: await pillModel(entry), tool: name, args }) : null;
+    let pillOutcome = "failed";
     try {
       const outcome = await invoke(entry, name, args, rooted, name, signal);
       if (outcome.failed) return outcome.failed;
@@ -2296,8 +2315,10 @@ function createChatAgentTools({
         ? await approveAndRetry(entry, name, args, rooted, failure, confirmed, signal)
         : toolResult(name, args, outcome.result, entry.instructionsSeen ??= new Set());
       track(entry, name, args, result);
+      if (!result?.isError) pillOutcome = "done";
       return result;
     } finally {
+      shown?.(pillOutcome);
       if (name === "exec_command") entry.commandState.pending -= 1;
       prunePaneEntries();
     }
