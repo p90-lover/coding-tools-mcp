@@ -7,6 +7,16 @@ export function chromeLoginPending(operation: OperationState | null, authenticat
   return operation?.name === "passkey-login" && operation.status === "running" && authenticated !== true;
 }
 
+export function chromeLoginWaitingForClose(operation: OperationState | null): boolean {
+  return operation?.name === "passkey-login" && operation.status === "running"
+    && operation.message === "Waiting for the dedicated Chrome window to close before importing";
+}
+
+export function chromeLoginContinuationPending(operation: OperationState | null): boolean {
+  return chromeLoginWaitingForClose(operation) || (operation?.name === "passkey-login" && operation.status === "running"
+    && /^Capturing and verifying the (?:passkey|Chrome) session$/.test(operation.message));
+}
+
 /** Keep the explicit Continue step reachable while the person works outside the Browser page. */
 export function ChromeLoginNotice({ open, operation, language, continueLogin, openBrowser, setError }: {
   open: boolean; operation: OperationState | null; language: Language;
@@ -19,7 +29,8 @@ export function ChromeLoginNotice({ open, operation, language, continueLogin, op
   }, [open]);
   if (!open) return null;
   const zh = language !== "en";
-  const importing = requested || /^Capturing and verifying the (?:passkey|Chrome) session$/.test(operation?.message ?? "");
+  const waitingForClose = chromeLoginWaitingForClose(operation);
+  const importing = requested || chromeLoginContinuationPending(operation);
   const proceed = async () => {
     if (inFlight.current || importing) return;
     inFlight.current = true; setRequested(true); setError(null);
@@ -28,10 +39,13 @@ export function ChromeLoginNotice({ open, operation, language, continueLogin, op
   };
   return <section className="chrome-login-notice" role="status" aria-live="polite">
     <span><strong>{zh ? "完成 Chrome 登入" : "Finish Chrome sign-in"}</strong>
-      {zh ? "請在專用 Chrome 視窗中登入 ChatGPT，關閉該視窗，再按「繼續」。" : "Sign in to ChatGPT in the dedicated Chrome window, close that window, then choose Continue."}</span>
+      {waitingForClose
+        ? zh ? "已收到繼續要求。請關閉專用 Chrome 登入視窗，關閉後將開始匯入；不必再次按繼續。" : "Continue received. Close the dedicated Chrome window to start importing; no need to choose Continue again."
+        : zh ? "請在專用 Chrome 視窗中登入 ChatGPT，關閉該視窗，再按「繼續」。" : "Sign in to ChatGPT in the dedicated Chrome window, close that window, then choose Continue."}</span>
     <div className="chrome-login-actions">
-      <button type="button" disabled={importing} onClick={() => void proceed()}>{importing
-        ? zh ? "正在驗證登入…" : "Verifying sign-in…"
+      <button type="button" disabled={importing} onClick={() => void proceed()}>{waitingForClose
+        ? zh ? "等待關閉 Chrome…" : "Waiting for Chrome to close…"
+        : importing ? zh ? "正在驗證登入…" : "Verifying sign-in…"
         : zh ? "繼續" : "Continue"}</button>
       <button type="button" onClick={openBrowser}>{zh ? "開啟瀏覽器頁面" : "Open Browser"}</button>
     </div>

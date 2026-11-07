@@ -4344,7 +4344,7 @@ class BrowserHost {
     return inspected;
   }
 
-  async withManualOperation(name, action) {
+  async withManualOperation(name, action, { preserveSurface = false } = {}) {
     await this.ready();
     if (this.activeTraceId) {
       throw new Error(`ChatGPT browser is running Codex turn ${this.activeTraceId}`);
@@ -4352,7 +4352,7 @@ class BrowserHost {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
-    this.activateHomeSurface();
+    if (!preserveSurface) this.activateHomeSurface();
     this.manualOperation = name;
     let settle;
     this.manualOperationSettled = new Promise((resolve) => { settle = resolve; });

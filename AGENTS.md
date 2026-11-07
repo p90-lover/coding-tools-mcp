@@ -71,9 +71,11 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 
 ## GitHub delivery
 
-- Whenever a task changes tracked project files, commit the task's changes, push them to GitHub, and open or update a pull request before reporting the task as complete, unless the user explicitly asks otherwise.
-- Keep the PR scoped to the task: do not include unrelated edits or commits from the shared checkout. Do not merge the PR unless asked.
-- If verification, authentication, permissions, or another blocker prevents PR delivery, report the blocker and what remains instead of claiming completion.
+- **Standing user authorization:** unless the user explicitly asks otherwise, deliver installer-affecting changes end to end: verify → commit → push → pull request → passing applicable checks → merge to `main` → new version/build → verified published release. Do not ask the user to repeat permission for this normal delivery sequence.
+- **Do not stop at “PR open”, “CI running” or “build queued”.** Those are progress updates, not completion. Continue through publication and verify the release tag, exact source, downloadable assets and checksums; report the release/installer URL. If work is genuinely blocked, name the blocker and save a resumable checkpoint instead of claiming success.
+- Keep each PR scoped to its task. Do not merge unrelated, unverified or another owner's unfinished work, and never publish credentials or temporary artifacts. Coordinate one release owner and batch compatible verified merges into one build rather than creating competing releases.
+- Follow the detailed delivery workflow below, including its docs-only exception. Documentation/instruction-only changes still require a PR and merge, but do not need a redundant installer rebuild when packaged code is unchanged.
+- CI, authentication, disabled Actions, permissions and billing failures are real blockers, not permission to force-merge, skip verification, change account settings or report a release that does not exist. The one exception is **Releasing while GitHub Actions is blocked** below, and only after the user explicitly chooses it. An already-successful build may be published only after verifying its exact source provenance and asset checksums. Installation, patching or restarting the user's running app still requires their separate request.
 
 ## Storage: never the C: drive
 
@@ -94,7 +96,7 @@ Every agent working in this repository follows this: Claude Code, Codex, opencod
      - `gh pr list --state open --search "release: in:title"`
      - `gh run list --workflow electron-windows-release.yml --limit 3`
 
-     If a release PR is open or a `workflow_dispatch` run is in progress, stop: that release includes everything on `main` at its commit.
+     If a release PR is open or a `workflow_dispatch` run is in progress, do not start a competing release. Coordinate with its owner and verify that your change is actually included in the pinned build commit. An unrelated or older release is not a reason to abandon delivery; queue changes that miss the cutoff for the next release and report their true state.
    - Open a version-bump PR titled `release: 0.8.x`. It changes the version line in `desktop-electron/electron/product.cjs`, `desktop-electron/package.json`, `desktop-electron/scripts/prepare-package-resources.cjs`, `desktop-electron/scripts/verify-package.cjs`, `desktop-electron/tests/product-identity.test.cjs` and `desktop-electron/tests/rc12-release-identity.test.cjs`, plus new notes in `docs/releases/v0.8.x.md` (English and 繁體中文). Search `desktop-electron` for the old version to catch every line, but leave the `@xmldom/xmldom` override in `package.json` alone. Merge it once green.
    - Publish from CI: `gh workflow run electron-windows-release.yml --ref main -f publish=true`. CI builds, verifies and publishes the installer. Don't build a release installer locally.
    - Merges that land close together share one release.
@@ -104,6 +106,28 @@ Every agent working in this repository follows this: Claude Code, Codex, opencod
    - `G:\Projects\coding-tools-worktrees\ct-build` is shared: check its `git reflog` and look for running `electron-builder`/`cargo`/`bun` processes there first.
    - Build at low I/O priority, because the installed app runs from the same disk and freezes during a full-priority build.
 6. **The installed app.** Never install over, patch or restart the user's installed app (`H:\Apps\Coding Tools`) unless the user asks.
+
+### Releasing while GitHub Actions is blocked
+
+GitHub sometimes stops running workflows for this repository at the account level. `gh workflow run` then answers `HTTP 422: Actions has been disabled for this repository`, PRs show no checks and stay `BLOCKED`, and `actions/runs?head_sha=<head>` is 0, even though `actions/permissions` still says enabled. The user's repository settings don't fix it: it's the account's Actions billing, spending limit or a GitHub compute flag.
+
+1. **Report it and ask.** Tell the user, and don't re-trigger CI in a loop. Wait for Actions unless the user explicitly chooses to bypass CI. Their choice covers that one release.
+2. **Merge as admin.** Run `gh pr merge <n> --admin --merge`, one PR at a time, smallest and most independent first, with the version-bump PR last. Re-check `mergeable` before each merge and stop at the first conflict. In PowerShell 5.1, `gh --jq` expressions containing spaces or quotes break ("accepts at most 1 arg"), so run these from bash.
+3. **Release notes.** One `docs/releases/v0.8.x.md` covers every merged PR. Its verification section says the release was built locally without CI.
+4. **Test locally instead of CI.** On the merged `main`, run the desktop Electron suite (`node --test desktop-electron/tests/*.cjs`) at low I/O priority, plus the release identity tests. A failure blocks the release. Fix it in a PR and admin-merge that too.
+5. **Build like the release workflow.** Follow `.github/workflows/electron-windows-release.yml` on the exact merged commit, in `ct-build` (see step 5 above: reflog, running processes, low I/O priority, at least 3 GB free on G:):
+   - `git submodule update --init`;
+   - `bun install --frozen-lockfile` in `runtime-web`, `runtime-web/launcher` and `desktop-electron`;
+   - the checksum-pinned tunnel-client archive the workflow names;
+   - `cargo build --release --locked` for `rust-core/coding-tools-headless`;
+   - `bun run --cwd desktop-electron package:win`.
+
+   Then check what the workflow checks: `Coding.Tools_<ver>_win_x64_portable.zip`, `_update.json`, `*.ctpack` and `SHA256SUMS.txt` exist; delete `*.blockmap`; append the `.exe` hash to `SHA256SUMS.txt`; and `sha256sum -c SHA256SUMS.txt` passes.
+6. **Publish by hand, draft first.** The in-app updater skips drafts.
+   - `gh release create v<ver> --target <merged commit> --draft --title "Coding Tools v<ver>" --notes-file docs/releases/v<ver>.md <artifacts>/*`
+   - Download it back with `gh release download` and run `sha256sum -c SHA256SUMS.txt` on the copies.
+   - Only then run `gh release edit v<ver> --draft=false --latest`.
+7. **Clean up.** Delete the build's dated `aiTemp/Trash` folders in `ct-build`. Tell the user the release was built and tested locally, not by CI.
 
 ## xyTom 0.3 integration invariants
 

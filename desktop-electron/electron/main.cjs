@@ -38,6 +38,8 @@ const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require(".
 const { restoreGptBrowserAccounts } = require("./gpt-browser-restore.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
+const { createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
+const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createRegisterHost, createRegisterCpaSync } = require("./register-host.cjs");
@@ -273,6 +275,7 @@ let catalogVerificationInFlight = false;
 // round (a tunnel restart, a sign-in, an account switch, the setting); one try per bridge left MCP
 // unconnected for the whole session after one slow ChatGPT page.
 let automaticMcpAttempt = null;
+let automaticAccountMcp = null;
 const AUTOMATIC_MCP_RETRY_DELAYS_MS = [60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
 let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
@@ -789,6 +792,8 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
  */
 function restartAutomaticMcpVerification({ logger, stateStore, reason }) {
   automaticMcpAttempt = null;
+  automaticAccountMcp?.invalidate();
+  void automaticAccountMcp?.sync();
   const state = stateStore.read();
   if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
     || state.coreSetupComplete !== true) return;
@@ -1394,6 +1399,7 @@ function recordBrowserWorkspaceContext(partition, context) {
 
 async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore }) {
   if (browserHost !== host) return;
+  void automaticAccountMcp?.sync();
   try {
     // The account's own partition: the host may already show another account.
     if (browserAccounts.setEmail(accountId, await readChatGptAccountEmail(browserAccounts.partitionOf(accountId)))) publishBrowserAccounts();
@@ -2809,7 +2815,8 @@ function registerIpc({ logger, stateStore }) {
     return browserAccountsStatus();
   });
   handle("launcher:browser-account-inspect", async (event, accountId = browserAccounts.activeId()) => {
-    assertFocusedMainWindow(event, true);
+    // Metadata inspection uses an offscreen page and cannot perform MCP actions.
+    assertFocusedMainWindow(event, false, true);
     const partition = browserAccounts.partitionOf(accountId);
     const assertCurrent = () => {
       if ((browserHost?.interactionModeOverride ?? stateStore.read().browserInteractionMode) === "manual") {
@@ -2820,10 +2827,13 @@ function registerIpc({ logger, stateStore }) {
       }
     };
     assertCurrent();
-    if (!signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }))) {
+    const signedIn = signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
+    assertCurrent();
+    if (!signedIn) {
       throw new Error("Sign in to this account before checking its plan.");
     }
     await routeIdleAccountPartition(partition, logger);
+    assertCurrent();
     const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true });
     assertCurrent();
     recordBrowserWorkspaceContext(partition, context);
@@ -3329,9 +3339,7 @@ function registerIpc({ logger, stateStore }) {
     }
   } });
   dispatchMcpConnectorCommand();
-  handle("launcher:mcp-create-connector", async (event, accountId) => {
-    assertFocusedMainWindow(event, true);
-    if (accountId === undefined) return mcpConnectorCommand.request("create", "settings");
+  const connectAccountMcp = async (accountId, assertAutomaticCurrent) => {
     if (IS_DEV_PROFILE) throw new Error("Automatic connector creation is available in the production profile only");
     const partition = browserAccounts.partitionOf(accountId);
     const operationBrowser = browserHost, operationPartition = operationBrowser?.partition;
@@ -3341,6 +3349,7 @@ function registerIpc({ logger, stateStore }) {
     let primarySettings = null, tunnelId = tunnel?.tunnelId;
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
+      assertAutomaticCurrent?.();
       if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
       if (!operationBrowser || operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
         || browserAccounts.partitionOf(accountId) !== partition || extraTunnels !== runtimeSupervisor?.extraTunnels
@@ -3392,6 +3401,7 @@ function registerIpc({ logger, stateStore }) {
       creating = true;
       try {
         result = await createWorkspaceConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
+        preserveSurface: typeof assertAutomaticCurrent === "function",
         onContext: recordBrowserWorkspaceContext,
         accountCandidates: async () => {
           const candidates = [];
@@ -3431,7 +3441,64 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
+  };
+  handle("launcher:mcp-create-connector", async (event, accountId) => {
+    assertFocusedMainWindow(event, true);
+    if (accountId === undefined) return mcpConnectorCommand.request("create", "settings");
+    return connectAccountMcp(accountId);
   });
+
+  let accountMcpConfig = null;
+  automaticAccountMcp = createBrowserAccountMcpSync({
+    logger,
+    accounts: () => browserAccounts.status().accounts.map(account => ({
+      ...account, partition: browserAccounts.partitionOf(account.id),
+    })),
+    canRun: ({ connecting = false } = {}) => {
+      const state = stateStore.read();
+      const operation = browserHost?.currentOperation();
+      return !IS_DEV_PROFILE && !quitting && !shutdownInProgress
+        && state.autoConnectExistingMcp === true && state.coreSetupComplete === true
+        && state.browserInteractionMode === "automatic"
+        && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()
+        && mainWindow.isFocused() && mainWindow.webContents.isFocused()
+        && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
+        && (!operation || (connecting && operation === "MCP connector creation"))
+        && runtimeHost && !runtimeHost.currentOperation();
+    },
+    prepare: async () => {
+      // Timers must not synchronously read configuration/credential files on the main thread.
+      const config = await runtimeSupervisor.readConfigAsync();
+      accountMcpConfig = config?.browserHost === "launcher" && config.mode === "full"
+        && config.browserInteractionMode !== "manual"
+        && await runtimeHost.mcpCredentialsConfiguredAsync(config, "automatic") ? config : null;
+    },
+    target: accountId => {
+      if (!accountMcpConfig) return null;
+      const tunnel = runtimeSupervisor?.extraTunnels?.status().find(entry => entry.accountId === accountId);
+      const primary = accountMcpConfig.automaticTunnel || (!accountMcpConfig.manualTunnel ? accountMcpConfig.tunnel : null);
+      const tunnelId = tunnel?.tunnelId ?? primary?.tunnelId;
+      return tunnelId ? JSON.stringify([accountMcpConfig.appName, tunnelId,
+        browserAccounts.status().accounts.find(entry => entry.id === accountId)?.proxyProfileId]) : null;
+    },
+    readCookies: partition => session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }),
+    verifySignIn: async partition => {
+      await routeIdleAccountPartition(partition, logger);
+      const ownedSession = session.fromPartition(partition);
+      return readChatGptAuthSession(ownedSession.fetch.bind(ownedSession), "https://chatgpt.com", 10_000);
+    },
+    connect: (accountId, current) => connectAccountMcp(accountId, () => {
+      if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
+    }),
+  });
+  const syncAccountMcp = () => void automaticAccountMcp.sync().catch(error => logger.warn("browser_accounts.automatic_mcp_pending", {
+    message: error instanceof Error ? error.message : String(error),
+  }));
+  mainWindow.on("focus", syncAccountMcp);
+  const accountMcpTimer = setInterval(syncAccountMcp, 60_000);
+  accountMcpTimer.unref?.();
+  mainWindow.once("closed", () => clearInterval(accountMcpTimer));
+  syncAccountMcp();
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
   handle("launcher:cancel-turns", () => {
@@ -4682,6 +4749,12 @@ async function start() {
           schedule: (request) => {
             if (!missionWorkflowRuntime?.scheduleWakeup) throw new Error("Agent Orchestrator is not ready yet");
             return missionWorkflowRuntime.scheduleWakeup(request);
+          },
+        },
+        commandEvents: {
+          register: request => {
+            if (!missionWorkflowRuntime?.registerCommandWatch) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.registerCommandWatch(request);
           },
         },
         // get_goal, create_goal, update_goal: Codex's goal tools, on the chat's /goal.

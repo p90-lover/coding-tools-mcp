@@ -28,6 +28,9 @@ const MAX_CHECKPOINT_FILE_BYTES = 16 * 1024 * 1024;
 const PASSKEY_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_PASSKEY_STATE_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_PASSKEY_MARKER_FILE_BYTES = 64 * 1024;
+// Linear backoff (200 ms, 400 ms, ...): up to ~11 s for Chrome helpers or a scan to let go.
+const PASSKEY_TRANSFER_REMOVE_OPTIONS = Object.freeze({ recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+const PASSKEY_TRANSFER_BUSY_CODES = new Set(["EPERM", "EBUSY", "EACCES", "ENOTEMPTY"]);
 function collect(stream, chunks, onLine, onError) {
   let buffered = "";
   let bytes = 0;
@@ -222,13 +225,9 @@ class RuntimeHost {
     this.lifecycleOperation = null;
     this.cleanupEphemeralSecrets();
     this.passkeyContinuationRequested = false;
-    try {
-      this.cleanupPasskeyTransfers();
-    } catch (error) {
-      this.logger.warn("runtime.passkey_cleanup_failed", {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
+    this.activePasskeyTransfers = new Set();
+    // Never throws; kept so a caller (or test) can wait for the startup sweep.
+    this.startupPasskeyCleanup = this.cleanupPasskeyTransfers();
   }
 
   currentOperation() {
@@ -279,18 +278,50 @@ class RuntimeHost {
     }
   }
 
-  cleanupPasskeyTransfers() {
+  // Removes one transfer folder (its storage state and the dedicated Chrome profile). Chrome's
+  // helper processes and antivirus scans keep files open for a moment after Chrome closes, so
+  // Windows refuses the delete (EPERM/EBUSY) at first; retry off the main thread, then say why.
+  async removePasskeyTransfer(transferRoot) {
+    try {
+      await fs.promises.rm(transferRoot, PASSKEY_TRANSFER_REMOVE_OPTIONS);
+    } catch (error) {
+      if (!PASSKEY_TRANSFER_BUSY_CODES.has(error?.code)) throw error;
+      const busy = new Error(
+        "Windows is still using the temporary Chrome sign-in folder (Chrome may still be closing, or antivirus may be scanning it). "
+        + "It is removed on the next sign-in or app start.",
+      );
+      busy.code = error.code;
+      busy.cause = error;
+      throw busy;
+    }
+  }
+
+  // Best effort: leftovers of earlier attempts must never block a new sign-in, and a folder an
+  // attempt still uses (its Chrome open, or its state not imported yet) is never touched.
+  async cleanupPasskeyTransfers() {
     const parent = path.join(this.app.getPath("userData"), "passkey-login");
     let entries;
     try {
-      entries = fs.readdirSync(parent, { withFileTypes: true });
+      entries = await fs.promises.readdir(parent, { withFileTypes: true });
     } catch (error) {
-      if (error?.code === "ENOENT") return;
-      throw error;
+      if (error?.code !== "ENOENT") {
+        this.logger.warn("runtime.passkey_cleanup_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return;
     }
     for (const entry of entries) {
-      if (entry.isDirectory() && /^transfer-[A-Za-z0-9]+$/.test(entry.name)) {
-        fs.rmSync(path.join(parent, entry.name), { recursive: true, force: true });
+      if (!entry.isDirectory() || !/^transfer-[A-Za-z0-9]+$/.test(entry.name)) continue;
+      const transferRoot = path.join(parent, entry.name);
+      if (this.activePasskeyTransfers.has(transferRoot)) continue;
+      try {
+        await this.removePasskeyTransfer(transferRoot);
+      } catch (error) {
+        this.logger.warn("runtime.passkey_transfer_cleanup_deferred", {
+          code: error?.code,
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
@@ -323,25 +354,35 @@ class RuntimeHost {
     this.publishOperation?.({
       name: "passkey-login",
       status: "running",
-      message: "Capturing and verifying the passkey session",
+      message: this.platform === "win32"
+        ? "Waiting for the dedicated Chrome window to close before importing"
+        : "Capturing and verifying the Chrome session",
     });
     return new Promise((resolve, reject) => {
-      child.stdin.write(
-        `${JSON.stringify({ version: 1, type: "passkey-login-continue" })}\n`,
-        error => {
-          if (error) {
-            this.passkeyContinuationRequested = false;
-            reject(error);
-          } else {
-            resolve(true);
-          }
-        },
-      );
+      const failed = error => {
+        if (this.active === "passkey-login" && this.activeChild === child) {
+          this.passkeyContinuationRequested = false;
+          this.publishOperation?.({ name: "passkey-login", status: "running",
+            message: "Sign in in Chrome, close the dedicated Chrome window, then return here and choose Continue" });
+        }
+        reject(error);
+      };
+      try {
+        child.stdin.write(
+          `${JSON.stringify({ version: 1, type: "passkey-login-continue" })}\n`,
+          error => { if (error) failed(error); else resolve(true); },
+        );
+      } catch (error) { failed(error); }
     });
   }
 
   async capturePasskeyLogin({ proxyRules = "DIRECT" } = {}) {
-    this.cleanupPasskeyTransfers();
+    // One shared runtime serves every browser account: a second account's sign-in must neither
+    // start a second dedicated Chrome nor reach the open attempt's folder.
+    if (this.active === "passkey-login") {
+      throw new Error("A Chrome sign-in is already open. Finish it in the dedicated Chrome window and choose Continue, or close that window, then try again.");
+    }
+    await this.cleanupPasskeyTransfers();
     const chrome = this.passkeyChromeExecutable();
     let proxyServer;
     if (proxyRules !== "DIRECT") {
@@ -353,10 +394,16 @@ class RuntimeHost {
     fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
     try { fs.chmodSync(parent, 0o700); } catch {}
     const transferRoot = fs.mkdtempSync(path.join(parent, "transfer-"));
+    this.activePasskeyTransfers.add(transferRoot);
     try { fs.chmodSync(transferRoot, 0o700); } catch {}
     const storageStatePath = path.join(transferRoot, "storage-state.json");
     const markerPath = `${storageStatePath}.verified.json`;
-    const cleanup = async () => fs.rmSync(transferRoot, { recursive: true, force: true });
+    const cleanup = async () => {
+      // Once cleanup is asked for, the folder is no longer in use: if it stays held, a later
+      // sign-in or app start removes it.
+      this.activePasskeyTransfers.delete(transferRoot);
+      await this.removePasskeyTransfer(transferRoot);
+    };
     this.passkeyContinuationRequested = false;
     try {
       await this.run("passkey-login", [
@@ -395,7 +442,15 @@ class RuntimeHost {
       }
       return { storageState: JSON.parse(fs.readFileSync(storageStatePath, "utf8")), cleanup };
     } catch (error) {
-      await cleanup();
+      // The sign-in's own failure is what the user needs to see; a held folder is retried later.
+      try {
+        await cleanup();
+      } catch (cleanupError) {
+        this.logger.warn("runtime.passkey_transfer_cleanup_deferred", {
+          code: cleanupError?.code,
+          message: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+        });
+      }
       throw error;
     } finally {
       this.passkeyContinuationRequested = false;
