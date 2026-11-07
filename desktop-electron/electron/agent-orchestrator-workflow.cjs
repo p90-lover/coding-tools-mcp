@@ -5461,7 +5461,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}, checkCurrent = () => {}) {
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -5483,6 +5483,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
     checkCurrent();
+    if (afterRunId !== undefined) {
+      const parent = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (parent?.id !== afterRunId) throw new Error("A newer turn superseded this background continuation");
+      if (parent.cancelled || parent.paused || taskLifecycle(saved, taskId).visibility !== "active") {
+        throw new Error("This background continuation's parent was stopped or is unavailable");
+      }
+    }
     // The runs before this send, to tell whether its own run was made (withdrawFollowUp).
     const runsBefore = new Set(saved.runs.map(run => run.id));
     if (executionMode !== undefined && !["single", "team"].includes(executionMode)) throw new Error("Choose single or team execution");
@@ -6509,6 +6516,98 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return to;
   }
 
+  // ---- Command completion continuations (watch_command) ----
+
+  const commandWatchTickets = new Map();
+  const commandWatchTimers = new Map();
+  const commandWatchSending = new Set();
+  function settleCommandWatch(ticket, delivery) {
+    if (commandWatchTickets.get(ticket.id) !== ticket) return;
+    commandWatchTickets.delete(ticket.id);
+    ticket.resolve?.(delivery);
+  }
+  function armCommandWatches(workspaceId, taskId, delay = 1) {
+    const key = JSON.stringify([workspaceId, taskId]);
+    if (wakeupsDisposed || commandWatchTimers.has(key) && delay > 1) return;
+    if (commandWatchTimers.has(key)) clearTimer(commandWatchTimers.get(key));
+    const timer = setTimer(() => {
+      commandWatchTimers.delete(key);
+      void fireCommandWatches(workspaceId, taskId);
+    }, delay);
+    timer?.unref?.();
+    commandWatchTimers.set(key, timer);
+  }
+  async function fireCommandWatches(workspaceId, taskId) {
+    const key = JSON.stringify([workspaceId, taskId]);
+    if (wakeupsDisposed || commandWatchSending.has(key)) return;
+    const ticket = [...commandWatchTickets.values()].find(value => value.workspaceId === workspaceId && value.taskId === taskId && value.outcome);
+    if (!ticket) return;
+    const current = () => !wakeupsDisposed && commandWatchTickets.get(ticket.id) === ticket && ticket.isCurrent();
+    let attempted = false;
+    commandWatchSending.add(key);
+    try {
+      runReads.delete(JSON.stringify([workspaceId, ""]));
+      const saved = await runs({ workspaceId });
+      if (!current()) { settleCommandWatch(ticket, "dropped"); return; }
+      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (latest?.id !== ticket.runId || latest.cancelled || latest.paused || backgroundRuns.get(runKey(workspaceId, latest.id))?.stopped
+        || sessionStops.has(ticket.session) || taskLifecycle(saved, taskId).visibility !== "active") {
+        settleCommandWatch(ticket, "dropped"); return;
+      }
+      if (chatWorking(workspaceId, taskId, saved.runs)) { armCommandWatches(workspaceId, taskId, 60_000); return; }
+      const message = ["A registered background command watch ended. This is a tool notification, not a new user request or approval.",
+        `Command: ${ticket.commandId}`, `Your next-step note: ${ticket.reason}`, `Observed outcome: ${JSON.stringify(ticket.outcome)}`,
+        "Continue that pending next step now. Read the command's output and verify the actual result before reporting success. "
+          + "A watch deadline or observation failure is not command success or proof it stopped. Do not replay the command merely because its outcome is unknown. "
+          + "If more waiting is needed, register watch_command or schedule_wakeup and check that registration succeeded; a promise alone schedules nothing."].join("\n\n");
+      attempted = true;
+      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, () => {
+        if (!current()) throw new Error("This command watch was cancelled");
+      });
+      if (result?.ok === false || !result?.runId) { settleCommandWatch(ticket, "failed"); return; }
+      const previousRunId = ticket.runId;
+      for (const other of commandWatchTickets.values()) {
+        if (other.workspaceId === workspaceId && other.taskId === taskId && other.runId === previousRunId) other.runId = result.runId;
+      }
+      settleCommandWatch(ticket, "delivered");
+    } catch {
+      if (!current()) settleCommandWatch(ticket, "dropped");
+      else if (attempted) settleCommandWatch(ticket, "unknown");
+      else if (++ticket.failures >= 3) settleCommandWatch(ticket, "failed");
+      else armCommandWatches(workspaceId, taskId, 60_000);
+    } finally {
+      commandWatchSending.delete(key);
+      if (!wakeupsDisposed && [...commandWatchTickets.values()].some(value => value.workspaceId === workspaceId && value.taskId === taskId && value.outcome)) {
+        armCommandWatches(workspaceId, taskId, 60_000);
+      }
+    }
+  }
+  async function registerCommandWatch({ workspaceId, session, commandId, reason, isCurrent = () => true } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    const command = clean(commandId, 128), note = publicText(clean(reason, 500, false), 500);
+    if (!note.trim() || wakeupsDisposed || !isCurrent()) throw new Error("This command watch is unavailable");
+    runReads.delete(JSON.stringify([id, ""]));
+    const { run, latest } = await sessionChat(id, thread, "watch a command");
+    if (latest?.id !== run.id || run.cancelled || run.paused || sessionStops.has(thread) || !isCurrent() || wakeupsDisposed) {
+      throw new Error("A newer turn or Stop superseded this command watch");
+    }
+    if (commandWatchTickets.size >= 128) throw new Error("Too many pending command watches");
+    const ticket = { id: randomUUID(), workspaceId: id, taskId: run.project_id, runId: run.id, session: thread,
+      commandId: command, reason: note, isCurrent, failures: 0 };
+    commandWatchTickets.set(ticket.id, ticket);
+    return {
+      complete(outcome) {
+        if (commandWatchTickets.get(ticket.id) !== ticket || wakeupsDisposed) return Promise.resolve("dropped");
+        if (ticket.pending) return ticket.pending;
+        ticket.outcome = outcome;
+        ticket.pending = new Promise(resolve => { ticket.resolve = resolve; });
+        armCommandWatches(id, run.project_id);
+        return ticket.pending;
+      },
+      cancel() { settleCommandWatch(ticket, "dropped"); },
+    };
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -6594,6 +6693,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   // When a chat's turn settles, a wake-up that came due while it ran fires now.
   async function wakeupAfterRun(workspaceId, runId) {
+    for (const ticket of commandWatchTickets.values()) {
+      if (ticket.workspaceId === workspaceId && ticket.runId === runId && ticket.outcome) armCommandWatches(workspaceId, ticket.taskId);
+    }
     const due = Object.values(wakeups.forWorkspace(workspaceId)).filter(wakeup => wakeup.due || wakeup.dueAt <= now());
     for (const wakeup of due) {
       // A self-paced /loop's round also waits out a turn the user started meanwhile.
@@ -7851,6 +7953,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     scheduleTimers.clear();
     // Saved wake-ups stay on disk and are armed again by the next app.
     wakeupsDisposed = true;
+    for (const timer of commandWatchTimers.values()) clearTimer(timer);
+    commandWatchTimers.clear();
+    for (const ticket of commandWatchTickets.values()) settleCommandWatch(ticket, "dropped");
     for (const timer of wakeTimers.values()) clearTimer(timer);
     wakeTimers.clear();
     for (const timer of loopTimers.values()) clearTimer(timer);
@@ -8051,7 +8156,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

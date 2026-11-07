@@ -5424,6 +5424,123 @@ function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
 }
 const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
 
+const watchInput = { workspaceId: "ws-1", session: "sess-1", commandId: "cmd-build", reason: "verify CI and finish delivery" };
+const watchOutcome = { kind: "completed", status: "exited", exit_code: 0, command_ok: true };
+
+test("a command watch actually starts its next turn after the final answer, on the same model route", async (t) => {
+  const { workflow, world, route, advance } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const ticket = await workflow.registerCommandWatch(watchInput);
+  const before = world.updates.length;
+  const delivered = ticket.complete(watchOutcome);
+  await advance(1);
+  assert.equal(await delivered, "delivered");
+  assert.equal(world.updates.length, before + 1, "a real run was created, not just a notification string");
+  assert.deepEqual(world.updates.at(-1).single_route, route);
+  assert.match(world.edits.at(-1).description, /registered background command watch ended[\s\S]*verify CI and finish delivery[\s\S]*Continue that pending next step now/);
+  await advance(60_000);
+  assert.equal(world.updates.length, before + 1, "completion is delivered only once");
+});
+
+test("command completion waits while its parent works and continues after settlement", async (t) => {
+  const { workflow, world, advance } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  world.runs[0].nodes[0].state = "running";
+  const ticket = await workflow.registerCommandWatch(watchInput);
+  const before = world.updates.length;
+  const delivered = ticket.complete(watchOutcome);
+  await advance(1);
+  assert.equal(world.updates.length, before);
+  world.runs[0].nodes[0].state = "finished";
+  await advance(60_000);
+  assert.equal(await delivered, "delivered");
+  assert.equal(world.updates.length, before + 1);
+});
+
+for (const change of ["cancel", "stop", "new turn", "delete", "dispose"]) {
+  test(`a command watch does not revive after ${change}`, async (t) => {
+    const { workflow, world, advance } = wakeChat({ hold: true });
+    t.after(() => workflow.dispose());
+    const ticket = await workflow.registerCommandWatch(watchInput);
+    const before = world.updates.length;
+    const delivered = ticket.complete(watchOutcome);
+    if (change === "cancel") ticket.cancel();
+    else if (change === "stop") world.runs[0].cancelled = true;
+    else if (change === "new turn") world.runs.push({ ...structuredClone(world.runs[0]), id: "newer" });
+    else if (change === "delete") world.runs.length = 0;
+    else workflow.dispose();
+    await advance(60_000);
+    assert.equal(await delivered, "dropped");
+    assert.equal(world.updates.length, before);
+  });
+}
+
+test("cancel during a pending completion read wins before a follow-up is written", async (t) => {
+  const { workflow, world, advance, gate } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const ticket = await workflow.registerCommandWatch(watchInput);
+  let release; gate.read = new Promise(resolve => { release = resolve; });
+  const before = world.updates.length;
+  const delivered = ticket.complete(watchOutcome);
+  await advance(1); ticket.cancel(); gate.read = null; release();
+  await advance(1);
+  assert.equal(await delivered, "dropped");
+  assert.equal(world.updates.length, before);
+});
+
+test("multiple command watches keep their continuation lineage without simultaneous turns", async (t) => {
+  const { workflow, world, advance } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const first = await workflow.registerCommandWatch(watchInput);
+  const second = await workflow.registerCommandWatch({ ...watchInput, commandId: "cmd-two" });
+  const before = world.updates.length;
+  const a = first.complete(watchOutcome), b = second.complete(watchOutcome);
+  await advance(1);
+  assert.equal(await a, "delivered");
+  assert.equal(world.updates.length, before + 1);
+  const next = { ...structuredClone(world.runs[0]), id: world.updates.at(-1).run_id };
+  next.nodes[0].state = "running";
+  world.runs.push(next);
+  await advance(60_000);
+  assert.equal(world.updates.length, before + 1, "the second event cannot start beside the first follow-up");
+  world.runs.at(-1).nodes.forEach(node => { node.state = "finished"; });
+  await advance(60_000);
+  assert.equal(await b, "delivered");
+  assert.equal(world.updates.length, before + 2);
+});
+
+test("an uncertain continuation send is not automatically replayed", async (t) => {
+  const { workflow, world, advance, gate } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const ticket = await workflow.registerCommandWatch(watchInput);
+  gate.fail = 1;
+  const before = world.updates.length;
+  const delivered = ticket.complete(watchOutcome);
+  await advance(1);
+  assert.equal(await delivered, "unknown");
+  await advance(10 * 60_000);
+  assert.equal(world.updates.length, before);
+});
+
+for (const state of ["cancelled", "paused"]) {
+  test(`the serialized continuation send rechecks a ${state} parent before writing`, async (t) => {
+    const { workflow, world, route } = wakeChat({ hold: true });
+    t.after(() => workflow.dispose());
+    world.runs[0][state] = true;
+    const before = world.edits.length;
+    await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "stale event", executionMode: "single", singleRoute: route, afterRunId: "r1" }), /background continuation|superseded/);
+    assert.equal(world.edits.length, before);
+  });
+}
+
+test("a stale expected parent cannot append a background continuation to a newer conversation", async (t) => {
+  const { workflow, world, route } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const before = world.edits.length;
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "stale background event", executionMode: "single", singleRoute: route, afterRunId: "older" }), /newer turn superseded/);
+  assert.equal(world.edits.length, before);
+});
+
 test("goal status updates explain deferred reports instead of silently returning active", async (t) => {
   const { workflow } = wakeChat();
   t.after(() => workflow.dispose());

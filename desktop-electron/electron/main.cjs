@@ -4684,6 +4684,12 @@ async function start() {
             return missionWorkflowRuntime.scheduleWakeup(request);
           },
         },
+        commandEvents: {
+          register: request => {
+            if (!missionWorkflowRuntime?.registerCommandWatch) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.registerCommandWatch(request);
+          },
+        },
         // get_goal, create_goal, update_goal: Codex's goal tools, on the chat's /goal.
         goals: {
           call: (request) => {

@@ -1,0 +1,7 @@
+{
+  "layout": "parent-child",
+  "subspecs": [
+    { "id": "terminal-watch", "title": "Bounded command watches and tool discovery", "fr": ["FR-1", "FR-2", "FR-3"] },
+    { "id": "continuation", "title": "Completion delivery and next-turn ownership", "fr": ["FR-4", "FR-5", "FR-6"], "dependsOn": ["terminal-watch"] }
+  ]
+}
