@@ -33,7 +33,8 @@ const {
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const SAVED_CHAT_URL = "https://chatgpt.com/";
 // The Browser tab's own page (startup, sign-in, sign-out, a new tab) is ChatGPT's plain home whatever
-// "Save chats in ChatGPT" says; only task turns and connector verification open Temporary Chat.
+// "Save chats in ChatGPT" says. Account and connector checks keep that home;
+// task turns choose their own chat kind.
 const HOME_URL = SAVED_CHAT_URL;
 function authenticationContextFor(host, session) {
   host.authenticationContexts ??= new WeakMap();
@@ -2006,18 +2007,16 @@ class BrowserHost {
     });
   }
 
-  async refreshChatGptHomeDocument(useSavedChats = false) {
-    // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
-    // existing new-chat document of the requested kind so the helper observes one authoritative
-    // SPA bootstrap (and, for verification, the same kind of chat the task turns use).
-    const targetUrl = useSavedChats ? SAVED_CHAT_URL : TEMPORARY_CHAT_URL;
+  async refreshChatGptHomeDocument() {
+    // Maintenance uses the person's home page, not the task-turn privacy setting.
+    const targetUrl = HOME_URL;
     // Cloudflare's check page reloads itself until it passes; a reload from here only adds a request
     // and a flash, then times out on the same check. Name the check at once instead.
     if (await this.cloudflareCheckShown()) {
       this.logger.warn("browser.cloudflare_check_page", { url: urlWithoutQuery(this.view.webContents.getURL()) });
       throw new Error(CHATGPT_SECURITY_CHECK_MESSAGE);
     }
-    if (isNewChatUrl(this.view.webContents.getURL(), useSavedChats)) {
+    if (isNewChatUrl(this.view.webContents.getURL(), true)) {
       await this.hardRefreshHome();
     } else {
       await this.view.webContents.loadURL(targetUrl);
@@ -4280,14 +4279,13 @@ class BrowserHost {
     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
     const connectorName = validateConnectorName(appName);
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
-    const useSavedChats = useSavedChatsFor(this);
-    await this.refreshChatGptHomeDocument(useSavedChats);
+    await this.refreshChatGptHomeDocument();
     try {
       const result = await this.verifyConnectorWithBrowserHelper({
         helper: this.helper,
         descriptorPath: this.descriptorPath,
         appName: connectorName,
-        useSavedChats,
+        useSavedChats: true,
         logger: this.logger,
       });
       this.logger.info("connector.verified", { appName: connectorName });

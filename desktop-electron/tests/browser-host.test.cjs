@@ -1707,7 +1707,7 @@ test("browser helper operations fail closed when the configured connector name i
   assert.equal(helperCalls, 0);
 });
 
-for (const useSavedChats of [true, false]) test(`connector verification uses the task-turn chat mode (saved=${useSavedChats}) without effort or a visible surface`, async () => {
+for (const useSavedChats of [true, false]) test(`connector verification keeps normal home regardless of task privacy (saved=${useSavedChats})`, async () => {
   const calls = [];
   const fixture = {
     helper: { executable: "/runtime/electron", script: "/runtime/browser-helper.cjs" },
@@ -1716,7 +1716,7 @@ for (const useSavedChats of [true, false]) test(`connector verification uses the
     setState: (patch) => calls.push(["state", patch]),
     show: () => calls.push(["show"]),
     getUseSavedChats: () => useSavedChats,
-    refreshChatGptHomeDocument: async (saved) => calls.push(["refresh", saved]),
+    refreshChatGptHomeDocument: async (...args) => calls.push(["refresh", ...args]),
     selectHighEffort: async () => {
       throw new Error("connector verification must not select an effort");
     },
@@ -1729,25 +1729,26 @@ for (const useSavedChats of [true, false]) test(`connector verification uses the
   const result = await BrowserHost.prototype.runConnectorVerification.call(fixture, "Codex Native2");
 
   assert.deepEqual(result, { ok: true, appName: "Codex Native2" });
+  assert.equal(fixture.getUseSavedChats(), useSavedChats, "verification must not change task privacy");
   assert.equal(calls.some(([type]) => type === "show"), false);
   assert.deepEqual(
     calls.filter(([type]) => ["refresh", "helper"].includes(type)),
     [
-      ["refresh", useSavedChats],
+      ["refresh"],
       ["helper", {
         helper: fixture.helper,
         descriptorPath: fixture.descriptorPath,
         appName: "Codex Native2",
-        useSavedChats,
+        useSavedChats: true,
         logger: fixture.logger,
       }],
     ],
   );
 });
 
-for (const useSavedChats of [true, false]) test(`verification refresh opens and authenticates the selected new chat (saved=${useSavedChats})`, async () => {
-  const target = useSavedChats ? "https://chatgpt.com/" : "https://chatgpt.com/?temporary-chat=true";
-  const other = useSavedChats ? "https://chatgpt.com/?temporary-chat=true" : "https://chatgpt.com/";
+for (const useSavedChats of [true, false]) test(`verification refresh uses normal home even with a legacy privacy argument (saved=${useSavedChats})`, async () => {
+  const target = "https://chatgpt.com/";
+  const other = "https://chatgpt.com/?temporary-chat=true";
   for (const initial of [target, other, "https://chatgpt.com/c/0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c", IDLE_BROWSER_URL]) {
     const calls = [];
     let currentUrl = initial;
@@ -1766,8 +1767,8 @@ for (const useSavedChats of [true, false]) test(`verification refresh opens and 
           if (script.startsWith("(function isCloudflareCheckPage")) return false;
           calls.push(["authenticate"]);
           // The page's own probe: a saved-chat home is no Temporary Chat but is a new chat.
-          return { sessionAuthenticated: true, composer: true, temporary: !useSavedChats,
-            savedHome: useSavedChats, url: currentUrl, readyState: "complete" };
+          return { sessionAuthenticated: true, composer: true, temporary: false,
+            savedHome: true, url: currentUrl, readyState: "complete" };
         },
       } },
       hardRefreshHome: async () => calls.push(["refresh"]),
