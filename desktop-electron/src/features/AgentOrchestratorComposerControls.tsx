@@ -115,6 +115,14 @@ function fitInPane(menu: HTMLElement | null) {
   if (over > 0 && room > 0) menu.style.left = `${(Number.parseFloat(style.left) || 0) - Math.min(over, room)}px`;
 }
 
+/** Marks which ends of a scrolling list have more rows past them, so CSS fades just those ends. */
+export function fadeEdges(list: HTMLElement | null) {
+  if (!list) return;
+  const above = list.scrollTop > 1, below = list.scrollTop + list.clientHeight < list.scrollHeight - 1;
+  const fade = above && below ? "both" : above ? "top" : below ? "bottom" : "";
+  if (list.dataset.fade !== fade) list.dataset.fade = fade;
+}
+
 /**
  * Shared keyboard/outside-click behavior for the three independent composer popovers. Focus never
  * scrolls: in a split pane, focusing a menu that reached past the pane's edge scrolled the whole
@@ -130,7 +138,7 @@ export function useComposerPopover() {
   const focus = (control: HTMLElement) => {
     control.focus({ preventScroll: true });
     if (!panel.current?.matches(".ao-harness-popup, .ao-model-popup")) return;
-    const scroller = control.closest<HTMLElement>(".ao-model-options") ?? panel.current;
+    const scroller = control.closest<HTMLElement>(".ao-model-options, .ao-harness-list") ?? panel.current;
     const bounds = scroller.getBoundingClientRect(), rect = control.getBoundingClientRect();
     if (rect.top < bounds.top) scroller.scrollTop -= bounds.top - rect.top;
     else if (rect.bottom > bounds.bottom) scroller.scrollTop += rect.bottom - bounds.bottom;
@@ -189,8 +197,10 @@ function ChipMenu({ label, ariaLabel, title, disabled, className = "", popupClas
 }
 
 /** An option row in a chip menu: a radio mark, its text, and a check when it is the pick. `row` staggers its entrance. */
-function Option({ picked, disabled, onPick, title, row, children }: { picked: boolean; disabled: boolean; onPick: () => void; title?: string; row?: number; children: ReactNode }) {
-  return <button type="button" role="radio" aria-checked={picked} className="ao-picker-option" disabled={disabled} onClick={onPick} title={title}
+function Option({ picked, disabled, onPick, title, ariaLabel, row, children }: {
+  picked: boolean; disabled: boolean; onPick: () => void; title?: string; ariaLabel?: string; row?: number; children: ReactNode;
+}) {
+  return <button type="button" role="radio" aria-checked={picked} className="ao-picker-option" disabled={disabled} onClick={onPick} title={title} aria-label={ariaLabel}
     style={row === undefined ? undefined : { "--row": row } as CSSProperties}>
     <span className="ao-option-radio" aria-hidden="true" /><span>{children}</span>{picked ? <Icon name="check" width="16" height="16" /> : null}
   </button>;
@@ -214,6 +224,8 @@ export function AgentOrchestratorComposerControls({
   // Opening the model menu reads the catalog again (the loader keeps it a minute), so a provider
   // added in CPA shows up without switching harness or restarting.
   const [reload, setReload] = useState(0);
+  // The harness strip's name bubble: the hovered or focused logo's name, at that row's height.
+  const [tip, setTip] = useState<{ label: string; top: number } | null>(null);
   const shown = useRef("");
   // The route as it is now: a catalog that arrives after the user picked another model must not
   // write the route it started with back over that pick.
@@ -320,11 +332,13 @@ export function AgentOrchestratorComposerControls({
         title={isWebModel(route.model) ? `${harnessName} · WebGPT runs only on Native Codex` : `${harnessName} · the agent that runs this chat`}
         label={<HarnessLogo harnessId={route.harness_id} label={harnessName} />}>
         {(close) => {
-          // One slim line per harness: its logo and name. Its state is no word on the row: a missing
-          // harness is greyed with a blinking red dot on its logo (and folded under "+N"), one that
-          // needs a sign-in has an amber dot.
+          // A slim strip of logos, every harness in one scrolling column: the ones that run first,
+          // then the missing ones, each with a red dot on its logo (one that needs a sign-in has an
+          // amber dot). No names on the rows: hovering or focusing a logo shows its name in a bubble
+          // beside the strip, and the ends of the column fade where more logos follow.
+          const nameOf = (item: AoHarness) => item.runnable ? item.label : `${item.label} · not installed`;
           const row = (item: AoHarness, index: number) => <Option key={item.id} picked={item.id === route.harness_id} disabled={busy || !item.runnable} row={index}
-            title={!item.runnable ? `${item.label} · not installed` : item.label}
+            ariaLabel={nameOf(item)}
             onPick={() => {
               // Each harness starts on an explicit model; one without a known model shows "Choose a model".
               const model = item.id === NATIVE_HARNESS ? WEB_ROUTE.model : item.id === DEFAULT_WORKER_HARNESS ? DEFAULT_WORKER_MODEL : "";
@@ -332,23 +346,38 @@ export function AgentOrchestratorComposerControls({
               close();
             }}>
             <span className={item.runnable ? "ao-harness-option" : "ao-harness-option is-missing"}>
-              <span className="ao-harness-face"><HarnessLogo harnessId={item.id} label={item.label} size={16} />
+              <span className="ao-harness-face"><HarnessLogo harnessId={item.id} label={item.label} size={18} />
                 {!item.runnable ? <i className="ao-harness-missing" aria-hidden="true" />
-                  : item.authStatus === "unauthorized" ? <i className="ao-harness-signin" aria-hidden="true" /> : null}</span>
-              <strong>{item.label}</strong></span>
+                  : item.authStatus === "unauthorized" ? <i className="ao-harness-signin" aria-hidden="true" /> : null}</span></span>
           </Option>;
-          // The picked harness always stays in view, even if it went missing since.
-          const ready = harnesses.filter(item => item.runnable || item.id === route.harness_id);
-          const missing = harnesses.filter(item => !item.runnable && item.id !== route.harness_id);
-          return <div role="radiogroup" aria-label="Harnesses" className="ao-harness-list">
-            {ready.map(row)}
-            {missing.length ? <details className="ao-harness-more">
-              <summary title={`Not installed: ${missing.map(item => item.label).join(", ")}`} aria-label={`${missing.length} more, not installed`}>
-                <Icon name="chevron" width="12" height="12" /><span>+{missing.length}</span></summary>
-              {missing.map(row)}
-            </details> : null}
-            {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
-          </div>;
+          // The picked harness always stays up top, even if it went missing since.
+          const ordered = [...harnesses.filter(item => item.runnable || item.id === route.harness_id),
+            ...harnesses.filter(item => !item.runnable && item.id !== route.harness_id)];
+          // One listener for the whole column: a missing harness's row is a disabled button. The gap
+          // between two rows keeps the bubble; leaving the column clears it.
+          const point = (target: EventTarget | null) => {
+            const option = (target as HTMLElement | null)?.closest?.<HTMLElement>(".ao-picker-option");
+            const panel = option?.closest<HTMLElement>(".ao-harness-popup");
+            const label = option?.getAttribute("aria-label");
+            if (!option || !panel || !label) return;
+            const at = option.getBoundingClientRect(), box = panel.getBoundingClientRect();
+            const top = Math.round(at.top - box.top + at.height / 2);
+            setTip(current => current?.label === label && current.top === top ? current : { label, top });
+          };
+          const [name, state] = tip?.label.split(" · ") ?? [];
+          return <>
+            <div role="radiogroup" aria-label="Harnesses" className="ao-harness-list"
+              ref={list => { fadeEdges(list); if (list && typeof requestAnimationFrame === "function") requestAnimationFrame(() => fadeEdges(list)); }}
+              onScroll={event => { fadeEdges(event.currentTarget); setTip(null); }}
+              onPointerOver={event => point(event.target)} onPointerLeave={() => setTip(null)}
+              // Keyboard focus names its logo too; the focus a mouse-opened menu puts on its first row does not.
+              onFocus={event => { if ((event.target as HTMLElement).matches?.(":focus-visible")) point(event.target); }} onBlur={() => setTip(null)}>
+              {ordered.map(row)}
+              {!harnesses.length ? <p role="status">No agents found yet.</p> : null}
+            </div>
+            {tip ? <span key={tip.label} className="ao-harness-tip" aria-hidden="true" style={{ "--tip-y": `${tip.top}px` } as CSSProperties}>
+              {name}{state ? <small>{state}</small> : null}</span> : null}
+          </>;
         }}
       </ChipMenu>
       <ChipMenu heading="Model" showHeading={false} popupClass="ao-model-popup" ariaLabel="Choose model" disabled={busy} className={unlisted ? "is-warning" : ""}

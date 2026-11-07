@@ -504,32 +504,43 @@
 /* Monochrome brand glyphs turn white on the dark theme. */
 .ao-workflow[data-theme="dark"] .ao-harness-mark.is-mono, :root[data-theme="dark"] .ao-harness-mark.is-mono { filter: invert(1); }
 .ao-workflow .ao-harness-option { display: flex; align-items: center; gap: 8px; min-width: 0; }
-/* The harness list is one slim line per harness: logo and name, no state words. A missing harness
-   is greyed and folded under "+N", one that needs a sign-in has a dot on its logo, and the tooltip
-   says which. The pick is marked by its tint and check, so the rows need no radio. The panel rises
-   in, its rows follow one by one, the check pops and a hovered logo tips toward the pointer. */
-.ao-workflow .ao-composer-popover.ao-harness-popup { width: min(160px, calc(100vw - 32px)); max-height: min(280px, 44dvh, var(--ao-picker-room, 100dvh)); padding: 4px; border-radius: 10px;
-  overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable;
+/* The harness menu is a slim strip of logos, every harness in one column that scrolls (no fold).
+   No names or state words on the rows: a hovered or focused logo shows its name in a bubble beside
+   the strip, a missing harness has a red dot on its logo and one that needs a sign-in an amber dot.
+   The column fades at an end only while more logos lie past it. The pick is a tinted, ringed tile.
+   The panel rises in, its rows follow one by one and a hovered logo tips toward the pointer. The
+   panel itself never scrolls or clips, so the bubble can sit outside it; the column scrolls. */
+.ao-workflow .ao-composer-popover.ao-harness-popup { width: auto; max-height: none; padding: 3px; border-radius: 12px; overflow: visible;
   transform-origin: 16px 100%; animation: ao-popover-in .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+.ao-workflow .ao-tuning-popup .ao-harness-list { max-height: min(280px, 44dvh, calc(var(--ao-picker-room, 100dvh) - 6px)); overflow-y: auto;
+  overscroll-behavior: contain; scrollbar-width: none; }
+.ao-workflow .ao-harness-list::-webkit-scrollbar { display: none; }
+.ao-workflow .ao-harness-list[data-fade="top"] { mask-image: linear-gradient(to bottom, transparent, #000 26px); }
+.ao-workflow .ao-harness-list[data-fade="bottom"] { mask-image: linear-gradient(to top, transparent, #000 26px); }
+.ao-workflow .ao-harness-list[data-fade="both"] { mask-image: linear-gradient(to bottom, transparent, #000 26px, #000 calc(100% - 26px), transparent); }
+.ao-workflow .ao-harness-tip { position: absolute; z-index: 1; top: var(--tip-y, 50%); left: calc(100% + 8px); transform: translateY(-50%);
+  display: flex; align-items: baseline; gap: 6px; padding: 4px 9px; border-radius: 7px; background: var(--claude-text, #1d2939); color: var(--claude-bg, #fff);
+  font-size: 12px; font-weight: 500; white-space: nowrap; pointer-events: none; box-shadow: 0 4px 14px rgb(15 23 42 / 18%);
+  animation: ao-tip-in .14s ease-out backwards; }
+.ao-workflow .ao-harness-tip small { font-size: 11px; font-weight: 400; opacity: .72; }
+@keyframes ao-tip-in { from { opacity: 0; transform: translate(-4px, -50%); } }
 .ao-workflow .ao-harness-popup > header { margin: 0 2px 4px 8px; }
 .ao-workflow .ao-harness-popup h3 { font-size: 13px; }
 .ao-workflow .ao-harness-popup .ao-popover-close { flex-basis: 22px; width: 22px; height: 22px; border-radius: 6px; transition: transform .2s ease, background-color .16s ease; }
 .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: rotate(90deg); background: var(--cx-hover, #eef3f8); }
 .ao-workflow .ao-harness-list { gap: 1px; }
-.ao-workflow .ao-harness-list .ao-picker-option { margin: 0; padding: 4px 6px; gap: 6px; border-radius: 6px; font-size: 12px;
-  transition: background-color .16s ease, transform .16s ease;
-  animation: ao-row-in .3s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(var(--row, 0) * 18ms + 50ms); }
-.ao-workflow .ao-harness-list .ao-option-radio { display: none; }
-.ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled) { transform: translateX(2px); }
+.ao-workflow .ao-harness-list .ao-picker-option { justify-content: center; margin: 0; padding: 6px; gap: 0; border-radius: 8px;
+  transition: background-color .16s ease, box-shadow .16s ease;
+  animation: ao-row-in .3s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(min(var(--row, 0), 10) * 18ms + 50ms); }
+.ao-workflow .ao-harness-list .ao-picker-option > span:nth-child(2) { flex: none; }
+.ao-workflow .ao-harness-list .ao-option-radio, .ao-workflow .ao-harness-list .ao-picker-option > svg { display: none; }
+.ao-workflow .ao-harness-list .ao-picker-option[aria-checked="true"] { background: var(--claude-accent-soft, #e8f1ff);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--claude-accent, #1677ff) 45%, transparent); }
 .ao-workflow .ao-harness-list .ao-harness-logo { transition: transform .22s cubic-bezier(.3, 1.6, .5, 1); }
 .ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled) .ao-harness-logo { transform: scale(1.14) rotate(-6deg); }
-.ao-workflow .ao-harness-list .ao-picker-option > svg { flex: none; width: 14px; height: 14px; color: var(--claude-accent, #1677ff);
-  animation: ao-check-pop .34s cubic-bezier(.3, 1.6, .5, 1) .12s backwards; }
-.ao-workflow .ao-harness-list .ao-harness-option strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .ao-workflow .ao-harness-list .ao-picker-option:disabled { opacity: 0.55; cursor: default; }
-/* Installation state dims the name, not the brand: every logo keeps its real colour and contrast. */
+/* Installation state is the red dot, not a faded brand: every logo keeps its real colour and contrast. */
 .ao-workflow .ao-harness-list .ao-picker-option:disabled:has(.is-missing) { opacity: 1; }
-.ao-workflow .ao-harness-option.is-missing strong { color: var(--claude-text-2, #7a879c); }
 .ao-workflow .ao-harness-face { position: relative; display: inline-grid; flex: none; }
 .ao-workflow .ao-harness-signin { position: absolute; top: -2px; right: -3px; width: 7px; height: 7px; border-radius: 50%;
   background: var(--ao-amber, #c98a12); box-shadow: 0 0 0 2px var(--claude-raised, #fff); animation: ao-check-pop .34s cubic-bezier(.3, 1.6, .5, 1) .3s backwards; }
@@ -537,25 +548,14 @@
 .ao-workflow .ao-harness-missing { position: absolute; top: -2px; left: -3px; width: 7px; height: 7px; border-radius: 50%;
   background: var(--ao-red, #e5484d); box-shadow: 0 0 0 2px var(--claude-raised, #fff); animation: ao-missing-blink 1.2s ease-in-out infinite; }
 @keyframes ao-missing-blink { 50% { opacity: .25; } }
-.ao-workflow .ao-harness-more > summary { display: flex; align-items: center; gap: 6px; margin-top: 2px; padding: 4px 8px; border-radius: 8px;
-  color: var(--claude-text-2, #7a879c); font-size: 11.5px; list-style: none; cursor: pointer; transition: background-color .16s ease, color .16s ease; }
-.ao-workflow .ao-harness-more > summary::-webkit-details-marker { display: none; }
-.ao-workflow .ao-harness-more > summary:hover { background: var(--cx-hover, #eef3f8); color: var(--claude-text, #27384f); }
-.ao-workflow .ao-harness-more > summary:focus-visible { outline: 2px solid var(--claude-accent, #1677ff); outline-offset: -2px; }
-.ao-workflow .ao-harness-more > summary svg { transition: transform .22s cubic-bezier(.2, .8, .2, 1); }
-.ao-workflow .ao-harness-more[open] > summary svg { transform: rotate(90deg); }
-/* Folded rows unfold when opened: the animation's name changes then, which starts it again. */
-.ao-workflow .ao-harness-more[open] .ao-picker-option { animation-name: ao-row-unfold; animation-delay: calc(var(--row, 0) * 14ms); }
 @keyframes ao-popover-in { from { opacity: 0; transform: translateY(8px) scale(.94); filter: blur(4px); } }
 @keyframes ao-row-in { from { opacity: 0; transform: translateY(4px); } }
-@keyframes ao-row-unfold { from { opacity: 0; transform: translateY(-4px); } }
 @keyframes ao-check-pop { from { opacity: 0; transform: scale(.3) rotate(-25deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .ao-workflow .ao-harness-popup, .ao-workflow .ao-harness-list .ao-picker-option, .ao-workflow .ao-harness-list .ao-picker-option > svg,
+  .ao-workflow .ao-harness-popup, .ao-workflow .ao-harness-list .ao-picker-option, .ao-workflow .ao-harness-tip,
   .ao-workflow .ao-harness-signin, .ao-workflow .ao-harness-missing { animation: none !important; }
   .ao-workflow .ao-harness-list *, .ao-workflow .ao-harness-popup .ao-popover-close { transition: none !important; }
-  .ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled), .ao-workflow .ao-harness-list .ao-picker-option:hover .ao-harness-logo,
-  .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: none; }
+  .ao-workflow .ao-harness-list .ao-picker-option:hover .ao-harness-logo, .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: none; }
 }
 .ao-workflow .ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
 .ao-workflow .ao-tuning-popup [role="radiogroup"] { display: grid; gap: 2px; }
