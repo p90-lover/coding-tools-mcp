@@ -16,6 +16,7 @@ const { embeddedRuntimeInvocation, runtimeInvocation, runtimeReleaseVersion } = 
 const { redactText } = require("./logging.cjs");
 const { DETACH_OWNED_CHILD, terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const { spawnOffThread } = require("./off-thread-run.cjs");
+const { prepareChromeConnector, chromeConnectorIdentity, createChromeProfileCapture } = require("./chrome-profile-login.cjs");
 
 const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
@@ -374,6 +375,60 @@ class RuntimeHost {
         );
       } catch (error) { failed(error); }
     });
+  }
+
+  async prepareChromeProfileConnector() {
+    return prepareChromeConnector(path.join(__dirname, "../assets/chrome-profile-connector"), this.app.getPath("userData"));
+  }
+
+  async openChromeProfileConnector() {
+    const capture = this.chromeProfileCapture;
+    if (!capture || this.active !== "chrome-profile-login") throw new Error("Start Chrome sign-in in Coding Tools first");
+    // This is the person's normal browser, not an owned helper: never assign it to activeChild,
+    // terminate its process tree, add a user-data-dir, or change its proxy/profile arguments.
+    const child = await this.startProgram(this.passkeyChromeExecutable(), ["--new-tab", capture.url],
+      { detached: true, stdio: "ignore", windowsHide: false });
+    child.once?.("error", () => capture.fail());
+    child.unref?.();
+    return true;
+  }
+
+  cancelChromeProfileLogin() {
+    return this.chromeProfileCapture?.cancel() ?? false;
+  }
+
+  async captureCurrentChromeLogin({ safeStorage } = {}) {
+    if (this.browserInteractionMode() !== "automatic") throw new Error("Chrome session verification requires Automatic mode");
+    if (this.currentOperation()) throw new Error("Another runtime operation is already in progress");
+    const owner = Symbol("chrome-profile-login");
+    this.chromeProfileOwner = owner; this.active = "chrome-profile-login";
+    let capture;
+    const publish = (status, message) => { if (this.chromeProfileOwner === owner) this.publishOperation?.({ name: "chrome-profile-login", status, message }); };
+    try {
+      await this.prepareChromeProfileConnector();
+      const identity = await chromeConnectorIdentity(this.app.getPath("userData"), safeStorage);
+      capture = await createChromeProfileCapture({ identity, onPhase: phase => {
+        if (this.chromeProfileOwner !== owner) return;
+        if (phase === "verifying") { publish("running", "Verifying the ChatGPT session from your Chrome profile"); return; }
+        publish(phase === "verified" || phase === "cancelled" ? "completed" : "failed", phase === "verified"
+          ? "Chrome profile sign-in verified" : phase === "cancelled" ? "Chrome profile sign-in cancelled" : "Chrome profile sign-in was not verified. Open a new connection to retry.");
+        this.active = null; this.chromeProfileCapture = null; this.chromeProfileOwner = null;
+      } });
+      this.chromeProfileCapture = capture;
+      publish("running", `Approve pairing code ${capture.code} once in the Chrome connector, then sign in. Verification is automatic; keep Chrome open.`);
+      await this.openChromeProfileConnector();
+      const transfer = await capture.result;
+      if (this.chromeProfileOwner !== owner || this.browserInteractionMode() !== "automatic") {
+        await transfer.cleanup(); throw new Error("The Chrome sign-in request is no longer current");
+      }
+      return transfer;
+    } catch (error) {
+      if (this.chromeProfileOwner === owner) {
+        publish("failed", "Could not connect to your Chrome profile. Install the connector in that profile and start sign-in again.");
+        this.active = null; this.chromeProfileCapture = null; this.chromeProfileOwner = null;
+      }
+      capture?.cancel(); throw error;
+    }
   }
 
   async capturePasskeyLogin({ proxyRules = "DIRECT" } = {}) {

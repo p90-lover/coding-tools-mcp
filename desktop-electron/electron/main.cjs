@@ -2910,6 +2910,14 @@ function registerIpc({ logger, stateStore }) {
     return browser;
   });
   handle("launcher:browser-passkey-login-continue", () => runtimeHost.continuePasskeyLogin());
+  handle("launcher:browser-chrome-profile-open", () => runtimeHost.openChromeProfileConnector());
+  handle("launcher:browser-chrome-profile-cancel", () => runtimeHost.cancelChromeProfileLogin());
+  handle("launcher:browser-chrome-connector-folder", async () => {
+    const folder = await runtimeHost.prepareChromeProfileConnector();
+    const error = await shell.openPath(folder);
+    if (error) throw new Error("Could not open the Chrome connector folder");
+    return true;
+  });
   handle("launcher:browser-logout", async () => {
     const browser = await browserHost.logout();
     const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
@@ -5280,8 +5288,9 @@ async function start() {
       getConnectorName: () => runtimeHost.browserConnectorName(),
       helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
       logger,
-      loginWithPasskey: async (partition, route) => (await providerNetworkReady()).withBrowserLoginProxy(
-        partition, route, loginRoute => runtimeHost.capturePasskeyLogin(loginRoute)),
+      // The approved extension connects the current Chrome profile. App-side fresh verification
+      // still uses this account's routed partition; ordinary Chrome's routing is never changed.
+      loginWithPasskey: () => runtimeHost.captureCurrentChromeLogin({ safeStorage }),
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,
       publishState: (state) => {

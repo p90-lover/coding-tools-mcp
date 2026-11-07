@@ -81,6 +81,7 @@
       "vendor/tools/antigravity-cli.json",
       "vendor/bundled/cpa-plugins/**",
       "assets/icon.png",
+      "assets/chrome-profile-connector/**",
       "assets/linux-appimage-runner.sh",
       "package.json",
       {
