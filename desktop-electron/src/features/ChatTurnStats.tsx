@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
-import { cpaStatusWord, dshDuration, isDeepSeekModel, tokensShort, type CpaRefusal } from "./ao-chat";
+import { cpaStatusWord, isDeepSeekModel, tokensShort, type CpaRefusal } from "./ao-chat";
 import { useSurfaceHidden } from "./page-visibility";
 
 // The line under the chat box, as DeepSeek Harness shows one: the chat's rounds, then the latest
@@ -30,23 +30,21 @@ const seconds = (ms: number) => {
 const ENDED_STATS = new Map<string, TurnStats>();
 
 /**
- * The foot of a turn that ended, as Codex closes one: how long it worked ("Worked for 3m 2s") and
- * that turn's own model requests through CPA (steps, time in the model, speed, tokens), where the
- * line under the chat box only ever shows the latest turn's. Read once it scrolls into view.
- * `to`: when the turn ended, or else when the next one started (cards saved before their end time
- * was kept); without either the requests are not counted, since the log runs on into later work.
- * `showTime`: false where the turn's own header already says how long it ran (DeepSeek's).
+ * An ended turn's own model requests through CPA (steps, time in the model, speed, tokens), where
+ * the line under the chat box only ever shows the latest turn's. Read once the reply's line scrolls
+ * into view (`ref`), and said only on hover: the line itself stays "model · time · files", as Codex
+ * closes a reply. `to`: when the turn ended, or else when the next one started (cards saved before
+ * their end time was kept); without either the requests are not counted, since the log runs on into
+ * later work.
  */
-export function TurnFoot({ from, endedAt, to, models, status, showTime = true }: {
-  from?: number; endedAt?: number; to?: number; models?: string[]; status: string; showTime?: boolean;
-}) {
+export function useTurnRequests({ from, to, models }: { from?: number; to?: number; models?: string[] }) {
   const key = models?.length && from && to ? `${models.join("|")}:${from}:${to}` : "";
   const [stats, setStats] = useState<TurnStats | null>(() => (key ? ENDED_STATS.get(key) ?? null : null));
   const [seen, setSeen] = useState(false);
-  const foot = useRef<HTMLParagraphElement | null>(null);
+  const ref = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!key || stats || seen) return undefined;
-    const node = foot.current;
+    const node = ref.current;
     if (!node || typeof IntersectionObserver === "undefined") { setSeen(true); return undefined; }
     const observer = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) setSeen(true); });
     observer.observe(node);
@@ -67,24 +65,19 @@ export function TurnFoot({ from, endedAt, to, models, status, showTime = true }:
       .catch(() => undefined);
     return () => { live = false; };
   }, [key, seen, stats]);
-  // How long it worked: its kept end, or else its last model request when the next turn bounds it.
-  const end = endedAt ?? (stats?.lastAt && to ? stats.lastAt : undefined);
-  const worked = showTime && from && end && end > from ? `${status === "stopped" ? "Stopped after" : "Worked for"} ${dshDuration(end - from)}` : "";
-  const has = stats?.available && stats.steps;
-  const parts: { key: string; text: string; title: string }[] = [];
-  if (worked) parts.push({ key: "time", text: worked, title: `Started ${new Date(from!).toLocaleString()} · ended ${new Date(end!).toLocaleString()}` });
-  if (has) {
-    parts.push({ key: "steps", text: `${stats.steps} ${stats.steps === 1 ? "step" : "steps"}${stats.failed ? ` · ${stats.failed} failed` : ""}`, title: "Model requests this turn, retries included" });
-    parts.push({ key: "llm", text: `LLM ${seconds(stats.latencyMs ?? 0)}`,
-      title: [stats.ttftMs ? `First token ${seconds(stats.ttftMs)}` : "", stats.tokensPerSecond ? `${stats.tokensPerSecond} tok/s` : ""].filter(Boolean).join(" · ") || "Time waiting on the model" });
-    parts.push({ key: "tokens", text: `in ${tokensShort(stats.inputTokens)} · out ${tokensShort(stats.outputTokens)}`,
-      title: stats.cacheHit !== null && stats.cacheHit !== undefined ? `Cache hit ${Math.round(stats.cacheHit * 100)}%` : "Tokens this turn" });
-  }
-  // Kept in the page while empty, so the observer has something to watch.
-  if (!parts.length) return key ? <p ref={foot} className="cx-turn-foot is-empty" aria-hidden="true" /> : null;
-  return <p ref={foot} className="cx-turn-foot" aria-label="This turn">
-    {parts.map((part) => <span key={part.key} title={part.title}>{part.text}</span>)}
-  </p>;
+  return { ref, lastAt: stats?.lastAt ?? undefined, summary: stats?.available && stats.steps ? turnRequestsText(stats) : "" };
+}
+
+/** A turn's requests in one hover line: "12 steps · LLM 40.2s · first token 1.2s · in 120k · out 3k · cache 80%". */
+export function turnRequestsText(stats: TurnStats): string {
+  return [
+    `${stats.steps} ${stats.steps === 1 ? "step" : "steps"}${stats.failed ? ` (${stats.failed} failed)` : ""}`,
+    `LLM ${seconds(stats.latencyMs ?? 0)}`,
+    stats.ttftMs ? `first token ${seconds(stats.ttftMs)}` : "",
+    stats.tokensPerSecond ? `${stats.tokensPerSecond} tok/s` : "",
+    `in ${tokensShort(stats.inputTokens)} · out ${tokensShort(stats.outputTokens)}`,
+    stats.cacheHit !== null && stats.cacheHit !== undefined ? `cache ${Math.round(stats.cacheHit * 100)}%` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 export function ChatTurnStats({ model, models = [], from, rounds, running, onRefusal }: {

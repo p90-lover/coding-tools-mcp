@@ -515,7 +515,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const replyHead = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatReplyHead.tsx"), "utf8"),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-  { exports: replyHead, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat : {} });
+  { exports: replyHead, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat : name === "./ChatTurnStats" ? { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } : {} });
   const replyPlan = {};
   const replyPlanView = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/chat-reply-plan.ts"), "utf8"),

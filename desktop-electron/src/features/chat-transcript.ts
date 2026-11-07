@@ -67,9 +67,11 @@ export function transcriptSummary(items: ChatLiveItem[]) {
 /** Ending a model turn is not evidence that the person's mission or goal succeeded. */
 export function transcriptCompletion(turn: ChatTurn): string {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
-  const state = steps.some((step) => step.error) ? "Failed" : turn.status === "stopped" ? "Stopped"
-    : turn.status === "attention" || turn.status === "paused" ? "Waiting for input"
-      : turn.status === "done" ? "Turn completed" : "Working";
-  return turn.startedAtMs && turn.endedAtMs && turn.endedAtMs > turn.startedAtMs
-    ? `${state} · ${dshDuration(turn.endedAtMs - turn.startedAtMs)}` : state;
+  const time = turn.startedAtMs && turn.endedAtMs && turn.endedAtMs > turn.startedAtMs ? dshDuration(turn.endedAtMs - turn.startedAtMs) : "";
+  // Codex's words for folded work: "Worked for 1m 53s", or how it stopped short.
+  if (steps.some((step) => step.error)) return time ? `Failed after ${time}` : "Failed";
+  if (turn.status === "stopped") return time ? `Stopped after ${time}` : "Stopped";
+  if (turn.status === "attention" || turn.status === "paused") return time ? `Waiting for input · ${time}` : "Waiting for input";
+  if (turn.status === "done") return time ? `Worked for ${time}` : "Worked";
+  return "Working";
 }

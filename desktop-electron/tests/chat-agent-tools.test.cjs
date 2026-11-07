@@ -37,7 +37,7 @@ function tempTree() {
 function fixture({ enabled = () => true, desktop = () => false, terminal = () => false, results = {}, workspaces = null, confirm = async () => true, root = null, worktreesRoot = null,
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
-  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, previewEnabled = () => true,
+  chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, sessionModel = null, previewEnabled = () => true,
   registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
@@ -48,7 +48,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
-    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}), ...(reviewCall ? { reviewCall } : {}),
+    ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}), ...(reviewCall ? { reviewCall } : {}), ...(sessionModel ? { sessionModel } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -2649,9 +2649,18 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
       if (answer.allowed) allowed.add(`${request.workspaceId}:${request.aoSession}:${request.target.app}`);
       return answer;
     },
-    start: async ({ target }) => { starts.push(target); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
+    start: async ({ target, agent, model }) => { starts.push({ ...target, agent, model }); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
+    // The control pill: each call it names, with how many headless calls had gone out when it began and ended.
+    activity: ({ agent, model, tool }) => {
+      const shown = { agent, model, tool, began: calls.length, ended: null, outcome: null };
+      activities.push(shown);
+      return (outcome) => { shown.ended = calls.length; shown.outcome = outcome; };
+    },
   };
-  const { tools, calls } = fixture({ root: tree.root, desktop: () => true, computerControl, reviewCall: async () => ({ action: "allow" }) });
+  const activities = [];
+  const modelLookups = [];
+  const sessionModel = async ({ workspaceId, session: id }) => { modelLookups.push([workspaceId, id]); return "cpa/gpt-6.1-sol"; };
+  const { tools, calls } = fixture({ root: tree.root, desktop: () => true, computerControl, sessionModel, reviewCall: async () => ({ action: "allow" }) });
   try {
     const chat = await session(tools, { agent: "claude-code", id: "ao-1" });
     const listed = (await callTool(chat.url, chat.auth, "computer_list_windows", {})).structuredContent;
@@ -2667,12 +2676,18 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
     assert.equal(picked.isError, false);
     assert.equal(asks.length, 1);
     assert.deepEqual([asks[0].agent, asks[0].target.app, asks[0].workspaceId, asks[0].aoSession], ["Claude Code", "notepad.exe", "ws1", "ao-1"]);
-    assert.deepEqual(starts.map((item) => item.window_id), [7], "control starts on the window it asked for");
+    assert.deepEqual(starts.map((item) => [item.window_id, item.agent, item.model]), [[7, "Claude Code", "cpa/gpt-6.1-sol"]],
+      "control starts on the window it asked for, the pill naming the agent and its model");
     assert.equal(picked.structuredContent.session_id, "lease-1");
     assert.equal(picked.structuredContent.app, "Notepad");
 
     assert.equal((await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease-1", action: "click" })).isError, false);
     assert.equal(calls.at(-1).body.tool, "computer_action");
+    const step = activities.at(-1);
+    assert.deepEqual([step.agent, step.model, step.tool, step.outcome], ["Claude Code", "cpa/gpt-6.1-sol", "computer_action", "done"]);
+    assert.deepEqual(modelLookups, [["ws1", "ao-1"]], "the model is looked up once, then kept for a while");
+    assert.equal(calls[step.began]?.body?.tool, "computer_action", "the pill names the step before it reaches headless");
+    assert.ok(step.ended > step.began, "and stops naming it only once headless answered");
     assert.equal(asks.length, 1, "the allowed app is not asked again");
 
     // Another chat using the same control is asked for itself.
@@ -2782,7 +2797,7 @@ test("the control bar's Stop reaches the app on a data: page: it renames the pag
   const page = barPage({ title: "Calculator" });
   assert.doesNotMatch(page, /location\.hash/, "a hash change never fires on a data: page");
   // The page's own script, run against a stand-in document: Stop renames the page.
-  const elements = { stop: {}, left: {} };
+  const elements = { stop: {}, toggle: {} };
   const document = { title: "Computer control is on", getElementById: (id) => elements[id] };
   vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window: {} });
   elements.stop.onclick();

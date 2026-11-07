@@ -118,7 +118,8 @@ function mount(props, { effects = false, objectUrls } = {}) {
     : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, { window: timers, clearTimeout() {} });
   // The reply's head renders inline too, so a turn's who, status and files can be read.
   const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./ChatChangedFiles" ? changedFiles : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
+    : name === "./ao-chat" ? chat : name === "./ChatChangedFiles" ? changedFiles : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
+    : name === "./ChatTurnStats" ? { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } : {}, { window: timers });
   // The reply's steps (chat-reply-plan) and their views, real too.
   const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
   const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
@@ -304,7 +305,7 @@ test("the reviewer's answer closes the turn in full, with Retry on the latest se
   const answer = walk(view).find((element) => element.props?.className === "cx-answer has-verdict");
   assert.ok(answer);
   assert.equal(walk(answer).find((element) => element.type === "Markdown").props.text, "APPROVED — **done**");
-  assert.equal(text(walk(view).find((element) => element.props?.className === "cx-work-head")), "Turn completedNo tool calls");
+  assert.equal(text(walk(view).find((element) => element.props?.className === "cx-work-head")), "WorkedNo tool calls");
   walk(answer).find((element) => element.props?.["aria-label"] === "Retry this mission").props.onClick();
   assert.deepEqual(calls, [["restart", "r1"]]);
 });
@@ -321,7 +322,7 @@ test("the agent whose reply closes the turn keeps its row under Worked, without 
   const chatView = mount(props);
   let view = chatView.render();
   const head = walk(view).find((element) => element.props?.className === "cx-work-head");
-  assert.equal(text(head), "Turn completedActivity not loaded yet");
+  assert.equal(text(head), "WorkedActivity not loaded yet");
   head.props.onClick();
   view = chatView.render();
   const work = walk(view).find((element) => element.props?.className === "cx-work");
@@ -1495,7 +1496,7 @@ test("a single model's thinking and tool calls stay folded under its answer once
 
   const older = mount(base({ selectedTaskId: "t",
     runs: [run("r0", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s0", answer: "Done before." } })], { execution_mode: "single" })] }).props).render();
-  assert.match(text(walk(older).find((element) => element.props?.className === "cx-work-head")), /^Turn completed.*Activity not loaded yet/, "a historical card distinguishes unknown activity from zero tools");
+  assert.match(text(walk(older).find((element) => element.props?.className === "cx-work-head")), /^Worked.*Activity not loaded yet/, "a historical card distinguishes unknown activity from zero tools");
 });
 
 test("folding a live work row keeps native assistant messages visible and expanded work interleaved", () => {
@@ -1516,9 +1517,9 @@ test("folding a live work row keeps native assistant messages visible and expand
     "expanded work preserves assistant/tool/assistant order");
   assert.equal(shown(timeline[0].text).length, 1);
   assert.equal(shown(timeline[2].text).length, 1);
-  walk(initial).find(element => element.props?.className === "cx-step-head").props.onClick();
-  assert.equal(shown(timeline[0].text).length, 1, "folding work cannot hide earlier assistant speech");
-  assert.equal(shown(timeline[2].text).length, 1, "folding work cannot hide the streaming assistant response");
+  // A single card has no head of its own (nothing to fold it by): its request, steers and work read as one column.
+  assert.equal(walk(initial).some(element => element.props?.className === "cx-step-head"), false, "one card, no agent header");
+  assert.ok(walk(initial).some(element => element.props?.className === "cx-step tone-working is-solo"));
 });
 
 test("folding team work keeps a finished assistant receipt visible before the reviewer answers", () => {
@@ -1636,13 +1637,17 @@ test("a joined finished receipt keeps research and bug findings between compact 
   const view = page.render();
   for (const text of speech) assert.equal(walk(view).filter(row => row.props?.text === text).length, 1, text);
   const rows = walk(view).filter(row => row.type === "li" && /cx-live-item/.test(row.props?.className ?? ""));
-  assert.deepEqual(rows.map(row => /kind-(\w+)/.exec(row.props.className)?.[1]), ["message", "group", "message", "group"]);
+  // Folded under "Worked for", as Codex folds it: what the agent said stays, its tool calls wait behind the head.
+  assert.deepEqual(rows.map(row => /kind-(\w+)/.exec(row.props.className)?.[1]), ["message", "message"]);
   const head = walk(view).find(row => row.props?.className === "cx-work-head");
   assert.equal(head.props["aria-expanded"], false);
-  assert.match(text(head), /Turn completed.*Edited a file, read a file/);
+  assert.match(text(head), /^Worked for 3s.*Edited a file, read a file/);
   assert.equal(reads.length, 1, "summary, narrative and final answer share the read");
   assert.equal(walk(view).some(row => row.props?.className?.includes("cx-tool ")), false, "tool bodies are not mounted by preload");
-  walk(view).find(row => row.props?.className === "cx-activity-head").props.onClick();
+  head.props.onClick();
+  const opened = walk(page.render()).filter(row => row.type === "li" && /cx-live-item/.test(row.props?.className ?? ""));
+  assert.deepEqual(opened.map(row => /kind-(\w+)/.exec(row.props.className)?.[1]), ["message", "group", "tool", "message", "group", "edit"], "opened, each tool group opens between what was said");
+  walk(page.render()).find(row => row.props?.className === "cx-activity-head").props.onClick();
   assert.ok(walk(page.render()).some(row => /cx-tool/.test(row.props?.className ?? "")), "the recorded tool remains inspectable");
 });
 

@@ -99,7 +99,8 @@ test("placement flips above the footer and stays inside a narrow viewport", () =
 });
 
 test("the reply renders only the compact changed-file control beside runtime, including for a single file", () => {
-  const head = load("ChatReplyHead.tsx", { "./ChatChangedFiles": changes, "./HarnessLogo": { ModelLogo: () => null }, "./ao-chat": { dshDuration: () => "1m" } });
+  const head = load("ChatReplyHead.tsx", { "./ChatChangedFiles": changes, "./HarnessLogo": { ModelLogo: () => null }, "./ao-chat": { dshDuration: () => "1m" },
+    "./ChatTurnStats": { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } });
   for (const selected of [files, files.slice(0, 1), []]) {
     const html = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: false, name: "Agent", tone: "done", startedAtMs: 1000, endedAtMs: 61000, members: [], changes: selected }));
     assert.doesNotMatch(html, /cx-reply-files|cx-turn-changes|title="G:/);

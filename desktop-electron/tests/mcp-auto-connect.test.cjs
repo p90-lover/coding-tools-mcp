@@ -34,6 +34,8 @@ function fixture() {
   const context = vm.createContext({
     ...options, IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false,
     automaticMcpAttempt: null, mcpVerificationInFlight: null, catalogVerificationTimer: null,
+    // The signed-in accounts' MCP sync (#1089): a new round makes it look again.
+    accountSyncs: [], automaticAccountMcp: { invalidate() { context.accountSyncs.push("invalidate"); }, async sync() { context.accountSyncs.push("sync"); } },
     send() {}, publishOperation: op => calls.push(op.status), mainWindow: null,
     runtimeSupervisor: { readConfig: () => ({ mode: "full", releaseVersion: "5.0.6" }), readState: () => ({ daemonPid: 123 }) },
     runtimeHost: { currentOperation: () => null, mcpCredentialsConfigured: () => true,
@@ -153,6 +155,7 @@ test("a tunnel restart or sign-in starts a new round that checks the connector a
   assert.equal(f.calls.filter(x => x === "connector").length, 1);
   f.restart("tunnel-started");
   assert.deepEqual(f.monitors, ["monitor"], "the stopped monitor starts again");
+  assert.deepEqual(f.context.accountSyncs, ["invalidate", "sync"], "and the signed-in accounts' MCP is checked again");
   assert.equal(await f.run(), false);
   assert.equal(f.calls.filter(x => x === "connector").length, 2, "checked again, which reloads ChatGPT's connector list");
   f.context.catalogVerificationTimer = {};
