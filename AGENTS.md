@@ -75,7 +75,7 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 - **Do not stop at “PR open”, “CI running” or “build queued”.** Those are progress updates, not completion. Continue through publication and verify the release tag, exact source, downloadable assets and checksums; report the release/installer URL. If work is genuinely blocked, name the blocker and save a resumable checkpoint instead of claiming success.
 - Keep each PR scoped to its task. Do not merge unrelated, unverified or another owner's unfinished work, and never publish credentials or temporary artifacts. Coordinate one release owner and batch compatible verified merges into one build rather than creating competing releases.
 - Follow the detailed delivery workflow below, including its docs-only exception. Documentation/instruction-only changes still require a PR and merge, but do not need a redundant installer rebuild when packaged code is unchanged.
-- CI, authentication, disabled Actions, permissions and billing failures are real blockers, not permission to force-merge, skip verification, change account settings or report a release that does not exist. The one exception is **Releasing while GitHub Actions is blocked** below, and only after the user explicitly chooses it. An already-successful build may be published only after verifying its exact source provenance and asset checksums. Installation, patching or restarting the user's running app still requires their separate request.
+- Authentication failures, denied tool permissions, failed verification and unavailable publication access remain real blockers. For unavailable PRs or Actions, use the user-authorized fallback below rather than stopping solely because CI cannot run. Never change account settings, misrepresent checks or report a release that does not exist. Installation, patching or restarting the user's running app still requires their separate request.
 
 ## Storage: never the C: drive
 
@@ -88,8 +88,8 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 
 Every agent working in this repository follows this: Claude Code, Codex, opencode and Coding Tools' own chat agents. A task with file changes is not done until its change is merged and released.
 
-1. **Pull request.** Every change goes into a pull request against `main`. Never push to `main` directly. Never leave a change only in a worktree or as uncommitted edits. One PR per task, pushed as few times as possible: this repository's GitHub Actions were once suspended for using too much compute.
-2. **Merge.** Once the PR's required checks pass, merge it yourself. Don't leave it open for someone else unless the user said to wait. Fix a failing check and push again. Don't re-run CI in a loop.
+1. **Pull request.** Normally, every change goes into a pull request against `main`, not a direct push. Use the fallback below when PRs or Actions are unavailable. Never leave a change only in a worktree or as uncommitted edits. One PR per task, pushed as few times as possible: this repository's GitHub Actions were once suspended for using too much compute.
+2. **Merge.** Once the PR's required checks pass, merge it yourself. Don't leave it open for someone else unless the user said to wait. Fix a failing check and push again. Don't re-run CI in a loop. User-authorized unavailable-CI delivery is the exception described below; an actually failing check is not.
 3. **Plugins.** Plugin repositories, for example `G:\Projects\cpa_provider_manager` (`p90-lover/cpa_provider_manager`) and `G:\Projects\cpa-helper-plugin`, follow the same steps in their own repository: PR, merge to its `main`, then that plugin's release. If this app pins or bundles the plugin, the app's update is a separate PR here.
 4. **Release.** After a merge to `main`, release a new version:
    - First check that no release is already under way:
@@ -98,10 +98,10 @@ Every agent working in this repository follows this: Claude Code, Codex, opencod
 
      If a release PR is open or a `workflow_dispatch` run is in progress, do not start a competing release. Coordinate with its owner and verify that your change is actually included in the pinned build commit. An unrelated or older release is not a reason to abandon delivery; queue changes that miss the cutoff for the next release and report their true state.
    - Open a version-bump PR titled `release: 0.8.x`. It changes the version line in `desktop-electron/electron/product.cjs`, `desktop-electron/package.json`, `desktop-electron/scripts/prepare-package-resources.cjs`, `desktop-electron/scripts/verify-package.cjs`, `desktop-electron/tests/product-identity.test.cjs` and `desktop-electron/tests/rc12-release-identity.test.cjs`, plus new notes in `docs/releases/v0.8.x.md` (English and 繁體中文). Search `desktop-electron` for the old version to catch every line, but leave the `@xmldom/xmldom` override in `package.json` alone. Merge it once green.
-   - Publish from CI: `gh workflow run electron-windows-release.yml --ref main -f publish=true`. CI builds, verifies and publishes the installer. Don't build a release installer locally.
+   - Prefer publishing from CI: `gh workflow run electron-windows-release.yml --ref main -f publish=true`. CI builds, verifies and publishes the installer when available; otherwise use the local release fallback below.
    - Merges that land close together share one release.
    - A change that ships nothing in the installer (agent instructions, docs, CI-only files) needs no release of its own. The next release carries it.
-5. **Local builds** (`bun run package:win`) only when the user asks for an installer on this machine:
+5. **Local builds** (`bun run package:win`) when the user asks for an installer on this machine or the unavailable-CI fallback applies:
    - Run one build at a time.
    - `G:\Projects\coding-tools-worktrees\ct-build` is shared: check its `git reflog` and look for running `electron-builder`/`cargo`/`bun` processes there first.
    - Build at low I/O priority, because the installed app runs from the same disk and freezes during a full-priority build.
@@ -111,7 +111,7 @@ Every agent working in this repository follows this: Claude Code, Codex, opencod
 
 GitHub sometimes stops running workflows for this repository at the account level. `gh workflow run` then answers `HTTP 422: Actions has been disabled for this repository`, PRs show no checks and stay `BLOCKED`, and `actions/runs?head_sha=<head>` is 0, even though `actions/permissions` still says enabled. The user's repository settings don't fix it: it's the account's Actions billing, spending limit or a GitHub compute flag.
 
-1. **Report it and ask.** Tell the user, and don't re-trigger CI in a loop. Wait for Actions unless the user explicitly chooses to bypass CI. Their choice covers that one release.
+1. **Report it and use the standing fallback.** Tell the user CI is unavailable, do not re-trigger it in a loop, and follow **Delivery fallback when PRs or Actions are unavailable** below. The user authorized that locally verified route on 2026-11-07; do not ask them to repeat permission for each release. Respect any later opt-out and stop for failed verification or a denied remote/tool action.
 2. **Merge as admin.** Run `gh pr merge <n> --admin --merge`, one PR at a time, smallest and most independent first, with the version-bump PR last. Re-check `mergeable` before each merge and stop at the first conflict. In PowerShell 5.1, `gh --jq` expressions containing spaces or quotes break ("accepts at most 1 arg"), so run these from bash.
 3. **Release notes.** One `docs/releases/v0.8.x.md` covers every merged PR. Its verification section says the release was built locally without CI.
 4. **Test locally instead of CI.** On the merged `main`, run the desktop Electron suite (`node --test desktop-electron/tests/*.cjs`) at low I/O priority, plus the release identity tests. A failure blocks the release. Fix it in a PR and admin-merge that too.
@@ -128,6 +128,13 @@ GitHub sometimes stops running workflows for this repository at the account leve
    - Download it back with `gh release download` and run `sha256sum -c SHA256SUMS.txt` on the copies.
    - Only then run `gh release edit v<ver> --draft=false --latest`.
 7. **Clean up.** Delete the build's dated `aiTemp/Trash` folders in `ct-build`. Tell the user the release was built and tested locally, not by CI.
+
+## Delivery fallback when PRs or Actions are unavailable
+
+- **Standing user authorization (2026-11-07):** if PR creation, normal PR merge or GitHub Actions is unavailable, complete local verification, merge the scoped change into the user's GitHub repository and publish a new version instead of stopping solely for those unavailable services. This overrides the normal PR/CI-only route above.
+- Prefer an existing PR. If its merge is blocked solely by unavailable required CI, an administrator merge of the exact tested commit is authorized without changing repository protection settings. If PR creation itself is unavailable, use a normal non-force push of the verified, integrated commit to `main` only when the remote permits it. Do not change branch-protection, bypass lists, authentication, billing or account settings. Do not force-push or overwrite concurrent work; a remote or tool permission denial remains a blocker.
+- Run the applicable tests, type checks, graph checks and package verification locally against the pinned source. Do not skip an actually failing check, invent a passing CI status or substitute an older build that omits the change. State explicitly that CI was unavailable and report the local verification used instead.
+- Coordinate one release owner. Build the new version from the exact merged source with `bun run package:win`, at low priority with storage on G:, verify the installer, source provenance, downloadable assets and checksums, then publish through GitHub Releases. Documentation-only changes do not require another identical installer. Do not install, patch or restart the running app without the user's separate request.
 
 ## xyTom 0.3 integration invariants
 
