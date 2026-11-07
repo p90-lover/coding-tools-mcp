@@ -298,10 +298,32 @@
 /* The role editor reuses the movable sheet and stays inside the graph viewport. */
 .ao-role-popup { z-index: 6; width: min(370px, calc(100% - 16px)); max-height: calc(100% - 16px); }
 .ao-role-inspector { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 0 14px 14px; }
-.ao-route-tuning { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-column: 1 / -1; gap: 8px; min-width: 0; margin: 0; padding: 8px 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; }
-.ao-route-tuning legend { padding: 0 4px; color: var(--color-text-primary); font-size: 11px; font-weight: 600; }
-.ao-route-tuning label { display: grid; gap: 5px; min-width: 0; color: var(--ao-muted); font-size: 11px; }
-.ao-route-tuning input:disabled, .ao-route-tuning select:disabled { opacity: .55; }
+/* Model picker: one slim row (model, agent, effort, context, reset); the list opens below it. */
+.ao-route-picker { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ao-route-bar { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.ao-route-bar > * { flex: none; height: 28px; margin: 0; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; }
+.ao-route-bar > :disabled { opacity: .5; cursor: default; }
+.ao-route-model { display: flex; flex: 1 1 auto !important; align-items: center; gap: 6px; min-width: 0; padding: 0 8px; text-align: left; cursor: pointer; }
+.ao-route-model > span:not(.ao-harness-logo) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-route-model.is-warning { border-color: var(--ao-amber, #d29922); }
+.ao-route-caret { flex: none; width: 6px; height: 6px; margin: -3px 2px 0; border: solid var(--ao-muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+.ao-route-model[aria-expanded="true"] .ao-route-caret { margin-top: 3px; transform: rotate(-135deg); }
+.ao-route-agents { display: flex; align-items: center; gap: 1px; padding: 0 2px; }
+.ao-route-agents > button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; opacity: .45; cursor: pointer; }
+.ao-route-agents > button[aria-checked="true"] { background: rgb(127 127 127 / 18%); opacity: 1; }
+.ao-workflow .ao-route-bar select.ao-route-effort { width: 70px; padding: 0 2px 0 6px; }
+.ao-workflow .ao-route-bar input.ao-route-context { width: 70px; padding: 0 6px; }
+.ao-route-reset { width: 28px; padding: 0; color: var(--ao-muted) !important; cursor: pointer; }
+.ao-route-reset:hover:not(:disabled) { color: var(--color-text-primary) !important; }
+.ao-route-list { display: flex; flex-direction: column; gap: 2px; max-height: 280px; padding: 4px; overflow-y: auto; border: 1px solid var(--ao-line); border-radius: 8px; background: var(--color-bg-primary); }
+.ao-workflow .ao-route-list .ao-route-search { flex: none; height: 26px; margin-bottom: 2px; padding: 0 8px; }
+.ao-route-group h4 { display: flex; align-items: center; gap: 5px; margin: 6px 6px 2px; color: var(--ao-muted); font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.ao-route-option { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 26px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: var(--color-text-primary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.ao-route-option > span:not(.ao-harness-logo) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-route-option:hover, .ao-route-option:focus-visible { background: rgb(127 127 127 / 14%); outline: none; }
+.ao-route-option[aria-selected="true"] { background: color-mix(in srgb, var(--ao-blue) 18%, transparent); }
+.ao-route-empty { margin: 0; padding: 6px; color: var(--ao-muted); font-size: 12px; }
+.ao-route-option small { flex: none; color: var(--ao-muted); font-size: 10px; }
 .ao-role-inspector form { display: flex; flex-direction: column; gap: 10px; }
 .ao-inspector-tabs { display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgb(255 255 255 / 5%); }
 .ao-inspector-tabs button { flex: 1 1 0; min-width: 0; height: 26px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted); text-transform: capitalize; font-size: 12px; }
@@ -562,9 +584,6 @@
 .ao-workflow .ao-model-popup > h4 { order: 3; margin: 3px 0 -4px; font-size: 12px; }
 /* Only the rows scroll: the search stays put, and short split panes can shrink the list. */
 .ao-workflow .ao-model-options { order: 4; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
-.ao-workflow .ao-model-popup .ao-route-tuning { order: 5; display: grid; grid-template-columns: 1fr; gap: 10px; margin: 4px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--ao-line); }
-.ao-workflow .ao-model-popup .ao-route-tuning legend { display: none; }
-.ao-workflow .ao-model-popup .ao-route-tuning label { display: grid; gap: 7px; }
 .ao-workflow .ao-picker-option { display: flex; align-items: center; width: 100%; gap: 10px; margin: 3px 0; padding: 9px 8px; border: 0; border-radius: 7px; background: #fff; color: #27384f; text-align: left; cursor: pointer; }
 .ao-workflow .ao-picker-option[aria-checked="true"] { background: #edf6ff; color: #122742; }
 .ao-workflow .ao-picker-option > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
