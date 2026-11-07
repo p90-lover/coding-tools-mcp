@@ -4,7 +4,7 @@ import "./chrome-login-notice.css";
 
 /** The legacy operation id also serves ordinary Chrome sign-in on Windows. */
 export function chromeLoginPending(operation: OperationState | null, authenticated?: boolean): boolean {
-  return operation?.name === "passkey-login" && operation.status === "running" && authenticated !== true;
+  return (operation?.name === "passkey-login" || operation?.name === "chrome-profile-login") && operation.status === "running" && authenticated !== true;
 }
 
 export function chromeLoginWaitingForClose(operation: OperationState | null): boolean {
@@ -18,9 +18,10 @@ export function chromeLoginContinuationPending(operation: OperationState | null)
 }
 
 /** Keep the explicit Continue step reachable while the person works outside the Browser page. */
-export function ChromeLoginNotice({ open, operation, language, continueLogin, openBrowser, setError }: {
+export function ChromeLoginNotice({ open, operation, language, continueLogin, openBrowser, setError, openChrome, installConnector, cancelLogin }: {
   open: boolean; operation: OperationState | null; language: Language;
   continueLogin: () => Promise<boolean>; openBrowser: () => void; setError: (error: string | null) => void;
+  openChrome?: () => Promise<boolean>; installConnector?: () => Promise<boolean>; cancelLogin?: () => Promise<boolean>;
 }) {
   const [requested, setRequested] = useState(false);
   const inFlight = useRef(false);
@@ -29,6 +30,22 @@ export function ChromeLoginNotice({ open, operation, language, continueLogin, op
   }, [open]);
   if (!open) return null;
   const zh = language !== "en";
+  if (operation?.name === "chrome-profile-login") {
+    const verifying = operation.message === "Verifying the ChatGPT session from your Chrome profile";
+    const act = (action?: () => Promise<boolean>) => { if (action) { setError(null); void action().catch(error => setError(error instanceof Error ? error.message : String(error))); } };
+    return <section className="chrome-login-notice" role="status" aria-live="polite">
+      <span><strong>{zh ? "使用目前的 Chrome 設定檔登入" : "Sign in with your Chrome profile"}</strong>
+        {verifying ? zh ? "正在獨立驗證登入…" : "Independently verifying sign-in…" : <>
+          {zh ? "首次使用請安裝連接器（chrome://extensions → 載入未封裝項目），核對並批准配對碼，再登入 ChatGPT。驗證會自動完成；不用關閉 Chrome 或按繼續。" : "Install the connector once (chrome://extensions → Load unpacked), approve the matching pairing code, then sign in to ChatGPT. Verification is automatic; no need to close Chrome or press Continue."}
+          <br />{operation.message}
+        </>}</span>
+      <div className="chrome-login-actions">
+        <button type="button" disabled={verifying || !openChrome} onClick={() => act(openChrome)}>{zh ? "開啟 Chrome" : "Open Chrome"}</button>
+        <button type="button" disabled={verifying || !installConnector} onClick={() => act(installConnector)}>{zh ? "安裝連接器" : "Install connector"}</button>
+        <button type="button" disabled={!cancelLogin} onClick={() => act(cancelLogin)}>{zh ? "取消" : "Cancel"}</button>
+      </div>
+    </section>;
+  }
   const waitingForClose = chromeLoginWaitingForClose(operation);
   const importing = requested || chromeLoginContinuationPending(operation);
   const proceed = async () => {

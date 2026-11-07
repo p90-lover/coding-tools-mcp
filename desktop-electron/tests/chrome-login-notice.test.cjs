@@ -61,7 +61,7 @@ test("a continued login waiting on open Chrome does not claim importing or allow
 test("closed or completed notices take no space and both locales have readable actions",()=>{
  const f=fixture();assert.equal(f.render({open:false}),null);assert.match(text(f.render({language:"zh-TW"})),/完成 Chrome 登入/);assert(button(f.render({language:"zh-TW"}),"繼續"));
  const app=fs.readFileSync(path.join(__dirname,"../src/App.tsx"),"utf8");
- assert.match(app,/surface !== "browser" && chromeLoginPending\(operation, browser\?\.authenticated\)/);
+ assert.match(app,/\(surface !== "browser" \|\| operation\?\.name === "chrome-profile-login"\) && chromeLoginPending\(operation, browser\?\.authenticated\)/);
  assert.match(app,/<ChromeLoginNotice[\s\S]*?continueLogin=\{\(\) => api!\.continuePasskeyLogin\(\)\}/);
  const css=fs.readFileSync(path.join(__dirname,"../src/chrome-login-notice.css"),"utf8");
  assert.match(css,/\.workspace\.has-chrome-login-notice > \.surface-transition\s*\{[^}]*min-height:\s*0/);

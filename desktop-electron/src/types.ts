@@ -1116,6 +1116,9 @@ export interface LauncherApi {
   checkSignIn(): Promise<BrowserState>;
   openPasskeyLogin(): Promise<BrowserState>;
   continuePasskeyLogin(): Promise<boolean>;
+  openChromeProfileConnector(): Promise<boolean>;
+  cancelChromeProfileLogin(): Promise<boolean>;
+  showChromeProfileConnectorFolder(): Promise<boolean>;
   logoutChatGpt(): Promise<{ browser: BrowserState; state: LauncherState }>;
   dismissSessionReminder(): Promise<LauncherState>;
   smokeTest(): Promise<{ ok: boolean; effort: string; response: string }>;

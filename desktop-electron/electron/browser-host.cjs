@@ -3838,7 +3838,7 @@ class BrowserHost {
     }
     this.authNavigationError = null;
     if (this.externalLogin) this.hide();
-    this.setState({ authenticated: false, status: "loading", message: "Finish signing in in Chrome, close that dedicated window, then choose Continue", loading: true });
+    this.setState({ authenticated: false, status: "loading", message: "Sign in to ChatGPT in Chrome. Coding Tools will independently verify the session.", loading: true });
     this.logger.info("browser.passkey_login_started");
     const transfer = await this.loginWithPasskey(partition, { proxyRules: routes[0] });
     if (this.destroyed || this.partition !== partition || this.view?.webContents !== contents || contents?.isDestroyed()) {
@@ -3890,14 +3890,20 @@ class BrowserHost {
     let sessionDiscarded = false;
     let state;
     try {
+      transfer.assertCurrent?.();
       state = validatePasskeyLoginState(transfer.storageState);
       const contents = this.view?.webContents;
       if (!contents || contents.isDestroyed()) throw new Error("Owned ChatGPT browser session is unavailable");
       sessionMutated = true;
       await this.clearOwnedSessionForPasskey();
-      for (const cookie of state.cookies) await contents.session.cookies.set(cookie);
+      transfer.assertCurrent?.();
+      for (const cookie of state.cookies) {
+        transfer.assertCurrent?.();
+        await contents.session.cookies.set(cookie);
+      }
       contents.session.flushStorageData();
       await contents.session.cookies.flushStore();
+      transfer.assertCurrent?.();
       await contents.loadURL(HOME_URL);
       if (state.localStorage.length > 0) {
         const entries = javaScriptLiteral(state.localStorage);
@@ -3909,8 +3915,11 @@ class BrowserHost {
         })()`, true);
         await contents.loadURL(HOME_URL);
       }
-      result = await this.waitForAuthenticated(60_000);
+      transfer.assertCurrent?.();
+      result = await this.waitForAuthenticated(60_000, () => { transfer.assertCurrent?.(); return false; });
+      transfer.assertCurrent?.();
       await this.runSessionInspection(false);
+      transfer.assertCurrent?.();
       this.activateHomeSurface();
       this.show();
       this.logger.info("browser.passkey_login_imported");
@@ -3941,8 +3950,14 @@ class BrowserHost {
         error = combinedError(error, "retrying partial passkey session cleanup failed", cleanupError);
       }
     }
-    if (error) throw error;
-    if (!result?.authenticated) throw new Error("Passkey sign-in completed without an authenticated Launcher session");
+    if (error) {
+      transfer.complete?.(false);
+      // Never expose imported cookie values through a low-level cookie/import exception.
+      if (transfer.source === "approved-chrome-profile-connector") throw new Error("Chrome profile session verification failed. Check the selected account and its network route in Coding Tools, then reconnect your Chrome profile.");
+      throw error;
+    }
+    if (!result?.authenticated) { transfer.complete?.(false); throw new Error("Passkey sign-in completed without an authenticated Launcher session"); }
+    transfer.complete?.(true);
     return this.snapshot();
   }
 

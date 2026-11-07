@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Coding Tools — current Chrome sign-in",
+  "version": "1.0.0",
+  "description": "With your approval, connect this Chrome profile's ChatGPT session to Coding Tools and verify sign-in automatically.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApkIOirlV68micfO85luNEqLn3iOzzusgEBhe2GsV/MVSh/+pmHQf4pCupVJXP32IqV2o8ot1DMgGPAHN8rkNgYhsZPCXC/AIVqoM0794tPnOa08D9Bs36AIDnhui9mTPKIrX/hW2SgPm61S9Bhp14r7SoLHMqBI70yuCBO01snI/xi/08NyrSDXYP6+TI9HgYBQRo56N/3nhSbGy92iNkmyTkPnXY9dWGR15j/riCH84Tz1CoKfZZoWLOYWnJJw6kzXd7qTB796zODNLklsvlU53+moAU5ZtcYj7t+ONXTZgkSNKt6goIGZCwciVBvKUDAXdf34vsBv1DQkPqn9MzwIDAQAB",
+  "permissions": ["cookies", "scripting", "storage"],
+  "host_permissions": ["https://chatgpt.com/*", "https://*.chatgpt.com/*", "https://openai.com/*", "https://*.openai.com/*"],
+  "externally_connectable": { "matches": ["http://127.0.0.1/*"] },
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Coding Tools Chrome connector", "default_popup": "confirm.html" },
+  "incognito": "not_allowed"
+}
