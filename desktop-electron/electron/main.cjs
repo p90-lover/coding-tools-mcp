@@ -2809,7 +2809,8 @@ function registerIpc({ logger, stateStore }) {
     return browserAccountsStatus();
   });
   handle("launcher:browser-account-inspect", async (event, accountId = browserAccounts.activeId()) => {
-    assertFocusedMainWindow(event, true);
+    // Metadata inspection uses an offscreen page and cannot perform MCP actions.
+    assertFocusedMainWindow(event, false, true);
     const partition = browserAccounts.partitionOf(accountId);
     const assertCurrent = () => {
       if ((browserHost?.interactionModeOverride ?? stateStore.read().browserInteractionMode) === "manual") {
@@ -2820,10 +2821,13 @@ function registerIpc({ logger, stateStore }) {
       }
     };
     assertCurrent();
-    if (!signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }))) {
+    const signedIn = signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
+    assertCurrent();
+    if (!signedIn) {
       throw new Error("Sign in to this account before checking its plan.");
     }
     await routeIdleAccountPartition(partition, logger);
+    assertCurrent();
     const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true });
     assertCurrent();
     recordBrowserWorkspaceContext(partition, context);
