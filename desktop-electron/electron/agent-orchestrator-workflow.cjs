@@ -2893,26 +2893,224 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const restartInterrupted = (node) => RESTART_INTERRUPTED.test(String(node?.receipt?.error || ""))
     && (node.history?.length ?? 0) < RESTART_HISTORY_LIMIT;
 
-  // Requests the command approver may never allow, whatever the model says.
-  const HARD_DENY = [
-    /\brm\s+-[a-z]*[rf][a-z]*\s+(\/|~|\$HOME|[a-z]:[\\/])/i, /\bmkfs\b|\bformat\s+[a-z]:/i, /\bdd\s+if=/i,
-    /\b(curl|wget)\b[^|\n]*\|\s*(ba|z)?sh\b/i, /\b(iwr|irm|invoke-webrequest)\b[^|\n]*\|\s*iex\b/i,
-    /(^|[\\/\s])\.env(\.|\b)|id_rsa|[\\/]\.ssh[\\/]|credentials|secrets?\.(json|ya?ml|toml)/i,
-    /\bRemove-Item\b[^\n]*-Recurse[^\n]*([a-z]:\\|~|\$HOME)/i, /\bdel\s+\/[sq]\b|\brd\s+\/s\b/i,
-    /\bshutdown\b|\breg\s+delete\b|\bbcdedit\b|\bdiskpart\b/i,
+  // Requests the command approver may never allow, whatever the model says. The rules read what a
+  // request runs (its command line, or the command a tool's arguments carry) and the files it
+  // names: never a file's contents, a search pattern or the agent's own description of the request
+  // (safetyParts). Matched as single words anywhere in a request, they blocked harmless work as
+  // "Blocked by the command approver's safety rules", with no reason given: on 2026-11-06 a Grep of
+  // a log for "shutdown", a call to the project's own local API at
+  // /api/accounts/shutdown-controllers and an edit of a Markdown note naming that endpoint were each
+  // denied, and a goal chat gave its task up for two days. So quoted text is an argument ("rm -rf /"
+  // in a commit message, a search pattern, a URL) unless a shell runs it (bash -c "...",
+  // cmd /c "...", powershell -Command "...", "$(...)"); a heredoc's body is data unless an
+  // interpreter reads it; and a dangerous program counts only where a command starts.
+  const safetyRule = (why, source) => ({ why, pattern: new RegExp(source, "i") });
+  // A shell handed the rest of the line to run.
+  const SHELL_RUNS = String.raw`\bcmd(?:\.exe)?\b[^\n;|&"']*?\s\/[ck]|\b(?:ba|z|da|k)?sh(?:\.exe)?\b[^\n;|&"']*?\s-\w*c`
+    + String.raw`|\b(?:pwsh|powershell)(?:\.exe)?\b[^\n;|&"']*?\s-c(?:ommand)?|\b(?:iex|Invoke-Expression)\b(?:\s+-Command)?\s*\(?`;
+  // Where a command starts (a line, a chain, a pipe or bracket, a wrapper such as sudo, a shell's
+  // -c), then the program's folder if it is named: /sbin/shutdown, C:\Windows\System32\shutdown.exe.
+  const AT_COMMAND = String.raw`(?:^|[\n\r;&|({\x60]|\b(?:sudo|doas|exec|nohup|xargs|call|start|Start-Process(?:\s+-FilePath)?)\b|${SHELL_RUNS})\s*`
+    + String.raw`["'\x60]?(?:(?![a-z][\w+.-]*:\/\/)[^\s"'\x60|;&(){}]*[\\/])?`;
+  /** Read in a command line whose quoted text is blanked (hardDenial). */
+  const COMMAND_RULES = [
+    safetyRule("it shuts down or restarts the computer",
+      AT_COMMAND + String.raw`(?:shutdown|Stop-Computer|Restart-Computer)(?:\.exe)?(?![-\w.=])`),
+    safetyRule("it formats or wipes a disk", AT_COMMAND + String.raw`(?:format(?:\.com)?\s+[a-z]:(?![\\/]?[^\s"'\\/])`
+      + String.raw`|(?:mkfs(?:\.\w+)?|diskpart(?:\.exe)?|Format-Volume|Clear-Disk|Initialize-Disk)(?![-\w.=]))`),
+    safetyRule("it deletes registry keys or changes Windows' boot settings",
+      AT_COMMAND + String.raw`(?:reg(?:\.exe)?\s+delete|bcdedit(?:\.exe)?)(?![-\w.=])`),
+    safetyRule("it runs a script straight from the internet", String.raw`\b(?:curl|wget)(?:\.exe)?\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b`
+      + String.raw`|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|\n]*\|\s*(?:iex|Invoke-Expression)\b`
+      + String.raw`|\b(?:iex|Invoke-Expression)\s*\(+\s*(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|New-Object\s+(?:System\.)?Net\.WebClient)\b`),
   ];
-  const JSON_ESCAPES = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f" };
+  const DELETES_ROOT_WHY = "it deletes a whole drive, the root folder, a system folder or a home folder";
+  const DELETES = /^(?:rm|rmdir|rd|del|erase|Remove-Item|ri)$/i;
+  // A whole drive, the root folder, a system folder or a home folder, as one argument (with /* or \*.*).
+  const ROOT_FOLDER = new RegExp(String.raw`^(?:[\\/]|~|\$HOME|\$\{HOME\}|[a-z]:`
+    + String.raw`|\$env:(?:USERPROFILE|HOMEDRIVE|SystemDrive|SystemRoot|windir|ProgramFiles)|%(?:USERPROFILE|HOMEDRIVE|SystemDrive|SystemRoot|windir|ProgramFiles)%`
+    + String.raw`|[\\/](?:bin|boot|dev|etc|home|lib|lib64|opt|root|sbin|srv|sys|usr|var|Applications|Library|System|Users)`
+    + String.raw`|[\\/](?:home|Users)[\\/][^\\/]+|[a-z]:[\\/](?:Windows|Program Files(?: \(x86\))?|ProgramData|Users(?:[\\/][^\\/]+)?))`
+    + String.raw`[\\/]?(?:\.?\*(?:\.\*)?)?$`, "i");
+  // A raw disk device, not /dev/null or another stream.
+  const DISK_DEVICE = /^of=(?:\/dev\/(?!(?:null|zero|stdout|stderr|random|urandom|tty)$|fd\/)|\\\\\.\\)/i;
+  const SECRET_WHY = "it reads or writes a secret file (.env, SSH keys or cloud credentials)";
+  // A secret file's own name, as one part of a path: never .env.example or id_rsa.pub.
+  const SECRET_NAME = /^(?:\.env(?:\.(?!(?:example|sample|template|dist|defaults?)$)[\w.-]+)?|id_(?:rsa|dsa|ecdsa|ed25519)|\.git-credentials|(?:credentials|secrets?)\.(?:json|ya?ml|toml|xml|ini))$/i;
   /**
-   * Whether the safety rules block a request. A tool's arguments arrive as JSON (an MCP tool's
-   * toolInput, the app's own approvals), where "cd app\ngit push" reads "cd app\\ngit push" and
-   * the escape hid git push from the rules' word boundaries; so does a quote before ".env". The
-   * text is checked as given and with its escapes read back and its quotes as separators.
+   * Whether a path names a secret file: .env, an SSH private key (anything in .ssh but public keys
+   * and known_hosts), cloud or Git credentials. A command's argument with a space in it is a path
+   * only when it starts like one ("C:\My Project\.env"), not text that mentions one ("add .env to
+   * .gitignore"); --env-file=.env and user@host:~/.ssh/id_rsa are read after their = or @.
    */
-  function hardDenied(text) {
+  function secretPath(word, { argument = false } = {}) {
+    const text = String(word).replace(/^[^=@<>]*[=@<>]+/, "");
+    if (argument && /\s/.test(text) && !/^(?:[a-z]:[\\/]|[\\/~$%]|\.{1,2}[\\/])/i.test(text)) return false;
+    const parts = text.split(/[\\/]+/);
+    return parts.some((part, at) => SECRET_NAME.test(part)
+      || (/^\.ssh$/i.test(part) && !/^(?:[\w.-]+\.pub|known_hosts)$/i.test(parts[at + 1] ?? ""))
+      || (/^\.aws$/i.test(part) && /^credentials$/i.test(parts[at + 1] ?? ""))
+      || (/^\.docker$/i.test(part) && /^config\.json$/i.test(parts[at + 1] ?? "")));
+  }
+  // A quoted string: "..." (with \" or a PowerShell `" inside) or '...' (with '' inside).
+  const QUOTED = /"(?:[^"\\\x60]|\\(?:"(?![\s;|&)]|$))?|\x60[\s\S])*"|'(?:[^']|'')*'/g;
+  // A command line's tokens: separators, spaces, and the parts a word is made of.
+  const SHELL_TOKEN = new RegExp(String.raw`(?<sep>[;&|()\x60\r\n]+)|(?<space>[^\S\r\n]+)|(?<part>${QUOTED.source}|[^\s;&|()\x60"']+|["'])`, "g");
+  // A heredoc: the line that opens it, its body, and the line that ends it.
+  const HEREDOC = /(<<-?[ \t]*(["']?)([\w.-]+)\2[^\n]*\n)([\s\S]*?)(\r?\n[ \t]*\3[ \t]*(?=\r?\n|\)|$)|$)/g;
+  // An interpreter reading a heredoc as its script: bash <<EOF, python - <<'EOF'.
+  const READS_SCRIPT = /(?:^|[\n\r;&|(\x60])\s*(?:sudo\s+)?(?:[^\s"'|;&()]*[\\/])?(?:(?:ba|z|da|k)?sh|pwsh|powershell|cmd|python[\d.]*|py|node|bun|deno|perl|ruby|php)(?:\.exe)?\b[^\n;&|]*$/i;
+  // A quoted string a shell runs: given to a shell's -c or Invoke-Expression, or a program run by
+  // the call operator (& "C:\Tools\x.exe"), Start-Process or Process.Start.
+  const RUNS_QUOTED = new RegExp(String.raw`(?:(?:^|[^&])&|\b(?:sudo|doas|exec|nohup|xargs|call|start|Start-Process(?:\s+-FilePath)?)\b|${SHELL_RUNS}|\]::Start\()\s*$`, "i");
+  /** A command line as segments (split at ; & | and brackets) of words, each with its quotes taken off. */
+  function shellSegments(line) {
+    const segments = [[]];
+    let word = null;
+    for (const { groups } of line.matchAll(SHELL_TOKEN)) {
+      const { part } = groups;
+      if (part !== undefined) {
+        word = (word ?? "") + (part.length > 1 && /^["']/.test(part) && part.endsWith(part[0]) ? part.slice(1, -1) : part);
+        continue;
+      }
+      if (word !== null) segments.at(-1).push(word);
+      word = null;
+      if (groups.sep !== undefined && segments.at(-1).length) segments.push([]);
+    }
+    if (word !== null) segments.at(-1).push(word);
+    return segments.filter((words) => words.length);
+  }
+  /** The command substitutions in a double-quoted string: "$(git rev-parse HEAD)". */
+  function substitutions(text) {
+    const scripts = [];
+    for (let start = text.indexOf("$("); start >= 0; start = text.indexOf("$(", start + 2)) {
+      let depth = 0, end = start + 1;
+      for (; end < text.length; end++) {
+        if (text[end] === "(") depth++;
+        else if (text[end] === ")" && --depth === 0) break;
+      }
+      scripts.push(text.slice(start + 2, end));
+    }
+    return scripts;
+  }
+  /**
+   * The command lines a request runs: the text itself, with heredoc and here-string bodies blanked
+   * and continued lines joined, then each script it hands to a shell or an interpreter.
+   */
+  function commandLines(text, depth = 0) {
+    const nested = [];
+    let line = String(text).replace(HEREDOC, (whole, head, quote, tag, body, tail, at, source) => {
+      if (depth < 3 && READS_SCRIPT.test(source.slice(Math.max(0, at - 200), at))) nested.push(...commandLines(body, depth + 1));
+      return head + body.replace(/[^\r\n]/g, " ") + tail;
+    });
+    line = line.replace(/@(["'])\r?\n[\s\S]*?\r?\n\1@/g, (whole) => whole.replace(/[^\r\n]/g, " ")).replace(/[\\\x60^]\r?\n/g, " ");
+    if (depth < 3) {
+      for (const { 0: quoted, index } of line.matchAll(QUOTED)) {
+        const inner = quoted.slice(1, -1);
+        if (RUNS_QUOTED.test(line.slice(Math.max(0, index - 200), index))) nested.push(...commandLines(inner, depth + 1));
+        else if (quoted[0] === "\"") for (const script of substitutions(inner)) nested.push(...commandLines(script, depth + 1));
+      }
+    }
+    return [line, ...nested];
+  }
+  /** Which safety rule blocks a command line, as { why, match }, or null. */
+  function hardDenial(text) {
     const value = String(text ?? "");
-    const read = value.replace(/\\(?:u([0-9a-fA-F]{4})|([^u]))/g,
-      (_, hex, char) => (hex ? String.fromCharCode(Number.parseInt(hex, 16)) : JSON_ESCAPES[char] ?? char)).replace(/"/g, " ");
-    return HARD_DENY.some((pattern) => pattern.test(value) || pattern.test(read)) || gitPushRequest(value)?.status === "blocked";
+    if (!value.trim()) return null;
+    for (const line of commandLines(value)) {
+      const blanked = line.replace(QUOTED, (quoted) => quoted[0] + " ".repeat(quoted.length - 2) + quoted[0]);
+      for (const { why, pattern } of COMMAND_RULES) {
+        const found = pattern.exec(blanked);
+        if (found) return { why, match: found[0] };
+      }
+      const segments = shellSegments(line);
+      for (const words of segments) {
+        // Each word as a program name: /bin/rm and C:\Windows\System32\cmd.exe read rm and cmd.
+        const names = words.map((word) => word.replace(/^.*[\\/]/, "").replace(/\.(?:exe|com)$/i, ""));
+        const deletes = names.findIndex((name) => DELETES.test(name));
+        const root = deletes < 0 ? null : words.slice(deletes + 1)
+          .find((word) => /^--no-preserve-root$/i.test(word) || ROOT_FOLDER.test(word.replace(/^-{1,2}[\w-]+[:=](?=.)/, "")));
+        if (root) return { why: DELETES_ROOT_WHY, match: `${words[deletes]} ${root}` };
+        const device = names.some((name) => /^dd$/i.test(name)) && words.find((word) => DISK_DEVICE.test(word));
+        if (device) return { why: "it overwrites a disk device", match: device };
+      }
+      const secret = segments.flat().find((word) => secretPath(word, { argument: true }));
+      if (secret) return { why: SECRET_WHY, match: secret };
+    }
+    return gitPushRequest(value)?.status === "blocked"
+      ? { why: "it pushes to main or master, force-pushes, or deletes on the remote", match: "" } : null;
+  }
+  // A tool argument that is the command it runs (or input typed into one), and one that names a file.
+  const COMMAND_ARGS = ["cmd", "command", "commands", "script", "commandLine", "command_line", "chars", "stdin"];
+  const PATH_ARGS = ["file_path", "filePath", "path", "paths", "notebook_path", "target_file", "cwd", "workdir"];
+  // A patch names its files in its headers: "*** Update File: .env", "+++ b/.env".
+  const PATCH_FILE = /^(?:\*\*\* (?:Add|Update|Delete) File:|\*\*\* Move to:|\+\+\+ (?:b\/)?|--- (?:a\/)?)[ \t]*(\S.*?)[ \t\r]*$/gm;
+  /** A command given as text, or as an argv whose words are quoted again where they hold a space. */
+  const argText = (value) => typeof value === "string" ? value
+    : Array.isArray(value) && value.length && value.every((part) => typeof part === "string")
+      ? value.map((part) => (/[\s"']/.test(part) ? `"${part.replace(/"/g, "\\\"")}"` : part)).join(" ") : "";
+  const argsObject = (raw) => {
+    try { const value = JSON.parse(raw); return value && typeof value === "object" && !Array.isArray(value) ? value : null; } catch { return null; }
+  };
+  /** A tool input's string fields as far as they go, when its JSON was cut short. */
+  function looseArgs(raw) {
+    const args = {};
+    for (const [, key, body] of String(raw).matchAll(/"(\w+)"\s*:\s*"((?:[^"\\]|\\[\s\S])*)/g)) {
+      if (Object.hasOwn(args, key)) continue;
+      try { args[key] = JSON.parse(`"${body.replace(/\\$/, "")}"`); } catch { args[key] = body; }
+    }
+    return args;
+  }
+  /**
+   * What the safety rules read in a request: the command lines it runs and the files it names.
+   * Takes an approval ({ kind, command, path, cwd, toolInput }), a tool's own arguments, or text:
+   * a command line, a tool's arguments as JSON, or a request summary ending "input {...}".
+   */
+  function safetyParts(value) {
+    const commands = [], paths = [];
+    const fromArgs = (args) => {
+      for (const key of COMMAND_ARGS) if (argText(args[key])) commands.push(argText(args[key]));
+      // An argv beside its program: {"command": "git", "args": ["push", "origin", "main"]}.
+      for (const key of ["args", "argv"]) {
+        if (argText(args[key])) commands.push(`${argText(args.command ?? args.cmd ?? args.program ?? args.file)} ${argText(args[key])}`.trim());
+      }
+      for (const key of PATH_ARGS) {
+        if (typeof args[key] === "string") paths.push(args[key]);
+        else if (Array.isArray(args[key])) paths.push(...args[key].filter((entry) => typeof entry === "string"));
+      }
+      for (const key of ["patch", "input", "diff"]) {
+        if (typeof args[key] === "string") for (const [, file] of args[key].matchAll(PATCH_FILE)) paths.push(file);
+      }
+    };
+    if (typeof value === "string") {
+      const input = value.indexOf(" · input {");
+      const raw = input < 0 ? null : value.slice(input + " · input ".length);
+      const args = argsObject(value) ?? (raw === null ? null : argsObject(raw) ?? looseArgs(raw));
+      if (args) fromArgs(args);
+      else commands.push(value);
+    } else if (value && typeof value === "object") {
+      if (["approval_id", "toolInput", "kind"].some((key) => Object.hasOwn(value, key))) {
+        if (argText(value.command)) commands.push(argText(value.command));
+        for (const key of ["path", "cwd"]) if (typeof value[key] === "string" && value[key]) paths.push(value[key]);
+        if (typeof value.toolInput === "string" && value.toolInput) fromArgs(argsObject(value.toolInput) ?? looseArgs(value.toolInput));
+      } else fromArgs(value);
+    }
+    return { commands, paths };
+  }
+  /** Which safety rule blocks a request (an approval, a tool's arguments or a command), as { why, match }, or null. */
+  function requestDenial(value) {
+    const { commands, paths } = safetyParts(value);
+    for (const command of commands) {
+      const denial = hardDenial(command);
+      if (denial) return denial;
+    }
+    const secret = paths.find((file) => secretPath(file));
+    return secret ? { why: SECRET_WHY, match: secret } : null;
+  }
+  /** The safety rules' reason for a denial: the rule and what it matched, never a bare "blocked". */
+  function safetyReason(denial) {
+    const match = publicText(String(denial?.match ?? "").replace(/^[\s;&|({"'\x60]+/, "").replace(/\s+/g, " ").trim(), 80);
+    return `Blocked by the safety rules: ${denial?.why ?? "it raised a block"}${match ? ` (${match})` : ""}`;
   }
   // Routine project commands "Approve for me" runs without asking, as Codex's auto-review does:
   // installing from the project's lockfile, running the project's own scripts, type checks and
@@ -3884,8 +4082,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
   async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }, { check, signal, verifyCurrent, sending }) {
     check();
+    // The safety rules read the request's own command, files and tool arguments whole, not the
+    // summary the reviewer reads.
+    const denial = requestDenial(approval);
+    const blocked = Boolean(denial);
     // The command advisor must not decide from a truncated command or permission scope.
-    const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
     const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
       || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
       || JSON.stringify(approval.permissions ?? {}).length > 800;
@@ -3898,7 +4099,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
     let advice = exhausted
-      ? judges ? { action: "deny", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so it was denied (Let the model judge is on)` }
+      ? judges ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
@@ -3912,7 +4113,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : incomplete && !blocked
       ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
       : blocked
-        ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
+        ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) }
           // A shell line counts only from the agent's own shell tool; the app's exec_command
           // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
           : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
@@ -3955,9 +4156,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return `The reviewer couldn't answer yet, trying again: ${why}`;
       }
       // "Let the model judge" leaves nothing to the person: a reviewer that never answered denies,
-      // in doubt, and the agent hears why and goes another way.
+      // in doubt. The agent hears that the request was not judged, so it tries again rather than
+      // giving up on it: told "try a safer way", agents dropped harmless steps for good.
       advice = judges
-        ? { action: "deny", reason: `The command reviewer couldn't answer after ${tries} tries, so it was denied (Let the model judge is on): ${why}` }
+        ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
     reviewFailures.delete(approval.approval_id);
@@ -3973,7 +4175,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // touches the other requests; this one just goes to the person.
     if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
       const decision = aoDecision(approval, advice.action === "allow");
-      const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
+      const why = advice.action === "deny" ? reviewerDenial(advice.reason, advice) : "";
       if (!decision) {
         keepAdvice({ action: "ask", unresolved: true, unsent: advice.action,
           reason: `The reviewer's decision is not offered by this request, so choose an answer yourself. It said ${advice.action}: ${advice.reason}` });
@@ -4028,11 +4230,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /**
    * What an agent reads as the result of a call the reviewer or "Approve for me" denied. Claude Code
    * otherwise reports "User refused permission to run tool", and the agent took it as the person's
-   * own refusal and guessed at why.
+   * own refusal and guessed at why. A request the reviewer could not judge at all (it never
+   * answered, with "Let the model judge" on) says so, and that running it again is fine.
    */
-  const reviewerDenial = (reason) =>
-    `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
-    + "Try a safer way to reach the goal, or ask the user if only this will do.";
+  const reviewerDenial = (reason, { unavailable = false } = {}) => unavailable
+    ? `Not run, but not refused either: the command reviewer ("Approve for me") could not judge this request, and the user did not refuse it`
+      + ` (${String(reason || "the reviewer did not answer").replace(/\.$/, "")}). `
+      + "Run the same request again in a minute; if it is still not judged, tell the user the command reviewer is unavailable."
+    : `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
+      + "Try a safer way to reach the goal, or ask the user if only this will do.";
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -4069,8 +4275,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const approver = cardApprover(mission, node);
     if (approver && (!advice || (approver.settings?.auto_decide === true && advice.action !== "ask"))) return "wait";
     const request = describeRequest(approval);
-    if (hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput)
-      || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
+    if (requestDenial(approval) || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
     if (advice?.action === "allow") return "allow";
     // Publication never becomes an allow merely because nobody answered its timer.
     if (gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)) return "wait";
@@ -4110,6 +4315,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (verdict === "wait") continue;
         autoAnswered.set(id, verdict);
         if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.keys().next().value);
+        // A denial names its rule, or the reviewer's reason, never just "blocked".
+        const advice = approverAdvice.get(id);
+        const denial = verdict === "deny" ? requestDenial(approval) : null;
+        const why = denial ? safetyReason(denial) : advice?.reason || "the command reviewer raised a block";
         try {
           if (approval.source === "ao" && approval.kind === "question") {
             const answer = recommendedAnswer(approval);
@@ -4120,19 +4329,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
             if (!decision) continue;
-            const advice = approverAdvice.get(id);
-            await harnessService().resolveApproval(approval.thread_id, id, decision,
-              blocked ? reviewerDenial(advice?.action === "deny" ? advice.reason : "its safety rules block this request, or it is too long to review whole") : "");
-            note = blocked ? "Denied: blocked by the command approver's safety rules or reviewer"
+            await harnessService().resolveApproval(approval.thread_id, id, decision, blocked ? reviewerDenial(why, denial ? {} : advice) : "");
+            note = blocked ? `Denied: ${publicText(why, 160)}`
               : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Approve for me allowed the request once";
           } else if (approval.kind === "command") {
             const request = describeRequest(approval);
             const allow = verdict === "allow";
             await requestHeadless("/api/v1/ao/harness/approval", {
               workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: id, allow, confirm: false,
-              approver_reason: allow ? "Approve for me: the review raised no block" : "Blocked by the command approver's safety rules or reviewer", approver_request: request,
+              approver_reason: allow ? "Approve for me: the review raised no block" : why, approver_request: request,
             });
-            note = allow ? "Approve for me allowed the command once" : "Denied: blocked by the command approver's safety rules or reviewer";
+            note = allow ? "Approve for me allowed the command once" : `Denied: ${publicText(why, 160)}`;
           }
           logger?.info?.("ao.auto_answered", { approval_id: id, actor: "timeout_policy", decision: verdict ?? approval.kind,
             kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
@@ -8230,8 +8437,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     },
     stop: ({ workspaceId, runId }) => controlRun({ workspaceId, runId, action: "stop" }),
   };
-  /** Automatic tools/subagents have no publication-review path, so every detected push waits on a person. */
-  const blockedRequest = (text) => hardDenied(text) || Boolean(gitPushRequest(text));
+  /**
+   * Automatic tools/subagents have no publication-review path, so every detected push waits on a
+   * person. Takes an approval, a tool's arguments, or a command line (see safetyParts).
+   */
+  const blockedRequest = (value) => Boolean(requestDenial(value))
+    || safetyParts(value).commands.some((command) => Boolean(gitPushRequest(command)));
   restoreWakeups();
   restoreLoops();
   restoreQueues();
