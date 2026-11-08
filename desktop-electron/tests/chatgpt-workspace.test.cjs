@@ -6,6 +6,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const setup = require("../electron/mcp-connector-setup.cjs");
+const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 const { ADMIN_REQUIRED, PUBLISH_REQUIRED, isWorkspaceAdmin } = require("../electron/chatgpt-workspace.cjs");
 const workspaceId = "602b5d8d-e211-49b1-9762-206108d52954";
 const otherWorkspace = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
@@ -102,6 +103,13 @@ function fixture(options = {}) {
       const partition = input.target.partition, profile = profiles[partition];
       assert.equal(input.expectedContext.userId, profile.userId);
       assert.equal(input.expectedContext.workspaceId, workspaceId);
+      if (input.existingOnly) {
+        calls.push(["inspect-existing", partition]);
+        if (options.reuseError) throw Object.assign(new Error(options.reuseError), { mcpMutationStarted: options.reuseMutation });
+        if (!options.existingVerified) throw Object.assign(new Error(setup.UNVERIFIED_CONNECTOR), { mcpMutationStarted: false });
+        return { created: false, name: "Coding Tools", href: "/plugins/exact-fixture", connected: true,
+          binding: { userId: profile.userId, workspaceId, tunnelId: `tunnel_${"a".repeat(32)}` } };
+      }
       if (partition === "persist:member" && !input.shared && !options.memberCanCreate) throw new Error("ChatGPT did not open its connector form.");
       if (partition === "persist:owner" && options.wrongTunnelOwner) {
         throw Object.assign(new Error("The selected tunnel belongs to a different Platform user. Choose a tunnel created by the signed-in account."), { mcpMutationStarted: false });
@@ -158,6 +166,27 @@ test("same-workspace owner is preferred, publishes there, and connects the origi
   assert(f.contexts.some(value => value.partition === "persist:member" && value.context.planType === "team"));
 });
 
+test("a member or admin uses fresh exact existing connector identity before looking for an owner", async () => {
+  for (const role of ["standard-user", "account-admin"]) {
+    const f = fixture({ existingVerified: true });
+    f.profiles["persist:member"].memberships[workspaceId] = role;
+    f.input.accountCandidates = async () => { throw new Error("An existing verified connector must not seek owner authority"); };
+    const result = await f.run();
+    assert.equal(result.connected, true);
+    assert.equal(result.created, false);
+    assert.deepEqual(f.calls, [["inspect-existing", "persist:member"]]);
+    assert(f.windows.every(window => window.isDestroyed()));
+  }
+});
+
+test("consent, uncertain mutation, and changed context failures cannot fall back to owner creation", async () => {
+  for (const [message, mutation] of [[setup.UNVERIFIED_CONNECTOR, true], [setup.UNVERIFIED_CONNECTOR, undefined], ["Workspace context changed", false]]) {
+    const f = fixture({ owner: true, reuseError: message, reuseMutation: mutation });
+    await assert.rejects(f.run(), error => error.message === message);
+    assert.deepEqual(f.calls, [["inspect-existing", "persist:member"]]);
+  }
+});
+
 test("same-page directory filters keep the verified workspace inspection usable", async () => {
   const f = fixture({ owner: true, filterNavigation: true });
   const result = await f.run();
@@ -191,7 +220,7 @@ test("another workspace's owner and another partition of the same member cannot 
       f.profiles["persist:owner"].memberships = { [otherWorkspace]: "account-owner" };
     } else if (kind === "same-user") f.profiles["persist:owner"].userId = "user-member";
     else f.profiles["persist:owner"].memberships[workspaceId] = "standard-user";
-    await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+    await assert.rejects(f.run(), error => error.message.endsWith(ADMIN_REQUIRED));
     assert.equal(f.calls.some(call => ["create", "publish", "connect-member"].includes(call[0])), false);
     assert(f.windows.every(window => window.isDestroyed()));
   });
@@ -199,7 +228,7 @@ test("another workspace's owner and another partition of the same member cannot 
 
 test("a delegated member cannot create even when ChatGPT exposes an Add control", async () => {
   const f = fixture({ memberCanCreate: true });
-  await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+  await assert.rejects(f.run(), error => error.message.endsWith(ADMIN_REQUIRED));
   assert.equal(f.calls.some(call => ["create", "publish", "connect-member"].includes(call[0])), false);
 });
 
@@ -221,7 +250,12 @@ test("cached shared provenance cannot reconnect without fresh publisher verifica
   const f = fixture({ bindings: { "persist:admin": publisher,
     "persist:member": { ...publisher, userId: "user-member", publisherPartition: "persist:admin", publisherUserId: "user-admin" } } });
   f.input.accountCandidates = async () => [];
-  await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+  await assert.rejects(f.run(), error => {
+    assert.equal(mcpConnectorCommandFailure(error).code, "workspace_owner_required",
+      "the native caller must retain the actionable owner requirement");
+    assert.equal(error.cause?.message, setup.UNVERIFIED_CONNECTOR);
+    return error.message.endsWith(ADMIN_REQUIRED);
+  });
   assert.deepEqual(f.calls.filter(call => call[0] === "connect-member"), []);
 });
 
@@ -302,7 +336,8 @@ test("plan labels use subscription metadata while model access remains a separat
   for (const [type, label] of [["team", "Business (Team)"], ["pro", "Pro"], ["plus", "Plus"], ["free", "Free"], ["future-plan", "Unknown plan"]]) {
     const result = format({ ...metadata, planType: type, solAvailable: true, proAvailable: true, checkedAt: 123 }, true);
     assert.equal(result.label, label);
-    assert.match(result.detail, /Admin/);
+    assert.match(result.detail, /Workspace/);
+    assert.doesNotMatch(result.detail, /Admin/, "the role has its own explicit account row");
     assert.match(result.detail, /Model access/);
   }
   assert.equal(format({ solAvailable: true, proAvailable: true, checkedAt: 123 }, true).label, "Not verified");
