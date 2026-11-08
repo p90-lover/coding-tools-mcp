@@ -131,6 +131,26 @@ test("the in-turn reading is best effort and records what the slider showed", as
   });
 });
 
+test("the in-turn reading takes the 2026-11-08 slider, whose open ticks carry no data-locked", async () => {
+  const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
+  // Captured live: data-locked only on the root; data-selected fills the ticks up to the thumb.
+  const slider = (locked: number[]) => createDocument(`<div data-model-picker-power-slider="">`
+    + `<span data-locked="false" data-orientation="horizontal" aria-disabled="false"><span data-orientation="horizontal">`
+    + [0, 1, 2, 3, 4].map(index => `<span data-selected="${index <= 3}"${locked.includes(index) ? ' data-locked="true"' : ""}></span>`).join("")
+    + `</span><span role="slider" aria-valuemin="0" aria-valuemax="4" aria-valuenow="3"></span></span></div>`)
+    .querySelector("[data-model-picker-power-slider]")!;
+  const recorded: unknown[] = [];
+  for (const locked of [[], [3, 4]]) {
+    const element = slider(locked);
+    await recordChatGptEffortSnapshotInPassing({ evaluate: async (read: (node: Element) => unknown) => read(element) } as never,
+      { min: 0, max: 4, value: 3 }, snapshot => { recorded.push(snapshot); return true; });
+  }
+  expect(recorded).toEqual([
+    { ticks: [{ locked: false }, { locked: false }, { locked: false }, { locked: false }, { locked: false }] },
+    { ticks: [{ locked: false }, { locked: false }, { locked: false }, { locked: true }, { locked: true }] },
+  ]);
+});
+
 function nativeCatalog(): Record<string, unknown> {
   return {
     models: [{

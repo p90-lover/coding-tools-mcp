@@ -5,6 +5,7 @@ import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } 
 import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, recordPageShortcut, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
+import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
 import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
 
@@ -298,6 +299,9 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
   // The chat list's own settings, shared with its popover in the sidebar.
   const [list, setList] = useState(readChatListSettings);
   useEffect(() => onChatListSettings(setList), []);
+  // How chats draw their work, kept on this computer; open chats follow a change at once.
+  const [missionWork, setMissionWork] = useState(readMissionWork);
+  useEffect(() => onMissionWork(setMissionWork), []);
   // The archive days, kept by the bridge (chat-archive.cjs) like the preferences above.
   const [archive, setArchive] = useState<{ days: number; idleDays: number } | null>(null);
   useEffect(() => {
@@ -374,15 +378,15 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
               </Row>
             </Group>
             <Group title="Chat pages">
-              <Row label="Show page tabs" description="Keep separate sets of chat sessions on pages. Hiding the tabs keeps your current page and running chats">
-                <Toggle label="Show page tabs" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
+              <Row label="Use pages" description="When every screen on a page holds a chat, New chat opens on the next page. Turning pages off keeps your current page and running chats">
+                <Toggle label="Use pages" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
               </Row>
               <Row label="Open pages" description={`${pages.pageCount} of ${CHAT_PAGE_LIMIT} pages. Each new page starts with a new chat and keeps its own split layout`}>
                 <button type="button" className="cxs-button" disabled={!pages.enabled || pages.pageCount >= CHAT_PAGE_LIMIT}
                   onClick={() => setPagePreference({ pageCount: pages.pageCount + 1 })}>Add page</button>
               </Row>
-              <Row label="Scroll over the page bar to switch" description="Over the page bar, scroll up for the previous page and down for the next. Scrolling messages stays unchanged">
-                <Toggle label="Scroll over the page bar to switch" checked={pages.wheel} disabled={!pages.enabled}
+              <Row label="Scroll to switch pages" description="Scroll over the page numbers, or sideways anywhere in Chat (a touchpad swipe or Shift+scroll). Scrolling messages stays unchanged">
+                <Toggle label="Scroll to switch pages" checked={pages.wheel} disabled={!pages.enabled}
                   onChange={(wheel) => setPagePreference({ wheel })} />
               </Row>
               <Row label="Page keyboard shortcuts" description="Switch pages without clicking. Shortcuts pause while typing or using a dialog">
@@ -432,6 +436,9 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                   {chat && chat.questionTimeout > 0 ? <><QuestionSeconds value={chat.questionTimeout} disabled={!chat}
                     onChange={(seconds) => setChatPreference("chat_question_timeout", { seconds })} /><span className="cxs-unit">s</span></> : null}
                 </span>
+              </Row>
+              <Row label="Keep work expanded on a mission" description="Thoughts and steps stay open while a chat or its goal is working. Anything you fold stays folded">
+                <Toggle label="Keep work expanded on a mission" checked={missionWork} onChange={(next) => setMissionWork(saveMissionWork(next))} />
               </Row>
             </Group>
             <Group title="Keyboard shortcuts">

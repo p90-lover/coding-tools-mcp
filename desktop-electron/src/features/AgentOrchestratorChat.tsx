@@ -11,7 +11,8 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import type { AoNode } from "./AgentOrchestratorSurface";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { stepDuration, stepFamily, stepFamilyCounts, stepFamilyNoun, transcriptCompletion, transcriptParts, transcriptSummary, transcriptTone, type StepFamily } from "./chat-transcript";
+import { goalMissionStart, openedThought, stepDuration, stepFamily, stepFamilyCounts, stepFamilyNoun, transcriptCompletion, transcriptParts, transcriptSummary, transcriptTone, type StepFamily } from "./chat-transcript";
+import { onMissionWork, readMissionWork } from "./chat-view-settings";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
@@ -28,7 +29,7 @@ import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
@@ -312,11 +313,33 @@ function thoughtHeadline(item: ChatLiveItem): string {
 }
 
 /**
- * The model's reasoning summary, as Codex shows it: its first line (a short bold title such as
- * "**Inspecting the register route**") as one progress line, the rest a click away.
+ * A turn's work while it is on a mission, or was in this view: `open` shows its thoughts and step
+ * groups open by default (Settings › Chat). `chosen` keeps what the person opened or closed, by row,
+ * while the turn stays in view: a single chat's work moves from its running card to its "Worked for"
+ * fold when the answer lands, and a row folded while it ran stays folded there. `card` keeps two
+ * cards' rows apart.
  */
-function ReasoningItem({ item }: { item: ChatLiveItem }) {
-  const [open, setOpen] = useState(false);
+type MissionWork = { open: boolean; chosen: Map<string, boolean>; card?: string };
+
+/** One disclosure in a turn's work: the person's choice wins, else open on a mission, else `fallback`. */
+function useWorkOpen(mission: MissionWork | undefined, id: string, fallback = false): [boolean, (open: boolean) => void] {
+  const key = `${mission?.card ?? ""}\n${id}`;
+  const [chosen, setChosen] = useState<boolean | null>(() => mission?.chosen.get(key) ?? null);
+  return [chosen ?? (fallback || Boolean(mission?.open)), (open) => { mission?.chosen.set(key, open); setChosen(open); }];
+}
+
+/** A card's own part of its turn's mission state, so its rows' choices never meet another card's. */
+function useCardMission(mission: MissionWork | undefined, card: string): MissionWork | undefined {
+  return useMemo(() => mission && { ...mission, card }, [mission, card]);
+}
+
+/**
+ * The model's reasoning summary, as Codex shows it: its first line (a short bold title such as
+ * "**Inspecting the register route**") as one progress line, the rest a click away, or open while
+ * its turn is on a mission. Opened, the row keeps the title and the words go below it.
+ */
+function ReasoningItem({ item, mission }: { item: ChatLiveItem; mission?: MissionWork }) {
+  const [open, choose] = useWorkOpen(mission, item.id);
   const running = item.status === "running";
   // Live reasoning arrives as its newest part, so it headlines the current thought, not the first.
   const headline = thoughtHeadline(item);
@@ -324,11 +347,14 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
   const took = stepDuration(item.durationMs);
   // Every thought has the same disclosure, even a single paragraph. Parse it only while open:
   // mounting Markdown behind closed details made long streaming thoughts expensive.
-  return <details className="cx-reasoning" data-family="think" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary><StepGlyph family="think" /><span className="cx-live-label">{running ? "Thinking" : "Thought"}</span><span className="cx-live-text">{headline}</span>
+  const opened = open ? openedThought(item.text) : null;
+  return <details className="cx-reasoning" data-family="think" open={open}
+    onToggle={(event) => { if (event.currentTarget.open !== open) choose(event.currentTarget.open); }}>
+    <summary><StepGlyph family="think" /><span className="cx-live-label">{running ? "Thinking" : "Thought"}</span>
+      {!opened ? <span className="cx-live-text">{headline}</span> : opened.title ? <span className="cx-live-text">{opened.title}</span> : null}
       {took ? <span className="cx-step-time" title={`Thought for ${took}`}>{took}</span> : null}
       <Icon name="chevron" width="11" height="11" className="cx-step-caret" /></summary>
-    {open ? <div className="cx-reasoning-body"><ChatMarkdown text={item.text.trim()} /></div> : null}
+    {opened?.body ? <div className="cx-reasoning-body"><ChatMarkdown text={opened.body} /></div> : null}
   </details>;
 }
 
@@ -479,7 +505,7 @@ const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === 
   && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
   && a.answered?.question === b.answered?.question && a.answered?.answer === b.answered?.answer
   && a.input === b.input && a.output === b.output && a.receipt === b.receipt && a.durationMs === b.durationMs && sameFiles(a.files, b.files));
-const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
+const LiveRow = memo(LiveRowView, (prev, next) => prev.mission === next.mission && sameLiveItem(prev.item, next.item));
 
 /**
  * Messages steered into the running turn that its timeline does not show yet: the same bubble the
@@ -507,7 +533,7 @@ function PendingSteers({ steers }: { steers: PendingSteer[] }) {
   </div>)}</>;
 }
 
-function LiveRowView({ item }: { item: ChatLiveItem }) {
+function LiveRowView({ item, mission }: { item: ChatLiveItem; mission?: MissionWork }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
       // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
@@ -516,7 +542,7 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
       : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} />
         <div className="cx-msg-foot"><SteerReceiptMark receipt={item.receipt} /><MessageActions text={chatMessageReadable(item.text)} /></div></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
-      : item.kind === "reasoning" ? <ReasoningItem item={item} />
+      : item.kind === "reasoning" ? <ReasoningItem item={item} mission={mission} />
       : item.kind === "edit" ? <EditItem item={item} />
       : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
       : <><StepGlyph family={stepFamily(item)} /><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
@@ -564,11 +590,11 @@ function StepOverview({ items }: { items: ChatLiveItem[] }) {
 /**
  * A run of tool calls and thinking as one line, as Codex, Cursor and Claude Code fold them:
  * "Read a file, ran a command". The current operation stays one quiet line; a click exposes
- * each recorded call without obscuring the assistant's surrounding narrative.
+ * each recorded call without obscuring the assistant's surrounding narrative. On a mission it
+ * lists its steps from the start. `id`: its first step's, which names it in the turn's choices.
  */
-function ActivityGroup({ items, live, expanded = false }: { items: ChatLiveItem[]; live: boolean; expanded?: boolean }) {
-  const [chosen, setOpen] = useState<boolean | null>(null);
-  const open = chosen ?? expanded;
+function ActivityGroup({ id, items, live, expanded = false, mission }: { id: string; items: ChatLiveItem[]; live: boolean; expanded?: boolean; mission?: MissionWork }) {
+  const [open, setOpen] = useWorkOpen(mission, `group:${id}`, expanded);
   const summary = transcriptSummary(items);
   const hasCalls = items.some((item) => ["command", "tool", "edit"].includes(item.kind));
   const active = live && items.some((item) => /^(running|pending|in_progress)$/.test(item.status));
@@ -582,12 +608,12 @@ function ActivityGroup({ items, live, expanded = false }: { items: ChatLiveItem[
       <span className={`cx-group-verb${active ? " cx-shimmer" : ""}`}>{title}</span>
       {took ? <span className="cx-step-time">{took}</span> : null}
     </button>
-    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol> : null}
+    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} mission={mission} />)}</ol> : null}
   </div>;
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false, finished = false, reply, collapsed = false, expanded = false, joinedReply = false }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string; collapsed?: boolean; expanded?: boolean; joinedReply?: boolean }) {
+function LiveTimeline({ items, live = false, finished = false, reply, collapsed = false, expanded = false, joinedReply = false, mission }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string; collapsed?: boolean; expanded?: boolean; joinedReply?: boolean; mission?: MissionWork }) {
   const compact = useContext(CompactActivity);
   const normalized = tidyTimeline(steerReceipts(items, finished));
   const tidy = (joinedReply ? withoutReplied(normalized, reply) : transcriptParts(normalized, reply).items)
@@ -596,11 +622,12 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
     .filter((item) => !collapsed || item.kind === "message" || item.kind === "steer" || item.answered)
     .map((item) => !live && item.status === "running" ? { ...item, status: "completed" as const } : item);
   if (!tidy.length) return null;
-  if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
+  if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} mission={mission} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
-    {segments.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} />
-      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup items={segment.items} live={live && index === segments.length - 1} expanded={expanded} /></li>)}
+    {segments.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} mission={mission} />
+      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup id={segment.key} items={segment.items} live={live && index === segments.length - 1}
+        expanded={expanded} mission={mission} /></li>)}
   </ol>;
 }
 
@@ -665,13 +692,14 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   return known;
 }
 
-function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joinedReply = false, solo = false }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string; joinedReply?: boolean;
+function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joinedReply = false, solo = false, mission }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string; joinedReply?: boolean;
   /** The turn's only card: no head of its own, so its request, steers and work read as one column. */
-  solo?: boolean }) {
-  // A failed step opens on its error and a working one on its live turn, as Codex shows them;
-  // once the user toggles a row, their choice wins.
+  solo?: boolean; mission?: MissionWork }) {
+  // A failed step opens on its error and a working one on its live turn, as Codex shows them, and
+  // every card while its turn is on a mission; once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
-  const open = !folded && (solo || (chosen ?? Boolean(step.error || step.working?.timeline?.length)));
+  const open = !folded && (solo || (chosen ?? Boolean(step.error || step.working?.timeline?.length || mission?.open)));
+  const own = useCardMission(mission, step.key);
   const work = useStepWork(step, runId, !joinedReply || open, loadWork);
   const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
@@ -695,7 +723,7 @@ function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joi
           failed attempt showed under the new attempt's work, as if it came after it. */}
       {open ? <EarlierRounds rounds={step.earlier} /> : null}
       {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={reply} collapsed={!open} joinedReply={joinedReply} />
+        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={reply} collapsed={!open} joinedReply={joinedReply} mission={own} />
       </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
@@ -706,11 +734,12 @@ function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joi
 
 /**
  * The work behind an answer that closes its turn itself (a single model's, a solo orchestrator's):
- * with its narrative always readable and its tool details a click away.
+ * with its narrative always readable and its tool details a click away. Watched on its mission, it
+ * stays open once the answer lands.
  */
-function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { step: ChatStep; turn: ChatTurn; expanded: boolean; loadWork?: LoadWork; joinedReply?: boolean }) {
-  const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? expanded;
+function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false, mission }: { step: ChatStep; turn: ChatTurn; expanded: boolean; loadWork?: LoadWork; joinedReply?: boolean; mission?: MissionWork }) {
+  const own = useCardMission(mission, step.key);
+  const [open, setChosen] = useWorkOpen(own, "work", expanded);
   const work = useStepWork(step, turn.runId, !joinedReply || open, loadWork);
   const summary = workSummary(work ?? []);
   return <div className="cx-work cx-transcript-work">
@@ -724,7 +753,7 @@ function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { s
     {open && work?.length ? <StepOverview items={work} /> : null}
     {work?.length ? <SteerReader.Provider value={steerReader(step)}>
       {/* Folded, the work keeps what the agent said on the way and hides its tool calls, as Codex does. */}
-      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={!open} joinedReply={joinedReply} />
+      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={!open} joinedReply={joinedReply} mission={own} />
     </SteerReader.Provider> : null}
   </div>;
 }
@@ -735,7 +764,8 @@ function TranscriptAnswer({ step, runId, loadWork, onVisualize, plain = false }:
   return <ChatMarkdown text={plain ? step.text ?? "" : transcriptParts(tidyTimeline(work ?? []), step.text).answer} onVisualize={onVisualize} />;
 }
 
-type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork; workRevision?: number; joinedReply?: boolean };
+/** `mission`: the turn is on the chat's mission now, so its work shows expanded (and stays so in this view). */
+type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork; workRevision?: number; joinedReply?: boolean; mission?: boolean };
 
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
@@ -760,7 +790,8 @@ const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.stat
  * the page for up to a second each time; only the live turn needs the work.
  */
 export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
-  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork || prev.workRevision !== next.workRevision || prev.joinedReply !== next.joinedReply) return false;
+  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork || prev.workRevision !== next.workRevision || prev.joinedReply !== next.joinedReply
+    || Boolean(prev.mission) !== Boolean(next.mission)) return false;
   if (prev.turn === next.turn) return true;
   if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
   return sameTurnWork(prev.turn, next.turn);
@@ -769,7 +800,8 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live && prev.headed === next.headed
-  && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
+  && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal
+  && sameWork({ turn: prev.turn, expanded: prev.expanded, mission: prev.mission }, { turn: next.turn, expanded: next.expanded, mission: next.mission }));
 
 /**
  * A finished team turn's "Worked for" line: the kinds of work as glyphs, how it ended and what it
@@ -803,14 +835,21 @@ function TurnWorkHead({ turn, loadWork, open, onToggle }: { turn: ChatTurn; load
   </>;
 }
 
-function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedReply = false }: WorkGroupProps) {
+function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedReply = false, mission = false }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
+  // Once on a mission, the turn's work stays expanded in this view, after the mission ends too,
+  // until the person folds it; each row they open or close keeps their choice (MissionWork).
+  const kept = useRef(false);
+  if (mission) kept.current = true;
+  const missionOpen = kept.current;
+  const [choices] = useState(() => new Map<string, boolean>());
+  const missionWork = useMemo<MissionWork>(() => ({ open: missionOpen, chosen: choices }), [missionOpen, choices]);
   // Live and failed work opens by itself, and finished work too when the chat shows its details
-  // (single-model chats by default); a toggle on the turn itself holds over both.
+  // (single-model chats by default) or the turn was on a mission; a toggle on the turn itself holds over all.
   const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
+  const open = chosen ?? (expanded || missionOpen || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
-    if (turn.final) return <AnswerWork step={turn.final} turn={turn} expanded={joinedReply ? expanded : false} loadWork={loadWork} joinedReply={joinedReply} />;
+    if (turn.final) return <AnswerWork step={turn.final} turn={turn} expanded={joinedReply ? expanded : false} loadWork={loadWork} joinedReply={joinedReply} mission={missionWork} />;
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
@@ -824,7 +863,7 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedR
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
     {working ? null : <TurnWorkHead turn={turn} loadWork={loadWork} open={open} onToggle={() => setChosen(!open)} />}
     <ol className={`cx-steps${rows.length === 1 ? " is-solo" : ""}`}>{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
-      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} solo={rows.length === 1} />)}</ol>
+      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} solo={rows.length === 1} mission={missionWork} />)}</ol>
   </div>;
 }
 
@@ -1417,6 +1456,9 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(COMPACT_ACTIVITY_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
     return !current;
   });
+  // Settings › Chat › "Keep work expanded on a mission" (chat-view-settings), followed at once.
+  const [missionWork, setMissionWork] = useState(readMissionWork);
+  useEffect(() => onMissionWork(setMissionWork), []);
   // How a reply draws its steps (chat-reply-plan's styles), picked from the header menu.
   const [replyStyle, setReplyStyle] = useState<ChatStyle>(() => { try { return chatStyle(localStorage.getItem(CHAT_STYLE_KEY)); } catch { return "transcript"; } });
   const pickReplyStyle = (next: ChatStyle) => {
@@ -1829,9 +1871,13 @@ export function AgentOrchestratorChat({
     const marked = attachments.map((item) => item.markup ?? "").filter(Boolean);
     const body = chatMessageWithAttachments([...marked, draft.trim()].filter(Boolean).join("\n\n"), attachments);
     const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
-    // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
-    if (text.length > CHAT_MESSAGE_LIMIT) {
-      say("Too long", `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
+    // The chat sends at most 8,192 characters and CHAT_MESSAGE_BYTES bytes; a longer one failed
+    // after it left the composer ("task record is full"). It stays here, with what to do.
+    if (!chatMessageFits(text)) {
+      const bytes = chatMessageBytes(text);
+      say("Too long", text.length > CHAT_MESSAGE_LIMIT
+        ? `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`
+        : `This message is ${bytes.toLocaleString()} bytes. The limit is ${CHAT_MESSAGE_BYTES.toLocaleString()} (non-Latin text and emoji take 3 to 4 bytes a character). Shorten it or send it in parts.`);
       return;
     }
     if (queueing || queueWhileSending) {
@@ -2383,6 +2429,9 @@ export function AgentOrchestratorChat({
     const frame = requestAnimationFrame(() => startTransition(() => setDrawn({ taskId: drawKey, from: windowStart })));
     return () => cancelAnimationFrame(frame);
   }, [drawStart, windowStart, drawKey, shownAgain]);
+  // While the chat's goal is pursued, every round of it is on the mission, not only the one running.
+  const goalStatus = commands?.goal?.status;
+  const goalStart = useMemo(() => missionWork && goalStatus === "active" ? goalMissionStart(turns) : -1, [missionWork, goalStatus, turns]);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
     if (turnIndex < drawStart) return null;
     const foldKey = roundFolds.foldOf.get(turnIndex);
@@ -2406,6 +2455,10 @@ export function AgentOrchestratorChat({
     const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
     // The reply's summary (ReplyHead, under the answer): who answered, how it stands and what it changed; a failure (ReplyError) leads.
     const live = !idle && liveTurn(turn);
+    // On a mission (Settings › Chat): a turn at work, and each round of the goal being pursued, shows
+    // its thoughts and steps expanded. Focus keeps work behind Show work, and goal rounds folded under
+    // one row draw as they did when that row is opened, so a long goal stays light.
+    const mission = missionWork && replyStyle !== "focus" && !foldKey && (live || (goalStart >= 0 && turnIndex >= goalStart));
     const cards = [...turn.steps, ...(turn.final ? [turn.final] : [])];
     const modelOf = (step: ChatStep) => answerRun?.nodes.find((node) => node.id === step.nodeId)?.route?.model;
     const lead = turn.final ?? cards[0];
@@ -2470,12 +2523,14 @@ export function AgentOrchestratorChat({
               {userMessage}{savedSteers}
               {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
               <ReplyPlanView plan={plan} style={replyStyle} live={live} />
-              {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. */}
+              {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. Turning
+                  the mission setting off redraws the work, so nothing it opened stays open. */}
               {dsh && readWork
-                ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
-                  errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
+                ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}${missionWork ? "" : ":plain"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
+                  errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null} mission={mission}
                   beforeStatus={live ? steerViews.get(turnIndex) : undefined} headed />
-                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} workRevision={detailsWorkTick} joinedReply={replyStyle === "focus"} />}
+                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}${missionWork ? "" : ":plain"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork}
+                  workRevision={detailsWorkTick} joinedReply={replyStyle === "focus"} mission={mission} />}
               {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
@@ -2504,7 +2559,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
-    replyStyle, roundFolds, openRounds, drawStart]);
+    replyStyle, roundFolds, openRounds, drawStart, missionWork, goalStart]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>

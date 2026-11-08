@@ -11,6 +11,24 @@ const fs = require("node:fs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const OBJECTIVE_LIMIT = 2000;
+// A goal's condition and each round's message, in UTF-8 bytes: 2,000 characters of Chinese or emoji
+// passed the character limit at up to 8 KB and every round failed to send. GOAL_MESSAGE_BYTES is the
+// chat's message budget (agent-orchestrator-workflow.cjs CHAT_MESSAGE_BYTES, checked by a test).
+const OBJECTIVE_BYTES = 6000;
+const GOAL_MESSAGE_BYTES = 8192 - 256;
+const utf8Bytes = (text) => Buffer.byteLength(text, "utf8");
+/** The start of a text within a UTF-8 byte budget, never splitting a character. */
+function utf8Head(text, bytes) {
+  if (utf8Bytes(text) <= bytes) return text;
+  let used = 0, end = "";
+  for (const char of text) {
+    const size = utf8Bytes(char);
+    if (used + size > Math.max(0, bytes - 3)) break;
+    used += size;
+    end += char;
+  }
+  return `${end}…`;
+}
 const STATUSES = new Set(["active", "paused", "achieved", "stalled", "limited"]);
 // How much of a round the evaluator reads, the end kept: an agent's conclusion comes last.
 const TRANSCRIPT_LIMIT = 24_000;
@@ -24,9 +42,15 @@ const REASON_LIMIT = 1_500;
  * evaluator's reason it is not met yet.
  */
 function goalMessage(objective, round, reason = "") {
-  if (round <= 1) return objective;
+  if (round <= 1) return utf8Head(objective, GOAL_MESSAGE_BYTES);
   const why = String(reason || "").trim() || "The condition is not met yet; continue from where the last round left off.";
-  return `Stop hook feedback:\n[${objective}]: ${why}`;
+  // A round's message is a chat message: within the chat's byte budget, or the round could not be
+  // sent and the goal stalled. The evaluator's reason gives way first, then the condition's end.
+  const frame = (goal, said) => `Stop hook feedback:\n[${goal}]: ${said}`;
+  const whole = frame(objective, why);
+  if (utf8Bytes(whole) <= GOAL_MESSAGE_BYTES) return whole;
+  const goal = utf8Head(objective, GOAL_MESSAGE_BYTES - utf8Bytes(frame("", "")) - 400);
+  return frame(goal, utf8Head(why, GOAL_MESSAGE_BYTES - utf8Bytes(frame(goal, ""))));
 }
 
 /**
@@ -51,34 +75,46 @@ function roundTranscript(message, answers) {
  * evaluator also hears how the round ended (`ended`: it waited on the person, or failed), and may end
  * the goal itself ("stop") where going on is unsafe or pointless, so the goal never waits on the
  * person and never runs on regardless.
+ *
+ * Every verdict also says whether the turn made progress, judged against the previous turn's verdict
+ * (`previous`): the goal stalls after rounds in a row without any. Without it, an agent blocked on
+ * something only the person can change ran round after round (480 rounds over 14 days, seen live
+ * 2026-11-08), each one a full turn that only reported the same blocker.
  */
-function goalCheckPrompt(objective, transcript, { judge = false, ended = "" } = {}) {
+function goalCheckPrompt(objective, transcript, { judge = false, ended = "", previous = "" } = {}) {
   return [
     "You evaluate whether a stop condition set for an AI coding agent is satisfied, judging only from the transcript of its latest turn below.",
     "",
     `Condition: ${objective}`,
     ...(ended ? ["", `How the turn ended: ${ended}`] : []),
+    ...(previous ? ["", `The previous turn's verdict: ${previous}`] : []),
     "",
     "Rules:",
     "- The condition is satisfied only when the transcript shows evidence that it holds now: the work done, checked, and its result reported.",
     "- Claims without evidence, plans, partial progress, waiting on someone or something, or work left for later are not satisfied.",
     "- A condition that describes an ongoing aim rather than an end state is not satisfied by progress alone.",
     "- If the transcript does not show enough to decide, it is not satisfied.",
+    "- Also say whether this turn made progress. \"progress\" is false when the agent did no new work toward the condition: it only restated the condition, a plan or an earlier report, or it stayed blocked on something it cannot change itself (a refused approval, an account or service that is unavailable, a decision only the user can make) without working around it. New work toward the condition, or clearing a blocker, is progress.",
+    ...(previous ? ["- A turn that reports the same blocker or the same missing work as the previous verdict, with nothing new done, made no progress."] : []),
     ...(judge ? [
       "- The user is away and has asked you to judge for them: nobody will answer the agent's questions or approvals. When not met, write the reason as the agent's next instruction; if the turn waited on the user, tell the agent to choose the safest reasonable option itself and carry on.",
       "- Set \"stop\" to true to end the goal instead when going on would be unsafe or destructive, the condition cannot be reached, or the same blocker has repeated across turns with no progress. Do not stop merely because the work is hard, slow or unfinished.",
     ] : []),
     "",
     judge
-      ? 'Answer with JSON only: {"met": true|false, "stop": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met, or why the goal must end when stopping>"}'
-      : 'Answer with JSON only: {"met": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met>"}',
+      ? 'Answer with JSON only: {"met": true|false, "progress": true|false, "stop": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met, or why the goal must end when stopping>"}'
+      : 'Answer with JSON only: {"met": true|false, "progress": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met>"}',
     "",
     "Transcript:",
     transcript,
   ].join("\n");
 }
 
-/** The evaluator's answer as { met, stop, reason }; anything unreadable throws. A met goal is never stopped. */
+/**
+ * The evaluator's answer as { met, stop, progress, reason }; anything unreadable throws. A met goal
+ * is never stopped and always made progress; a verdict that does not say counts as progress, so an
+ * evaluator that leaves the field out never stalls a goal.
+ */
 function parseGoalCheck(text) {
   const raw = String(text ?? "");
   const start = raw.indexOf("{"), end = raw.lastIndexOf("}");
@@ -87,7 +123,8 @@ function parseGoalCheck(text) {
   if (typeof parsed?.met !== "boolean") throw new Error("The goal evaluator gave no verdict");
   const reason = String(parsed.reason ?? "").replace(/\s+/g, " ").trim().slice(0, REASON_LIMIT);
   const stop = !parsed.met && parsed.stop === true;
-  return { met: parsed.met, stop, reason: reason || (parsed.met ? "The condition is met." : stop ? "The goal cannot go on." : "The condition is not met yet.") };
+  const progress = parsed.met || parsed.progress !== false;
+  return { met: parsed.met, stop, progress, reason: reason || (parsed.met ? "The condition is met." : stop ? "The goal cannot go on." : "The condition is not met yet.") };
 }
 
 /**
@@ -128,6 +165,7 @@ function cleanObjective(value) {
   const text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
   if (!text) throw new Error("Describe your goal, e.g. /goal make every test pass");
   if (text.length > OBJECTIVE_LIMIT) throw new Error(`A goal can be at most ${OBJECTIVE_LIMIT} characters`);
+  if (utf8Bytes(text) > OBJECTIVE_BYTES) throw new Error(`A goal can be at most ${OBJECTIVE_BYTES.toLocaleString("en-US")} bytes; this one is ${utf8Bytes(text).toLocaleString("en-US")}. Shorten it`);
   return text;
 }
 
@@ -216,4 +254,4 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   };
 }
 
-module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore };
+module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, GOAL_MESSAGE_BYTES };

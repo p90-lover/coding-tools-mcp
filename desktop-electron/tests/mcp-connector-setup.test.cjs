@@ -230,6 +230,14 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "Business succeeds with its distinct binding", business: true },
     { name: "a team admin cannot create even when the tunnel belongs to that user", business: true, creatorRole: "account-admin", error: /verified owner/ },
     { name: "a team member cannot create even when the tunnel belongs to that user", business: true, creatorRole: "standard-user", error: /verified owner/ },
+    { name: "a team admin reuses exact fresh saved identity without Platform access", business: true, creatorRole: "account-admin", existingOnly: true, existing: true },
+    { name: "a team member reuses exact fresh saved identity without Platform access", business: true, creatorRole: "standard-user", existingOnly: true, existing: true },
+    { name: "existing-only cannot create when the renderer returns a new form", business: true, creatorRole: "standard-user", existingOnly: true, error: /unverified/i },
+    { name: "a member cannot reuse unreadable saved identity", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, identityMissing: true, error: /unverified/i },
+    { name: "a member cannot reuse a different saved tunnel", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, identityWrong: true, error: /unverified/i },
+    { name: "a member's workspace change during saved identity inspection stops consent", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, change: "reuse-workspace", error: /context|workspace.*changed/i },
+    { name: "a rejected identity read cannot hide a simultaneous member workspace change", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, change: "reuse-workspace-reject", error: /context|workspace.*changed/i },
+    { name: "a rejected existing-app lookup cannot hide a simultaneous workspace change", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, change: "reuse-prepare-workspace-reject", error: /context|workspace.*changed/i },
     { name: "an unknown workspace role cannot grant creation access", business: true, creatorRole: "future-role", error: /verified owner/ },
     { name: "owner authority revoked after prepare cannot submit", business: true, change: "owner-role", error: /context.*changed/i },
     { name: "another Platform creator cannot be reused", nonOwner: true, error: /different Platform user/ },
@@ -310,6 +318,10 @@ test("the production connector action verifies fresh owner and workspace proof b
         const phase = script.match(/__codingToolsConnectorHelpers\.(\w+)\(/)?.[1];
         if (phase === "selectWorkspace") { accountId = businessId; select(accountId); return { selected: true }; }
         if (phase === "prepareTunnelConnector") {
+          if (scenario.change === "reuse-prepare-workspace-reject") {
+            accountId = personalId; select(accountId);
+            throw new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.");
+          }
           if (scenario.existing) {
             return { prepared: true, existing: true, href: "/plugins/plugin_fixture" };
           }
@@ -324,7 +336,12 @@ test("the production connector action verifies fresh owner and workspace proof b
         }
         if (phase === "submitPreparedTunnelConnector" || phase === "createTunnelConnector") { counts.create++; return { created: true, href: "/plugins/plugin_fixture" }; }
         if (phase === "inspectTunnelConnectorIdentity") {
+          if (scenario.change === "reuse-workspace-reject") {
+            accountId = personalId; select(accountId);
+            throw new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.");
+          }
           if (scenario.identityMissing) throw new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.");
+          if (scenario.change === "reuse-workspace") { accountId = personalId; select(accountId); }
           return { verified: true, name: currentConnectorSettings(runtime()).name, href: "/plugins/plugin_fixture",
             tunnelId: scenario.identityWrong ? `tunnel_${"b".repeat(32)}` : tunnelId };
         }
@@ -374,6 +391,7 @@ test("the production connector action verifies fresh owner and workspace proof b
     }
     const action = () => createConfiguredConnector({ app: { getPath: () => userData }, BrowserWindow: Window, browserHost: host, runtimeHost,
       target: { ...(scenario.primary ? {} : { tunnelId }), partition: "persist:fixture", requireTunnelMatch: true },
+      existingOnly: scenario.existingOnly === true,
       ...(scenario.shared ? { expectedContext: { userId: initialUser, workspaceId: businessId,
         workspaceRole: "standard-user", workspaceStructure: "workspace" },
       operationHeld: scenario.transient === true,
@@ -512,15 +530,22 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     assert.equal(clicks, changed ? 0 : 1, `${changed || "valid"}: validate the current form before Create`);
   }
   const document = { title: "Plugins", body: { innerText: "Plugins" }, querySelectorAll: () => [{ textContent: "Personal", getAttribute: () => "true" }] };
-  const prepare = phase("createTunnelConnector", "async function submitPreparedTunnelConnector", {
+  const prepareContext = {
     location: { origin: "https://chatgpt.com" }, URL, document, isPersonalPluginsPage: () => true, isPluginDetailUrl: () => true,
     visible: () => true, textMatches: matches, PERSONAL_VIEW_LABELS: ["Personal"],
     waitFor: async read => read(), personalPluginsLoaded: () => true, clearPluginSearch: async () => {},
     findManagedAppCard: () => ({ getAttribute: () => "/plugins/existing" }),
     allClickable: () => { throw new Error("Existing connector must not open Create"); },
-  });
+  };
+  const prepare = phase("createTunnelConnector", "async function submitPreparedTunnelConnector", prepareContext);
   assert.deepEqual({ ...await prepare(settings, "prepare") },
     { prepared: true, existing: true, href: "/plugins/existing" });
+  assert.deepEqual({ ...await prepare(settings, "existing") },
+    { prepared: true, existing: true, href: "/plugins/existing" });
+  const absent = phase("createTunnelConnector", "async function submitPreparedTunnelConnector", {
+    ...prepareContext, findManagedAppCard: () => null, pluginCardLinks: () => [], pluginsPageRenderState: () => "empty",
+  });
+  await assert.rejects(absent(settings, "existing"), /unverified/i, "a missing app must stop before Add or Create is inspected");
   for (const existingHref of ["/plugins/other", "https://elsewhere.invalid/plugins/existing"]) {
     assert.equal((await prepare({ ...settings, existingHref }, "prepare")).href, "/plugins/existing",
       "a cached pathname supplies no authority or alternate navigation target");

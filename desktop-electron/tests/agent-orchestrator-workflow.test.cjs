@@ -4189,12 +4189,21 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   const prompt = goalCheckPrompt("make every test pass", transcript);
   assert.match(prompt, /Condition: make every test pass/);
   assert.match(prompt, /only from the transcript/);
-  assert.match(prompt, /Answer with JSON only: \{"met": true\|false, "reason"/);
+  assert.match(prompt, /Answer with JSON only: \{"met": true\|false, "progress": true\|false, "reason"/);
+  assert.match(prompt, /"progress" is false when the agent did no new work toward the condition/);
+  assert.doesNotMatch(prompt, /previous turn's verdict/, "round 1 has no previous verdict");
   assert.ok(prompt.endsWith(transcript));
+  const later = goalCheckPrompt("make every test pass", transcript, { previous: "Two tests still fail." });
+  assert.match(later, /The previous turn's verdict: Two tests still fail\./);
+  assert.match(later, /same blocker or the same missing work as the previous verdict/);
   // The evaluator's verdict.
-  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, stop: false, reason: "All 40 tests pass, shown in the output." });
-  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, stop: false, reason: "Two tests fail." });
-  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, stop: false, reason: "The condition is not met yet." });
+  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, stop: false, progress: true, reason: "All 40 tests pass, shown in the output." });
+  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, stop: false, progress: true, reason: "Two tests fail." });
+  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, stop: false, progress: true, reason: "The condition is not met yet." });
+  // No progress only when the evaluator says so; a met goal always made progress.
+  assert.equal(parseGoalCheck('{"met": false, "progress": false, "reason": "Still blocked."}').progress, false);
+  assert.equal(parseGoalCheck('{"met": true, "progress": false}').progress, true);
+  assert.equal(parseGoalCheck('{"met": false, "progress": "no"}').progress, true, "only a false counts");
   assert.throws(() => parseGoalCheck("I think it is done."), /no verdict/);
   assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
@@ -4957,6 +4966,59 @@ test("with \"Let the model judge\" on, a goal round that needs the person or fai
   await workflow.goalAfterRun("ws-1", "r3", "held", null);
   assert.equal(checks.length, asked);
   assert.match((await goalOf(workflow)).note, /needs you/);
+});
+
+test("a goal stalls after three rounds in a row without progress, judged or not; progress in between starts the count again", async () => {
+  // Seen live 2026-11-08: three goals had run 154, 281 and 480 rounds over 14 days. Each round the
+  // agent reported the same blocker (a refused approval, an account answering 404) and did nothing
+  // else, the evaluator said "not met", and the next round started. Nothing ever stopped them.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  let verdict = { met: false, progress: false, reason: "Still blocked: the controller's approval was refused." };
+  const { world, workflow, checks } = await goalChat({ evaluator: () => verdict });
+  let count = 0;
+  const settle = async (answer) => {
+    const id = `r${++count}`;
+    world.runs.push({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, history: [], receipt: { thread_id: "sess-1", answer } }] });
+    await workflow.goalAfterRun("ws-1", id, "finished", null);
+    return goalOf(workflow);
+  };
+  let goal = await settle("The controller is offline and its replacement was denied.");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.stuckRounds, 1);
+  assert.doesNotMatch(checks[0].messages[0].content, /previous turn's verdict/);
+  goal = await settle("Still blocked.");
+  assert.match(checks[1].messages[0].content, /The previous turn's verdict: Still blocked: the controller's approval was refused\./,
+    "the evaluator sees what the last round was told, so it can tell a repeat");
+  assert.equal(goal.stuckRounds, 2);
+  // A round with progress starts the count again.
+  verdict = { met: false, progress: true, reason: "Fixed the panel detection offline; the live run and YOLO training are still to do." };
+  goal = await settle("Fixed the detection offline; 30 tests pass.");
+  assert.equal(goal.stuckRounds, 0);
+  assert.equal(goal.status, "active");
+  verdict = { met: false, progress: false, reason: "Still blocked: the account answers 404." };
+  await settle("Blocked.");
+  await settle("Blocked.");
+  const sent = world.updates.length;
+  goal = await settle("Blocked.");
+  assert.equal(goal.status, "stalled");
+  assert.equal(goal.note, `No progress in 3 rounds in a row: ${verdict.reason} Clear what blocks it, then /goal resume`);
+  assert.equal(world.updates.length, sent, "no further round");
+  assert.equal(goal.feedback, verdict.reason, "resume carries on with the verdict as the agent's instruction");
+  // Resumed, it counts from nothing again.
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  await goalSettle();
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.stuckRounds, 0);
+  // With "Let the model judge" on, rounds without progress stall it the same way.
+  await workflow.call("chat_model_judges", { enabled: true });
+  verdict = { met: false, stop: false, progress: false, reason: "Still blocked: nobody can approve the controller." };
+  await settle("Blocked.");
+  await settle("Blocked.");
+  goal = await settle("Blocked.");
+  assert.equal(goal.status, "stalled");
+  assert.match(goal.note, /^No progress in 3 rounds in a row: Still blocked: nobody can approve the controller\./);
 });
 
 test("Claude Code chat agents run without Claude Code's own scheduler, so they wait with the app's wake-up", () => {
@@ -7870,7 +7932,7 @@ test("a chat over the board's byte limit in fewer characters compacts too, and a
   assert.match(world.tasks[0].description, /^Summary of the earlier conversation \(compacted [^)]+ UTC\):\nDid the first half\.\n\nFollow-up \([^)]+ UTC\):\nkeep\ngoing$/);
   assert.ok(written.length, "the board was written");
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "字".repeat(3000) }),
-    /9,000 bytes; a chat message can be at most 8,192/, "one message over the limit by itself says so, not that the chat is full");
+    /9,000 bytes; a chat message can be at most 7,936/, "one message over the limit by itself says so, not that the chat is full");
 });
 
 // A chat for the auto-compact tests: its task text, a summarizer answering `summary` (or failing),
@@ -7930,15 +7992,116 @@ test("a legacy auto-compact off preference cannot strand a chat whose task recor
   assert.ok(Buffer.byteLength(off.world.tasks[0].description, "utf8") <= 8192);
 });
 
-test("failed task-record rollover preserves the record and never suggests native /compact as a repair", async () => {
-  const down = compactWorld("x".repeat(8180), { fail: true });
-  await down.workflow.call("chat_auto_compact", { enabled: false });
-  await assert.rejects(down.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" }), error => {
-    assert.match(error.message, /task record is full and couldn't be rolled over/);
-    assert.doesNotMatch(error.message, /\/compact|\/autocompact/);
-    return true;
-  });
-  assert.equal(down.world.tasks[0].description, "x".repeat(8180));
+test("with no model to summarize, the record still rolls over: its newest part is kept and the message goes", async () => {
+  // The user (2026-11-08): "This chat's task record is full and couldn't be rolled over", then
+  // "bug fix, make a plan to avoid this forever". A summarizer that failed refused the send.
+  const old = `first ask\n\nFollow-up (2026-11-01 10:00 UTC):\n${"x".repeat(4100)}\n\n↳ Steer (2026-11-01 10:05 UTC): also y\n\nFollow-up (2026-11-02 10:00 UTC):\n${"z".repeat(4100)}END`;
+  const down = compactWorld(old, { fail: true });
+  await down.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "keep going" });
+  const final = down.world.tasks[0].description;
+  assert.ok(Buffer.byteLength(final, "utf8") <= 8192);
+  assert.match(final, /^Summary of the earlier conversation \(compacted [^)]+ UTC\):\n\[The earlier messages were rolled over/);
+  assert.match(final, /zEND\n\nFollow-up \([^)]+ UTC\):\nkeep going$/, "the newest part, then the message");
+  assert.equal(final.match(/\n\nFollow-up \(/g).length, 1, "the kept text is one summary: no marker the chat would read as a message");
+  assert.doesNotMatch(final, /↳ Steer \(/);
+});
+
+test("a long message right after a full record leaves no room for a model's summary, and still goes", async () => {
+  const { world, workflow, prompts } = compactWorld(`first ask${"x".repeat(8150)}`);
+  const message = "m".repeat(7900);
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message });
+  const final = world.tasks[0].description;
+  assert.equal(prompts.length, 0, "under 512 bytes of room: no model is asked");
+  assert.ok(final.endsWith(`\n\nFollow-up (${/Follow-up \(([^)]+) UTC/.exec(final)[1]} UTC):\n${message}`));
+  assert.ok(Buffer.byteLength(final, "utf8") <= 8192);
+});
+
+test("a short record with a long message rolls over too, instead of failing 'full even after rollover'", async () => {
+  // Under 800 characters the rollover was skipped, and 700 + a 7.6 KB message could never fit.
+  const { world, workflow } = compactWorld("a".repeat(700), { fail: true });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "b".repeat(7700) });
+  assert.ok(Buffer.byteLength(world.tasks[0].description, "utf8") <= 8192);
+  assert.ok(world.tasks[0].description.endsWith("b".repeat(7700)));
+});
+
+test("a steer note written while the record rolls over is read again, not a failed send", async () => {
+  const { world, workflow } = compactWorld("x".repeat(8180));
+  const request = world.requestHeadless;
+  let reads = 0;
+  world.requestHeadless = async (endpoint, body) => {
+    // The rollover's second look at the task finds a steer note added in between, once.
+    if (body?.tool === "workflow_list" && body.arguments?.task_id && ++reads === 3) world.tasks[0].description += "\n\n↳ Steer (2026-11-08 05:00 UTC): hurry";
+    return request(endpoint, body);
+  };
+  const rewired = createAgentOrchestratorWorkflow({ requestHeadless: (...args) => world.requestHeadless(...args), findCodexExecutable: () => "C:/c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => ({ ok: true, json: async () => String(url).endsWith("/models") ? { data: [{ id: "test-model" }] } : { choices: [{ message: { content: "Did it." } }] } }) });
+  void workflow;
+  await rewired.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on" });
+  assert.ok(reads >= 3, "the changed record was seen");
+  assert.match(world.tasks[0].description, /^Summary of the earlier conversation[^\n]*\nDid it\.\n\nFollow-up \([^)]+ UTC\):\ngo on$/);
+});
+
+test("every message within the budget fits every record, with or without a summarizer (property)", async () => {
+  // The invariant behind "avoid this forever": a message the composer and the bridge accept is always
+  // sent, and the record never passes the board's 8,192 bytes. Any change to the budget, the markers
+  // or the rollover head that breaks it fails here.
+  const bytes = (text) => Buffer.byteLength(text, "utf8");
+  const sized = (unit, size) => unit.repeat(Math.floor(size / bytes(unit))) + "x".repeat(size % bytes(unit));
+  const records = {
+    short: "first ask",
+    full: "x".repeat(8180),
+    cjk: `开始${"字".repeat(2700)}`,
+    marked: `first ask${`\n\nFollow-up (2026-11-01 10:00 UTC):\n${"y".repeat(300)}\n\n↳ Steer (2026-11-01 10:01 UTC): z`.repeat(20)}`,
+    summarized: `Summary of the earlier conversation (compacted 2026-11-01 10:00 UTC):\n${"s".repeat(5900)}\n\nFollow-up (2026-11-01 10:00 UTC):\n${"t".repeat(2100)}`,
+  };
+  const summarizers = { answers: {}, fails: { fail: true }, rambles: { summary: "r".repeat(9000) } };
+  const sizes = [1, 500, 3000, 7000, 7600, 7800, 7936];
+  let sends = 0;
+  for (const [recordName, record] of Object.entries(records)) {
+    for (const [summarizerName, options] of Object.entries(summarizers)) {
+      for (const unit of ["a", "字", "😀"]) {
+        for (const size of sizes) {
+          const { world, workflow } = compactWorld(record, options);
+          const message = sized(unit, size);
+          const label = `${recordName} / ${summarizerName} / ${unit} ${size} bytes`;
+          await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message }).catch((error) => assert.fail(`${label}: ${error.message}`));
+          const final = world.tasks[0].description;
+          assert.ok(bytes(final) <= 8192, `${label}: ${bytes(final)} bytes`);
+          assert.ok(final.endsWith(`):\n${message}`), `${label}: the message is whole, last`);
+          // Rolled over (the record and the message did not fit together): one summary, then the message.
+          if (bytes(`${record}\n\nFollow-up (2026-11-08 05:30 UTC):\n${message}`) > 8192) {
+            assert.equal(final.match(/\n\nFollow-up \(/g).length, 1, `${label}: one summary, one message`);
+          }
+          sends += 1;
+        }
+      }
+    }
+  }
+  assert.equal(sends, 5 * 3 * 3 * sizes.length);
+  // One byte over the budget is refused up front, before anything is written.
+  const over = compactWorld("first ask");
+  await assert.rejects(over.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "a".repeat(7937) }), /7,937 bytes; a chat message can be at most 7,936/);
+  assert.equal(over.world.tasks[0].description, "first ask");
+});
+
+test("the composer, the goal rounds and the bridge share one message budget that fits the record", () => {
+  const read = (file) => fs.readFileSync(path.join(__dirname, "..", file), "utf8");
+  const bridge = read("electron/agent-orchestrator-workflow.cjs");
+  assert.match(bridge, /const CHAT_MESSAGE_BYTES = BOARD_TEXT_BYTES - 256;/);
+  assert.match(read("src/features/ao-chat.ts"), /export const CHAT_MESSAGE_BYTES = 8192 - 256;/);
+  const { GOAL_MESSAGE_BYTES, goalMessage } = require("../electron/chat-goals.cjs");
+  assert.equal(GOAL_MESSAGE_BYTES, 8192 - 256);
+  // The marker and the longest rollover head fit in the 256 bytes kept free.
+  const head = "Summary of the earlier conversation (compacted 2026-11-08 05:30 UTC):\n";
+  const marker = "\n\nFollow-up (2026-11-08 05:30 UTC):\n";
+  assert.ok(Buffer.byteLength(head + marker, "utf8") < 256);
+  // A goal round never exceeds it, whatever the condition and the evaluator's reason.
+  for (const unit of ["a", "字", "😀"]) {
+    const objective = unit.repeat(unit === "a" ? 2000 : unit === "字" ? 2000 : 1000);
+    for (const round of [1, 2, 9]) assert.ok(Buffer.byteLength(goalMessage(objective, round, unit.repeat(1500)), "utf8") <= GOAL_MESSAGE_BYTES, `${unit} round ${round}`);
+  }
 });
 
 test("/compact uses Codex's no-instructions contract instead of summarizing task metadata", async () => {

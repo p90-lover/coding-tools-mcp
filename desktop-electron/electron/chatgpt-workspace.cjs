@@ -1,7 +1,7 @@
 "use strict";
 
 const { chatGptMcpContextScript, observeMcpSetupContext, extensionHelpersSource, createConfiguredConnector,
-  requireAutomaticConnectorSetup, WORKSPACE_OWNER_REQUIRED } = require("./mcp-connector-setup.cjs");
+  requireAutomaticConnectorSetup, UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED } = require("./mcp-connector-setup.cjs");
 
 const ADMIN_REQUIRED = WORKSPACE_OWNER_REQUIRED;
 const PUBLISH_REQUIRED = "The workspace owner created the MCP connector, but ChatGPT did not make it available to this member. Publish the connector in that workspace's app settings, then retry.";
@@ -212,6 +212,13 @@ async function createWorkspaceConnector(options) {
       target: { ...target, partition }, onContext });
     if (member.workspaceStructure !== "workspace" || isWorkspaceOwner(member)) return connect(target.partition, member);
     if (!["account-admin", "standard-user"].includes(member.workspaceRole)) throw new Error(ADMIN_REQUIRED);
+    try {
+      return await createConfiguredConnector({ ...options, operationHeld: true,
+        expectedContext: member, existingOnly: true, assertCurrent });
+    } catch (error) {
+      // Only a failed read may fall back to owner setup; consent failures must never create again.
+      if (error?.mcpMutationStarted !== false || error.message !== UNVERIFIED_CONNECTOR) throw error;
+    }
     // A visible Add control does not grant creation authority. Only a freshly verified owner of
     // this exact workspace may publish for the member; saved bindings never supply that proof.
     const candidates = await accountCandidates();
@@ -231,7 +238,7 @@ async function createWorkspaceConnector(options) {
         assertCurrent?.();
       }
     }
-    if (!admins.length) throw new Error(ADMIN_REQUIRED);
+    if (!admins.length) throw new Error(ADMIN_REQUIRED, { cause: new Error(UNVERIFIED_CONNECTOR) });
     let admin, created, preflightError;
     for (const candidate of admins) {
       const checkCandidate = () => { assertCurrent?.(); candidate.assertCurrent(); };

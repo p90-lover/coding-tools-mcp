@@ -651,22 +651,34 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   function turnTimeline(conversation, turnId, turnOver = false) {
     if (typeof turnId !== "string") return [];
+    const starts = new Map(); // item -> when AO created it (ms), to time recovered thoughts below
+    const started = (item, source) => { starts.set(item, Date.parse(source.createdAt ?? "")); return item; };
     const items = [
       ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
-        .map(message => ({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
+        .map(message => started({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
           // Streaming or finished, a message keeps up to TIMELINE_TEXT_BYTES: a 4 KB cut froze the
           // live answer until the turn ended, and cut a finished one mid-word.
-          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), TIMELINE_TEXT_BYTES) })),
+          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), TIMELINE_TEXT_BYTES) }, message)),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
-        .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
+        .map(activity => started(activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
           // AO records a steer as a system row tagged event "steer"; it is the user's own words.
           ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
             text: utf8Prefix(activity.detail.text.trim(), TIMELINE_TEXT_BYTES) }
-          : timelineActivity(activity)),
+          : timelineActivity(activity), activity)),
     ];
-    return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
+    items.sort((a, b) => a.sequence - b.sequence);
+    // A thought AO closed as "recovered" has no end of its own (timelineActivity). The model thinks
+    // until it acts or writes, so it ends where the next step that has a time begins; the turn's
+    // last thought, with nothing after it, stays untimed.
+    items.forEach((item, at) => {
+      if (item.kind !== "reasoning" || !/^recovered$/i.test(item.status)) return;
+      const begun = starts.get(item);
+      const next = items.slice(at + 1).map(later => starts.get(later)).find(Number.isFinite);
+      if (Number.isFinite(begun) && next > begun) item.durationMs = Math.min(next - begun, 24 * 3600_000);
+    });
+    return items.slice(-TIMELINE_ITEMS);
   }
   // Callers of a working chat's observe() (the run loop, the chat's activity poll and its follow-ups,
   // the approval screen, the panel's status poll) share one tail read, but each built its timeline
@@ -895,8 +907,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const timeout = Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {};
     // How long a finished call or thought took, from AO's first and last update of it, for the
     // chat's "1.2s" and "Thought for 4s". Left out while it runs and when no time passed.
+    // A "recovered" item never reported its end: AO's restart repair closed it, and its updatedAt
+    // is that restart, stamped again at every later one. Seen 2026-11-08: a GPT turn's 27 thoughts
+    // were left open by the harness, each read as ~12 h, and an 80-minute turn said "Steps took
+    // 316h". A recovered thought is timed to the next step instead (turnTimeline).
     const begun = Date.parse(activity.createdAt ?? ""), ended = Date.parse(activity.updatedAt ?? "");
-    const took = !/^(running|pending|in_progress)$/i.test(base.status) && Number.isFinite(begun) && Number.isFinite(ended) && ended > begun
+    const recovered = /^recovered$/i.test(base.status);
+    const took = !recovered && !/^(running|pending|in_progress)$/i.test(base.status) && Number.isFinite(begun) && Number.isFinite(ended) && ended > begun
       ? { durationMs: Math.min(ended - begun, 24 * 3600_000) } : {};
     // A file edit shows as Claude Code shows one: "Edited <file> +12 −3", opening on the diff.
     const edit = editedFiles(activity, detail, input);

@@ -127,6 +127,31 @@ test("lazy destination rechecks strict placement and retains the handoff intent"
   callback("openFromPage", room)({ workspaceId: "ws", taskId: "", maxColumns: 5, tried: [1], newScreen: true });
   assert.deepEqual(room.calls, [["split", "ws", "", { col: 4, row: 1 }]]);
 });
+test("with nothing saved, a plain New chat on a full page opens on a new page instead of replacing a chat", () => {
+  // The user's app on 2026-11-08: ten screens of chats, no page settings ever saved.
+  const values = new Map();
+  const fresh = load("chat-pages.ts", { localStorage: { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) },
+    window: { addEventListener() {}, removeEventListener() {} } });
+  const selected = [];
+  const registry = fresh.createChatPageRegistry((page) => selected.push(page), fresh.chatPageLayout({ current: fresh.parseChatPagePreferences(null) }, () => {}));
+  registry.register(1, [], () => {}, { room: () => false });
+  const bindings = world();
+  bindings.focusedSplit = { id: "bottom-4" };
+  bindings.pageRegistry = registry;
+  callback("openNewChat", bindings)("ws", false);
+  assert.deepEqual(bindings.calls, [], "no chat on the full page lost its screen");
+  assert.deepEqual(selected, [2], "page 2 opens");
+  assert.equal(JSON.parse(values.get("coding-tools:ao:chat-pages")).pageCount, 2);
+  assert.deepEqual(plain(registry.takeOpen(2)), { workspaceId: "ws", taskId: "", maxColumns: 5, tried: [1] });
+  // Nine screens: room on this page, so New chat stays in the focused pane (the 2026-10-31 rule).
+  const room = world(ten.slice(0, -1));
+  room.focusedSplit = { id: "bottom-3" };
+  room.pageRegistry = registry;
+  callback("openNewChat", room)("ws", false);
+  assert.deepEqual(room.calls, [["replace", "bottom-3", "ws"]]);
+  assert.deepEqual(selected, [2]);
+});
+
 test("only explicit Shift overflow enables disabled pages and preserves new-screen metadata", () => {
   let enabled = false, count = 1, enabledCalls = 0;
   const selected = [];
