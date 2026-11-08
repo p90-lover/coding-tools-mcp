@@ -5733,7 +5733,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const stalledNote = stalled?.note;
     if (stalled) {
       invalidateGoal(stalled);
-      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", stuckRounds: 0 });
     }
     const still = goalGuard(id, task, stalled);
     try {
@@ -6157,7 +6157,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!candidates.length) throw new Error("CPA has no model to check the goal with");
     // Judged from what the round was actually sent: after an edit the objective differs.
     const message = goal.lastMessage || goalMessage(goal.objective, goal.round, goal.feedback);
-    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)), { judge, ended });
+    // The previous round's verdict, so the evaluator can tell a round that only repeated it.
+    const previous = goal.round > 1 ? publicText(goal.feedback || "", 1500) : "";
+    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)), { judge, ended, previous });
     let failure = null;
     for (const model of candidates) {
       try {
@@ -6468,14 +6470,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return;
       }
       if (!still()) return;
+      // Rounds in a row the evaluator saw no progress in: the agent only restated, or stayed blocked.
+      const stuckRounds = check.progress ? 0 : (goal.stuckRounds ?? 0) + 1;
       goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now(), checkFailures: 0,
         failedRounds: outcome === "failed" ? (goal.failedRounds ?? 0) + 1 : 0,
-        agentBlockedRounds: goal.agentBlockedRunId === runId ? (goal.agentBlockedRounds ?? 0) : 0, note: "", retry: null });
+        agentBlockedRounds: goal.agentBlockedRunId === runId ? (goal.agentBlockedRounds ?? 0) : 0, stuckRounds, note: "", retry: null });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       // Ended by the evaluator ("Let the model judge"): going on was unsafe or pointless. Stalled, as
       // Codex's blocked: nothing more runs, and the person can still resume it.
       if (check.stop) { goals.update(workspaceId, task, { status: "stalled", note: `Ended by the goal checker: ${check.reason}`, feedback: "" }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
+      // GOAL_FAILED_ROUNDS rounds in a row without progress: the agent is stuck on something it cannot
+      // change, and another round would only report it again (seen live: 480 rounds over 14 days on a
+      // refused approval and an unavailable account). Stalled, as Codex's blocked, whether or not the
+      // model judges: the reason says what blocks it, and resume (or the person's next message, which
+      // may clear it) carries on with this verdict as the agent's instruction.
+      if (stuckRounds >= GOAL_FAILED_ROUNDS) {
+        goals.update(workspaceId, task, { status: "stalled",
+          note: `No progress in ${stuckRounds} rounds in a row: ${check.reason} Clear what blocks it, then /goal resume` });
+        return;
+      }
       if (goal.rounds > 0 && goal.round >= goal.rounds) {
         goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.round} rounds; resume allows ${goal.rounds} more` });
         return;
@@ -6570,7 +6584,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Edit goal: a new objective for the rounds still to come; the running round is left alone. An
     // achieved or stopped goal waits paused with the new objective, so Resume pursues it.
     if (action === "edit") {
-      const edited = { objective: cleanObjective(objective), evaluatedRunId: "" };
+      // A new condition starts its own count of rounds without progress.
+      const edited = { objective: cleanObjective(objective), evaluatedRunId: "", stuckRounds: 0 };
       if (goal.status !== "active") Object.assign(edited, { status: "paused", note: "Edited; resume to pursue it" });
       invalidateGoal(goal);
       return { ok: true, goal: goals.update(id, task, edited) };
@@ -6581,7 +6596,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Resuming carries on now: a pause still waiting is dropped.
     dropGoalRetry(id, task);
     invalidateGoal(goal);
-    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", stuckRounds: 0 });
     const still = goalGuard(id, task, goal);
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
