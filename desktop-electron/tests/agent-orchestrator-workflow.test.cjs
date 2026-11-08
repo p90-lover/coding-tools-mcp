@@ -7136,6 +7136,39 @@ test("steering hands the message to the running AO agent and notes it in the cha
   assert.equal(world.edits.length, 1, "nothing is noted for an undelivered steer");
 });
 
+test("one message steered twice into the same turn reaches the agent and the chat once", async () => {
+  // 2026-11-08: a send refused as "still running" went to the chat's queue, and the queue and a direct
+  // steer both put "unpause it" into the same goal round 0.6 s apart: twice in the turn and the chat.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Goal", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const steered = [];
+  let clock = Date.parse("2026-11-08T03:43:46Z"), release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => clock,
+    aoHarness: { steer: async (id, text) => { steered.push([id, text]); await gate; return { steered: true }; } } });
+  const steer = (message) => workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message });
+  // Two at once: the second waits for the first and takes its answer.
+  const [first, second] = [steer("unpause it"), steer("unpause it")];
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  assert.equal((await first).steered, true);
+  assert.deepEqual([(await second).steered, (await second).duplicate], [true, true]);
+  // One moments later: that turn already took it.
+  clock += 600;
+  assert.equal((await steer("unpause it")).duplicate, true);
+  assert.deepEqual(steered, [["sess-1", "unpause it"]], "the agent got it once");
+  for (let tick = 0; tick < 100 && !world.edits.length; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(world.edits.length, 1, "and the chat notes it once");
+  // Another message, or the same one again later, is steered as usual.
+  assert.equal((await steer("now attack")).duplicate, undefined);
+  clock += 31_000;
+  assert.equal((await steer("unpause it")).duplicate, undefined);
+  assert.deepEqual(steered.map(([, text]) => text), ["unpause it", "now attack", "unpause it"]);
+});
+
 test("a /goal sent mid-turn steers its condition in and becomes the goal of the run it steered", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };

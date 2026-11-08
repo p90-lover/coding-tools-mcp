@@ -5303,8 +5303,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // unsupported controls", 51 times in four seconds on 2026-10-22).
   const BOARD_TEXT_BYTES = 8192;
   const boardText = text => text.replace(/\r\n?/g, "\n").replace(/[\x7F-\x9F]/g, "");
+  // One message steered in twice: the chat's send was refused ("still running", a goal's next round
+  // had just started), the message went to the chat's queue, and the queue and a direct steer both
+  // put it into the same turn 0.6 s apart (2026-11-08: "unpause it" twice in the agent's turn and
+  // twice in the chat). A steer of the same text into the same chat waits for one already on its way
+  // and takes its answer, and one that turn already took within STEER_REPEAT_MS is not sent again.
+  const STEER_REPEAT_MS = 30_000;
+  const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
+  function chatSteer(input = {}) {
+    if (input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input);
+    const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
+    const earlier = steersInFlight.get(key);
+    if (earlier) {
+      return earlier.catch(() => null).then((answer) => answer?.steered === true ? { ...answer, duplicate: true } : steerTracked(key, input));
+    }
+    return steerTracked(key, input);
+  }
+  // The steer itself, as its caller's answer: no wait is added in front of it (the chat's note reads
+  // the message count while the caller carries on).
+  function steerTracked(key, input) {
+    const mine = chatSteerOnce(input);
+    steersInFlight.set(key, mine);
+    const forget = () => { if (steersInFlight.get(key) === mine) steersInFlight.delete(key); };
+    mine.then(forget, forget);
+    return mine;
+  }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteer({ workspaceId, taskId, message, restart = false, goal } = {}) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -5316,6 +5341,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
       && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
+    // This turn already took the same message moments ago: it is not handed over (or noted) again.
+    if (!objective && restart !== true && chatQueue.deliveredTo(id, run.id)
+      .some(steer => steer.taskId === task && steer.message === text && now() - steer.at < STEER_REPEAT_MS)) {
+      logger?.info?.("ao.steer_repeat_skipped", { workspaceId: id, taskId: task });
+      return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id };
+    }
     // Native Codex (WebGPT and the shared CPA pool) steers its running turn through Codex's own
     // turn/steer, as the Codex app does: the message joins the turn at the agent's next step. Its
     // chats queued every message until the turn ended ("Running. New messages send when it finishes").
