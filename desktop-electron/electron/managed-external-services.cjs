@@ -8,6 +8,7 @@ const { createManagedComponentController } = require("./managed-components.cjs")
 const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
 const { createProviderNetworkStore, proxyUrl } = require("./provider-network.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
+const { BACKUP_SUFFIX } = require("./durable-state.cjs");
 
 const MANAGED_PROXY_COMPONENTS = new Set(["cpa", "antigravity-cli"]);
 const RETIRED_SERVICE_IDS = new Set(["paseo", "codex-router", "commandcode-proxy", "anneal"]);
@@ -23,11 +24,15 @@ const SERVICE_ENDPOINTS = Object.freeze({
   cpa: Object.freeze({ endpoint: "http://127.0.0.1:8317/" }),
 });
 
-function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa") {
+/**
+ * The proxy route `componentId` starts on. `readText(file)` answers its file reads instead of the
+ * disk (readCpaProxyRoutes); without it the files are read synchronously, as a start always has.
+ */
+function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa", { readText = null } = {}) {
   const directory = path.join(path.dirname(dataRoot), "providers");
   const filePath = path.join(directory, "provider-network.json");
   let saved;
-  try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); }
+  try { saved = JSON.parse(readText ? readText(filePath) : fs.readFileSync(filePath, "utf8")); }
   catch (error) {
     if (error?.code === "ENOENT") return { profileId: null, url: "" };
     throw new Error("Couldn't read the saved proxy settings, so CPA didn't start");
@@ -36,7 +41,7 @@ function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa") {
     throw new Error("The saved proxy settings are invalid, so CPA didn't start");
   }
   const store = createProviderNetworkStore({
-    filePath, keyPath: path.join(directory, "provider-network.key"), safeStorage,
+    filePath, keyPath: path.join(directory, "provider-network.key"), safeStorage, readText,
   });
   const routing = store.snapshot().routing;
   const policy = componentId === "cpa"
@@ -60,6 +65,43 @@ function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa") {
     throw new Error("The proxy host is invalid, so CPA didn't start");
   }
   return { profileId: profile.id, url };
+}
+
+/**
+ * resolveCpaProxyRoute for each of `componentIds`, with the saved settings, their key and both
+ * copies read by fs.promises first, so the main thread only parses and decrypts. Each entry is
+ * { value } or { error }: what resolveCpaProxyRoute returns or throws for that component.
+ */
+async function readCpaProxyRoutes(dataRoot, safeStorage, componentIds) {
+  const directory = path.join(path.dirname(dataRoot), "providers");
+  const files = ["provider-network.json", "provider-network.key"]
+    .flatMap((name) => [path.join(directory, name), path.join(directory, `${name}${BACKUP_SUFFIX}`)]);
+  const read = new Map(await Promise.all(files.map(async (file) => {
+    try { return [file, { text: await fs.promises.readFile(file, "utf8") }]; }
+    catch (error) { return [file, { error }]; }
+  })));
+  const readText = (file) => {
+    const entry = read.get(file);
+    if (!entry) throw Object.assign(new Error(`${path.basename(file)} wasn't read ahead`), { code: "EIO" });
+    if (entry.error) throw entry.error;
+    return entry.text;
+  };
+  return new Map(componentIds.map((componentId) => {
+    try { return [componentId, { value: resolveCpaProxyRoute(dataRoot, safeStorage, componentId, { readText }) }]; }
+    catch (error) { return [componentId, { error }]; }
+  }));
+}
+
+/** The route CPA's config.yaml holds, "" for none, or null when it can't be read. */
+async function readCpaConfigProxyUrl(configPath) {
+  try {
+    const config = await fs.promises.readFile(configPath, "utf8");
+    // CPA 8 saves the route grouped (requests.proxy-url); a config it hasn't rewritten yet has it at
+    // the top level. Matching only the top level read every running CPA as unrouted.
+    const yaml = require("js-yaml");
+    const parsed = yaml.load(config) ?? {};
+    return parsed.requests?.["proxy-url"] ?? parsed["proxy-url"] ?? "";
+  } catch { return null; }
 }
 
 function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage, resolveRoute = resolveCpaProxyRoute) {
@@ -102,55 +144,97 @@ function createManagedExternalServicesController({
 
   // Every services snapshot read files synchronously on main: the saved proxy settings and their
   // key for CPA (twice) and agy, and CPA's config.yaml. On the busy hard disk that held main up to
-  // 12.8 s (0.8.48, 2026-11-01). A snapshot reuses what it read until fs.watch reports one of those
-  // files changed, then publishes afresh. Starts always resolve the route anew, so a process never
-  // starts on an old one. Without a watch, every snapshot reads as before.
-  let snapshotting = false;
-  const watchedCaches = [];
-  // One write reports several events (truncate, then data): one publish follows the burst.
+  // 12.8 s (0.8.48, 2026-11-01). Caching them until fs.watch reported a change still read them
+  // synchronously in the first snapshot and in the first one after every change, and building the
+  // snapshot's command lines saved loopback-mesh.json and read the proxy settings again for every
+  // installed component. Snapshots are built while project() and cpaConnection() answer, which
+  // launcher.main_blocked caught frozen 2 s and 28.8 s in a single existsSync call on 2026-10-31.
+  //
+  // A snapshot now only shows what was last read, and never reads. The routes (CPA's and agy's) and
+  // the route CPA's config.yaml holds are read with fs.promises: when the first snapshot is taken,
+  // when fs.watch reports one of those files changed, and before an install, repair, update, start,
+  // stop or restart publishes. A read that changes what a snapshot shows publishes afresh. Until the
+  // first read lands, a snapshot shows no route and no proxy error. Starts resolve the route
+  // synchronously as before (resolveCrossUseEnvironment), so a process never starts on an old one.
+  let disposed = false;
+  const providersDirectory = path.join(path.dirname(dataRoot), "providers");
+  const cpaConfigPath = path.join(dataRoot, "state", "cpa", "config.yaml");
+  const diskState = { read: false, routes: new Map(), cpaConfigProxyUrl: null };
+  const diskStateKey = () => JSON.stringify([
+    [...diskState.routes].map(([id, entry]) => [id, entry.error ? String(entry.error?.message) : entry.value]),
+    diskState.cpaConfigProxyUrl,
+  ]);
+  let diskRead = null;
+  let diskReadAgain = false;
+  /** Reads what a snapshot shows from disk, off the main thread. Resolves true when it changed. */
+  function refreshDiskState() {
+    // A change seen while a read is under way may have landed after that read's file reads: read
+    // once more before the waiting callers go on.
+    if (diskRead) { diskReadAgain = true; return diskRead; }
+    diskRead = (async () => {
+      const before = diskState.read ? diskStateKey() : null;
+      do {
+        diskReadAgain = false;
+        const [routes, cpaConfigProxyUrl] = await Promise.all([
+          readCpaProxyRoutes(dataRoot, options.safeStorage, [...MANAGED_PROXY_COMPONENTS]),
+          readCpaConfigProxyUrl(cpaConfigPath),
+        ]);
+        Object.assign(diskState, { read: true, routes, cpaConfigProxyUrl });
+      } while (diskReadAgain && !disposed);
+      return diskStateKey() !== before;
+    })().finally(() => { diskRead = null; });
+    return diskRead;
+  }
+  function refreshAndPublish() {
+    return refreshDiskState().then((changed) => {
+      if (changed) publishCombined();
+      return changed;
+    }, () => false);
+  }
+  // One write reports several events (truncate, then data): one read follows the burst.
   let refreshTimer = null;
   const refreshSoon = () => {
-    if (refreshTimer) return;
-    refreshTimer = setTimeout(() => { refreshTimer = null; publishCombined(); }, 50);
+    if (refreshTimer || disposed) return;
+    refreshTimer = setTimeout(() => { refreshTimer = null; void refreshAndPublish(); }, 50);
     refreshTimer.unref?.();
   };
-  function watchedCache(directory, fileNames) {
-    let values = null;
+  function directoryWatch(directory, fileNames) {
     let watcher = null;
-    const forget = () => { watcher?.close(); watcher = null; values = null; };
-    const cache = {
-      get(key, compute) {
-        if (!snapshotting) return compute();
-        if (!watcher) {
-          try {
-            // The folders also hold busy subfolders (CPA's plugin data); only these files matter.
-            watcher = watchOffThread(directory, (_event, name) => {
-              if (name && !fileNames.includes(String(name))) return;
-              values = new Map();
-              refreshSoon();
-            });
-            watcher.on("error", forget);
-            watcher.unref?.();
-            values = new Map();
-          } catch { forget(); return compute(); }
-        }
-        if (!values.has(key)) {
-          try { values.set(key, { value: compute() }); } catch (error) { values.set(key, { error }); }
-        }
-        const cached = values.get(key);
-        if (cached.error) throw cached.error;
-        return cached.value;
+    let armed = false;
+    const close = () => { watcher?.close(); watcher = null; };
+    return {
+      // Started by a snapshot, and again by the next one after it fails. Once in place it reports a
+      // change without a name (watchOffThread), and that read catches up on anything it missed. A
+      // folder that doesn't exist yet (no proxy saved) fails before that and has nothing to read.
+      ensure() {
+        if (watcher || disposed) return;
+        armed = false;
+        try {
+          // The folders also hold busy subfolders (CPA's plugin data); only these files matter.
+          watcher = watchOffThread(directory, (_event, name) => {
+            armed = true;
+            if (name && !fileNames.includes(String(name))) return;
+            refreshSoon();
+          });
+          watcher.on("error", () => {
+            const wasWatching = armed;
+            close();
+            if (wasWatching) refreshSoon();
+          });
+          watcher.unref?.();
+        } catch { close(); }
       },
-      close: forget,
+      close,
     };
-    watchedCaches.push(cache);
-    return cache;
   }
-  const routes = watchedCache(path.join(path.dirname(dataRoot), "providers"), ["provider-network.json", "provider-network.key"]);
-  const cpaConfigPath = path.join(dataRoot, "state", "cpa", "config.yaml");
-  const cpaConfigs = watchedCache(path.dirname(cpaConfigPath), ["config.yaml"]);
-  function snapshotRoute(root, safeStorage, componentId = "cpa") {
-    return routes.get(componentId, () => resolveCpaProxyRoute(root, safeStorage, componentId));
+  const diskWatches = [
+    directoryWatch(providersDirectory, ["provider-network.json", "provider-network.key"]),
+    directoryWatch(path.dirname(cpaConfigPath), ["config.yaml"]),
+  ];
+  /** An operation's own publish waits for a fresh read, so it shows the route it left behind. */
+  async function publishFresh() {
+    try { await refreshDiskState(); } catch {}
+    publishCombined();
   }
 
   const meshPath = path.join(dataRoot, "loopback-mesh.json");
@@ -182,7 +266,7 @@ function createManagedExternalServicesController({
     resolveRuntimeExecutable,
     resolveCrossUseEnvironment: (componentId) => {
       const extra = peerEnvironmentFor(componentId, crossUseSecrets());
-      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage, snapshotRoute));
+      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage));
       return extra;
     },
     publish: publishCombined,
@@ -200,8 +284,8 @@ function createManagedExternalServicesController({
     };
   }
 
-  function managedConfiguration(serviceId) {
-    const installed = managedController.runtimeConfiguration(serviceId);
+  function managedConfiguration(serviceId, { spawnEnvironment = true } = {}) {
+    const installed = managedController.runtimeConfiguration(serviceId, { spawnEnvironment });
     if (!installed) return null;
     const endpoints = SERVICE_ENDPOINTS[serviceId];
     return {
@@ -216,24 +300,29 @@ function createManagedExternalServicesController({
     };
   }
 
+  // From the last disk read (refreshDiskState), never the disk.
   function cpaProxyStatus(service) {
-    try {
-      const route = snapshotRoute(dataRoot, options.safeStorage);
-      const written = cpaConfigs.get("proxy-url", () => {
-        try {
-          const config = fs.readFileSync(cpaConfigPath, "utf8");
-          // CPA 8 saves the route grouped (requests.proxy-url); a config it hasn't rewritten yet has
-          // it at the top level. Matching only the top level read every running CPA as unrouted.
-          const yaml = require("js-yaml");
-          const parsed = yaml.load(config) ?? {};
-          return parsed.requests?.["proxy-url"] ?? parsed["proxy-url"] ?? "";
-        } catch { return null; }
-      });
-      const configured = service.status === "ready" && written !== null && written === route.url;
-      return { profileId: route.profileId, configMatches: configured, error: null };
-    } catch (error) {
-      return { profileId: null, configMatches: false, error: error instanceof Error ? error.message : "CPA proxy settings unavailable" };
+    const cached = diskState.routes.get("cpa");
+    if (!cached) return { profileId: null, configMatches: false, error: null };
+    if (cached.error) {
+      return { profileId: null, configMatches: false, error: cached.error instanceof Error ? cached.error.message : "CPA proxy settings unavailable" };
     }
+    const route = cached.value;
+    const written = diskState.cpaConfigProxyUrl;
+    const configured = service.status === "ready" && written !== null && written === route.url;
+    return { profileId: route.profileId, configMatches: configured, error: null };
+  }
+
+  // What a start would refuse for want of a proxy route (resolveManagedProxyEnvironment), from the
+  // last disk read: a snapshot shows it as the service's error, as it did when it resolved the route.
+  function checkReadProxyRoute(serviceId) {
+    if (!MANAGED_PROXY_COMPONENTS.has(serviceId)) return;
+    const cached = diskState.routes.get(serviceId);
+    if (!cached) return;
+    resolveManagedProxyEnvironment(serviceId, dataRoot, options.safeStorage, () => {
+      if (cached.error) throw cached.error;
+      return cached.value;
+    });
   }
 
   function redactManagedError(serviceId, value) {
@@ -255,8 +344,11 @@ function createManagedExternalServicesController({
     let configuration = null;
     let proxyError = null;
     if (managed.installState === "installed") {
-      try { configuration = managedConfiguration(service.id); }
-      catch (error) {
+      try {
+        const installed = managedConfiguration(service.id, { spawnEnvironment: false });
+        if (installed) checkReadProxyRoute(service.id);
+        configuration = installed;
+      } catch (error) {
         proxyError = error instanceof Error ? error.message : "Managed proxy settings unavailable";
       }
     }
@@ -309,7 +401,10 @@ function createManagedExternalServicesController({
     const snapshot = baseController.snapshot();
     if (snapshotBusy) return snapshot;
     snapshotBusy = true;
-    snapshotting = true;
+    if (!disposed) {
+      for (const watch of diskWatches) watch.ensure();
+      if (!diskState.read && !diskRead) void refreshAndPublish();
+    }
     try {
       return {
         ...snapshot,
@@ -317,7 +412,6 @@ function createManagedExternalServicesController({
       };
     } finally {
       snapshotBusy = false;
-      snapshotting = false;
     }
   }
 
@@ -347,7 +441,7 @@ function createManagedExternalServicesController({
     applyManagedConfiguration(serviceId);
     await managedController.startComponent(serviceId);
     await baseController.inspect(serviceId);
-    publishCombined();
+    await publishFresh();
     return serviceFromSnapshot(serviceId);
   }
 
@@ -358,7 +452,7 @@ function createManagedExternalServicesController({
     applyManagedConfiguration(serviceId);
     await managedController.startComponent(serviceId);
     await baseController.inspect(serviceId);
-    publishCombined();
+    await publishFresh();
     return serviceFromSnapshot(serviceId);
   }
 
@@ -396,7 +490,7 @@ function createManagedExternalServicesController({
       result = { swapped: false, rolledBack: true, ...change, error: message };
     }
     await baseController.inspect(serviceId);
-    publishCombined();
+    await publishFresh();
     return result;
   }
 
@@ -427,7 +521,7 @@ function createManagedExternalServicesController({
       applyManagedConfiguration(serviceId);
       await managedController.startComponent(serviceId);
       await baseController.inspect(serviceId);
-      publishCombined();
+      await publishFresh();
       return serviceFromSnapshot(serviceId);
     }
     return mergeService(await baseController.start(serviceId));
@@ -438,7 +532,7 @@ function createManagedExternalServicesController({
     if (managed.installState === "installed") {
       await managedController.stopComponent(serviceId);
       try { await baseController.inspect(serviceId); } catch {}
-      publishCombined();
+      await publishFresh();
       return serviceFromSnapshot(serviceId);
     }
     return mergeService(await baseController.stop(serviceId));
@@ -451,7 +545,7 @@ function createManagedExternalServicesController({
       applyManagedConfiguration(serviceId);
       await managedController.restartComponent(serviceId);
       await baseController.inspect(serviceId);
-      publishCombined();
+      await publishFresh();
       return serviceFromSnapshot(serviceId);
     }
     return mergeService(await baseController.restart(serviceId));
@@ -559,7 +653,8 @@ function createManagedExternalServicesController({
   }
 
   function dispose({ keepPersistent = false } = {}) {
-    for (const cache of watchedCaches) cache.close();
+    disposed = true;
+    for (const watch of diskWatches) watch.close();
     clearTimeout(refreshTimer); refreshTimer = null;
     managedController.dispose({ keepPersistent });
     baseController.dispose();
@@ -567,6 +662,8 @@ function createManagedExternalServicesController({
 
   return Object.freeze({
     snapshot: combinedSnapshot,
+    /** Reads the proxy routes and CPA's config again (off the main thread); publishes a change. */
+    refreshDiskState: refreshAndPublish,
     configure: forgettingCpaConnection(configure),
     inspect,
     start: forgettingCpaConnection(start),

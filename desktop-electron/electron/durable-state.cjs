@@ -63,10 +63,14 @@ function removeStateFile(filePath) {
   fs.rmSync(`${filePath}${BACKUP_SUFFIX}`, { force: true });
 }
 
-function attempt(file, parse) {
+function readTextFromDisk(file) {
+  return fs.readFileSync(file, "utf8");
+}
+
+function attempt(file, parse, readText = readTextFromDisk) {
   let text;
   try {
-    text = fs.readFileSync(file, "utf8");
+    text = readText(file);
   } catch (error) {
     return { error, missing: error?.code === "ENOENT" };
   }
@@ -87,9 +91,11 @@ function attempt(file, parse) {
  * An unusable file is renamed to `<filePath>.corrupt-<time>` (`setAside`) before anything is
  * written over it, so its bytes stay for recovery by hand. `error` says why the file was unusable.
  * `preserveUnreadable` leaves it in place so a later credential read can retry a transient failure.
+ * `readText(file)` replaces the disk read: a caller that read the file and its copy ahead with
+ * fs.promises answers from memory, so the main thread never waits on the disk.
  */
-function readStateFile(filePath, parse, { now = Date.now, preserveUnreadable = false } = {}) {
-  const main = attempt(filePath, parse);
+function readStateFile(filePath, parse, { now = Date.now, preserveUnreadable = false, readText = readTextFromDisk } = {}) {
+  const main = attempt(filePath, parse, readText);
   if (!main.error) return { value: main.value, source: "file", error: null, setAside: null };
   let setAside = null;
   if (!main.missing && !preserveUnreadable) {
@@ -103,7 +109,7 @@ function readStateFile(filePath, parse, { now = Date.now, preserveUnreadable = f
       setAside = target;
     } catch { /* left in place; the next write replaces it */ }
   }
-  const backup = attempt(`${filePath}${BACKUP_SUFFIX}`, parse);
+  const backup = attempt(`${filePath}${BACKUP_SUFFIX}`, parse, readText);
   const error = main.missing ? null : main.error;
   if (!backup.error) return { value: backup.value, source: "backup", error, setAside };
   return { value: undefined, source: main.missing && backup.missing ? "none" : "unreadable", error, setAside };

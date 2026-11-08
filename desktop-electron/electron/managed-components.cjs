@@ -1177,17 +1177,21 @@ function createManagedComponentController({
     }
   }
 
-  function commandSpec(entry, context) {
+  // `spawnEnvironment: false` leaves out the peer and cross-use variables, for a caller that only
+  // shows the command (runtimeConfiguration): resolving them saved loopback-mesh.json and read the
+  // proxy settings on the main thread, for every installed component on every services snapshot.
+  function commandSpec(entry, context, { spawnEnvironment = true } = {}) {
     const executable = expandToken(entry.executable, context);
     const args = (entry.arguments || []).map((value) => expandToken(value, context));
     const environment = Object.fromEntries(Object.entries(entry.environment || {}).map(([key, value]) => [
       key,
       expandToken(value, context),
     ]));
-    const crossUseEnvironment = typeof resolveCrossUseEnvironment === "function"
+    const crossUseEnvironment = spawnEnvironment && typeof resolveCrossUseEnvironment === "function"
       ? (resolveCrossUseEnvironment(context.id, context) || {})
       : {};
-    const mergedEnvironment = { ...crossUseEnvironment, ...peerEnv(context), ...environment };
+    const peerEnvironmentValues = spawnEnvironment ? peerEnv(context) : {};
+    const mergedEnvironment = { ...crossUseEnvironment, ...peerEnvironmentValues, ...environment };
     const managedMode = entry.execution === "managed-mode";
     if (context.mode === "wsl2" && managedMode) {
       const linuxHome = context.wslHome || wslPath(context.home);
@@ -1206,7 +1210,7 @@ function createManagedComponentController({
         key,
         expandToken(value, wslContext),
       ]));
-      const forwarded = { ...crossUseEnvironment, ...peerEnv(context), ...wslEnvironment };
+      const forwarded = { ...crossUseEnvironment, ...peerEnvironmentValues, ...wslEnvironment };
       const names = Object.keys(forwarded);
       if (names.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
         throw new Error("WSL environment contains an invalid name");
@@ -2372,7 +2376,12 @@ function createManagedComponentController({
     return componentStart(id, true);
   }
 
-  function runtimeConfiguration(idValue) {
+  /**
+   * The primary process's command. `spawnEnvironment: false` (a services snapshot) skips resolving
+   * its environment, which only a start uses; a start resolves it as before, so a missing proxy
+   * route still stops it before anything is configured.
+   */
+  function runtimeConfiguration(idValue, { spawnEnvironment = true } = {}) {
     const id = requiredComponentId(idValue);
     const manifest = manifestFor(id);
     const source = sourceState(manifest);
@@ -2381,7 +2390,7 @@ function createManagedComponentController({
     const primary = manifest.launch.processes.find((entry) => entry.id === manifest.launch.primaryProcessId)
       || manifest.launch.processes.find((entry) => entry.mode !== "command" && entry.detached !== true)
       || manifest.launch.processes[0];
-    const spec = commandSpec(primary, context);
+    const spec = commandSpec(primary, context, { spawnEnvironment });
     return {
       home: context.home,
       state: context.state,

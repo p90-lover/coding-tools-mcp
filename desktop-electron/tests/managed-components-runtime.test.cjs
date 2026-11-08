@@ -383,6 +383,85 @@ test("CPA inspection errors redact managed keys from projected status", async ()
   }
 });
 
+// Every services snapshot read the proxy settings and CPA's config.yaml, and saved loopback-mesh.json,
+// on the main thread; snapshots are built while project() and cpaConnection() answer, which were
+// caught holding the main process 2 s and 28.8 s in one existsSync on the busy disk (2026-10-31).
+test("a services snapshot after an install touches no file synchronously", async () => {
+  const payload = Buffer.from("managed-component-fixture-v1", "utf8");
+  const manifestRoot = manifestFixture(payload);
+  const bundleRoot = temporaryDirectory("coding-tools-snapshot-io-bundle");
+  fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(bundleRoot, "cpa", "cpa.bin"), payload);
+  const dataRoot = path.join(temporaryDirectory("coding-tools-snapshot-io"), "integrations");
+  await configureTestProxy(dataRoot);
+  const controller = createManagedExternalServicesController({
+    manifestRoot, bundleRoot, dataRoot,
+    filePath: path.join(dataRoot, "external-services.json"),
+    keyPath: path.join(dataRoot, "external-services.key"),
+    safeStorage: { isEncryptionAvailable: () => false },
+    resolveRuntimeExecutable: () => process.execPath,
+    fetchImpl: async (url) => (String(url).includes("/v1/models")
+      ? new Response(JSON.stringify({ data: [] }), { status: 200, headers: { "content-type": "application/json" } })
+      : new Response(payload, { status: 200, headers: { "content-length": String(payload.length) } })),
+    spawnProcess: () => mockChild(9750),
+    terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+  });
+  const syncNames = ["readFileSync", "writeFileSync", "existsSync", "statSync", "lstatSync", "readdirSync",
+    "accessSync", "openSync", "mkdirSync", "renameSync"];
+  const originals = Object.fromEntries(syncNames.map((name) => [name, fs[name]]));
+  const calls = [];
+  const cpaOf = (snapshot) => snapshot.services.find((service) => service.id === "cpa");
+  try {
+    await controller.installManagedComponent("cpa");
+    const before = cpaOf(controller.snapshot());
+    for (const name of syncNames) {
+      fs[name] = (...args) => {
+        calls.push(`${name} ${args[0]}`);
+        throw new Error(`${name} while building a services snapshot`);
+      };
+    }
+    const cpa = cpaOf(controller.snapshot());
+    Object.assign(fs, originals);
+    assert.deepEqual(calls, []);
+    // The same projection as before the disk was taken away: the command line, the route it shows
+    // and no proxy error.
+    assert.deepEqual(cpa, before);
+    assert.equal(cpa.managedInstall.state, "installed");
+    assert.equal(cpa.sourceConfigured, true);
+    assert.ok(cpa.home.includes("cpa"));
+    assert.equal(cpa.executable, path.join(cpa.home, "cpa.bin"));
+    assert.equal(cpa.outboundProxy.profileId, "test");
+    assert.equal(cpa.outboundProxy.error, null);
+    assert.notEqual(cpa.status, "error");
+
+    // With the route taken away, the snapshot shows the error a start would give, from its own read.
+    const directory = path.join(path.dirname(dataRoot), "providers");
+    const store = createProviderNetworkStore({
+      filePath: path.join(directory, "provider-network.json"),
+      keyPath: path.join(directory, "provider-network.key"),
+      safeStorage: { isEncryptionAvailable: () => false },
+    });
+    store.setGlobalRouting({ enabled: false, profileId: null });
+    await store.saved();
+    assert.equal(await controller.refreshDiskState(), true);
+    for (const name of syncNames) {
+      fs[name] = (...args) => {
+        calls.push(`${name} ${args[0]}`);
+        throw new Error(`${name} while building a services snapshot`);
+      };
+    }
+    const unrouted = cpaOf(controller.snapshot());
+    Object.assign(fs, originals);
+    assert.deepEqual(calls, []);
+    assert.equal(unrouted.status, "error");
+    assert.match(unrouted.error, /Select a network proxy before starting cpa/);
+    assert.equal(unrouted.outboundProxy.profileId, null);
+  } finally {
+    Object.assign(fs, originals);
+    controller.dispose();
+  }
+});
+
 test("CPA managed component snapshot redacts a secret-bearing process error", async () => {
   const payload = Buffer.from("managed-component-fixture-v1", "utf8");
   const manifestRoot = manifestFixture(payload);
