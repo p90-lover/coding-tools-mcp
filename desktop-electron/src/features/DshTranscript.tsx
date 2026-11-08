@@ -138,13 +138,17 @@ function DshRow({ icon, title, summary, suffix, running, tone = "ok", plainSumma
   </div>;
 }
 
-/** ReasoningRow: "Think · <first line>", opening on the whole thought in secondary type. */
-function DshThink({ item }: { item: ChatLiveItem }) {
-  const [open, setOpen] = useState(false);
+/**
+ * ReasoningRow: "Think · <first line>", opening on the whole thought in secondary type; open from
+ * the start while its turn is on a mission (`mission`), until the person closes it.
+ */
+function DshThink({ item, mission = false }: { item: ChatLiveItem; mission?: boolean }) {
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? mission;
   const running = item.status === "running";
   const summary = open ? "" : dshThinkSummary(item.text, running);
   return <DshRow className="dsh-think" icon={ICON.think} title="Think" summary={summary} running={running} tone={running ? "running" : "ok"}
-    open={open} expandable={Boolean(item.text.trim())} onToggle={() => setOpen(!open)}>
+    open={open} expandable={Boolean(item.text.trim())} onToggle={() => setChosen(!open)}>
     <div className="dsh-think-body"><ChatMarkdown text={item.text} /></div>
   </DshRow>;
 }
@@ -210,12 +214,13 @@ function DshTool({ item }: { item: ChatLiveItem }) {
 /**
  * One row of a group (exported for its tests). A row of a turn that is no longer live is settled
  * whatever its stored status: reasoning items whose completion never arrived otherwise kept their
- * shimmer for good, and a long chat repainted a hundred of them every frame.
+ * shimmer for good, and a long chat repainted a hundred of them every frame. `mission`: its turn is
+ * on a mission, so a thought starts open.
  */
-export function DshItem({ item: stored, live = true }: { item: ChatLiveItem; live?: boolean }) {
+export function DshItem({ item: stored, live = true, mission = false }: { item: ChatLiveItem; live?: boolean; mission?: boolean }) {
   const item = live || stored.status !== "running" ? stored : { ...stored, status: "completed" as const };
   if (item.answered) return <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />;
-  if (item.kind === "reasoning") return <DshThink item={item} />;
+  if (item.kind === "reasoning") return <DshThink item={item} mission={mission} />;
   if (item.kind === "message") return <div className="dsh-reply"><StreamingMarkdown text={item.text} live={item.status === "running"} /></div>;
   if (item.kind === "steer") return <DshSteer text={item.text} receipt={item.receipt} />;
   return <DshTool item={item} />;
@@ -251,15 +256,18 @@ function useHeldTitle<T extends { label: string }>(title: T, live: boolean): T {
  * ChatGroupSeat: a run of thinking and tool calls under one heading, its kind of work's icon
  * turning into a chevron on hover. Open, it scrolls inside min(400px, 50vh) with faded edges.
  * A running group (`live`: nothing has closed it yet) reads what it is doing now and shimmers;
- * opened by hand it starts at its newest row and follows new rows while scrolled to the bottom
- * (use-process-scroll.ts), where a closed group opens at its top.
+ * opened it starts at its newest row and follows new rows while scrolled to the bottom
+ * (use-process-scroll.ts), where a closed group opens at its top. While its turn is on a mission
+ * (`mission`) it starts open, until the person closes it.
  */
-function DshGroup({ items, live, turnLive }: { items: ChatLiveItem[]; live: boolean; turnLive: boolean }) {
-  const [open, setOpen] = useState(false);
+function DshGroup({ items, live, turnLive, mission = false }: { items: ChatLiveItem[]; live: boolean; turnLive: boolean; mission?: boolean }) {
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? mission;
   const [edges, setEdges] = useState({ up: false, down: false });
   const body = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
-  const start = useRef<"top" | "bottom" | null>(null);
+  // Where the body starts when it opens: set as it opens, by hand or by the mission (null: stay put).
+  const start = useRef<"top" | "bottom" | null>(open ? (live ? "bottom" : "top") : null);
   const following = useRef(false);
   const measure = () => {
     const box = body.current;
@@ -284,8 +292,12 @@ function DshGroup({ items, live, turnLive }: { items: ChatLiveItem[]; live: bool
   }, [open]);
   const toggle = () => {
     if (!open) start.current = live ? "bottom" : "top";
-    setOpen(!open);
+    setChosen(!open);
   };
+  // A turn that goes on a mission while the group is folded opens it as a click would.
+  const wasOpen = useRef(open);
+  if (open && !wasOpen.current && !start.current) start.current = live ? "bottom" : "top";
+  wasOpen.current = open;
   const now = useHeldTitle(live ? dshLiveTitle(items) : { activity: dshGroupActivity(items), label: dshProcessTitle(items) }, live);
   return <div className="dsh-group" data-open={open || undefined}>
     <button type="button" className="dsh-group-title" aria-expanded={open} data-process-activity={now.activity} onClick={toggle}>
@@ -296,26 +308,26 @@ function DshGroup({ items, live, turnLive }: { items: ChatLiveItem[]; live: bool
       <span className={`dsh-group-label${live ? " dsh-shimmer" : ""}`}>{now.label}</span>
     </button>
     {open ? <div ref={body} className={`dsh-group-body${edges.up ? " fade-top" : ""}${edges.down ? " fade-bottom" : ""}`} onScroll={measure}>
-      <div ref={content} className="dsh-flow">{items.map((item) => <DshItem key={item.id} item={item} live={turnLive} />)}</div>
+      <div ref={content} className="dsh-flow">{items.map((item) => <DshItem key={item.id} item={item} live={turnLive} mission={mission} />)}</div>
     </div> : null}
   </div>;
 }
 
 /**
  * A card's work as DeepSeek Desktop's Standard view lays it out: groups between the replies, each
- * folded under its heading. Only the last group of a running card is live; a reply or a steered
- * message after a group closes it.
+ * folded under its heading (open on a mission). Only the last group of a running card is live; a
+ * reply or a steered message after a group closes it.
  */
-function DshFlow({ items, live, finished, hideReply }: { items: ChatLiveItem[]; live: boolean; finished: boolean; hideReply?: string }) {
+function DshFlow({ items, live, finished, hideReply, mission = false }: { items: ChatLiveItem[]; live: boolean; finished: boolean; hideReply?: string; mission?: boolean }) {
   // The reply is the turn's messages joined: each one in it shows once, in the reply (withoutReplied).
   const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), hideReply);
   const segments = dshSegments(tidy);
   return <div className="dsh-flow">{segments.map((segment, index) => segment.kind === "item"
-    ? <DshItem key={segment.item.id} item={segment.item} live={live} />
-    : <DshGroup key={segment.key} items={segment.items} live={live && index === segments.length - 1} turnLive={live} />)}</div>;
+    ? <DshItem key={segment.item.id} item={segment.item} live={live} mission={mission} />
+    : <DshGroup key={segment.key} items={segment.items} live={live && index === segments.length - 1} turnLive={live} mission={mission} />)}</div>;
 }
 
-function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseStepWork; answer?: string }) {
+function DshStepWork({ step, useWork, answer, mission = false }: { step: ChatStep; useWork: UseStepWork; answer?: string; mission?: boolean }) {
   const work = useWork(step, true) ?? [];
   // A retried single card's earlier attempts come first, folded, as in a team card's row: they were
   // not shown at all here, and the other view drew them under the new attempt's work.
@@ -324,7 +336,7 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   // card can (DshAgent). Keep that reply, but leave the turn's final answer outside its work.
   const reply = step.text && step.text.trim() !== answer?.trim() ? step.text : undefined;
   return <>{earlier}{work.length ? <SteerReader.Provider value={steerReader(step)}>
-    <DshFlow items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} hideReply={reply ?? answer} />
+    <DshFlow items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} hideReply={reply ?? answer} mission={mission} />
   </SteerReader.Provider> : !reply ? step.working
     ? <p className="dsh-hint" role="status">{step.working.activity || "Waiting for the model's first response…"}</p>
     : step.hasWork ? <p className="dsh-hint">Loading…</p> : null : null}
@@ -332,11 +344,14 @@ function DshStepWork({ step, useWork, answer }: { step: ChatStep; useWork: UseSt
   </>;
 }
 
-/** A team card as one row: its name and what it is doing or how it ended, opening on its own work. */
-function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepWork; answer?: string }) {
+/**
+ * A team card as one row: its name and what it is doing or how it ended, opening on its own work;
+ * every card of a turn on a mission stays open, not only the one at work.
+ */
+function DshAgent({ step, useWork, answer, mission = false }: { step: ChatStep; useWork: UseStepWork; answer?: string; mission?: boolean }) {
   const live = Boolean(step.working);
   const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? (live || Boolean(step.error));
+  const open = chosen ?? (live || Boolean(step.error) || mission);
   const work = useWork(step, open);
   const tone: Tone = step.error ? "error" : live ? "running" : step.state === "cancelled" ? "stopped" : "ok";
   const summary = live ? (step.working!.activity || dshLiveTitle(work ?? []).label)
@@ -346,7 +361,7 @@ function DshAgent({ step, useWork, answer }: { step: ChatStep; useWork: UseStepW
     <div className="dsh-agent-body">
       <EarlierRounds rounds={step.earlier} />
       {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-        <DshFlow items={work} live={live} finished={!live && step.state === "finished"} hideReply={answer} />
+        <DshFlow items={work} live={live} finished={!live && step.state === "finished"} hideReply={answer} mission={mission} />
       </SteerReader.Provider> : null}
       {step.text && step.text.trim() !== answer?.trim() ? <div className="dsh-reply"><ChatMarkdown text={step.text} /></div> : null}
     </div>
@@ -395,19 +410,24 @@ const WATCHED = new Set<string>();
  * way): the line stays the turn's last row, as DeepSeek Harness keeps its status under everything.
  * `headed`: the chat's reply head (ChatReplyHead) already says how the turn ended and how long it
  * took, so the fold reads "Show work" and a failed or stopped turn, always open, has no line at all.
+ * `mission`: the turn is on the chat's mission now (Settings › Chat): its groups and thoughts start
+ * open, and stay so in this view once the mission ends, until the person closes them.
  */
-export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null; beforeStatus?: ReactNode; headed?: boolean };
+export type DshTurnWorkProps = { turn: ChatTurn; live: boolean; expanded: boolean; useWork: UseStepWork; errorShownBelow?: boolean; refusal?: CpaRefusal | null; beforeStatus?: ReactNode; headed?: boolean; mission?: boolean };
 
 /**
  * A DeepSeek turn's work. Running: its work in groups, the last one live, "Deep diving" under them. Ended: "Completed in
- * 1m 4s" heads it, folded unless the chat shows work details; a failed or stopped turn stays open.
+ * 1m 4s" heads it, folded unless the chat shows work details or watched it on its mission; a failed or stopped turn stays open.
  * The chat memoizes it with its own check of what a turn shows.
  */
-export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null, beforeStatus = null, headed = false }: DshTurnWorkProps) {
+export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = false, refusal = null, beforeStatus = null, headed = false, mission = false }: DshTurnWorkProps) {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   const failed = steps.some((step) => step.error);
   const stopped = turn.status === "stopped";
   const [chosen, setChosen] = useState<boolean | null>(null);
+  const kept = useRef(false);
+  if (mission) kept.current = true;
+  const missionOpen = kept.current;
   if (live) ENDED.delete(turn.key);
   else if (turn.startedAtMs && !ENDED.has(turn.key) && WATCHED.has(turn.key)) ENDED.set(turn.key, Date.now());
   if (live) WATCHED.add(turn.key);
@@ -415,12 +435,12 @@ export function DshTurnWork({ turn, live, expanded, useWork, errorShownBelow = f
   const heardAt = Math.max(0, ...steps.map((step) => step.working?.heardAtMs ?? 0)) || undefined;
   if (!steps.length) return live ? <>{beforeStatus}<DshRunning since={turn.startedAtMs} divider={false} /></> : null;
   const alwaysOpen = live || failed || stopped;
-  const open = alwaysOpen || (chosen ?? expanded);
+  const open = alwaysOpen || (chosen ?? (expanded || missionOpen));
   const answer = turn.final?.text;
   const single = steps.length === 1;
   const work = single
-    ? <DshStepWork step={steps[0]} useWork={useWork} answer={answer} />
-    : steps.map((step) => <DshAgent key={step.key} step={step} useWork={useWork} answer={step === turn.final ? answer : undefined} />);
+    ? <DshStepWork step={steps[0]} useWork={useWork} answer={answer} mission={missionOpen} />
+    : steps.map((step) => <DshAgent key={step.key} step={step} useWork={useWork} answer={step === turn.final ? answer : undefined} mission={missionOpen} />);
   // The end its cards kept, or the moment this window saw it end (cards saved before builds that kept one).
   const ended = turn.endedAtMs ?? ENDED.get(turn.key);
   const label = headed ? (open ? "Hide work" : "Show work")

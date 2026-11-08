@@ -970,6 +970,8 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step-caret { flex: none; align-self: center; margin-left: 2px; color: var(--ao-muted); opacity: 0; transition: transform .12s ease-out, opacity .12s; }
 .cx-step-time + .cx-step-caret, .cx-step-time + .cx-approved + .cx-step-caret { margin-left: 2px; }
 .cx-live-text + .cx-step-caret, .cx-diff-count + .cx-step-caret, .cx-approved + .cx-step-caret, .cx-tool-image-count + .cx-step-caret { margin-left: auto; }
+/* An opened thought without a title says only "Thought" on its row: its caret keeps the row's end. */
+.cx-live-label + .cx-step-caret { margin-left: auto; }
 summary:hover > .cx-step-caret, details[open] > summary > .cx-step-caret { opacity: .8; }
 details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-tool .cx-approved { align-self: center; }

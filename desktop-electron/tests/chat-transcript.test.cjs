@@ -166,3 +166,24 @@ test("completed turn is distinct from achieved goal and preserves non-success st
   assert.equal(transcript.transcriptCompletion({ ...base, steps: [{ error: "Blocked by quota" }] }), "Failed after 3s");
   assert.doesNotMatch(transcript.transcriptCompletion(base), /Goal completed|Task completed/);
 });
+
+test("an opened thought keeps its bold title on its row and only its words below", () => {
+  assert.deepEqual(plain(transcript.openedThought("**Inspecting the register route**\n\nThe form posts to /api/register.")),
+    { title: "Inspecting the register route", body: "The form posts to /api/register." });
+  assert.deepEqual(plain(transcript.openedThought("  **Checking `app.ts`**  \r\nTwo routes.\n\nOne handler.  ")),
+    { title: "Checking app.ts", body: "Two routes.\n\nOne handler." }, "Markdown marks leave the title, the body keeps its paragraphs");
+  assert.deepEqual(plain(transcript.openedThought("**Reading the router**")), { title: "Reading the router", body: "" }, "a title alone has nothing below it");
+  // Without a title line, every word stays in the body, not half of them on a row that cuts off.
+  assert.deepEqual(plain(transcript.openedThought("Let me check **both** routes.\nThen the tests.")), { title: "", body: "Let me check **both** routes.\nThen the tests." });
+  assert.deepEqual(plain(transcript.openedThought("**Bold** opening words of a sentence.")), { title: "", body: "**Bold** opening words of a sentence." });
+});
+
+test("a pursued goal's mission starts at the message that set it and runs through its rounds", () => {
+  const said = (text) => ({ user: { text } });
+  const round = (reason) => said(`Stop hook feedback:\n[ship it]: ${reason}`);
+  assert.equal(transcript.goalMissionStart([]), -1);
+  assert.equal(transcript.goalMissionStart([said("hi"), said("/goal ship it")]), 1, "round 1: the newest turn, the message that set it");
+  assert.equal(transcript.goalMissionStart([said("hi"), said("ship it"), round("tests fail"), round("one test fails")]), 1, "every later round follows the message");
+  assert.equal(transcript.goalMissionStart([said("ship it"), round("tests fail"), {}, round("lint fails")]), 0, "a restarted round (no message of its own) stays in it");
+  assert.equal(transcript.goalMissionStart([said("ship it"), round("tests fail"), said("also update the docs")]), 2, "a message the person sent since starts the mission anew");
+});

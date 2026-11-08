@@ -1,4 +1,4 @@
-import { dshActivity, dshDuration, dshToolName, type ChatLiveItem, type ChatTurn } from "./ao-chat";
+import { dshActivity, dshDuration, dshToolName, goalFeedback, type ChatLiveItem, type ChatTurn } from "./ao-chat";
 
 /** The adapter's receipt joins all assistant messages. Keep their chronology, not two copies. */
 export function transcriptParts(items: ChatLiveItem[], answer?: string): { items: ChatLiveItem[]; answer: string } {
@@ -126,6 +126,31 @@ export function stepDuration(ms?: number): string {
   const tenths = Math.round(Math.max(ms, 100) / 100) / 10;
   if (tenths < 10) return `${tenths.toFixed(1)}s`;
   return ms < 59_500 ? `${Math.round(ms / 1000)}s` : dshDuration(ms);
+}
+
+/**
+ * An opened thought's two parts: the title its row keeps and the words under it. A thought that
+ * starts on a bold title line ("**Inspecting the register route**", as reasoning summaries come)
+ * keeps the title on its row and the rest below, so an open thought never says its title twice;
+ * one without a title shows all of its words below.
+ */
+export function openedThought(text: string): { title: string; body: string } {
+  const trimmed = text.trim();
+  const titled = /^\*\*([^\n]+?)\*\*[ \t]*(?:\r?\n|$)/.exec(trimmed);
+  if (!titled) return { title: "", body: trimmed };
+  return { title: titled[1].replace(/[*_`]/g, "").trim(), body: trimmed.slice(titled[0].length).trim() };
+}
+
+/**
+ * Where the mission of a goal being pursued starts among a chat's turns: the message that set the
+ * goal (its round 1), after which every turn is one of its rounds: the goal's own feedback
+ * (goalFeedback), or a restart of a round, which has no message of its own. The newest turn while
+ * the goal is in its first round; -1 for a chat with no turns.
+ */
+export function goalMissionStart(turns: Pick<ChatTurn, "user">[]): number {
+  let start = turns.length - 1;
+  while (start > 0 && (!turns[start].user || goalFeedback(turns[start].user!.text))) start -= 1;
+  return start;
 }
 
 /** How a turn's work ended, for the colour of its "Worked for" line (transcriptCompletion's words). */
