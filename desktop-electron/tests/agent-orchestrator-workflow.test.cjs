@@ -3623,10 +3623,10 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this agent's model list/, message);
 });
 
-test("Claude Code is not offered Antigravity's models, Claude or Gemini, and says why; other agents and providers keep them", async () => {
-  // Seen live: Antigravity answers every request carrying Claude Code's "Claude Agent SDK" system
-  // line with "Resource has been exhausted", so those cards retried ten times and failed; Gemini
-  // subagents on Claude Code hit the same wall.
+test("every harness, Claude Code included, is offered Antigravity's Gemini and Claude; Pi and Unreal Agent run the CPA pool", async () => {
+  // The user's rule (2026-11-08): Gemini and its provider are always allowed. They had been hidden
+  // from Claude Code since Antigravity refused its Agent SDK identity line (2026-10-22). Pi and
+  // Unreal Agent offered no CPA model at all: AO now points both at the gateway.
   const catalog = { data: [
     { id: "claude-sonnet-4-6", owned_by: "antigravity", context_window: 200000 },
     { id: "claude-opus-4-6-thinking", owned_by: "antigravity", context_window: 200000 },
@@ -3640,22 +3640,28 @@ test("Claude Code is not offered Antigravity's models, Claude or Gemini, and say
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
+  const all = ["cpa/claude-sonnet-4-6", "cpa/claude-opus-4-6-thinking", "cpa/claude-haiku-4-5", "cpa/gemini-3.8-flash-high"];
   const claudeCode = await workflow.call("models", { harness: "ao:claude-code" });
-  assert.ok(!claudeCode.models.includes("cpa/claude-sonnet-4-6") && !claudeCode.models.includes("cpa/claude-opus-4-6-thinking"));
-  assert.match(claudeCode.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests.*Native Codex/);
-  assert.ok(claudeCode.models.includes("cpa/claude-haiku-4-5"), "a Claude model another provider serves stays");
-  assert.ok(!claudeCode.models.includes("cpa/gemini-3.8-flash-high"), "Antigravity's Gemini is refused too");
-  assert.match(claudeCode.unavailable["cpa/gemini-3.8-flash-high"], /not quota/);
-  const native = await workflow.call("models", { harness: "codex-native" }).catch(() => null);
-  if (native?.models) assert.ok(native.models.some(model => /claude-sonnet-4-6$/.test(model)), "Native Codex still runs it");
-  // A subagent saved on one of them is refused at launch with the reason; other routes are not.
-  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high" }),
-    /^gemini-3\.8-flash-high: Antigravity refuses Claude Code's requests/);
-  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high(high)" }),
-    /^gemini-3\.8-flash-high: Antigravity refuses/, "a saved effort suffix is looked up by its base model");
-  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/claude-haiku-4-5" }), null);
-  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:codex", model: "cpa/gemini-3.8-flash-high" }), null);
-  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/not-listed" }), null);
+  for (const model of all) assert.ok(claudeCode.models.includes(model), `Claude Code is offered ${model}`);
+  assert.equal(claudeCode.unavailable?.["cpa/gemini-3.8-flash-high"], undefined, "Gemini is not marked unavailable");
+  assert.equal(claudeCode.capabilities["cpa/gemini-3.8-flash-high"].provider, "antigravity");
+  assert.equal(workflow.subagentRouteRefusal, undefined, "no subagent route is refused for its provider");
+  // Pi and Unreal Agent list the pool beside their own models, and launch through the gateway.
+  for (const harness of ["ao:pi", "ao:unreal-agent"]) {
+    const listed = await workflow.call("models", { harness });
+    for (const model of all) assert.ok(listed.models.includes(model), `${harness} is offered ${model}`);
+  }
+  const pi = await workflow.call("models", { harness: "ao:pi" });
+  assert.ok(pi.capabilities["cpa/gemini-3.8-flash-high"].contextWindow, "Pi takes a window on a CPA model (AO's extension declares it)");
+  const unreal = await workflow.call("models", { harness: "ao:unreal-agent" });
+  assert.equal(unreal.capabilities["cpa/gemini-3.8-flash-high"].contextWindow, undefined, "Unreal Agent has no window setter");
+  const route = model => ({ harness_id: "ao:pi", provider_id: "agent-orchestrator", account_id: "ao-local", model });
+  const piLaunch = workflow.subagentLaunchArgs("ws", route("cpa/gemini-3.8-flash-high"), "Pi worker");
+  assert.equal(piLaunch.model, "coding-tools-cpa/gemini-3.8-flash-high", "Pi runs the provider AO's Pi extension registers");
+  assert.deepEqual(piLaunch.gateway, { provider: "cpa", model: "gemini-3.8-flash-high" });
+  const unrealLaunch = workflow.subagentLaunchArgs("ws", { ...route("cpa/claude-haiku-4-5"), harness_id: "ao:unreal-agent" }, "Unreal worker");
+  assert.equal(unrealLaunch.model, "claude-haiku-4-5");
+  assert.deepEqual(unrealLaunch.gateway, { provider: "cpa", model: "claude-haiku-4-5" });
 });
 
 test("each model is filed under the provider CPA says serves it, though CPA's full catalog names none", async () => {
@@ -3682,7 +3688,6 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
-  // Filed as opencode lists them: Claude Code is offered no Antigravity model at all (see below).
   const other = await workflow.call("models", { harness: "ao:opencode" });
   const provider = id => other.capabilities[`cpa/${id}`]?.provider;
   assert.equal(provider("gemini-3.8-flash-high"), "antigravity", "Antigravity's Gemini, not Gemini's");
@@ -3692,8 +3697,8 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
   const listed = await workflow.call("models", { harness: "ao:claude-code" });
   assert.equal(listed.capabilities["cpa/claude-haiku-4-5"]?.provider, "claude");
   for (const id of ["claude-sonnet-4-6", "gemini-3.8-flash-high"]) {
-    assert.ok(!listed.models.includes(`cpa/${id}`), `Claude Code is not offered Antigravity's ${id}`);
-    assert.match(listed.unavailable[`cpa/${id}`], /Antigravity refuses Claude Code's requests/);
+    assert.ok(listed.models.includes(`cpa/${id}`), `Claude Code is offered Antigravity's ${id}`);
+    assert.equal(listed.capabilities[`cpa/${id}`]?.provider, "antigravity", "filed under Antigravity there too");
   }
 });
 

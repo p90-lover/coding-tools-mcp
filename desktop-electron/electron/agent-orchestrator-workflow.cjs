@@ -169,10 +169,14 @@ const NAMED_WEB_MODELS = ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-so
 const CPA_MODEL_PREFIX = "cpa/";
 // Agents AO's daemon can point at the CPA gateway, each through its own launch variables
 // (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*, agy:
-// AGY_LLM_GATEWAY_*). Every harness offers every pool model except WebGPT (the user's rule):
-// agy listed none, since its own catalog is empty without a Google sign-in. Its gateway mode sends
-// its tools only for Gemini ids it knows, so another model on agy can chat but not touch files.
-const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
+// AGY_LLM_GATEWAY_*, Pi: AO_PI_GATEWAY_* that AO's Pi extension registers as the
+// "coding-tools-cpa" provider, Unreal Agent: UNREAL_HARNESS_LLM_*). Every harness offers every
+// pool model except WebGPT (the user's rule): agy and Pi listed none, since their own catalogs
+// are empty without a sign-in. agy's gateway mode sends its tools only for Gemini ids it knows, so
+// another model on agy can chat but not touch files.
+const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy", "pi", "unreal-agent"]);
+// The Pi provider AO's managed Pi extension registers for a CPA session (AO ports.PiGatewayProvider).
+const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
 // Agents whose AO adapter honours the three permission modes. agy maps them onto its --mode
 // (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
 // and stopped at approvals in a terminal nobody saw, so its card never finished.
@@ -180,14 +184,10 @@ const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
 const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.";
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
-// Antigravity refuses every request whose system prompt carries Claude Code's "You are a Claude
-// agent, built on Anthropic's Claude Agent SDK." line, for its Gemini models as well as its Claude
-// ones, and calls it "Resource has been exhausted": CPA retried every Google account for about 20 s,
-// then Claude Code backed off up to ten times, and the card or subagent failed as if out of quota.
-// The same model answers in 3 s for any other client, so Claude Code is never sent to it.
-const ANTIGRAVITY_REFUSES_CLAUDE_CODE = "Antigravity refuses Claude Code's requests (it answers \"quota exhausted\", but it is not quota); "
-  + "run this model on Native Codex or another agent, or give Claude Code a model from another provider";
-const antigravityRefuses = (agent, capability) => agent === "claude-code" && /antigravity/i.test(String(capability?.provider ?? ""));
+// Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
+// by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
+// requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
+// 2026-10-30, the line passed again, only slower while CPA skipped accounts that refused.
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
@@ -577,7 +577,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
-    const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
+    // Pi reaches CPA as the provider AO's Pi extension registers from the gateway's model.
+    const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}`
+      : wireModel && agent === "pi" ? `${PI_GATEWAY_PROVIDER}/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
       // "Approve for me" is Codex's auto-review: Codex runs its own reviewer, but Claude Code's
       // "auto" mode exists only for Claude models and otherwise falls back to asking for every
@@ -1088,7 +1090,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // agy's gateway variables carry no window, so it takes no context-window setting. Claude Code
     // takes one for every model, Claude ones included (their picker was off): AO declares a CPA
     // alias's window and has a model Claude Code recognizes compact at it, capped at its own.
-    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // Pi takes one only on a CPA model (AO's Pi extension declares it); Unreal Agent takes none.
+    const windowed = GATEWAY_AGENTS.has(agent) && agent !== "agy" && agent !== "unreal-agent" && (agent !== "pi" || viaCpa);
+    if (windowed && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
@@ -1144,17 +1148,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const cpaLimit = catalog?.capabilities[item.id]?.contextLimit;
         return [item.id, modelCapabilities(agent, item.id, item.contextLimit || !cpaLimit ? item : { ...item, contextLimit: cpaLimit })];
       }));
-      // Antigravity's models (Claude and Gemini) are not offered to Claude Code, which it refuses
-      // (ANTIGRAVITY_REFUSES_CLAUDE_CODE); Native Codex runs them.
-      const refused = id => antigravityRefuses(agent, catalog?.capabilities[id]);
-      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/") && !refused(id)).map(id => {
+      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
         const routed = `${CPA_MODEL_PREFIX}${id}`;
         capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
         return routed;
       });
       const routedNotes = notes => notes ? Object.fromEntries(Object.entries(notes).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
-      const refusedNotes = Object.fromEntries((catalog?.models ?? []).filter(refused).map(id => [id, ANTIGRAVITY_REFUSES_CLAUDE_CODE]));
-      const unavailable = routedNotes(Object.keys(refusedNotes).length ? { ...catalog?.unavailable, ...refusedNotes } : catalog?.unavailable);
+      const unavailable = routedNotes(catalog?.unavailable);
       const held = routedNotes(catalog?.held);
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities,
         ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(catalog?.stale ? { stale: true } : {}) };
@@ -8101,22 +8101,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const subagentLaunchArgs = (workspaceId, route, name) => aoLaunchArgs(clean(workspaceId, 128),
     { id: "subagent", role: "worker", route, settings: { name } }, true);
   /**
-   * Why a subagent cannot run on `route`, said so a person can act on it, or null. Checked before
-   * the launch: a Claude Code subagent on an Antigravity model would otherwise wait out minutes of
-   * "quota exhausted" retries. A CPA list that cannot be read lets the launch go ahead.
-   */
-  async function subagentRouteRefusal(route) {
-    const agent = String(route?.harness_id ?? "").replace(/^ao:/, "");
-    const model = String(route?.model ?? "");
-    if (agent !== "claude-code" || !model) return null;
-    let catalog = null;
-    try { catalog = await models(); } catch { return null; }
-    // CPA lists the base model; a saved route may carry an effort suffix (…-flash-high(high)).
-    const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
-      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
-    return antigravityRefuses(agent, catalog?.capabilities?.[id]) ? `${id}: ${ANTIGRAVITY_REFUSES_CLAUDE_CODE}` : null;
-  }
-  /**
    * A saved team run as a subagent (subagents.cjs): the team works on the task as a chat of its own
    * (chat_send in team mode, started in the background as a /goal round is), and its closing cards'
    * answers are the report. Only teams whose every role has a model are offered.
@@ -8173,7 +8157,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
