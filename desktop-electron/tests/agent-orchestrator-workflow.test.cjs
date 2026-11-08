@@ -4482,6 +4482,55 @@ test("after a round without the goal achieved, the chat runs the next round with
   assert.equal(world.updates.length, updatesBefore + 1);
 });
 
+test("goal rounds that end at once without meeting the goal wait longer each time, then stall the goal", async () => {
+  // 2026-11-08: a goal chat ran a round every ~20 s for hours (150+ rounds of "the account is on
+  // hold") until CPA refused its requests.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  let clock = 1_000_000;
+  const timers = [];
+  const { world, workflow } = await goalChat({ timers, now: () => clock });
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "The account is on hold." } }] });
+  // Each round the agent ends at once: the round's run (this test world records none) settles 20 s
+  // after it started.
+  const quickRound = async () => {
+    const id = (await goalOf(workflow)).lastRunId;
+    world.runs.push({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "The account is on hold." } }] });
+    clock += 20_000;
+    await workflow.goalAfterRun("ws-1", id, "finished", null);
+    return goalOf(workflow);
+  };
+  await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+  assert.equal((await goalOf(workflow)).round, 2, "the first round had no start time: the next one starts at once");
+  let goal = await quickRound();
+  assert.equal(goal.quickRounds, 1);
+  assert.equal(goal.round, 3, "one quick round goes straight on");
+  goal = await quickRound();
+  assert.equal(goal.quickRounds, 2);
+  assert.equal(goal.round, 3, "the second waits");
+  assert.equal(goal.retry.at, clock + 30_000);
+  assert.match(goal.note, /ended within 2 minutes without meeting the goal \(2 in a row\); the next round starts in 30 s/);
+  // The pause ends: the next round starts, and each quick one after waits longer.
+  const pauses = [];
+  for (let quick = 2; quick < 8; quick += 1) {
+    const { retry, round } = await goalOf(workflow);
+    pauses.push(retry.at - clock);
+    clock = retry.at;
+    timers.shift().callback();
+    let started = round;
+    for (let tick = 0; tick < 200 && started === round; tick += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      started = (await goalOf(workflow)).round;
+    }
+    assert.equal(started, round + 1, "the paused round starts once its pause ends");
+    goal = await quickRound();
+  }
+  assert.deepEqual(pauses, [30_000, 120_000, 300_000, 600_000, 900_000, 900_000]);
+  assert.equal(goal.status, "stalled", "eight in a row stall the goal");
+  assert.match(goal.note, /8 rounds in a row ended within 2 minutes/);
+});
+
 test("a goal whose next round finds its chat still busy tries again shortly, and stalls with a note if it stays busy", async () => {
   // Seen live 2026-10-31: a goal judged not met at 12:11 left its next round unstarted (the chat
   // still read busy) without a word, and nothing tried again until the window was opened at 15:17.
@@ -5285,10 +5334,14 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(world.updates.length, quiet);
   assert.equal(timers.length, 0);
 
-  ({ world, workflow } = await goalChat());
+  // Each round here works for three minutes: rounds that end at once are paced (see "goal rounds
+  // that end at once…").
+  let roundClock = 1_000_000;
+  ({ world, workflow } = await goalChat({ now: () => roundClock }));
   // No round limit, as in Claude Code: a goal not yet met goes on round after round.
   for (let round = 0; round < 10; round++) {
     world.runs.push(teamRun(`t4-${round}`, "more to do"));
+    roundClock += 3 * 60_000;
     await workflow.goalAfterRun("ws-1", `t4-${round}`, "finished");
   }
   let goal = await goalOf(workflow);

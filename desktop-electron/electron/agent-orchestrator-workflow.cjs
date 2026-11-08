@@ -5507,7 +5507,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const stalledNote = stalled?.note;
     if (stalled) {
       invalidateGoal(stalled);
-      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0 });
     }
     const still = goalGuard(id, task, stalled);
     try {
@@ -5854,7 +5854,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const selection = goal.team?.id ? { teamId: goal.team.id } : followUpSelection(previous, goal.route);
     const message = goalMessage(goal.objective, round, goal.feedback);
     // The reason it goes on stays readable (feedback) while the round runs; the note is for states.
-    goals.update(id, task, { round, note: "", lastMessage: message });
+    goals.update(id, task, { round, note: "", lastMessage: message, roundStartedAt: now() });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
       const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true }, (accepting = false) => {
@@ -5956,6 +5956,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // How many failed rounds (or failed checks) in a row a goal carries on through before it stalls,
   // and the pauses between: a round that failed waits 30 s, then 60 s; a check waits 2 minutes.
   const GOAL_FAILED_ROUNDS = 3;
+  // A round judged not met that ended this soon after it started is "quick"; the pause before the
+  // next round after N quick ones in a row is GOAL_QUICK_PAUSES_MS[N] (none for the first), and
+  // GOAL_QUICK_STALL in a row stall the goal. A longer round resets the count.
+  const GOAL_QUICK_ROUND_MS = 2 * 60_000;
+  const GOAL_QUICK_PAUSES_MS = [0, 0, 30_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
+  const GOAL_QUICK_STALL = 8;
   const GOAL_RETRY_DELAY_MS = 30_000;
   const GOAL_CHECK_RETRY_MS = 2 * 60_000;
   const goalTimers = new Map();
@@ -6249,6 +6255,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.round} rounds; resume allows ${goal.rounds} more` });
         return;
       }
+      // Rounds that end at once without meeting the goal (the agent only says it is blocked, without
+      // update_goal) wait longer each time, then stall the goal: a goal chat ran a round every ~20 s
+      // for hours, 150+ rounds of "the account is on hold", until CPA refused its requests (2026-11-08).
+      const quickRounds = Number.isFinite(goal.roundStartedAt) && now() - goal.roundStartedAt < GOAL_QUICK_ROUND_MS ? (goal.quickRounds ?? 0) + 1 : 0;
+      goals.update(workspaceId, task, { quickRounds });
+      if (quickRounds >= GOAL_QUICK_STALL) {
+        goals.update(workspaceId, task, { status: "stalled", quickRounds: 0,
+          note: `${quickRounds} rounds in a row ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal; check what the agent says it needs, then /goal resume` });
+        logger?.warn?.("ao.goal_quick_rounds_stalled", { task: task.slice(0, 8), round: goal.round, quickRounds });
+        return;
+      }
+      const pause = GOAL_QUICK_PAUSES_MS[Math.min(quickRounds, GOAL_QUICK_PAUSES_MS.length - 1)];
+      if (pause > 0) {
+        goals.update(workspaceId, task, { note: `Round ${goal.round} ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal (${quickRounds} in a row); the next round starts in ${pause < 60_000 ? `${pause / 1000} s` : `${pause / 60_000} min`}` });
+        logger?.info?.("ao.goal_round_paced", { task: task.slice(0, 8), round: goal.round, quickRounds, pauseMs: pause });
+        goalLater(workspaceId, task, pause, runId);
+        return;
+      }
       await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
     } finally {
       goalChecks.delete(guard);
@@ -6350,7 +6374,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Resuming carries on now: a pause still waiting is dropped.
     dropGoalRetry(id, task);
     invalidateGoal(goal);
-    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0 });
     const still = goalGuard(id, task, goal);
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
