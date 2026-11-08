@@ -66,6 +66,7 @@ import {
   selectChatGptModelFromList,
   selectChatGptPickerStop,
   readChatGptPickerStop,
+  readChatGptEffortTickSnapshot,
   CHATGPT_TURN_STOP_PREFIX,
 } from "../../chatgpt-session";
 import {
@@ -97,7 +98,6 @@ import {
   type ChatGptEffortSliderState,
 } from "../../chatgpt-ui/model-picker";
 import {
-  parseChatGptEffortTicks,
   recordChatGptEffortSnapshot,
   type ChatGptEffortSnapshot,
 } from "../../chatgpt-account-capabilities";
@@ -332,12 +332,8 @@ export async function recordChatGptEffortSnapshotInPassing(
   record: (snapshot: ChatGptEffortSnapshot) => boolean = recordChatGptEffortSnapshot,
 ): Promise<void> {
   try {
-    // Only the ticks carry both data-locked and data-selected; a locked tick is an upsell, not a choice.
-    const locks = await withChatGptBrowserObservationTimeout(sliderContainer.evaluate(container => Array.from(
-      container.querySelectorAll("[data-locked][data-selected]"),
-      tick => tick.getAttribute("data-locked"),
-    )));
-    const snapshot = parseChatGptEffortTicks(locks, sliderState.max - sliderState.min + 1);
+    // Setup's own tick reading: since 2026-11-08 an enabled slider's open ticks carry no data-locked.
+    const snapshot = await withChatGptBrowserObservationTimeout(readChatGptEffortTickSnapshot(sliderContainer, sliderState));
     if (snapshot) record(snapshot);
   } catch (error) {
     console.warn(`[chatgpt-web] effort availability was not recorded: ${error instanceof Error ? error.message : String(error)}`);

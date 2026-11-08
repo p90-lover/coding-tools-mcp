@@ -16,6 +16,7 @@ import {
   CHATGPT_MODEL_VIEW_TOGGLE_SELECTOR,
   CHATGPT_NEW_CHAT_URL,
   detectChatGptAccountCapabilities,
+  readChatGptPickerStop,
   selectChatGptModelFromList,
   selectChatGptPickerStop,
 } from "../src/chatgpt-session";
@@ -519,7 +520,7 @@ const TEAM_STOPS: Record<string, string[]> = {
  * model. Clicks act as ChatGPT does: the header opens the list; a row (only in the list) chooses
  * that model and returns to the slider. On Team "6" is the default, so it never reads as explicit.
  */
-function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; defaultModel?: string; stops?: string[]; locked?: string; disabled?: string; lockedStops?: string[]; statusOffset?: number; afterKey?: () => void; clickIgnored?: boolean; jumpy?: boolean } = {}) {
+function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; defaultModel?: string; stops?: string[]; locked?: string; disabled?: string; lockedStops?: string[]; statusOffset?: number; afterKey?: () => void; clickIgnored?: boolean; jumpy?: boolean; filledTicks?: boolean; fillOffset?: number; sliderDisabled?: string } = {}) {
   const { createDocument } = require("@mixmark-io/domino") as { createDocument(html: string): Document };
   const team = options.plan === "team";
   const stopsByModel = team ? TEAM_STOPS : PLUS_STOPS;
@@ -537,8 +538,15 @@ function modelListPicker(options: { plan?: "plus" | "team"; models?: string[]; d
   const render = () => createDocument(`<body><div role="menu" id="menu"><div data-model-picker-view="${state.view}">`
     + `<div data-explicit-model="${state.chosen !== defaultModel}"><div role="menuitem" aria-label="Select model" data-model-picker-view-toggle="true">`
     + `<div data-menu-row-content="true"><span>${stops()[state.value]}</span></div></div></div>`
-    + `<div data-model-picker-power-slider=""><span role="slider" aria-valuemin="0" aria-valuemax="${stops().length - 1}" aria-valuenow="${state.value}"></span>`
-    + stops().map((label, index) => `<span data-locked="${options.lockedStops?.includes(label) ?? false}" data-selected="${index === state.value}"></span>`).join("") + "</div>"
+    + (options.filledTicks
+      // Captured live 2026-11-08: only the root says data-locked; an open tick has none, and
+      // data-selected fills every tick up to the thumb (all five at Pro, four one stop left).
+      ? `<div data-model-picker-power-slider=""><span data-locked="false" data-orientation="horizontal" aria-disabled="${options.sliderDisabled ?? "false"}">`
+        + `<span data-orientation="horizontal">${stops().map((label, index) => `<span data-selected="${index <= state.value + (options.fillOffset ?? 0)}"`
+          + `${options.lockedStops?.includes(label) ? ' data-locked="true"' : ""}></span>`).join("")}</span>`
+        + `<span role="slider" aria-valuemin="0" aria-valuemax="${stops().length - 1}" aria-orientation="horizontal" data-orientation="horizontal" aria-hidden="true" aria-valuenow="${state.value}"></span></span></div>`
+      : `<div data-model-picker-power-slider=""><span role="slider" aria-valuemin="0" aria-valuemax="${stops().length - 1}" aria-valuenow="${state.value}"></span>`
+        + stops().map((label, index) => `<span data-locked="${options.lockedStops?.includes(label) ?? false}" data-selected="${index === state.value}"></span>`).join("") + "</div>")
     + `<div role="status">${stops()[state.value]}, ${state.value + 1 + (options.statusOffset ?? 0)} of ${stops().length}.</div>`
     + `<div><div data-menu-section-label="true">Select model</div><span id="locked-note">Locked, opens access options</span>${models.map(row).join("")}</div>`
     + "</div></div></body>").getElementById("menu")!;
@@ -661,6 +669,54 @@ test("the account probe reads GPT-6's own slider: Plus has no Extra High or Pro,
   await expect(detectChatGptAccountCapabilities(team.pageOver(reasoningPicker()) as never))
     .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
   expect(team.state.chosen).toBe("6");
+});
+
+/** The picker as captured live on 2026-11-08: GPT-6 checked, plain stop names, filled ticks. */
+function filledTickPicker(options: Parameters<typeof modelListPicker>[0] = {}) {
+  const picker = modelListPicker({ plan: "team", models: ["GPT-6", "GPT-5.6 Sol"], defaultModel: "GPT-6",
+    stops: ["Instant", "Medium", "High", "Extra High", "Pro"], filledTicks: true, ...options });
+  picker.state.value = 4;
+  return picker;
+}
+
+test("the 2026-11-08 slider (lock only on its root, ticks filled up to the thumb) is read, walked and probed", async () => {
+  // Every setup since then failed here ("did not settle on one stop"), so the bridge never started
+  // and Codex got no model list from it.
+  const read = filledTickPicker();
+  await expect(readChatGptPickerStop(read.menu as never, "GPT-6")).resolves.toMatchObject({
+    value: 4, label: "6 Pro", modelName: "GPT-6", locked: false,
+    snapshot: { ticks: [{ locked: false }, { locked: false }, { locked: false }, { locked: false }, { locked: false }] },
+  });
+
+  const walked = filledTickPicker();
+  const high = await selectChatGptPickerStop(walked.menu as never, walked.slider as never, "6 High", 50, "GPT-6");
+  expect(walked.label()).toBe("High");
+  expect(high.label).toBe("6 High");
+  expect(high.effortSnapshot?.ticks.map(tick => tick.locked)).toEqual([false, false, false, false, false]);
+
+  const probed = filledTickPicker();
+  await expect(detectChatGptAccountCapabilities(probed.pageOver(reasoningPicker()) as never))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: true, proAvailable: true });
+
+  // A plan without the top tiers still marks those ticks locked.
+  const plus = filledTickPicker({ lockedStops: ["Extra High", "Pro"] });
+  plus.state.value = 2;
+  await expect(detectChatGptAccountCapabilities(plus.pageOver(reasoningPicker()) as never))
+    .resolves.toEqual({ solAvailable: true, extraHighAvailable: false, proAvailable: false });
+});
+
+test("filled ticks behind the thumb, or a disabled slider's unmarked ticks, never count as a stop", async () => {
+  const lagging = filledTickPicker({ fillOffset: -1 });
+  await expect(readChatGptPickerStop(lagging.menu as never, "GPT-6")).resolves.toBeUndefined();
+  await expect(selectChatGptPickerStop(lagging.menu as never, lagging.slider as never, "6 High", 50, "GPT-6"))
+    .rejects.toThrow("did not settle");
+
+  const disabled = filledTickPicker({ sliderDisabled: "true" });
+  await expect(readChatGptPickerStop(disabled.menu as never, "GPT-6")).resolves.toBeUndefined();
+
+  // The earlier markup (every tick says data-locked, only the thumb's is selected) still reads.
+  const earlier = modelListPicker({ plan: "team" });
+  await expect(readChatGptPickerStop(earlier.menu as never, "6")).resolves.toMatchObject({ value: 3, label: "6 Extra High" });
 });
 
 const selectModelAndEffort = (ChatGptBrowserWorker.prototype as unknown as {
