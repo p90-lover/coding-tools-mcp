@@ -971,6 +971,27 @@ test("a screenshot tool's row shows its picture and what it said, not the pictur
   assert.ok(!bare.output.includes("iVBOR"));
 });
 
+test("a finished call or thought carries how long it took; a running one and an instant one carry none", async () => {
+  const at = seconds => new Date(Date.parse("2026-11-08T10:00:00Z") + seconds * 1000).toISOString();
+  const activity = (id, sequence, activityKind, status, from, to, detail = {}) => ({ id, turnId: "t", sequence, activityKind, status,
+    summary: activityKind === "reasoning" ? "Reasoning" : "Bash", createdAt: at(from), updatedAt: at(to), detail });
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation")
+      ? { turns: [{ id: "t", state: "running" }], messages: [], activities: [
+        activity("r", 1, "reasoning", "completed", 0, 4.2, { text: "Checking the build" }),
+        activity("c", 2, "mcp_tool", "completed", 5, 6.84, { input: { command: "npm test" }, output: "ok" }),
+        activity("i", 3, "mcp_tool", "completed", 7, 7, { input: { command: "ls" }, output: "a" }),
+        activity("w", 4, "mcp_tool", "running", 8, 20, { input: { command: "npm run build" } }),
+      ] }
+      : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const [thought, command, instant, running] = (await upstream.observe("s")).timeline;
+  assert.equal(thought.durationMs, 4200, "\"Thought for 4.2s\"");
+  assert.equal(command.durationMs, 1840);
+  assert.equal(instant.durationMs, undefined, "no time passed between its first and last update");
+  assert.equal(running.durationMs, undefined, "a running call has no duration yet");
+});
+
 test("a tool's row carries its arguments and output well past a few lines", async () => {
   const file = Array.from({ length: 300 }, (_, line) => `${line + 1}\tconst value${line} = ${line};`).join("\n");
   const upstream = observeHarness({

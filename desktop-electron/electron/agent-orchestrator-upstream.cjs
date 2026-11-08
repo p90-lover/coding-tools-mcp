@@ -893,23 +893,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // loop can tell a long call still within it from one whose result never came back.
     const stated = Number(input.timeout);
     const timeout = Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {};
+    // How long a finished call or thought took, from AO's first and last update of it, for the
+    // chat's "1.2s" and "Thought for 4s". Left out while it runs and when no time passed.
+    const begun = Date.parse(activity.createdAt ?? ""), ended = Date.parse(activity.updatedAt ?? "");
+    const took = !/^(running|pending|in_progress)$/i.test(base.status) && Number.isFinite(begun) && Number.isFinite(ended) && ended > begun
+      ? { durationMs: Math.min(ended - begun, 24 * 3600_000) } : {};
     // A file edit shows as Claude Code shows one: "Edited <file> +12 −3", opening on the diff.
     const edit = editedFiles(activity, detail, input);
-    if (edit) return { ...base, kind: "edit", label: edit.label, text: utf8Prefix(edit.files.map(file => file.path).join(", "), 400), files: edit.files };
+    if (edit) return { ...base, kind: "edit", label: edit.label, text: utf8Prefix(edit.files.map(file => file.path).join(", "), 400), files: edit.files, ...took };
     // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
     if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
-      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input), ...timeout };
+      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input), ...timeout, ...took };
     }
     if (activity.activityKind === "mcp_tool") {
       return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400),
-        ...toolDetails(detail, input), ...timeout };
+        ...toolDetails(detail, input), ...timeout, ...took };
     }
     // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
     // summary is only the word "Reasoning".
     if (activity.activityKind === "reasoning") {
       const text = typeof detail.text === "string" ? detail.text.trim() : "";
       // While the model thinks, its newest thought is the progress to show; once done, all of it.
-      return { ...base, kind: "reasoning", text: base.status === "running" ? utf8Suffix(text, 4096) : utf8Prefix(text, TIMELINE_TEXT_BYTES) };
+      return { ...base, kind: "reasoning", text: base.status === "running" ? utf8Suffix(text, 4096) : utf8Prefix(text, TIMELINE_TEXT_BYTES), ...took };
     }
     // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
     // out, or when the turn ends first. The agent then only says it was "blocked by permissions",

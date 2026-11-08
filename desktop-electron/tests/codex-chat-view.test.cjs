@@ -1451,11 +1451,11 @@ test("a working card's reasoning shows Codex-style: its title as one line, the r
   assert.match(text(reasoning), /Thought\s*Inspecting the register route/);
 });
 
-test("a tool call opens on what it ran and what came back, with a dot for how it ended (Claude Code's tool rows)", () => {
+test("a tool call opens on a card of what it ran and what came back, led by its kind's glyph (Claude Code's tool rows)", () => {
   const { props } = base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
     activity: { "r1:w": { activity: "running", last_event_at_ms: Date.now(), turn_started: true, timeline: [
-      { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool" },
+      { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool", durationMs: 1200 },
       { id: "m", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_file", input: "{\"path\":\"main.py\"}", output: "from fastapi import FastAPI" },
       { id: "p", kind: "tool", status: "pending", label: "Read", text: "Read x" }] } } });
   // Compact activity folds the run of calls into one line, named with DeepSeek's label for what is
@@ -1464,15 +1464,25 @@ test("a tool call opens on what it ran and what came back, with a dot for how it
   const group = walk(view.render()).find((element) => element.props?.className === "cx-activity-head");
   assert.match(text(group), /Reading files/);
   group.props.onClick();
-  const tools = walk(view.render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
-  const [command, mcp, waiting] = tools;
+  const rows = () => walk(view.render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
+  const [closed] = rows();
+  assert.doesNotMatch(text(closed), /User refused/, "a closed row draws no card");
+  // Opening a row (the browser's toggle event) draws its card.
+  for (const row of rows().filter((element) => element.type === "details")) row.props.onToggle({ currentTarget: { open: true } });
+  const [command, mcp, waiting] = rows();
   assert.equal(command.type, "details");
   assert.match(command.props.className, /tone-failed/);
+  assert.equal(command.props["data-family"], "command", "coloured as a command; the failure paints over it");
   assert.match(text(command), /Ran/);
+  assert.match(text(command), /1\.2s/, "how long it took, on the row");
   assert.match(text(command), /npm config list/);
+  assert.match(text(command), /Failed/);
   assert.match(text(command), /User refused permission to run tool/, "the output is in the opened row");
   assert.match(mcp.props.className, /tone-ok/);
-  assert.match(text(mcp), /"path":"main\.py"/);
+  assert.equal(mcp.props["data-family"], "read", "an MCP read_file is a read, whatever its label");
+  assert.match(text(mcp), /read_file/, "named by its tool, not by its MCP label");
+  assert.match(text(mcp), /coding-tools · read_file/, "its server and tool, opened");
+  assert.match(text(mcp), /path\s*main\.py/, "its arguments as names and values");
   assert.match(text(mcp), /from fastapi import FastAPI/);
   assert.equal(waiting.type, "div", "nothing to open on yet");
   assert.match(waiting.props.className, /tone-running/);
