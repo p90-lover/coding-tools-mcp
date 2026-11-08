@@ -27,9 +27,14 @@ const key = (value = "E", extra = {}) => ({
 });
 const configured = (api) => ({ ...plain(api.DEFAULT_CHAT_PAGES), enabled: true, pageCount: 3 });
 
-test("chat pages default off, and corrupt or out-of-range settings preserve usable defaults", () => {
+test("chat pages default on, an explicit off stays off, and corrupt or out-of-range settings preserve usable defaults", () => {
   const { api } = load();
   assert.deepEqual(plain(api.parseChatPagePreferences(null)), plain(api.DEFAULT_CHAT_PAGES));
+  // Nothing saved (the user's app on 2026-11-08): pages, their keys and the wheel all work.
+  assert.equal(api.DEFAULT_CHAT_PAGES.enabled, true);
+  assert.equal(api.parseChatPagePreferences(null).enabled, true);
+  assert.equal(api.parseChatPagePreferences('{"pageCount":3}').enabled, true, "a store without the switch is on");
+  assert.equal(api.parseChatPagePreferences('{"enabled":false,"pageCount":3}').enabled, false, "turned off in Settings stays off");
   for (const raw of ["broken", "null", "[]", '{"pageCount":0}', '{"pageCount":999}', '{"pageCount":2.5}']) {
     assert.equal(api.parseChatPagePreferences(raw).pageCount, 1);
   }
@@ -83,6 +88,83 @@ test("page keys never consume editing, dialogs, composition, repeats or an alrea
     { shiftKey: false }, { ctrlKey: true }, { target: { closest: () => ({}) } }]) {
     assert.equal(api.pageShortcutDirection(key("R", extra), preferences), 0);
   }
+});
+
+// A small stand-in for Element.closest over PAGE_KEYS_PAUSED's simple selectors: tags,
+// [attr], [attr="value"] and [attr]:not([attr="value"]), on an element and its ancestors.
+function element(tag, attributes = {}, parent = null, extra = {}) {
+  const matches = (node, selector) => {
+    const [, name = "", rest = ""] = /^([a-z]*)(.*)$/.exec(selector.trim());
+    if (name && node.tag !== name) return false;
+    for (const [, negate, attr, value] of rest.matchAll(/(:not\()?\[([a-z-]+)(?:="([^"]*)")?\]\)?/g)) {
+      const has = attr in node.attributes && (value === undefined || node.attributes[attr] === value);
+      if (negate ? has : !has) return false;
+    }
+    return true;
+  };
+  const node = { tag, attributes, parent, ...extra,
+    closest(selectors) {
+      for (let at = node; at; at = at.parent) if (selectors.split(",").some((selector) => matches(at, selector))) return at;
+      return null;
+    } };
+  return node;
+}
+
+test("Shift+Q / Shift+R never turn a page while focus is where typing goes", () => {
+  const { api } = load();
+  const preferences = configured(api);
+  const composer = element("textarea", { class: "cx-composer" });
+  const rich = element("div", { contenteditable: "" });
+  const typing = [
+    element("input", { type: "text" }), composer, element("select"), rich, element("span", {}, rich),
+    element("div", { role: "textbox" }), element("div", { role: "searchbox" }), element("div", { role: "combobox" }),
+    element("div", { role: "listbox" }), element("button", {}, element("div", { role: "dialog" })), element("div", { role: "menu" }),
+    element("div", {}, null, { isContentEditable: true }),
+  ];
+  for (const target of typing) {
+    assert.equal(api.pageShortcutDirection(key("R", { target }), preferences), 0, `${target.tag} ${JSON.stringify(target.attributes)}`);
+    assert.equal(api.pageShortcutDirection(key("Q", { target }), preferences), 0);
+  }
+  // Elsewhere they turn pages: the page body, a chat's button, a page tab, a switched-off editor.
+  for (const target of [element("body"), element("button", { role: "tab" }), element("div", { contenteditable: "false" }), null]) {
+    assert.equal(api.pageShortcutDirection(key("R", { target }), preferences), 1);
+    assert.equal(api.pageShortcutDirection(key("Q", { target }), preferences), -1);
+  }
+});
+
+test("only a sideways scroll turns pages over the chats; over the page tabs any scroll does", () => {
+  const { api } = load();
+  const wheel = (extra) => ({ deltaX: 0, deltaY: 0, deltaMode: 0, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, ...extra });
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100 }), false), 0, "scrolling messages never turns a page");
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, deltaX: 20 }), false), 0, "a mostly up/down scroll is no swipe");
+  assert.equal(api.pageWheelDelta(wheel({ deltaX: 100 }), false), 100, "a tilted wheel or touchpad swipe");
+  assert.equal(api.pageWheelDelta(wheel({ deltaX: -30, deltaY: 4 }), false), -30);
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, shiftKey: true }), false), 100, "Shift+wheel reported as deltaY");
+  assert.equal(api.pageWheelDelta(wheel({ deltaX: -100, shiftKey: true }), false), -100, "Shift+wheel reported as deltaX");
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: -3, deltaMode: 1 }), true), -48, "over the tabs, lines count as 16 px");
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100 }), true), 100, "over the tabs, down is the next page");
+  for (const modifier of ["ctrlKey", "metaKey", "altKey"]) {
+    assert.equal(api.pageWheelDelta(wheel({ deltaX: 100, [modifier]: true }), false), 0, `${modifier}+wheel is not a page turn`);
+    assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, [modifier]: true }), true), 0);
+  }
+});
+
+test("a scroll gesture turns one page at most, and one that starts up/down or is kept turns none", () => {
+  const { api } = load();
+  const run = (deltas, { step = 16, blocked } = {}) => {
+    const swipe = api.createPageSwipe();
+    return deltas.map((delta, index) => swipe(delta, 1000 + index * step, blocked)).filter(Boolean);
+  };
+  assert.deepEqual(run([100]), [1], "a wheel notch turns at once");
+  assert.deepEqual(run([-100]), [-1]);
+  assert.deepEqual(run([10, 10, 10, 10, 10, 10, 9, 9, 8, 6, 4, 3, 2, 1]), [1], "a touchpad swipe and its momentum: one page");
+  assert.deepEqual(run([100, 100, 100, 100]), [1], "notches in a burst: one page");
+  assert.deepEqual(run([100, 100], { step: 300 }), [1, 1], "notches apart: a page each");
+  assert.deepEqual(run([0, 30, 30, 30, 30]), [], "an up/down scroll drifting sideways never turns a page");
+  assert.deepEqual(run([30, -30, -30]), [-1], "a reversal counts afresh");
+  let asked = 0;
+  assert.deepEqual(run([60, 60, 60], { blocked: () => { asked++; return true; } }), [], "a wide code block keeps its own swipe");
+  assert.equal(asked, 1, "what is under the pointer is read once per gesture, not per event");
 });
 
 test("page navigation wraps in both directions without making a new page", () => {
@@ -204,6 +286,40 @@ test("a chat handed on never returns to a page that already had no room, and pag
   off.room(1, false);
   assert.equal(off.registry.openElsewhere(1, ask), false, "without page tabs a chat never moves to a page no one can see");
   assert.equal(api.createChatPageRegistry(() => {}).openElsewhere(1, ask), false, "no layout: no pages to go to");
+});
+
+test("with nothing saved, a plain New chat on a full page adds page 2, keeps it and waits there", () => {
+  const { api, values } = load();
+  const failures = [];
+  const latest = { current: api.parseChatPagePreferences(null) };
+  const seen = [];
+  const registry = api.createChatPageRegistry((page) => seen.push(page), api.chatPageLayout(latest, (message) => failures.push(message)));
+  registry.register(1, [], () => {}, { room: () => false });
+  assert.equal(registry.openElsewhere(1, ask), true, "not only Shift+New chat: the page tabs need no switching on first");
+  assert.deepEqual(seen, [2]);
+  assert.equal(JSON.parse(values.get(api.CHAT_PAGES_STORE)).pageCount, 2, "the new page is kept for the next start");
+  assert.equal(latest.current.pageCount, 2);
+  assert.deepEqual(plain(registry.takeOpen(2)), { ...ask, tried: [1] });
+  assert.deepEqual(failures, []);
+});
+
+test("the page layout stops at twelve pages, does nothing while pages are off, and reports a failed save", () => {
+  const { api, localStorage } = load();
+  const failures = [];
+  const latest = { current: { ...plain(api.DEFAULT_CHAT_PAGES), pageCount: 12 } };
+  const layout = api.chatPageLayout(latest, (message) => failures.push(message));
+  assert.equal(layout.count(), 12);
+  assert.equal(layout.canAdd(), false, "twelve pages: the cap");
+  latest.current = { ...latest.current, enabled: false, pageCount: 3 };
+  assert.equal(layout.count(), 0, "pages off: no page to hand a chat to");
+  assert.equal(layout.canAdd(), false);
+  latest.current = { ...latest.current, enabled: true };
+  localStorage.setItem = () => { throw new Error("storage full"); };
+  assert.equal(layout.add(), false);
+  assert.equal(latest.current.pageCount, 3, "a failed save adds no page");
+  // The error comes from this realm, not the module's, so it reads "Error: storage full" here.
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /storage full/);
 });
 
 // Execute the production callbacks so these checks cover the integration, not a copy of it.
