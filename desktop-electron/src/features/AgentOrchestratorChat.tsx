@@ -28,7 +28,7 @@ import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
@@ -1829,9 +1829,13 @@ export function AgentOrchestratorChat({
     const marked = attachments.map((item) => item.markup ?? "").filter(Boolean);
     const body = chatMessageWithAttachments([...marked, draft.trim()].filter(Boolean).join("\n\n"), attachments);
     const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
-    // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
-    if (text.length > CHAT_MESSAGE_LIMIT) {
-      say("Too long", `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
+    // The chat sends at most 8,192 characters and CHAT_MESSAGE_BYTES bytes; a longer one failed
+    // after it left the composer ("task record is full"). It stays here, with what to do.
+    if (!chatMessageFits(text)) {
+      const bytes = chatMessageBytes(text);
+      say("Too long", text.length > CHAT_MESSAGE_LIMIT
+        ? `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`
+        : `This message is ${bytes.toLocaleString()} bytes. The limit is ${CHAT_MESSAGE_BYTES.toLocaleString()} (non-Latin text and emoji take 3 to 4 bytes a character). Shorten it or send it in parts.`);
       return;
     }
     if (queueing || queueWhileSending) {

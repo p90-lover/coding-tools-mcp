@@ -122,6 +122,20 @@ test("queued annotated messages join into one block numbered across both, and a 
   const big = "x".repeat(6000);
   const apart = chat.chatQueueAdd([{ what: "Message", message: big }], { what: "Message", message: big });
   assert.equal(apart.length, 2, "two messages that together pass 8,192 characters are sent one after the other");
+  // In bytes too: two Chinese messages under the character limit joined past the bridge's byte budget.
+  const cjk = "字".repeat(1500);
+  assert.equal(chat.chatQueueAdd([{ what: "Message", message: cjk }], { what: "Message", message: cjk }).length, 2, "4,500 + 4,500 bytes stay two messages");
+});
+
+test("the composer counts a message in UTF-8 bytes against the bridge's budget, not only in characters", () => {
+  assert.equal(chat.CHAT_MESSAGE_BYTES, 7936);
+  for (const [text, bytes] of [["a", 1], ["é", 2], ["字", 3], ["😀", 4], ["a字😀", 8]]) {
+    assert.equal(chat.chatMessageBytes(text), bytes, text);
+    assert.equal(chat.chatMessageBytes(text), Buffer.byteLength(text, "utf8"), `${text} as Node counts it`);
+  }
+  assert.equal(chat.chatMessageFits("a".repeat(7936)), true);
+  assert.equal(chat.chatMessageFits("a".repeat(7937)), false, "one byte over the budget");
+  assert.equal(chat.chatMessageFits("字".repeat(2700)), false, "2,700 characters, 8,100 bytes: refused before it is sent");
 });
 
 test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek Harness's", () => {
@@ -1867,6 +1881,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
       const text = chat.chatMessageWithAnnotations(chat.chatMessageWithAttachments(state.draft, state.attachments), state.annotations);
       const submit = rendererCallback("AgentOrchestratorChat.tsx", "submit", { ...globals(), commands: undefined, chatSlashParse: chat.chatSlashParse, chatMessageWithAttachments: chat.chatMessageWithAttachments,
         chatMessageWithAnnotations: chat.chatMessageWithAnnotations, canSend: true, queueing: true, queueWhileSending: false, CHAT_MESSAGE_LIMIT: 8192, enqueue,
+        CHAT_MESSAGE_BYTES: chat.CHAT_MESSAGE_BYTES, chatMessageBytes: chat.chatMessageBytes, chatMessageFits: chat.chatMessageFits,
         say: rendererCallback("AgentOrchestratorChat.tsx", "say", { setCard: set("card") }) });
       await submit(); renderSnapshot();
       return { text, queuedTask, fail: async () => { reply.reject(new Error("queue unavailable")); await new Promise(setImmediate); } };

@@ -11,6 +11,24 @@ const fs = require("node:fs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const OBJECTIVE_LIMIT = 2000;
+// A goal's condition and each round's message, in UTF-8 bytes: 2,000 characters of Chinese or emoji
+// passed the character limit at up to 8 KB and every round failed to send. GOAL_MESSAGE_BYTES is the
+// chat's message budget (agent-orchestrator-workflow.cjs CHAT_MESSAGE_BYTES, checked by a test).
+const OBJECTIVE_BYTES = 6000;
+const GOAL_MESSAGE_BYTES = 8192 - 256;
+const utf8Bytes = (text) => Buffer.byteLength(text, "utf8");
+/** The start of a text within a UTF-8 byte budget, never splitting a character. */
+function utf8Head(text, bytes) {
+  if (utf8Bytes(text) <= bytes) return text;
+  let used = 0, end = "";
+  for (const char of text) {
+    const size = utf8Bytes(char);
+    if (used + size > Math.max(0, bytes - 3)) break;
+    used += size;
+    end += char;
+  }
+  return `${end}…`;
+}
 const STATUSES = new Set(["active", "paused", "achieved", "stalled", "limited"]);
 // How much of a round the evaluator reads, the end kept: an agent's conclusion comes last.
 const TRANSCRIPT_LIMIT = 24_000;
@@ -24,9 +42,15 @@ const REASON_LIMIT = 1_500;
  * evaluator's reason it is not met yet.
  */
 function goalMessage(objective, round, reason = "") {
-  if (round <= 1) return objective;
+  if (round <= 1) return utf8Head(objective, GOAL_MESSAGE_BYTES);
   const why = String(reason || "").trim() || "The condition is not met yet; continue from where the last round left off.";
-  return `Stop hook feedback:\n[${objective}]: ${why}`;
+  // A round's message is a chat message: within the chat's byte budget, or the round could not be
+  // sent and the goal stalled. The evaluator's reason gives way first, then the condition's end.
+  const frame = (goal, said) => `Stop hook feedback:\n[${goal}]: ${said}`;
+  const whole = frame(objective, why);
+  if (utf8Bytes(whole) <= GOAL_MESSAGE_BYTES) return whole;
+  const goal = utf8Head(objective, GOAL_MESSAGE_BYTES - utf8Bytes(frame("", "")) - 400);
+  return frame(goal, utf8Head(why, GOAL_MESSAGE_BYTES - utf8Bytes(frame(goal, ""))));
 }
 
 /**
@@ -128,6 +152,7 @@ function cleanObjective(value) {
   const text = String(value ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").trim();
   if (!text) throw new Error("Describe your goal, e.g. /goal make every test pass");
   if (text.length > OBJECTIVE_LIMIT) throw new Error(`A goal can be at most ${OBJECTIVE_LIMIT} characters`);
+  if (utf8Bytes(text) > OBJECTIVE_BYTES) throw new Error(`A goal can be at most ${OBJECTIVE_BYTES.toLocaleString("en-US")} bytes; this one is ${utf8Bytes(text).toLocaleString("en-US")}. Shorten it`);
   return text;
 }
 
@@ -216,4 +241,4 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   };
 }
 
-module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore };
+module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, GOAL_MESSAGE_BYTES };
