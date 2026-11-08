@@ -19,6 +19,7 @@ import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotati
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
+import { ChatScrollToBottom } from "./ChatScrollToBottom";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
@@ -1244,6 +1245,8 @@ export function AgentOrchestratorChat({
     return () => document.removeEventListener("pointerdown", outside);
   }, [projectPicker]);
   const [atBottom, setAtBottom] = useState(true);
+  // Set while the ↓ button's smooth scroll runs: its in-between scroll events are not the user leaving.
+  const jumpingToBottom = useRef(false);
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -1388,20 +1391,29 @@ export function AgentOrchestratorChat({
   [detailsOpen, turns, detailsWorkTick]);
   // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
   // stream and flashes the ↓ button. Only that button scrolls smoothly.
-  useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" }); }, [turns.length, stepCount, atBottom]);
+  // A send or a chat switch sets atBottom: that re-arms following too.
+  useEffect(() => {
+    if (!atBottom || jumpingToBottom.current) return;
+    following.current = true;
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
+  }, [turns.length, stepCount, atBottom]);
   // A running step grows without a new turn or step (each tool call, each streamed line): the
   // thread follows any growth of its content while it is read at the bottom.
   const column = useRef<HTMLDivElement>(null);
   // A click in the thread (opening "Worked", a group, a tool's output) grows it too, but that is the
   // user reading: the view stays on what they opened and following stops if it left the bottom.
+  // Only a person moving away ends following (wheel, touch, pointer, or scrolling up), so layout and
+  // scroll anchoring can't switch it off while an answer grows; the scroll handler below sets it.
   const following = useRef(atBottom);
-  following.current = atBottom;
+  const lastScrollTop = useRef(0);
   const clicked = useRef(false);
+  useEffect(() => { jumpingToBottom.current = false; following.current = true; lastScrollTop.current = 0; }, [selectedTaskId]);
   useEffect(() => {
     const box = scroller.current, content = column.current;
     if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => {
-      if (clicked.current) { clicked.current = false; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); return; }
+      if (jumpingToBottom.current) return;
+      if (clicked.current) { clicked.current = false; following.current = box.scrollHeight - box.scrollTop - box.clientHeight <= 24; setAtBottom(following.current); return; }
       // Instant, like the follow above: setting scrollTop obeys the theme's smooth scrolling, and the
       // animation's in-between scroll events read as "left the bottom" and ended following. Seen
       // live: right after a send (the thread grows a lot at once) the view stopped on an older
@@ -1409,6 +1421,7 @@ export function AgentOrchestratorChat({
       if (following.current) box.scrollTo({ top: box.scrollHeight, behavior: "instant" });
     });
     observer.observe(content);
+    observer.observe(box);
     return () => observer.disconnect();
   }, [selectedTaskId]);
   // Compact activity (the header's toggle): tool calls and thinking fold into one line per run.
@@ -1798,6 +1811,16 @@ export function AgentOrchestratorChat({
   // The "waiting for you" line's Answer (WaitingAnswer): the request the turn waits on, brought into
   // view with its first choice focused.
   const approvalDock = useRef<HTMLDivElement>(null);
+  // The dock floats over the thread's foot, where the ↓ button sits: the button rises above it.
+  const docked = approvals.length > 0 || computerRequests.length > 0;
+  const [dockHeight, setDockHeight] = useState(0);
+  useEffect(() => {
+    const dock = approvalDock.current;
+    if (!docked || !dock || typeof ResizeObserver === "undefined") { setDockHeight(0); return undefined; }
+    const observer = new ResizeObserver(() => setDockHeight(dock.offsetHeight));
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, [docked]);
   const answerRequest = approvals.length || computerRequests.length ? () => {
     const dock = approvalDock.current;
     if (!dock) return;
@@ -2609,7 +2632,21 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
         })() : null}
 
         <div className="cx-scroll" ref={scroller}
-          onScroll={(event) => { const box = event.currentTarget; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); }}>
+          onWheel={() => { jumpingToBottom.current = false; following.current = false; }}
+          onTouchStart={() => { jumpingToBottom.current = false; following.current = false; }}
+          onPointerDown={() => { jumpingToBottom.current = false; following.current = false; }}
+          onScroll={(event) => {
+            const box = event.currentTarget, bottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 24;
+            const movedUp = box.scrollTop < lastScrollTop.current - 1;
+            lastScrollTop.current = box.scrollTop;
+            if (jumpingToBottom.current && !bottom) return;
+            jumpingToBottom.current = false;
+            // Layout and scroll anchoring emit scroll events too. Only a person moving away
+            // ends following; a growing answer must not turn it off before ResizeObserver runs.
+            if (bottom) following.current = true;
+            else if (movedUp) following.current = false;
+            if (bottom || !following.current) setAtBottom(bottom);
+          }}>
           <div className="cx-column" ref={column} onClickCapture={() => {
             // Only the growth a click causes (in its next frame or so) counts as the user's.
             clicked.current = true;
@@ -2653,9 +2690,16 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               })}
             </div></div> : null}
           </div>
-          {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
-            onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
         </div>
+        <ChatScrollToBottom show={!atBottom} working={anyWorking} lift={dockHeight ? dockHeight + 20 : 0} onClick={() => {
+          const box = scroller.current;
+          if (!box) return;
+          jumpingToBottom.current = true;
+          following.current = true;
+          const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+          box.scrollTo({ top: box.scrollHeight, behavior: reducedMotion ? "instant" : "smooth" });
+          if (box.scrollHeight - box.scrollTop - box.clientHeight <= 24) { jumpingToBottom.current = false; setAtBottom(true); }
+        }} />
 
         {!selectedTaskId && !deciding ? <div className="cx-context-strip" aria-label="Where this chat runs">
           {/* Codex's context chips are menus: the project picker, where it runs, and its environment. */}

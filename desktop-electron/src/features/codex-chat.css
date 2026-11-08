@@ -1215,8 +1215,24 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-model-judges.is-compact { flex: none; gap: 6px; font-size: 11px; white-space: nowrap; }
 .cx-auto-retry:has(input:disabled) { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .cx-switch, .cx-switch::after { transition: none; } }
-.cx-to-bottom { position: sticky; bottom: 12px; left: 50%; display: grid; place-items: center; width: 32px; height: 32px; margin: -44px auto 12px; border: 1px solid var(--ao-line);
-  border-radius: 50%; background: var(--color-bg-primary); box-shadow: 0 4px 14px rgb(0 0 0 / 12%); color: var(--color-text-primary); cursor: pointer; }
+/* Codex B6l/je: anchored outside the scroller, not a sticky item at the end of its content. */
+.cx-scroll-bottom-anchor { position: relative; z-index: 30; flex: 0 0 0; height: 0; min-height: 0; pointer-events: none; }
+.cx-to-bottom { position: absolute; right: 50%; bottom: 24px; display: flex; align-items: center; justify-content: center; box-sizing: border-box; width: 32px; height: 32px; margin: 0; padding: 0;
+  border: 1px solid var(--ao-line); border-radius: 50%; background: var(--color-bg-primary); background-clip: padding-box; box-shadow: none; color: var(--color-text-secondary); cursor: pointer;
+  opacity: 0; pointer-events: none; transform: translateX(50%); transition: opacity 150ms ease-in-out, bottom 150ms ease-in-out; }
+.cx-to-bottom.is-visible { opacity: 1; pointer-events: auto; }
+.cx-to-bottom:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; }
+.cx-scroll-arrow { flex: none; color: var(--color-text-primary); }
+.cx-scroll-working { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.cx-scroll-working > span { width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: .7; animation: cx-scroll-dot-wave 1.2s ease-in-out infinite; }
+.cx-scroll-working > span:nth-child(2) { animation-delay: .15s; }
+.cx-scroll-working > span:nth-child(3) { animation-delay: .3s; }
+.cx-to-bottom.is-working .cx-scroll-arrow { display: none; }
+.cx-to-bottom:is(:hover, :focus-visible) .cx-scroll-working { display: none; }
+.cx-to-bottom.is-working:is(:hover, :focus-visible) .cx-scroll-arrow { display: block; }
+@keyframes cx-scroll-dot-wave { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .cx-to-bottom { transition: none; } .cx-scroll-working > span { animation: none; } }
+@media print { .cx-scroll-bottom-anchor { display: none; } }
 
 /* Markdown answers */
 .cx-md { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }

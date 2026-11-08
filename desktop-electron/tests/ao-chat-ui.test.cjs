@@ -47,7 +47,7 @@ const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./chat-transcript": load("chat-transcript.ts", { "./ao-chat": chat }), "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./image-markup": load("image-markup.ts"),
-  "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
+  "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"), "./ChatScrollToBottom": load("ChatScrollToBottom.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client, "./page-visibility": visibility }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
