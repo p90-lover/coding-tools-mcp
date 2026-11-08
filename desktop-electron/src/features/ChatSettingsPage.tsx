@@ -294,15 +294,15 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
               </Row>
             </Group>
             <Group title="Chat pages">
-              <Row label="Show page tabs" description="Keep separate sets of chat sessions on pages. Hiding the tabs keeps your current page and running chats">
-                <Toggle label="Show page tabs" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
+              <Row label="Use pages" description="When every screen on a page holds a chat, New chat opens on the next page. Turning pages off keeps your current page and running chats">
+                <Toggle label="Use pages" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
               </Row>
               <Row label="Open pages" description={`${pages.pageCount} of ${CHAT_PAGE_LIMIT} pages. Each new page starts with a new chat and keeps its own split layout`}>
                 <button type="button" className="cxs-button" disabled={!pages.enabled || pages.pageCount >= CHAT_PAGE_LIMIT}
                   onClick={() => setPagePreference({ pageCount: pages.pageCount + 1 })}>Add page</button>
               </Row>
-              <Row label="Scroll over the page bar to switch" description="Over the page bar, scroll up for the previous page and down for the next. Scrolling messages stays unchanged">
-                <Toggle label="Scroll over the page bar to switch" checked={pages.wheel} disabled={!pages.enabled}
+              <Row label="Scroll to switch pages" description="Scroll over the page numbers, or sideways anywhere in Chat (a touchpad swipe or Shift+scroll). Scrolling messages stays unchanged">
+                <Toggle label="Scroll to switch pages" checked={pages.wheel} disabled={!pages.enabled}
                   onChange={(wheel) => setPagePreference({ wheel })} />
               </Row>
               <Row label="Page keyboard shortcuts" description="Switch pages without clicking. Shortcuts pause while typing or using a dialog">
