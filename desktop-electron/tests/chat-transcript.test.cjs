@@ -92,6 +92,61 @@ test("no tools and unverified edits do not invent changed files", () => {
   assert.equal(summary.text, "Made an edit");
 });
 
+test("each work step gets the colour family of what it did, whatever label or harness named it", () => {
+  const family = (kind, extra = {}) => transcript.stepFamily(item(`${kind}${JSON.stringify(extra)}`, kind, extra.text ?? "", extra));
+  assert.equal(family("reasoning"), "think");
+  assert.equal(family("command", { text: "npm test" }), "command");
+  assert.equal(family("edit"), "edit");
+  // ACP's tool kinds arrive as labels; an MCP tool by its own name, not its "MCP" label.
+  assert.equal(family("tool", { label: "Read", text: "Read src/app.ts" }), "read");
+  assert.equal(family("tool", { label: "Search", text: "Grep" }), "search");
+  assert.equal(family("tool", { label: "Fetch", text: "WebFetch" }), "web");
+  assert.equal(family("tool", { label: "Thought", text: "think" }), "think");
+  assert.equal(family("tool", { label: "Command", text: "Bash" }), "command");
+  assert.equal(family("tool", { label: "MCP", text: "mcp__coding-tools__read_file" }), "read");
+  assert.equal(family("tool", { label: "MCP", text: "mcp__claude-artifacts__publish_version" }), "tool");
+  assert.equal(family("tool", { label: "Tool", text: "update_plan" }), "plan");
+  assert.equal(family("tool", { text: "subagent_start" }), "agent");
+  // Native Codex steps carry only a label.
+  assert.equal(family("tool", { label: "Edited", text: "app.ts" }), "edit");
+  assert.equal(family("tool", { label: "Web search", text: "release notes" }), "web");
+  assert.equal(family("approval", { label: "Approval timed out" }), "approval");
+  assert.equal(family("system"), "note");
+});
+
+test("a fold's chips count each family once per step, failures apart, in reading order", () => {
+  const items = [item("r1", "reasoning", "Plan"), item("c1", "command", "npm test", { status: "failed" }), item("c1", "command", "npm test", { status: "failed" }),
+    item("t1", "tool", "Read a.ts", { label: "Read" }), item("r2", "reasoning", "Fix"), item("c2", "command", "npm test"), message("m", "Done."),
+    item("e1", "edit", "a.ts", { files: [{ path: "a.ts", additions: 2, deletions: 1 }] })];
+  assert.deepEqual(plain(transcript.stepFamilyCounts(items)), [
+    { family: "think", count: 2, failed: 0 }, { family: "read", count: 1, failed: 0 },
+    { family: "command", count: 2, failed: 1 }, { family: "edit", count: 1, failed: 0 },
+  ], "a repeated id is one step, and a message is not a step");
+  assert.equal(transcript.stepFamilyNoun("command", 1), "1 command");
+  assert.equal(transcript.stepFamilyNoun("search", 3), "3 searches");
+  assert.equal(transcript.stepFamilyNoun("web", 2), "2 web lookups");
+});
+
+test("a step's time reads in tenths under ten seconds, then as the turn's own durations", () => {
+  assert.equal(transcript.stepDuration(undefined), "");
+  assert.equal(transcript.stepDuration(0), "");
+  assert.equal(transcript.stepDuration(40), "0.1s", "an instant call still shows it was timed");
+  assert.equal(transcript.stepDuration(1840), "1.8s");
+  assert.equal(transcript.stepDuration(9_960), "10s", "whole seconds from ten on, never \"10.0s\"");
+  assert.equal(transcript.stepDuration(42_000), "42s");
+  assert.equal(transcript.stepDuration(113_000), "1m 53s");
+});
+
+test("a turn's tone follows its completion words: failed, stopped, waiting, done", () => {
+  const base = { steps: [], status: "done" };
+  assert.equal(transcript.transcriptTone(base), "done");
+  assert.equal(transcript.transcriptTone({ ...base, steps: [{ error: "Blocked" }] }), "failed");
+  assert.equal(transcript.transcriptTone({ ...base, final: { error: "Blocked" } }), "failed");
+  assert.equal(transcript.transcriptTone({ ...base, status: "stopped" }), "stopped");
+  assert.equal(transcript.transcriptTone({ ...base, status: "attention" }), "waiting");
+  assert.equal(transcript.transcriptTone({ ...base, status: "running" }), "working");
+});
+
 test("completed turn is distinct from achieved goal and preserves non-success states", () => {
   const base = { steps: [], status: "done", startedAtMs: 1000, endedAtMs: 4000 };
   // Codex's words for folded work.

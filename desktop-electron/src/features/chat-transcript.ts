@@ -64,6 +64,79 @@ export function transcriptSummary(items: ChatLiveItem[]) {
     deletions: changed.reduce((total, file) => total + file.deletions, 0) };
 }
 
+/**
+ * The colour family a work step is drawn in: what kind of work it was, not how it ended (a failed
+ * step keeps its family and turns red on top). Native Codex steps carry only a label ("Edited",
+ * "Web search"), and ACP's tool kinds arrive as labels too ("Thought", "Command", "Plan").
+ */
+export type StepFamily = "think" | "command" | "read" | "search" | "edit" | "web" | "plan" | "agent" | "ask" | "tool" | "approval" | "note";
+
+export function stepFamily(item: ChatLiveItem): StepFamily {
+  if (item.kind === "reasoning") return "think";
+  if (item.kind === "approval") return "approval";
+  if (item.kind === "user_input") return "ask";
+  if (!["command", "tool", "edit"].includes(item.kind)) return "note";
+  const label = (item.label ?? "").trim().toLowerCase();
+  if (label === "edited" || label === "created") return "edit";
+  if (label === "web search") return "web";
+  if (label === "thought") return "think";
+  if (label === "command") return "command";
+  if (label === "plan") return "plan";
+  // "MCP" and "Tool" say nothing about the work; the tool's own name does.
+  const call = label === "mcp" || label === "tool" ? { ...item, label: undefined } : item;
+  switch (dshActivity(call)) {
+    case "commands": case "code": return "command";
+    case "read": case "readImage": return "read";
+    case "search": return "search";
+    case "edit": case "write": return "edit";
+    case "webSearch": case "webFetch": return "web";
+    case "plan": return "plan";
+    case "subagents": return "agent";
+    case "questions": return "ask";
+    default: return "tool";
+  }
+}
+
+/** The families a work fold's chips count, in the order they read best. */
+const FAMILY_ORDER: StepFamily[] = ["think", "read", "search", "command", "edit", "web", "tool", "agent", "plan", "ask"];
+const FAMILY_NOUN: Record<StepFamily, [string, string]> = {
+  think: ["thought", "thoughts"], command: ["command", "commands"], read: ["read", "reads"], search: ["search", "searches"],
+  edit: ["edit", "edits"], web: ["web lookup", "web lookups"], plan: ["plan update", "plan updates"], agent: ["subagent", "subagents"],
+  ask: ["question", "questions"], tool: ["tool call", "tool calls"], approval: ["approval", "approvals"], note: ["note", "notes"],
+};
+export const stepFamilyNoun = (family: StepFamily, count: number) => `${count} ${FAMILY_NOUN[family][count === 1 ? 0 : 1]}`;
+
+/** Each family's steps in a stretch of work, counted once per step, plus how many of them failed. */
+export function stepFamilyCounts(items: ChatLiveItem[]): { family: StepFamily; count: number; failed: number }[] {
+  const counts = new Map<StepFamily, { count: number; failed: number }>();
+  for (const item of new Map(items.map((entry) => [entry.id, entry])).values()) {
+    if (!["command", "tool", "edit", "reasoning"].includes(item.kind)) continue;
+    const family = stepFamily(item);
+    const known = counts.get(family) ?? { count: 0, failed: 0 };
+    known.count += 1;
+    if (FAILED.test(item.status) || /^Denied\b/i.test(item.approval ?? "")) known.failed += 1;
+    counts.set(family, known);
+  }
+  return FAMILY_ORDER.filter((family) => counts.has(family)).map((family) => ({ family, ...counts.get(family)! }));
+}
+
+/** A step's time as the row shows it: tenths under ten seconds ("0.4s", "3.2s"), then "42s", "1m 53s". */
+export function stepDuration(ms?: number): string {
+  if (!ms || !Number.isFinite(ms) || ms <= 0) return "";
+  const tenths = Math.round(Math.max(ms, 100) / 100) / 10;
+  if (tenths < 10) return `${tenths.toFixed(1)}s`;
+  return ms < 59_500 ? `${Math.round(ms / 1000)}s` : dshDuration(ms);
+}
+
+/** How a turn's work ended, for the colour of its "Worked for" line (transcriptCompletion's words). */
+export function transcriptTone(turn: ChatTurn): "failed" | "stopped" | "waiting" | "done" | "working" {
+  const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
+  if (steps.some((step) => step.error)) return "failed";
+  if (turn.status === "stopped") return "stopped";
+  if (turn.status === "attention" || turn.status === "paused") return "waiting";
+  return turn.status === "done" ? "done" : "working";
+}
+
 /** Ending a model turn is not evidence that the person's mission or goal succeeded. */
 export function transcriptCompletion(turn: ChatTurn): string {
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];

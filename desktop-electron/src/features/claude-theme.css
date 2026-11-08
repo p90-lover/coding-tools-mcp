@@ -39,6 +39,18 @@
   --ao-red: #c2463a;
   --ao-green: #5c8b3b;
   --ao-amber: #b8801a;
+  /* Step families (codex-chat.css): each kind of work step's colour, readable as text on the canvas. */
+  --cx-k-think: #7c3aed;
+  --cx-k-command: #0f766e;
+  --cx-k-read: #2563eb;
+  --cx-k-search: #b45309;
+  --cx-k-edit: #c2410c;
+  --cx-k-web: #0e7490;
+  --cx-k-plan: #4f46e5;
+  --cx-k-agent: #be185d;
+  --cx-k-ask: #a16207;
+  --cx-k-tool: #a21caf;
+  --cx-k-approval: #047857;
   --cx-hover: rgb(31 30 29 / 5%);
   --cx-active: rgb(31 30 29 / 8%);
   --cx-bubble: var(--claude-bubble);
@@ -71,6 +83,17 @@
   --ao-red: #e5695c;
   --ao-green: #8bbf6a;
   --ao-amber: #d9a441;
+  --cx-k-think: #a78bfa;
+  --cx-k-command: #2dd4bf;
+  --cx-k-read: #60a5fa;
+  --cx-k-search: #fbbf24;
+  --cx-k-edit: #fb923c;
+  --cx-k-web: #22d3ee;
+  --cx-k-plan: #818cf8;
+  --cx-k-agent: #f472b6;
+  --cx-k-ask: #facc15;
+  --cx-k-tool: #e879f9;
+  --cx-k-approval: #34d399;
   --cx-hover: rgb(250 249 245 / 6%);
   --cx-active: rgb(250 249 245 / 10%);
   color-scheme: dark;
@@ -220,6 +243,22 @@
 .ao-workflow .cx-chat .cx-reasoning-body .cx-md { color: var(--claude-text-2); font-size: 13px; line-height: 1.6; }
 .ao-workflow .cx-chat .cx-shimmer { background-image: linear-gradient(90deg, var(--claude-text-2) 0%, var(--claude-text) 50%, var(--claude-text-2) 100%);
   animation-duration: 2.8s; animation-timing-function: steps(84); }
+/* Step rows lead with their family's glyph (codex-chat.css "Step families"): names in its colour,
+   the glyph taking the place the dot and the 14px indent held, opened cards ruled in its colour. */
+.ao-workflow .cx-chat .cx-tool summary, .ao-workflow .cx-chat .cx-tool-row, .ao-workflow .cx-chat .cx-reasoning summary { align-items: flex-start; }
+.ao-workflow .cx-chat .cx-tool[data-family] summary .cx-live-label, .ao-workflow .cx-chat .cx-tool[data-family] .cx-tool-row .cx-live-label,
+.ao-workflow .cx-chat .cx-live-item.kind-reasoning .cx-reasoning[data-family] .cx-live-label { color: var(--cx-k); font-weight: 500; }
+.ao-workflow .cx-chat .cx-tool.tone-failed[data-family] summary .cx-live-label, .ao-workflow .cx-chat .cx-tool.tone-failed[data-family] .cx-tool-row .cx-live-label { color: var(--ao-red); }
+.ao-workflow .cx-chat .cx-live-item.kind-reasoning { padding-left: 0; }
+.ao-workflow .cx-chat .cx-live-item:not(.kind-message):not(.kind-tool):not(.kind-command):not(.kind-reasoning):not(.kind-steer):has(> .cx-step-glyph) { padding-left: 0; }
+.ao-workflow .cx-chat .cx-tool-body.cx-step-card { margin: 4px 0 8px 8px; }
+.ao-workflow .cx-chat .cx-live-item.kind-reasoning .cx-reasoning[data-family] > .cx-reasoning-body { margin: 2px 0 8px 8px; padding: 6px 10px 6px 12px;
+  border-left: 2px solid var(--cx-k); border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--cx-k) 5%, transparent); }
+.ao-workflow .cx-chat .cx-step-card .cx-tool-io { background: var(--claude-bg); }
+.ao-workflow .cx-chat .cx-step-card .cx-step-args { border-color: var(--claude-line-soft); background: var(--claude-bg); }
+.ao-workflow .cx-chat .cx-glyph-stack > .cx-step-glyph { background: color-mix(in srgb, var(--cx-k) 24%, var(--claude-bg)); box-shadow: 0 0 0 1.5px var(--claude-bg); }
+.ao-workflow .cx-chat .cx-work-head .cx-work-state.is-failed { color: var(--ao-red); }
+.ao-workflow .cx-chat .cx-work-head .cx-work-state.is-stopped, .ao-workflow .cx-chat .cx-work-head .cx-work-state.is-waiting { color: var(--ao-amber); }
 
 /* ---------- Cards: approvals, questions, plans, errors ---------- */
 .ao-workflow .cx-chat .ao-msg-approval, .ao-workflow .cx-chat .cx-card { padding: 14px 16px; border: 1px solid var(--claude-line); border-radius: 12px;
