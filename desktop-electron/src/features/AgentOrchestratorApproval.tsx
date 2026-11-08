@@ -79,6 +79,8 @@ export type AoApproval = {
   source?: "ao"; tool?: string; summary?: string;
   /** The decisions the AO agent offered; `plan` is the plan of an ExitPlanMode request. */
   decisions?: { id: string; kind: string; label: string }[]; plan?: string; since?: string;
+  /** When a question this chat answers for the person gets its recommended answer (Settings › Chat › Agent questions). */
+  auto_answer_at?: number;
   /** An MCP tool's arguments, as JSON (what read_file reads, what search_text looks for). */
   toolInput?: string;
   /** What an install command does to the project's own packages (see dependencyInstallNote). */
@@ -91,6 +93,25 @@ export type QuestionField = {
   key: string; type: "choice" | "multi" | "text" | "boolean" | "number"; title: string; description: string;
   options: { value: string; label: string; description: string }[]; customKey?: string; required?: boolean;
 };
+
+/**
+ * How long until a question is answered for the person ("Answers itself in 23s"), ticking each
+ * second; nothing when it waits for them (Settings › Chat › Agent questions: Wait for my answer).
+ */
+function QuestionCountdown({ at }: { at?: number }) {
+  const [clock, setClock] = useState(() => Date.now());
+  const live = typeof at === "number" && Number.isFinite(at);
+  useEffect(() => {
+    if (!live) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [live]);
+  if (!live) return null;
+  const seconds = Math.max(0, Math.ceil((at - clock) / 1000));
+  return <span className="cdx-countdown" role="timer" aria-live="off"
+    title="Settings › Chat › Agent questions: choose Wait for my answer to keep the agent paused until you answer">
+    {seconds > 0 ? `Answers itself in ${seconds}s` : "Answering for you…"}</span>;
+}
 
 /**
  * A question the AO agent asked (Claude Code's AskUserQuestion), answered in the chat: one choice,
@@ -174,6 +195,7 @@ function AoQuestion({ approval, busy, approve }: { approval: AoApproval; busy: b
         value={other[field.key] ?? ""} onChange={(event) => setOther((current) => ({ ...current, [field.key]: event.target.value }))} /> : null}
     </div>
     <div className="cdx-foot">
+      <QuestionCountdown at={approval.auto_answer_at} />
       <button type="button" className="cdx-button is-ghost" disabled={busy} title="Skip answering. The agent goes on without it." onClick={dismiss}>
         Dismiss <Kbd>ESC</Kbd></button>
       {/* Codex: "Skip" while nothing is entered, then "Next" or, on the last question, "Submit". */}
