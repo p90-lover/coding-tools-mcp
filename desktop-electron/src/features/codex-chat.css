@@ -810,10 +810,16 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live.is-compact > .kind-message { font-size: 14px; line-height: 1.65; }
 .cx-live.is-compact > .kind-message > :first-child { margin-top: 0; }
 .cx-live.is-compact > .kind-message > :last-child { margin-bottom: 0; }
-.cx-transcript-work > .cx-work-head { display: flex; flex-wrap: wrap; width: 100%; text-align: left; margin-bottom: 12px; }
-.cx-work-state { flex: 0 1 auto; font-weight: 500; }
-.cx-work-summary { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
-.cx-transcript-work > .cx-work-head > svg { flex: none; margin-left: auto; }
+/* A finished turn's head is one quiet line, as Codex and Claude Code fold work: "Worked for 4m · Edited
+   3 files, ran 9 commands +40 −2 ›". It never wraps; the summary gives way first, ending in an ellipsis,
+   while the time, the diff count and the chevron keep their place. */
+.cx-transcript-work > .cx-work-head { display: flex; max-width: 100%; text-align: left; margin-bottom: 12px; }
+.cx-work-head { max-width: 100%; min-width: 0; white-space: nowrap; }
+.cx-work-state { flex: none; font-weight: 400; }
+.cx-work-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cx-work-state + .cx-work-summary::before { content: "·"; margin-right: 6px; }
+.cx-work-head > .cx-diff-count { flex: none; margin-left: 0; }
+.cx-work-head > svg { flex: none; }
 .cx-work-head:focus-visible { outline: 2px solid var(--color-focus, var(--ao-blue)); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .cx-work-head svg, .cx-activity-head svg { transition: none; } }
 .cx-live-item.kind-group { display: block; }

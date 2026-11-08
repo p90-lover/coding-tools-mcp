@@ -717,7 +717,7 @@ function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { s
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
       {work?.length ? <StepGlyphs items={work} /> : null}
       <span className={`cx-work-state is-${transcriptTone(turn)}`}>{transcriptCompletion(turn)}</span>
-      <span className="cx-work-summary">{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
+      <span className="cx-work-summary" title={work?.length ? summary.text : undefined}>{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
@@ -790,11 +790,13 @@ function TurnWorkHead({ turn, loadWork, open, onToggle }: { turn: ChatTurn; load
   const unknown = steps.some((step) => step.hasWork && !CHAT_WORK.has(stepWorkKey(step)));
   const items = steps.flatMap((step) => (CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])
     .map((item) => ({ ...item, id: `${step.key}:${item.id}` })));
+  const text = unknown ? "Activity not loaded yet" : workSummary(items).text;
+  // One line that ends in an ellipsis when the row is narrow; the whole summary is its tooltip.
   return <>
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={onToggle}>
       {unknown ? null : <StepGlyphs items={items} />}
       <span className={`cx-work-state is-${transcriptTone(turn)}`}>{transcriptCompletion(turn)}</span>
-      <span className="cx-work-summary">{unknown ? "Activity not loaded yet" : workSummary(items).text}</span>
+      <span className="cx-work-summary" title={unknown ? undefined : text}>{text}</span>
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
     {open && !unknown ? <StepOverview items={items} /> : null}
