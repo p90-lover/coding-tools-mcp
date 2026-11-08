@@ -5534,6 +5534,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // compacted, and every follow-up after was refused ("Text is empty, oversized or contains
   // unsupported controls", 51 times in four seconds on 2026-10-22).
   const BOARD_TEXT_BYTES = 8192;
+  // The most one message may be, in UTF-8 bytes: room is left for its "Follow-up (…)" marker and a
+  // rolled-over record's head, so any message within it fits the record however full it was. The
+  // composer checks the same number (ao-chat.ts CHAT_MESSAGE_BYTES) before it sends. A follow-up of
+  // 7.6 to 8 KB passed the old 8,192 check and then failed the rollover, the chat wedged.
+  const CHAT_MESSAGE_BYTES = BOARD_TEXT_BYTES - 256;
+  const tooLong = (text) => `This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${CHAT_MESSAGE_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`;
   const boardText = text => text.replace(/\r\n?/g, "\n").replace(/[\x7F-\x9F]/g, "");
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
   async function chatSteer({ workspaceId, taskId, message, restart = false, goal } = {}) {
@@ -5542,6 +5548,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const objective = goal === undefined ? null : cleanObjective(goal);
     const text = objective ? goalMessage(objective, 1) : boardText(clean(message, 8192, false));
     if (!text.trim()) throw new Error("Type a message to steer the agent");
+    // A steer that cannot go in now is sent as the next turn: it must fit a chat message as well.
+    if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const saved = await runs({ workspaceId: id });
     const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
@@ -5764,10 +5772,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!text.trim()) throw new Error("Type a message to start the chat");
     if (rewind !== undefined && (!taskId || !rewind || !Number.isSafeInteger(rewind.index) || rewind.index < 0
       || typeof rewind.description !== "string" || goal !== undefined)) throw new Error("Choose a message to rewind in this chat");
-    // Compacting the chat cannot make room for one message over the board's byte limit by itself.
-    if (utf8Bytes(text) > BOARD_TEXT_BYTES) {
-      throw new Error(`This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${BOARD_TEXT_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`);
-    }
+    // Rolling the record over cannot make room for one message over the budget by itself.
+    if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
     checkCurrent();
@@ -5867,31 +5873,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
         }
         discarded = [...hidden];
+        const rewound = rewind.index === 0 ? "" : `\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+        const kept = rewind.index === 0 ? "" : before.slice(0, marks[rewind.index - 1].index);
+        // The messages kept ahead of the rewound one roll over as a send's would, when they and it
+        // no longer fit ("This rewind exceeds the chat size limit" left the message unsendable).
         rewoundDescription = rewind.index === 0 ? text
-          : `${before.slice(0, marks[rewind.index - 1].index)}\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+          : utf8Bytes(kept + rewound) <= BOARD_TEXT_BYTES ? `${kept}${rewound}`
+            : `${rolledRecord(kept, utf8Bytes(rewound), new Date(now()))}${rewound}`;
         rewindBefore = chatEdits.get(id, task);
       }
       const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
       let description = rewoundDescription ?? extended();
-      if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
       if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
         // This is bounded task-record storage, not the agent's token context. Only roll it over
         // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
         // nor strand a chat. Native /compact and model-token auto-compaction are independent.
+        // The rollover always makes room for a message within CHAT_MESSAGE_BYTES (compactChat).
         const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
-        let compacted;
         try {
-          compacted = await compactChat({ workspaceId: id, taskId: task, reserve });
+          await compactChat({ workspaceId: id, taskId: task, reserve });
         } catch (error) {
-          throw new Error(`This chat's task record is full and couldn't be rolled over: ${String(error?.message || error).slice(0, 200)}`);
+          throw new Error(`Couldn't make room in this chat's record: ${String(error?.message || error).slice(0, 200)}`);
         }
-        if (compacted.compacted) {
-          detail = await board({ workspaceId: id, taskId: task });
-          if (!detail.task) throw new Error("This chat's task no longer exists");
-          description = extended();
-        }
-        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat's task record is full even after rollover. Shorten the message or start a new chat.");
+        detail = await board({ workspaceId: id, taskId: task });
+        if (!detail.task) throw new Error("This chat's task no longer exists");
+        description = extended();
+      }
+      // Unreachable by construction (the property test in chat-record-rollover.test.cjs); kept so a
+      // future change to the budget fails loudly here rather than at the board.
+      if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
+        logger?.error?.("ao.record_over_budget", { bytes: utf8Bytes(description), message: utf8Bytes(text), rewind: Boolean(rewind) });
+        throw new Error("This chat's record couldn't hold the message. Start a new chat and send it there.");
       }
       const saidBefore = String(detail.task.description || "");
       checkCurrent();
@@ -7568,40 +7581,79 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, status: "in_progress", compactionId: entry.id, ...(!entry.accepted ? { uncertain: true } : {}) };
   }
 
-  // The board's bounded task record is separate from the agent's token context. This legacy
-  // helper only makes room for task metadata when appending a follow-up; /compact never calls it.
-  // `reserve` is the room, in UTF-8 bytes, left for that follow-up.
-  async function compactChat({ workspaceId, taskId, instructions = "", reserve = 0 } = {}) {
+  /**
+   * The earlier record as plain text to keep after a rollover: the markers the chat reads as its
+   * messages and steers ("Follow-up (…)", "↳ Steer (…)", an earlier summary's head) are renamed, so
+   * the kept text stays one message, the summary, as a model's summary is. Each renamed form is
+   * shorter than the marker it replaces, so the text never grows.
+   */
+  const unmarkedRecord = (text) => text
+    .replace(/^Summary of the earlier conversation \(compacted ([^)]+) UTC\):\n/, "[Earlier summary, $1 UTC]\n")
+    .replace(/\n\nFollow-up \(([^)]+) UTC\):\n/g, "\n\n[Message, $1 UTC]\n")
+    .replace(/\n\n↳ Steer \(([^)]+) UTC\): /g, "\n\n[Steer, $1 UTC] ");
+  const ROLLED_NOTE = "[The earlier messages were rolled over to make room; the newest part is kept below. Replies stay in the chat.]\n…";
+  const rolloverHead = (at) => `Summary of the earlier conversation (compacted ${at.toISOString().replace("T", " ").slice(0, 16)} UTC):\n`;
+  /** The bytes a rolled-over record has for its summary when `reserve` bytes must follow it. Never below 0. */
+  const rolloverRoom = (head, reserve) => Math.max(0, Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - reserve));
+  /** The record kept as it was, its newest part within `room` bytes: no model needed, so it cannot fail. */
+  function keptRecord(before, room) {
+    const plain = unmarkedRecord(before).trim();
+    if (utf8Bytes(plain) <= room) return plain;
+    return room > utf8Bytes(ROLLED_NOTE) ? `${ROLLED_NOTE}${utf8Tail(plain, room - utf8Bytes(ROLLED_NOTE))}` : utf8Tail(plain, room);
+  }
+  /** `before` rolled over to leave `reserve` bytes free: its head, then `summary` or the record's newest part. */
+  function rolledRecord(before, reserve, at, summary = "") {
+    const head = rolloverHead(at);
+    const room = rolloverRoom(head, reserve);
+    return `${head}${utf8Head(summary || keptRecord(before, room), room)}`.trim();
+  }
+
+  // The board's bounded task record is separate from the agent's token context. It holds the chat's
+  // own messages, and when the next one does not fit it rolls over: what came before becomes one
+  // summary under the follow-up. `reserve` is the room, in UTF-8 bytes, that follow-up needs.
+  //
+  // A rollover cannot fail (docs/fixes/chat-record-rollover.md). The user (2026-11-08, "bug fix,
+  // make a plan to avoid this forever") saw a send refused with "This chat's task record is full and
+  // couldn't be rolled over: The next message leaves no room for a summary": a long message left
+  // under 512 bytes for a model's summary, and a summary nobody answered, a short record or a steer
+  // note written meanwhile failed it too. Now a model's summary is used when there is room for one
+  // and a model answers; otherwise the newest part of the record that fits is kept as it was.
+  async function compactChat({ workspaceId, taskId, reserve = 0 } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
-    const focus = instructions ? boardText(clean(String(instructions), 1000, false)) : "";
     const saved = await runs({ workspaceId: id });
     if (chatWorking(id, task, saved.runs)) throw new Error("Compact is disabled while a chat is in progress");
-    const detail = await board({ workspaceId: id, taskId: task });
-    if (!detail.task) throw new Error("This chat's task no longer exists");
-    const before = String(detail.task.description || "");
-    if (before.length < 800) return { ok: true, compacted: false, before: before.length, after: before.length };
-    const stamp = new Date(now()).toISOString().replace("T", " ").slice(0, 16);
-    const head = `Summary of the earlier conversation (compacted ${stamp} UTC):\n`;
     const kept = Number.isSafeInteger(reserve) && reserve > 0 ? reserve : 0;
-    const room = Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - kept);
-    if (room < SUMMARY_MIN_BYTES) throw new Error("The next message leaves no room for a summary. Shorten it or start a new chat.");
-    let summary = "";
-    try {
-      summary = await handoffSummary(before, { maxChars: room, instructions: focus });
-    } catch (error) {
-      throw new Error(`Couldn't compact: no CPA model answered. ${String(error?.message || error).slice(0, 160)}`);
+    // A steer note or another write can land between the read and the write: read again, a few times.
+    for (let attempt = 1; ; attempt++) {
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task) throw new Error("This chat's task no longer exists");
+      const before = String(detail.task.description || "");
+      const at = new Date(now());
+      // A message within CHAT_MESSAGE_BYTES always leaves room for the head itself.
+      const room = rolloverRoom(rolloverHead(at), kept);
+      let summary = "";
+      if (room >= SUMMARY_MIN_BYTES && before.trim()) {
+        summary = await handoffSummary(before, { maxChars: room }).catch((error) => {
+          logger?.warn?.("ao.record_rollover_summary_failed", { message: publicText(error?.message || error, 200) });
+          return "";
+        });
+        // A model's summary may run past the length it was asked for, or carry control characters.
+        summary = boardText(String(summary || "")).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
+      }
+      const mechanical = !summary;
+      const description = rolledRecord(before, kept, at, summary);
+      const fresh = await board({ workspaceId: id, taskId: task });
+      if (!fresh.task) throw new Error("This chat's task no longer exists");
+      if (String(fresh.task.description || "") !== before) {
+        if (attempt < ROLLOVER_TRIES) continue;
+        throw new Error("The chat kept changing while its record rolled over. Send the message again.");
+      }
+      await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });
+      logger?.info?.("ao.record_rolled_over", { mechanical, before: utf8Bytes(before), after: utf8Bytes(description), reserve: kept });
+      return { ok: true, compacted: true, mechanical, before: before.length, after: description.length };
     }
-    // A model's summary may run past the length it was asked for, or carry control characters: it
-    // is cut to the room left (clean() threw on either, so a long summary failed the compaction).
-    summary = boardText(summary).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
-    if (!summary) throw new Error("The model returned no summary. The chat is unchanged.");
-    const description = `${head}${utf8Head(summary, room)}`;
-    if (utf8Bytes(description) >= utf8Bytes(before)) return { ok: true, compacted: false, before: before.length, after: before.length };
-    const fresh = await board({ workspaceId: id, taskId: task });
-    if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting. Try again.");
-    await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });
-    return { ok: true, compacted: true, before: before.length, after: description.length };
   }
+  const ROLLOVER_TRIES = 3;
 
   // Delete one message from a chat, with its reply. The message (and the steers sent during its
   // turn) leaves the task's description and its runs (the one it started, as the chat paired them,

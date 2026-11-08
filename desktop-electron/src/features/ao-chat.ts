@@ -1799,7 +1799,7 @@ export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage
     const before = chatAnnotationsSplit(last.message), after = chatAnnotationsSplit(item.message);
     const message = chatMessageWithAnnotations([before.rest.trim(), after.rest.trim()].filter(Boolean).join("\n\n"),
       [...before.annotations, ...after.annotations]);
-    if (message.length <= CHAT_MESSAGE_LIMIT) return [...queue.slice(0, -1), { ...last, message }];
+    if (chatMessageFits(message)) return [...queue.slice(0, -1), { ...last, message }];
   }
   return [...queue, item];
 }
@@ -1903,6 +1903,23 @@ const ANNOTATIONS_BLOCK = /^# Response annotations:\n[^\n]*\n<response-annotatio
 
 /** The longest message the chat sends (chat_send keeps 8,192 characters and refuses more). */
 export const CHAT_MESSAGE_LIMIT = 8192;
+/**
+ * The most one message may be in UTF-8 bytes, as the bridge counts it (agent-orchestrator-workflow.cjs
+ * CHAT_MESSAGE_BYTES): the chat's 8,192-byte record less room for the message's marker and a
+ * rolled-over head. Counted in characters only, Chinese text or emoji passed here and the send failed.
+ */
+export const CHAT_MESSAGE_BYTES = 8192 - 256;
+/** UTF-8 bytes, counted by code point (no TextEncoder: tests evaluate this module in a bare context). */
+export function chatMessageBytes(text: string): number {
+  let bytes = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+/** Whether the bridge takes this message: within both the character and the byte limit. */
+export const chatMessageFits = (text: string): boolean => text.length <= CHAT_MESSAGE_LIMIT && chatMessageBytes(text) <= CHAT_MESSAGE_BYTES;
 
 /** The message with its annotations in front, as Codex sends them. */
 export function chatMessageWithAnnotations(message: string, annotations: ChatAnnotation[]): string {
