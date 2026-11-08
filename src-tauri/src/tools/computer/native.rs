@@ -323,7 +323,7 @@ pub fn inspect(target: &Target) -> Result<(Vec<Control>, bool)> {
     }
     Ok((controls, truncated))
 }
-fn modifiers_clear() -> Result<()> {
+pub(super) fn modifiers_clear() -> Result<()> {
     for code in [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN] {
         if unsafe { GetAsyncKeyState(code.0 as i32) } < 0 {
             return Err(error(
@@ -334,158 +334,11 @@ fn modifiers_clear() -> Result<()> {
     }
     Ok(())
 }
-fn send(events: &[INPUT]) -> Result<()> {
-    let n = unsafe { SendInput(events, std::mem::size_of::<INPUT>() as i32) };
-    if n as usize != events.len() {
-        return Err(error("INPUT_OUTCOME_UNKNOWN","Windows did not acknowledge every input. It may have been blocked by integrity protection; do not replay automatically."));
-    }
-    Ok(())
-}
-fn mouse(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32, data: u32) -> INPUT {
-    INPUT {
-        r#type: INPUT_MOUSE,
-        Anonymous: INPUT_0 {
-            mi: MOUSEINPUT {
-                dx,
-                dy,
-                mouseData: data,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-fn move_event(point: (i32, i32)) -> Result<INPUT> {
-    let _dpi = capture_backend::physical_dpi()?;
-    let (vx, vy, w, h) = unsafe {
-        (
-            GetSystemMetrics(SM_XVIRTUALSCREEN),
-            GetSystemMetrics(SM_YVIRTUALSCREEN),
-            GetSystemMetrics(SM_CXVIRTUALSCREEN),
-            GetSystemMetrics(SM_CYVIRTUALSCREEN),
-        )
-    };
-    if w < 2 || h < 2 {
-        return Err(failure("Desktop geometry is invalid"));
-    }
-    let x = ((i64::from(point.0) - i64::from(vx)) * 65535 / (i64::from(w) - 1)) as i32;
-    let y = ((i64::from(point.1) - i64::from(vy)) * 65535 / (i64::from(h) - 1)) as i32;
-    if !(0..=65535).contains(&x) || !(0..=65535).contains(&y) {
-        return Err(error(
-            "INVALID_COORDINATE",
-            "Point lies outside the physical desktop",
-        ));
-    }
-    Ok(mouse(
-        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-        x,
-        y,
-        0,
-    ))
-}
-pub fn move_pointer(t: &Target, p: (i32, i32), check: &dyn Fn() -> Result<()>) -> Result<()> {
-    check()?;
-    modifiers_clear()?;
-    validate_point(t, p.0, p.1)?;
-    send(&[move_event(p)?])
-}
-pub fn click(
-    t: &Target,
-    p: (i32, i32),
-    button: &str,
-    check: &dyn Fn() -> Result<()>,
-) -> Result<()> {
-    let (down, up) = if button == "right" {
-        (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
-    } else {
-        (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
-    };
-    for _ in 0..if button == "double" { 2 } else { 1 } {
-        check()?;
-        modifiers_clear()?;
-        validate_point(t, p.0, p.1)?;
-        let result = send(&[move_event(p)?, mouse(down, 0, 0, 0), mouse(up, 0, 0, 0)]);
-        if result.is_err() {
-            let _ = send(&[mouse(up, 0, 0, 0)]);
-            return result;
-        }
-    }
-    Ok(())
-}
-fn keyboard(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
-    INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(vk),
-                wScan: scan,
-                dwFlags: flags,
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    }
-}
-pub fn type_text(t: &Target, text: &str, check: &dyn Fn() -> Result<()>) -> Result<()> {
-    modifiers_clear()?;
-    validate_focus(t)?;
-    for (i, ch) in text.chars().enumerate() {
-        check()?;
-        if i % 32 == 0 {
-            modifiers_clear()?;
-            validate_focus(t)?;
-        }
-        let mut units = [0u16; 2];
-        let mut inputs = Vec::new();
-        let mut releases = Vec::new();
-        for unit in ch.encode_utf16(&mut units).iter() {
-            inputs.push(keyboard(0, *unit, KEYEVENTF_UNICODE));
-            inputs.push(keyboard(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-            releases.push(keyboard(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-        }
-        if let Err(e) = send(&inputs) {
-            let _ = send(&releases);
-            return Err(e);
-        }
-    }
-    Ok(())
-}
-pub fn key(t: &Target, key: &str, check: &dyn Fn() -> Result<()>) -> Result<()> {
-    let keys = super::types::key_codes(key)?;
-    check()?;
-    modifiers_clear()?;
-    validate_focus(t)?;
-    let mut events = Vec::new();
-    let flags = |k: u16| {
-        if matches!(k, 0x21..=0x28) {
-            KEYEVENTF_EXTENDEDKEY
-        } else {
-            KEYBD_EVENT_FLAGS(0)
-        }
-    };
-    for k in &keys {
-        events.push(keyboard(*k, 0, flags(*k)));
-    }
-    let releases: Vec<_> = keys
-        .iter()
-        .rev()
-        .map(|k| keyboard(*k, 0, flags(*k) | KEYEVENTF_KEYUP))
-        .collect();
-    events.extend_from_slice(&releases);
-    if let Err(e) = send(&events) {
-        let _ = send(&releases);
-        return Err(e);
-    }
-    Ok(())
-}
-pub fn scroll(t: &Target, amount: i32, check: &dyn Fn() -> Result<()>) -> Result<()> {
-    check()?;
-    modifiers_clear()?;
+pub fn pointer_position(t: &Target) -> Result<(i32, i32)> {
     let mut p = POINT::default();
     unsafe { GetCursorPos(&mut p) }.map_err(|_| failure("Cursor position unavailable"))?;
     validate_point(t, p.x, p.y)?;
-    send(&[mouse(MOUSEEVENTF_WHEEL, 0, 0, (amount * 120) as u32)])
+    Ok((p.x, p.y))
 }
 static MONITOR: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 unsafe extern "system" fn event_hook(
