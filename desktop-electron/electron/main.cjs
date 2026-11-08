@@ -4967,6 +4967,8 @@ async function start() {
       wakeupsFile: path.join(app.getPath("userData"), "integrations", "chat-wakeups.json"),
       // So do the chats' loops (/loop).
       loopsFile: path.join(app.getPath("userData"), "integrations", "chat-loops.json"),
+      // So do the chats' schedules (/schedule).
+      schedulesFile: path.join(app.getPath("userData"), "integrations", "chat-schedules.json"),
       // So do the chats' queued messages, sent with the chat closed too (chat-queue.cjs).
       chatQueueFile: path.join(app.getPath("userData"), "integrations", "chat-queue.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
