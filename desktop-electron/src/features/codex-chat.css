@@ -810,10 +810,16 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live.is-compact > .kind-message { font-size: 14px; line-height: 1.65; }
 .cx-live.is-compact > .kind-message > :first-child { margin-top: 0; }
 .cx-live.is-compact > .kind-message > :last-child { margin-bottom: 0; }
-.cx-transcript-work > .cx-work-head { display: flex; flex-wrap: wrap; width: 100%; text-align: left; margin-bottom: 12px; }
-.cx-work-state { flex: 0 1 auto; font-weight: 500; }
-.cx-work-summary { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
-.cx-transcript-work > .cx-work-head > svg { flex: none; margin-left: auto; }
+/* A finished turn's head is one quiet line, as Codex and Claude Code fold work: "Worked for 4m · Edited
+   3 files, ran 9 commands +40 −2 ›". It never wraps; the summary gives way first, ending in an ellipsis,
+   while the time, the diff count and the chevron keep their place. */
+.cx-transcript-work > .cx-work-head { display: flex; max-width: 100%; text-align: left; margin-bottom: 12px; }
+.cx-work-head { max-width: 100%; min-width: 0; white-space: nowrap; }
+.cx-work-state { flex: none; font-weight: 400; }
+.cx-work-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cx-work-state + .cx-work-summary::before { content: "·"; margin-right: 6px; }
+.cx-work-head > .cx-diff-count { flex: none; margin-left: 0; }
+.cx-work-head > svg { flex: none; }
 .cx-work-head:focus-visible { outline: 2px solid var(--color-focus, var(--ao-blue)); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .cx-work-head svg, .cx-activity-head svg { transition: none; } }
 .cx-live-item.kind-group { display: block; }
@@ -928,6 +934,109 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-tool-image-count { flex: none; margin-left: 6px; padding: 0 5px; border: 1px solid var(--ao-line); border-radius: 4px;
   color: var(--ao-muted); font-size: 11px; line-height: 16px; }
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
+
+/* ---------- Step families: each work step's kind as a colour (chat-transcript stepFamily) ----------
+   One custom property, --cx-k, set wherever data-family is; the glyph, the label, the opened card's
+   rule, the overview's chips and the step strip all read it. The Claude palette sets the tokens for
+   light and dark; these fallbacks are its light values. */
+.cx-chat [data-family="think"] { --cx-k: var(--cx-k-think, #7c3aed); }
+.cx-chat [data-family="command"] { --cx-k: var(--cx-k-command, #0f766e); }
+.cx-chat [data-family="read"] { --cx-k: var(--cx-k-read, #2563eb); }
+.cx-chat [data-family="search"] { --cx-k: var(--cx-k-search, #b45309); }
+.cx-chat [data-family="edit"] { --cx-k: var(--cx-k-edit, #c2410c); }
+.cx-chat [data-family="web"] { --cx-k: var(--cx-k-web, #0e7490); }
+.cx-chat [data-family="plan"] { --cx-k: var(--cx-k-plan, #4f46e5); }
+.cx-chat [data-family="agent"] { --cx-k: var(--cx-k-agent, #be185d); }
+.cx-chat [data-family="ask"] { --cx-k: var(--cx-k-ask, #a16207); }
+.cx-chat [data-family="tool"] { --cx-k: var(--cx-k-tool, #a21caf); }
+.cx-chat [data-family="approval"] { --cx-k: var(--cx-k-approval, #047857); }
+.cx-chat [data-family="note"] { --cx-k: var(--ao-muted); }
+
+/* The glyph: a small rounded tile tinted with its family, the stroke in full colour. A failed call
+   turns red; a running one breathes. */
+.cx-step-glyph { display: inline-grid; flex: none; place-items: center; width: 18px; height: 18px; border-radius: 5px;
+  background: color-mix(in srgb, var(--cx-k, var(--ao-muted)) 15%, transparent); color: var(--cx-k, var(--ao-muted)); }
+.cx-step-glyph > svg { display: block; }
+/* A failure paints over the family: its glyph, name, card rule and headings all turn red. */
+.cx-chat .cx-tool.tone-failed, .cx-tool.tone-failed .cx-step-glyph { --cx-k: var(--ao-red); }
+.cx-tool.tone-running .cx-step-glyph, .cx-live-item.is-running .cx-reasoning .cx-step-glyph { animation: cx-pulse 1.4s ease-in-out infinite; }
+/* Rows lead with the glyph and keep their name beside it on the first line, however the text wraps. */
+.cx-tool summary, .cx-tool-row, .cx-reasoning summary { align-items: flex-start; }
+.cx-tool .cx-live-label, .cx-tool .cx-live-text, .cx-reasoning .cx-live-label, .cx-reasoning .cx-live-text { line-height: 18px; }
+.cx-tool[data-family] .cx-live-label, .cx-reasoning[data-family] .cx-live-label { color: var(--cx-k); }
+.cx-tool.tone-failed .cx-live-label { color: var(--ao-red); }
+/* How long the step took, at the row's end; the caret shows only when the row can be opened and is hovered or open. */
+.cx-step-time { flex: none; margin-left: auto; padding-left: 8px; color: var(--ao-muted); font-size: 11.5px; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cx-step-caret { flex: none; align-self: center; margin-left: 2px; color: var(--ao-muted); opacity: 0; transition: transform .12s ease-out, opacity .12s; }
+.cx-step-time + .cx-step-caret, .cx-step-time + .cx-approved + .cx-step-caret { margin-left: 2px; }
+.cx-live-text + .cx-step-caret, .cx-diff-count + .cx-step-caret, .cx-approved + .cx-step-caret, .cx-tool-image-count + .cx-step-caret { margin-left: auto; }
+summary:hover > .cx-step-caret, details[open] > summary > .cx-step-caret { opacity: .8; }
+details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
+.cx-tool .cx-approved { align-self: center; }
+
+/* An opened step: a card ruled in its family's colour, its facts as pills, then labelled parts. */
+.cx-tool-body.cx-step-card { gap: 8px; margin: 4px 0 8px 8px; padding: 8px 10px 10px 12px; border-left: 2px solid var(--cx-k, var(--ao-line));
+  border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--cx-k, var(--ao-muted)) 5%, transparent); }
+.cx-step-facts { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.cx-fact { display: inline-flex; align-items: center; max-width: 100%; height: 20px; padding: 0 8px; overflow: hidden; border-radius: 10px;
+  background: color-mix(in srgb, var(--ao-muted) 13%, transparent); color: var(--ao-muted); font-size: 11.5px; font-weight: 500;
+  text-overflow: ellipsis; white-space: nowrap; }
+.cx-fact.is-ok { background: color-mix(in srgb, var(--ao-green) 14%, transparent); color: var(--ao-green); }
+.cx-fact.is-failed { background: color-mix(in srgb, var(--ao-red) 14%, transparent); color: var(--ao-red); }
+.cx-fact.is-running { background: color-mix(in srgb, var(--ao-amber) 16%, transparent); color: var(--ao-amber); }
+.cx-fact.is-allowed { background: color-mix(in srgb, var(--cx-k-approval, #047857) 12%, transparent); color: var(--cx-k-approval, #047857); }
+.cx-fact.is-mono { font-family: var(--claude-mono, var(--font-mono, ui-monospace, monospace)); font-weight: 400; }
+.cx-step-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+.cx-step-section > h5 { display: flex; align-items: baseline; gap: 6px; margin: 0; color: var(--cx-k, var(--ao-muted)); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .05em; text-transform: uppercase; }
+.cx-step-section > h5 > span { color: var(--ao-muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
+.cx-tool-io.is-command code::before { content: "$ "; color: var(--cx-k, var(--ao-muted)); font-weight: 600; user-select: none; }
+.cx-step-args { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; margin: 0; padding: 6px 10px; border: 1px solid var(--ao-line); border-radius: 8px;
+  background: var(--cx-tray, rgb(127 127 127 / 6%)); font: 12px/1.5 var(--claude-mono, var(--font-mono, ui-monospace, monospace)); }
+.cx-step-args > div { display: grid; grid-template-columns: minmax(64px, max-content) minmax(0, 1fr); gap: 12px; min-width: 0; }
+.cx-step-args dt { color: var(--cx-k, var(--ao-muted)); }
+.cx-step-args dd { max-height: 132px; margin: 0; overflow: auto; color: var(--color-text-primary); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* An edit's files: the name, its folder muted, the counts and GitHub's five squares. */
+.cx-edit-file > header { flex-wrap: wrap; align-items: center; }
+.cx-edit-name { color: var(--color-text-primary); font-weight: 600; }
+.cx-edit-folder { min-width: 0; overflow: hidden; color: var(--ao-muted); text-overflow: ellipsis; white-space: nowrap; }
+.cx-diff-bar { display: inline-flex; gap: 1px; margin-left: 2px; }
+.cx-diff-bar > i { width: 7px; height: 7px; border-radius: 1.5px; background: color-mix(in srgb, var(--ao-red, #c0392b) 85%, transparent); }
+.cx-diff-bar > i.is-add { background: var(--ao-green, #2e9d5b); }
+/* A thought, opened: its words under a rule in the thinking colour. */
+.cx-reasoning[data-family] > .cx-reasoning-body { margin: 2px 0 8px 8px; padding: 6px 10px 6px 12px; border-left: 2px solid var(--cx-k);
+  border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--cx-k) 5%, transparent); }
+/* Rows with no tool (approvals, notices, inputs) lead with their glyph too. */
+.cx-live-item:not(.kind-message):not(.kind-steer) > .cx-step-glyph { align-self: flex-start; }
+
+/* Fold heads: the kinds of work as overlapping round glyphs before "Worked for…". */
+.cx-glyph-stack { display: inline-flex; flex: none; align-items: center; }
+.cx-glyph-stack > .cx-step-glyph { width: 16px; height: 16px; border-radius: 50%;
+  background: color-mix(in srgb, var(--cx-k) 24%, var(--color-bg-primary)); box-shadow: 0 0 0 1.5px var(--color-bg-primary); }
+.cx-glyph-stack > .cx-step-glyph + .cx-step-glyph { margin-left: -4px; }
+.cx-glyph-stack svg { width: 9px; height: 9px; }
+.cx-activity-head > .cx-step-time { padding-left: 4px; }
+.cx-work-state.is-failed { color: var(--ao-red); }
+.cx-work-state.is-stopped, .cx-work-state.is-waiting { color: var(--ao-amber); }
+
+/* An opened fold's overview: chips per kind of work, then every step in order as a coloured strip. */
+.cx-work-overview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 6px 0 12px; }
+.cx-work-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cx-work-chip { --cx-k: var(--ao-muted); display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px 0 3px; border-radius: 12px;
+  background: color-mix(in srgb, var(--cx-k) 11%, transparent); color: color-mix(in srgb, var(--cx-k) 82%, var(--color-text-primary));
+  font-size: 12px; font-weight: 500; white-space: nowrap; }
+.cx-work-chip > .cx-step-glyph { width: 18px; height: 18px; border-radius: 50%; background: color-mix(in srgb, var(--cx-k) 20%, transparent); }
+.cx-work-chip > .cx-diff-count { margin-left: 0; }
+.cx-work-chip.is-failed { --cx-k: var(--ao-red); padding-left: 10px; }
+.cx-work-chip.is-time { padding-left: 10px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.cx-step-strip { display: flex; gap: 2px; height: 6px; }
+.cx-step-strip > i { flex: 1 1 0; min-width: 3px; border-radius: 3px; background: var(--cx-k, var(--ao-muted)); opacity: .8; transition: opacity .12s, transform .12s; }
+.cx-step-strip > i.is-failed { background: var(--ao-red); opacity: 1; }
+.cx-step-strip > i:hover { opacity: 1; transform: scaleY(1.7); }
+@media (prefers-reduced-motion: reduce) {
+  .cx-tool.tone-running .cx-step-glyph, .cx-live-item.is-running .cx-reasoning .cx-step-glyph { animation: none; }
+  .cx-step-caret, .cx-step-strip > i { transition: none; }
+}
 
 .cx-answer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
 /* A reply (ChatReplyHead.tsx), per turn: why it failed, if it did, then its work and answer, then

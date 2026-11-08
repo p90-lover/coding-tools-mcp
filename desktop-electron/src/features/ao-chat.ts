@@ -129,6 +129,8 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  /** How long a finished tool call or thought took, from AO's first and last update of it. */
+  durationMs?: number;
   /** Images a tool call returned (a screenshot, a picture it read), as the files Claude Code saved them to. */
   images?: string[];
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
