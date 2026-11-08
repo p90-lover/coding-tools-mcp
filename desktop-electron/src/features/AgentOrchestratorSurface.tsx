@@ -3142,7 +3142,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
             if (!saved.available || saved.mode !== mode) throw new Error(saved.reason || "Couldn't save where chats work. Try again.");
           }} />;
       })()}
-      {settingsOpen && !pane ? <ChatSettingsPage onClose={() => setSettingsOpen(false)} onArchiveChanged={() => void loadArchived()} /> : null}
+      {settingsOpen && !pane ? <ChatSettingsPage onClose={() => setSettingsOpen(false)} onArchiveChanged={() => void loadArchived()} workspaceId={workspaceId} /> : null}
     </section>
   );
 }

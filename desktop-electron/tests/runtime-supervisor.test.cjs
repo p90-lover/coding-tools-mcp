@@ -2473,6 +2473,51 @@ test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cl
   }
 });
 
+test("an unchanged ownership state is not flushed to disk again; a changed, removed or replaced one is", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-unchanged-runtime-state-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  const written = () => fs.statSync(supervisor.statePath).mtimeMs;
+  const setBack = () => { const past = new Date(Date.now() - 60_000); fs.utimesSync(supervisor.statePath, past, past); };
+  try {
+    // 2026-11-08: each watchdog check of a bridge needing setup flushed the same state on the main
+    // thread, holding every window 0.4-1.5 s on the hard disk.
+    const first = supervisor.writeState("needs-setup", "Config requires bridge 5.0.6");
+    // An older modification time shows whether the file is written again.
+    setBack(); const kept = written();
+    const again = supervisor.writeState("needs-setup", "Config requires bridge 5.0.6");
+    assert.equal(again, first, "the same state is kept");
+    assert.equal(written(), kept, "and not written");
+
+    setBack(); const before = written();
+    supervisor.writeState("ready");
+    assert.notEqual(written(), before, "a new status is written");
+    assert.equal(supervisor.readState().status, "ready");
+
+    // Another launcher's state, seen by a read, is replaced by the next write.
+    fs.writeFileSync(supervisor.statePath, JSON.stringify({ ...supervisor.writtenState, status: "external" }));
+    assert.equal(supervisor.readState().status, "external");
+    supervisor.writeState("ready");
+    assert.equal(supervisor.readState().status, "ready", "a file another launcher replaced is written again");
+
+    supervisor.clearState();
+    supervisor.writeState("ready");
+    assert.equal(supervisor.readState().status, "ready", "a cleared state is written again");
+
+    fs.rmSync(supervisor.statePath);
+    assert.equal(supervisor.readState(), null);
+    supervisor.writeState("ready");
+    assert.equal(supervisor.readState().status, "ready", "a file removed under it is written again once a read misses it");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an unreadable marker is set aside only when it was written before this boot", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-preboot-runtime-state-"));
   const warnings = [];

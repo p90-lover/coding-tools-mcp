@@ -28,15 +28,95 @@ const LIST_SHORTCUTS: { label: string; keys: string }[] = [
  * sidebar's Settings row or Ctrl+, (pressed again, it closes, as in Codex).
  */
 
-type Section = "general" | "chat" | "computer-use" | "updates";
+type Section = "general" | "chat" | "instructions" | "computer-use" | "updates";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "general", label: "General" },
   { id: "chat", label: "Chat" },
+  { id: "instructions", label: "Instructions" },
   { id: "computer-use", label: "Computer use" },
   { id: "updates", label: "Updates" },
 ];
-const SECTION_GLYPHS = { general: "gear", chat: "compose", "computer-use": "monitor", updates: "update" } as const;
+const SECTION_GLYPHS = { general: "gear", chat: "compose", instructions: "edit", "computer-use": "monitor", updates: "update" } as const;
+
+/** What agent_instructions answers: both AGENTS.md files and the projects that can have one. */
+type InstructionFiles = { global: string; globalFile: string; workspace: string | null; workspaceFile: string | null;
+  projects: { id: string; name: string; path: string }[] };
+
+/** One AGENTS.md: the text, where it is kept, and Save once it differs from what is on disk. */
+function InstructionEditor({ label, file, value, saved, placeholder, onChange, onSave }: { label: string; file: string | null; value: string;
+  saved: string; placeholder: string; onChange: (next: string) => void; onSave: () => void }) {
+  const dirty = value !== saved;
+  return <div className="cxs-instructions">
+    <textarea className="cxs-textarea" aria-label={label} value={value} placeholder={placeholder} spellCheck={false}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "s") { event.preventDefault(); if (dirty) onSave(); } }} />
+    <div className="cxs-instructions-foot">
+      <span className="cxs-instructions-file" title={file ?? undefined}>{file ?? ""}</span>
+      <span className="cxs-instructions-state">{dirty ? "Unsaved changes" : saved.trim() ? "Saved" : ""}</span>
+      <button type="button" className="cxs-button" disabled={!dirty} onClick={onSave}>Save</button>
+    </div>
+  </div>;
+}
+
+/**
+ * Settings › Instructions, as Codex's custom instructions: the global AGENTS.md every agent follows
+ * in every project, and the open project's own AGENTS.md. Every new agent's first message starts
+ * with both, and a running agent's next message once either changed (agent-instructions.cjs).
+ */
+function InstructionsSection({ workspaceId, onError }: { workspaceId?: string | null; onError: (message: string) => void }) {
+  const [files, setFiles] = useState<InstructionFiles | null>(null);
+  const [project, setProject] = useState<string | null>(workspaceId ?? null);
+  const [global, setGlobal] = useState("");
+  const [workspace, setWorkspace] = useState("");
+  const [failed, setFailed] = useState(false);
+  const take = (next: InstructionFiles, keep: { global?: boolean; workspace?: boolean } = {}) => {
+    setFiles(next);
+    if (!keep.global) setGlobal(next.global);
+    if (!keep.workspace) setWorkspace(next.workspace ?? "");
+  };
+  useEffect(() => {
+    let live = true;
+    void chatCall("agent_instructions", project ? { workspaceId: project } : {}).then((result) => {
+      if (!live) return;
+      const next = result as unknown as InstructionFiles;
+      // A project picked by default that has no folder gives way to the first that has one.
+      if (!project && next.projects?.length) { setProject(next.projects[0].id); return; }
+      take(next, { global: files !== null });
+    }, () => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [project]);
+  const save = (scope: "global" | "workspace") => {
+    void chatCall("agent_instructions", { scope, text: scope === "global" ? global : workspace, ...(project ? { workspaceId: project } : {}) })
+      .then((result) => take(result as unknown as InstructionFiles, scope === "global" ? { workspace: true } : { global: true }),
+        (cause: unknown) => onError(cause instanceof Error ? cause.message : String(cause)));
+  };
+  const choose = (next: string) => {
+    if (files && workspace !== (files.workspace ?? "") && !window.confirm("Discard the unsaved changes to this project's AGENTS.md?")) return;
+    setProject(next);
+  };
+  if (failed) return <Group><Row label="Unable to load the instructions."><span /></Row></Group>;
+  const projects = files?.projects ?? [];
+  return <>
+    <Group title="Global AGENTS.md">
+      <Row label="For every agent, in every project" description="Every new agent starts with these instructions, and a running agent gets them again with your next message once you change them"><span /></Row>
+      <InstructionEditor label="Global AGENTS.md" file={files?.globalFile ?? null} value={global} saved={files?.global ?? ""}
+        placeholder={"# How I work\n\n- Answer in English\n- Run the tests before you say it works"} onChange={setGlobal} onSave={() => save("global")} />
+    </Group>
+    <Group title="Workspace AGENTS.md">
+      <Row label="Project" description="The AGENTS.md at the root of the project's folder. Agents in this project get it after the global one">
+        <select className="cxs-select" aria-label="Project" value={project ?? ""} disabled={!projects.length}
+          onChange={(event) => choose(event.target.value)}>
+          {projects.length ? null : <option value="">No project folders</option>}
+          {projects.map((item) => <option key={item.id} value={item.id} title={item.path}>{item.name}</option>)}
+        </select>
+      </Row>
+      {files?.workspaceFile ? <InstructionEditor label="Workspace AGENTS.md" file={files.workspaceFile} value={workspace} saved={files.workspace ?? ""}
+        placeholder={"# This project\n\n- Build with bun run build\n- Never commit to main"} onChange={setWorkspace} onSave={() => save("workspace")} />
+        : <Row label={files ? "This project has no folder" : "Loading…"}><span /></Row>}
+    </Group>
+  </>;
+}
 
 /**
  * Codex's "Always-allowed apps" (settings.computerUse.allowedApps): the apps a chat agent may use
@@ -144,7 +224,7 @@ function PageShortcut({ label, value, disabled, onChange }: { label: string; val
  * `onArchiveChanged` tells the chat list the archive days changed, so its Archived section and
  * popover read them again.
  */
-export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () => void; onArchiveChanged?: () => void }) {
+export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null }: { onClose: () => void; onArchiveChanged?: () => void; workspaceId?: string | null }) {
   const api = window.codexWebLauncher;
   const [section, setSection] = useState<Section>("general");
   const [state, setState] = useState<LauncherState | null>(null);
@@ -324,6 +404,8 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
                 <kbd className="cxs-kbd">{item.keys}</kbd>
               </Row>)}
             </Group>
+          </div> : section === "instructions" ? <div className="cxs-sections">
+            <InstructionsSection workspaceId={workspaceId} onError={setError} />
           </div> : section === "computer-use" ? <div className="cxs-sections">
             <Group title="Always-allowed apps">
               <AllowedApps onError={setError} />

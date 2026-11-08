@@ -300,3 +300,46 @@
   min-width: 16px;
   color: var(--cc-muted, rgba(26, 28, 31, 0.65));
 }
+
+/* Settings > Instructions: an AGENTS.md as a full-width editor inside its card, with where the file
+   is kept and Save beneath it. Monospace, as the file is Markdown read by agents. */
+.cxs-instructions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 16px 14px;
+}
+.cxs-root .cxs-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 220px;
+  max-height: 60vh;
+  padding: 10px 12px;
+  border: 1px solid var(--cxs-border-heavy);
+  border-radius: 12px;
+  background: var(--cxs-surface-under);
+  color: var(--cxs-text);
+  font: 12.5px/1.55 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  resize: vertical;
+  tab-size: 2;
+}
+.cxs-root .cxs-textarea::placeholder { color: var(--cxs-text-tertiary); }
+.cxs-root .cxs-textarea:focus-visible { outline: 2px solid var(--cxs-accent); outline-offset: 1px; }
+.cxs-instructions-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--cxs-text-tertiary);
+  font-size: 12px;
+}
+.cxs-instructions-file {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.cxs-instructions-state { flex: none; }
+.cxs-root .cxs-button:disabled { opacity: 0.5; cursor: default; }

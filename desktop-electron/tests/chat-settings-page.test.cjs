@@ -18,7 +18,22 @@ test("the chat sidebar's footer opens Settings, and Ctrl+, toggles it, as in Cod
   const surface = read("src/features/AgentOrchestratorSurface.tsx");
   assert.match(surface, /openSettings: \(\) => setSettingsOpen\(true\)/);
   assert.match(surface, /event\.key === ","[\s\S]{0,80}setSettingsOpen\(\(open\) => !open\)/);
-  assert.match(surface, /\{settingsOpen && !pane \? <ChatSettingsPage onClose=\{\(\) => setSettingsOpen\(false\)\} onArchiveChanged=\{\(\) => void loadArchived\(\)\} \/> : null\}/);
+  assert.match(surface, /\{settingsOpen && !pane \? <ChatSettingsPage onClose=\{\(\) => setSettingsOpen\(false\)\} onArchiveChanged=\{\(\) => void loadArchived\(\)\} workspaceId=\{workspaceId\} \/> : null\}/);
+});
+
+test("Settings › Instructions edits the global and the open project's AGENTS.md through main", () => {
+  const page = read("src/features/ChatSettingsPage.tsx");
+  assert.match(page, /\{ id: "instructions", label: "Instructions" \}/);
+  assert.match(page, /<InstructionsSection workspaceId=\{workspaceId\} onError=\{setError\} \/>/);
+  // Read and saved by the bridge's agent_instructions, never by the page itself.
+  assert.match(page, /chatCall\("agent_instructions", project \? \{ workspaceId: project \} : \{\}\)/);
+  assert.match(page, /chatCall\("agent_instructions", \{ scope, text: scope === "global" \? global : workspace/);
+  assert.match(page, /<InstructionEditor label="Global AGENTS\.md"/);
+  assert.match(page, /<InstructionEditor label="Workspace AGENTS\.md"/);
+  // Switching project never drops unsaved text silently.
+  assert.match(page, /window\.confirm\("Discard the unsaved changes to this project's AGENTS\.md\?"\)/);
+  const handler = read("../app-handler/agent-orchestrator/handler.cjs");
+  assert.match(handler, /agent_instructions: \{ readOnly: false,/);
 });
 
 test("the gear and the back arrow are Codex's own icons", () => {

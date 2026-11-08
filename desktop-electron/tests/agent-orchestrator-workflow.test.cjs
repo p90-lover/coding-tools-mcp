@@ -6976,7 +6976,7 @@ test("a follow-up that cannot continue its agent says which session and why befo
     const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
       nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
     const world = chatWorld({ tasks: [task], runs: [previous] });
-    const created = new Map(), spawned = [], warnings = [];
+    const created = new Map(), spawned = [], warnings = [], timings = [];
     const request = async (endpoint, body, options) => {
       if (endpoint === "/api/v1/ao/read" && body.run_id) {
         const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
@@ -6994,7 +6994,7 @@ test("a follow-up that cannot continue its agent says which session and why befo
     const workflow = createAgentOrchestratorWorkflow({
       requestHeadless: request, findCodexExecutable: () => process.execPath,
       resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
-      logger: { info() {}, warn: (event, fields) => warnings.push([event, fields]) },
+      logger: { info: (event, fields) => { if (event === "ao.launch_timing") timings.push(fields); }, warn: (event, fields) => warnings.push([event, fields]) },
       aoHarness: { ...aoHarness,
         spawn: async input => { spawned.push(input); return "new-session"; },
         observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "done" }) },
@@ -7002,12 +7002,75 @@ test("a follow-up that cannot continue its agent says which session and why befo
     await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now run the tests", executionMode: "single", singleRoute: route });
     for (let tries = 0; tries < 200 && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(spawned.length, 1, "a fresh agent starts");
+    for (let tries = 0; tries < 200 && !timings.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    lost.timing = timings[0];
     return JSON.parse(JSON.stringify(warnings.filter(([event]) => event === "ao.continuation_lost")));
   }
   assert.deepEqual(await lost({ continuable: async () => false }),
     [["ao.continuation_lost", { session: "sess-1", reason: "not_continuable" }]]);
+  // The launch's timing says how long bringing the agent back took, and the send when there was one
+  // (2026-11-08: continued launches of 10-17 s, with nothing to say which part waited).
+  assert.ok(Number.isFinite(lost.timing.checkMs), "the agent check is timed");
+  assert.equal(lost.timing.sendMs, undefined, "nothing was sent to it");
   assert.deepEqual(await lost({ continuable: async () => true, send: async () => { throw new Error("AO: CHAT_CONTROLLER_NOT_READY"); } }),
     [["ao.continuation_lost", { session: "sess-1", reason: "send_failed", message: "AO: CHAT_CONTROLLER_NOT_READY" }]]);
+  assert.ok(Number.isFinite(lost.timing.checkMs) && Number.isFinite(lost.timing.sendMs), "the check and the send are timed");
+});
+
+/** A chat_send whose launch continues sess-1 (`continues`) or starts fresh, with Settings › Instructions saved. */
+async function instructedLaunch(continues) {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map(), spawned = [], sent = [], asked = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask\n\nFollow-up: now run the tests" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    agentInstructions: { forLaunch: async (workspaceId, options) => { asked.push([workspaceId, options.maxBytes]); return { text: "<user_instructions>Run bun test.</user_instructions>\n\n", hash: "h1" }; } },
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "new-session"; },
+      continuable: async id => continues && id === "sess-1",
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-2", state: "running" }; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "tests pass" }),
+    },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now run the tests", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && !sent.length && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  return { sent, spawned, asked };
+}
+
+test("Settings › Instructions go in front of a continued agent's next message", async () => {
+  const { sent, spawned, asked } = await instructedLaunch(true);
+  assert.equal(spawned.length, 0);
+  assert.equal(sent[0][1], "<user_instructions>Run bun test.</user_instructions>\n\nnow run the tests",
+    "an agent not yet given this version of the files gets them with the message");
+  assert.equal(asked[0][0], "ws-1");
+  assert.ok(asked[0][1] > 16_384, "a follow-up has steer-sized room");
+});
+
+test("Settings › Instructions start a new agent's first message, within AO's 16 KiB prompt", async () => {
+  const { sent, spawned, asked } = await instructedLaunch(false);
+  assert.equal(sent.length, 0);
+  assert.match(spawned[0].prompt, /^<user_instructions>Run bun test\.<\/user_instructions>\n\n[\s\S]*Follow-up: now run the tests$/,
+    "the instructions first and the person's request last, never cut");
+  assert.ok(asked.at(-1)[1] <= 16_384 - Buffer.byteLength("first ask\n\nFollow-up: now run the tests"), "the room the request leaves");
 });
 
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
@@ -9040,6 +9103,7 @@ test("each launch logs where its time went", async () => {
   assert.equal(timing.via, "spawn");
   assert.equal(timing.ok, true);
   for (const field of ["prepareMs", "launchMs", "totalMs"]) assert.ok(Number.isFinite(timing[field]) && timing[field] >= 0, field);
+  assert.equal(timing.checkMs, undefined, "a first launch has no agent to bring back");
 });
 
 

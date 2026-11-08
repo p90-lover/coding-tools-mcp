@@ -4975,6 +4975,12 @@ async function start() {
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
       // The chat's own preferences ("Retry automatically").
       chatPreferencesFile: path.join(app.getPath("userData"), "integrations", "chat-preferences.json"),
+      // Settings › Instructions: the global AGENTS.md and each project's own, put in front of every
+      // agent's first message (agent-instructions.cjs ships with the app, not the backend bundle).
+      agentInstructions: require("./agent-instructions.cjs").createAgentInstructions({
+        globalFile: path.join(app.getPath("userData"), "instructions", "AGENTS.md"),
+        workspaces: listHeadlessWorkspaces,
+      }),
       // Points per model from finished Team rounds (model-scores.cjs).
       modelScoresFile: path.join(app.getPath("userData"), "integrations", "model-scores.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),

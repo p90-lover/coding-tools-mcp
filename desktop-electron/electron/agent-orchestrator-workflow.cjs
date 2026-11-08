@@ -355,7 +355,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -880,6 +880,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const planner = team?.nodes?.find(node => node.role === "planner");
     if (!planner?.route) return { ok: true, warmed: false, reason: "The team has no orchestrator to pre-warm" };
     return chatPrewarmRoute(id, planner.route, false);
+  }
+  // The person's global and workspace AGENTS.md (agent-instructions.cjs): in front of a new agent's
+  // first message, and of a running agent's next one once they changed (AO session -> the version
+  // it was given). A follow-up is sent as a steer-sized message (64 KiB), not a 16 KiB spawn prompt.
+  const FOLLOW_UP_BYTES = 60 * 1024;
+  const instructionsGiven = new Map();
+  function givenInstructions(session, hash) {
+    if (!session) return;
+    instructionsGiven.delete(session);
+    instructionsGiven.set(session, hash);
+    if (instructionsGiven.size > 500) instructionsGiven.delete(instructionsGiven.keys().next().value);
+  }
+  /** Never fails a launch: unreadable files are left out (and logged), as no files are. */
+  async function launchInstructions(workspaceId, maxBytes) {
+    if (!agentInstructions || maxBytes <= 0) return { text: "", hash: "" };
+    return agentInstructions.forLaunch(workspaceId, { maxBytes }).catch((error) => {
+      logger?.warn?.("ao.instructions_unread", { message: publicText(error?.message || error, 200) });
+      return { text: "", hash: "" };
+    });
+  }
+  function agentInstructionsCall({ workspaceId = null, scope, text } = {}) {
+    if (!agentInstructions) throw new Error("Agent instructions are unavailable");
+    const id = workspaceId ? clean(workspaceId, 128) : null;
+    const files = scope === undefined ? agentInstructions.read(id) : agentInstructions.save({ scope, workspaceId: id, text });
+    return Promise.all([files, agentInstructions.projects?.().catch(() => []) ?? []])
+      .then(([read, projects]) => ({ ok: true, ...read, projects }));
   }
   // AO session -> the turn its latest follow-up started, so the previous turn is not read as its answer.
   const expectedTurns = new Map();
@@ -1474,6 +1500,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // window before it, and whether it continued the chat's session, took a warm one or spawned.
       let launchedVia = "spawn";
       let launchStarted = null;
+      // A follow-up's launch in two parts: bringing its agent back (or confirming it is up) and the
+      // send itself. Continued launches took 10-17 s against ~0.3 s usually (2026-11-08), and the
+      // total alone did not say which part waited.
+      let checkMs = null, sendMs = null;
       // No warm start begins in this project while the launch runs (it would queue in front of
       // it in AO), and a route the picker asked to warm before the send is no longer wanted.
       launching.set(workspaceId, (launching.get(workspaceId) ?? 0) + 1);
@@ -1494,11 +1524,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // It is stopped (its session, worktree and conversation stay), so it cannot come back beside
         // the new agent, which starts with the chat so far (the handoff below).
         let unconfirmed = null;
+        const checkStarted = now();
         const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
           if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
           unconfirmed = error;
           return false;
         });
+        if (continued) checkMs = now() - checkStarted;
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
           // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
@@ -1509,8 +1541,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
-          sent = await harnessService().send(continued.session, continued.text, reserved.request_key)
+          // The person's AGENTS.md files go in front again only when they changed since this agent
+          // was given them (or since the app started, when that is not known).
+          const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
+          const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
+          const sendStarted = now();
+          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key)
             .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
+          sendMs = now() - sendStarted;
+          if (sent?.turnId) givenInstructions(continued.session, standing.hash);
         }
         // A follow-up that should have continued the chat's session starts a fresh one: logged with
         // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
@@ -1524,10 +1563,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
         handoffs.delete(runId);
-        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt);
+        // A new agent's first message starts with the person's AGENTS.md files, in the room the
+        // request leaves; the chat's handoff gets what is left after them.
+        const standing = sent?.turnId ? { text: "", hash: "" } : await launchInstructions(workspaceId, PROMPT_BYTES - utf8Bytes(reserved.prompt));
+        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt) - utf8Bytes(standing.text);
         if (!sent?.turnId && handoff) stage("summarising the chat for a new agent");
-        const prompt = !sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt;
+        const prompt = standing.text + (!sent?.turnId && handoff
+          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt);
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
@@ -1559,6 +1601,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage(continued ? "starting a new agent (the chat's agent was gone or refused the message)" : "starting a new agent");
           session = await harnessService().spawn({ ...launch, prompt });
         }
+        if (first?.turnId || (session && !sent?.turnId)) givenInstructions(session, standing.hash);
         // The next chat on this route finds a session waiting too, started once this turn is under
         // way rather than beside its first model call.
         if (warmed && !idleStopped) {
@@ -1576,7 +1619,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       const done = now();
       logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
-        prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted });
+        prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted,
+        ...(checkMs === null ? {} : { checkMs }), ...(sendMs === null ? {} : { sendMs }) });
       // A card stopped while its launch was in flight has no session to stop yet; once the launch
       // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
       const stopIfAbandoned = async () => {
@@ -8046,6 +8090,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_loop": return chatLoop(args);
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
+      case "agent_instructions": return agentInstructionsCall(args);
       case "chat_auto_compact": return chatAutoCompact(args);
       case "compact_chat": return compactSession(args);
       case "chat_diff": return chatDiff(args);
