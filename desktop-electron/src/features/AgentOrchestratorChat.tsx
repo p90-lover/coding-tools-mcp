@@ -1083,7 +1083,7 @@ export function AgentOrchestratorChat({
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
   /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
-  steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting" | "answered">;
   /** Checks the captured accepted turn without sending a prompt, stopping it, or replaying work. */
   recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
   openStructure: (runId: string) => void;
@@ -1671,6 +1671,13 @@ export function AgentOrchestratorChat({
       // and goes in once it can. It stays shown as steering; a "Queued" card here read as if the
       // message had not been sent at all ("it pop up as queued for no reason").
       const waits = steered === "wait" || steered === "starting";
+      // It answered the question the agent was waiting on (chat_steer's answered): the chat shows it
+      // as that question's answer, so no steer bubble waits for the turn to show it.
+      if (steered === "answered") {
+        dropPending();
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        return true;
+      }
       // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
       if (steered !== true && !waits) dropPending();
       if (steered === true) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, sent: true } : entry));

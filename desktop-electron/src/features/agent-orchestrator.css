@@ -685,6 +685,8 @@ pre.cdx-command:focus-visible { outline: 2px solid var(--ao-blue, #2f6fdd); outl
 .cdx-foot .cx-computer-lead { margin-right: auto; }
 /* Codex's footer: px-3 pb-3 with gap-2, composer-size buttons. */
 .cdx-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 0 12px 12px; }
+/* A question this chat answers for the person: how long it still waits, at the foot's start. */
+.cdx-countdown { align-self: center; color: var(--cdx-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .cdx-button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 999px;
   font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
 .cdx-button:disabled { opacity: .45; cursor: default; }
