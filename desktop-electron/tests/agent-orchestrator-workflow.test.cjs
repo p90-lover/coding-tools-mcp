@@ -6637,7 +6637,55 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
     }
     assert.deepEqual(resolved, [["poll", "no"]], "denied, not left waiting for the person");
     assert.match(reasons[0], /couldn't answer after 3 tries/);
+    // Told "try a safer way", agents dropped a harmless step for good: the agent hears it was not judged.
+    assert.match(reasons[0], /not refused/);
+    assert.match(reasons[0], /Run the same request again/);
+    assert.doesNotMatch(reasons[0], /Try a safer way/);
     assert.doesNotMatch(JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" })), /check it yourself/);
+  } finally { mission.nodes[0].state = "finished"; }
+});
+
+test("a request the safety rules block is denied naming the rule; one that only mentions a dangerous word is reviewed", async () => {
+  // The user, 2026-11-08: "the auto review keeps always blocking harmless command for no reason". The
+  // agent heard only "Blocked by the command approver's safety rules", and a Grep for "shutdown" was one.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const requests = [
+    { approval_id: "env", source: "ao", kind: "command", tool: "Bash", command: "cat .env", decisions },
+    { approval_id: "grep", source: "ao", kind: "permission", tool: "Grep", toolInput: JSON.stringify({ pattern: "shutdown", path: "logs" }), decisions },
+    { approval_id: "api", source: "ao", kind: "command", tool: "PowerShell",
+      command: "Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/accounts/shutdown-controllers", decisions },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  const resolved = new Map(), prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      prompts.push(JSON.parse(init.body).messages[0].content);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "{\"action\":\"allow\",\"reason\":\"local API call\"}" } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: requests.filter(request => !resolved.has(request.approval_id)) }),
+      resolveApproval: async (_session, id, decision, why) => { resolved.set(id, { decision, why }); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && resolved.size < requests.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(resolved.get("env")?.decision, "no");
+    assert.match(resolved.get("env").why, /Blocked by the safety rules: it reads or writes a secret file .*\(\.env\)/, "the agent hears which rule and what it matched");
+    assert.match(resolved.get("env").why, /not by the user/);
+    assert.equal(resolved.get("grep")?.decision, "yes", "a search pattern is not a command");
+    assert.equal(resolved.get("api")?.decision, "yes", "a URL path is not the shutdown command");
+    assert.ok(prompts.some(prompt => prompt.includes("shutdown-controllers")), "the model reviewed the API call");
+    assert.ok(!prompts.some(prompt => prompt.includes("cat .env")), "the blocked request never reached the model");
   } finally { mission.nodes[0].state = "finished"; }
 });
 
