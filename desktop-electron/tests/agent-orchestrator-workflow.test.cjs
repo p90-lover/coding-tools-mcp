@@ -4189,12 +4189,21 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   const prompt = goalCheckPrompt("make every test pass", transcript);
   assert.match(prompt, /Condition: make every test pass/);
   assert.match(prompt, /only from the transcript/);
-  assert.match(prompt, /Answer with JSON only: \{"met": true\|false, "reason"/);
+  assert.match(prompt, /Answer with JSON only: \{"met": true\|false, "progress": true\|false, "reason"/);
+  assert.match(prompt, /"progress" is false when the agent did no new work toward the condition/);
+  assert.doesNotMatch(prompt, /previous turn's verdict/, "round 1 has no previous verdict");
   assert.ok(prompt.endsWith(transcript));
+  const later = goalCheckPrompt("make every test pass", transcript, { previous: "Two tests still fail." });
+  assert.match(later, /The previous turn's verdict: Two tests still fail\./);
+  assert.match(later, /same blocker or the same missing work as the previous verdict/);
   // The evaluator's verdict.
-  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, stop: false, reason: "All 40 tests pass, shown in the output." });
-  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, stop: false, reason: "Two tests fail." });
-  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, stop: false, reason: "The condition is not met yet." });
+  assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, stop: false, progress: true, reason: "All 40 tests pass, shown in the output." });
+  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, stop: false, progress: true, reason: "Two tests fail." });
+  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, stop: false, progress: true, reason: "The condition is not met yet." });
+  // No progress only when the evaluator says so; a met goal always made progress.
+  assert.equal(parseGoalCheck('{"met": false, "progress": false, "reason": "Still blocked."}').progress, false);
+  assert.equal(parseGoalCheck('{"met": true, "progress": false}').progress, true);
+  assert.equal(parseGoalCheck('{"met": false, "progress": "no"}').progress, true, "only a false counts");
   assert.throws(() => parseGoalCheck("I think it is done."), /no verdict/);
   assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
@@ -4908,6 +4917,59 @@ test("with \"Let the model judge\" on, a goal round that needs the person or fai
   await workflow.goalAfterRun("ws-1", "r3", "held", null);
   assert.equal(checks.length, asked);
   assert.match((await goalOf(workflow)).note, /needs you/);
+});
+
+test("a goal stalls after three rounds in a row without progress, judged or not; progress in between starts the count again", async () => {
+  // Seen live 2026-11-08: three goals had run 154, 281 and 480 rounds over 14 days. Each round the
+  // agent reported the same blocker (a refused approval, an account answering 404) and did nothing
+  // else, the evaluator said "not met", and the next round started. Nothing ever stopped them.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
+  let verdict = { met: false, progress: false, reason: "Still blocked: the controller's approval was refused." };
+  const { world, workflow, checks } = await goalChat({ evaluator: () => verdict });
+  let count = 0;
+  const settle = async (answer) => {
+    const id = `r${++count}`;
+    world.runs.push({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, history: [], receipt: { thread_id: "sess-1", answer } }] });
+    await workflow.goalAfterRun("ws-1", id, "finished", null);
+    return goalOf(workflow);
+  };
+  let goal = await settle("The controller is offline and its replacement was denied.");
+  assert.equal(goal.status, "active");
+  assert.equal(goal.stuckRounds, 1);
+  assert.doesNotMatch(checks[0].messages[0].content, /previous turn's verdict/);
+  goal = await settle("Still blocked.");
+  assert.match(checks[1].messages[0].content, /The previous turn's verdict: Still blocked: the controller's approval was refused\./,
+    "the evaluator sees what the last round was told, so it can tell a repeat");
+  assert.equal(goal.stuckRounds, 2);
+  // A round with progress starts the count again.
+  verdict = { met: false, progress: true, reason: "Fixed the panel detection offline; the live run and YOLO training are still to do." };
+  goal = await settle("Fixed the detection offline; 30 tests pass.");
+  assert.equal(goal.stuckRounds, 0);
+  assert.equal(goal.status, "active");
+  verdict = { met: false, progress: false, reason: "Still blocked: the account answers 404." };
+  await settle("Blocked.");
+  await settle("Blocked.");
+  const sent = world.updates.length;
+  goal = await settle("Blocked.");
+  assert.equal(goal.status, "stalled");
+  assert.equal(goal.note, `No progress in 3 rounds in a row: ${verdict.reason} Clear what blocks it, then /goal resume`);
+  assert.equal(world.updates.length, sent, "no further round");
+  assert.equal(goal.feedback, verdict.reason, "resume carries on with the verdict as the agent's instruction");
+  // Resumed, it counts from nothing again.
+  await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
+  await goalSettle();
+  goal = await goalOf(workflow);
+  assert.equal(goal.status, "active");
+  assert.equal(goal.stuckRounds, 0);
+  // With "Let the model judge" on, rounds without progress stall it the same way.
+  await workflow.call("chat_model_judges", { enabled: true });
+  verdict = { met: false, stop: false, progress: false, reason: "Still blocked: nobody can approve the controller." };
+  await settle("Blocked.");
+  await settle("Blocked.");
+  goal = await settle("Blocked.");
+  assert.equal(goal.status, "stalled");
+  assert.match(goal.note, /^No progress in 3 rounds in a row: Still blocked: nobody can approve the controller\./);
 });
 
 test("Claude Code chat agents run without Claude Code's own scheduler, so they wait with the app's wake-up", () => {
