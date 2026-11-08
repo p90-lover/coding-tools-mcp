@@ -992,6 +992,38 @@ test("a finished call or thought carries how long it took; a running one and an 
   assert.equal(running.durationMs, undefined, "a running call has no duration yet");
 });
 
+test("a thought AO recovered after a restart is timed to the next step, not to the restart", async () => {
+  // Seen 2026-11-08: the harness never closed a GPT turn's thoughts; AO's restart repair marked
+  // them "recovered" ~12 h later, and that restart was read as each thought's end ("Steps took 316h"
+  // for an 80-minute turn).
+  const at = seconds => new Date(Date.parse("2026-11-07T13:15:58Z") + seconds * 1000).toISOString();
+  const restart = new Date(Date.parse("2026-11-08T01:28:36Z")).toISOString();
+  const activity = (id, sequence, activityKind, status, from, to, detail = {}) => ({ id, turnId: "t", sequence, activityKind, status,
+    summary: activityKind === "reasoning" ? "Reasoning" : "Bash", createdAt: at(from), updatedAt: typeof to === "string" ? to : at(to), detail });
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation")
+      ? { turns: [{ id: "t", state: "running" }], messages: [
+        { id: "m", turnId: "t", sequence: 5, role: "assistant", text: "Done.", createdAt: at(90) },
+      ], activities: [
+        activity("r1", 1, "reasoning", "recovered", 0, restart, { text: "I'll verify the existing watcher" }),
+        activity("c", 2, "mcp_tool", "completed", 7, 28, { input: { command: "gh pr view 1093" }, output: "ok" }),
+        activity("r2", 3, "reasoning", "recovered", 30, restart, { text: "Verifying merged source" }),
+        activity("x", 4, "mcp_tool", "recovered", 41, restart, { input: { command: "gh pr view 1097" } }),
+        activity("r3", 6, "reasoning", "recovered", 95, restart, { text: "Wrapping up" }),
+      ] }
+      : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const timeline = (await upstream.observe("s")).timeline;
+  const byId = Object.fromEntries(timeline.map(item => [item.id, item]));
+  assert.equal(byId.r1.durationMs, 7000, "the thought ends when the next step starts");
+  assert.equal(byId.c.durationMs, 21000, "a completed call keeps its own time");
+  assert.equal(byId.r2.durationMs, 11000);
+  assert.equal(byId.x.durationMs, undefined, "a recovered call's end is unknown");
+  assert.equal(byId.r3.durationMs, undefined, "the turn's last thought has nothing after it");
+  const total = timeline.reduce((sum, item) => sum + (item.durationMs ?? 0), 0);
+  assert.ok(total < 90_000, `steps fit inside the turn (${total} ms)`);
+});
+
 test("a tool's row carries its arguments and output well past a few lines", async () => {
   const file = Array.from({ length: 300 }, (_, line) => `${line + 1}\tconst value${line} = ${line};`).join("\n");
   const upstream = observeHarness({
