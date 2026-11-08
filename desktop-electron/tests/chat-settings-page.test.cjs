@@ -59,3 +59,37 @@ test("Settings › Chat holds Claude Code's auto-compact and the chat's own swit
   // Reading them is passive (no focus needed), as the other chat switches; changing them is not.
   assert.match(read("electron/main.cjs"), /\["chat_auto_retry", "chat_model_judges", "chat_auto_compact"\]\.includes\(input\.operation\) && input\.arguments\?\.enabled === undefined && input\.arguments\?\.percent === undefined/);
 });
+
+test("Settings › Chat's mission switch is kept on this computer, on by default, and every open chat follows it at once", () => {
+  const page = read("src/features/ChatSettingsPage.tsx");
+  assert.match(page, /<Row label="Keep work expanded on a mission" description="[^"]+">\s*<Toggle label="Keep work expanded on a mission" checked=\{missionWork\} onChange=\{\(next\) => setMissionWork\(saveMissionWork\(next\)\)\} \/>/);
+  assert.match(page, /useEffect\(\(\) => onMissionWork\(setMissionWork\), \[\]\)/, "the page follows a change made in another window");
+  assert.match(read("src/features/AgentOrchestratorChat.tsx"), /useEffect\(\(\) => onMissionWork\(setMissionWork\), \[\]\)/, "so does every chat");
+
+  const ts = require("typescript");
+  const vm = require("node:vm");
+  const stored = new Map();
+  const listeners = new Map();
+  const window = {
+    addEventListener: (type, listener) => listeners.set(type, [...(listeners.get(type) ?? []), listener]),
+    removeEventListener: (type, listener) => listeners.set(type, (listeners.get(type) ?? []).filter((entry) => entry !== listener)),
+    dispatchEvent: (event) => { for (const listener of listeners.get(event.type) ?? []) listener(event); },
+  };
+  const settings = {};
+  vm.runInNewContext(ts.transpileModule(read("src/features/chat-view-settings.ts"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { exports: settings, window, Event: class { constructor(type) { this.type = type; } },
+      localStorage: { getItem: (key) => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) } });
+  assert.equal(settings.readMissionWork(), true, "on until turned off");
+  const seen = [];
+  const stop = settings.onMissionWork((on) => seen.push(on));
+  assert.equal(settings.saveMissionWork(false), false);
+  assert.equal(stored.get(settings.MISSION_WORK_KEY), "off");
+  assert.equal(settings.readMissionWork(), false);
+  // Another window turned it back on.
+  stored.set(settings.MISSION_WORK_KEY, "on");
+  window.dispatchEvent({ type: "storage", key: settings.MISSION_WORK_KEY });
+  assert.deepEqual(seen, [false, true]);
+  stop();
+  settings.saveMissionWork(false);
+  assert.deepEqual(seen, [false, true], "an unsubscribed chat hears nothing more");
+});

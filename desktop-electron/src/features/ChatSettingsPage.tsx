@@ -5,6 +5,7 @@ import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } 
 import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, recordPageShortcut, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
+import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
 import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
 
@@ -196,6 +197,9 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
   // The chat list's own settings, shared with its popover in the sidebar.
   const [list, setList] = useState(readChatListSettings);
   useEffect(() => onChatListSettings(setList), []);
+  // How chats draw their work, kept on this computer; open chats follow a change at once.
+  const [missionWork, setMissionWork] = useState(readMissionWork);
+  useEffect(() => onMissionWork(setMissionWork), []);
   // The archive days, kept by the bridge (chat-archive.cjs) like the preferences above.
   const [archive, setArchive] = useState<{ days: number; idleDays: number } | null>(null);
   useEffect(() => {
@@ -317,6 +321,9 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
               <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead">
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
+              </Row>
+              <Row label="Keep work expanded on a mission" description="Thoughts and steps stay open while a chat or its goal is working. Anything you fold stays folded">
+                <Toggle label="Keep work expanded on a mission" checked={missionWork} onChange={(next) => setMissionWork(saveMissionWork(next))} />
               </Row>
             </Group>
             <Group title="Keyboard shortcuts">
