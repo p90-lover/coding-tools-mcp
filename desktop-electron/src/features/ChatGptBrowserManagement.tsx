@@ -59,10 +59,8 @@ function planText(plan: BrowserAccount["plan"], signedIn?: boolean | null) {
   const labels: Record<string, string> = { free: "Free", go: "Go", plus: "Plus", pro: "Pro", team: "Business (Team)",
     business: "Business", enterprise: "Enterprise", edu: "Edu", education: "Edu" };
   const label = labels[plan.planType ?? ""] ?? "Unknown plan";
-  const role = plan.workspaceRole === "account-owner" ? "Owner" : plan.workspaceRole === "account-admin" ? "Admin"
-    : plan.workspaceRole === "standard-user" ? "Member" : "Role not verified";
   return { label: signedIn === false ? `Last known ${label}` : label,
-    detail: [plan.workspaceStructure === "personal" ? "Personal workspace" : plan.workspaceName || "Workspace", role,
+    detail: [plan.workspaceStructure === "personal" ? "Personal workspace" : plan.workspaceName || "Workspace",
       `${signedIn === false ? "Last checked" : "Checked"} ${ago(plan.planCheckedAt)}`, capabilities].filter(Boolean).join(" · ") };
 }
 
@@ -73,17 +71,24 @@ export function mcpAccountAccess(account: BrowserAccount, accounts: BrowserAccou
   const fresh = (plan: BrowserAccount["plan"]) => Boolean(plan?.planCheckedAt && plan.userId && plan.workspaceId
     && now >= plan.planCheckedAt && now - plan.planCheckedAt < 300_000);
   const plan = account.plan;
-  if (!fresh(plan) || !["workspace", "personal"].includes(plan?.workspaceStructure ?? "")
-    || !["account-owner", "account-admin", "standard-user"].includes(plan?.workspaceRole ?? "")) {
-    return { allowed: false, detail: "Refresh this account's workspace details to verify MCP ownership." };
+  const knownRole = plan?.workspaceRole === "account-owner" ? "Owner" : plan?.workspaceRole === "account-admin" ? "Admin"
+    : plan?.workspaceRole === "standard-user" ? "Member" : null;
+  const verified = account.signedIn === true && fresh(plan) && Boolean(knownRole)
+    && ["workspace", "personal"].includes(plan?.workspaceStructure ?? "");
+  const role = knownRole ? verified ? knownRole : `Last known ${knownRole}` : "Not verified";
+  if (!verified) {
+    return { allowed: false, role, label: "Refresh required", detail: "Refresh this account's workspace details to verify its role and MCP access." };
   }
-  if (plan?.workspaceRole === "account-owner") return { allowed: true, detail: "The verified workspace owner can set up this MCP connector." };
-  if (plan?.workspaceStructure === "workspace" && accounts.some(owner => owner.id !== account.id && owner.signedIn === true
-    && fresh(owner.plan) && owner.plan?.workspaceId === plan.workspaceId && owner.plan?.workspaceStructure === "workspace"
-    && owner.plan?.workspaceRole === "account-owner" && owner.plan?.userId !== plan.userId)) {
-    return { allowed: true, detail: "A signed-in owner of this workspace will create and publish the connector for this account." };
+  if (plan?.workspaceRole === "account-owner") return { allowed: true, role, label: "Can create and connect", detail: "The verified workspace owner can create, publish, or connect this MCP connector." };
+  if (plan?.workspaceStructure === "workspace") {
+    const ownerAvailable = accounts.some(owner => owner.id !== account.id && owner.signedIn === true
+      && fresh(owner.plan) && owner.plan?.workspaceId === plan.workspaceId && owner.plan?.workspaceStructure === "workspace"
+      && owner.plan?.workspaceRole === "account-owner" && owner.plan?.userId !== plan.userId);
+    return { allowed: true, role, label: "Use existing only", detail: ownerAvailable
+      ? "Check an existing connector first. A signed-in owner of this workspace can create and publish it if needed."
+      : "Check an existing connector in this workspace. A verified owner is required to create or publish one." };
   }
-  return { allowed: false, detail: "Only the workspace owner can create MCP. Add or sign in to that owner account and refresh its workspace details." };
+  return { allowed: false, role, label: "Owner required", detail: "Only the workspace owner can create MCP. Add or sign in to that owner account and refresh its workspace details." };
 }
 
 function connectorText(connector: BrowserAccount["connector"]) {
@@ -226,7 +231,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
         let connected = 0, skipped = 0;
         for (const account of targets) {
           const signedIn = accountSignedIn(account, accounts?.activeId ?? "", browser?.authenticated) === true;
-          const access = mcpAccountAccess(account, (accounts?.accounts ?? []).map(entry => ({ ...entry,
+          const access = mcpAccountAccess({ ...account, signedIn }, (accounts?.accounts ?? []).map(entry => ({ ...entry,
             signedIn: accountSignedIn(entry, accounts?.activeId ?? "", browser?.authenticated) === true })));
           if (!signedIn || !access.allowed) { skipped += 1; continue; }
           setConnections(previous => ({ ...previous, [account.id]: { state: "connecting", detail: "Setting up and checking this account's connector", checkedAt: Date.now(), email: account.email } }));
@@ -244,7 +249,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
           }
         }
-        setConnectionSummary(`Last connection check: ${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected.${skipped ? ` ${skipped} skipped: sign-in and a verified workspace owner are required.` : ""}${connected < targets.length - skipped ? " Check the accounts that need attention below." : ""}`);
+        setConnectionSummary(`Last connection check: ${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected.${skipped ? ` ${skipped} skipped: sign-in and fresh workspace details are required.` : ""}${connected < targets.length - skipped ? " Check the accounts that need attention below." : ""}`);
         await api.browserAccounts().then(setAccounts).catch(() => {});
         await api.mcpTunnels().then(setTunnels).catch(() => {});
       });
@@ -503,7 +508,7 @@ function AccountCard({
   // own saved session (null until read).
   const signedIn = inUse && authenticated ? true : account.signedIn;
   const plan = planText(account.plan, signedIn);
-  const mcpAccess = mcpAccountAccess(account, holders);
+  const mcpAccess = mcpAccountAccess({ ...account, signedIn: signedIn === true }, holders);
   const observedAt = Math.max(account.connector?.okAt ?? 0, account.connector?.errorAt ?? 0);
   const connectionCheck = signedIn !== false && connection && connectionMatchesAccount(connection, account)
     && (connection.state === "connecting" || connection.checkedAt >= observedAt) ? connection : undefined;
@@ -511,7 +516,7 @@ function AccountCard({
   const connector = signedIn === false
     ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
     : !mcpAccess.allowed && connectionCheck?.state !== "connected" && !account.connector?.okAt
-      ? { tone: "warn", label: "Owner required", detail: mcpAccess.detail }
+      ? { tone: "warn", label: mcpAccess.label, detail: mcpAccess.detail }
       : connectionCheck
       ? { tone: connectionCheck.state === "connected" ? "ok" : connectionCheck.state === "failed" ? "error" : "idle",
         label: connectionCheck.state === "connected" ? "Connected" : connectionCheck.state === "failed" ? "Needs attention" : "Connecting…", detail: connectionCheck.detail }
@@ -594,6 +599,17 @@ function AccountCard({
                 {isRunning(`plan:${account.id}`) ? "Checking…" : "Refresh"}
               </button>
             ) : null}
+          </dd>
+        </div>
+        <div>
+          <dt>Role</dt>
+          <dd><span className="cbm-muted">{mcpAccess.role}</span></dd>
+        </div>
+        <div>
+          <dt>MCP access</dt>
+          <dd className="cbm-connector" title={mcpAccess.detail}>
+            <span className="cbm-muted">{mcpAccess.label}</span>
+            <span className="cbm-muted">{mcpAccess.detail}</span>
           </dd>
         </div>
         <div>

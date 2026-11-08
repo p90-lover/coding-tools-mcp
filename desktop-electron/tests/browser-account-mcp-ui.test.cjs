@@ -72,6 +72,33 @@ function button(tree, label) {
   return found;
 }
 
+test("team role access separates existing connector validation from owner creation", async () => {
+  for (const [role, label] of [["account-admin", "Admin"], ["standard-user", "Member"]]) {
+    const ui = fixture();
+    for (const account of ui.accounts) account.plan.workspaceRole = role;
+    const card = ui.card("second");
+    const connect = button(card, "Connect MCP");
+    assert.equal(connect.props.disabled, false, "a fresh member may ask the backend to verify an existing workspace connector");
+    assert.match(text(card), new RegExp(`Role${label}`));
+    assert.match(text(card), /MCP accessUse existing only/);
+    assert.match(connect.props.title, /existing.*owner/i);
+    connect.props.onClick();
+    await ui.flush();
+    assert.deepEqual(ui.calls.connector, ["second"]);
+  }
+});
+
+test("fresh active-page authentication is honored by both single and bulk MCP handlers", async () => {
+  for (const signedIn of [null, false]) for (const bulk of [false, true]) {
+    const ui = fixture();
+    ui.accounts[0].signedIn = signedIn;
+    assert.equal(button(ui.card("main"), "Connect MCP").props.disabled, false);
+    button(bulk ? ui.page() : ui.card("main"), bulk ? "Connect all accounts" : "Connect MCP").props.onClick();
+    await ui.flush();
+    assert.equal(ui.calls.connector[0], "main", "the enabled active account must not be silently skipped");
+  }
+});
+
 test("an account MCP button sends its exact ID and does not retain another sign-in's result", async () => {
   const ui = fixture();
   button(ui.card("second"), "Connect MCP").props.onClick();
@@ -197,14 +224,15 @@ test("MCP setup waits only for that account's in-flight removal", async () => {
   assert.equal(button(ui.card("second"), "Connect MCP").props.disabled, false);
 });
 
-for (const role of ["account-admin", "standard-user", "owner", undefined]) {
-  test(`MCP creation is blocked without a verified workspace owner: ${role}`, async () => {
+for (const role of ["owner", "constructor", "toString", "__proto__", undefined]) {
+  test(`MCP setup is blocked without a verified workspace role: ${role}`, async () => {
     const ui = fixture();
     for (const account of ui.accounts) account.plan.workspaceRole = role;
     const connect = button(ui.card("second"), "Connect MCP");
     assert.equal(connect.props.disabled, true);
     assert.match(connect.props.title, /owner|verify/i);
-    assert.match(text(ui.card("second")), /Owner required/);
+    assert.match(text(ui.card("second")), /RoleNot verified/);
+    assert.match(text(ui.card("second")), /Refresh required/);
     assert.equal(button(ui.page(), "Connect all accounts").props.disabled, true);
     // The handler also refuses a queued click whose permissions have since changed.
     connect.props.onClick();
@@ -226,19 +254,35 @@ test("unknown and stale workspace metadata cannot enable MCP creation", async ()
   assert.match(text(ui.page()), /3 skipped/);
 });
 
-test("a member can connect through a signed-in owner of the exact workspace only", () => {
+test("a known role is last-known after sign-out, stale inspection, or a future timestamp", () => {
+  for (const state of ["signed-out", "stale", "future", "identity-missing"]) {
+    const ui = fixture();
+    const account = ui.accounts[1];
+    if (state === "signed-out") account.signedIn = false;
+    if (state === "stale") account.plan.planCheckedAt = Date.now() - 300001;
+    if (state === "future") account.plan.planCheckedAt = Date.now() + 60000;
+    if (state === "identity-missing") account.plan.userId = null;
+    const card = ui.card(account.id);
+    assert.match(text(card), /RoleLast known Owner/);
+    assert.match(text(card), /MCP accessRefresh required/);
+    assert.equal(button(card, "Connect MCP").props.disabled, true);
+  }
+});
+
+test("only an exact-workspace fresh signed-in owner is offered for creation after member reuse", () => {
   const ui = fixture();
   const [, member, owner] = ui.accounts;
   member.plan.workspaceRole = "standard-user";
-  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, true, "another workspace owner is not authority");
+  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, false, "existing connector validation needs no owner candidate");
+  assert.doesNotMatch(button(ui.card(member.id), "Connect MCP").props.title, /signed-in owner/i);
   owner.plan.workspaceId = member.plan.workspaceId;
   assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, false);
   assert.match(button(ui.card(member.id), "Connect MCP").props.title, /owner.*create and publish/i);
   owner.signedIn = false;
-  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, true);
+  assert.doesNotMatch(button(ui.card(member.id), "Connect MCP").props.title, /signed-in owner/i);
   owner.signedIn = true;
   owner.plan.planCheckedAt = Date.now() - 300001;
-  assert.equal(button(ui.card(member.id), "Connect MCP").props.disabled, true);
+  assert.doesNotMatch(button(ui.card(member.id), "Connect MCP").props.title, /signed-in owner/i);
 });
 
 test("losing creation authority does not relabel an already confirmed connection as failed", async () => {
@@ -248,7 +292,8 @@ test("losing creation authority does not relabel an already confirmed connection
   ui.accounts[1].plan.workspaceRole = "standard-user";
   const card = ui.card("second");
   assert.match(text(card), /Connected/);
-  assert.equal(button(card, "Check connection").props.disabled, true, "creation/setup cannot borrow the old connection's authority");
+  assert.equal(button(card, "Check connection").props.disabled, false, "a member can validate the existing connector without creation authority");
+  assert.match(text(card), /MCP accessUse existing only/);
 });
 
 test("a saved successful connection survives reopening the page without creation authority", () => {
@@ -258,7 +303,7 @@ test("a saved successful connection survives reopening the page without creation
   const card = ui.card("second");
   assert.match(text(card), /Previously connected/);
   assert.doesNotMatch(text(card), /Owner required/);
-  assert.equal(button(card, "Connect MCP").props.disabled, true, "connection history does not authorize creation");
+  assert.equal(button(card, "Connect MCP").props.disabled, false, "the backend must freshly verify identity before reusing the connector");
   assert.deepEqual(ui.calls.connector, [], "the saved status requires no creation attempt");
 });
 
@@ -271,12 +316,12 @@ test("bulk owner setup preserves a saved sign-in while the active page is idle",
   assert.deepEqual(ui.calls.connector, ["main", "second", "third"], "the idle active page does not erase its partition's verified sign-in");
 });
 
-test("bulk setup skips nonowners and unverified accounts without calling creation", async () => {
+test("bulk setup includes fresh existing-connector checks and skips unverified accounts", async () => {
   const ui = fixture();
   ui.accounts[1].plan.workspaceRole = "account-admin";
   ui.accounts[2].plan = null;
   button(ui.page(), "Connect all accounts").props.onClick();
   await ui.flush();
-  assert.deepEqual(ui.calls.connector, ["main"]);
-  assert.match(text(ui.page()), /2 skipped/);
+  assert.deepEqual(ui.calls.connector, ["main", "second"]);
+  assert.match(text(ui.page()), /1 skipped/);
 });
