@@ -253,6 +253,20 @@
 .cxs-root .cxs-select:hover {
   background: var(--cxs-ghost-hover);
 }
+/* "Agent questions": the choice, then its seconds and their unit, on one line. */
+.cxs-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cxs-root .cxs-seconds {
+  width: 72px;
+  cursor: text;
+}
+.cxs-unit {
+  color: var(--cxs-text-secondary, var(--cxs-text));
+  font-size: 13px;
+}
 /* A shortcut's keys in Keyboard shortcuts: read-only, in the controls' border and corners. */
 .cxs-kbd {
   display: inline-block;
