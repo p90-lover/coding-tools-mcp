@@ -23,19 +23,10 @@ pub fn validate_point(_: &Target, _: i32, _: i32) -> Result<()> {
 pub fn inspect(_: &Target) -> Result<(Vec<Control>, bool)> {
     unavailable()
 }
-pub fn click(_: &Target, _: (i32, i32), _: &str, _: &dyn Fn() -> Result<()>) -> Result<()> {
+pub(super) fn modifiers_clear() -> Result<()> {
     unavailable()
 }
-pub fn move_pointer(_: &Target, _: (i32, i32), _: &dyn Fn() -> Result<()>) -> Result<()> {
-    unavailable()
-}
-pub fn type_text(_: &Target, _: &str, _: &dyn Fn() -> Result<()>) -> Result<()> {
-    unavailable()
-}
-pub fn key(_: &Target, _: &str, _: &dyn Fn() -> Result<()>) -> Result<()> {
-    unavailable()
-}
-pub fn scroll(_: &Target, _: i32, _: &dyn Fn() -> Result<()>) -> Result<()> {
+pub fn pointer_position(_: &Target) -> Result<(i32, i32)> {
     unavailable()
 }
 

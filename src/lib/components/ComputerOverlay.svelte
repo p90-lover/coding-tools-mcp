@@ -54,7 +54,7 @@
 <main class="monitor">
   <header>
     <span class:active={status.state === 'active'} class:paused={status.state === 'paused'} class="dot"></span>
-    <div><strong>{controlLabel(status)}</strong><small>Local executor · 本機執行 · No Codex agent</small></div>
+    <div><strong>{controlLabel(status)}</strong><small>Codex Windows engine · Local approval · 本機授權</small></div>
   </header>
   <section class="target">
     <span>{status.target?.title ?? 'No active control session · 沒有啟用的操作會話'}</span>

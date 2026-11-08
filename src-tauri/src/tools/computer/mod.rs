@@ -1,6 +1,7 @@
 //! Opt-in local Windows control. No model client, remote consent endpoint or disk frames.
 mod background;
 mod capture;
+mod codex;
 #[cfg(target_os = "windows")]
 mod native;
 #[cfg(not(target_os = "windows"))]
@@ -131,6 +132,7 @@ struct State {
 }
 impl State {
     fn stop(&mut self, reason: &str) {
+        codex::cancel();
         self.lease = None;
         self.frame = None;
         self.action = None;
@@ -183,7 +185,7 @@ impl State {
                 "request_capacity_remaining":MAX_RECEIPTS.saturating_sub(self.receipts.len()),
                 "request_window_refresh_needed":self.receipts.len()>=MAX_RECEIPTS-8,
                 "overlay_ready":l.heartbeat.is_some_and(|t|t.elapsed()<=OVERLAY_LEASE),
-                "action":self.action,"screenshot_storage":"memory_only","codex_invoked":false,
+                "action":self.action,"screenshot_storage":"memory_only","engine":"codex_sky","codex_agent_invoked":false,
                 "sequence":self.sequence.as_ref().map(|s|json!({"sequence_id":s.id,"next_step":s.next,"total_steps":s.steps.len(),"outcome_unknown":s.uncertain})),
                 "last_snapshot_id":self.frame.as_ref().and_then(|f|f.value.get("snapshot_id"))})
         } else {
@@ -212,6 +214,7 @@ pub fn stop_workspace(root: &Path) {
     wake();
 }
 pub fn pause() {
+    codex::cancel();
     let mut s = state();
     if let Some(l) = &mut s.lease {
         l.paused = true;
@@ -369,6 +372,7 @@ pub fn local_preview() -> Result<Value> {
     };
     lease.validate(&lease.root, &lease.id, Instant::now(), true)?;
     let bounds = native::validate_target(&lease.target, false)?;
+    // The optional local-only live preview must not replace Sky's cached agent screenshot/indexes.
     let pixels = capture::frame(&lease.target, bounds, 1200)?;
     check_same_lease(&lease, false)?;
     Ok(pixels)
@@ -438,7 +442,7 @@ fn checked_lease(ctx: &ToolContext, args: &Value, input: bool) -> Result<Lease> 
 fn record_frame(l: &Lease) -> Result<Value> {
     check_same_lease(l, false)?;
     let bounds = native::validate_target(&l.target, false)?;
-    let mut frame = capture::frame(&l.target, bounds, 2000)?;
+    let mut frame = capture::codex_frame(l, bounds, 2000)?;
     check_same_lease(l, false)?;
     frame["session_id"] = json!(l.id);
     let mut s = state();
@@ -595,6 +599,9 @@ fn complete_receipt(id: &str, result: Value) {
 }
 fn execute_step(l: &Lease, step: &Step, id: &str, raw: &Value) -> Result<Value> {
     step.validate()?;
+    if matches!(step, Step::Move { .. }) {
+        return Err(error("CODEX_METHOD_UNAVAILABLE", "Codex window2 has no standalone pointer-move method. Use click or drag; no alternate input engine was used."));
+    }
     check_same_lease(l, step.mutates())?;
     match step {
         Step::Find { selector } | Step::Verify { selector } => {
@@ -642,24 +649,12 @@ fn execute_step(l: &Lease, step: &Step, id: &str, raw: &Value) -> Result<Value> 
         native::validate_focus(&l.target)?;
     }
     begin_receipt(l, id, &digest, step.name())?;
-    // All input primitives release their pressed keys/buttons within the same call.
-    // The check closure is re-evaluated between UTF-16 units, scrolls and double clicks.
-    let check = || {
-        check_same_lease(l, true)?;
-        native::validate_identity(&l.target, true)
-    };
-    let result = match step {
-        Step::Click { button, .. } => {
-            native::click(&l.target, point.expect("validated click"), button, &check)
-        }
-        Step::Move { .. } => {
-            native::move_pointer(&l.target, point.expect("validated move"), &check)
-        }
-        Step::Type { text } => native::type_text(&l.target, text, &check),
-        Step::Key { key } => native::key(&l.target, key, &check),
-        Step::Scroll { amount } => native::scroll(&l.target, *amount, &check),
-        _ => unreachable!(),
-    };
+    // Sky owns input and key/button release. The worker monitor can revoke its owned tree
+    // independently of this execution gate, including while an action is still in flight.
+    let result = check_same_lease(l, true)
+        .and_then(|_| native::validate_identity(&l.target, true))
+        .and_then(|_| native::modifiers_clear())
+        .and_then(|_| codex::legacy_step(l, step, point));
     let summary = match result {
         Ok(()) => {
             json!({"ok":true,"request_id":id,"action":step.name(),"input_sent":true,"verified":false,"outcome":"input_submitted","retry_allowed":false})
@@ -671,6 +666,95 @@ fn execute_step(l: &Lease, step: &Step, id: &str, raw: &Value) -> Result<Value> 
     complete_receipt(id, summary.clone());
     Ok(summary)
 }
+fn execute_codex_method(l: &Lease, args: &Value, method: &str) -> Result<Value> {
+    if !matches!(
+        method,
+        "get_window"
+            | "get_window_state"
+            | "click"
+            | "press_key"
+            | "type_text"
+            | "scroll"
+            | "set_value"
+            | "drag"
+            | "perform_secondary_action"
+            | "activate_window"
+    ) {
+        return Err(error(
+            "INVALID_CODEX_METHOD",
+            "Unsupported Codex window2 method; no input was sent",
+        ));
+    }
+    if !matches!(method, "get_window" | "get_window_state") {
+        native::modifiers_clear()?;
+    }
+    let id = request_id(args)?;
+    let params = args
+        .get("params")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| error("INVALID_INPUT", "Codex methods require a params object"))?;
+    let digest = fingerprint(args);
+    if let Some(prior) = prior_receipt(&id, &digest)? {
+        return Ok(prior);
+    }
+    let bounds = native::validate_target(&l.target, false)?;
+    begin_receipt(l, &id, &digest, method)?;
+    let outcome = codex::request(l, method, params.clone()).and_then(|value| {
+        if method == "get_window_state"
+            && value["screenshots"]
+                .as_array()
+                .is_some_and(|images| !images.is_empty())
+        {
+            let frame = capture::render_codex_state(l, bounds, 2000, &value)?;
+            let mut s = state();
+            if s.lease
+                .as_ref()
+                .is_none_or(|current| current.id != l.id || current.paused)
+            {
+                return Err(error("CONTROL_NOT_ARMED", "Control ended during capture"));
+            }
+            s.frame = Some(Frame {
+                value: frame.clone(),
+                created: Instant::now(),
+                geometry: bounds,
+                session: l.id.clone(),
+                usable: true,
+            });
+            Ok(frame)
+        } else {
+            Ok(value)
+        }
+    });
+    let mut result = match outcome {
+        Ok(native_result) => {
+            let observation = matches!(method, "get_window" | "get_window_state");
+            json!({"ok":true,"request_id":id,"action":method,"engine":"codex_sky","native_result":native_result,
+                "input_sent":!observation,"verified":observation,"outcome":"input_submitted","retry_allowed":false})
+        }
+        Err(_) => {
+            json!({"ok":false,"request_id":id,"action":method,"engine":"codex_sky","outcome":"unknown","retry_allowed":false,"requires_reobserve":true,"error":"Codex engine could not complete the operation; inspect control status before proceeding"})
+        }
+    };
+    // A native image is also the regular MCP image envelope, not a base64 string hidden in text.
+    if let Some(image) = result
+        .get_mut("native_result")
+        .filter(|v| v.get("base64").is_some())
+    {
+        let image = image.take();
+        let mut envelope = image;
+        result["native_result"] = json!({"window":envelope["window"],"accessibility":envelope["accessibility"],"screenshot_id":envelope["native_screenshot_id"]});
+        complete_receipt(&id, result.clone());
+        envelope["operation"] = result;
+        return Ok(envelope);
+    }
+    complete_receipt(&id, result.clone());
+    if matches!(method, "get_window" | "get_window_state") {
+        Ok(tool_ok(result))
+    } else {
+        Ok(with_post_frame(l, result))
+    }
+}
+
 fn snapshot_result(l: &Lease, include_ui: bool) -> Result<Value> {
     let mut result = record_frame(l)?;
     if include_ui {
@@ -870,8 +954,23 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
             json!({"state":"stopped"})
         };
         value["supported"] = json!(cfg!(target_os = "windows"));
-        value["native_backend"] = json!("Windows UI Automation + SendInput (not Codex)");
-        value["codex_invoked"] = json!(false);
+        value["native_backend"] = json!("Installed Codex @oai/sky Windows engine");
+        value["engine"] = json!("codex_sky");
+        value["codex_agent_invoked"] = json!(false);
+        value["runtime_required"] =
+            json!("Compatible installed Codex desktop runtime; binaries are not bundled");
+        value["native_methods"] = json!([
+            "get_window",
+            "get_window_state",
+            "click",
+            "press_key",
+            "type_text",
+            "scroll",
+            "set_value",
+            "drag",
+            "perform_secondary_action",
+            "activate_window"
+        ]);
         value["capture_storage"] = json!("memory_only");
         value["local_enable_required"] = json!(true);
         value["duration_modes"] = json!(["timed", "always"]);
@@ -923,6 +1022,9 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
             )?))
         }
         "computer_action" => {
+            if let Some(method) = args.get("method").and_then(Value::as_str) {
+                return execute_codex_method(&l, args, method);
+            }
             let id = request_id(args)?;
             let raw = args
                 .get("step")
