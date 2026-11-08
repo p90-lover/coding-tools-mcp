@@ -65,12 +65,24 @@ test("Settings changes go through main's checked IPC, within main's own limits",
 test("Settings › Chat holds Claude Code's auto-compact and the chat's own switches, read from and saved by the bridge", () => {
   const page = read("src/features/ChatSettingsPage.tsx");
   assert.match(page, /\{ id: "chat", label: "Chat" \}/);
-  for (const operation of ["chat_auto_compact", "chat_auto_retry", "chat_model_judges"]) {
+  for (const operation of ["chat_auto_compact", "chat_auto_retry", "chat_model_judges", "chat_question_timeout"]) {
     assert.ok(page.includes(`chatCall("${operation}")`), `${operation} is read`);
     assert.ok(page.includes(`setChatPreference("${operation}"`), `${operation} is set`);
   }
   // The shares offered are the ones the bridge takes (chatAutoCompact: 20 to 100).
   for (const percent of JSON.parse(page.match(/const COMPACT_CHOICES = (\[[^\]]*\]);/)[1])) assert.ok(percent >= 20 && percent <= 100, `${percent}%`);
   // Reading them is passive (no focus needed), as the other chat switches; changing them is not.
-  assert.match(read("electron/main.cjs"), /\["chat_auto_retry", "chat_model_judges", "chat_auto_compact"\]\.includes\(input\.operation\) && input\.arguments\?\.enabled === undefined && input\.arguments\?\.percent === undefined/);
+  assert.match(read("electron/main.cjs"), /\["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"\]\.includes\(input\.operation\) && input\.arguments\?\.enabled === undefined && input\.arguments\?\.percent === undefined && input\.arguments\?\.seconds === undefined/);
+});
+
+test("Settings › Chat › Agent questions: wait for the answer (the agent pauses) or answer for me after N seconds, 30 by default", () => {
+  const page = read("src/features/ChatSettingsPage.tsx");
+  assert.match(page, /const QUESTION_TIMEOUT_DEFAULT = 30;/);
+  assert.match(page, /<option value="wait">Wait for my answer<\/option>/);
+  assert.match(page, /<option value="timeout">Answer for me after<\/option>/);
+  assert.match(page, /seconds: event\.target\.value === "wait" \? 0 : QUESTION_TIMEOUT_DEFAULT/);
+  // The question's card counts down to that answer, and says nothing when it waits for the person.
+  const card = read("src/features/AgentOrchestratorApproval.tsx");
+  assert.match(card, /<QuestionCountdown at=\{approval\.auto_answer_at\} \/>/);
+  assert.match(card, /Answers itself in \$\{seconds\}s/);
 });

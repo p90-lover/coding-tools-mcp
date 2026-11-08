@@ -3623,10 +3623,10 @@ test("an agent's own models take CPA's real window for the same model, and a no-
   assert.match(message, /no longer in this agent's model list/, message);
 });
 
-test("Claude Code is not offered Antigravity's models, Claude or Gemini, and says why; other agents and providers keep them", async () => {
-  // Seen live: Antigravity answers every request carrying Claude Code's "Claude Agent SDK" system
-  // line with "Resource has been exhausted", so those cards retried ten times and failed; Gemini
-  // subagents on Claude Code hit the same wall.
+test("every harness, Claude Code included, is offered Antigravity's Gemini and Claude; Pi and Unreal Agent run the CPA pool", async () => {
+  // The user's rule (2026-11-08): Gemini and its provider are always allowed. They had been hidden
+  // from Claude Code since Antigravity refused its Agent SDK identity line (2026-10-22). Pi and
+  // Unreal Agent offered no CPA model at all: AO now points both at the gateway.
   const catalog = { data: [
     { id: "claude-sonnet-4-6", owned_by: "antigravity", context_window: 200000 },
     { id: "claude-opus-4-6-thinking", owned_by: "antigravity", context_window: 200000 },
@@ -3640,22 +3640,28 @@ test("Claude Code is not offered Antigravity's models, Claude or Gemini, and say
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
+  const all = ["cpa/claude-sonnet-4-6", "cpa/claude-opus-4-6-thinking", "cpa/claude-haiku-4-5", "cpa/gemini-3.8-flash-high"];
   const claudeCode = await workflow.call("models", { harness: "ao:claude-code" });
-  assert.ok(!claudeCode.models.includes("cpa/claude-sonnet-4-6") && !claudeCode.models.includes("cpa/claude-opus-4-6-thinking"));
-  assert.match(claudeCode.unavailable["cpa/claude-sonnet-4-6"], /Antigravity refuses Claude Code's requests.*Native Codex/);
-  assert.ok(claudeCode.models.includes("cpa/claude-haiku-4-5"), "a Claude model another provider serves stays");
-  assert.ok(!claudeCode.models.includes("cpa/gemini-3.8-flash-high"), "Antigravity's Gemini is refused too");
-  assert.match(claudeCode.unavailable["cpa/gemini-3.8-flash-high"], /not quota/);
-  const native = await workflow.call("models", { harness: "codex-native" }).catch(() => null);
-  if (native?.models) assert.ok(native.models.some(model => /claude-sonnet-4-6$/.test(model)), "Native Codex still runs it");
-  // A subagent saved on one of them is refused at launch with the reason; other routes are not.
-  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high" }),
-    /^gemini-3\.8-flash-high: Antigravity refuses Claude Code's requests/);
-  assert.match(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/gemini-3.8-flash-high(high)" }),
-    /^gemini-3\.8-flash-high: Antigravity refuses/, "a saved effort suffix is looked up by its base model");
-  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/claude-haiku-4-5" }), null);
-  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:codex", model: "cpa/gemini-3.8-flash-high" }), null);
-  assert.equal(await workflow.subagentRouteRefusal({ harness_id: "ao:claude-code", model: "cpa/not-listed" }), null);
+  for (const model of all) assert.ok(claudeCode.models.includes(model), `Claude Code is offered ${model}`);
+  assert.equal(claudeCode.unavailable?.["cpa/gemini-3.8-flash-high"], undefined, "Gemini is not marked unavailable");
+  assert.equal(claudeCode.capabilities["cpa/gemini-3.8-flash-high"].provider, "antigravity");
+  assert.equal(workflow.subagentRouteRefusal, undefined, "no subagent route is refused for its provider");
+  // Pi and Unreal Agent list the pool beside their own models, and launch through the gateway.
+  for (const harness of ["ao:pi", "ao:unreal-agent"]) {
+    const listed = await workflow.call("models", { harness });
+    for (const model of all) assert.ok(listed.models.includes(model), `${harness} is offered ${model}`);
+  }
+  const pi = await workflow.call("models", { harness: "ao:pi" });
+  assert.ok(pi.capabilities["cpa/gemini-3.8-flash-high"].contextWindow, "Pi takes a window on a CPA model (AO's extension declares it)");
+  const unreal = await workflow.call("models", { harness: "ao:unreal-agent" });
+  assert.equal(unreal.capabilities["cpa/gemini-3.8-flash-high"].contextWindow, undefined, "Unreal Agent has no window setter");
+  const route = model => ({ harness_id: "ao:pi", provider_id: "agent-orchestrator", account_id: "ao-local", model });
+  const piLaunch = workflow.subagentLaunchArgs("ws", route("cpa/gemini-3.8-flash-high"), "Pi worker");
+  assert.equal(piLaunch.model, "coding-tools-cpa/gemini-3.8-flash-high", "Pi runs the provider AO's Pi extension registers");
+  assert.deepEqual(piLaunch.gateway, { provider: "cpa", model: "gemini-3.8-flash-high" });
+  const unrealLaunch = workflow.subagentLaunchArgs("ws", { ...route("cpa/claude-haiku-4-5"), harness_id: "ao:unreal-agent" }, "Unreal worker");
+  assert.equal(unrealLaunch.model, "claude-haiku-4-5");
+  assert.deepEqual(unrealLaunch.gateway, { provider: "cpa", model: "claude-haiku-4-5" });
 });
 
 test("each model is filed under the provider CPA says serves it, though CPA's full catalog names none", async () => {
@@ -3682,7 +3688,6 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
     aoHarness: { catalog: async () => [], models: async () => [], spawn: async () => "session" },
     confirm: async () => true,
   });
-  // Filed as opencode lists them: Claude Code is offered no Antigravity model at all (see below).
   const other = await workflow.call("models", { harness: "ao:opencode" });
   const provider = id => other.capabilities[`cpa/${id}`]?.provider;
   assert.equal(provider("gemini-3.8-flash-high"), "antigravity", "Antigravity's Gemini, not Gemini's");
@@ -3692,8 +3697,8 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
   const listed = await workflow.call("models", { harness: "ao:claude-code" });
   assert.equal(listed.capabilities["cpa/claude-haiku-4-5"]?.provider, "claude");
   for (const id of ["claude-sonnet-4-6", "gemini-3.8-flash-high"]) {
-    assert.ok(!listed.models.includes(`cpa/${id}`), `Claude Code is not offered Antigravity's ${id}`);
-    assert.match(listed.unavailable[`cpa/${id}`], /Antigravity refuses Claude Code's requests/);
+    assert.ok(listed.models.includes(`cpa/${id}`), `Claude Code is offered Antigravity's ${id}`);
+    assert.equal(listed.capabilities[`cpa/${id}`]?.provider, "antigravity", "filed under Antigravity there too");
   }
 });
 
@@ -6685,7 +6690,55 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
     }
     assert.deepEqual(resolved, [["poll", "no"]], "denied, not left waiting for the person");
     assert.match(reasons[0], /couldn't answer after 3 tries/);
+    // Told "try a safer way", agents dropped a harmless step for good: the agent hears it was not judged.
+    assert.match(reasons[0], /not refused/);
+    assert.match(reasons[0], /Run the same request again/);
+    assert.doesNotMatch(reasons[0], /Try a safer way/);
     assert.doesNotMatch(JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" })), /check it yourself/);
+  } finally { mission.nodes[0].state = "finished"; }
+});
+
+test("a request the safety rules block is denied naming the rule; one that only mentions a dangerous word is reviewed", async () => {
+  // The user, 2026-11-08: "the auto review keeps always blocking harmless command for no reason". The
+  // agent heard only "Blocked by the command approver's safety rules", and a Grep for "shutdown" was one.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const requests = [
+    { approval_id: "env", source: "ao", kind: "command", tool: "Bash", command: "cat .env", decisions },
+    { approval_id: "grep", source: "ao", kind: "permission", tool: "Grep", toolInput: JSON.stringify({ pattern: "shutdown", path: "logs" }), decisions },
+    { approval_id: "api", source: "ao", kind: "command", tool: "PowerShell",
+      command: "Invoke-RestMethod -Method Post http://127.0.0.1:8080/api/accounts/shutdown-controllers", decisions },
+  ];
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  const resolved = new Map(), prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      prompts.push(JSON.parse(init.body).messages[0].content);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: "{\"action\":\"allow\",\"reason\":\"local API call\"}" } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: requests.filter(request => !resolved.has(request.approval_id)) }),
+      resolveApproval: async (_session, id, decision, why) => { resolved.set(id, { decision, why }); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && resolved.size < requests.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(resolved.get("env")?.decision, "no");
+    assert.match(resolved.get("env").why, /Blocked by the safety rules: it reads or writes a secret file .*\(\.env\)/, "the agent hears which rule and what it matched");
+    assert.match(resolved.get("env").why, /not by the user/);
+    assert.equal(resolved.get("grep")?.decision, "yes", "a search pattern is not a command");
+    assert.equal(resolved.get("api")?.decision, "yes", "a URL path is not the shutdown command");
+    assert.ok(prompts.some(prompt => prompt.includes("shutdown-controllers")), "the model reviewed the API call");
+    assert.ok(!prompts.some(prompt => prompt.includes("cat .env")), "the blocked request never reached the model");
   } finally { mission.nodes[0].state = "finished"; }
 });
 
@@ -7220,6 +7273,35 @@ test("one message steered twice into the same turn reaches the agent and the cha
   clock += 31_000;
   assert.equal((await steer("unpause it")).duplicate, undefined);
   assert.deepEqual(steered.map(([, text]) => text), ["unpause it", "now attack", "unpause it"]);
+});
+
+test("the same words typed again answer a question the agent asked since, rather than being skipped as a repeat", async () => {
+  // A message typed under the agent's question answers it (#1117); one the turn took moments ago is
+  // not handed over again (#1111). "never ask" steered in and then asked about is the answer.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Goal", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  const question = { approval_id: "q1", kind: "question", source: "ao", tool: "AskUserQuestion", message: "Which?",
+    fields: [{ key: "question_0", type: "choice", title: "Which?", customKey: "question_0_custom",
+      options: [{ value: "keep", label: "Keep asking", description: "" }, { value: "never", label: "Never ask", description: "" }] }] };
+  let clock = Date.parse("2026-11-08T10:00:00Z"), open = [];
+  const answered = [], steered = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, now: () => clock,
+    aoHarness: {
+      observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: open, needsInput: open.length > 0 }),
+      resolveInput: async (session, id, action, content) => { answered.push([id, content]); open = []; return { ok: true }; },
+      steer: async (session, text) => { steered.push(text); return { steered: true }; } } });
+  const steer = () => workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "never ask" });
+  assert.equal((await steer()).steered, true);
+  clock += 5_000;
+  open = [question];
+  const reply = await steer();
+  assert.deepEqual([reply.answered, reply.duplicate], [true, undefined], "it answers the question");
+  assert.deepEqual(answered, [["q1", { question_0: "never" }]]);
+  clock += 1_000;
+  assert.equal((await steer()).duplicate, true, "with no question waiting it is a repeat again");
+  assert.deepEqual(steered, ["never ask"], "the agent was steered once");
 });
 
 test("a /goal sent mid-turn steers its condition in and becomes the goal of the run it steered", async () => {
@@ -9702,6 +9784,66 @@ test("typing while the agent asks never declines its request: the steer waits fo
   assert.deepEqual(resolved, [], "the steer never answers the agent's request");
   assert.equal(result.steered, true, "it goes in once the request is answered");
   assert.deepEqual(steered, [["sess-1", "use the API instead"]]);
+});
+
+test("a message typed while the agent's question waits answers that question at once, as in Claude Code", async () => {
+  // The user (2026-11-08): "fix the steer message always in queued instead auto sending to agent".
+  // Typed under a question, it waited 30 s for that question, then sat in the queue until it went.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const ask = (fields, extra = {}) => ({ approval_id: "q1", kind: "question", source: "ao", tool: "AskUserQuestion", message: "Which permission behavior?", fields, ...extra });
+  const choice = { key: "question_0", type: "choice", title: "Which?", customKey: "question_0_custom",
+    options: [{ value: "keep", label: "Keep asking (Recommended)", description: "" }, { value: "never", label: "Never ask", description: "" }] };
+  async function type(message, pending) {
+    const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+      nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+    let clock = 1_000_000, open = [pending];
+    const answered = [], steered = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: world.requestHeadless, now: () => clock,
+      setTimer: (resolve, ms) => { clock += ms; resolve(); return 0; },
+      aoHarness: {
+        observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: open, needsInput: open.length > 0 }),
+        resolveInput: async (session, id, action, content) => { answered.push([session, id, action, content]); open = []; return { ok: true }; },
+        steer: async (session, text) => { steered.push([session, text]); return { steered: true }; },
+      },
+    });
+    const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message });
+    return { result, answered, steered };
+  }
+
+  const own = await type("only the shell commands", ask([choice]));
+  assert.equal(own.result.steered, true);
+  assert.equal(own.result.answered, true, "it went in as the answer, not to the queue");
+  assert.deepEqual(own.answered, [["sess-1", "q1", "accept", { question_0_custom: "only the shell commands" }]], "the person's words as the question's Other");
+  assert.deepEqual(own.steered, [], "nothing steered past the question");
+
+  const picked = await type("never ask", ask([choice]));
+  assert.deepEqual(picked.answered[0][3], { question_0: "never" }, "an option's own words pick it");
+
+  const text = await type("use port 8443", ask([{ key: "port", type: "text", title: "Port?" }]));
+  assert.deepEqual(text.answered[0][3], { port: "use port 8443" });
+
+  const both = await type("staging first", ask([choice, { ...choice, key: "question_1", customKey: "question_1_custom" }]));
+  assert.deepEqual(both.answered[0][3], { question_0_custom: "staging first", question_1_custom: "staging first" }, "one reply answers each question");
+
+  // Free text is no answer to a required yes/no, nor to a page to visit: the message keeps waiting.
+  for (const pending of [ask([{ key: "ok", type: "boolean", title: "Proceed?", required: true }]), ask([], { mode: "url", url: "https://example.com" })]) {
+    const kept = await type("go ahead", pending);
+    assert.deepEqual(kept.answered, [], "the question stays the person's");
+    assert.equal(kept.result.waiting, true);
+  }
+  // A /goal is never a question's answer.
+  const goal = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  let clock = 1_000_000;
+  const answeredByGoal = [];
+  const goalFlow = createAgentOrchestratorWorkflow({ requestHeadless: goal.requestHeadless, now: () => clock,
+    setTimer: (resolve, ms) => { clock += ms; resolve(); return 0; },
+    aoHarness: { observe: async () => ({ turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: [ask([choice])] }),
+      resolveInput: async (...args) => { answeredByGoal.push(args); } } });
+  await goalFlow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", goal: "tests pass" });
+  assert.deepEqual(answeredByGoal, []);
 });
 
 test("a dated DeepSeek V4.1 Flash build from Cline Pass takes the same effort levels as the model itself", async () => {

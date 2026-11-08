@@ -1857,7 +1857,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       if (result.steered) void loadBoard(workspaceId).catch(() => undefined);
       // The agent waits on a request of its own (or its hung turn, or a long command, was just
       // stopped): the message waits for the turn instead.
-      return result.steered === true ? true : result.interrupted === true ? "interrupt" as const : result.restarted === true ? "restart" as const
+      return result.answered === true ? "answered" as const : result.steered === true ? true : result.interrupted === true ? "interrupt" as const : result.restarted === true ? "restart" as const
         : result.starting === true ? "starting" as const
         : result.waiting === true ? "wait" as const : false;
     } catch (cause) {

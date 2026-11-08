@@ -11,7 +11,7 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import type { AoNode } from "./AgentOrchestratorSurface";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { transcriptCompletion, transcriptParts, transcriptSummary } from "./chat-transcript";
+import { stepDuration, stepFamily, stepFamilyCounts, stepFamilyNoun, transcriptCompletion, transcriptParts, transcriptSummary, transcriptTone, type StepFamily } from "./chat-transcript";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
@@ -275,23 +275,59 @@ function stepTone(step: ChatStep): string {
   return step.state;
 }
 
+/** The glyph each step family is drawn with (chat-transcript's stepFamily), on a 16-unit grid. */
+const STEP_GLYPHS: Record<StepFamily, string> = {
+  think: "M8 2.3 9.2 6.8 13.7 8 9.2 9.2 8 13.7 6.8 9.2 2.3 8 6.8 6.8Z",
+  command: "M3.2 4.6 6.6 8l-3.4 3.4M8.6 11.6h4.4",
+  read: "M4.2 2h5l3 3v9h-8ZM9.2 2v3h3M6.2 8.2h4M6.2 10.8h4",
+  search: "M7 2.8a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4ZM10.1 10.1l3.4 3.4",
+  edit: "M10.6 2.6l2.8 2.8L6 12.8H3.2V10ZM9 4.2 11.8 7",
+  web: "M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2ZM2.2 8h11.6M8 2c-1.9 2-1.9 10 0 12M8 2c1.9 2 1.9 10 0 12",
+  plan: "M6 4.2h7.4M6 8h7.4M6 11.8h7.4M2.8 4.2h.4M2.8 8h.4M2.8 11.8h.4",
+  agent: "M8 2.8a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 0 1 0-4.8ZM3.2 13.4c.8-2.4 2.6-3.7 4.8-3.7s4 1.3 4.8 3.7",
+  ask: "M5.9 6a2.2 2.2 0 1 1 3 2c-.6.3-.9.8-.9 1.4v.5M8 12.4h.01",
+  tool: "M6 2.5v3M10 2.5v3M4.5 5.5h7V8a3.5 3.5 0 0 1-7 0ZM8 11.5v2",
+  approval: "M8 1.8 13 3.7v4c0 3-2.1 5.4-5 6.5-2.9-1.1-5-3.5-5-6.5v-4ZM5.8 8l1.6 1.6 3-3.2",
+  note: "M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2ZM8 7.3v3.4M8 5.1h.01",
+};
+
+/** A step's kind as a small tinted glyph, in its family's colour (the data-family palette). */
+function StepGlyph({ family }: { family: StepFamily }) {
+  return <span className="cx-step-glyph" data-family={family} aria-hidden="true">
+    <svg viewBox="0 0 16 16" width="11" height="11"><path d={STEP_GLYPHS[family]} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+  </span>;
+}
+
+/** The kinds of work a fold holds, as overlapping glyphs on its head line. */
+function StepGlyphs({ items }: { items: ChatLiveItem[] }) {
+  const families = stepFamilyCounts(items).map((entry) => entry.family).slice(0, 4);
+  return families.length ? <span className="cx-glyph-stack" aria-hidden="true">{families.map((family) => <StepGlyph key={family} family={family} />)}</span> : null;
+}
+
+/** A thought's headline: its newest line while it streams, its first (a bold title) once done. */
+function thoughtHeadline(item: ChatLiveItem): string {
+  const lines = item.text.trim().split(/\r?\n/);
+  const current = item.status === "running" ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
+  return current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+}
+
 /**
  * The model's reasoning summary, as Codex shows it: its first line (a short bold title such as
  * "**Inspecting the register route**") as one progress line, the rest a click away.
  */
 function ReasoningItem({ item }: { item: ChatLiveItem }) {
   const [open, setOpen] = useState(false);
-  const lines = item.text.trim().split(/\r?\n/);
   const running = item.status === "running";
-  if (!lines[0]) return <span className="cx-live-label">{running ? "Thinking…" : "Thought"}</span>;
-  const label = running ? "Thinking" : "Thought";
   // Live reasoning arrives as its newest part, so it headlines the current thought, not the first.
-  const current = running ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
-  const headline = current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+  const headline = thoughtHeadline(item);
+  if (!headline) return <span className="cx-live-label">{running ? "Thinking…" : "Thought"}</span>;
+  const took = stepDuration(item.durationMs);
   // Every thought has the same disclosure, even a single paragraph. Parse it only while open:
   // mounting Markdown behind closed details made long streaming thoughts expensive.
-  return <details className="cx-reasoning" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary><Icon name="chevron" width="12" height="12" /><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
+  return <details className="cx-reasoning" data-family="think" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary><StepGlyph family="think" /><span className="cx-live-label">{running ? "Thinking" : "Thought"}</span><span className="cx-live-text">{headline}</span>
+      {took ? <span className="cx-step-time" title={`Thought for ${took}`}>{took}</span> : null}
+      <Icon name="chevron" width="11" height="11" className="cx-step-caret" /></summary>
     {open ? <div className="cx-reasoning-body"><ChatMarkdown text={item.text.trim()} /></div> : null}
   </details>;
 }
@@ -304,7 +340,9 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
 function toolHeadline(item: ChatLiveItem): string {
   // The agent's own words say what the call is for; the command itself is one click away.
   if (item.description) return item.description;
-  return dshItemDetail(item) || item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
+  // "MCP" and "Tool" are labels, not names: the row read "MCP mcp" instead of the tool it called.
+  const named = /^(mcp|tool)$/i.test(item.label ?? "") ? { ...item, label: undefined } : item;
+  return dshItemDetail(named) || item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
 }
 
 /** How a tool call ended, for its dot: AO's activity status, "pending" while it waits on approval. */
@@ -313,53 +351,111 @@ function toolTone(status: string): "ok" | "failed" | "running" {
   return /complet|done|success/i.test(status) ? "ok" : "running";
 }
 
-/** A tool call as Claude Code shows it: a dot, its name and one line, opening on what it ran and got back. */
+/**
+ * A tool call as Claude Code shows it: its kind's glyph, its name and one line (with how long it
+ * took), opening on a card of what it ran and got back.
+ */
 function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
+  const family = stepFamily(item);
   const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
-  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
-    <span className="cx-live-text">{toolHeadline(item)}</span><ApprovedMark text={item.approval} /></>;
+  const took = stepDuration(item.durationMs);
+  const head = <><StepGlyph family={family} /><span className="cx-live-label">{name}</span>
+    <span className="cx-live-text">{toolHeadline(item)}</span>{took ? <span className="cx-step-time">{took}</span> : null}<ApprovedMark text={item.approval} /></>;
   const images = item.images ?? [];
-  // A returned image is read from disk only once its row is opened, not for every row in the turn.
+  // The card (and any image it returned, read from disk) is drawn once the row is first opened:
+  // a long chat holds hundreds of calls, and each card is a dozen elements.
   const [opened, setOpened] = useState(false);
-  const opens = item.kind === "command" || item.input || item.output || images.length;
+  const opens = item.kind === "command" || item.input || item.output || images.length || item.approval;
   return opens
-    ? <details className={`cx-tool tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
-      <summary>{head}{images.length ? <span className="cx-tool-image-count">{images.length === 1 ? "image" : `${images.length} images`}</span> : null}</summary>
-      <div className="cx-tool-body">
-        {item.kind === "command" ? <pre className="cx-tool-io"><code>{item.text}</code></pre> : null}
-        {item.input ? <pre className="cx-tool-io"><code>{item.input}</code></pre> : null}
-        {opened && images.length ? <ToolImages paths={images} /> : null}
-        {item.output ? <pre className="cx-tool-io is-output"><code>{item.output}</code></pre>
-          : tone === "running" || images.length ? null : <p className="cx-tool-empty">No output</p>}
-      </div></details>
-    : <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
+    ? <details className={`cx-tool tone-${tone}`} data-family={family} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
+      <summary>{head}{images.length ? <span className="cx-tool-image-count">{images.length === 1 ? "image" : `${images.length} images`}</span> : null}
+        <Icon name="chevron" width="11" height="11" className="cx-step-caret" /></summary>
+      {opened ? <ToolCard item={item} tone={tone} images={images} /> : null}</details>
+    : <div className={`cx-tool tone-${tone}`} data-family={family}><div className="cx-tool-row">{head}</div></div>;
+}
+
+/** One labelled part of an opened step's card: its command, arguments or output. */
+function StepSection({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
+  return <section className="cx-step-section"><h5>{title}{note ? <span>{note}</span> : null}</h5>{children}</section>;
+}
+
+/** A call's JSON arguments as name and value pairs; null when they are not (or no longer, once cut) a JSON object. */
+function toolArguments(input?: string): [string, string][] | null {
+  if (!input) return null;
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    return entries.length ? entries.slice(0, 24).map(([key, value]) => [key, typeof value === "string" ? value : JSON.stringify(value, null, 1) ?? String(value)]) : null;
+  } catch { return null; }
+}
+
+/**
+ * An opened tool call: how it ended, how long it took, which MCP tool it was and who let it run,
+ * then the command it ran (or its arguments, one per line) and what came back.
+ */
+function ToolCard({ item, tone, images }: { item: ChatLiveItem; tone: ReturnType<typeof toolTone>; images: string[] }) {
+  const took = stepDuration(item.durationMs);
+  const server = /^mcp__([\w-]+?)__/.exec(item.text)?.[1];
+  const args = toolArguments(item.input);
+  const lines = item.output ? item.output.split(/\r?\n/).length : 0;
+  return <div className="cx-tool-body cx-step-card">
+    <div className="cx-step-facts">
+      <span className={`cx-fact is-${tone}`}>{tone === "ok" ? "Done" : tone === "failed" ? "Failed" : "Running"}</span>
+      {took ? <span className="cx-fact">{`Took ${took}`}</span> : null}
+      {server ? <span className="cx-fact is-mono" title={item.text}>{`${server} · ${item.text.replace(/^mcp__[\w-]+?__/, "").split(/\s/)[0]}`}</span> : null}
+      {item.approval ? <span className={`cx-fact ${/^Denied/.test(item.approval) ? "is-failed" : "is-allowed"}`} title={item.approval}>{item.approval}</span> : null}
+    </div>
+    {item.kind === "command" ? <StepSection title="Command"><pre className="cx-tool-io is-command"><code>{item.text}</code></pre></StepSection> : null}
+    {args ? <StepSection title="Arguments"><dl className="cx-step-args">{args.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></StepSection>
+      : item.input ? <StepSection title="Input"><pre className="cx-tool-io"><code>{item.input}</code></pre></StepSection> : null}
+    {images.length ? <ToolImages paths={images} /> : null}
+    {item.output ? <StepSection title="Output" note={lines === 1 ? "1 line" : `${lines} lines`}><pre className="cx-tool-io is-output"><code>{item.output}</code></pre></StepSection>
+      : tone === "running" || images.length ? null : <p className="cx-tool-empty">No output</p>}
+  </div>;
 }
 
 const fileName = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+/** The folder a changed file is in, its last three parts at most: "…/src/features". */
+const fileFolder = (path: string) => {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]+/).slice(0, -1);
+  return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : parts.join("/");
+};
 
 /** "+12 −3", green and red, as Claude Code counts an edit. */
 function DiffCount({ additions, deletions }: { additions: number; deletions: number }) {
   return <span className="cx-diff-count"><span className="is-add">+{additions}</span> <span className="is-del">−{deletions}</span></span>;
 }
 
-/** A file edit as Claude Code shows one: "Edited <file> +12 −3", opening on the changed lines. */
+/** GitHub's five squares: how much of a change was added (green) and removed (red). */
+function DiffBar({ additions, deletions }: { additions: number; deletions: number }) {
+  const total = additions + deletions;
+  if (!total) return null;
+  const added = Math.round((additions / total) * 5);
+  return <span className="cx-diff-bar" aria-hidden="true">{[0, 1, 2, 3, 4].map((index) => <i key={index} className={index < added ? "is-add" : "is-del"} />)}</span>;
+}
+
+/** A file edit as Claude Code shows one: "Edited <file> +12 −3", opening on each file's changed lines. */
 function EditItem({ item }: { item: ChatLiveItem }) {
   const files = item.files ?? [];
   const tone = toolTone(item.status);
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
-  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
+  const took = stepDuration(item.durationMs);
+  const head = <><StepGlyph family="edit" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
-    <DiffCount additions={additions} deletions={deletions} /><ApprovedMark text={item.approval} /></>;
+    <DiffCount additions={additions} deletions={deletions} />{took ? <span className="cx-step-time">{took}</span> : null}<ApprovedMark text={item.approval} /></>;
   // The numbered lines are drawn once the row is first opened (as DshRow does): a folded edit kept
   // four cells a line in the page, ~50k of a long chat's 85k elements, and every restyle walked them.
   const [opened, setOpened] = useState(false);
-  if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
-  return <details className={`cx-tool cx-edit tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}><summary>{head}</summary>
-    {opened ? <div className="cx-tool-body">
+  if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`} data-family="edit"><div className="cx-tool-row">{head}</div></div>;
+  return <details className={`cx-tool cx-edit tone-${tone}`} data-family="edit" onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
+    <summary>{head}<Icon name="chevron" width="11" height="11" className="cx-step-caret" /></summary>
+    {opened ? <div className="cx-tool-body cx-step-card">
       {files.map((file) => <section key={file.path} className="cx-edit-file">
-        {files.length > 1 ? <header><span title={file.path}>{fileName(file.path)}</span><DiffCount additions={file.additions} deletions={file.deletions} /></header> : null}
+        <header><span className="cx-edit-name" title={file.path}>{fileName(file.path)}</span><span className="cx-edit-folder">{fileFolder(file.path)}</span>
+          <DiffCount additions={file.additions} deletions={file.deletions} /><DiffBar additions={file.additions} deletions={file.deletions} /></header>
         {file.diff ? <EditDiff diff={file.diff} /> : null}
       </section>)}
     </div> : null}</details>;
@@ -382,7 +478,7 @@ const sameFiles = (a: ChatLiveItem["files"], b: ChatLiveItem["files"]) => a === 
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
   && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
   && a.answered?.question === b.answered?.question && a.answered?.answer === b.answered?.answer
-  && a.input === b.input && a.output === b.output && a.receipt === b.receipt && sameFiles(a.files, b.files));
+  && a.input === b.input && a.output === b.output && a.receipt === b.receipt && a.durationMs === b.durationMs && sameFiles(a.files, b.files));
 const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
 
 /**
@@ -423,8 +519,46 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
       : item.kind === "reasoning" ? <ReasoningItem item={item} />
       : item.kind === "edit" ? <EditItem item={item} />
       : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
-      : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
+      : <><StepGlyph family={stepFamily(item)} /><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
   </li>;
+}
+
+/** A step's one line for the strip's tooltip: "Ran npm test (3.2s)". */
+function stepTitle(item: ChatLiveItem): string {
+  const took = stepDuration(item.durationMs);
+  const verb = item.kind === "reasoning" ? "Thought" : item.kind === "command" ? "Ran" : item.label ?? "Called";
+  const what = item.kind === "reasoning" ? thoughtHeadline(item) : item.kind === "edit" ? (item.files ?? []).map((file) => fileName(file.path)).join(", ") : toolHeadline(item);
+  return `${verb}${what ? ` ${what}` : ""}${took ? ` (${took})` : ""}`;
+}
+
+const STEP_KINDS = new Set(["command", "tool", "edit", "reasoning"]);
+
+/**
+ * An opened fold's overview: the kinds of work it took as coloured chips (edits as files and lines,
+ * failures and time on their own), and every step in order as a strip, sized by its time when all
+ * steps have one, so the long command stands out.
+ */
+function StepOverview({ items }: { items: ChatLiveItem[] }) {
+  const counts = stepFamilyCounts(items);
+  if (!counts.length) return null;
+  const summary = transcriptSummary(items);
+  const failed = counts.reduce((sum, entry) => sum + entry.failed, 0);
+  const steps = [...new Map(items.filter((item) => STEP_KINDS.has(item.kind)).map((item) => [item.id, item])).values()].slice(-200);
+  const timed = steps.every((step) => step.durationMs);
+  const total = stepDuration(steps.reduce((sum, step) => sum + (step.durationMs ?? 0), 0));
+  return <div className="cx-work-overview">
+    <div className="cx-work-chips">
+      {counts.map(({ family, count }) => <span key={family} className="cx-work-chip" data-family={family}><StepGlyph family={family} />
+        {family === "edit" && summary.files.length ? `${summary.files.length} ${summary.files.length === 1 ? "file" : "files"}` : stepFamilyNoun(family, count)}
+        {family === "edit" && (summary.additions || summary.deletions) ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}</span>)}
+      {failed ? <span className="cx-work-chip is-failed">{`${failed} failed`}</span> : null}
+      {total ? <span className="cx-work-chip is-time" title="The time the steps themselves took, without the model's writing in between">{`Steps took ${total}`}</span> : null}
+    </div>
+    {steps.length > 1 ? <div className="cx-step-strip" role="img" aria-label={`${steps.length} steps, in order`}>
+      {steps.map((step) => <i key={step.id} data-family={stepFamily(step)} className={toolTone(step.status) === "failed" ? "is-failed" : undefined}
+        style={{ flexGrow: timed ? Math.sqrt(step.durationMs ?? 1) : 1 }} title={stepTitle(step)} />)}
+    </div> : null}
+  </div>;
 }
 
 /**
@@ -439,10 +573,14 @@ function ActivityGroup({ items, live, expanded = false }: { items: ChatLiveItem[
   const hasCalls = items.some((item) => ["command", "tool", "edit"].includes(item.kind));
   const active = live && items.some((item) => /^(running|pending|in_progress)$/.test(item.status));
   const title = active ? dshLiveTitle(items).label : hasCalls ? summary.text : "Thought";
+  // The group's own time: what its steps took, summed (a running group shows its live line instead).
+  const took = active ? "" : stepDuration(items.reduce((sum, item) => sum + (item.durationMs ?? 0), 0));
   return <div className={`cx-group${live ? " is-live" : ""}`}>
     <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)} title={activitySummary(items)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
+      <StepGlyphs items={items} />
       <span className={`cx-group-verb${active ? " cx-shimmer" : ""}`}>{title}</span>
+      {took ? <span className="cx-step-time">{took}</span> : null}
     </button>
     {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol> : null}
   </div>;
@@ -577,11 +715,13 @@ function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { s
   const summary = workSummary(work ?? []);
   return <div className="cx-work cx-transcript-work">
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span className="cx-work-state">{transcriptCompletion(turn)}</span>
-      <span className="cx-work-summary">{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
+      {work?.length ? <StepGlyphs items={work} /> : null}
+      <span className={`cx-work-state is-${transcriptTone(turn)}`}>{transcriptCompletion(turn)}</span>
+      <span className="cx-work-summary" title={work?.length ? summary.text : undefined}>{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
+    {open && work?.length ? <StepOverview items={work} /> : null}
     {work?.length ? <SteerReader.Provider value={steerReader(step)}>
       {/* Folded, the work keeps what the agent said on the way and hides its tool calls, as Codex does. */}
       <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={!open} joinedReply={joinedReply} />
@@ -631,7 +771,11 @@ const WorkGroup = memo(WorkGroupView, sameWork);
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live && prev.headed === next.headed
   && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
 
-function TurnWorkSummary({ turn, loadWork }: { turn: ChatTurn; loadWork?: LoadWork }) {
+/**
+ * A finished team turn's "Worked for" line: the kinds of work as glyphs, how it ended and what it
+ * did, opening on its overview (chips and the step strip) above the cards.
+ */
+function TurnWorkHead({ turn, loadWork, open, onToggle }: { turn: ChatTurn; loadWork?: LoadWork; open: boolean; onToggle: () => void }) {
   const [, setLoaded] = useState(0);
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   useEffect(() => {
@@ -646,7 +790,17 @@ function TurnWorkSummary({ turn, loadWork }: { turn: ChatTurn; loadWork?: LoadWo
   const unknown = steps.some((step) => step.hasWork && !CHAT_WORK.has(stepWorkKey(step)));
   const items = steps.flatMap((step) => (CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])
     .map((item) => ({ ...item, id: `${step.key}:${item.id}` })));
-  return <span className="cx-work-summary">{unknown ? "Activity not loaded yet" : workSummary(items).text}</span>;
+  const text = unknown ? "Activity not loaded yet" : workSummary(items).text;
+  // One line that ends in an ellipsis when the row is narrow; the whole summary is its tooltip.
+  return <>
+    <button type="button" className="cx-work-head" aria-expanded={open} onClick={onToggle}>
+      {unknown ? null : <StepGlyphs items={items} />}
+      <span className={`cx-work-state is-${transcriptTone(turn)}`}>{transcriptCompletion(turn)}</span>
+      <span className="cx-work-summary" title={unknown ? undefined : text}>{text}</span>
+      <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
+    </button>
+    {open && !unknown ? <StepOverview items={items} /> : null}
+  </>;
 }
 
 function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedReply = false }: WorkGroupProps) {
@@ -668,11 +822,7 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedR
   // has worked and on what is said once, at the turn's foot (TurnRunning, whose verb alone shimmers).
   // Once done it folds under "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
-    {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span className="cx-work-state">{transcriptCompletion(turn)}</span>
-      <TurnWorkSummary turn={turn} loadWork={loadWork} />
-      <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
-    </button>}
+    {working ? null : <TurnWorkHead turn={turn} loadWork={loadWork} open={open} onToggle={() => setChosen(!open)} />}
     <ol className={`cx-steps${rows.length === 1 ? " is-solo" : ""}`}>{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
       folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} solo={rows.length === 1} />)}</ol>
   </div>;
@@ -933,7 +1083,7 @@ export function AgentOrchestratorChat({
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
   /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
-  steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting" | "answered">;
   /** Checks the captured accepted turn without sending a prompt, stopping it, or replaying work. */
   recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
   openStructure: (runId: string) => void;
@@ -1521,6 +1671,13 @@ export function AgentOrchestratorChat({
       // and goes in once it can. It stays shown as steering; a "Queued" card here read as if the
       // message had not been sent at all ("it pop up as queued for no reason").
       const waits = steered === "wait" || steered === "starting";
+      // It answered the question the agent was waiting on (chat_steer's answered): the chat shows it
+      // as that question's answer, so no steer bubble waits for the turn to show it.
+      if (steered === "answered") {
+        dropPending();
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        return true;
+      }
       // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
       if (steered !== true && !waits) dropPending();
       if (steered === true) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, sent: true } : entry));

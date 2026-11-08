@@ -169,10 +169,14 @@ const NAMED_WEB_MODELS = ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-so
 const CPA_MODEL_PREFIX = "cpa/";
 // Agents AO's daemon can point at the CPA gateway, each through its own launch variables
 // (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*, agy:
-// AGY_LLM_GATEWAY_*). Every harness offers every pool model except WebGPT (the user's rule):
-// agy listed none, since its own catalog is empty without a Google sign-in. Its gateway mode sends
-// its tools only for Gemini ids it knows, so another model on agy can chat but not touch files.
-const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
+// AGY_LLM_GATEWAY_*, Pi: AO_PI_GATEWAY_* that AO's Pi extension registers as the
+// "coding-tools-cpa" provider, Unreal Agent: UNREAL_HARNESS_LLM_*). Every harness offers every
+// pool model except WebGPT (the user's rule): agy and Pi listed none, since their own catalogs
+// are empty without a sign-in. agy's gateway mode sends its tools only for Gemini ids it knows, so
+// another model on agy can chat but not touch files.
+const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy", "pi", "unreal-agent"]);
+// The Pi provider AO's managed Pi extension registers for a CPA session (AO ports.PiGatewayProvider).
+const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
 // Agents whose AO adapter honours the three permission modes. agy maps them onto its --mode
 // (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
 // and stopped at approvals in a terminal nobody saw, so its card never finished.
@@ -180,14 +184,10 @@ const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
 const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.";
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
-// Antigravity refuses every request whose system prompt carries Claude Code's "You are a Claude
-// agent, built on Anthropic's Claude Agent SDK." line, for its Gemini models as well as its Claude
-// ones, and calls it "Resource has been exhausted": CPA retried every Google account for about 20 s,
-// then Claude Code backed off up to ten times, and the card or subagent failed as if out of quota.
-// The same model answers in 3 s for any other client, so Claude Code is never sent to it.
-const ANTIGRAVITY_REFUSES_CLAUDE_CODE = "Antigravity refuses Claude Code's requests (it answers \"quota exhausted\", but it is not quota); "
-  + "run this model on Native Codex or another agent, or give Claude Code a model from another provider";
-const antigravityRefuses = (agent, capability) => agent === "claude-code" && /antigravity/i.test(String(capability?.provider ?? ""));
+// Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
+// by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
+// requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
+// 2026-10-30, the line passed again, only slower while CPA skipped accounts that refused.
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
@@ -333,17 +333,26 @@ function delayToMilliseconds(value, unit) {
  * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
  * chatModelJudges). Legacy autoCompact / autoCompactPercent values remain readable for older
  * callers, but do not control native token compaction or bounded task-record rollover.
+ * questionTimeout: how many seconds an agent's question waits for the person in an "Approve for me"
+ * or "Full access" chat before it gets its recommended answer; 0 keeps it (and the agent) waiting
+ * until the person answers (chatQuestionTimeout).
  * Kept in memory when no file is given (tests).
  */
 const AUTO_COMPACT_PERCENT = 95;
 const AUTO_COMPACT_MIN_PERCENT = 20;
 const autoCompactPercent = value => (Number.isSafeInteger(value) && value >= AUTO_COMPACT_MIN_PERCENT && value <= 100 ? value : AUTO_COMPACT_PERCENT);
+// The user (2026-11-08): "add a settings that allow the ask to be stay and pause or time out in X
+// seconds default is 30 seconds". It was a fixed 20 s, often before the question had been read.
+const QUESTION_TIMEOUT_SECONDS = 30;
+const QUESTION_TIMEOUT_MAX_SECONDS = 24 * 60 * 60;
+const questionTimeoutSeconds = value => (Number.isSafeInteger(value) && value >= 0 && value <= QUESTION_TIMEOUT_MAX_SECONDS ? value : QUESTION_TIMEOUT_SECONDS);
 function createChatPreferences(file) {
   let saved = {};
   try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
-      autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent) }),
+      autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
+      questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
     set(change) {
       saved = { ...saved, ...change };
       if (!file) return;
@@ -577,7 +586,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
-    const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
+    // Pi reaches CPA as the provider AO's Pi extension registers from the gateway's model.
+    const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}`
+      : wireModel && agent === "pi" ? `${PI_GATEWAY_PROVIDER}/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
       // "Approve for me" is Codex's auto-review: Codex runs its own reviewer, but Claude Code's
       // "auto" mode exists only for Claude models and otherwise falls back to asking for every
@@ -1114,7 +1125,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // agy's gateway variables carry no window, so it takes no context-window setting. Claude Code
     // takes one for every model, Claude ones included (their picker was off): AO declares a CPA
     // alias's window and has a model Claude Code recognizes compact at it, capped at its own.
-    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // Pi takes one only on a CPA model (AO's Pi extension declares it); Unreal Agent takes none.
+    const windowed = GATEWAY_AGENTS.has(agent) && agent !== "agy" && agent !== "unreal-agent" && (agent !== "pi" || viaCpa);
+    if (windowed && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
@@ -1170,17 +1183,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const cpaLimit = catalog?.capabilities[item.id]?.contextLimit;
         return [item.id, modelCapabilities(agent, item.id, item.contextLimit || !cpaLimit ? item : { ...item, contextLimit: cpaLimit })];
       }));
-      // Antigravity's models (Claude and Gemini) are not offered to Claude Code, which it refuses
-      // (ANTIGRAVITY_REFUSES_CLAUDE_CODE); Native Codex runs them.
-      const refused = id => antigravityRefuses(agent, catalog?.capabilities[id]);
-      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/") && !refused(id)).map(id => {
+      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
         const routed = `${CPA_MODEL_PREFIX}${id}`;
         capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
         return routed;
       });
       const routedNotes = notes => notes ? Object.fromEntries(Object.entries(notes).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
-      const refusedNotes = Object.fromEntries((catalog?.models ?? []).filter(refused).map(id => [id, ANTIGRAVITY_REFUSES_CLAUDE_CODE]));
-      const unavailable = routedNotes(Object.keys(refusedNotes).length ? { ...catalog?.unavailable, ...refusedNotes } : catalog?.unavailable);
+      const unavailable = routedNotes(catalog?.unavailable);
       const held = routedNotes(catalog?.held);
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities,
         ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(catalog?.stale ? { stale: true } : {}) };
@@ -2092,6 +2101,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         : publicText(item.text, item.kind === "message" || item.kind === "reasoning" || item.kind === "steer" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
+      // How long a finished call or thought took (the upstream adapter's durationMs).
+      ...(Number.isFinite(item.durationMs) && item.durationMs > 0 ? { durationMs: Math.round(item.durationMs) } : {}),
       ...(item.input ? { input: publicText(item.input, toolBytes.input) } : {}),
       ...(item.output ? { output: publicText(item.output, toolBytes.output) } : {}),
       // Images a tool returned, as the files they were saved to: the chat reads one when it is opened.
@@ -2588,6 +2599,35 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
     return parts.join(" · ") || "Answered";
   }
+  /**
+   * A message typed in the composer while the agent's question waits, as that question's answer
+   * ({ action: "accept", content } in the form's shape, as the question card sends it), or null when
+   * it can't stand as one and the message should wait to be steered in after the question instead.
+   *
+   * `pending.fields`: [{ key, type: "choice" | "multi" | "text" | "boolean" | "number", title,
+   * description, options: [{ value, label, description }], customKey?, required? }]. Claude Code's
+   * AskUserQuestion gives each question a choice field `question_N` and its "Other" text `question_N_custom`.
+   * `pending.mode === "url"` asks the person to visit a page: typed text is no answer to that.
+   */
+  function typedAnswer(pending, message) {
+    const typed = String(message ?? "").trim();
+    const fields = Array.isArray(pending?.fields) ? pending.fields : [];
+    if (!typed || pending?.mode === "url" || !fields.length) return null;
+    const content = {};
+    for (const field of fields) {
+      // An option's own words pick that option ("Never ask"); anything else is the person's "Other".
+      const option = (field.options ?? []).find((entry) => entry.label.trim().toLowerCase() === typed.toLowerCase()
+        || String(entry.value).trim().toLowerCase() === typed.toLowerCase());
+      if (option && field.type === "choice") content[field.key] = option.value;
+      else if (option && field.type === "multi") content[field.key] = [option.value];
+      else if (field.customKey) content[field.customKey] = typed;
+      else if (field.type === "text") content[field.key] = typed;
+      // A yes/no, a number or a choice with no "Other" can't take free text: one it must have
+      // keeps the message waiting; an optional one is left unanswered.
+      else if (field.required) return null;
+    }
+    return Object.keys(content).length ? { action: "accept", content } : null;
+  }
 
   async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId, answer } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
@@ -2897,26 +2937,224 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const restartInterrupted = (node) => RESTART_INTERRUPTED.test(String(node?.receipt?.error || ""))
     && (node.history?.length ?? 0) < RESTART_HISTORY_LIMIT;
 
-  // Requests the command approver may never allow, whatever the model says.
-  const HARD_DENY = [
-    /\brm\s+-[a-z]*[rf][a-z]*\s+(\/|~|\$HOME|[a-z]:[\\/])/i, /\bmkfs\b|\bformat\s+[a-z]:/i, /\bdd\s+if=/i,
-    /\b(curl|wget)\b[^|\n]*\|\s*(ba|z)?sh\b/i, /\b(iwr|irm|invoke-webrequest)\b[^|\n]*\|\s*iex\b/i,
-    /(^|[\\/\s])\.env(\.|\b)|id_rsa|[\\/]\.ssh[\\/]|credentials|secrets?\.(json|ya?ml|toml)/i,
-    /\bRemove-Item\b[^\n]*-Recurse[^\n]*([a-z]:\\|~|\$HOME)/i, /\bdel\s+\/[sq]\b|\brd\s+\/s\b/i,
-    /\bshutdown\b|\breg\s+delete\b|\bbcdedit\b|\bdiskpart\b/i,
+  // Requests the command approver may never allow, whatever the model says. The rules read what a
+  // request runs (its command line, or the command a tool's arguments carry) and the files it
+  // names: never a file's contents, a search pattern or the agent's own description of the request
+  // (safetyParts). Matched as single words anywhere in a request, they blocked harmless work as
+  // "Blocked by the command approver's safety rules", with no reason given: on 2026-11-06 a Grep of
+  // a log for "shutdown", a call to the project's own local API at
+  // /api/accounts/shutdown-controllers and an edit of a Markdown note naming that endpoint were each
+  // denied, and a goal chat gave its task up for two days. So quoted text is an argument ("rm -rf /"
+  // in a commit message, a search pattern, a URL) unless a shell runs it (bash -c "...",
+  // cmd /c "...", powershell -Command "...", "$(...)"); a heredoc's body is data unless an
+  // interpreter reads it; and a dangerous program counts only where a command starts.
+  const safetyRule = (why, source) => ({ why, pattern: new RegExp(source, "i") });
+  // A shell handed the rest of the line to run.
+  const SHELL_RUNS = String.raw`\bcmd(?:\.exe)?\b[^\n;|&"']*?\s\/[ck]|\b(?:ba|z|da|k)?sh(?:\.exe)?\b[^\n;|&"']*?\s-\w*c`
+    + String.raw`|\b(?:pwsh|powershell)(?:\.exe)?\b[^\n;|&"']*?\s-c(?:ommand)?|\b(?:iex|Invoke-Expression)\b(?:\s+-Command)?\s*\(?`;
+  // Where a command starts (a line, a chain, a pipe or bracket, a wrapper such as sudo, a shell's
+  // -c), then the program's folder if it is named: /sbin/shutdown, C:\Windows\System32\shutdown.exe.
+  const AT_COMMAND = String.raw`(?:^|[\n\r;&|({\x60]|\b(?:sudo|doas|exec|nohup|xargs|call|start|Start-Process(?:\s+-FilePath)?)\b|${SHELL_RUNS})\s*`
+    + String.raw`["'\x60]?(?:(?![a-z][\w+.-]*:\/\/)[^\s"'\x60|;&(){}]*[\\/])?`;
+  /** Read in a command line whose quoted text is blanked (hardDenial). */
+  const COMMAND_RULES = [
+    safetyRule("it shuts down or restarts the computer",
+      AT_COMMAND + String.raw`(?:shutdown|Stop-Computer|Restart-Computer)(?:\.exe)?(?![-\w.=])`),
+    safetyRule("it formats or wipes a disk", AT_COMMAND + String.raw`(?:format(?:\.com)?\s+[a-z]:(?![\\/]?[^\s"'\\/])`
+      + String.raw`|(?:mkfs(?:\.\w+)?|diskpart(?:\.exe)?|Format-Volume|Clear-Disk|Initialize-Disk)(?![-\w.=]))`),
+    safetyRule("it deletes registry keys or changes Windows' boot settings",
+      AT_COMMAND + String.raw`(?:reg(?:\.exe)?\s+delete|bcdedit(?:\.exe)?)(?![-\w.=])`),
+    safetyRule("it runs a script straight from the internet", String.raw`\b(?:curl|wget)(?:\.exe)?\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b`
+      + String.raw`|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|\n]*\|\s*(?:iex|Invoke-Expression)\b`
+      + String.raw`|\b(?:iex|Invoke-Expression)\s*\(+\s*(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|New-Object\s+(?:System\.)?Net\.WebClient)\b`),
   ];
-  const JSON_ESCAPES = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f" };
+  const DELETES_ROOT_WHY = "it deletes a whole drive, the root folder, a system folder or a home folder";
+  const DELETES = /^(?:rm|rmdir|rd|del|erase|Remove-Item|ri)$/i;
+  // A whole drive, the root folder, a system folder or a home folder, as one argument (with /* or \*.*).
+  const ROOT_FOLDER = new RegExp(String.raw`^(?:[\\/]|~|\$HOME|\$\{HOME\}|[a-z]:`
+    + String.raw`|\$env:(?:USERPROFILE|HOMEDRIVE|SystemDrive|SystemRoot|windir|ProgramFiles)|%(?:USERPROFILE|HOMEDRIVE|SystemDrive|SystemRoot|windir|ProgramFiles)%`
+    + String.raw`|[\\/](?:bin|boot|dev|etc|home|lib|lib64|opt|root|sbin|srv|sys|usr|var|Applications|Library|System|Users)`
+    + String.raw`|[\\/](?:home|Users)[\\/][^\\/]+|[a-z]:[\\/](?:Windows|Program Files(?: \(x86\))?|ProgramData|Users(?:[\\/][^\\/]+)?))`
+    + String.raw`[\\/]?(?:\.?\*(?:\.\*)?)?$`, "i");
+  // A raw disk device, not /dev/null or another stream.
+  const DISK_DEVICE = /^of=(?:\/dev\/(?!(?:null|zero|stdout|stderr|random|urandom|tty)$|fd\/)|\\\\\.\\)/i;
+  const SECRET_WHY = "it reads or writes a secret file (.env, SSH keys or cloud credentials)";
+  // A secret file's own name, as one part of a path: never .env.example or id_rsa.pub.
+  const SECRET_NAME = /^(?:\.env(?:\.(?!(?:example|sample|template|dist|defaults?)$)[\w.-]+)?|id_(?:rsa|dsa|ecdsa|ed25519)|\.git-credentials|(?:credentials|secrets?)\.(?:json|ya?ml|toml|xml|ini))$/i;
   /**
-   * Whether the safety rules block a request. A tool's arguments arrive as JSON (an MCP tool's
-   * toolInput, the app's own approvals), where "cd app\ngit push" reads "cd app\\ngit push" and
-   * the escape hid git push from the rules' word boundaries; so does a quote before ".env". The
-   * text is checked as given and with its escapes read back and its quotes as separators.
+   * Whether a path names a secret file: .env, an SSH private key (anything in .ssh but public keys
+   * and known_hosts), cloud or Git credentials. A command's argument with a space in it is a path
+   * only when it starts like one ("C:\My Project\.env"), not text that mentions one ("add .env to
+   * .gitignore"); --env-file=.env and user@host:~/.ssh/id_rsa are read after their = or @.
    */
-  function hardDenied(text) {
+  function secretPath(word, { argument = false } = {}) {
+    const text = String(word).replace(/^[^=@<>]*[=@<>]+/, "");
+    if (argument && /\s/.test(text) && !/^(?:[a-z]:[\\/]|[\\/~$%]|\.{1,2}[\\/])/i.test(text)) return false;
+    const parts = text.split(/[\\/]+/);
+    return parts.some((part, at) => SECRET_NAME.test(part)
+      || (/^\.ssh$/i.test(part) && !/^(?:[\w.-]+\.pub|known_hosts)$/i.test(parts[at + 1] ?? ""))
+      || (/^\.aws$/i.test(part) && /^credentials$/i.test(parts[at + 1] ?? ""))
+      || (/^\.docker$/i.test(part) && /^config\.json$/i.test(parts[at + 1] ?? "")));
+  }
+  // A quoted string: "..." (with \" or a PowerShell `" inside) or '...' (with '' inside).
+  const QUOTED = /"(?:[^"\\\x60]|\\(?:"(?![\s;|&)]|$))?|\x60[\s\S])*"|'(?:[^']|'')*'/g;
+  // A command line's tokens: separators, spaces, and the parts a word is made of.
+  const SHELL_TOKEN = new RegExp(String.raw`(?<sep>[;&|()\x60\r\n]+)|(?<space>[^\S\r\n]+)|(?<part>${QUOTED.source}|[^\s;&|()\x60"']+|["'])`, "g");
+  // A heredoc: the line that opens it, its body, and the line that ends it.
+  const HEREDOC = /(<<-?[ \t]*(["']?)([\w.-]+)\2[^\n]*\n)([\s\S]*?)(\r?\n[ \t]*\3[ \t]*(?=\r?\n|\)|$)|$)/g;
+  // An interpreter reading a heredoc as its script: bash <<EOF, python - <<'EOF'.
+  const READS_SCRIPT = /(?:^|[\n\r;&|(\x60])\s*(?:sudo\s+)?(?:[^\s"'|;&()]*[\\/])?(?:(?:ba|z|da|k)?sh|pwsh|powershell|cmd|python[\d.]*|py|node|bun|deno|perl|ruby|php)(?:\.exe)?\b[^\n;&|]*$/i;
+  // A quoted string a shell runs: given to a shell's -c or Invoke-Expression, or a program run by
+  // the call operator (& "C:\Tools\x.exe"), Start-Process or Process.Start.
+  const RUNS_QUOTED = new RegExp(String.raw`(?:(?:^|[^&])&|\b(?:sudo|doas|exec|nohup|xargs|call|start|Start-Process(?:\s+-FilePath)?)\b|${SHELL_RUNS}|\]::Start\()\s*$`, "i");
+  /** A command line as segments (split at ; & | and brackets) of words, each with its quotes taken off. */
+  function shellSegments(line) {
+    const segments = [[]];
+    let word = null;
+    for (const { groups } of line.matchAll(SHELL_TOKEN)) {
+      const { part } = groups;
+      if (part !== undefined) {
+        word = (word ?? "") + (part.length > 1 && /^["']/.test(part) && part.endsWith(part[0]) ? part.slice(1, -1) : part);
+        continue;
+      }
+      if (word !== null) segments.at(-1).push(word);
+      word = null;
+      if (groups.sep !== undefined && segments.at(-1).length) segments.push([]);
+    }
+    if (word !== null) segments.at(-1).push(word);
+    return segments.filter((words) => words.length);
+  }
+  /** The command substitutions in a double-quoted string: "$(git rev-parse HEAD)". */
+  function substitutions(text) {
+    const scripts = [];
+    for (let start = text.indexOf("$("); start >= 0; start = text.indexOf("$(", start + 2)) {
+      let depth = 0, end = start + 1;
+      for (; end < text.length; end++) {
+        if (text[end] === "(") depth++;
+        else if (text[end] === ")" && --depth === 0) break;
+      }
+      scripts.push(text.slice(start + 2, end));
+    }
+    return scripts;
+  }
+  /**
+   * The command lines a request runs: the text itself, with heredoc and here-string bodies blanked
+   * and continued lines joined, then each script it hands to a shell or an interpreter.
+   */
+  function commandLines(text, depth = 0) {
+    const nested = [];
+    let line = String(text).replace(HEREDOC, (whole, head, quote, tag, body, tail, at, source) => {
+      if (depth < 3 && READS_SCRIPT.test(source.slice(Math.max(0, at - 200), at))) nested.push(...commandLines(body, depth + 1));
+      return head + body.replace(/[^\r\n]/g, " ") + tail;
+    });
+    line = line.replace(/@(["'])\r?\n[\s\S]*?\r?\n\1@/g, (whole) => whole.replace(/[^\r\n]/g, " ")).replace(/[\\\x60^]\r?\n/g, " ");
+    if (depth < 3) {
+      for (const { 0: quoted, index } of line.matchAll(QUOTED)) {
+        const inner = quoted.slice(1, -1);
+        if (RUNS_QUOTED.test(line.slice(Math.max(0, index - 200), index))) nested.push(...commandLines(inner, depth + 1));
+        else if (quoted[0] === "\"") for (const script of substitutions(inner)) nested.push(...commandLines(script, depth + 1));
+      }
+    }
+    return [line, ...nested];
+  }
+  /** Which safety rule blocks a command line, as { why, match }, or null. */
+  function hardDenial(text) {
     const value = String(text ?? "");
-    const read = value.replace(/\\(?:u([0-9a-fA-F]{4})|([^u]))/g,
-      (_, hex, char) => (hex ? String.fromCharCode(Number.parseInt(hex, 16)) : JSON_ESCAPES[char] ?? char)).replace(/"/g, " ");
-    return HARD_DENY.some((pattern) => pattern.test(value) || pattern.test(read)) || gitPushRequest(value)?.status === "blocked";
+    if (!value.trim()) return null;
+    for (const line of commandLines(value)) {
+      const blanked = line.replace(QUOTED, (quoted) => quoted[0] + " ".repeat(quoted.length - 2) + quoted[0]);
+      for (const { why, pattern } of COMMAND_RULES) {
+        const found = pattern.exec(blanked);
+        if (found) return { why, match: found[0] };
+      }
+      const segments = shellSegments(line);
+      for (const words of segments) {
+        // Each word as a program name: /bin/rm and C:\Windows\System32\cmd.exe read rm and cmd.
+        const names = words.map((word) => word.replace(/^.*[\\/]/, "").replace(/\.(?:exe|com)$/i, ""));
+        const deletes = names.findIndex((name) => DELETES.test(name));
+        const root = deletes < 0 ? null : words.slice(deletes + 1)
+          .find((word) => /^--no-preserve-root$/i.test(word) || ROOT_FOLDER.test(word.replace(/^-{1,2}[\w-]+[:=](?=.)/, "")));
+        if (root) return { why: DELETES_ROOT_WHY, match: `${words[deletes]} ${root}` };
+        const device = names.some((name) => /^dd$/i.test(name)) && words.find((word) => DISK_DEVICE.test(word));
+        if (device) return { why: "it overwrites a disk device", match: device };
+      }
+      const secret = segments.flat().find((word) => secretPath(word, { argument: true }));
+      if (secret) return { why: SECRET_WHY, match: secret };
+    }
+    return gitPushRequest(value)?.status === "blocked"
+      ? { why: "it pushes to main or master, force-pushes, or deletes on the remote", match: "" } : null;
+  }
+  // A tool argument that is the command it runs (or input typed into one), and one that names a file.
+  const COMMAND_ARGS = ["cmd", "command", "commands", "script", "commandLine", "command_line", "chars", "stdin"];
+  const PATH_ARGS = ["file_path", "filePath", "path", "paths", "notebook_path", "target_file", "cwd", "workdir"];
+  // A patch names its files in its headers: "*** Update File: .env", "+++ b/.env".
+  const PATCH_FILE = /^(?:\*\*\* (?:Add|Update|Delete) File:|\*\*\* Move to:|\+\+\+ (?:b\/)?|--- (?:a\/)?)[ \t]*(\S.*?)[ \t\r]*$/gm;
+  /** A command given as text, or as an argv whose words are quoted again where they hold a space. */
+  const argText = (value) => typeof value === "string" ? value
+    : Array.isArray(value) && value.length && value.every((part) => typeof part === "string")
+      ? value.map((part) => (/[\s"']/.test(part) ? `"${part.replace(/"/g, "\\\"")}"` : part)).join(" ") : "";
+  const argsObject = (raw) => {
+    try { const value = JSON.parse(raw); return value && typeof value === "object" && !Array.isArray(value) ? value : null; } catch { return null; }
+  };
+  /** A tool input's string fields as far as they go, when its JSON was cut short. */
+  function looseArgs(raw) {
+    const args = {};
+    for (const [, key, body] of String(raw).matchAll(/"(\w+)"\s*:\s*"((?:[^"\\]|\\[\s\S])*)/g)) {
+      if (Object.hasOwn(args, key)) continue;
+      try { args[key] = JSON.parse(`"${body.replace(/\\$/, "")}"`); } catch { args[key] = body; }
+    }
+    return args;
+  }
+  /**
+   * What the safety rules read in a request: the command lines it runs and the files it names.
+   * Takes an approval ({ kind, command, path, cwd, toolInput }), a tool's own arguments, or text:
+   * a command line, a tool's arguments as JSON, or a request summary ending "input {...}".
+   */
+  function safetyParts(value) {
+    const commands = [], paths = [];
+    const fromArgs = (args) => {
+      for (const key of COMMAND_ARGS) if (argText(args[key])) commands.push(argText(args[key]));
+      // An argv beside its program: {"command": "git", "args": ["push", "origin", "main"]}.
+      for (const key of ["args", "argv"]) {
+        if (argText(args[key])) commands.push(`${argText(args.command ?? args.cmd ?? args.program ?? args.file)} ${argText(args[key])}`.trim());
+      }
+      for (const key of PATH_ARGS) {
+        if (typeof args[key] === "string") paths.push(args[key]);
+        else if (Array.isArray(args[key])) paths.push(...args[key].filter((entry) => typeof entry === "string"));
+      }
+      for (const key of ["patch", "input", "diff"]) {
+        if (typeof args[key] === "string") for (const [, file] of args[key].matchAll(PATCH_FILE)) paths.push(file);
+      }
+    };
+    if (typeof value === "string") {
+      const input = value.indexOf(" · input {");
+      const raw = input < 0 ? null : value.slice(input + " · input ".length);
+      const args = argsObject(value) ?? (raw === null ? null : argsObject(raw) ?? looseArgs(raw));
+      if (args) fromArgs(args);
+      else commands.push(value);
+    } else if (value && typeof value === "object") {
+      if (["approval_id", "toolInput", "kind"].some((key) => Object.hasOwn(value, key))) {
+        if (argText(value.command)) commands.push(argText(value.command));
+        for (const key of ["path", "cwd"]) if (typeof value[key] === "string" && value[key]) paths.push(value[key]);
+        if (typeof value.toolInput === "string" && value.toolInput) fromArgs(argsObject(value.toolInput) ?? looseArgs(value.toolInput));
+      } else fromArgs(value);
+    }
+    return { commands, paths };
+  }
+  /** Which safety rule blocks a request (an approval, a tool's arguments or a command), as { why, match }, or null. */
+  function requestDenial(value) {
+    const { commands, paths } = safetyParts(value);
+    for (const command of commands) {
+      const denial = hardDenial(command);
+      if (denial) return denial;
+    }
+    const secret = paths.find((file) => secretPath(file));
+    return secret ? { why: SECRET_WHY, match: secret } : null;
+  }
+  /** The safety rules' reason for a denial: the rule and what it matched, never a bare "blocked". */
+  function safetyReason(denial) {
+    const match = publicText(String(denial?.match ?? "").replace(/^[\s;&|({"'\x60]+/, "").replace(/\s+/g, " ").trim(), 80);
+    return `Blocked by the safety rules: ${denial?.why ?? "it raised a block"}${match ? ` (${match})` : ""}`;
   }
   // Routine project commands "Approve for me" runs without asking, as Codex's auto-review does:
   // installing from the project's lockfile, running the project's own scripts, type checks and
@@ -3252,8 +3490,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         && (Object.hasOwn(request, "additionalPermissions") || Object.hasOwn(request, "networkApprovalContext"))
         ? { ...item, permissions: { additionalPermissions: request.additionalPermissions ?? null,
           networkApprovalContext: request.networkApprovalContext ?? null } } : item;
-      const advised = approverAdvice.has(item?.approval_id)
+      const recommended = approverAdvice.has(item?.approval_id)
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
+      // A question this chat answers for the person says when (autoAnswerStale), so its card can
+      // count down; one the person chose to keep has no deadline, and the agent waits on it.
+      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node) ? questionWaitMs() : null;
+      const opened = wait ? Math.min(pendingSeen.get(item.approval_id) ?? now(), Date.parse(item.since ?? "") || Infinity) : NaN;
+      const advised = Number.isFinite(opened) ? { ...recommended, auto_answer_at: opened + wait } : recommended;
       // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
       // is not the person's to answer. The chat popped it up as a question anyway, and the person
       // waited on (or raced) the reviewer; it now shows as being reviewed instead.
@@ -3883,8 +4126,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
   async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }, { check, signal, verifyCurrent, sending }) {
     check();
+    // The safety rules read the request's own command, files and tool arguments whole, not the
+    // summary the reviewer reads.
+    const denial = requestDenial(approval);
+    const blocked = Boolean(denial);
     // The command advisor must not decide from a truncated command or permission scope.
-    const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
     const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
       || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
       || JSON.stringify(approval.permissions ?? {}).length > 800;
@@ -3897,7 +4143,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
     let advice = exhausted
-      ? judges ? { action: "deny", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so it was denied (Let the model judge is on)` }
+      ? judges ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
@@ -3911,7 +4157,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : incomplete && !blocked
       ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
       : blocked
-        ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
+        ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) }
           // A shell line counts only from the agent's own shell tool; the app's exec_command
           // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
           : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
@@ -3954,9 +4200,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return `The reviewer couldn't answer yet, trying again: ${why}`;
       }
       // "Let the model judge" leaves nothing to the person: a reviewer that never answered denies,
-      // in doubt, and the agent hears why and goes another way.
+      // in doubt. The agent hears that the request was not judged, so it tries again rather than
+      // giving up on it: told "try a safer way", agents dropped harmless steps for good.
       advice = judges
-        ? { action: "deny", reason: `The command reviewer couldn't answer after ${tries} tries, so it was denied (Let the model judge is on): ${why}` }
+        ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
     reviewFailures.delete(approval.approval_id);
@@ -3972,7 +4219,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // touches the other requests; this one just goes to the person.
     if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
       const decision = aoDecision(approval, advice.action === "allow");
-      const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
+      const why = advice.action === "deny" ? reviewerDenial(advice.reason, advice) : "";
       if (!decision) {
         keepAdvice({ action: "ask", unresolved: true, unsent: advice.action,
           reason: `The reviewer's decision is not offered by this request, so choose an answer yourself. It said ${advice.action}: ${advice.reason}` });
@@ -4012,20 +4259,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Approve for me" and "Full access" never leave the agent stuck on a request nobody answers: one
   // still waiting after AUTO_ANSWER_MS is answered for the person. A command or tool request is
   // allowed once (one the safety rules block is denied), a plan is accepted with edits allowed,
-  // and a question gets its recommended answer (the option marked "Recommended", else the first).
+  // and a question gets its recommended answer (the option marked "Recommended", else the first)
+  // after the person's own "Agent questions" wait (questionWaitMs; none when they chose to keep it).
   // "Ask for approval" keeps waiting for the person.
   const AUTO_ANSWER_MS = 20_000;
-  const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
+  /** How long a question waits for the person before it is answered for them; null: until they answer. */
+  const questionWaitMs = () => {
+    const seconds = chatPreferences.get().questionTimeout;
+    return seconds > 0 ? seconds * 1000 : null;
+  };
+  const noAnswerText = () => `No answer from the user within ${Math.round((questionWaitMs() ?? AUTO_ANSWER_MS) / 1000)} seconds; use your best judgment and continue.`;
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
   const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
   /**
    * What an agent reads as the result of a call the reviewer or "Approve for me" denied. Claude Code
    * otherwise reports "User refused permission to run tool", and the agent took it as the person's
-   * own refusal and guessed at why.
+   * own refusal and guessed at why. A request the reviewer could not judge at all (it never
+   * answered, with "Let the model judge" on) says so, and that running it again is fine.
    */
-  const reviewerDenial = (reason) =>
-    `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
-    + "Try a safer way to reach the goal, or ask the user if only this will do.";
+  const reviewerDenial = (reason, { unavailable = false } = {}) => unavailable
+    ? `Not run, but not refused either: the command reviewer ("Approve for me") could not judge this request, and the user did not refuse it`
+      + ` (${String(reason || "the reviewer did not answer").replace(/\.$/, "")}). `
+      + "Run the same request again in a minute; if it is still not judged, tell the user the command reviewer is unavailable."
+    : `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
+      + "Try a safer way to reach the goal, or ask the user if only this will do.";
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -4037,7 +4294,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (field.type === "choice" && pick) content[field.key] = pick.value;
       else if (field.type === "multi" && pick) content[field.key] = [pick.value];
       else if (field.type === "boolean") content[field.key] = true;
-      else if (field.type === "text") content[field.key] = NO_ANSWER_TEXT;
+      else if (field.type === "text") content[field.key] = noAnswerText();
     }
     return { action: "accept", content };
   }
@@ -4062,8 +4319,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const approver = cardApprover(mission, node);
     if (approver && (!advice || (approver.settings?.auto_decide === true && advice.action !== "ask"))) return "wait";
     const request = describeRequest(approval);
-    if (hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput)
-      || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
+    if (requestDenial(approval) || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
     if (advice?.action === "allow") return "allow";
     // Publication never becomes an allow merely because nobody answered its timer.
     if (gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)) return "wait";
@@ -4085,7 +4341,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!answersForPerson(node) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
-        // A question or a plan is the person's: it waits AUTO_ANSWER_MS for them. A command or tool
+        // A question or a plan is the person's: a plan waits AUTO_ANSWER_MS for them, a question the
+        // person's "Agent questions" wait, or for good when they chose to keep it (the agent stays
+        // paused on it until they answer). A command or tool
         // request the card's reviewer screens is answered as soon as that review is in ("wait"
         // until then): the wait only held the agent up. One the reviewer left at "ask" is never
         // answered here: it waits for the person, with no timer (approvalNeedsPerson). A team whose
@@ -4094,34 +4352,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const personal = ["question", "plan"].includes(approval.kind);
         const reviewedHere = !personal && Boolean(cardApprover(mission, node));
         if (reviewedHere && approverAdvice.get(id)?.action === "ask") continue;
-        if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
+        const wait = approval.kind === "question" ? questionWaitMs() : AUTO_ANSWER_MS;
+        if (wait === null) continue;
+        if (!reviewedHere && at - opened < wait) continue;
         const verdict = personal ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;
         autoAnswered.set(id, verdict);
         if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.keys().next().value);
+        // A denial names its rule, or the reviewer's reason, never just "blocked".
+        const advice = approverAdvice.get(id);
+        const denial = verdict === "deny" ? requestDenial(approval) : null;
+        const why = denial ? safetyReason(denial) : advice?.reason || "the command reviewer raised a block";
         try {
           if (approval.source === "ao" && approval.kind === "question") {
             const answer = recommendedAnswer(approval);
             await harnessService().resolveInput(approval.thread_id, id, answer.action, answer.content)
               .catch(() => harnessService().resolveInput(approval.thread_id, id, "decline"));
-            note = "Nobody answered the agent's question in 20 seconds, so it got the recommended answer";
+            note = `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
           } else if (approval.source === "ao") {
             const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
             if (!decision) continue;
-            const advice = approverAdvice.get(id);
-            await harnessService().resolveApproval(approval.thread_id, id, decision,
-              blocked ? reviewerDenial(advice?.action === "deny" ? advice.reason : "its safety rules block this request, or it is too long to review whole") : "");
-            note = blocked ? "Denied: blocked by the command approver's safety rules or reviewer"
+            await harnessService().resolveApproval(approval.thread_id, id, decision, blocked ? reviewerDenial(why, denial ? {} : advice) : "");
+            note = blocked ? `Denied: ${publicText(why, 160)}`
               : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Approve for me allowed the request once";
           } else if (approval.kind === "command") {
             const request = describeRequest(approval);
             const allow = verdict === "allow";
             await requestHeadless("/api/v1/ao/harness/approval", {
               workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: id, allow, confirm: false,
-              approver_reason: allow ? "Approve for me: the review raised no block" : "Blocked by the command approver's safety rules or reviewer", approver_request: request,
+              approver_reason: allow ? "Approve for me: the review raised no block" : why, approver_request: request,
             });
-            note = allow ? "Approve for me allowed the command once" : "Denied: blocked by the command approver's safety rules or reviewer";
+            note = allow ? "Approve for me allowed the command once" : `Denied: ${publicText(why, 160)}`;
           }
           logger?.info?.("ao.auto_answered", { approval_id: id, actor: "timeout_policy", decision: verdict ?? approval.kind,
             kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
@@ -4302,6 +4564,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (enabled) for (const [id, advice] of approverAdvice) if (advice.action === "ask" && !advice.unsent) approverAdvice.delete(id);
     }
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
+  }
+  /**
+   * chat_question_timeout: reads "Agent questions", or sets it with `seconds`: how long a question
+   * waits for the person before it gets its recommended answer, 0 to keep it (and the agent)
+   * waiting until they answer. Only "Approve for me" and "Full access" chats answer for the person.
+   */
+  function chatQuestionTimeout({ seconds } = {}) {
+    if (seconds !== undefined) {
+      if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > QUESTION_TIMEOUT_MAX_SECONDS) {
+        throw new Error("Choose 0 (wait for me) or a whole number of seconds up to a day");
+      }
+      chatPreferences.set({ questionTimeout: seconds });
+    }
+    return { ok: true, seconds: chatPreferences.get().questionTimeout };
   }
   /**
    * chat_auto_compact: compatibility storage for older callers, not native model-token control.
@@ -5341,12 +5617,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
       && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
-    // This turn already took the same message moments ago: it is not handed over (or noted) again.
-    if (!objective && restart !== true && chatQueue.deliveredTo(id, run.id)
-      .some(steer => steer.taskId === task && steer.message === text && now() - steer.at < STEER_REPEAT_MS)) {
+    // This turn already took the same message moments ago: it is not handed over (or noted) again,
+    // unless the agent has asked a question since that what was typed answers (below).
+    const repeat = !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
+      .some(steer => steer.taskId === task && steer.message === text && now() - steer.at < STEER_REPEAT_MS);
+    const skipRepeat = () => {
       logger?.info?.("ao.steer_repeat_skipped", { workspaceId: id, taskId: task });
       return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id };
-    }
+    };
+    if (repeat && !externalAgent(card)) return skipRepeat();
     // Native Codex (WebGPT and the shared CPA pool) steers its running turn through Codex's own
     // turn/steer, as the Codex app does: the message joins the turn at the agent's next step. Its
     // chats queued every message until the turn ended ("Running. New messages send when it finishes").
@@ -5372,6 +5651,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
+    const question = !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
+    const reply = question ? typedAnswer(question, text) : null;
+    if (repeat && !reply) return skipRepeat();
     // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
     // (seen 2026-10-21: a steer into a turn waiting on an approval held the session's dispatch lock,
     // and every later steer, approval answer and stop hung for 180 s). The message waits instead.
@@ -5400,6 +5682,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reason: "The agent's process had stopped. Your message starts its next turn." };
     }
     const asking =(state) => Boolean(state?.approvals?.length || state?.needsInput);
+    // The agent asked the person something and waits on it: what they typed is their answer, as in
+    // Claude Code, where a reply typed under its question answers it. The user (2026-11-08): "fix the
+    // steer message always in queued instead auto sending to agent"; a steer typed under a question
+    // waited 30 s here, then sat in the queue until the question went (answered for them, or never).
+    if (reply) {
+      await harnessService().resolveInput(card.receipt.thread_id, question.approval_id, reply.action, reply.content);
+      rememberAnswer(question.approval_id, questionText(question), reply.action === "accept" ? questionAnswerText(question, reply.content) : "Skipped");
+      logger?.info?.("ao.steer_answered_question", { action: reply.action, fields: (question.fields ?? []).length });
+      return { ok: true, steered: true, answered: true, runId: run.id, nodeId: card.id };
+    }
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
     // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
@@ -8146,6 +8438,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
       case "agent_instructions": return agentInstructionsCall(args);
+      case "chat_question_timeout": return chatQuestionTimeout(args);
       case "chat_auto_compact": return chatAutoCompact(args);
       case "compact_chat": return compactSession(args);
       case "chat_diff": return chatDiff(args);
@@ -8199,22 +8492,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const subagentLaunchArgs = (workspaceId, route, name) => aoLaunchArgs(clean(workspaceId, 128),
     { id: "subagent", role: "worker", route, settings: { name } }, true);
   /**
-   * Why a subagent cannot run on `route`, said so a person can act on it, or null. Checked before
-   * the launch: a Claude Code subagent on an Antigravity model would otherwise wait out minutes of
-   * "quota exhausted" retries. A CPA list that cannot be read lets the launch go ahead.
-   */
-  async function subagentRouteRefusal(route) {
-    const agent = String(route?.harness_id ?? "").replace(/^ao:/, "");
-    const model = String(route?.model ?? "");
-    if (agent !== "claude-code" || !model) return null;
-    let catalog = null;
-    try { catalog = await models(); } catch { return null; }
-    // CPA lists the base model; a saved route may carry an effort suffix (…-flash-high(high)).
-    const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
-      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
-    return antigravityRefuses(agent, catalog?.capabilities?.[id]) ? `${id}: ${ANTIGRAVITY_REFUSES_CLAUDE_CODE}` : null;
-  }
-  /**
    * A saved team run as a subagent (subagents.cjs): the team works on the task as a chat of its own
    * (chat_send in team mode, started in the background as a /goal round is), and its closing cards'
    * answers are the report. Only teams whose every role has a model are offered.
@@ -8264,14 +8541,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     },
     stop: ({ workspaceId, runId }) => controlRun({ workspaceId, runId, action: "stop" }),
   };
-  /** Automatic tools/subagents have no publication-review path, so every detected push waits on a person. */
-  const blockedRequest = (text) => hardDenied(text) || Boolean(gitPushRequest(text));
+  /**
+   * Automatic tools/subagents have no publication-review path, so every detected push waits on a
+   * person. Takes an approval, a tool's arguments, or a command line (see safetyParts).
+   */
+  const blockedRequest = (value) => Boolean(requestDenial(value))
+    || safetyParts(value).commands.some((command) => Boolean(gitPushRequest(command)));
   restoreWakeups();
   restoreLoops();
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
