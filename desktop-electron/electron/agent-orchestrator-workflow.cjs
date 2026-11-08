@@ -333,17 +333,26 @@ function delayToMilliseconds(value, unit) {
  * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
  * chatModelJudges). Legacy autoCompact / autoCompactPercent values remain readable for older
  * callers, but do not control native token compaction or bounded task-record rollover.
+ * questionTimeout: how many seconds an agent's question waits for the person in an "Approve for me"
+ * or "Full access" chat before it gets its recommended answer; 0 keeps it (and the agent) waiting
+ * until the person answers (chatQuestionTimeout).
  * Kept in memory when no file is given (tests).
  */
 const AUTO_COMPACT_PERCENT = 95;
 const AUTO_COMPACT_MIN_PERCENT = 20;
 const autoCompactPercent = value => (Number.isSafeInteger(value) && value >= AUTO_COMPACT_MIN_PERCENT && value <= 100 ? value : AUTO_COMPACT_PERCENT);
+// The user (2026-11-08): "add a settings that allow the ask to be stay and pause or time out in X
+// seconds default is 30 seconds". It was a fixed 20 s, often before the question had been read.
+const QUESTION_TIMEOUT_SECONDS = 30;
+const QUESTION_TIMEOUT_MAX_SECONDS = 24 * 60 * 60;
+const questionTimeoutSeconds = value => (Number.isSafeInteger(value) && value >= 0 && value <= QUESTION_TIMEOUT_MAX_SECONDS ? value : QUESTION_TIMEOUT_SECONDS);
 function createChatPreferences(file) {
   let saved = {};
   try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
-      autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent) }),
+      autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
+      questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
     set(change) {
       saved = { ...saved, ...change };
       if (!file) return;
@@ -2546,6 +2555,35 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
     return parts.join(" · ") || "Answered";
   }
+  /**
+   * A message typed in the composer while the agent's question waits, as that question's answer
+   * ({ action: "accept", content } in the form's shape, as the question card sends it), or null when
+   * it can't stand as one and the message should wait to be steered in after the question instead.
+   *
+   * `pending.fields`: [{ key, type: "choice" | "multi" | "text" | "boolean" | "number", title,
+   * description, options: [{ value, label, description }], customKey?, required? }]. Claude Code's
+   * AskUserQuestion gives each question a choice field `question_N` and its "Other" text `question_N_custom`.
+   * `pending.mode === "url"` asks the person to visit a page: typed text is no answer to that.
+   */
+  function typedAnswer(pending, message) {
+    const typed = String(message ?? "").trim();
+    const fields = Array.isArray(pending?.fields) ? pending.fields : [];
+    if (!typed || pending?.mode === "url" || !fields.length) return null;
+    const content = {};
+    for (const field of fields) {
+      // An option's own words pick that option ("Never ask"); anything else is the person's "Other".
+      const option = (field.options ?? []).find((entry) => entry.label.trim().toLowerCase() === typed.toLowerCase()
+        || String(entry.value).trim().toLowerCase() === typed.toLowerCase());
+      if (option && field.type === "choice") content[field.key] = option.value;
+      else if (option && field.type === "multi") content[field.key] = [option.value];
+      else if (field.customKey) content[field.customKey] = typed;
+      else if (field.type === "text") content[field.key] = typed;
+      // A yes/no, a number or a choice with no "Other" can't take free text: one it must have
+      // keeps the message waiting; an optional one is left unanswered.
+      else if (field.required) return null;
+    }
+    return Object.keys(content).length ? { action: "accept", content } : null;
+  }
 
   async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId, answer } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
@@ -3408,8 +3446,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         && (Object.hasOwn(request, "additionalPermissions") || Object.hasOwn(request, "networkApprovalContext"))
         ? { ...item, permissions: { additionalPermissions: request.additionalPermissions ?? null,
           networkApprovalContext: request.networkApprovalContext ?? null } } : item;
-      const advised = approverAdvice.has(item?.approval_id)
+      const recommended = approverAdvice.has(item?.approval_id)
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
+      // A question this chat answers for the person says when (autoAnswerStale), so its card can
+      // count down; one the person chose to keep has no deadline, and the agent waits on it.
+      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node) ? questionWaitMs() : null;
+      const opened = wait ? Math.min(pendingSeen.get(item.approval_id) ?? now(), Date.parse(item.since ?? "") || Infinity) : NaN;
+      const advised = Number.isFinite(opened) ? { ...recommended, auto_answer_at: opened + wait } : recommended;
       // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
       // is not the person's to answer. The chat popped it up as a question anyway, and the person
       // waited on (or raced) the reviewer; it now shows as being reviewed instead.
@@ -4172,10 +4215,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Approve for me" and "Full access" never leave the agent stuck on a request nobody answers: one
   // still waiting after AUTO_ANSWER_MS is answered for the person. A command or tool request is
   // allowed once (one the safety rules block is denied), a plan is accepted with edits allowed,
-  // and a question gets its recommended answer (the option marked "Recommended", else the first).
+  // and a question gets its recommended answer (the option marked "Recommended", else the first)
+  // after the person's own "Agent questions" wait (questionWaitMs; none when they chose to keep it).
   // "Ask for approval" keeps waiting for the person.
   const AUTO_ANSWER_MS = 20_000;
-  const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
+  /** How long a question waits for the person before it is answered for them; null: until they answer. */
+  const questionWaitMs = () => {
+    const seconds = chatPreferences.get().questionTimeout;
+    return seconds > 0 ? seconds * 1000 : null;
+  };
+  const noAnswerText = () => `No answer from the user within ${Math.round((questionWaitMs() ?? AUTO_ANSWER_MS) / 1000)} seconds; use your best judgment and continue.`;
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
   const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
   /**
@@ -4201,7 +4250,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (field.type === "choice" && pick) content[field.key] = pick.value;
       else if (field.type === "multi" && pick) content[field.key] = [pick.value];
       else if (field.type === "boolean") content[field.key] = true;
-      else if (field.type === "text") content[field.key] = NO_ANSWER_TEXT;
+      else if (field.type === "text") content[field.key] = noAnswerText();
     }
     return { action: "accept", content };
   }
@@ -4248,7 +4297,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!answersForPerson(node) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
-        // A question or a plan is the person's: it waits AUTO_ANSWER_MS for them. A command or tool
+        // A question or a plan is the person's: a plan waits AUTO_ANSWER_MS for them, a question the
+        // person's "Agent questions" wait, or for good when they chose to keep it (the agent stays
+        // paused on it until they answer). A command or tool
         // request the card's reviewer screens is answered as soon as that review is in ("wait"
         // until then): the wait only held the agent up. One the reviewer left at "ask" is never
         // answered here: it waits for the person, with no timer (approvalNeedsPerson). A team whose
@@ -4257,7 +4308,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const personal = ["question", "plan"].includes(approval.kind);
         const reviewedHere = !personal && Boolean(cardApprover(mission, node));
         if (reviewedHere && approverAdvice.get(id)?.action === "ask") continue;
-        if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
+        const wait = approval.kind === "question" ? questionWaitMs() : AUTO_ANSWER_MS;
+        if (wait === null) continue;
+        if (!reviewedHere && at - opened < wait) continue;
         const verdict = personal ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;
         autoAnswered.set(id, verdict);
@@ -4271,7 +4324,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             const answer = recommendedAnswer(approval);
             await harnessService().resolveInput(approval.thread_id, id, answer.action, answer.content)
               .catch(() => harnessService().resolveInput(approval.thread_id, id, "decline"));
-            note = "Nobody answered the agent's question in 20 seconds, so it got the recommended answer";
+            note = `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
           } else if (approval.source === "ao") {
             const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
@@ -4467,6 +4520,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (enabled) for (const [id, advice] of approverAdvice) if (advice.action === "ask" && !advice.unsent) approverAdvice.delete(id);
     }
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
+  }
+  /**
+   * chat_question_timeout: reads "Agent questions", or sets it with `seconds`: how long a question
+   * waits for the person before it gets its recommended answer, 0 to keep it (and the agent)
+   * waiting until they answer. Only "Approve for me" and "Full access" chats answer for the person.
+   */
+  function chatQuestionTimeout({ seconds } = {}) {
+    if (seconds !== undefined) {
+      if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > QUESTION_TIMEOUT_MAX_SECONDS) {
+        throw new Error("Choose 0 (wait for me) or a whole number of seconds up to a day");
+      }
+      chatPreferences.set({ questionTimeout: seconds });
+    }
+    return { ok: true, seconds: chatPreferences.get().questionTimeout };
   }
   /**
    * chat_auto_compact: compatibility storage for older callers, not native model-token control.
@@ -5534,6 +5601,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reason: "The agent's process had stopped. Your message starts its next turn." };
     }
     const asking =(state) => Boolean(state?.approvals?.length || state?.needsInput);
+    // The agent asked the person something and waits on it: what they typed is their answer, as in
+    // Claude Code, where a reply typed under its question answers it. The user (2026-11-08): "fix the
+    // steer message always in queued instead auto sending to agent"; a steer typed under a question
+    // waited 30 s here, then sat in the queue until the question went (answered for them, or never).
+    const question = !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
+    const reply = question ? typedAnswer(question, text) : null;
+    if (reply) {
+      await harnessService().resolveInput(card.receipt.thread_id, question.approval_id, reply.action, reply.content);
+      rememberAnswer(question.approval_id, questionText(question), reply.action === "accept" ? questionAnswerText(question, reply.content) : "Skipped");
+      logger?.info?.("ao.steer_answered_question", { action: reply.action, fields: (question.fields ?? []).length });
+      return { ok: true, steered: true, answered: true, runId: run.id, nodeId: card.id };
+    }
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
     // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
@@ -8255,6 +8334,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_loop": return chatLoop(args);
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
+      case "chat_question_timeout": return chatQuestionTimeout(args);
       case "chat_auto_compact": return chatAutoCompact(args);
       case "compact_chat": return compactSession(args);
       case "chat_diff": return chatDiff(args);

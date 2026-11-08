@@ -71,7 +71,27 @@ function AllowedApps({ onError }: { onError: (message: string) => void }) {
 const COMPACT_CHOICES = [50, 60, 70, 80, 90, 95, 100];
 
 /** The chat's own preferences, kept by the bridge (agent-orchestrator-workflow.cjs), as Claude Code's settings. */
-type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean };
+type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; questionTimeout: number };
+// "Agent questions": how long a question waits before it is answered for you (chat_question_timeout).
+// 0 keeps it, and the agent paused on it, until you answer.
+const QUESTION_TIMEOUT_DEFAULT = 30;
+const QUESTION_TIMEOUT_MAX = 24 * 60 * 60;
+const questionSeconds = (value: unknown) => (Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : QUESTION_TIMEOUT_DEFAULT);
+
+/** The seconds an "Agent questions" wait is typed in, saved when it is left or Enter is pressed. */
+function QuestionSeconds({ value, disabled, onChange }: { value: number; disabled: boolean; onChange: (seconds: number) => void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  const commit = () => {
+    const seconds = Number(text);
+    if (Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= QUESTION_TIMEOUT_MAX) { if (seconds !== value) onChange(seconds); }
+    else setText(String(value));
+  };
+  return <input className="cxs-select cxs-seconds" type="number" min={1} max={QUESTION_TIMEOUT_MAX} step={1} inputMode="numeric"
+    aria-label="Seconds before the agent's question is answered for you" value={text} disabled={disabled}
+    onChange={(event) => setText(event.target.value)} onBlur={commit}
+    onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }} />;
+}
 const chatCall = (operation: string, args: JsonObject = {}) => getCodingToolsClient().apps
   .call({ moduleId: "agent-orchestrator", operation, arguments: args })
   .then((outer) => ((outer as { result?: Record<string, unknown> }).result ?? outer) as Record<string, unknown>);
@@ -168,9 +188,10 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
   }, [api]);
   useEffect(() => {
     let live = true;
-    void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges")])
-      .then(([compact, retry, judges]) => {
-        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true });
+    void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges"), chatCall("chat_question_timeout")])
+      .then(([compact, retry, judges, questions]) => {
+        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true,
+          questionTimeout: questionSeconds(questions.seconds) });
       }, () => undefined);
     return () => { live = false; };
   }, []);
@@ -191,6 +212,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
       ...(operation === "chat_auto_compact" ? { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || current.percent } : {}),
       ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
       ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true } : {}),
+      ...(operation === "chat_question_timeout" ? { questionTimeout: questionSeconds(result.seconds) } : {}),
     })));
   };
   // The chat list's own settings, shared with its popover in the sidebar.
@@ -317,6 +339,19 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
               <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead">
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
+              </Row>
+              <Row label="Agent questions" description={chat?.questionTimeout === 0
+                ? "A question the agent asks waits for your answer, and the agent pauses until you answer it"
+                : "With Approve for me or Full access, a question nobody answers gets its recommended answer after this many seconds"}>
+                <span className="cxs-inline">
+                  <select className="cxs-select" aria-label="Agent questions" value={chat?.questionTimeout === 0 ? "wait" : "timeout"} disabled={!chat}
+                    onChange={(event) => setChatPreference("chat_question_timeout", { seconds: event.target.value === "wait" ? 0 : QUESTION_TIMEOUT_DEFAULT })}>
+                    <option value="wait">Wait for my answer</option>
+                    <option value="timeout">Answer for me after</option>
+                  </select>
+                  {chat && chat.questionTimeout > 0 ? <><QuestionSeconds value={chat.questionTimeout} disabled={!chat}
+                    onChange={(seconds) => setChatPreference("chat_question_timeout", { seconds })} /><span className="cxs-unit">s</span></> : null}
+                </span>
               </Row>
             </Group>
             <Group title="Keyboard shortcuts">
