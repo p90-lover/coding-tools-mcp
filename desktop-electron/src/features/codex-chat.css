@@ -417,7 +417,7 @@ a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-dec
 .cx-details-dot.is-failed { background: #dc2626; }
 .cx-details-dot.is-done { background: #16a34a; }
 /* Processes: a solid centre with a soft halo of the same colour, green while running, red once offline. */
-.cx-process-row > small { flex: none; margin-left: auto; color: var(--color-text-secondary); font-size: 11px; }
+.cx-process-row > small, .cx-schedule-row > small { flex: none; margin-left: auto; color: var(--color-text-secondary); font-size: 11px; }
 .cx-process-dot { flex: none; width: 8px; height: 8px; margin: 0 2px; border-radius: 50%; }
 .cx-process-dot.is-running { background: #22c55e; box-shadow: 0 0 0 3px rgb(34 197 94 / .22), 0 0 8px 2px rgb(34 197 94 / .45); }
 .cx-process-dot.is-offline { background: #ef4444; box-shadow: 0 0 0 3px rgb(239 68 68 / .2), 0 0 8px 2px rgb(239 68 68 / .35); }

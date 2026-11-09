@@ -9,6 +9,7 @@ const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
 const { restartResume } = require("./chat-resume.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
+const { scheduleMessage, scheduleAction, createScheduleStore } = require("./chat-schedules.cjs");
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
@@ -364,7 +365,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -409,6 +410,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Chats running a prompt again and again (/loop, chat-loops.cjs).
   const loops = createLoopStore({ file: loopsFile, now });
+  // Chats the person asked to go on by themselves later (/schedule, chat-schedules.cjs).
+  const schedules = createScheduleStore({ file: schedulesFile, now });
   // Messages waiting for their chat's turn, and steers waiting to be read (chat-queue.cjs).
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
@@ -463,6 +466,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
     // A /loop round that came due while its chat worked runs now; a self-paced one that scheduled nothing ends.
     if (["finished", "failed"].includes(state.status)) void loopAfterRun(workspaceId, runId).catch(() => undefined);
+    // A /schedule that came due while its chat worked is sent now.
+    if (["finished", "failed"].includes(state.status)) void chatScheduleAfterRun(workspaceId).catch(() => undefined);
     // A turn that ended (or stopped, or is held on a failed step) lets its chat's queue go on: a steer
     // it never read goes back to the queue, and the queue's next message is sent (queueAfterRun).
     if (state.stopped || state.settled || ["finished", "failed", "held"].includes(state.status)) {
@@ -6816,6 +6821,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (wakeups.move(workspaceId, to, taskId)) armWakeup(to, taskId);
     disarmLoop(workspaceId, taskId);
     if (loops.move(workspaceId, to, taskId)) armLoop(to, taskId);
+    disarmChatSchedule(workspaceId, taskId);
+    if (schedules.move(workspaceId, to, taskId)) armChatSchedule(to, taskId);
     chatQueue.move(workspaceId, to, taskId);
     // The agent's session works in the old folder: the next turn starts afresh in the new one.
     chatEdits.restore(to, taskId, { ...(chatEdits.get(workspaceId, taskId) ?? { deletedRuns: [] }), fresh: true });
@@ -7408,6 +7415,106 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (now() >= loop.expiresAt) { loops.clear(workspaceId, taskId, loop.id); continue; }
       if (loop.minutes !== null) armLoop(workspaceId, taskId, Math.max(WAKE_RESTORE_MS, (loop.nextAt ?? now()) - now()));
       else if (loop.due) armLoop(workspaceId, taskId, WAKE_RESTORE_MS);
+    }
+  }
+
+  // ---- /schedule (chat-schedules.cjs) ----
+
+  // A chat's schedule has its own timer. One that comes due while the chat works is sent when that
+  // turn settles (chatScheduleAfterRun). A timer longer than setTimeout allows (24.8 days) fires
+  // early and is armed again for the rest.
+  const chatScheduleTimers = new Map();
+  const chatScheduleFailures = new Map();
+  const scheduling = new Set();
+  function disarmChatSchedule(workspaceId, taskId) {
+    const key = wakeKey(workspaceId, taskId);
+    if (chatScheduleTimers.has(key)) clearTimer(chatScheduleTimers.get(key));
+    chatScheduleTimers.delete(key);
+  }
+  function armChatSchedule(workspaceId, taskId, delay = null) {
+    disarmChatSchedule(workspaceId, taskId);
+    const schedule = schedules.get(workspaceId, taskId);
+    if (wakeupsDisposed || !schedule) return;
+    const key = wakeKey(workspaceId, taskId);
+    const handle = setTimer(() => {
+      chatScheduleTimers.delete(key);
+      void runChatSchedule(workspaceId, taskId, schedule.id);
+    }, Math.min(2_147_483_647, Math.max(1, delay ?? schedule.dueAt - now())));
+    handle?.unref?.();
+    chatScheduleTimers.set(key, handle);
+  }
+  /** A due schedule: its message is sent now, held for the chat's running turn, or dropped with its chat (scheduleAction). */
+  async function runChatSchedule(workspaceId, taskId, id) {
+    const key = wakeKey(workspaceId, taskId);
+    const schedule = schedules.get(workspaceId, taskId);
+    if (wakeupsDisposed || !schedule || schedule.id !== id || scheduling.has(key)) return;
+    if (schedule.dueAt > now()) { armChatSchedule(workspaceId, taskId); return; }
+    // Deleted or replaced while this read was out: left alone from then on.
+    const current = () => !wakeupsDisposed && schedules.get(workspaceId, taskId)?.id === id;
+    let sent = false;
+    scheduling.add(key);
+    try {
+      const saved = await runs({ workspaceId });
+      if (!current()) return;
+      const chatRuns = saved.runs.filter(run => run.project_id === taskId);
+      const action = scheduleAction(schedule, {
+        active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
+        working: chatWorking(workspaceId, taskId, saved.runs),
+      });
+      if (action === "wait") { schedules.update(workspaceId, taskId, { due: true }); armChatSchedule(workspaceId, taskId, WAKE_RETRY_MS); return; }
+      if (action === "drop") {
+        schedules.clear(workspaceId, taskId, id);
+        chatScheduleFailures.delete(id);
+        logger?.info?.("ao.schedule.dropped", { workspaceId, taskId });
+        return;
+      }
+      const result = await chatSend({ workspaceId, taskId, message: scheduleMessage(schedule, now()), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      if (result?.ok === false) throw new Error(String(result.reason || "the message could not start"));
+      sent = true;
+      schedules.clear(workspaceId, taskId, id);
+      chatScheduleFailures.delete(id);
+      logger?.info?.("ao.schedule.sent", { workspaceId, taskId, lateMs: Math.max(0, now() - schedule.dueAt) });
+    } catch (error) {
+      if (sent || !current()) { chatScheduleFailures.delete(id); return; }
+      const failures = (chatScheduleFailures.get(id) ?? 0) + 1;
+      chatScheduleFailures.set(id, failures);
+      const why = publicText(error?.message || error, 200);
+      logger?.warn?.("ao.schedule.failed", { workspaceId, taskId, failures, error: why });
+      if (failures >= WAKE_RETRIES) { schedules.clear(workspaceId, taskId, id); chatScheduleFailures.delete(id); return; }
+      schedules.update(workspaceId, taskId, { due: true, note: `It could not be sent (${why}); trying again in a minute` });
+      armChatSchedule(workspaceId, taskId, WAKE_RETRY_MS);
+    } finally { scheduling.delete(key); }
+  }
+  // When a chat's turn settles, a schedule that came due meanwhile is sent.
+  async function chatScheduleAfterRun(workspaceId) {
+    for (const schedule of Object.values(schedules.forWorkspace(workspaceId))) {
+      if (schedule.due || schedule.dueAt <= now()) await runChatSchedule(workspaceId, schedule.taskId, schedule.id);
+    }
+  }
+  /**
+   * chat_schedule: "set" sends the chat `message` (or "Continue") at `dueAt` (epoch ms), replacing
+   * its schedule; `spec` is the time as the person typed it. "clear" deletes it (only `id` when given).
+   */
+  async function chatSchedule({ workspaceId, taskId, action, dueAt, message, spec, id } = {}) {
+    const workspace = clean(workspaceId, 128), task = clean(taskId, 128);
+    if (action === "clear") {
+      const cleared = schedules.clear(workspace, task, id ? clean(id, 128) : null);
+      if (cleared) disarmChatSchedule(workspace, task);
+      return { ok: true, cleared };
+    }
+    if (action !== "set") throw new Error("Choose set or clear");
+    const saved = await runs({ workspaceId: workspace });
+    if (!saved.runs.some(run => run.project_id === task)) throw new Error("Send this chat a message first, then schedule it to continue");
+    const previous = schedules.get(workspace, task);
+    const schedule = schedules.set(workspace, task, { dueAt, message: message === undefined ? "" : String(message), spec: spec === undefined ? "" : String(spec) });
+    if (previous) chatScheduleFailures.delete(previous.id);
+    armChatSchedule(workspace, task);
+    return { ok: true, schedule };
+  }
+  // Schedules saved before a restart: an overdue one is sent shortly after the app is back.
+  function restoreChatSchedules() {
+    for (const { workspaceId, taskId, schedule } of schedules.all()) {
+      if (typeof workspaceId === "string" && typeof taskId === "string") armChatSchedule(workspaceId, taskId, Math.max(WAKE_RESTORE_MS, schedule.dueAt - now()));
     }
   }
 
@@ -8230,7 +8337,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const life=taskLifecycle(saved,taskId);
       if (life.visibility !== "active") continue;
       const followUps=goals.get(workspaceId,taskId)?.status === "active" || Boolean(wakeups.get(workspaceId,taskId))
-        || Boolean(loops.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
+        || Boolean(loops.get(workspaceId,taskId)) || Boolean(schedules.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
       const chatRuns=saved.runs.filter(run=>run.project_id===taskId);
       if (!idleChat(chatRuns,life,followUps,cutoff,{ restoredAt:archive.restoredAt(workspaceId,taskId),
         driven:chatRuns.some(run=>{ const state=backgroundRuns.get(runKey(workspaceId,run.id)); return Boolean(state?.starting || state?.driving || state?.status === "running"); }) })) continue;
@@ -8330,6 +8437,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     wakeTimers.clear();
     for (const timer of loopTimers.values()) clearTimer(timer);
     loopTimers.clear();
+    // Saved schedules stay on disk too; the next app arms them (restoreChatSchedules).
+    for (const timer of chatScheduleTimers.values()) clearTimer(timer);
+    chatScheduleTimers.clear();
     // Saved goal pauses (retry) stay on disk too; the next app arms them when it reads the chat.
     goalsDisposed = true;
     for (const timer of goalTimers.values()) clearTimer(timer);
@@ -8392,6 +8502,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
         return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),
+          schedules: schedules.forWorkspace(clean(args.workspaceId, 128)),
           queues: chatQueue.forWorkspace(clean(args.workspaceId, 128)) };
       }
       case "chat_queue": return chatQueueCall(args);
@@ -8399,6 +8510,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
       case "chat_loop": return chatLoop(args);
+      case "chat_schedule": return chatSchedule(args);
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
       case "chat_question_timeout": return chatQuestionTimeout(args);
@@ -8512,10 +8624,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     || safetyParts(value).commands.some((command) => Boolean(gitPushRequest(command)));
   restoreWakeups();
   restoreLoops();
+  restoreChatSchedules();
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
