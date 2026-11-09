@@ -281,10 +281,15 @@ test("an answer that arrived while the main loop was blocked is read before the 
   // 2026-10-30: main stalls of seconds are common on this machine. The health timer then ran
   // before the answer that had arrived meanwhile, so a service answering in 7 ms read as
   // unresponsive and the Register view was taken down.
-  const f = await fixture(t), service = await f.serve();
+  // The block starts once the service has written its answer, so the answer is waiting in the
+  // socket. A fixed 5 ms wait did not ensure that on a loaded machine: the exchange was still under
+  // way when the block began, and the answer then truly came after the deadline (0.8.103 build, twice).
+  let answered;
+  const sent = new Promise(resolve => { answered = resolve; });
+  const f = await fixture(t), service = await f.serve((_request, response) => response.end(JSON.stringify(identity), answered));
   const host = f.host({ origin: service.origin, healthTimeoutMs: 50 });
   const checked = host.status();
-  await new Promise(resolve => setTimeout(resolve, 5)); // the request is out
+  await sent;
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300); // main blocked past the deadline
   assert.equal((await checked).ready, true);
 });
@@ -310,7 +315,12 @@ test("a ready service that is briefly slow keeps its page; one that stays silent
   assert.match(down.error, /not answering/);
   assert.equal(f.detaches.length, 1);
   silent = false;
-  assert.equal((await host.status()).ready, true, "an answer brings it straight back");
+  // The first answer brings it back. A check whose answer misses the 30 ms timeout on a loaded
+  // machine (0.8.103 build, twice) is one more timeout, which keeps it down: ask again.
+  let back = await host.status();
+  for (let check = 1; !back.ready && check < 10; check++) back = await host.status();
+  assert.equal(back.ready, true, "an answer brings it straight back");
+  assert.equal(back.error, null);
 });
 
 test("loopback origin is constructor-only and rejects credentials or nonlocal hosts", async () => {
