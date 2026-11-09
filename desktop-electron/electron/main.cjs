@@ -510,15 +510,22 @@ function describeTimedPartition(partition) {
   return {};
 }
 
-// The launcher's own network for a cookie-less native fetch: its browser session (Global Routing's
-// proxy, else the system's) with that proxy's credentials, as the browser control server uses (NFR-2).
-async function fetchThroughLauncherNetwork(url, options) {
+// Native fetches omit cookies by default. Explicit session reads use their registered account's
+// own cookie jar and bound proxy, answering proxy authentication without rerouting a live page.
+async function fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies = false } = {}) {
+  const sessionRead = useSessionCookies === true;
+  if (sessionRead && !browserAccounts.accountIdOfPartition(partition)) {
+    throw new Error("Session checks require a registered account partition");
+  }
   const network = await providerNetworkReady();
   const routing = network.store.snapshot().routing;
-  const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
+  const boundId = sessionRead ? browserAccounts.proxyForPartition(partition) : null;
+  const profile = (boundId ? network.store.activeProxy(boundId) : null)
+    ?? (routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null);
   const credentials = profile ? network.store.proxySecret(profile.id) : null;
   return fetchNativeWithProxyAuth({
-    electronNet, browserSession: session.fromPartition(browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    electronNet, browserSession: session.fromPartition(sessionRead ? partition : browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    useSessionCookies: sessionRead,
     getProxyCredentials: (authInfo) => (
       profile && authInfo.port === profile.endpoint.port
       && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
@@ -3559,8 +3566,8 @@ function registerIpc({ logger, stateStore }) {
     readCookies: partition => session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }),
     verifySignIn: async partition => {
       await routeIdleAccountPartition(partition, logger);
-      const ownedSession = session.fromPartition(partition);
-      return readChatGptAuthSession(ownedSession.fetch.bind(ownedSession), "https://chatgpt.com", 10_000);
+      return readChatGptAuthSession((url, options) => fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies: true }),
+        "https://chatgpt.com", 10_000);
     },
     connect: (accountId, current) => connectAccountMcp(accountId, () => {
       if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
