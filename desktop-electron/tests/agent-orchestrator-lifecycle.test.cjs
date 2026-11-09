@@ -972,6 +972,38 @@ test("a chat started in the background whose agent failed to come up is resumed 
   } finally { await h.controller.stop(); }
 });
 
+test("a chat whose agent is still starting says so, and one the app ended meanwhile is never resumed", async () => {
+  // Cancelling a background start leaves AO's reason "context canceled", which reads as transient:
+  // the resume brought back an agent whose card the launch watchdog had already moved on.
+  const resumed = [], killed = [];
+  let provisionState = "provisioning";
+  const h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "idle", provisionState,
+          ...(provisionState === "failed" ? { provisionError: "context canceled" } : {}) } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      if (endpoint.pathname.endsWith("/kill")) { killed.push(endpoint.pathname); provisionState = "failed"; return { ok: true }; }
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumed.push(endpoint.pathname); return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    const starting = await h.controller.harness.observe("s1");
+    assert.equal(starting.turnState, "queued");
+    assert.equal(starting.provisioning, true, "the opening message waits on an agent AO is still starting");
+    await h.controller.harness.kill("s1");
+    assert.equal(killed.length, 1);
+    const ended = await h.controller.harness.observe("s1");
+    assert.equal(ended.turnState, "failed");
+    assert.equal(ended.provisioning, undefined);
+    assert.deepEqual(resumed, [], "a start ended on purpose is not brought back");
+  } finally { await h.controller.stop(); }
+});
+
 test("observers of the same conversation page share one built timeline, each with its own array", async () => {
   // A working chat's run loop, activity poll and approval screen observe it within the same moment.
   let reads = 0;

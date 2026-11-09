@@ -663,9 +663,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const stale = await harnessService().warmSessions?.(WARM_NAME).catch(() => []) ?? [];
     for (const id of stale) void harnessService().kill?.(id).catch(() => undefined);
   })();
+  // After a launch takes a warm session, the next one for that route starts this soon: once the
+  // taken agent's first turn is under way (it accepts the message in about 1.6 s), not beside it. It
+  // was 90 s, and a burst of chats on one model outran it (seen live 2026-11-09: chats 34 s and 56 s
+  // after a warm take both launched cold, and both cold starts hung for AO's whole 10-minute start
+  // budget). A warm start takes 15-26 s, and a launch waits for one already starting
+  // (WARM_START_BUDGET_MS), so the next chat of a burst gets an agent in seconds.
+  const REWARM_AFTER_TAKE_MS = 12_000;
   // A chat opened while the app's tools were still starting asked once and was told no; nothing
   // asked again, so the first chat after every app start launched cold. Ask again once they listen.
-  const REWARM_DELAY_MS = 90_000;
   const TOOLS_WAIT_MS = 2_000;
   const TOOLS_WAIT_TRIES = 45;
   const toolsWaits = new Map(); // workspaceId -> timer; the latest route asked for wins
@@ -927,6 +933,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const expectedTurns = new Map();
   const sessionOwners = new Map(); // AO session -> the run that most recently dispatched it
   const sessionStops = new Map(); // Only in-flight stop promises; reused sessions wait for settlement.
+  const freshLaunches = new Map(); // AO session -> when this app session spawned it cold (dispatchExternal)
+  const stalledLaunches = new Set(); // fresh launches the watchdog ended (stopStalledLaunch)
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
   // nodeKey -> { at, pending }: the run loop's latest view of an AO card's parked tool requests.
   const pendingFrames = new Map();
@@ -1614,12 +1622,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         } else {
           stage(continued ? "starting a new agent (the chat's agent was gone or refused the message)" : "starting a new agent");
           session = await harnessService().spawn({ ...launch, prompt });
+          // A brand-new agent holding nothing but this message: the one kind of start the launch
+          // watchdog may end (stopStalledLaunch).
+          if (session) {
+            freshLaunches.set(session, now());
+            if (freshLaunches.size > 200) freshLaunches.delete(freshLaunches.keys().next().value);
+          }
         }
         if (first?.turnId || (session && !sent?.turnId)) givenInstructions(session, standing.hash);
         // The next chat on this route finds a session waiting too, started once this turn is under
         // way rather than beside its first model call.
         if (warmed && !idleStopped) {
-          const timer = setTimer(() => { rewarmTimers.delete(timer); void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_DELAY_MS);
+          const timer = setTimer(() => { rewarmTimers.delete(timer); void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_AFTER_TAKE_MS);
           rewarmTimers.add(timer);
           timer?.unref?.();
         }
@@ -1756,6 +1770,37 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return true;
   }
 
+  // A cold launch whose agent never took its message. AO starts a new chat's agent in the
+  // background and keeps the opening prompt queued until the agent is up; healthy cold starts took
+  // 15-75 s (measured 2026-11-09). Two that day hung with claude.exe running and the prompt never
+  // delivered, and their chats said "launching" for AO's whole 10-minute start budget before the
+  // automatic retry relaunched them (on a warm agent, in seconds). The turn stall stop never saw
+  // them: a cold start has no turn of its own on the card yet. With "Retry automatically" on, a
+  // fresh launch still starting after LAUNCH_STALL_MS is ended now, so that retry comes sooner.
+  // Only sessions this app session spawned for a launch qualify: they hold nothing but the queued
+  // message, while a continued chat's session holds its agent's work and is never ended here.
+  const LAUNCH_STALL_MS = 4 * 60_000;
+  const LAUNCH_STALL_FAILURE = `The agent did not start within ${LAUNCH_STALL_MS / 60_000} minutes, so its start was stopped; the step is retried on another agent.`;
+  async function stopStalledLaunch(session, observed, ownership) {
+    const launchedAt = freshLaunches.get(session);
+    if (!chatPreferences.get().autoRetry || launchedAt === undefined || stalledLaunches.has(session)
+      || observed?.provisioning !== true || observed.turnState !== "queued" || now() - launchedAt <= LAUNCH_STALL_MS) return false;
+    const { workspaceId, runId, nodeId, requestKey } = ownership;
+    const latest = await savedNode(workspaceId, runId, nodeId).catch(() => null);
+    if (latest?.mission?.cancelled || latest?.node?.state !== "running" || latest.node.receipt?.thread_id !== session
+      || (latest.node.receipt?.request_key || latest.node.request_key) !== requestKey) return false;
+    stalledLaunches.add(session);
+    if (stalledLaunches.size > 200) stalledLaunches.delete(stalledLaunches.values().next().value);
+    try { await harnessService().kill(session); }
+    catch (error) {
+      stalledLaunches.delete(session);
+      logger?.warn?.("ao.launch_stall_stop_failed", { message: publicText(error?.message || error, 200) });
+      return false;
+    }
+    logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node) });
+    return true;
+  }
+
   // AO marks a session needs_input as a permission request comes in, about 2 s before the request
   // itself shows in the conversation (sampled live 2026-10-24). Read in that gap, a routine request
   // the reviewer then allowed reported the run as "needs input" for one pass: 160 approvals in 40
@@ -1785,12 +1830,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const ownership = { workspaceId, runId, nodeId: node.id,
       turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
     const observed = await harnessService().observe(session, ownership.turnId);
+    // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
+    // the chat's work, never a fresh launch the watchdog may end.
+    if (observed?.provisioning !== true) freshLaunches.delete(session);
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
       // `pending` is observed.approvals for this card: none, or only ones already answered.
-      const stopped = nothingToAnswer(observed) && await stopStalledTurn(session, observed, ownership);
+      const stopped = nothingToAnswer(observed)
+        && (await stopStalledLaunch(session, observed, ownership) || await stopStalledTurn(session, observed, ownership));
       if (!stopped) wakeQueueOnAgentReady(workspaceId, mission, node, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
@@ -1802,7 +1851,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
       ...(observed.answer ? { answer: observed.answer } : {}),
       completed,
-      ...(!completed ? { failure: observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
+      // A start the launch watchdog ended says so, not AO's "Session start was cancelled".
+      ...(!completed ? { failure: (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
+        || observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
     if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
     return { ...result, pending_approvals: [] };
