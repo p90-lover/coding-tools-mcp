@@ -3681,9 +3681,72 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     return runtimeSupervisor.extraTunnels.remove(id);
   });
-  handle("launcher:mcp-tunnel-reconnect", (event, id) => {
+  handle("launcher:mcp-tunnel-reconnect", async (event, id) => {
     assertFocusedMainWindow(event, true);
-    return runtimeSupervisor.extraTunnels.reconnect(id);
+    if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
+    const supervisor = runtimeSupervisor, host = runtimeHost, extraTunnels = supervisor?.extraTunnels;
+    const tunnel = typeof id === "string" && /^[a-f0-9]{8}$/.test(id)
+      ? extraTunnels?.status().find(candidate => candidate.id === id) : null;
+    if (!tunnel) throw new Error("That tunnel is not configured.");
+    const saved = host.runtimeConfigSnapshot(), mode = saved.config?.browserInteractionMode ?? "automatic";
+    if (!saved.configured || saved.owner !== "launcher" || saved.mode !== "full" || !saved.config?.tunnel
+      || !host.mcpCredentialsConfigured(mode)) throw new Error("Start the MCP runtime before reconnecting a tunnel.");
+    const { accountId, tunnelId } = tunnel;
+    const partition = accountId ? browserAccounts.partitionOf(accountId) : null;
+    const operationBrowser = browserHost, operationPartition = operationBrowser?.partition;
+    const assertCurrent = () => {
+      if (quitting || shutdownInProgress || supervisor !== runtimeSupervisor || host !== runtimeHost
+        || extraTunnels !== supervisor.extraTunnels || browserHost !== operationBrowser || browserHost?.partition !== operationPartition
+        || browserAccountsStatus().switching || (accountId && browserAccounts.partitionOf(accountId) !== partition)
+        || !extraTunnels.status().some(current => current.id === id && current.accountId === accountId && current.tunnelId === tunnelId)) {
+        throw new Error("The account's MCP tunnel changed during reconnect.");
+      }
+      const current = host.runtimeConfigSnapshot();
+      // Managed startup may migrate its version, name and credential paths, never this tunnel/mode.
+      if (!current.configured || current.owner !== "launcher" || current.mode !== "full"
+        || (current.config?.browserInteractionMode ?? "automatic") !== mode
+        || current.config?.tunnel?.tunnelId !== saved.config.tunnel.tunnelId
+        || stateStore.read().browserInteractionMode !== mode || !host.mcpCredentialsConfigured(mode)) {
+        throw new Error("The MCP configuration changed during reconnect.");
+      }
+      return current.config;
+    };
+    assertCurrent();
+    const previousOperation = lastOperation;
+    let startup = runtimeStartupInFlight;
+    await startup;
+    if (lastOperation !== previousOperation && lastOperation?.name === "runtime-start" && lastOperation.status === "failed") {
+      throw new Error(lastOperation.message);
+    }
+    let config = assertCurrent();
+    let health = await supervisor.ownedRuntimeCheck(config);
+    assertCurrent();
+    const primaryFailures = ["tunnel_missing", "tunnel_health"];
+    if (runtimeStartupInFlight !== startup || !extraTunnels.config || host.managedRuntimeUpgradeRequired()
+      || (!health.ready && !primaryFailures.includes(health.failed))) {
+      if (runtimeStartupInFlight === startup) {
+        if (host.currentOperation() || operationBrowser?.currentOperation() || operationBrowser?.activeTraceId) {
+          throw new Error("Wait for the active browser or runtime operation before reconnecting a tunnel.");
+        }
+        runtimeStartupInFlight = startManagedRuntime({ logger, stateStore,
+          startupAuthenticationRefresh: Promise.resolve(operationBrowser?.snapshot()) });
+      }
+      startup = runtimeStartupInFlight;
+      await startup;
+      if (lastOperation !== previousOperation && lastOperation?.name === "runtime-start" && lastOperation.status === "failed") {
+        throw new Error(lastOperation.message);
+      }
+      config = assertCurrent();
+      health = await supervisor.ownedRuntimeCheck(config);
+      assertCurrent();
+    }
+    if (runtimeStartupInFlight !== startup || host.currentOperation()) throw new Error("Runtime setup changed during reconnect. Retry when it finishes.");
+    if (!extraTunnels.config || host.managedRuntimeUpgradeRequired() || (!health.ready && !primaryFailures.includes(health.failed))) {
+      throw new Error((lastOperation?.name === "runtime-start" && lastOperation.status === "failed" ? lastOperation.message : supervisor.readState()?.detail)
+        || "The MCP runtime did not become ready. Check Setup before reconnecting this tunnel.");
+    }
+    assertFocusedMainWindow(event, true);
+    return extraTunnels.reconnect(id);
   });
   handle("launcher:mcp-tunnel-settings", async (event, id) => {
     assertFocusedMainWindow(event, true);
