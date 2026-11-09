@@ -2890,14 +2890,14 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   [pane, threadWorkspaces, workspaceId, threadChats, threadArchived, listSelected, listSelectedWorkspace, listNow, archivedAll, chatPins, chatUnread,
     projectPins, chatBusy, threadOpenIds, listPending, listLoading, loadProjectChats, listCalls, listActions]);
 
-  // The page tabs sit in the drag strip (ChatPages hands them over), costing the chats no height.
+  // The page tabs (ChatPages hands them over): a glass dock at the foot of the window's chat column.
   const PageTabs = pane ? undefined : pageRegistry?.Tabs;
   return (
     <section className={pane ? "ao-workflow cx-pane-surface" : "ao-workflow"} aria-label={copy.title} lang={language}>
       {threadList}
       <div className="ao-main">
       {/* A pane sits inside the window's own chat area: only that one holds the window's drag strip. */}
-      {pane ? null : <div className="ao-dragstrip" aria-hidden={PageTabs ? undefined : true}>{PageTabs ? <PageTabs page={pageNumber} /> : null}</div>}
+      {pane ? null : <div className="ao-dragstrip" aria-hidden="true" />}
       {view !== "chat" ? <header className="ao-workspace-head">
         <div className="ao-workspace-title">
           <strong>{workspaces.find(workspace => workspace.id === workspaceId)?.name || copy.title}</strong>
@@ -3158,6 +3158,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         </OverviewSplit>
         </ChatSplit>
       </div>
+      {/* The page tabs float at the foot of the chat column, centred under its chats. */}
+      {PageTabs ? <PageTabs page={pageNumber} /> : null}
       </div>
       {(() => {
         const project = projectEdit && workspaces.find((item) => item.id === projectEdit.id);

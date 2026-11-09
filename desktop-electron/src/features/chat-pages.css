@@ -2,29 +2,84 @@
 .cx-chat-page { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .cx-chat-page[hidden] { display: none; }
 .cx-chat-page > .ao-workflow { flex: 1; min-width: 0; }
-/* Page tabs: in the chat column's title-bar strip (.ao-dragstrip), which stays draggable around them.
-   They keep clear of the window's caption buttons on the right. Colours follow the chat's palette
-   beside a chat (claude-theme.css), the app's elsewhere. */
-.ao-dragstrip:has(> .cx-page-tabs) { display: flex; align-items: center; min-width: 0; }
+
+/* Page tabs: a liquid-glass dock floating at the foot of the open page's chat column, centred under
+   its chats (ChatPages.tsx). The column keeps a slim band for it, so it never covers a composer.
+   Light glass over Claude's light canvas, dark glass beside a dark chat. Motion runs only when you
+   use it: the blob's spring between pages, a lift on hover, a press, and one sheen sweep as the
+   pointer comes in. Nothing loops, and reduced motion turns it all off. */
+.ao-main:has(> .cx-page-tabs) { position: relative; padding-bottom: 40px; }
 .cx-page-tabs {
-  --cx-page-text: var(--color-text-secondary); --cx-page-strong: var(--color-text-primary);
-  --cx-page-hover: var(--color-background-control-hover); --cx-page-on: var(--color-background-control-hover);
-  display: flex; align-items: center; gap: 2px; min-width: 0; max-width: calc(100% - 160px); margin-left: 10px;
+  --cx-page-text: #6b6a65; --cx-page-strong: #141413; --cx-page-hover: rgb(20 20 19 / 5%);
+  --cx-glass: rgb(255 255 255 / 46%); --cx-glass-top: rgb(255 255 255 / 80%); --cx-glass-rim: rgb(255 255 255 / 95%);
+  --cx-glass-line: rgb(20 20 19 / 10%); --cx-glass-shadow: rgb(20 20 19 / 16%); --cx-glass-edge: rgb(255 255 255 / 90%);
+  --cx-blob-top: #fff; --cx-blob: rgb(255 255 255 / 82%); --cx-blob-ring: rgb(20 20 19 / 9%); --cx-sheen: rgb(255 255 255 / 70%);
+  position: absolute; left: 50%; bottom: 7px; z-index: 30;
+  display: flex; align-items: center; gap: 2px; max-width: calc(100% - 32px); padding: 3px;
+  border-radius: 999px; isolation: isolate; overflow: hidden;
+  background: linear-gradient(180deg, var(--cx-glass-top), var(--cx-glass) 60%), var(--cx-glass);
+  -webkit-backdrop-filter: blur(18px) saturate(1.8); backdrop-filter: blur(18px) saturate(1.8);
+  box-shadow: inset 0 1px 0 var(--cx-glass-rim), inset 0 -1px 1px rgb(20 20 19 / 5%), 0 0 0 0.5px var(--cx-glass-line),
+    0 2px 6px -1px var(--cx-glass-shadow), 0 14px 30px -12px var(--cx-glass-shadow);
+  transform: translateX(-50%);
   font-family: var(--font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); -webkit-app-region: no-drag;
+  transition: transform 320ms cubic-bezier(0.3, 1.4, 0.5, 1), box-shadow 240ms ease;
 }
-.ao-workflow .ao-main:has(> .ao-stage .cx-chat) .cx-page-tabs {
-  --cx-page-text: #73726c; --cx-page-strong: #141413; --cx-page-hover: rgb(31 30 29 / 5%); --cx-page-on: rgb(31 30 29 / 8%);
+.cx-page-tabs:hover {
+  transform: translateX(-50%) translateY(-1px);
+  box-shadow: inset 0 1px 0 var(--cx-glass-rim), inset 0 -1px 1px rgb(20 20 19 / 5%), 0 0 0 0.5px var(--cx-glass-line),
+    0 3px 8px -1px var(--cx-glass-shadow), 0 18px 36px -12px var(--cx-glass-shadow);
 }
-.ao-workflow[data-theme="dark"] .ao-main:has(> .ao-stage .cx-chat) .cx-page-tabs {
-  --cx-page-text: #a6a39a; --cx-page-strong: #faf9f5; --cx-page-hover: rgb(250 249 245 / 6%); --cx-page-on: rgb(250 249 245 / 10%);
+/* The rim: light catching the glass's top-left and bottom-right edges. */
+.cx-page-tabs::before {
+  content: ""; position: absolute; inset: 0; z-index: -1; padding: 1px; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(135deg, var(--cx-glass-edge), transparent 38%, transparent 62%, var(--cx-glass-edge));
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude;
 }
-.cx-page-tabs [role="tablist"] { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
+/* One sweep of light across the glass as the pointer comes in; it resets unseen when it leaves. */
+.cx-page-sheen {
+  position: absolute; inset: 0; z-index: -1; border-radius: inherit; pointer-events: none;
+  background: linear-gradient(105deg, transparent 32%, var(--cx-sheen) 48%, transparent 64%) no-repeat 140% 0 / 260% 100%;
+}
+.cx-page-tabs:hover .cx-page-sheen { background-position: -40% 0; transition: background-position 950ms cubic-bezier(0.2, 0.8, 0.2, 1); }
+
+.cx-page-tabs [role="tablist"] { position: relative; display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; border-radius: 999px; }
+/* The liquid blob behind the open page: placed and sprung by ChatPages.tsx. */
+.cx-page-blob {
+  position: absolute; top: 0; left: 0; z-index: 0; width: 0; height: 100%; border-radius: 999px; pointer-events: none;
+  background: linear-gradient(180deg, var(--cx-blob-top), var(--cx-blob));
+  box-shadow: inset 0 0 0 0.5px var(--cx-blob-ring), inset 0 -1px 2px rgb(20 20 19 / 6%), 0 1px 3px rgb(20 20 19 / 12%), 0 4px 10px -4px rgb(20 20 19 / 20%);
+}
 .cx-page-tabs button {
-  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 6px;
-  border: 0; border-radius: 6px; background: transparent; color: var(--cx-page-text); cursor: pointer;
-  font: inherit; font-size: 12px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums;
+  position: relative; z-index: 1;
+  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; min-width: 28px; height: 28px; padding: 0 8px;
+  border: 0; border-radius: 999px; background: transparent; color: var(--cx-page-text); cursor: pointer;
+  font: inherit; font-size: 12.5px; font-weight: 550; line-height: 1; font-variant-numeric: tabular-nums;
+  transition: color 160ms ease, background-color 160ms ease, transform 280ms cubic-bezier(0.3, 1.6, 0.5, 1);
 }
-.cx-page-tabs button:hover { background: var(--cx-page-hover); color: var(--cx-page-strong); }
-.cx-page-tabs button[aria-selected="true"] { background: var(--cx-page-on); color: var(--cx-page-strong); }
+.cx-page-tabs button:hover { color: var(--cx-page-strong); transform: translateY(-1px) scale(1.08); }
+.cx-page-tabs button:not([aria-selected="true"]):hover { background: var(--cx-page-hover); }
+.cx-page-tabs button:active { transform: scale(0.9); transition-duration: 90ms; }
+.cx-page-tabs button[aria-selected="true"] { color: var(--cx-page-strong); font-weight: 650; }
 .cx-page-tabs button:focus-visible { outline: 2px solid var(--color-border-focus, #d97757); outline-offset: -2px; }
-.cx-page-tabs .cx-page-add { width: 24px; padding: 0; }
+.cx-page-tabs .cx-page-add { width: 28px; padding: 0; margin-left: 3px; }
+.cx-page-tabs .cx-page-add::before {
+  content: ""; position: absolute; top: 7px; bottom: 7px; left: -3px; width: 1px; background: var(--cx-glass-line); pointer-events: none;
+}
+.cx-page-tabs .cx-page-add svg { transition: transform 360ms cubic-bezier(0.3, 1.6, 0.5, 1); }
+.cx-page-tabs .cx-page-add:hover svg { transform: rotate(90deg); }
+
+/* Beside a dark chat: smoked glass. */
+.ao-workflow[data-theme="dark"] .cx-page-tabs {
+  --cx-page-text: #a6a39a; --cx-page-strong: #faf9f5; --cx-page-hover: rgb(250 249 245 / 7%);
+  --cx-glass: rgb(40 40 38 / 58%); --cx-glass-top: rgb(64 64 60 / 62%); --cx-glass-rim: rgb(255 255 255 / 16%);
+  --cx-glass-line: rgb(255 255 255 / 11%); --cx-glass-shadow: rgb(0 0 0 / 50%); --cx-glass-edge: rgb(255 255 255 / 30%);
+  --cx-blob-top: rgb(255 255 255 / 24%); --cx-blob: rgb(255 255 255 / 11%); --cx-blob-ring: rgb(255 255 255 / 14%); --cx-sheen: rgb(255 255 255 / 16%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cx-page-tabs, .cx-page-tabs button, .cx-page-tabs .cx-page-add svg, .cx-page-tabs:hover .cx-page-sheen { transition: none; }
+  .cx-page-tabs:hover { transform: translateX(-50%); }
+  .cx-page-tabs button:hover, .cx-page-tabs button:active, .cx-page-tabs .cx-page-add:hover svg { transform: none; }
+  .cx-page-sheen { display: none; }
+}
