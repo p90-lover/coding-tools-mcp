@@ -160,25 +160,32 @@ test("an unsuccessful deadline stop stays visible and never relaunches the child
   } finally { setup.children[0].pid = undefined; }
 });
 
-test("an explicit deadline stops a real owned Windows process tree and keeps its output", { skip: process.platform !== "win32", timeout: 12_000 }, async t => {
+// Real processes, so real timing: in 0.8.103's third release build (two suites' worth of load on one
+// HDD) taskkill /T plus the parent's close took over 7.5 s, and the 10 s wait ended with the command
+// still finalizing (command_ok null); in its retry the folder cleanup hit EPERM while Windows was
+// still releasing the killed processes. The wait ends as soon as the tree is gone, so a generous
+// bound costs nothing when it works, and a tree that never stops still fails every assertion below.
+test("an explicit deadline stops a real owned Windows process tree and keeps its output", { skip: process.platform !== "win32", timeout: 60_000 }, async t => {
   const parent = path.join(__dirname, "../../aiTemp/chat-long-horizon-tests");
   fs.mkdirSync(parent, { recursive: true });
   const scriptDir = fs.mkdtempSync(path.join(parent, "real-"));
   let child, descendant;
   t.after(() => {
     for (const pid of [child?.pid, descendant]) if (Number.isInteger(pid)) { try { process.kill(pid); } catch {} }
-    fs.rmSync(scriptDir, { recursive: true, force: true });
+    // EPERM/EBUSY while a killed process or an antivirus scan still holds the folder: retried.
+    fs.rmSync(scriptDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   const runner = createSandboxRunner({
     scriptDir, locate: () => ({ codex: "fixture-only" }), roots: () => [], logger: { info() {} },
     spawnProcess: () => {
       const script = "const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});process.stdout.write('descendant:'+child.pid+'\\n');setInterval(()=>{},1000);";
-      child = spawn(process.execPath, ["-e", script], { cwd: scriptDir, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      // Started outside scriptDir: a process's working folder cannot be deleted while it lives.
+      child = spawn(process.execPath, ["-e", script], { cwd: parent, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
       return child;
     },
   });
   const id = await runner.start({ cmd: "fixture-only supervisor smoke", cwd: scriptDir, writable: scriptDir, timeoutMs: 2500 });
-  await runner.wait(id, 10_000);
+  await runner.wait(id, 45_000);
   const result = runner.snapshot(id);
   assert.equal(result.termination_reason, "timed_out");
   assert.equal(result.command_ok, false);
