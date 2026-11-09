@@ -301,7 +301,14 @@ test("a ready service that is briefly slow keeps its page; one that stays silent
   const host = f.host({ origin: service.origin, healthTimeoutMs: 30 });
   host.setBounds({ x: 0, y: 0, width: 100, height: 100 });
   host.setSurfaceActive(true);
-  assert.equal((await host.status()).ready, true);
+  // Each check below needs a loopback answer inside 30 ms; on a loaded machine one can miss it.
+  // Until the service first reads as ready, a missed answer is just a not-yet-ready check: ask again.
+  const firstReady = async () => {
+    let checked = await host.status();
+    for (let check = 1; !checked.ready && check < 10; check++) checked = await host.status();
+    return checked;
+  };
+  assert.equal((await firstReady()).ready, true);
   await f.until(() => f.attaches.length === 1);
   silent = true;
   for (let check = 1; check < 3; check++) {
@@ -317,8 +324,7 @@ test("a ready service that is briefly slow keeps its page; one that stays silent
   silent = false;
   // The first answer brings it back. A check whose answer misses the 30 ms timeout on a loaded
   // machine (0.8.103 build, twice) is one more timeout, which keeps it down: ask again.
-  let back = await host.status();
-  for (let check = 1; !back.ready && check < 10; check++) back = await host.status();
+  const back = await firstReady();
   assert.equal(back.ready, true, "an answer brings it straight back");
   assert.equal(back.error, null);
 });
