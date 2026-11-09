@@ -148,6 +148,8 @@
 .cx-show-more:hover { background: var(--cc-hover); color: var(--cc-text-2); }
 .cx-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 28px; margin: 8px 0 0; padding: 0 2px 0 10px; }
 .cx-group-head h3 { margin: 0; color: var(--cc-muted); font-size: 12px; line-height: 16px; font-weight: 400; }
+/* A heading's buttons sit together at its right (Projects: + then the list settings). */
+.cx-group-actions { display: inline-flex; align-items: center; gap: 2px; }
 /* A section header's ghost icon button (24 px). */
 .cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
   border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; }

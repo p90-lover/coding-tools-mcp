@@ -2865,6 +2865,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     // Another project's new chat goes through the same seed as "Continue in", with an empty draft.
     newChatIn: (id, newScreen) => openNewChat(id, newScreen),
     editProject: (id) => setProjectEdit({ id, step: "edit" }),
+    // The Projects heading's +: the same folder pick, confirm and new chat as the composer's "+ New project".
+    addProject: addProjectFromFolder,
     removeProject: (id) => setProjectEdit({ id, step: "remove" }),
     selectIn: (id, taskId) => showChat(id, taskId),
     lifecycleIn: chatLifecycleIn });
