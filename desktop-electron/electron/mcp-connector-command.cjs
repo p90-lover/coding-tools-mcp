@@ -66,7 +66,12 @@ function mcpConnectorCommandFailure(error, action = "create") {
   if (action === "add-tunnel") return { code: "tunnel_add_failed", message: "MCP tunnel connection failed. The private input was retained for retry." };
   const text = String(error?.message || error || "");
   const known = PREFLIGHT_FAILURES.get(text);
-  if (known) return { ...known };
+  if (known) {
+    // A setup window that moved names where it went (navigationPlace: host and path only).
+    const place = known.code === "workspace_context_changed" && typeof error?.navigatedTo === "string"
+      && /^[A-Za-z0-9./_-]{1,340}$/.test(error.navigatedTo) ? error.navigatedTo : null;
+    return place ? { ...known, message: `${known.message} It moved to ${place}.` } : { ...known };
+  }
   if (CHATGPT_PAGE_FAILURES.has(text)) return { code: "creation_failed", message: text };
   const [code, message] = /denied access/i.test(text)
     ? ["mcp_access_denied", "The MCP server denied access. Check its authentication and workspace access."]

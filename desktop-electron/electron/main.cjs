@@ -3515,6 +3515,14 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "completed", message: "This account's MCP connector is connected" });
       return result;
     } catch (error) {
+      if (assertAutomaticCurrent && error?.automaticDeferred === true) {
+        // An automatic setup that lost its turn (the app left focus, a Browser turn or switch
+        // began) failed nothing and runs again later. Recorded as "Connector creation failed" it
+        // replaced each card's real error and raised the app's error banner every minute
+        // (2026-11-09: a hidden setup window took 22 s to open, so few runs kept focus that long).
+        publishOperation({ name: "mcp-connector-create", status: "completed", message: "Automatic MCP setup paused until Coding Tools is focused and idle" });
+        throw error;
+      }
       const failure = mcpConnectorCommandFailure(error);
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
@@ -3531,23 +3539,27 @@ function registerIpc({ logger, stateStore }) {
   });
 
   let accountMcpConfig = null;
+  // What keeps automatic MCP setup from running now, or null. Its words name a paused run in the log.
+  const automaticMcpBlocker = ({ connecting = false } = {}) => {
+    const state = stateStore.read();
+    if (IS_DEV_PROFILE || quitting || shutdownInProgress) return "shutdown";
+    if (state.autoConnectExistingMcp !== true || state.coreSetupComplete !== true
+      || state.browserInteractionMode !== "automatic") return "settings";
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized()) return "window_hidden";
+    if (!mainWindow.isFocused() || !mainWindow.webContents.isFocused()) return "window_unfocused";
+    if (!browserHost || browserHost.activeTraceId) return "browser_turn";
+    if (browserAccountsStatus().switching) return "account_switch";
+    const operation = browserHost.currentOperation();
+    if (operation && !(connecting && operation === "MCP connector creation")) return "browser_operation";
+    if (!runtimeHost || runtimeHost.currentOperation()) return "runtime_operation";
+    return null;
+  };
   automaticAccountMcp = createBrowserAccountMcpSync({
     logger,
     accounts: () => browserAccounts.status().accounts.map(account => ({
       ...account, partition: browserAccounts.partitionOf(account.id),
     })),
-    canRun: ({ connecting = false } = {}) => {
-      const state = stateStore.read();
-      const operation = browserHost?.currentOperation();
-      return !IS_DEV_PROFILE && !quitting && !shutdownInProgress
-        && state.autoConnectExistingMcp === true && state.coreSetupComplete === true
-        && state.browserInteractionMode === "automatic"
-        && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()
-        && mainWindow.isFocused() && mainWindow.webContents.isFocused()
-        && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
-        && (!operation || (connecting && operation === "MCP connector creation"))
-        && runtimeHost && !runtimeHost.currentOperation();
-    },
+    canRun: options => automaticMcpBlocker(options) === null,
     prepare: async () => {
       // Timers must not synchronously read configuration/credential files on the main thread.
       const config = await runtimeSupervisor.readConfigAsync();
@@ -3570,7 +3582,11 @@ function registerIpc({ logger, stateStore }) {
         "https://chatgpt.com", 10_000);
     },
     connect: (accountId, current) => connectAccountMcp(accountId, () => {
-      if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
+      if (!current()) {
+        throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."), {
+          automaticDeferred: true, reason: automaticMcpBlocker({ connecting: true }) ?? "account_changed",
+        });
+      }
     }),
   });
   const syncAccountMcp = () => void automaticAccountMcp.sync().catch(error => logger.warn("browser_accounts.automatic_mcp_pending", {

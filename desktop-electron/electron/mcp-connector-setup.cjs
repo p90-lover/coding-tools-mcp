@@ -127,6 +127,20 @@ function platformMcpOwnerContext({ user, organizationId, permissions, tunnels } 
   };
 }
 
+/**
+ * Where a navigation the setup did not expect went: host and path only, with the query, fragment
+ * and any unusual character dropped, so a failure can name the page without carrying its data.
+ * "The browser navigation changed" alone left a Connect that failed every time on 2026-11-09
+ * with nothing to say which page moved.
+ */
+function navigationPlace(value) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (!["https:", "http:"].includes(url.protocol)) return url.protocol === "about:" || url.protocol === "data:" ? url.protocol.slice(0, -1) : null;
+  if (!/^[a-z0-9.-]{1,253}$/i.test(url.hostname)) return null;
+  return `${url.hostname}${url.pathname.replace(/[^A-Za-z0-9/_.-]/g, "").slice(0, 80)}`;
+}
+
 // Observe only the new setup window's normal requests. This never sends an API request or keeps
 // authentication headers/raw bodies; callers must still verify fresh context before mutations.
 async function observeMcpSetupContext(contents, tunnelId) {
@@ -800,6 +814,8 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       },
     });
     let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
+    let navigatedTo = null;
+    const changedTo = value => { navigationChanged = true; navigatedTo ??= navigationPlace(value); };
     let expectedPath = null, platformPhase = false, recheckExistingFailure = null, timer;
     // A Cloudflare check restarts the clock with its own wait added (loadPastCloudflareCheck).
     const budget = target ? 120_000 : 75_000;
@@ -817,8 +833,8 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       navigationVersion++;
       if (navigating) return;
       let url;
-      try { url = new URL(value); } catch { navigationChanged = true; return; }
-      if (!inPlace || (!submitting && url.pathname !== expectedPath)) navigationChanged = true;
+      try { url = new URL(value); } catch { changedTo(value); return; }
+      if (!inPlace || (!submitting && url.pathname !== expectedPath)) changedTo(value);
     };
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -833,7 +849,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
             && (url.hostname === "chatgpt.com" || (platformPhase
               && ["platform.openai.com", "auth.openai.com", "auth0.openai.com"].includes(url.hostname)))) return;
         } catch {}
-        navigationChanged = true;
+        changedTo(value);
         event.preventDefault();
       };
       popup.webContents.on("will-navigate", guardNavigation);
@@ -848,7 +864,9 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       const evidence = async ready => {
         while (!popup.isDestroyed()) {
           checkHost();
-          if (navigationChanged) throw new Error("The browser navigation changed during MCP context inspection.");
+          if (navigationChanged) {
+            throw Object.assign(new Error("The browser navigation changed during MCP context inspection."), { navigatedTo });
+          }
           const snapshot = observer.snapshot();
           if (snapshot.error) throw new Error(snapshot.error);
           if (ready(snapshot)) return snapshot;
@@ -1065,4 +1083,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

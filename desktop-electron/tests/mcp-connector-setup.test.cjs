@@ -4,7 +4,8 @@ const vm = require("node:vm");
 const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
-const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 
 function fakeMcpNetwork() {
   const debuggerClient = new EventEmitter(), bodies = new Map(), bodyWaits = new Map(), commands = [];
@@ -244,6 +245,15 @@ test("a new Platform login cannot combine its identity with the previous user's 
   assert.throws(() => platformMcpOwnerContext(snapshot.platform, tunnelId, { userId: "user-target" }), /ownership.*unknown/i);
 });
 
+test("a setup window that moved is named by host and path only", () => {
+  assert.equal(navigationPlace("https://platform.openai.com/login?next=%2Fsettings&token=SECRET#frag"), "platform.openai.com/login");
+  assert.equal(navigationPlace("https://chatgpt.com/auth/<b>x"), "chatgpt.com/auth/3Cb3Ex");
+  assert.equal(navigationPlace("https://cdn.platform.openai.com/" + "a".repeat(200)).length, "cdn.platform.openai.com".length + 80);
+  assert.equal(navigationPlace("about:blank"), "about");
+  assert.equal(navigationPlace("javascript:alert(1)"), null);
+  assert.equal(navigationPlace("not a url"), null);
+});
+
 test("the production connector action verifies fresh owner and workspace proof before each mutation", async t => {
   const personalId = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", businessId = "602b5d8d-e211-49b1-9762-206108d52954";
   const tunnelId = `tunnel_${"a".repeat(32)}`, initialUser = "user-fixture", org = "org-fixture";
@@ -269,6 +279,9 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "subject switch after preparing cannot submit", change: "user", error: /context|authentication.*changed/i },
     { name: "partition switch after preparing cannot submit", change: "partition", error: /account|partition|context/i },
     { name: "unexpected document navigation after preparing cannot submit", change: "navigation", error: /navigation|context/i },
+    { name: "a Platform page that moves itself while its tunnels load names where it went", change: "platform-login",
+      error: error => /navigation changed/.test(error.message) && error.navigatedTo === "platform.openai.com/login"
+        && mcpConnectorCommandFailure(error).message.endsWith(" It moved to platform.openai.com/login.") },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
     { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, identityMissing: true, error: /existing connector.*tunnel.*unverified/i },
@@ -404,6 +417,11 @@ test("the production connector action verifies fresh owner and workspace proof b
             platformVisits++;
             assert(!scenario.shared || publishing, "a member never borrows Platform authentication from its publisher");
             assert(network.debuggerClient.isAttached(), "observation must precede Platform navigation");
+            if (scenario.change === "platform-login") {
+              // The page loads, then its own router moves to sign-in; the query never reaches the message.
+              setImmediate(() => contents.emit("did-start-navigation", {}, "https://platform.openai.com/login?next=%2Fsettings%2Forganization%2Ftunnels&token=SECRET", true, true));
+              return;
+            }
             network.observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, { user: { id: userId, orgs: { data: [{ id: org, role: "owner" }] } } });
             network.observed("GET", "https://api.openai.com/v1/dashboard/organization/permissions", { "openai-organization": org }, { data: ["api.organization.tunnel.read", "api.organization.tunnel.use"] });
             network.observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, { tunnels: [{ id: tunnelId,

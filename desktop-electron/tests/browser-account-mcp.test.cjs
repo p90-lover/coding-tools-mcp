@@ -16,7 +16,7 @@ function fixture() {
   const state = { allowed: true, time: 1, target: "configured-tunnel", operation: null };
   const accounts = [{ id: "one", partition: "persist:one" }, { id: "two", partition: "persist:two" }];
   const cookies = new Map(accounts.map(account => [account.partition, cookie(account.id)]));
-  const verified = [], connected = [], warnings = [];
+  const verified = [], connected = [], warnings = [], infos = [];
   const deps = {
     accounts: () => accounts,
     canRun: ({ connecting = false } = {}) => state.allowed && (!state.operation || connecting && state.operation === "MCP connector creation"),
@@ -25,10 +25,10 @@ function fixture() {
     readCookies: async partition => cookies.get(partition) ?? [],
     verifySignIn: async partition => { verified.push(partition); return { sessionAuthenticated: true, sessionCheckError: null }; },
     connect: async (id, current) => { assert(current()); connected.push(id); return { connected: true }; },
-    logger: { warn: (event, fields) => warnings.push({ event, ...fields }) },
+    logger: { warn: (event, fields) => warnings.push({ event, ...fields }), info: (event, fields) => infos.push({ event, ...fields }) },
   };
   const sync = createBrowserAccountMcpSync(deps);
-  return { state, accounts, cookies, verified, connected, warnings, deps, sync };
+  return { state, accounts, cookies, verified, connected, warnings, infos, deps, sync };
 }
 
 test("cookie candidates require fresh session proof; security failures never open setup", async () => {
@@ -139,6 +139,28 @@ test("the coordinator permits its own held operation and resumes when focus retu
   };
   await f.sync.sync();
   f.state.allowed = true; loseFocus = false;
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "one"]);
+});
+
+test("a run that lost its turn is logged as paused, not failed, and runs again when focus returns", async () => {
+  // Live 2026-11-09: each paused run was logged and shown as "Connector creation failed".
+  const f = fixture();
+  f.accounts.splice(1);
+  f.deps.connect = async (id, current) => {
+    f.connected.push(id);
+    if (f.connected.length === 1) {
+      f.state.allowed = false;
+      try { current(); } catch {}
+      throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."),
+        { automaticDeferred: true, reason: "window_unfocused" });
+    }
+    return { connected: true };
+  };
+  await f.sync.sync();
+  assert.deepEqual(f.warnings, []);
+  assert.deepEqual(f.infos, [{ event: "browser_accounts.automatic_mcp_deferred", reason: "window_unfocused" }]);
+  f.state.allowed = true;
   await f.sync.sync();
   assert.deepEqual(f.connected, ["one", "one"]);
 });

@@ -447,6 +447,47 @@ test("account setup keeps its captured account and tunnel across awaited workspa
   });
 });
 
+test("an automatic setup that lost its turn is paused: no failure reaches the card or the error banner", async t => {
+  // Live 2026-11-09: a hidden setup window took 22 s to open, the app lost focus meanwhile, and
+  // every such run wrote "Connector creation failed" over the card's real error.
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf('  const connectAccountMcp =');
+  const end = source.indexOf('\n  let accountMcpConfig =', start);
+  assert(start >= 0 && end > start);
+  for (const scenario of [
+    { name: "a paused automatic run records nothing", automatic: true, deferred: true },
+    { name: "a real automatic failure is still recorded", automatic: true },
+    { name: "a manual Connect never treats a failure as paused", deferred: true },
+  ]) await t.test(scenario.name, async () => {
+    const recorded = [], published = [];
+    const tunnel = { id: "extra-2", accountId: "account-2", tunnelId: "tunnel_original", state: "ready" };
+    const deferral = Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."),
+      { automaticDeferred: true, reason: "window_unfocused" });
+    const context = {
+      Error, Object, handle() {}, IS_DEV_PROFILE: false,
+      quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
+      browserAccounts: { has: () => true, partitionOf: () => "persist:account-2",
+        recordConnector: async (_id, value) => { recorded.push(value); return true; } },
+      browserHost: { partition: "persist:global", currentOperation: () => null, activeTraceId: null, ready: async () => {} },
+      runtimeHost: { currentOperation: () => null },
+      session: { fromPartition: () => ({ cookies: { get: async () => [] } }) },
+      signedInFromCookies: () => true, routeIdleAccountPartition: async () => {},
+      runtimeSupervisor: { extraTunnels: { status: () => [tunnel] } },
+      createWorkspaceConnector: async () => { throw scenario.deferred ? deferral : new Error("ChatGPT did not confirm the selected workspace."); },
+      app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: operation => published.push(operation),
+    };
+    vm.runInNewContext(`${source.slice(start, end)}\nglobalThis.connect = connectAccountMcp;`, context);
+    const error = await context.connect("account-2", scenario.automatic ? () => {} : undefined).then(() => null, caught => caught);
+    assert(error instanceof Error);
+    const paused = scenario.automatic === true && scenario.deferred === true;
+    // A manual Connect rethrows the mapped failure; only a paused automatic run keeps its tag.
+    assert.equal(error.automaticDeferred === true, paused);
+    assert.deepEqual(recorded.map(value => value.error), paused ? [] : [scenario.deferred ? "Connector creation failed. Check Configuration in Coding Tools." : "ChatGPT did not confirm the selected workspace."]);
+    assert.deepEqual(published.map(operation => operation.status), ["running", paused ? "completed" : "failed"]);
+  });
+});
+
 test("account setup verifies the configured main tunnel without an extra assignment", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf('  const connectAccountMcp =');

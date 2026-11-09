@@ -56,9 +56,13 @@ function createBrowserAccountMcpSync(deps) {
           const result = await deps.connect(account.id, current);
           if (result?.connected !== true) throw new Error("ChatGPT did not confirm the exact connector state.");
         } catch (error) {
-          deps.logger?.warn?.("browser_accounts.automatic_mcp_failed", {
-            message: error instanceof Error ? error.message : String(error),
-          });
+          if (error?.automaticDeferred === true) {
+            deps.logger?.info?.("browser_accounts.automatic_mcp_deferred", { reason: String(error.reason ?? "unknown").slice(0, 40) });
+          } else {
+            deps.logger?.warn?.("browser_accounts.automatic_mcp_failed", {
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
         } finally { connecting = false; }
         if (!current()) {
           // Losing admission defers work until focus/setup is available again.

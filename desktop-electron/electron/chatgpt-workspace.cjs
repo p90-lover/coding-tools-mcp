@@ -1,7 +1,7 @@
 "use strict";
 
 const { chatGptMcpContextScript, observeMcpSetupContext, extensionHelpersSource, createConfiguredConnector,
-  requireAutomaticConnectorSetup, UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED } = require("./mcp-connector-setup.cjs");
+  requireAutomaticConnectorSetup, navigationPlace, UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED } = require("./mcp-connector-setup.cjs");
 const { loadPastCloudflareCheck, matchBrowserUserAgent, SETUP_CHECK_WAIT_MS } = require("./chatgpt-cloudflare-check.cjs");
 
 const ADMIN_REQUIRED = WORKSPACE_OWNER_REQUIRED;
@@ -93,7 +93,8 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
   const popup = new BrowserWindow({ show: false, width: 1100, height: 800,
     webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true,
       backgroundThrottling: false, offscreen: true } });
-  let observer, loading = false, changed = false, version = 0, timedOut = false, expectedPath = null, timer;
+  let observer, loading = false, changed = false, version = 0, timedOut = false, expectedPath = null, timer, movedTo = null;
+  const changedTo = value => { changed = true; movedTo ??= navigationPlace(value); };
   // A hidden window can take half a minute just to start on the busy hard disk (31 s on
   // 2026-11-09, when a plain Refresh had 35 s in all). A Cloudflare check restarts the clock with
   // its own wait added.
@@ -112,11 +113,11 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
       const url = new URL(value);
       if (inPlace && url.origin === "https://chatgpt.com" && url.pathname === expectedPath) return;
     } catch {}
-    changed = true;
+    changedTo(value);
   };
   const check = () => {
     assertCurrent?.();
-    if (popup.isDestroyed() || changed) throw new Error(CONTEXT_CHANGED);
+    if (popup.isDestroyed() || changed) throw Object.assign(new Error(CONTEXT_CHANGED), changed ? { navigatedTo: movedTo } : {});
   };
   try {
     popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
@@ -128,7 +129,7 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
       try { const url = new URL(value);
         if (url.origin === "https://chatgpt.com" && !url.username && !url.password) return;
       } catch {}
-      changed = true; event.preventDefault();
+      changedTo(value); event.preventDefault();
     };
     popup.webContents.on("will-navigate", guard);
     popup.webContents.on("will-redirect", guard);
