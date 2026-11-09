@@ -28,6 +28,18 @@ type Result<T> = std::result::Result<T, WorkspaceError>;
 const OVERLAY_LEASE: Duration = Duration::from_secs(3);
 const FRAME_AGE: Duration = Duration::from_secs(15);
 const MAX_RECEIPTS: usize = 256;
+const BUSY_WAIT: Duration = Duration::from_secs(10);
+/// A receipt's outcome when the input never left: the engine could not reach the window.
+const NOT_SENT: &str = "not_sent";
+/// Whether a receipt's input is settled: submitted, or known never to have been sent.
+fn settled(receipt: &Value) -> bool {
+    matches!(
+        receipt.get("outcome").and_then(Value::as_str),
+        Some("input_submitted") | Some(NOT_SENT)
+    )
+}
+/// The longest side of the agent-frame copy the app's control bar shows.
+const BAR_PREVIEW_SIDE: u32 = 960;
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 static EXECUTION: Mutex<()> = Mutex::new(());
 static WAKE: OnceLock<(Mutex<u64>, Condvar)> = OnceLock::new();
@@ -52,13 +64,33 @@ fn state() -> MutexGuard<'static, State> {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
 }
+/// The one control permit, if it is free now. A panic that poisoned it does not keep it taken:
+/// until 2026-11-09 a poisoned permit refused every later call as COMPUTER_BUSY.
+fn try_exclusive() -> Option<MutexGuard<'static, ()>> {
+    match EXECUTION.try_lock() {
+        Ok(guard) => Some(guard),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+/// The control permit, waiting up to BUSY_WAIT for a call already running. Agents send calls in
+/// parallel (a snapshot beside a find), and a second call refused at once read as a broken tool.
+/// Still one call at a time: a waiting call is checked against the lease again once it runs, so a
+/// Stop while it waited refuses it, and nothing waits longer than BUSY_WAIT.
 fn exclusive() -> Result<MutexGuard<'static, ()>> {
-    EXECUTION.try_lock().map_err(|_| {
-        error(
-            "COMPUTER_BUSY",
-            "Another local computer operation is still running. No action was queued.",
-        )
-    })
+    let deadline = Instant::now() + BUSY_WAIT;
+    loop {
+        if let Some(guard) = try_exclusive() {
+            return Ok(guard);
+        }
+        if Instant::now() >= deadline {
+            return Err(error(
+                "COMPUTER_BUSY",
+                "Another computer operation is still running after 10 s. Nothing was queued; try again.",
+            ));
+        }
+        wait_tick(Duration::from_millis(50));
+    }
 }
 
 /// The one local control lease the user arms in the app. It is bound to a workspace root, not to
@@ -162,10 +194,7 @@ impl State {
                 .sequence
                 .as_ref()
                 .is_none_or(|s| !s.uncertain && s.next == s.steps.len())
-            && self
-                .receipts
-                .iter()
-                .all(|r| r.2.get("outcome").and_then(Value::as_str) == Some("input_submitted"));
+            && self.receipts.iter().all(|r| settled(&r.2));
         if !eligible {
             return false;
         }
@@ -362,7 +391,13 @@ pub fn focus_local_target() -> Result<()> {
     native::focus(&lease.target)
 }
 pub fn local_preview() -> Result<Value> {
-    let _busy = exclusive()?;
+    // A preview never makes an agent's call wait: it is skipped while one runs.
+    let _busy = try_exclusive().ok_or_else(|| {
+        error(
+            "COMPUTER_BUSY",
+            "A computer operation is running; the preview is skipped",
+        )
+    })?;
     let lease = {
         let mut s = state();
         s.prune();
@@ -376,6 +411,26 @@ pub fn local_preview() -> Result<Value> {
     let pixels = capture::frame(&lease.target, bounds, 1200)?;
     check_same_lease(&lease, false)?;
     Ok(pixels)
+}
+/// The frame the agent was given last, as the app's control bar shows it (capture::bar_preview),
+/// when it is newer than `after`, the snapshot the bar already shows. None while control is off,
+/// before the agent's first frame, or when the bar is current. Never captures anything itself.
+pub fn local_frame_preview(after: Option<&str>) -> Result<Option<Value>> {
+    let frame = {
+        let mut s = state();
+        s.prune();
+        if s.lease.is_none() {
+            return Ok(None);
+        }
+        match &s.frame {
+            Some(f) if f.value.get("snapshot_id").and_then(Value::as_str) != after => {
+                f.value.clone()
+            }
+            _ => return Ok(None),
+        }
+    };
+    // Decoded outside the state lock, so an agent's call is never held up by the bar.
+    capture::bar_preview(&frame, BAR_PREVIEW_SIDE).map(Some)
 }
 pub(super) fn wake() {
     let (lock, cv) = WAKE.get_or_init(|| (Mutex::new(0), Condvar::new()));
@@ -442,7 +497,23 @@ fn checked_lease(ctx: &ToolContext, args: &Value, input: bool) -> Result<Lease> 
 fn record_frame(l: &Lease) -> Result<Value> {
     check_same_lease(l, false)?;
     let bounds = native::validate_target(&l.target, false)?;
-    let mut frame = capture::codex_frame(l, bounds, 2000)?;
+    let mut frame = match capture::codex_frame(l, bounds, 2000) {
+        // Codex's engine leaves its own windows (ChatGPT and Codex) out of what it controls. They
+        // can still be seen: the window's own pixels from the in-memory GDI capture the local
+        // preview uses. Input to them stays refused (CODEX_WINDOW_UNAVAILABLE), so this shows,
+        // never acts. Until 2026-11-09 the refusal stopped control and the snapshot failed.
+        Err(e) if e.code() == codex::WINDOW_UNAVAILABLE => {
+            let mut frame = capture::frame(&l.target, bounds, 2000)?;
+            frame["input_available"] = json!(false);
+            frame["engine_note"] = json!(
+                "Codex's computer-use engine cannot reach this window (Codex leaves out its own \
+                 ChatGPT and Codex windows). This image is a native capture: you can look at it, \
+                 but clicks and typing here are refused. Select another app's window to act."
+            );
+            frame
+        }
+        other => other?,
+    };
     check_same_lease(l, false)?;
     frame["session_id"] = json!(l.id);
     let mut s = state();
@@ -659,8 +730,12 @@ fn execute_step(l: &Lease, step: &Step, id: &str, raw: &Value) -> Result<Value> 
         Ok(()) => {
             json!({"ok":true,"request_id":id,"action":step.name(),"input_sent":true,"verified":false,"outcome":"input_submitted","retry_allowed":false})
         }
+        // A window the engine never reached got no input: nothing is uncertain about it.
+        Err(e) if e.code() == codex::WINDOW_UNAVAILABLE => {
+            json!({"ok":false,"request_id":id,"action":step.name(),"input_sent":false,"outcome":NOT_SENT,"code":e.code(),"error":e.message(),"retry_allowed":false})
+        }
         Err(e) => {
-            json!({"ok":false,"request_id":id,"action":step.name(),"outcome":"unknown","error":e.message(),"retry_allowed":false,"requires_reobserve":true})
+            json!({"ok":false,"request_id":id,"action":step.name(),"outcome":"unknown","code":e.code(),"error":e.message(),"retry_allowed":false,"requires_reobserve":true})
         }
     };
     complete_receipt(id, summary.clone());
@@ -867,10 +942,11 @@ fn sequence(l: &Lease, args: &Value) -> Result<Value> {
         let result = execute_step(l, &step, &format!("{id}/{}", plan.next), raw);
         match result {
             Ok(value) => {
-                let uncertain = value.get("ok").and_then(Value::as_bool) == Some(false);
-                summaries.push(json!({"step":plan.next,"action":step.name(),"ok":!uncertain}));
-                if uncertain {
-                    plan.uncertain = true;
+                let failed = value.get("ok").and_then(Value::as_bool) == Some(false);
+                summaries.push(json!({"step":plan.next,"action":step.name(),"ok":!failed}));
+                if failed {
+                    // A step whose input never left stops the sequence without making it uncertain.
+                    plan.uncertain = !settled(&value);
                     break;
                 }
                 plan.next += 1;
@@ -931,7 +1007,8 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
         return Ok(tool_ok(json!({"state":"stopped"})));
     }
     if name == "computer_status" {
-        let gate = exclusive().ok();
+        // Status never waits for a running call: it only rotates the request window when free.
+        let gate = try_exclusive();
         let mut s = state();
         s.prune();
         let own_scope = ctx.policy.allow_screen_capture
@@ -1199,5 +1276,39 @@ mod tests {
         };
         assert!(b.contains(-150, 50));
         assert!(!b.contains(-100, 50));
+    }
+    #[test]
+    fn an_input_that_never_left_is_settled_and_an_unknown_one_is_not() {
+        assert!(settled(&json!({"outcome":"input_submitted"})));
+        assert!(settled(&json!({"outcome":NOT_SENT})));
+        assert!(!settled(&json!({"outcome":"unknown"})));
+        assert!(!settled(&json!({"ok":false})));
+    }
+    #[test]
+    fn the_bar_preview_is_the_agent_frame_scaled_down_without_a_capture() {
+        use base64::Engine;
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1600,
+            900,
+            image::Rgba([10, 20, 30, 255]),
+        ))
+        .write_with_encoder(image::codecs::png::PngEncoder::new(&mut png))
+        .unwrap();
+        let frame = json!({"snapshot_id":"s1","captured_at_unix_ms":5,"input_available":false,
+            "base64":base64::engine::general_purpose::STANDARD.encode(&png)});
+        let preview = capture::bar_preview(&frame, BAR_PREVIEW_SIDE).unwrap();
+        assert_eq!(
+            (preview["width"].as_u64(), preview["height"].as_u64()),
+            (Some(960), Some(540))
+        );
+        assert!(preview["data_url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/jpeg;base64,"));
+        assert_eq!(preview["snapshot_id"], "s1");
+        assert_eq!(preview["input_available"], false);
+        assert_eq!(preview["persisted"], false);
+        assert!(capture::bar_preview(&json!({"snapshot_id":"s2"}), BAR_PREVIEW_SIDE).is_err());
     }
 }

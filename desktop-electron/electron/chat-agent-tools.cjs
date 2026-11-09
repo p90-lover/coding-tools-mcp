@@ -2254,6 +2254,24 @@ function createChatAgentTools({
       try { compact = await rewriteCommand(args.cmd); } catch { compact = null; }
       if (typeof compact === "string" && compact && compact !== args.cmd) args = { ...args, cmd: compact };
     }
+    // The control pill names a computer_* call from the moment it arrives, while it waits for its
+    // review too (computer-control.cjs). Until 2026-11-09 it appeared only once the call ran, so a
+    // call that waited minutes for its review never showed on the pill.
+    const reviewed = group === "desktop" && !UNREVIEWED_DESKTOP.has(name);
+    const shown = computerControl && name.startsWith("computer_") && computerControl.controlled?.()
+      ? computerControl.activity?.({ agent: agentName(entry), model: await pillModel(entry), tool: name, args, waiting: reviewed }) : null;
+    if (!shown) return reviewAndRun(entry, name, args, root, group, signal, null);
+    let result = null;
+    try {
+      result = await reviewAndRun(entry, name, args, root, group, signal, shown);
+      return result;
+    } finally {
+      shown(result && !result.isError ? "done" : "failed");
+    }
+  }
+
+  /** callTool from the review on. `shown` is the call's line on the control pill, if it has one. */
+  async function reviewAndRun(entry, name, args, root, group, signal, shown) {
     // Every call that sees or drives the screen is reviewed first, whatever the chat's approval
     // mode (reviewDesktop); as in Codex's Computer Use, control is then of an app the person allowed
     // this chat to use (computerUse).
@@ -2261,6 +2279,7 @@ function createChatAgentTools({
       const verdict = await reviewDesktop(entry, name, args, signal);
       if (verdict !== true) return verdict;
     }
+    shown?.proceed?.();
     if (computerControl && (CONTROL_TOOLS.has(name) || name === "computer_snapshot" || name === "computer_list_windows")) {
       const handled = await computerUse(entry, name, args, signal);
       if (handled) return handled;
@@ -2310,10 +2329,6 @@ function createChatAgentTools({
     }
     const rooted = group === "desktop" ? null : root;
     if (name === "exec_command") entry.commandState.pending = (entry.commandState.pending ?? 0) + 1;
-    // The control pill names the step a computer_* call takes while it runs (computer-control.cjs).
-    const shown = computerControl && name.startsWith("computer_") && computerControl.controlled?.()
-      ? computerControl.activity?.({ agent: agentName(entry), model: await pillModel(entry), tool: name, args }) : null;
-    let pillOutcome = "failed";
     try {
       const outcome = await invoke(entry, name, args, rooted, name, signal);
       if (outcome.failed) return outcome.failed;
@@ -2323,10 +2338,8 @@ function createChatAgentTools({
         ? await approveAndRetry(entry, name, args, rooted, failure, confirmed, signal)
         : toolResult(name, args, outcome.result, entry.instructionsSeen ??= new Set());
       track(entry, name, args, result);
-      if (!result?.isError) pillOutcome = "done";
       return result;
     } finally {
-      shown?.(pillOutcome);
       if (name === "exec_command") entry.commandState.pending -= 1;
       prunePaneEntries();
     }

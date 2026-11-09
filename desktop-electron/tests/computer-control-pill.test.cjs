@@ -29,7 +29,9 @@ test("each computer_* call is named in words, and typed text never appears on sc
   assert.equal(describeAction("computer_snapshot", {}), "Looking at the window");
   assert.equal(describeAction("computer_wait", { selector: { name: "OK" } }), "Waiting for “OK”");
   assert.equal(describeAction("computer_select_window", { activate: true }), "Bringing the window forward");
-  for (const quiet of ["computer_status", "computer_route", "computer_stop", "computer_select_window"]) {
+  assert.equal(describeAction("computer_select_window", {}), "Choosing a window");
+  assert.equal(describeAction("computer_list_windows", {}), "Looking at the open windows");
+  for (const quiet of ["computer_status", "computer_route", "computer_stop"]) {
     assert.equal(describeAction(quiet, {}), null, `${quiet} does nothing on screen, so the pill keeps its line`);
   }
   assert.doesNotMatch(step({ action: "type", text: "hunter2" }), /hunter2/);
@@ -77,14 +79,26 @@ function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3
     getDisplayNearestPoint: (point) => displays.find((item) => point.x >= item.workArea.x && point.x < item.workArea.x + item.workArea.width) ?? displays[0],
   };
   const requests = [];
-  const request = async (endpoint) => {
+  // Headless as the pill sees it: control on after a start, off after a stop, and the agent's last
+  // frame (`agent.frame`) reported by the heartbeat and served by /computer/frame.
+  const agent = { armed: false, frame: null, frameFails: false };
+  const request = async (endpoint, body, options = {}) => {
     requests.push(endpoint);
-    if (endpoint === "/api/v1/computer/start") return { status: { state: "active", session_id: "lease" } };
-    if (endpoint.startsWith("/api/v1/computer/status")) return { status: { state: "active" } };
+    if (endpoint === "/api/v1/computer/start") { agent.armed = true; return { status: { state: "active", session_id: "lease" } }; }
+    if (endpoint === "/api/v1/computer/stop") { agent.armed = false; return {}; }
+    if (endpoint.startsWith("/api/v1/computer/status")) {
+      return { status: agent.armed ? { state: "active", last_snapshot_id: agent.frame?.snapshot_id ?? null } : { state: "stopped" } };
+    }
+    if (endpoint.startsWith("/api/v1/computer/frame")) {
+      assert.equal(options.localConfirmation, true, "only the app's own UI reads the agent's frame");
+      if (agent.frameFails) throw new Error("COMPUTER_FRAME_FAILED");
+      const after = new URL(endpoint, "http://x").searchParams.get("after");
+      return { frame: agent.frame && agent.frame.snapshot_id !== after ? agent.frame : null };
+    }
     return {};
   };
   const control = createComputerControl({ request, BrowserWindow: FakeWindow, screen, ownPids: () => [1], now });
-  return { control, made, requests };
+  return { control, made, requests, agent };
 }
 
 const calls = (window, name) => window.scripts.filter((code) => code.startsWith(`window.${name}(`)).map((code) => JSON.parse(code.slice(name.length + 8, -1)));
@@ -98,7 +112,7 @@ test("the pill sits on the screen the person is using, above full-screen apps, n
     const [window] = made;
     assert.equal(made.length, 1);
     const { options } = window;
-    assert.deepEqual([options.x, options.y, options.width, options.height], [1920 + (1280 - 620) / 2, 8, 620, 40], "top centre of the pointer's screen");
+    assert.deepEqual([options.x, options.y, options.width, options.height], [1920 + (1280 - 680) / 2, 8, 680, 40], "top centre of the pointer's screen");
     assert.equal(options.focusable, false, "clicking Stop leaves the controlled app in front");
     assert.equal(options.transparent, true);
     assert.equal(options.type, "toolbar", "out of Alt+Tab");
@@ -218,7 +232,8 @@ test("the pill's page shows untrusted names as text, opens its history, and stil
   const node = (id) => ({ id, children: [], textContent: "", attributes: {}, className: "",
     toggleAttribute(name, on) { this.attributes[name] = on; }, hasAttribute(name) { return Boolean(this.attributes[name]); },
     replaceChildren() { this.children = []; }, append(...items) { this.children.push(...items); } });
-  const elements = Object.fromEntries(["stop", "toggle", "who", "model", "what", "app", "pill", "panel"].map((id) => [id, node(id)]));
+  const elements = Object.fromEntries(["stop", "toggle", "who", "model", "what", "app", "pill", "panel", "list", "thumb", "thumbimg", "shot", "cap"]
+    .map((id) => [id, node(id)]));
   const document = { title: "Computer control is on", body: node("body"), getElementById: (id) => elements[id],
     createElement: (tag) => { const item = node(tag); made.push(item); return item; } };
   const window = {};
@@ -234,13 +249,109 @@ test("the pill's page shows untrusted names as text, opens its history, and stil
   assert.equal(document.body.attributes["data-open"], true);
   assert.match(document.title, /^computer-control-history:open:1$/);
   window.showHistory([{ time: "11:04:05", agent: "Codex", model: "gpt-6.1-sol", action: "<b>Clicking</b>", app: "Paint", outcome: "failed" }]);
-  const [row] = elements.panel.children;
+  const [row] = elements.list.children;
   assert.deepEqual(row.children.map((cell) => cell.textContent), ["11:04:05", "<b>Clicking</b>", "Paint", "✕"], "history rows are text too");
   elements.toggle.onclick();
   assert.match(document.title, /^computer-control-history:closed:2$/, "each change is a new title, so the app hears every one");
   window.showHistory([]);
-  assert.equal(elements.panel.children[0].textContent, "Nothing done yet.");
+  assert.equal(elements.list.children[0].textContent, "Nothing done yet.");
+
+  window.showFrame({ src: "data:image/jpeg;base64,AAAA", time: "11:04:06", viewOnly: true });
+  assert.equal(elements.thumbimg.src, "data:image/jpeg;base64,AAAA", "the small preview on the pill");
+  assert.equal(elements.shot.src, "data:image/jpeg;base64,AAAA", "and the large one in the panel");
+  assert.equal(elements.thumb.hidden, false);
+  assert.equal(document.body.attributes["data-frame"], true);
+  assert.match(elements.cap.textContent, /^What it saw at 11:04:06 · view only/);
+  elements.thumb.onclick();
+  assert.match(document.title, /^computer-control-history:open:3$/, "the preview opens the panel too");
 
   elements.stop.onclick();
   assert.equal(document.title, "stop-computer-control");
+});
+
+test("a call waiting for its review says so, lets no click through, and drops it once it runs", async () => {
+  const { control, made } = pill();
+  try {
+    await control.start({ workspaceId: "ws", agent: "Codex", target: { window_id: 7, pid: 70, title: "Paint", app: "mspaint.exe" } });
+    await settle();
+    const [window] = made;
+    const click = control.activity({ tool: "computer_action", args: { step: { action: "click", selector: { name: "Save" } } }, waiting: true });
+    assert.equal(calls(window, "show").at(-1).action, "Clicking “Save” · waiting for approval");
+    assert.deepEqual(window.ignoring, [], "Stop stays clickable while nothing can act yet");
+    click.proceed();
+    assert.equal(calls(window, "show").at(-1).action, "Clicking “Save”");
+    assert.deepEqual(window.ignoring, [true], "now its click passes under the pill");
+    click.proceed();
+    assert.deepEqual(window.ignoring, [true], "proceeding twice changes nothing");
+    click("done");
+    assert.deepEqual(window.ignoring, [true, false]);
+    assert.equal(control.history()[0].action, "Clicking “Save”");
+
+    const denied = control.activity({ tool: "computer_snapshot", args: {}, waiting: true });
+    denied("failed");
+    assert.deepEqual([control.history()[0].action, control.history()[0].outcome], ["Looking at the window", "failed"],
+      "a call the review refused is in the history by its step, marked failed");
+    assert.equal(typeof control.activity({ tool: "computer_status", args: {} }).proceed, "function", "a quiet call can be proceeded too");
+  } finally { control.dispose(); }
+});
+
+test("the pill previews what the agent saw: fetched once per new frame, shown small and large, never re-asked when it fails", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const { control, made, requests, agent } = pill();
+  const beat = async () => { t.mock.timers.tick(1_000); for (let i = 0; i < 5; i += 1) await settle(); };
+  const frames = () => requests.filter((endpoint) => endpoint.startsWith("/api/v1/computer/frame"));
+  try {
+    await control.start({ workspaceId: "ws", agent: "Codex", target: { window_id: 7, pid: 70, title: "Paint", app: "mspaint.exe" } });
+    await settle();
+    const [window] = made;
+    await beat();
+    assert.equal(frames().length, 0, "no frame yet: nothing is fetched");
+    assert.equal(calls(window, "showFrame").length, 0);
+
+    agent.frame = { snapshot_id: "s1", captured_at_unix_ms: Date.UTC(2026, 10, 9, 3, 4, 5), data_url: "data:image/jpeg;base64,QUJD", input_available: true };
+    await beat();
+    assert.deepEqual(frames(), ["/api/v1/computer/frame"]);
+    const [shown] = calls(window, "showFrame");
+    assert.equal(shown.src, "data:image/jpeg;base64,QUJD");
+    assert.match(shown.time, /^\d\d:\d\d:\d\d$/);
+    assert.equal(shown.viewOnly, false);
+    await beat();
+    assert.equal(frames().length, 1, "the frame it shows is not fetched again");
+
+    assert.equal(window.retitle("computer-control-history:open:1"), true);
+    assert.equal(window.bounds.height, 40 + 268 + 320, "an open panel holds the preview over the history");
+
+    agent.frame = { snapshot_id: "s2", captured_at_unix_ms: 0, data_url: "data:image/jpeg;base64,REVG", input_available: false };
+    await beat();
+    assert.deepEqual(frames().at(-1), "/api/v1/computer/frame?after=s1", "only a frame newer than the one shown");
+    assert.equal(calls(window, "showFrame").at(-1).viewOnly, true, "a window the engine cannot act in is marked view only");
+
+    agent.frame = { snapshot_id: "s3", data_url: "javascript:alert(1)" };
+    await beat();
+    assert.equal(calls(window, "showFrame").length, 2, "anything but a JPEG data URL is never shown");
+    agent.frame = { snapshot_id: "s4", data_url: "data:image/jpeg;base64,R0hJ" };
+    agent.frameFails = true;
+    await beat();
+    await beat();
+    await beat();
+    assert.equal(frames().filter((endpoint) => endpoint.endsWith("s2")).length, 2, "a failed frame is asked for once, not every second");
+  } finally { control.dispose(); }
+});
+
+test("asking for another window moves control there instead of failing on the one already controlled", async () => {
+  const { control, made, requests } = pill();
+  try {
+    await control.start({ workspaceId: "ws", agent: "Codex", target: { window_id: 7, pid: 70, title: "Paint", app: "mspaint.exe" } });
+    await settle();
+    assert.equal(requests.includes("/api/v1/computer/stop"), false, "nothing to stop the first time");
+    await control.start({ workspaceId: "ws", agent: "Codex", target: { window_id: 8, pid: 80, title: "Notepad", app: "notepad.exe" } });
+    await settle();
+    const order = requests.filter((endpoint) => /computer\/(stop|start)$/.test(endpoint));
+    assert.deepEqual(order, ["/api/v1/computer/start", "/api/v1/computer/stop", "/api/v1/computer/start"], "the old control ends before the new one starts");
+    assert.equal(made[0].destroyed, true, "the old pill goes");
+    assert.equal(made.length, 2);
+    assert.equal(control.controlled().app, "notepad.exe");
+    const page = decodeURIComponent(made[1].url.slice(made[1].url.indexOf(",") + 1));
+    assert.match(page, /<span class="app" id="app">Notepad<\/span>/);
+  } finally { control.dispose(); }
 });

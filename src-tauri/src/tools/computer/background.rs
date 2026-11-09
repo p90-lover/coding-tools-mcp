@@ -86,9 +86,7 @@ pub(super) fn select(lease: &Lease, args: &Value) -> Result<Value> {
         if s.sequence
             .as_ref()
             .is_some_and(|p| p.uncertain || p.next != p.steps.len())
-            || s.receipts
-                .iter()
-                .any(|r| r.2.get("outcome").and_then(Value::as_str) != Some("input_submitted"))
+            || s.receipts.iter().any(|r| !settled(&r.2))
         {
             return Err(error(
                 "REOBSERVATION_REQUIRED",

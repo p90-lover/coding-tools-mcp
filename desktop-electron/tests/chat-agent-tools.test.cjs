@@ -2651,10 +2651,12 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
     },
     start: async ({ target, agent, model }) => { starts.push({ ...target, agent, model }); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
     // The control pill: each call it names, with how many headless calls had gone out when it began and ended.
-    activity: ({ agent, model, tool }) => {
-      const shown = { agent, model, tool, began: calls.length, ended: null, outcome: null };
+    activity: ({ agent, model, tool, waiting }) => {
+      const shown = { agent, model, tool, waiting, began: calls.length, proceeded: null, ended: null, outcome: null };
       activities.push(shown);
-      return (outcome) => { shown.ended = calls.length; shown.outcome = outcome; };
+      const end = (outcome) => { shown.ended = calls.length; shown.outcome = outcome; };
+      end.proceed = () => { shown.proceeded ??= calls.length; };
+      return end;
     },
   };
   const activities = [];
@@ -2687,6 +2689,8 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
     assert.deepEqual([step.agent, step.model, step.tool, step.outcome], ["Claude Code", "cpa/gpt-6.1-sol", "computer_action", "done"]);
     assert.deepEqual(modelLookups, [["ws1", "ao-1"]], "the model is looked up once, then kept for a while");
     assert.equal(calls[step.began]?.body?.tool, "computer_action", "the pill names the step before it reaches headless");
+    assert.equal(step.waiting, true, "from the moment it arrives, while it waits for its review");
+    assert.equal(calls[step.proceeded]?.body?.tool, "computer_action", "and drops the wait once the review passed, before headless runs it");
     assert.ok(step.ended > step.began, "and stops naming it only once headless answered");
     assert.equal(asks.length, 1, "the allowed app is not asked again");
 
@@ -2697,6 +2701,7 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
     const refused = await callTool(other.url, other.auth, "computer_action", { session_id: "lease-1", action: "click" });
     assert.match(refused.content[0].text, /did not allow Codex to use Notepad \(the user denied it\)/);
     assert.equal(calls.length, before, "nothing reached the screen");
+    assert.deepEqual([activities.at(-1).agent, activities.at(-1).outcome], ["Codex", "failed"], "the refused call shows on the pill as failed");
 
     const gone = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 99, pid: 1 });
     assert.match(gone.content[0].text, /not open any more/);
@@ -2797,7 +2802,7 @@ test("the control bar's Stop reaches the app on a data: page: it renames the pag
   const page = barPage({ title: "Calculator" });
   assert.doesNotMatch(page, /location\.hash/, "a hash change never fires on a data: page");
   // The page's own script, run against a stand-in document: Stop renames the page.
-  const elements = { stop: {}, toggle: {} };
+  const elements = { stop: {}, toggle: {}, thumb: {} };
   const document = { title: "Computer control is on", getElementById: (id) => elements[id] };
   vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window: {} });
   elements.stop.onclick();

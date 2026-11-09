@@ -36,6 +36,32 @@ pub fn frame(target: &Target, bounds: Bounds, max_side: u32) -> Result<Value> {
     )
 }
 
+/// The control bar's copy of a frame the agent was given: the same pixels, scaled down to
+/// `max_side` and JPEG-encoded, in memory only. No new capture, and no vision permit: that permit
+/// refuses rather than waits, so holding it here could fail an agent's own capture.
+pub(super) fn bar_preview(frame: &Value, max_side: u32) -> Result<Value> {
+    let unavailable = || error("PREVIEW_UNAVAILABLE", "The agent's last frame has no image");
+    let encoded = frame["base64"].as_str().ok_or_else(unavailable)?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| unavailable())?;
+    let mut image = image::load_from_memory(&bytes).map_err(|_| unavailable())?;
+    if image.width() > max_side || image.height() > max_side {
+        image = image.thumbnail(max_side, max_side);
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 72)
+        .encode_image(&image.to_rgb8())
+        .map_err(|_| unavailable())?;
+    Ok(json!({
+        "snapshot_id": frame["snapshot_id"], "captured_at_unix_ms": frame["captured_at_unix_ms"],
+        "width": image.width(), "height": image.height(),
+        "data_url": format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(&jpeg)),
+        "input_available": frame.get("input_available").and_then(Value::as_bool).unwrap_or(true),
+        "capture_storage": "memory_only", "persisted": false,
+    }))
+}
+
 pub(super) fn codex_frame(lease: &Lease, bounds: Bounds, max_side: u32) -> Result<Value> {
     let state = super::codex::request(
         lease,

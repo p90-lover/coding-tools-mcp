@@ -129,6 +129,21 @@ export async function loadEngine(config, onUnexpectedExit = () => {}) {
   return { bridge, version: manifest.version };
 }
 
+// A call's failure ends this worker only when the worker can no longer be trusted: the engine
+// closed, the person pressed physical Escape, or the window stopped being the approved one. Any
+// other refusal (a stale element index, a parameter the engine rejected, a window it cannot see)
+// is that call's alone: the worker keeps serving, so one rejected click no longer ends control
+// (until 2026-11-09 every failure was fatal and stopped the session).
+const FATAL_CODES = new Set(['CODEX_ENGINE_CLOSED', 'CONTROL_SCOPE_MISMATCH', 'INVALID_CODEX_RUNTIME', 'INCOMPATIBLE_CODEX_RUNTIME']);
+export function failureReply(error, closed = false) {
+  const message = String(error?.message ?? '');
+  if (/stopped by the user|physical Escape/i.test(message)) return { ok: false, code: 'CODEX_ENGINE_INTERRUPTED', fatal: true };
+  // The engine lists no window it will not control: Codex leaves out its own (ChatGPT and Codex).
+  if (/window id \d+ was not found/i.test(message)) return { ok: false, code: 'CODEX_WINDOW_HIDDEN', fatal: closed };
+  const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(error.code) ? error.code : 'CODEX_ENGINE_FAILED';
+  return { ok: false, code, fatal: closed || FATAL_CODES.has(code) };
+}
+
 async function* messages(stream) {
   let buffer = '';
   stream.setEncoding('utf8');
@@ -163,9 +178,9 @@ export async function main() {
         await send({ ok: true, result: await bridge.call(request.method, request.params) });
       } catch (error) {
         // Never echo native error text, source code, typed values or screenshot bytes.
-        const interrupted = /stopped by the user|physical Escape/i.test(error?.message ?? '');
-        await send({ ok: false, code: interrupted ? 'CODEX_ENGINE_INTERRUPTED' : error.code ?? 'CODEX_ENGINE_FAILED', fatal: true });
-        break;
+        const reply = failureReply(error, bridge.closed);
+        await send(reply);
+        if (reply.fatal) break;
       }
     }
   } catch {
