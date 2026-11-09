@@ -288,7 +288,7 @@ function normalizeAccountDefaults(accounts) {
   }));
 }
 
-function createSecretCodec({ safeStorage, keyPath, canCreateKey }) {
+function createSecretCodec({ safeStorage, keyPath, canCreateKey, readText = null }) {
   let fallbackKey = null;
 
   function encryptionAvailable() {
@@ -305,7 +305,7 @@ function createSecretCodec({ safeStorage, keyPath, canCreateKey }) {
       const key = Buffer.from(text.trim(), "base64");
       if (key.length !== 32) throw new Error("Invalid encryption key");
       return key;
-    }, { preserveUnreadable: true });
+    }, { preserveUnreadable: true, ...(readText ? { readText } : {}) });
     if (read.value) return (fallbackKey = read.value);
     if (read.source !== "none" || !create || !canCreateKey()) {
       throw new Error("Saved encryption key is unavailable; restore it before changing credentials");
@@ -367,13 +367,18 @@ function createSecretCodec({ safeStorage, keyPath, canCreateKey }) {
   return { encrypt, decrypt };
 }
 
-function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
+/**
+ * `readText(file)`, when given, answers every read of the settings, the key and their copies: a
+ * caller that read them ahead with fs.promises builds a store without the main thread touching the
+ * disk (readCpaProxyRoutes in managed-external-services.cjs). Such a store is only for reading.
+ */
+function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText = null }) {
   const readStore = () => readStateFile(filePath, text => {
     const value = JSON.parse(text);
     if (!value || Object.prototype.toString.call(value) !== "[object Object]"
       || value.version !== STORE_VERSION) throw new Error("Invalid provider settings");
     return normalizeState(value);
-  }, { preserveUnreadable: true });
+  }, { preserveUnreadable: true, ...(readText ? { readText } : {}) });
   let stateRead = readStore();
   let state = stateRead.value || defaultState();
   function recoverState() {
@@ -381,7 +386,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage }) {
     const read = readStore();
     if (read.value) { stateRead = read; state = read.value; }
   }
-  const codec = createSecretCodec({ safeStorage, keyPath,
+  const codec = createSecretCodec({ safeStorage, keyPath, readText,
     canCreateKey: () => stateRead.source !== "unreadable" && ![...Object.values(state.secrets.accounts), ...Object.values(state.secrets.proxies), state.secrets.decodo]
       .some(envelope => envelope?.scheme === "aes-256-gcm-v1"),
   });
