@@ -1,6 +1,7 @@
 "use strict";
 
 const { MODEL_PRICES } = require("./cpa-model-prices.cjs");
+const { accountOf } = require("./cpa-quota.cjs");
 
 // Each CPA account's token use, request count and estimated cost, for the CPA accounts view and
 // the chat's context meter, with what is known of its quota (Codex: CPA Helper's 5-hour and weekly
@@ -34,7 +35,7 @@ const MAX_MODELS = 12;
 const HOUR_MS = 60 * 60_000;
 const DAY_MS = 24 * HOUR_MS;
 // 5h matches a Codex account's 5-hour limit window (the CPA Auth Files cards show both).
-const RANGES = Object.freeze({ "5h": 5 * HOUR_MS, "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS, all: null });
+const RANGES = Object.freeze({ "5h": 5 * HOUR_MS, "24h": DAY_MS, "7d": 7 * DAY_MS, "30d": 30 * DAY_MS, all: null, session: null, week: null });
 const DEFAULT_RANGE = "30d";
 /** A turn's request stats are read again after this; the line polls while the chat is open. */
 const TURN_CACHE_MS = 3_000;
@@ -314,6 +315,17 @@ async function mapLimited(items, limit, fn) {
   return results;
 }
 
+/** Only a provider-confirmed active window is a counting boundary; never roll an expired reset forward. */
+function quotaUsageWindow(account, range, at) {
+  const window = account?.[range];
+  const end = finite(window?.resetsAt);
+  const seconds = finite(window?.windowSeconds);
+  if (!end || !seconds || seconds <= 0 || seconds > 30 * 86400 || account.error) return null;
+  const start = end - seconds * 1000;
+  if (start <= 0 || start > at || end <= at || !(account.checkedAt >= start) || account.checkedAt > at) return null;
+  return { from: start, to: end };
+}
+
 function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
   const cache = new Map(); // range -> { at, value }
   const pending = new Map(); // range or turn key -> Promise
@@ -402,13 +414,56 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = 
     return { ok: true, available: true, range, from, refreshedAt: now(), source: "CPA Helper", ...result };
   }
 
-  /** Usage for a range ("5h", "24h", "7d", "30d" or "all"), cached CACHE_MS; concurrent reads share one load. */
+  async function loadWindow(range) {
+    const target = connection();
+    if (!target) return { ok: true, available: false, reason: "CPA is not running" };
+    // The chat meter's quota reader caps its account list. Cards need every account's cached window,
+    // without triggering extra upstream quota refreshes.
+    const [files, quotas] = await Promise.all([
+      optional(target, "/auth-files"), optional(target, "/cpa-helper/codex/accounts"),
+    ]);
+    if (!Array.isArray(files?.files)) return { ok: true, available: false, reason: "CPA accounts are unavailable" };
+    const at = now();
+    const byId = new Map((Array.isArray(quotas?.items) ? quotas.items : []).map(accountOf).map((account) => [account.id, account]));
+    const accounts = await mapLimited(files.files, SPLIT_CONCURRENCY, async (file) => {
+      const id = text(String(file?.auth_index ?? file?.authIndex ?? ""), 64);
+      const codex = byId.get(id);
+      const window = quotaUsageWindow(codex, range, at);
+      const row = aggregateUsage({ authFiles: [file], codexAccounts: codex ? [codex] : [] }).accounts[0];
+      if (!row) return null;
+      Object.assign(row, { window, usageAvailable: false, cost: null });
+      if (!window || !id) return row;
+      const listing = await recordSlot(() => optional(target, `/cpa-helper/rankings?${new URLSearchParams({
+        group: "model", auth: id, from: String(window.from), to: String(at),
+      })}`));
+      if (!Array.isArray(listing?.items)) return row;
+      const models = listing.items.map(modelRow);
+      for (const model of models) addUsage(row, model);
+      Object.assign(row, combineCosts(models.length ? models.map((model) => ({
+        cost: model.cost, source: model.costSource, partial: model.costPartial,
+      })) : [{ cost: 0, source: null, partial: false }]));
+      row.models = models.slice(0, 6);
+      row.usageAvailable = true;
+      return row;
+    });
+    const rows = accounts.filter(Boolean);
+    const totals = emptyUsage();
+    for (const row of rows) if (row.usageAvailable) addUsage(totals, row);
+    Object.assign(totals, combineCosts(rows.filter((row) => row.usageAvailable).map((row) => ({
+      cost: row.cost, source: row.costSource, partial: row.costPartial,
+    }))));
+    return { ok: true, available: true, range, from: null, refreshedAt: at, source: "CPA Helper", accounts: rows, totals, models: [] };
+  }
+
+  /** Rolling ranges and provider-reset session/week windows share concurrent reads, but never a cache entry. */
   async function read({ range } = {}) {
     const key = Object.hasOwn(RANGES, range) ? range : DEFAULT_RANGE;
+    const currentWindow = key === "session" || key === "week";
     const hit = cache.get(key);
-    if (hit && now() - hit.at < CACHE_MS) return hit.value;
+    if (hit && now() - hit.at < CACHE_MS && (!currentWindow
+      || !hit.value.accounts?.some((row) => row.window && row.window.to <= now()))) return hit.value;
     if (!pending.has(key)) {
-      pending.set(key, load(key)
+      pending.set(key, (currentWindow ? loadWindow(key) : load(key))
         .then((value) => { cache.set(key, { at: now(), value }); return value; })
         .finally(() => pending.delete(key)));
     }
