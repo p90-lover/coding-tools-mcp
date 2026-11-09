@@ -27,7 +27,7 @@ const ALLOWED = {
   // The prior port record is captured before the first await; ready apps are rejected before IO.
   "browser-debugging.cjs": 1,
   "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 6, "chat-archive.cjs": 4, "chat-edits.cjs": 4,
-  "chat-goals.cjs": 2, "chat-loops.cjs": 4, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 4,
+  "chat-goals.cjs": 2, "chat-loops.cjs": 1, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 1,
   // /schedule reads its saved schedules once, when the workflow is created at startup; it saves off the main thread.
   "chat-schedules.cjs": 1,
   "chatgpt-desktop-sync.cjs": 1, "chatgpt-desktop.cjs": 25, "codex-chat-lifecycle-sync.cjs": 9,
