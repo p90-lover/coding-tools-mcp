@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type R
 import { createPortal } from "react-dom";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ImagePreviewDialog, type MarkupResult } from "./ImagePreview";
-import { chatMessageReadable, hiddenSecretParts, numberedDiff, type ChatStepRound, type SteerReceipt, type ChatSentAttachment } from "./ao-chat";
+import { chatMessageReadable, hiddenSecretParts, numberedDiff, workWindowStart, type ChatStepRound, type SteerReceipt, type ChatSentAttachment } from "./ao-chat";
 
 // Parts of a chat turn both transcripts draw: the Claude Code one (AgentOrchestratorChat) and the
 // DeepSeek Harness one (DshTranscript), so a fix to one is a fix to both.
@@ -133,6 +133,26 @@ export function SteerReceiptMark({ receipt }: { receipt?: SteerReceipt }) {
  * each folded under its label and verdict: the history of a review stays traceable without crowding
  * out the round in progress.
  */
+/**
+ * Which of a list of work's entries draw (from `start`, workWindowStart), and the "Show earlier steps"
+ * that draws more above them. `keys` name the entries; `rows` is what each draws (1 when left out).
+ * By itself the window moves on with the newest entries as a turn works; once the person has asked
+ * for earlier ones it keeps its first entry, so what they went back to read stays drawn.
+ */
+export function useWorkWindow(keys: string[], rows?: number[]): { start: number; showEarlier: () => void } {
+  const [from, setFrom] = useState<string | null>(null);
+  const weights = rows ?? keys.map(() => 1);
+  const pinned = from === null ? -1 : keys.indexOf(from);
+  const start = pinned >= 0 ? pinned : workWindowStart(weights);
+  return { start, showEarlier: () => setFrom(keys[workWindowStart(weights.slice(0, start))] ?? null) };
+}
+
+/** What a list of work leaves undrawn above its window, as the one control that draws more of it. */
+export function EarlierSteps({ hidden, onShow }: { hidden: number; onShow: () => void }) {
+  if (hidden <= 0) return null;
+  return <button type="button" className="cx-round-fold cx-work-earlier" onClick={onShow}>{`Show earlier steps · ${hidden} not shown`}</button>;
+}
+
 export function EarlierRounds({ rounds }: { rounds?: ChatStepRound[] }) {
   if (!rounds?.length) return null;
   return <div className="cx-step-earlier">

@@ -367,6 +367,34 @@ export type ChatLiveSegment = { kind: "item"; item: ChatLiveItem } | { kind: "gr
 const GROUPED = new Set(["tool", "command", "edit", "reasoning"]);
 
 /** Runs of tool calls and thinking fold into one group each, as Codex, Cursor and Claude Code show them. */
+/**
+ * A list of a turn's work draws its newest WORK_WINDOW rows; "Show earlier steps" above them draws as
+ * many again. Ten working chats in split panes, every step of each expanded on its mission, mounted
+ * 63k elements on one page: each frame (a shimmer step, a poll) restyled, laid out and painted all of
+ * them, about 11 frames a second, and showing the page again froze it for 3.5 s (2026-11-09).
+ */
+export const WORK_WINDOW = 40;
+
+/**
+ * Where a list of work starts drawing: the newest entries whose rows fit in `budget`, and always the
+ * newest entry. `rows` is how many rows each entry draws: 1 for a row or a folded group, an open
+ * group's head and rows (which it windows itself) otherwise.
+ */
+export function workWindowStart(rows: number[], budget = WORK_WINDOW): number {
+  let used = 0;
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    used += rows[index];
+    if (used > budget) return Math.min(index + 1, rows.length - 1);
+  }
+  return 0;
+}
+
+/** The rows a group of work draws: its head, and while open its newest WORK_WINDOW steps. */
+export const workGroupRows = (items: ChatLiveItem[], open: boolean) => open ? Math.min(items.length, WORK_WINDOW) + 1 : 1;
+
+/** The steps a list of work's segments hold (a group counts each of its steps). */
+export const workSegmentSteps = (segments: ChatLiveSegment[]) => segments.reduce((sum, segment) => sum + (segment.kind === "item" ? 1 : segment.items.length), 0);
+
 export function groupTimeline(items: ChatLiveItem[]): ChatLiveSegment[] {
   const segments: ChatLiveSegment[] = [];
   for (const item of items) {
