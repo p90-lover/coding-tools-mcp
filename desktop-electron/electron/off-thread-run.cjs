@@ -246,6 +246,11 @@ class OffThreadChild extends EventEmitter {
     this.telling = false;
   }
 
+  /** The three standard streams, as ChildProcess.stdio lists them (null where not piped). */
+  get stdio() {
+    return [this.stdin, this.stdout, this.stderr];
+  }
+
   /** Counts output this thread has taken and tells the worker once per turn (OUTPUT_WINDOW_BYTES). */
   taken(stream, bytes) {
     this.untold[stream] += bytes;
