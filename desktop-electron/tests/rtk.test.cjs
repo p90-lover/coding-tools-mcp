@@ -354,11 +354,15 @@ test("rtk's savings report is read as text and JSON", async () => {
 });
 
 // The OpenCode plugin's folder, as main.cjs names it under the launcher's data ("Coding Tools" has a space).
+const pluginRuns = [];
+test.after(() => { for (const run of pluginRuns) require("node:fs").rmSync(run, { recursive: true, force: true }); });
 function pluginFolder() {
   const fs = require("node:fs");
   const root = path.resolve(__dirname, "../../aiTemp/rtk-opencode-plugin-tests");
   fs.mkdirSync(root, { recursive: true });
-  return path.join(fs.mkdtempSync(path.join(root, "run-")), "Coding Tools", "rtk", "opencode");
+  const run = fs.mkdtempSync(path.join(root, "run-"));
+  pluginRuns.push(run);
+  return path.join(run, "Coding Tools", "rtk", "opencode");
 }
 
 /** world() with the OpenCode plugin's folder. */
