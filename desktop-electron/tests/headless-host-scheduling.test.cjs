@@ -309,6 +309,29 @@ test("a Stop prerequisite read uses protected capacity without joining a saturat
   await poll;
 });
 
+test("a person's send is admitted ahead of saturated polls on every path it uses, not only reads", async t => {
+  // A send writes the chat and makes its run through /tools/call: marked, it takes the slot kept for
+  // controls while the same call from a background refresh waits its turn.
+  const held = [];
+  const host = await serverHost(t, (request, response) => { held.push(response); });
+  host.maxInFlight = 2; // one ordinary slot, one kept for controls
+  const poll = host.request("/api/v1/ao/read", { workspace_id: "ws", run_id: "run" });
+  await until(() => held.length === 1);
+  const background = host.request("/api/v1/tools/call", { workspace_id: "ws", tool: "workflow_list" });
+  const send = host.request("/api/v1/tools/call", { workspace_id: "ws", tool: "workflow_update" }, { admissionControl: true });
+  await until(() => held.length === 2);
+  const status = host.admissionStatus();
+  assert.deepEqual(status.running.map(entry => entry.category), ["read", "control"]);
+  assert.deepEqual(status.waiting.map(entry => entry.category), ["other"]);
+  held[1].end('{"ok":true}');
+  assert.deepEqual(await send, { ok: true });
+  held[0].end('{"ok":true}');
+  await poll;
+  await until(() => held.length === 3);
+  held[2].end('{"ok":true}');
+  assert.deepEqual(await background, { ok: true });
+});
+
 test("Stop bypasses workflow-level background read sharing and preserves local confirmation", async () => {
   const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
   const calls = [];

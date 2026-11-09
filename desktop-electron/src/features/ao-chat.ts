@@ -2148,3 +2148,18 @@ export function contextFraction(usage: { contextUsed: number | null; contextWind
   if (!usage || !usage.contextWindow || usage.contextWindow <= 0 || usage.contextUsed === null) return null;
   return Math.max(0, Math.min(1, usage.contextUsed / usage.contextWindow));
 }
+
+/**
+ * Why a chat message was refused only for the moment, or "" when it failed for what it says. The
+ * chat started working again under it ("still running": its automatic retry), the app window was
+ * not in front (sends run only from the focused window), or the local service had no room and never
+ * sent it ("full": its admission queue did not clear, as with ten split chats polling a saturated
+ * disk on 2026-11-09). Each waits at the front of the chat's queue, sent as soon as it can be,
+ * instead of a "Something went wrong" toast. A request that timed out after it was sent is not one
+ * of these: it may have gone through, so it is told and never sent again by itself.
+ */
+export function sendRefusedForNow(cause: unknown): "busy" | "unfocused" | "full" | "" {
+  const why = cause instanceof Error ? cause.message : String(cause ?? "");
+  return /still running/i.test(why) ? "busy" : /focused app window/i.test(why) ? "unfocused"
+    : /HEADLESS_CAPACITY|HEADLESS_QUEUE_FULL|launcher queue is full/.test(why) ? "full" : "";
+}
