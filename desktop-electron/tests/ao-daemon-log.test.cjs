@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs } = require("../electron/ao-daemon-log.cjs");
+const { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs, daemonLogEvent, SLOW_STAGE_MS } = require("../electron/ao-daemon-log.cjs");
 
 const access = (method, status, duration) =>
   `time=2026-10-20T20:56:32.338+08:00 level=INFO msg="http request" id=simon/uWvaNUFOLG-048664 method=${method} path=/api/v1/sessions/reg-machine-117 status=${status} bytes=763 duration=${duration} remote=127.0.0.1:59094`;
@@ -113,6 +113,24 @@ test("each output stream has independent UTF-8 state", () => {
   err.flush();
   assert.deepEqual(stdout, ["中\n"]);
   assert.deepEqual(stderr, ["WARN: µ\n"]);
+});
+
+test("AO's writer report and a slow start stage become launcher log events; other lines do not", () => {
+  const stage = (stageName, duration) =>
+    `time=2026-11-09T14:47:31.004+08:00 level=INFO msg="spawn: asynchronous chat stage" sessionID=coding-tools-mcp-280 stage=${stageName} duration=${duration}`;
+  // The stack summary is quoted, with escaped quotes inside, and a CRLF line ending is no part of it.
+  assert.deepEqual(daemonLogEvent('time=2026-11-09T14:46:17.120+08:00 level=WARN msg="sqlite writer held while writes wait" held=1m3.2s waiting=3 poolWaitCount=9 poolWait=41.5s holder="CreateSession<-Spawn; \\"Retention\\"<-Sweep"\r'),
+    { level: "warn", event: "ao.writer_held", detail: { heldMs: 63200, waiting: 3, holder: 'CreateSession<-Spawn; "Retention"<-Sweep' } });
+  assert.deepEqual(daemonLogEvent(stage("controller_start", "2m26.4s")),
+    { level: "info", event: "ao.start_stage_slow", detail: { session: "coding-tools-mcp-280", stage: "controller_start", ms: 146400 } });
+  assert.equal(daemonLogEvent(stage("total", `${SLOW_STAGE_MS}ms`))?.detail.ms, SLOW_STAGE_MS);
+  // A quick stage, one whose duration can't be read, and every other line say nothing.
+  assert.equal(daemonLogEvent(stage("queue_drain", "12.5ms")), null);
+  assert.equal(daemonLogEvent(stage("workspace_create", "soon")), null);
+  assert.equal(daemonLogEvent(access("POST", 201, "70s")), null);
+  assert.equal(daemonLogEvent('time=2026-11-09T14:46:17.120+08:00 level=WARN msg="usage source ingestion failed"'), null);
+  // A report that names no holder still says how long the writer was held.
+  assert.deepEqual(daemonLogEvent('level=WARN msg="sqlite writer held while writes wait" held=31s waiting=1').detail, { heldMs: 31000, waiting: 1, holder: "" });
 });
 
 test("an endless line is passed on rather than held", () => {
