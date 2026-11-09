@@ -783,6 +783,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (!sessionStops.has(session)) return usable;
     }
   }
+  /** continuableSession settled as { usable } or { error }: a check begun ahead of its use never rejects unheard. */
+  function continuableOutcome(session) {
+    return continuableSession(session).then(usable => ({ usable }), error => ({ error }));
+  }
   // A pre-warm's check, which brings back an agent released while idle, runs one at a time. Several
   // chats opening together (split panes, restored tabs) resumed each one's agent at once: AO answers
   // a resume only when the agent is up, all through its one database writer, and on the busy disk
@@ -1488,6 +1492,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // A follow-up that continues the chat's live session keeps the settings it was started with:
       // nothing new is launched, so there is nothing to check against the catalog.
       const continuing = continuations.has(runId);
+      // The chat's agent is brought back (or found up) while the card is reserved and the launch
+      // settings are read, not after them: those took 1-18 s of their own before a released agent
+      // even began to resume (seen live 2026-11-09). A launch that ends up not needing it (the card
+      // is already being started, or the reservation fails) leaves a resumed agent the idle sweep
+      // releases again, as reopening the chat does.
+      const early = continuing ? continuations.get(runId) : null;
+      const earlyCheck = early ? continuableOutcome(early.session) : null;
       // Checked after the card is reserved: a refusal found before it left the card pending, so the
       // chat said "Starting" for good and the reason lived only in memory. Now it holds the card
       // with the reason, which the chat shows and Retry clears.
@@ -1563,11 +1574,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // the new agent, which starts with the chat so far (the handoff below).
         let unconfirmed = null;
         const checkStarted = now();
-        const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
-          if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
-          unconfirmed = error;
-          return false;
-        });
+        // checkMs is what the launch still waited for here, after the check that began with it.
+        const outcome = !continued ? { usable: false }
+          : await (continued === early ? earlyCheck : continuableOutcome(continued.session));
+        if (outcome.error && outcome.error.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw outcome.error;
+        if (outcome.error) unconfirmed = outcome.error;
+        const usable = Boolean(continued) && !outcome.error && Boolean(outcome.usable);
         if (continued) checkMs = now() - checkStarted;
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
