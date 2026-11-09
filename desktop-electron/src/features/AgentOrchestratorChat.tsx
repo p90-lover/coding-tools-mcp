@@ -11,14 +11,16 @@ import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import type { AoNode } from "./AgentOrchestratorSurface";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { transcriptCompletion, transcriptParts, transcriptSummary } from "./chat-transcript";
+import { goalMissionStart, openedThought, stepDuration, stepFamily, stepFamilyCounts, stepFamilyNoun, transcriptCompletion, transcriptParts, transcriptSummary, transcriptTone, type StepFamily } from "./chat-transcript";
+import { onMissionWork, readMissionWork } from "./chat-view-settings";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
 import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
 import { ChatPet } from "./ChatPet";
-import { ChatTurnStats, TurnFoot } from "./ChatTurnStats";
+import { ChatTurnStats } from "./ChatTurnStats";
+import { ChatScrollToBottom } from "./ChatScrollToBottom";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
@@ -28,13 +30,14 @@ import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
-  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_LIMIT, chatList, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
+  CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
+  chatScheduleParse, scheduleCountdown, scheduleLabel, scheduleWhen, type ChatSchedule,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -275,24 +278,85 @@ function stepTone(step: ChatStep): string {
   return step.state;
 }
 
+/** The glyph each step family is drawn with (chat-transcript's stepFamily), on a 16-unit grid. */
+const STEP_GLYPHS: Record<StepFamily, string> = {
+  think: "M8 2.3 9.2 6.8 13.7 8 9.2 9.2 8 13.7 6.8 9.2 2.3 8 6.8 6.8Z",
+  command: "M3.2 4.6 6.6 8l-3.4 3.4M8.6 11.6h4.4",
+  read: "M4.2 2h5l3 3v9h-8ZM9.2 2v3h3M6.2 8.2h4M6.2 10.8h4",
+  search: "M7 2.8a4.2 4.2 0 1 1 0 8.4 4.2 4.2 0 0 1 0-8.4ZM10.1 10.1l3.4 3.4",
+  edit: "M10.6 2.6l2.8 2.8L6 12.8H3.2V10ZM9 4.2 11.8 7",
+  web: "M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2ZM2.2 8h11.6M8 2c-1.9 2-1.9 10 0 12M8 2c1.9 2 1.9 10 0 12",
+  plan: "M6 4.2h7.4M6 8h7.4M6 11.8h7.4M2.8 4.2h.4M2.8 8h.4M2.8 11.8h.4",
+  agent: "M8 2.8a2.4 2.4 0 1 1 0 4.8 2.4 2.4 0 0 1 0-4.8ZM3.2 13.4c.8-2.4 2.6-3.7 4.8-3.7s4 1.3 4.8 3.7",
+  ask: "M5.9 6a2.2 2.2 0 1 1 3 2c-.6.3-.9.8-.9 1.4v.5M8 12.4h.01",
+  tool: "M6 2.5v3M10 2.5v3M4.5 5.5h7V8a3.5 3.5 0 0 1-7 0ZM8 11.5v2",
+  approval: "M8 1.8 13 3.7v4c0 3-2.1 5.4-5 6.5-2.9-1.1-5-3.5-5-6.5v-4ZM5.8 8l1.6 1.6 3-3.2",
+  note: "M8 2a6 6 0 1 1 0 12A6 6 0 0 1 8 2ZM8 7.3v3.4M8 5.1h.01",
+};
+
+/** A step's kind as a small tinted glyph, in its family's colour (the data-family palette). */
+function StepGlyph({ family }: { family: StepFamily }) {
+  return <span className="cx-step-glyph" data-family={family} aria-hidden="true">
+    <svg viewBox="0 0 16 16" width="11" height="11"><path d={STEP_GLYPHS[family]} fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+  </span>;
+}
+
+/** The kinds of work a fold holds, as overlapping glyphs on its head line. */
+function StepGlyphs({ items }: { items: ChatLiveItem[] }) {
+  const families = stepFamilyCounts(items).map((entry) => entry.family).slice(0, 4);
+  return families.length ? <span className="cx-glyph-stack" aria-hidden="true">{families.map((family) => <StepGlyph key={family} family={family} />)}</span> : null;
+}
+
+/** A thought's headline: its newest line while it streams, its first (a bold title) once done. */
+function thoughtHeadline(item: ChatLiveItem): string {
+  const lines = item.text.trim().split(/\r?\n/);
+  const current = item.status === "running" ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
+  return current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+}
+
+/**
+ * A turn's work while it is on a mission, or was in this view: `open` shows its thoughts and step
+ * groups open by default (Settings › Chat). `chosen` keeps what the person opened or closed, by row,
+ * while the turn stays in view: a single chat's work moves from its running card to its "Worked for"
+ * fold when the answer lands, and a row folded while it ran stays folded there. `card` keeps two
+ * cards' rows apart.
+ */
+type MissionWork = { open: boolean; chosen: Map<string, boolean>; card?: string };
+
+/** One disclosure in a turn's work: the person's choice wins, else open on a mission, else `fallback`. */
+function useWorkOpen(mission: MissionWork | undefined, id: string, fallback = false): [boolean, (open: boolean) => void] {
+  const key = `${mission?.card ?? ""}\n${id}`;
+  const [chosen, setChosen] = useState<boolean | null>(() => mission?.chosen.get(key) ?? null);
+  return [chosen ?? (fallback || Boolean(mission?.open)), (open) => { mission?.chosen.set(key, open); setChosen(open); }];
+}
+
+/** A card's own part of its turn's mission state, so its rows' choices never meet another card's. */
+function useCardMission(mission: MissionWork | undefined, card: string): MissionWork | undefined {
+  return useMemo(() => mission && { ...mission, card }, [mission, card]);
+}
+
 /**
  * The model's reasoning summary, as Codex shows it: its first line (a short bold title such as
- * "**Inspecting the register route**") as one progress line, the rest a click away.
+ * "**Inspecting the register route**") as one progress line, the rest a click away, or open while
+ * its turn is on a mission. Opened, the row keeps the title and the words go below it.
  */
-function ReasoningItem({ item }: { item: ChatLiveItem }) {
-  const [open, setOpen] = useState(false);
-  const lines = item.text.trim().split(/\r?\n/);
+function ReasoningItem({ item, mission }: { item: ChatLiveItem; mission?: MissionWork }) {
+  const [open, choose] = useWorkOpen(mission, item.id);
   const running = item.status === "running";
-  if (!lines[0]) return <span className="cx-live-label">{running ? "Thinking…" : "Thought"}</span>;
-  const label = running ? "Thinking" : "Thought";
   // Live reasoning arrives as its newest part, so it headlines the current thought, not the first.
-  const current = running ? lines.filter((line) => line.trim()).at(-1) ?? lines[0] : lines[0];
-  const headline = current.replace(/^\s*\*\*(.+?)\*\*\s*$/, "$1").replace(/[*_`]/g, "").trim();
+  const headline = thoughtHeadline(item);
+  if (!headline) return <span className="cx-live-label">{running ? "Thinking…" : "Thought"}</span>;
+  const took = stepDuration(item.durationMs);
   // Every thought has the same disclosure, even a single paragraph. Parse it only while open:
   // mounting Markdown behind closed details made long streaming thoughts expensive.
-  return <details className="cx-reasoning" onToggle={(event) => setOpen(event.currentTarget.open)}>
-    <summary><Icon name="chevron" width="12" height="12" /><span className="cx-live-label">{label}</span><span className="cx-live-text">{headline}</span></summary>
-    {open ? <div className="cx-reasoning-body"><ChatMarkdown text={item.text.trim()} /></div> : null}
+  const opened = open ? openedThought(item.text) : null;
+  return <details className="cx-reasoning" data-family="think" open={open}
+    onToggle={(event) => { if (event.currentTarget.open !== open) choose(event.currentTarget.open); }}>
+    <summary><StepGlyph family="think" /><span className="cx-live-label">{running ? "Thinking" : "Thought"}</span>
+      {!opened ? <span className="cx-live-text">{headline}</span> : opened.title ? <span className="cx-live-text">{opened.title}</span> : null}
+      {took ? <span className="cx-step-time" title={`Thought for ${took}`}>{took}</span> : null}
+      <Icon name="chevron" width="11" height="11" className="cx-step-caret" /></summary>
+    {opened?.body ? <div className="cx-reasoning-body"><ChatMarkdown text={opened.body} /></div> : null}
   </details>;
 }
 
@@ -304,7 +368,9 @@ function ReasoningItem({ item }: { item: ChatLiveItem }) {
 function toolHeadline(item: ChatLiveItem): string {
   // The agent's own words say what the call is for; the command itself is one click away.
   if (item.description) return item.description;
-  return dshItemDetail(item) || item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
+  // "MCP" and "Tool" are labels, not names: the row read "MCP mcp" instead of the tool it called.
+  const named = /^(mcp|tool)$/i.test(item.label ?? "") ? { ...item, label: undefined } : item;
+  return dshItemDetail(named) || item.text.replace(/^mcp__[\w-]+__/, "").replace(/\s+/g, " ").trim();
 }
 
 /** How a tool call ended, for its dot: AO's activity status, "pending" while it waits on approval. */
@@ -313,53 +379,111 @@ function toolTone(status: string): "ok" | "failed" | "running" {
   return /complet|done|success/i.test(status) ? "ok" : "running";
 }
 
-/** A tool call as Claude Code shows it: a dot, its name and one line, opening on what it ran and got back. */
+/**
+ * A tool call as Claude Code shows it: its kind's glyph, its name and one line (with how long it
+ * took), opening on a card of what it ran and got back.
+ */
 function ToolItem({ item }: { item: ChatLiveItem }) {
   const tone = toolTone(item.status);
+  const family = stepFamily(item);
   const name = item.kind === "command" ? (tone === "running" ? "Running" : "Ran") : item.label ?? item.kind.replace(/_/g, " ");
-  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{name}</span>
-    <span className="cx-live-text">{toolHeadline(item)}</span><ApprovedMark text={item.approval} /></>;
+  const took = stepDuration(item.durationMs);
+  const head = <><StepGlyph family={family} /><span className="cx-live-label">{name}</span>
+    <span className="cx-live-text">{toolHeadline(item)}</span>{took ? <span className="cx-step-time">{took}</span> : null}<ApprovedMark text={item.approval} /></>;
   const images = item.images ?? [];
-  // A returned image is read from disk only once its row is opened, not for every row in the turn.
+  // The card (and any image it returned, read from disk) is drawn once the row is first opened:
+  // a long chat holds hundreds of calls, and each card is a dozen elements.
   const [opened, setOpened] = useState(false);
-  const opens = item.kind === "command" || item.input || item.output || images.length;
+  const opens = item.kind === "command" || item.input || item.output || images.length || item.approval;
   return opens
-    ? <details className={`cx-tool tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
-      <summary>{head}{images.length ? <span className="cx-tool-image-count">{images.length === 1 ? "image" : `${images.length} images`}</span> : null}</summary>
-      <div className="cx-tool-body">
-        {item.kind === "command" ? <pre className="cx-tool-io"><code>{item.text}</code></pre> : null}
-        {item.input ? <pre className="cx-tool-io"><code>{item.input}</code></pre> : null}
-        {opened && images.length ? <ToolImages paths={images} /> : null}
-        {item.output ? <pre className="cx-tool-io is-output"><code>{item.output}</code></pre>
-          : tone === "running" || images.length ? null : <p className="cx-tool-empty">No output</p>}
-      </div></details>
-    : <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
+    ? <details className={`cx-tool tone-${tone}`} data-family={family} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
+      <summary>{head}{images.length ? <span className="cx-tool-image-count">{images.length === 1 ? "image" : `${images.length} images`}</span> : null}
+        <Icon name="chevron" width="11" height="11" className="cx-step-caret" /></summary>
+      {opened ? <ToolCard item={item} tone={tone} images={images} /> : null}</details>
+    : <div className={`cx-tool tone-${tone}`} data-family={family}><div className="cx-tool-row">{head}</div></div>;
+}
+
+/** One labelled part of an opened step's card: its command, arguments or output. */
+function StepSection({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
+  return <section className="cx-step-section"><h5>{title}{note ? <span>{note}</span> : null}</h5>{children}</section>;
+}
+
+/** A call's JSON arguments as name and value pairs; null when they are not (or no longer, once cut) a JSON object. */
+function toolArguments(input?: string): [string, string][] | null {
+  if (!input) return null;
+  try {
+    const parsed: unknown = JSON.parse(input);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const entries = Object.entries(parsed as Record<string, unknown>);
+    return entries.length ? entries.slice(0, 24).map(([key, value]) => [key, typeof value === "string" ? value : JSON.stringify(value, null, 1) ?? String(value)]) : null;
+  } catch { return null; }
+}
+
+/**
+ * An opened tool call: how it ended, how long it took, which MCP tool it was and who let it run,
+ * then the command it ran (or its arguments, one per line) and what came back.
+ */
+function ToolCard({ item, tone, images }: { item: ChatLiveItem; tone: ReturnType<typeof toolTone>; images: string[] }) {
+  const took = stepDuration(item.durationMs);
+  const server = /^mcp__([\w-]+?)__/.exec(item.text)?.[1];
+  const args = toolArguments(item.input);
+  const lines = item.output ? item.output.split(/\r?\n/).length : 0;
+  return <div className="cx-tool-body cx-step-card">
+    <div className="cx-step-facts">
+      <span className={`cx-fact is-${tone}`}>{tone === "ok" ? "Done" : tone === "failed" ? "Failed" : "Running"}</span>
+      {took ? <span className="cx-fact">{`Took ${took}`}</span> : null}
+      {server ? <span className="cx-fact is-mono" title={item.text}>{`${server} · ${item.text.replace(/^mcp__[\w-]+?__/, "").split(/\s/)[0]}`}</span> : null}
+      {item.approval ? <span className={`cx-fact ${/^Denied/.test(item.approval) ? "is-failed" : "is-allowed"}`} title={item.approval}>{item.approval}</span> : null}
+    </div>
+    {item.kind === "command" ? <StepSection title="Command"><pre className="cx-tool-io is-command"><code>{item.text}</code></pre></StepSection> : null}
+    {args ? <StepSection title="Arguments"><dl className="cx-step-args">{args.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></StepSection>
+      : item.input ? <StepSection title="Input"><pre className="cx-tool-io"><code>{item.input}</code></pre></StepSection> : null}
+    {images.length ? <ToolImages paths={images} /> : null}
+    {item.output ? <StepSection title="Output" note={lines === 1 ? "1 line" : `${lines} lines`}><pre className="cx-tool-io is-output"><code>{item.output}</code></pre></StepSection>
+      : tone === "running" || images.length ? null : <p className="cx-tool-empty">No output</p>}
+  </div>;
 }
 
 const fileName = (path: string) => path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+/** The folder a changed file is in, its last three parts at most: "…/src/features". */
+const fileFolder = (path: string) => {
+  const parts = path.replace(/[\\/]+$/, "").split(/[\\/]+/).slice(0, -1);
+  return parts.length > 3 ? `…/${parts.slice(-3).join("/")}` : parts.join("/");
+};
 
 /** "+12 −3", green and red, as Claude Code counts an edit. */
 function DiffCount({ additions, deletions }: { additions: number; deletions: number }) {
   return <span className="cx-diff-count"><span className="is-add">+{additions}</span> <span className="is-del">−{deletions}</span></span>;
 }
 
-/** A file edit as Claude Code shows one: "Edited <file> +12 −3", opening on the changed lines. */
+/** GitHub's five squares: how much of a change was added (green) and removed (red). */
+function DiffBar({ additions, deletions }: { additions: number; deletions: number }) {
+  const total = additions + deletions;
+  if (!total) return null;
+  const added = Math.round((additions / total) * 5);
+  return <span className="cx-diff-bar" aria-hidden="true">{[0, 1, 2, 3, 4].map((index) => <i key={index} className={index < added ? "is-add" : "is-del"} />)}</span>;
+}
+
+/** A file edit as Claude Code shows one: "Edited <file> +12 −3", opening on each file's changed lines. */
 function EditItem({ item }: { item: ChatLiveItem }) {
   const files = item.files ?? [];
   const tone = toolTone(item.status);
   const additions = files.reduce((sum, file) => sum + file.additions, 0);
   const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
-  const head = <><span className="cx-tool-dot" aria-hidden="true" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
+  const took = stepDuration(item.durationMs);
+  const head = <><StepGlyph family="edit" /><span className="cx-live-label">{item.label ?? "Edited"}</span>
     <span className="cx-live-text" title={files.map((file) => file.path).join("\n")}>{files.length === 1 ? fileName(files[0].path) : `${files.length} files`}</span>
-    <DiffCount additions={additions} deletions={deletions} /><ApprovedMark text={item.approval} /></>;
+    <DiffCount additions={additions} deletions={deletions} />{took ? <span className="cx-step-time">{took}</span> : null}<ApprovedMark text={item.approval} /></>;
   // The numbered lines are drawn once the row is first opened (as DshRow does): a folded edit kept
   // four cells a line in the page, ~50k of a long chat's 85k elements, and every restyle walked them.
   const [opened, setOpened] = useState(false);
-  if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`}><div className="cx-tool-row">{head}</div></div>;
-  return <details className={`cx-tool cx-edit tone-${tone}`} onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}><summary>{head}</summary>
-    {opened ? <div className="cx-tool-body">
+  if (!files.some((file) => file.diff)) return <div className={`cx-tool tone-${tone}`} data-family="edit"><div className="cx-tool-row">{head}</div></div>;
+  return <details className={`cx-tool cx-edit tone-${tone}`} data-family="edit" onToggle={(event) => { if (event.currentTarget.open) setOpened(true); }}>
+    <summary>{head}<Icon name="chevron" width="11" height="11" className="cx-step-caret" /></summary>
+    {opened ? <div className="cx-tool-body cx-step-card">
       {files.map((file) => <section key={file.path} className="cx-edit-file">
-        {files.length > 1 ? <header><span title={file.path}>{fileName(file.path)}</span><DiffCount additions={file.additions} deletions={file.deletions} /></header> : null}
+        <header><span className="cx-edit-name" title={file.path}>{fileName(file.path)}</span><span className="cx-edit-folder">{fileFolder(file.path)}</span>
+          <DiffCount additions={file.additions} deletions={file.deletions} /><DiffBar additions={file.additions} deletions={file.deletions} /></header>
         {file.diff ? <EditDiff diff={file.diff} /> : null}
       </section>)}
     </div> : null}</details>;
@@ -382,8 +506,8 @@ const sameFiles = (a: ChatLiveItem["files"], b: ChatLiveItem["files"]) => a === 
 const sameLiveItem = (a: ChatLiveItem, b: ChatLiveItem) => a === b || (a.id === b.id && a.kind === b.kind && a.status === b.status
   && a.text === b.text && a.label === b.label && a.description === b.description && a.approval === b.approval
   && a.answered?.question === b.answered?.question && a.answered?.answer === b.answered?.answer
-  && a.input === b.input && a.output === b.output && a.receipt === b.receipt && sameFiles(a.files, b.files));
-const LiveRow = memo(LiveRowView, (prev, next) => sameLiveItem(prev.item, next.item));
+  && a.input === b.input && a.output === b.output && a.receipt === b.receipt && a.durationMs === b.durationMs && sameFiles(a.files, b.files));
+const LiveRow = memo(LiveRowView, (prev, next) => prev.mission === next.mission && sameLiveItem(prev.item, next.item));
 
 /**
  * Messages steered into the running turn that its timeline does not show yet: the same bubble the
@@ -411,7 +535,7 @@ function PendingSteers({ steers }: { steers: PendingSteer[] }) {
   </div>)}</>;
 }
 
-function LiveRowView({ item }: { item: ChatLiveItem }) {
+function LiveRowView({ item, mission }: { item: ChatLiveItem; mission?: MissionWork }) {
   return <li className={`cx-live-item kind-${item.kind} is-${item.status || "done"}`}>
     {item.answered ? <AnsweredRecord question={item.answered.question} answer={item.answered.answer} />
       // As any sent message: an attached image as its thumbnail, not "Attached image: <path>" text.
@@ -420,36 +544,78 @@ function LiveRowView({ item }: { item: ChatLiveItem }) {
       : item.kind === "steer" ? <div className="cx-user cx-steer"><SentMessage text={item.text} />
         <div className="cx-msg-foot"><SteerReceiptMark receipt={item.receipt} /><MessageActions text={chatMessageReadable(item.text)} /></div></div>
       : item.kind === "message" ? <StreamingMarkdown text={item.text} live={item.status === "running"} />
-      : item.kind === "reasoning" ? <ReasoningItem item={item} />
+      : item.kind === "reasoning" ? <ReasoningItem item={item} mission={mission} />
       : item.kind === "edit" ? <EditItem item={item} />
       : item.kind === "command" || item.kind === "tool" ? <ToolItem item={item} />
-      : <><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
+      : <><StepGlyph family={stepFamily(item)} /><span className="cx-live-label">{item.label ?? item.kind.replace(/_/g, " ")}</span><span className="cx-live-text">{item.text}</span></>}
   </li>;
+}
+
+/** A step's one line for the strip's tooltip: "Ran npm test (3.2s)". */
+function stepTitle(item: ChatLiveItem): string {
+  const took = stepDuration(item.durationMs);
+  const verb = item.kind === "reasoning" ? "Thought" : item.kind === "command" ? "Ran" : item.label ?? "Called";
+  const what = item.kind === "reasoning" ? thoughtHeadline(item) : item.kind === "edit" ? (item.files ?? []).map((file) => fileName(file.path)).join(", ") : toolHeadline(item);
+  return `${verb}${what ? ` ${what}` : ""}${took ? ` (${took})` : ""}`;
+}
+
+const STEP_KINDS = new Set(["command", "tool", "edit", "reasoning"]);
+
+/**
+ * An opened fold's overview: the kinds of work it took as coloured chips (edits as files and lines,
+ * failures and time on their own), and every step in order as a strip, sized by its time when all
+ * steps have one, so the long command stands out.
+ */
+function StepOverview({ items }: { items: ChatLiveItem[] }) {
+  const counts = stepFamilyCounts(items);
+  if (!counts.length) return null;
+  const summary = transcriptSummary(items);
+  const failed = counts.reduce((sum, entry) => sum + entry.failed, 0);
+  const steps = [...new Map(items.filter((item) => STEP_KINDS.has(item.kind)).map((item) => [item.id, item])).values()].slice(-200);
+  const timed = steps.every((step) => step.durationMs);
+  const total = stepDuration(steps.reduce((sum, step) => sum + (step.durationMs ?? 0), 0));
+  return <div className="cx-work-overview">
+    <div className="cx-work-chips">
+      {counts.map(({ family, count }) => <span key={family} className="cx-work-chip" data-family={family}><StepGlyph family={family} />
+        {family === "edit" && summary.files.length ? `${summary.files.length} ${summary.files.length === 1 ? "file" : "files"}` : stepFamilyNoun(family, count)}
+        {family === "edit" && (summary.additions || summary.deletions) ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}</span>)}
+      {failed ? <span className="cx-work-chip is-failed">{`${failed} failed`}</span> : null}
+      {total ? <span className="cx-work-chip is-time" title="The time the steps themselves took, without the model's writing in between">{`Steps took ${total}`}</span> : null}
+    </div>
+    {steps.length > 1 ? <div className="cx-step-strip" role="img" aria-label={`${steps.length} steps, in order`}>
+      {steps.map((step) => <i key={step.id} data-family={stepFamily(step)} className={toolTone(step.status) === "failed" ? "is-failed" : undefined}
+        style={{ flexGrow: timed ? Math.sqrt(step.durationMs ?? 1) : 1 }} title={stepTitle(step)} />)}
+    </div> : null}
+  </div>;
 }
 
 /**
  * A run of tool calls and thinking as one line, as Codex, Cursor and Claude Code fold them:
  * "Read a file, ran a command". The current operation stays one quiet line; a click exposes
- * each recorded call without obscuring the assistant's surrounding narrative.
+ * each recorded call without obscuring the assistant's surrounding narrative. On a mission it
+ * lists its steps from the start. `id`: its first step's, which names it in the turn's choices.
  */
-function ActivityGroup({ items, live, expanded = false }: { items: ChatLiveItem[]; live: boolean; expanded?: boolean }) {
-  const [chosen, setOpen] = useState<boolean | null>(null);
-  const open = chosen ?? expanded;
+function ActivityGroup({ id, items, live, expanded = false, mission }: { id: string; items: ChatLiveItem[]; live: boolean; expanded?: boolean; mission?: MissionWork }) {
+  const [open, setOpen] = useWorkOpen(mission, `group:${id}`, expanded);
   const summary = transcriptSummary(items);
   const hasCalls = items.some((item) => ["command", "tool", "edit"].includes(item.kind));
   const active = live && items.some((item) => /^(running|pending|in_progress)$/.test(item.status));
   const title = active ? dshLiveTitle(items).label : hasCalls ? summary.text : "Thought";
+  // The group's own time: what its steps took, summed (a running group shows its live line instead).
+  const took = active ? "" : stepDuration(items.reduce((sum, item) => sum + (item.durationMs ?? 0), 0));
   return <div className={`cx-group${live ? " is-live" : ""}`}>
     <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)} title={activitySummary(items)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
+      <StepGlyphs items={items} />
       <span className={`cx-group-verb${active ? " cx-shimmer" : ""}`}>{title}</span>
+      {took ? <span className="cx-step-time">{took}</span> : null}
     </button>
-    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} />)}</ol> : null}
+    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} mission={mission} />)}</ol> : null}
   </div>;
 }
 
 /** A role's turn, as Codex and Claude Code show it: thinking, tool calls and streamed messages. */
-function LiveTimeline({ items, live = false, finished = false, reply, collapsed = false, expanded = false, joinedReply = false }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string; collapsed?: boolean; expanded?: boolean; joinedReply?: boolean }) {
+function LiveTimeline({ items, live = false, finished = false, reply, collapsed = false, expanded = false, joinedReply = false, mission }: { items: ChatLiveItem[]; live?: boolean; finished?: boolean; reply?: string; collapsed?: boolean; expanded?: boolean; joinedReply?: boolean; mission?: MissionWork }) {
   const compact = useContext(CompactActivity);
   const normalized = tidyTimeline(steerReceipts(items, finished));
   const tidy = (joinedReply ? withoutReplied(normalized, reply) : transcriptParts(normalized, reply).items)
@@ -458,11 +624,12 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
     .filter((item) => !collapsed || item.kind === "message" || item.kind === "steer" || item.answered)
     .map((item) => !live && item.status === "running" ? { ...item, status: "completed" as const } : item);
   if (!tidy.length) return null;
-  if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} />)}</ol>;
+  if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} mission={mission} />)}</ol>;
   const segments = groupTimeline(tidy);
   return <ol className="cx-live is-compact">
-    {segments.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} />
-      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup items={segment.items} live={live && index === segments.length - 1} expanded={expanded} /></li>)}
+    {segments.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} mission={mission} />
+      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup id={segment.key} items={segment.items} live={live && index === segments.length - 1}
+        expanded={expanded} mission={mission} /></li>)}
   </ol>;
 }
 
@@ -478,17 +645,32 @@ const CHAT_WORK_LIVE = new Set<string>();
 const CHAT_WORK_READ = new Map<string, Promise<ChatLiveItem[]>>();
 type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
 
+/**
+ * A read that failed waits before it is tried again: every chat poll renders the turn anew, so a
+ * failed read was retried on each one, and while AO was slow seven cards' reads timed out together
+ * every 30 s, adding to its load (2026-11-09). The wait starts at 30 s and doubles to 5 minutes.
+ */
+const CHAT_WORK_FAILED = new Map<string, { at: number; waitMs: number }>();
+const WORK_RETRY_MS = 30_000;
+const WORK_RETRY_MAX_MS = 300_000;
+
 /** The summary, narrative and details share one read, including the final live-to-ended refresh. */
 function readStepWork(step: ChatStep, runId: string, loadWork: LoadWork): Promise<ChatLiveItem[]> {
   const key = stepWorkKey(step);
   const pending = CHAT_WORK_READ.get(key);
   if (pending) return pending;
+  const failed = CHAT_WORK_FAILED.get(key);
+  if (failed && Date.now() - failed.at < failed.waitMs) return Promise.reject(new Error("This card's activity could not be read; it is tried again shortly."));
   const settled = !step.working;
   const read = loadWork(runId, step.nodeId).then((items) => {
     const merged = mergeTimeline(CHAT_WORK.get(key), items, { cap: Infinity });
     CHAT_WORK.set(key, merged);
+    CHAT_WORK_FAILED.delete(key);
     if (settled) CHAT_WORK_LIVE.delete(key);
     return merged;
+  }, (error: unknown) => {
+    CHAT_WORK_FAILED.set(key, { at: Date.now(), waitMs: failed ? Math.min(failed.waitMs * 2, WORK_RETRY_MAX_MS) : WORK_RETRY_MS });
+    throw error;
   }).finally(() => { CHAT_WORK_READ.delete(key); });
   CHAT_WORK_READ.set(key, read);
   return read;
@@ -527,11 +709,14 @@ function useStepWork(step: ChatStep, runId: string, wanted: boolean, loadWork?: 
   return known;
 }
 
-function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joinedReply = false }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string; joinedReply?: boolean }) {
-  // A failed step opens on its error and a working one on its live turn, as Codex shows them;
-  // once the user toggles a row, their choice wins.
+function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joinedReply = false, solo = false, mission }: { step: ChatStep; runId: string; loadWork?: LoadWork; folded?: boolean; reply?: string; joinedReply?: boolean;
+  /** The turn's only card: no head of its own, so its request, steers and work read as one column. */
+  solo?: boolean; mission?: MissionWork }) {
+  // A failed step opens on its error and a working one on its live turn, as Codex shows them, and
+  // every card while its turn is on a mission; once the user toggles a row, their choice wins.
   const [chosen, setOpen] = useState<boolean | null>(null);
-  const open = !folded && (chosen ?? Boolean(step.error || step.working?.timeline?.length));
+  const open = !folded && (solo || (chosen ?? Boolean(step.error || step.working?.timeline?.length || mission?.open)));
+  const own = useCardMission(mission, step.key);
   const work = useStepWork(step, runId, !joinedReply || open, loadWork);
   const compact = useContext(CompactActivity);
   const body = step.error || step.text || (work?.length || step.hasWork || step.earlier?.length ? "work" : "");
@@ -541,8 +726,8 @@ function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joi
   const state = step.working ? (step.working.stalled ? "may be stuck" : "")
     : step.error ? "failed" : step.verdict || (step.state === "finished" ? "done" : step.state);
   if (folded && !step.text && !step.error && !work?.some((item) => item.kind === "message" || item.kind === "steer" || item.answered)) return null;
-  return <li className={`cx-step tone-${stepTone(step)}`}>
-    {!folded ? <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
+  return <li className={`cx-step tone-${stepTone(step)}${solo ? " is-solo" : ""}`}>
+    {solo ? null : !folded ? <button type="button" className="cx-step-head" aria-expanded={open} disabled={!body && !step.working} onClick={() => setOpen(!open)}
       title={step.working?.detail || step.detail || undefined}>
       <span className="cx-step-dot" aria-hidden="true" />
       <span className="cx-step-name">{step.name}</span>
@@ -555,7 +740,7 @@ function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joi
           failed attempt showed under the new attempt's work, as if it came after it. */}
       {open ? <EarlierRounds rounds={step.earlier} /> : null}
       {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={reply} collapsed={!open} joinedReply={joinedReply} />
+        <LiveTimeline items={work} live={Boolean(step.working)} finished={!step.working && step.state === "finished"} reply={reply} collapsed={!open} joinedReply={joinedReply} mission={own} />
       </SteerReader.Provider> : null}
       {/* A held or failed card keeps the reply it gave: the error says why, the reply stays readable. */}
       {step.error ? <p className="cx-step-error">{step.error}</p> : null}
@@ -566,22 +751,26 @@ function StepRow({ step, runId, loadWork, folded = false, reply = step.text, joi
 
 /**
  * The work behind an answer that closes its turn itself (a single model's, a solo orchestrator's):
- * with its narrative always readable and its tool details a click away.
+ * with its narrative always readable and its tool details a click away. Watched on its mission, it
+ * stays open once the answer lands.
  */
-function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false }: { step: ChatStep; turn: ChatTurn; expanded: boolean; loadWork?: LoadWork; joinedReply?: boolean }) {
-  const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? expanded;
+function AnswerWork({ step, turn, expanded, loadWork, joinedReply = false, mission }: { step: ChatStep; turn: ChatTurn; expanded: boolean; loadWork?: LoadWork; joinedReply?: boolean; mission?: MissionWork }) {
+  const own = useCardMission(mission, step.key);
+  const [open, setChosen] = useWorkOpen(own, "work", expanded);
   const work = useStepWork(step, turn.runId, !joinedReply || open, loadWork);
   const summary = workSummary(work ?? []);
   return <div className="cx-work cx-transcript-work">
     <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span className="cx-work-state">{transcriptCompletion(turn)}</span>
-      <span className="cx-work-summary">{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
+      {work?.length ? <StepGlyphs items={work} /> : null}
+      <span className={`cx-work-state is-${transcriptTone(turn)}`}>{transcriptCompletion(turn)}</span>
+      <span className="cx-work-summary" title={work?.length ? summary.text : undefined}>{work === null && step.hasWork ? "Activity not loaded yet" : summary.text}</span>
       {summary.additions || summary.deletions ? <DiffCount additions={summary.additions} deletions={summary.deletions} /> : null}
       <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
     </button>
+    {open && work?.length ? <StepOverview items={work} /> : null}
     {work?.length ? <SteerReader.Provider value={steerReader(step)}>
-      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={joinedReply && !open} joinedReply={joinedReply} />
+      {/* Folded, the work keeps what the agent said on the way and hides its tool calls, as Codex does. */}
+      <LiveTimeline items={work} finished={!step.working && step.state === "finished"} reply={step.text} expanded={open} collapsed={!open} joinedReply={joinedReply} mission={own} />
     </SteerReader.Provider> : null}
   </div>;
 }
@@ -592,7 +781,8 @@ function TranscriptAnswer({ step, runId, loadWork, onVisualize, plain = false }:
   return <ChatMarkdown text={plain ? step.text ?? "" : transcriptParts(tidyTimeline(work ?? []), step.text).answer} onVisualize={onVisualize} />;
 }
 
-type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork; workRevision?: number; joinedReply?: boolean };
+/** `mission`: the turn is on the chat's mission now, so its work shows expanded (and stays so in this view). */
+type WorkGroupProps = { turn: ChatTurn; idle?: boolean; expanded?: boolean; loadWork?: LoadWork; workRevision?: number; joinedReply?: boolean; mission?: boolean };
 
 /** A turn still being worked on: its steps change on every update, so it always re-renders. */
 const liveTurn = (turn: ChatTurn) => turn.status === "running" || turn.status === "queued"
@@ -617,7 +807,8 @@ const sameTurnWork = (a: ChatTurn, b: ChatTurn) => a.runId === b.runId && a.stat
  * the page for up to a second each time; only the live turn needs the work.
  */
 export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
-  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork || prev.workRevision !== next.workRevision || prev.joinedReply !== next.joinedReply) return false;
+  if (prev.idle !== next.idle || prev.expanded !== next.expanded || prev.loadWork !== next.loadWork || prev.workRevision !== next.workRevision || prev.joinedReply !== next.joinedReply
+    || Boolean(prev.mission) !== Boolean(next.mission)) return false;
   if (prev.turn === next.turn) return true;
   if (liveTurn(prev.turn) || liveTurn(next.turn)) return false;
   return sameTurnWork(prev.turn, next.turn);
@@ -626,9 +817,14 @@ export function sameWork(prev: WorkGroupProps, next: WorkGroupProps): boolean {
 const WorkGroup = memo(WorkGroupView, sameWork);
 /** A DeepSeek turn's work (DshTranscript), skipped on re-render by the same check as WorkGroup. */
 const DshWork = memo(DshTurnWork, (prev: DshTurnWorkProps, next: DshTurnWorkProps) => prev.live === next.live && prev.headed === next.headed
-  && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal && sameWork({ turn: prev.turn, expanded: prev.expanded }, { turn: next.turn, expanded: next.expanded }));
+  && prev.useWork === next.useWork && prev.beforeStatus === next.beforeStatus && prev.errorShownBelow === next.errorShownBelow && prev.refusal === next.refusal
+  && sameWork({ turn: prev.turn, expanded: prev.expanded, mission: prev.mission }, { turn: next.turn, expanded: next.expanded, mission: next.mission }));
 
-function TurnWorkSummary({ turn, loadWork }: { turn: ChatTurn; loadWork?: LoadWork }) {
+/**
+ * A finished team turn's "Worked for" line: the kinds of work as glyphs, how it ended and what it
+ * did, opening on its overview (chips and the step strip) above the cards.
+ */
+function TurnWorkHead({ turn, loadWork, open, onToggle }: { turn: ChatTurn; loadWork?: LoadWork; open: boolean; onToggle: () => void }) {
   const [, setLoaded] = useState(0);
   const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
   useEffect(() => {
@@ -643,17 +839,34 @@ function TurnWorkSummary({ turn, loadWork }: { turn: ChatTurn; loadWork?: LoadWo
   const unknown = steps.some((step) => step.hasWork && !CHAT_WORK.has(stepWorkKey(step)));
   const items = steps.flatMap((step) => (CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])
     .map((item) => ({ ...item, id: `${step.key}:${item.id}` })));
-  return <span className="cx-work-summary">{unknown ? "Activity not loaded yet" : workSummary(items).text}</span>;
+  const text = unknown ? "Activity not loaded yet" : workSummary(items).text;
+  // One line that ends in an ellipsis when the row is narrow; the whole summary is its tooltip.
+  return <>
+    <button type="button" className="cx-work-head" aria-expanded={open} onClick={onToggle}>
+      {unknown ? null : <StepGlyphs items={items} />}
+      <span className={`cx-work-state is-${transcriptTone(turn)}`}>{transcriptCompletion(turn)}</span>
+      <span className="cx-work-summary" title={unknown ? undefined : text}>{text}</span>
+      <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
+    </button>
+    {open && !unknown ? <StepOverview items={items} /> : null}
+  </>;
 }
 
-function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedReply = false }: WorkGroupProps) {
+function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedReply = false, mission = false }: WorkGroupProps) {
   const working = turn.steps.find((step) => step.working);
+  // Once on a mission, the turn's work stays expanded in this view, after the mission ends too,
+  // until the person folds it; each row they open or close keeps their choice (MissionWork).
+  const kept = useRef(false);
+  if (mission) kept.current = true;
+  const missionOpen = kept.current;
+  const [choices] = useState(() => new Map<string, boolean>());
+  const missionWork = useMemo<MissionWork>(() => ({ open: missionOpen, chosen: choices }), [missionOpen, choices]);
   // Live and failed work opens by itself, and finished work too when the chat shows its details
-  // (single-model chats by default); a toggle on the turn itself holds over both.
+  // (single-model chats by default) or the turn was on a mission; a toggle on the turn itself holds over all.
   const [chosen, setChosen] = useState<boolean | null>(null);
-  const open = chosen ?? (expanded || Boolean(working) || turn.steps.some((step) => step.error));
+  const open = chosen ?? (expanded || missionOpen || Boolean(working) || turn.steps.some((step) => step.error));
   if (!turn.steps.length) {
-    if (turn.final) return <AnswerWork step={turn.final} turn={turn} expanded={joinedReply ? expanded : false} loadWork={loadWork} joinedReply={joinedReply} />;
+    if (turn.final) return <AnswerWork step={turn.final} turn={turn} expanded={joinedReply ? expanded : false} loadWork={loadWork} joinedReply={joinedReply} mission={missionWork} />;
     return !idle && (turn.status === "running" || turn.status === "queued")
       ? <div className="cx-work is-live"><span className="cx-shimmer">Starting…</span></div> : null;
   }
@@ -665,13 +878,9 @@ function WorkGroupView({ turn, idle = false, expanded = false, loadWork, joinedR
   // has worked and on what is said once, at the turn's foot (TurnRunning, whose verb alone shimmers).
   // Once done it folds under "Worked · N steps".
   return <div className={`cx-work${working ? " is-live" : ""}${working?.working?.stalled ? " is-stalled" : ""}`}>
-    {working ? null : <button type="button" className="cx-work-head" aria-expanded={open} onClick={() => setChosen(!open)}>
-      <span className="cx-work-state">{transcriptCompletion(turn)}</span>
-      <TurnWorkSummary turn={turn} loadWork={loadWork} />
-      <Icon name="chevron" width="12" height="12" className={open ? "is-open" : undefined} />
-    </button>}
-    <ol className="cx-steps">{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
-      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} />)}</ol>
+    {working ? null : <TurnWorkHead turn={turn} loadWork={loadWork} open={open} onToggle={() => setChosen(!open)} />}
+    <ol className={`cx-steps${rows.length === 1 ? " is-solo" : ""}`}>{rows.map((step) => <StepRow key={step.key} step={step} runId={turn.runId} loadWork={loadWork}
+      folded={!open && !working} reply={step.key === turn.final?.key ? turn.final.text : step.text} joinedReply={joinedReply} solo={rows.length === 1} mission={missionWork} />)}</ol>
   </div>;
 }
 
@@ -890,6 +1099,25 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
   </div>;
 }
 
+/**
+ * The chat's schedule (/schedule): when it continues by itself, what it sends, then Delete. The
+ * label ticks alone; the time it fires and why a send failed are in the tooltip.
+ */
+function ScheduleBar({ schedule, onDelete }: { schedule: ChatSchedule; onDelete: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <div className="cx-goal cx-wakeup is-active" role="status">
+    <span className="cx-wakeup-glyph" aria-hidden="true">◷</span>
+    <span className="cx-goal-state" title={`Continues ${scheduleWhen(schedule.dueAt, now)}${schedule.spec ? ` (/schedule ${schedule.spec})` : ""}`}>{scheduleLabel(schedule, now)}</span>
+    <span className="cx-goal-objective" title={schedule.message}>{schedule.message}</span>
+    {schedule.note ? <span className="cx-goal-note" title={schedule.note}>{schedule.note}</span> : null}
+    <button type="button" className="cx-goal-icon" title="Delete schedule (/clearschedule)" aria-label="Delete schedule" onClick={onDelete}><GoalGlyph name="trash" /></button>
+  </div>;
+}
+
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
@@ -930,7 +1158,7 @@ export function AgentOrchestratorChat({
   /** Hands a message to the running agent at once (Codex's steer); false when its turn already ended. */
   /** true: steered; "wait": the agent waits on a request, so the message is queued; false: send it normally. */
   /** `restart`: stop the turn and send the message as its next turn, whatever its quiet time (Restart). */
-  steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting">;
+  steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting" | "answered">;
   /** Checks the captured accepted turn without sending a prompt, stopping it, or replaying work. */
   recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
   openStructure: (runId: string) => void;
@@ -1091,6 +1319,8 @@ export function AgentOrchestratorChat({
     return () => document.removeEventListener("pointerdown", outside);
   }, [projectPicker]);
   const [atBottom, setAtBottom] = useState(true);
+  // Set while the ↓ button's smooth scroll runs: its in-between scroll events are not the user leaving.
+  const jumpingToBottom = useRef(false);
   const scroller = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const picker = useRef<HTMLInputElement>(null);
@@ -1235,20 +1465,29 @@ export function AgentOrchestratorChat({
   [detailsOpen, turns, detailsWorkTick]);
   // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
   // stream and flashes the ↓ button. Only that button scrolls smoothly.
-  useEffect(() => { if (atBottom) scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" }); }, [turns.length, stepCount, atBottom]);
+  // A send or a chat switch sets atBottom: that re-arms following too.
+  useEffect(() => {
+    if (!atBottom || jumpingToBottom.current) return;
+    following.current = true;
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
+  }, [turns.length, stepCount, atBottom]);
   // A running step grows without a new turn or step (each tool call, each streamed line): the
   // thread follows any growth of its content while it is read at the bottom.
   const column = useRef<HTMLDivElement>(null);
   // A click in the thread (opening "Worked", a group, a tool's output) grows it too, but that is the
   // user reading: the view stays on what they opened and following stops if it left the bottom.
+  // Only a person moving away ends following (wheel, touch, pointer, or scrolling up), so layout and
+  // scroll anchoring can't switch it off while an answer grows; the scroll handler below sets it.
   const following = useRef(atBottom);
-  following.current = atBottom;
+  const lastScrollTop = useRef(0);
   const clicked = useRef(false);
+  useEffect(() => { jumpingToBottom.current = false; following.current = true; lastScrollTop.current = 0; }, [selectedTaskId]);
   useEffect(() => {
     const box = scroller.current, content = column.current;
     if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => {
-      if (clicked.current) { clicked.current = false; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); return; }
+      if (jumpingToBottom.current) return;
+      if (clicked.current) { clicked.current = false; following.current = box.scrollHeight - box.scrollTop - box.clientHeight <= 24; setAtBottom(following.current); return; }
       // Instant, like the follow above: setting scrollTop obeys the theme's smooth scrolling, and the
       // animation's in-between scroll events read as "left the bottom" and ended following. Seen
       // live: right after a send (the thread grows a lot at once) the view stopped on an older
@@ -1256,6 +1495,7 @@ export function AgentOrchestratorChat({
       if (following.current) box.scrollTo({ top: box.scrollHeight, behavior: "instant" });
     });
     observer.observe(content);
+    observer.observe(box);
     return () => observer.disconnect();
   }, [selectedTaskId]);
   // Compact activity (the header's toggle): tool calls and thinking fold into one line per run.
@@ -1264,6 +1504,9 @@ export function AgentOrchestratorChat({
     try { localStorage.setItem(COMPACT_ACTIVITY_KEY, current ? "off" : "on"); } catch { /* applies now regardless */ }
     return !current;
   });
+  // Settings › Chat › "Keep work expanded on a mission" (chat-view-settings), followed at once.
+  const [missionWork, setMissionWork] = useState(readMissionWork);
+  useEffect(() => onMissionWork(setMissionWork), []);
   // How a reply draws its steps (chat-reply-plan's styles), picked from the header menu.
   const [replyStyle, setReplyStyle] = useState<ChatStyle>(() => { try { return chatStyle(localStorage.getItem(CHAT_STYLE_KEY)); } catch { return "transcript"; } });
   const pickReplyStyle = (next: ChatStyle) => {
@@ -1518,6 +1761,13 @@ export function AgentOrchestratorChat({
       // and goes in once it can. It stays shown as steering; a "Queued" card here read as if the
       // message had not been sent at all ("it pop up as queued for no reason").
       const waits = steered === "wait" || steered === "starting";
+      // It answered the question the agent was waiting on (chat_steer's answered): the chat shows it
+      // as that question's answer, so no steer bubble waits for the turn to show it.
+      if (steered === "answered") {
+        dropPending();
+        if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
+        return true;
+      }
       // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
       if (steered !== true && !waits) dropPending();
       if (steered === true) setPendingSteers((list) => list.map((entry) => entry.id === pendingId ? { ...entry, sent: true } : entry));
@@ -1645,6 +1895,16 @@ export function AgentOrchestratorChat({
   // The "waiting for you" line's Answer (WaitingAnswer): the request the turn waits on, brought into
   // view with its first choice focused.
   const approvalDock = useRef<HTMLDivElement>(null);
+  // The dock floats over the thread's foot, where the ↓ button sits: the button rises above it.
+  const docked = approvals.length > 0 || computerRequests.length > 0;
+  const [dockHeight, setDockHeight] = useState(0);
+  useEffect(() => {
+    const dock = approvalDock.current;
+    if (!docked || !dock || typeof ResizeObserver === "undefined") { setDockHeight(0); return undefined; }
+    const observer = new ResizeObserver(() => setDockHeight(dock.offsetHeight));
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, [docked]);
   const answerRequest = approvals.length || computerRequests.length ? () => {
     const dock = approvalDock.current;
     if (!dock) return;
@@ -1669,9 +1929,13 @@ export function AgentOrchestratorChat({
     const marked = attachments.map((item) => item.markup ?? "").filter(Boolean);
     const body = chatMessageWithAttachments([...marked, draft.trim()].filter(Boolean).join("\n\n"), attachments);
     const text = chatMessageWithAnnotations(commands?.planMode ? planMessage(body) : body, annotations);
-    // The chat sends at most 8,192 characters; long selections could pass that and the send failed.
-    if (text.length > CHAT_MESSAGE_LIMIT) {
-      say("Too long", `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`);
+    // The chat sends at most 8,192 characters and CHAT_MESSAGE_BYTES bytes; a longer one failed
+    // after it left the composer ("task record is full"). It stays here, with what to do.
+    if (!chatMessageFits(text)) {
+      const bytes = chatMessageBytes(text);
+      say("Too long", text.length > CHAT_MESSAGE_LIMIT
+        ? `This message is ${text.length.toLocaleString()} characters with annotations. The limit is ${CHAT_MESSAGE_LIMIT.toLocaleString()}. Remove an annotation or select less.`
+        : `This message is ${bytes.toLocaleString()} bytes. The limit is ${CHAT_MESSAGE_BYTES.toLocaleString()} (non-Latin text and emoji take 3 to 4 bytes a character). Shorten it or send it in parts.`);
       return;
     }
     if (queueing || queueWhileSending) {
@@ -1899,6 +2163,36 @@ export function AgentOrchestratorChat({
           say("Loop", parsed.minutes === null
             ? `Looping: it ${first}, then the agent picks when to run it again. It ends when the agent stops scheduling rounds, after 7 days, or with /loop stop.`
             : `Looping every ${loopInterval(parsed.minutes)}: it ${first}, then every ${loopInterval(parsed.minutes)} for up to 7 days. /loop stop ends it.`);
+          break;
+        }
+        case "schedule": {
+          const schedule = commands?.schedule;
+          if (!arg) {
+            setCard(schedule ? { title: "Schedule", rows: [["Continues", scheduleWhen(schedule.dueAt)], ["Sends", schedule.message],
+              ...(schedule.spec ? [["Set with", `/schedule ${schedule.spec}`] as [string, string]] : []),
+              ...(schedule.note ? [["Note", schedule.note] as [string, string]] : [])] }
+              : { title: "Schedule", text: "This chat has no schedule.\nUsage: /schedule <when> [message] | clear\n"
+                + "Examples: /schedule 5h (continue in 5 hours)\n/schedule 1h30m run the tests again\n"
+                + "/schedule 9:30 or /schedule 9pm (the next 9:30 or 9 pm)\n/schedule tomorrow 9am check the overnight build\n"
+                + "/clearschedule deletes it." });
+            break;
+          }
+          if (["clear", "cancel", "delete", "off", "stop"].includes(arg.toLowerCase())) { await runCommand("clearschedule", "", typed); break; }
+          if (!selectedTaskId || !commands?.setSchedule) { say("Schedule", "Open a chat first: a schedule continues the chat it was set in."); break; }
+          const parsed = chatScheduleParse(arg);
+          if ("error" in parsed) { say("Schedule", parsed.error); setDraft(`/schedule ${arg}`); break; }
+          if (schedule && !window.confirm(`Replace this chat's schedule?\n\nIt continues ${scheduleWhen(schedule.dueAt)} now; the new one ${scheduleWhen(parsed.dueAt)}.`)) {
+            setDraft(`/schedule ${arg}`); break;
+          }
+          await commands.setSchedule(parsed);
+          say("Schedule", `This chat continues by itself ${scheduleWhen(parsed.dueAt)} (in ${scheduleCountdown(parsed.dueAt - Date.now())}), sending "${parsed.message || "Continue"}". `
+            + "If a turn is running then, it waits for that turn to end. /clearschedule or the chat details delete it.");
+          break;
+        }
+        case "clearschedule": {
+          if (!commands?.schedule) { say("Schedule", "This chat has no schedule."); break; }
+          await commands.clearSchedule?.();
+          say("Schedule", "Schedule deleted. The chat won't continue by itself.");
           break;
         }
         case "plan":
@@ -2223,6 +2517,9 @@ export function AgentOrchestratorChat({
     const frame = requestAnimationFrame(() => startTransition(() => setDrawn({ taskId: drawKey, from: windowStart })));
     return () => cancelAnimationFrame(frame);
   }, [drawStart, windowStart, drawKey, shownAgain]);
+  // While the chat's goal is pursued, every round of it is on the mission, not only the one running.
+  const goalStatus = commands?.goal?.status;
+  const goalStart = useMemo(() => missionWork && goalStatus === "active" ? goalMissionStart(turns) : -1, [missionWork, goalStatus, turns]);
   const threadTurns = useMemo(() => turns.map((turn, turnIndex) => {
     if (turnIndex < drawStart) return null;
     const foldKey = roundFolds.foldOf.get(turnIndex);
@@ -2246,6 +2543,10 @@ export function AgentOrchestratorChat({
     const teamAnswer = Boolean(answerRun) && answerRun?.execution_mode !== "single";
     // The reply's summary (ReplyHead, under the answer): who answered, how it stands and what it changed; a failure (ReplyError) leads.
     const live = !idle && liveTurn(turn);
+    // On a mission (Settings › Chat): a turn at work, and each round of the goal being pursued, shows
+    // its thoughts and steps expanded. Focus keeps work behind Show work, and goal rounds folded under
+    // one row draw as they did when that row is opened, so a long goal stays light.
+    const mission = missionWork && replyStyle !== "focus" && !foldKey && (live || (goalStart >= 0 && turnIndex >= goalStart));
     const cards = [...turn.steps, ...(turn.final ? [turn.final] : [])];
     const modelOf = (step: ChatStep) => answerRun?.nodes.find((node) => node.id === step.nodeId)?.route?.model;
     const lead = turn.final ?? cards[0];
@@ -2268,6 +2569,11 @@ export function AgentOrchestratorChat({
     // Focus keeps the work behind Show work whatever the chat's setting: its progress line says where the turn is.
     const turnWork = replyStyle === "focus" ? false : showWork;
     const hasReply = Boolean(turn.runId && (cards.length || live));
+    const answerActions = turn.final ? <MessageActions text={turn.final.text ?? ""}>
+      {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
+    </MessageActions> : null;
+    // A single chat's ended answer keeps copy and retry on its quiet line, as Codex does; a team's stay under the answer.
+    const quietLine = !teamAnswer && !live && !dsh;
     // The request belongs to its agent's card, like a steer. Before a run exists it stays visible
     // on its own; constructing it once keeps the attachments and message actions identical.
     // Its read receipt leads the actions, as on a steer: "Sending…" while an agent comes up for it,
@@ -2305,12 +2611,14 @@ export function AgentOrchestratorChat({
               {userMessage}{savedSteers}
               {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
               <ReplyPlanView plan={plan} style={replyStyle} live={live} />
-              {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. */}
+              {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. Turning
+                  the mission setting off redraws the work, so nothing it opened stays open. */}
               {dsh && readWork
-                ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
-                  errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null}
+                ? <DshWork key={`${turn.key}:${turnWork ? "open" : "folded"}${missionWork ? "" : ":plain"}`} turn={turn} live={live} expanded={turnWork} useWork={readWork}
+                  errorShownBelow={Boolean(failing)} refusal={live ? cpaRefusal : null} mission={mission}
                   beforeStatus={live ? steerViews.get(turnIndex) : undefined} headed />
-                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork} workRevision={detailsWorkTick} joinedReply={replyStyle === "focus"} />}
+                : <WorkGroup key={`${turn.key}:${turnWork ? "open" : "folded"}${missionWork ? "" : ":plain"}`} turn={turn} idle={idle} expanded={turnWork} loadWork={loadWork}
+                  workRevision={detailsWorkTick} joinedReply={replyStyle === "focus"} mission={mission} />}
               {/* A steer on its way sits above the turn's running line ("Deep diving", "Working"), never
                   under it: a running DeepSeek turn draws it inside its work, right above that line. */}
               {steerViews.has(turnIndex) && !(dsh && readWork && live) ? steerViews.get(turnIndex) : null}
@@ -2322,28 +2630,24 @@ export function AgentOrchestratorChat({
                   && chatRuns.find(run => run.id === turn.runId)?.nodes.some(node => node.id === turn.final?.nodeId
                     && node.route?.harness_id === "codex-native" && node.route.model.startsWith("chatgpt-web/"))
                   ? () => setWorkbench("preview") : undefined} />
-                <MessageActions text={turn.final.text ?? ""}>
-                  {restart && turn.runId && turn.runId === latest?.id && !runOpen ? <button type="button" title="Retry" aria-label="Retry this mission" disabled={busy} onClick={() => restart(turn.runId)}><Icon name="reload" width="14" height="14" /></button> : null}
-                </MessageActions>
+                {quietLine ? null : answerActions}
               </div> : null}
               {!turn.final && turn.status === "done" && !turn.steps.some((step) => step.text || step.error)
                 ? <p className="cx-note">Finished without an answer.</p> : null}
               {turn.solo ? <p className="cx-note">The orchestrator answered alone. No workers ran.</p> : null}
-              {/* The reply's summary closes it, under the answer: the files it changed, a team's cards,
-                  who answered, how it stands and for how long. */}
+              {/* The reply's summary closes it, under the answer: a team's cards, then one quiet line of
+                  who answered, how long it worked and the files it changed. A single chat's running
+                  turn keeps only its files: its running line (TurnRunning) says who and how long. */}
               <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
                 startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
-                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes} />
-              {/* How long it worked is in the summary; the foot keeps the turn's model requests. */}
-              {turn.runId && turn.startedAtMs && !liveTurn(turn)
-                ? <TurnFoot from={turn.startedAtMs} endedAt={turn.endedAtMs} models={turn.cpaModels} status={turn.status} showTime={false}
-                  to={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs} /> : null}
+                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes}
+                requestModels={turn.runId && !live ? turn.cpaModels : undefined} actions={quietLine ? answerActions : undefined} />
               </section> : null}
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
-    replyStyle, roundFolds, openRounds, drawStart]);
+    replyStyle, roundFolds, openRounds, drawStart, missionWork, goalStart]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>
@@ -2439,6 +2743,29 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 <Icon name={row.kind === "app" ? "globe" : "logs"} width="14" height="14" />
                 <span>{row.label}</span><small>{row.running ? "Running" : "Offline"}</small></button>)
                 : <p className="cx-details-empty">Apps and terminals the agents start show here.</p>}
+              {/* /schedule: when the chat continues by itself. A click shows it; right-click deletes it. */}
+              <p className="cx-details-label">Schedule</p>
+              {commands?.schedule ? (() => {
+                const schedule = commands.schedule;
+                const menuFor = (x: number, y: number) => setMenu({ x, y, label: "Schedule", items: [
+                  { label: "Show schedule", icon: "schedule", run: () => void runCommand("schedule", "", false) },
+                  { kind: "separator" },
+                  { label: "Delete schedule", icon: "delete", danger: true, run: () => void runCommand("clearschedule", "", false) },
+                ] });
+                return <button type="button" className="cx-details-row cx-schedule-row" aria-haspopup="menu"
+                  title={`Sends "${schedule.message}" ${scheduleWhen(schedule.dueAt)}${schedule.note ? `\n${schedule.note}` : ""}\nRight-click to delete`}
+                  onClick={() => void runCommand("schedule", "", false)}
+                  onContextMenu={(event) => { event.preventDefault(); menuFor(event.clientX, event.clientY); }}
+                  onKeyDown={(event) => {
+                    // The keyboard's context menu (Shift+F10, the menu key) opens the same menu.
+                    if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+                      event.preventDefault();
+                      const box = event.currentTarget.getBoundingClientRect();
+                      menuFor(box.left + 12, box.bottom);
+                    }
+                  }}>
+                  <ChatGlyph name="schedule" size={15} /><span>{scheduleLabel(schedule)}</span><small>{scheduleWhen(schedule.dueAt)}</small></button>;
+              })() : <p className="cx-details-empty">Type /schedule 5h to have this chat continue by itself later.</p>}
               <p className="cx-details-label">Setup</p>
               {lead ? <>
                 <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
@@ -2455,7 +2782,21 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
         })() : null}
 
         <div className="cx-scroll" ref={scroller}
-          onScroll={(event) => { const box = event.currentTarget; setAtBottom(box.scrollHeight - box.scrollTop - box.clientHeight < 48); }}>
+          onWheel={() => { jumpingToBottom.current = false; following.current = false; }}
+          onTouchStart={() => { jumpingToBottom.current = false; following.current = false; }}
+          onPointerDown={() => { jumpingToBottom.current = false; following.current = false; }}
+          onScroll={(event) => {
+            const box = event.currentTarget, bottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 24;
+            const movedUp = box.scrollTop < lastScrollTop.current - 1;
+            lastScrollTop.current = box.scrollTop;
+            if (jumpingToBottom.current && !bottom) return;
+            jumpingToBottom.current = false;
+            // Layout and scroll anchoring emit scroll events too. Only a person moving away
+            // ends following; a growing answer must not turn it off before ResizeObserver runs.
+            if (bottom) following.current = true;
+            else if (movedUp) following.current = false;
+            if (bottom || !following.current) setAtBottom(bottom);
+          }}>
           <div className="cx-column" ref={column} onClickCapture={() => {
             // Only the growth a click causes (in its next frame or so) counts as the user's.
             clicked.current = true;
@@ -2499,9 +2840,16 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
               })}
             </div></div> : null}
           </div>
-          {!atBottom ? <button type="button" className="cx-to-bottom" aria-label="Scroll to the latest message"
-            onClick={() => { setAtBottom(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "smooth" }); }}>↓</button> : null}
         </div>
+        <ChatScrollToBottom show={!atBottom} working={anyWorking} lift={dockHeight ? dockHeight + 20 : 0} onClick={() => {
+          const box = scroller.current;
+          if (!box) return;
+          jumpingToBottom.current = true;
+          following.current = true;
+          const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+          box.scrollTo({ top: box.scrollHeight, behavior: reducedMotion ? "instant" : "smooth" });
+          if (box.scrollHeight - box.scrollTop - box.clientHeight <= 24) { jumpingToBottom.current = false; setAtBottom(true); }
+        }} />
 
         {!selectedTaskId && !deciding ? <div className="cx-context-strip" aria-label="Where this chat runs">
           {/* Codex's context chips are menus: the project picker, where it runs, and its environment. */}
@@ -2592,8 +2940,9 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                   .then(() => setWakeupEditing(null), (cause) => say("Edit wake-up", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
           </section>;
         })() : null}
-        {commands?.goal || commands?.planMode || commands?.wakeup || commands?.loop ? <div className="cx-composer-modes">
+        {commands?.goal || commands?.planMode || commands?.wakeup || commands?.loop || commands?.schedule ? <div className="cx-composer-modes">
           {commands?.loop ? <LoopBar loop={commands.loop} onStop={() => void runCommand("loop", "stop", false)} /> : null}
+          {commands?.schedule ? <ScheduleBar schedule={commands.schedule} onDelete={() => void runCommand("clearschedule", "", false)} /> : null}
           {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup}
             onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
               minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}

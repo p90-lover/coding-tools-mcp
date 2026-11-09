@@ -241,7 +241,8 @@ test("Refresh menu reports every open and close path to the Register native gate
   assert.equal(nodes(titlebar, "icon-button")[0].props.releaseFocus, true);
   assert.match(appSource, /onMouseDown=\{releaseFocus \? \(event\) => event\.preventDefault\(\) : undefined\}/);
   // A manual browser tab closes only the compact sidebar, never the docked one.
-  assert.match(appSource, /setSurface\("browser"\);\s*\/\/[^\n]*\n\s*if \(window\.matchMedia\(COMPACT_SIDEBAR_QUERY\)\.matches\) setSidebarOpen\(false\);/);
+  // (showSurface: the tab switch, timed for Activity > Action time.)
+  assert.match(appSource, /showSurface\("browser"\);\s*\/\/[^\n]*\n\s*if \(window\.matchMedia\(COMPACT_SIDEBAR_QUERY\)\.matches\) setSidebarOpen\(false\);/);
   assert.match(appSource, /onRefreshMenuOpenChange=\{setRefreshMenuOpen\}/);
   const expression = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)[1];
   const gate = new Function("surface", "sidebarCovers", "biggerContextRecommendationOpen", "sessionReminderDue", "refreshMenuOpen", "return " + expression);
@@ -648,9 +649,9 @@ test("Windows and macOS Chrome sign-in uses the owned account route and existing
   assert.match(preloadSource, /openPasskeyLogin:[\s\S]*?launcher:browser-passkey-login/);
   assert.match(preloadSource, /continuePasskeyLogin:[\s\S]*?launcher:browser-passkey-login-continue/);
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
-  assert.match(electronMain, /loginWithPasskey: async \(partition, route\) =>[\s\S]*?withBrowserLoginProxy\([\s\S]*?runtimeHost\.capturePasskeyLogin\(loginRoute\)/);
+  assert.match(electronMain, /loginWithPasskey: \(\) => runtimeHost\.captureCurrentChromeLogin\(\{ safeStorage \}\)/);
   assert.match(browserHostSource, /\["chatgpt\.com", \.\.\.AUTH_PROVIDER_HOSTS\][\s\S]*?contents\.session\.resolveProxy/);
-  assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000\)[\s\S]*?runSessionInspection\(false\)/);
+  assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000, \(\) => \{ transfer\.assertCurrent\?\.\(\); return false; \}\)[\s\S]*?runSessionInspection\(false\)/);
 });
 
 test("Bigger Context stays in Settings without opening a startup recommendation", () => {

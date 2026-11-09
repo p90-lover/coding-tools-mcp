@@ -41,6 +41,7 @@ interface SystemBrowserLoginOptions {
   proxyServer?: string;
   timeoutMs?: number;
   onBrowserReady?: () => void;
+  onProgress?: (phase: "waiting-for-browser-close" | "capturing") => void;
 }
 
 interface LoginVerificationMarker {
@@ -275,12 +276,13 @@ export async function captureSystemBrowserLogin(
           if (process.platform === "win32") {
             // Closing Chrome normally flushes its cookies; kill() is abrupt on Windows.
             if (browserProcessExited(loginBrowser)) resolve();
+            else options.onProgress?.("waiting-for-browser-close");
             return;
           }
           if (!loginBrowser.kill() && !browserProcessExited(loginBrowser)) {
             reject(new Error("The dedicated Chrome login process refused the Continue request"));
           }
-        }, reject);
+        }, reject).catch(reject);
         loginBrowser.once("error", reject);
         loginBrowser.once("exit", (code, signal) => {
           if (process.platform === "win32" && (signal || code !== 0)) {
@@ -305,6 +307,7 @@ export async function captureSystemBrowserLogin(
       if (timeout) clearTimeout(timeout);
     }
 
+    options.onProgress?.("capturing");
     // Authentication happens before Playwright ever owns this profile. Chrome does not load
     // session-only cookies after a normal restart unless session restore is requested. Remove only
     // the disposable profile's tab-session files first, so restoring cookies cannot reopen the

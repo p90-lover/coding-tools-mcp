@@ -13,6 +13,10 @@
 
 Follow the **Delivery** section of `AGENTS.md` for every change in this repository. Read it before you finish a task. In short: every change goes in a PR against `main` (never push to `main`); merge it once checks pass; plugin repositories do the same in their own repository; then release a new version (a `release: 0.8.x` bump PR, then `gh workflow run electron-windows-release.yml --ref main -f publish=true`, unless a release is already under way).
 
+## Required delivery: PR, merge, build and release
+
+Read and follow `AGENTS.md`, especially **GitHub delivery** and **Delivery: every change ships as a release**. The user has standing authorization for verified task-scoped commits, pushes, PRs, merges and a new published build; do not stop at an open PR or queued build and make them ask again. Coordinate one release owner, preserve explicit opt-outs and verification/permission boundaries, and report real blockers truthfully. Docs-only changes need no redundant installer; installing, patching or restarting the running app still needs the user's separate request.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 

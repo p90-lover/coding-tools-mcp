@@ -148,6 +148,8 @@
 .cx-show-more:hover { background: var(--cc-hover); color: var(--cc-text-2); }
 .cx-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 28px; margin: 8px 0 0; padding: 0 2px 0 10px; }
 .cx-group-head h3 { margin: 0; color: var(--cc-muted); font-size: 12px; line-height: 16px; font-weight: 400; }
+/* A heading's buttons sit together at its right (Projects: + then the list settings). */
+.cx-group-actions { display: inline-flex; align-items: center; gap: 2px; }
 /* A section header's ghost icon button (24 px). */
 .cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
   border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; }
@@ -417,7 +419,7 @@ a.cx-details-row, p.cx-details-row { box-sizing: border-box; margin: 0; text-dec
 .cx-details-dot.is-failed { background: #dc2626; }
 .cx-details-dot.is-done { background: #16a34a; }
 /* Processes: a solid centre with a soft halo of the same colour, green while running, red once offline. */
-.cx-process-row > small { flex: none; margin-left: auto; color: var(--color-text-secondary); font-size: 11px; }
+.cx-process-row > small, .cx-schedule-row > small { flex: none; margin-left: auto; color: var(--color-text-secondary); font-size: 11px; }
 .cx-process-dot { flex: none; width: 8px; height: 8px; margin: 0 2px; border-radius: 50%; }
 .cx-process-dot.is-running { background: #22c55e; box-shadow: 0 0 0 3px rgb(34 197 94 / .22), 0 0 8px 2px rgb(34 197 94 / .45); }
 .cx-process-dot.is-offline { background: #ef4444; box-shadow: 0 0 0 3px rgb(239 68 68 / .2), 0 0 8px 2px rgb(239 68 68 / .35); }
@@ -776,6 +778,9 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-step.tone-stalled .cx-step-meta { color: var(--ao-amber); }
 .cx-step.tone-error .cx-step-meta { color: var(--ao-red); }
 .cx-step-body { margin: 2px 0 8px 22px; color: var(--color-text-primary); }
+/* A turn's only card has no head: its work sits in the reply's own column, as Codex shows one agent. */
+.cx-steps.is-solo { padding-left: 0; border-left: 0; }
+.cx-step.is-solo > .cx-step-body { margin-left: 0; }
 .cx-step-detail { margin: 0 0 4px; color: var(--ao-muted); font-size: 12px; overflow-wrap: anywhere; }
 .cx-step-error { margin: 0; color: var(--ao-red); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* A tool call that timed out while the chat carries on: one red line in the conversation. */
@@ -807,10 +812,16 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-live.is-compact > .kind-message { font-size: 14px; line-height: 1.65; }
 .cx-live.is-compact > .kind-message > :first-child { margin-top: 0; }
 .cx-live.is-compact > .kind-message > :last-child { margin-bottom: 0; }
-.cx-transcript-work > .cx-work-head { display: flex; flex-wrap: wrap; width: 100%; text-align: left; margin-bottom: 12px; }
-.cx-work-state { flex: 0 1 auto; font-weight: 500; }
-.cx-work-summary { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
-.cx-transcript-work > .cx-work-head > svg { flex: none; margin-left: auto; }
+/* A finished turn's head is one quiet line, as Codex and Claude Code fold work: "Worked for 4m · Edited
+   3 files, ran 9 commands +40 −2 ›". It never wraps; the summary gives way first, ending in an ellipsis,
+   while the time, the diff count and the chevron keep their place. */
+.cx-transcript-work > .cx-work-head { display: flex; max-width: 100%; text-align: left; margin-bottom: 12px; }
+.cx-work-head { max-width: 100%; min-width: 0; white-space: nowrap; }
+.cx-work-state { flex: none; font-weight: 400; }
+.cx-work-summary { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.cx-work-state + .cx-work-summary::before { content: "·"; margin-right: 6px; }
+.cx-work-head > .cx-diff-count { flex: none; margin-left: 0; }
+.cx-work-head > svg { flex: none; }
 .cx-work-head:focus-visible { outline: 2px solid var(--color-focus, var(--ao-blue)); outline-offset: 3px; }
 @media (prefers-reduced-motion: reduce) { .cx-work-head svg, .cx-activity-head svg { transition: none; } }
 .cx-live-item.kind-group { display: block; }
@@ -926,25 +937,137 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   color: var(--ao-muted); font-size: 11px; line-height: 16px; }
 @media (prefers-reduced-motion: reduce) { .cx-tool.tone-running .cx-tool-dot { animation: none; } }
 
+/* ---------- Step families: each work step's kind as a colour (chat-transcript stepFamily) ----------
+   One custom property, --cx-k, set wherever data-family is; the glyph, the label, the opened card's
+   rule, the overview's chips and the step strip all read it. The Claude palette sets the tokens for
+   light and dark; these fallbacks are its light values. */
+.cx-chat [data-family="think"] { --cx-k: var(--cx-k-think, #7c3aed); }
+.cx-chat [data-family="command"] { --cx-k: var(--cx-k-command, #0f766e); }
+.cx-chat [data-family="read"] { --cx-k: var(--cx-k-read, #2563eb); }
+.cx-chat [data-family="search"] { --cx-k: var(--cx-k-search, #b45309); }
+.cx-chat [data-family="edit"] { --cx-k: var(--cx-k-edit, #c2410c); }
+.cx-chat [data-family="web"] { --cx-k: var(--cx-k-web, #0e7490); }
+.cx-chat [data-family="plan"] { --cx-k: var(--cx-k-plan, #4f46e5); }
+.cx-chat [data-family="agent"] { --cx-k: var(--cx-k-agent, #be185d); }
+.cx-chat [data-family="ask"] { --cx-k: var(--cx-k-ask, #a16207); }
+.cx-chat [data-family="tool"] { --cx-k: var(--cx-k-tool, #a21caf); }
+.cx-chat [data-family="approval"] { --cx-k: var(--cx-k-approval, #047857); }
+.cx-chat [data-family="note"] { --cx-k: var(--ao-muted); }
+
+/* The glyph: a small rounded tile tinted with its family, the stroke in full colour. A failed call
+   turns red; a running one breathes. */
+.cx-step-glyph { display: inline-grid; flex: none; place-items: center; width: 18px; height: 18px; border-radius: 5px;
+  background: color-mix(in srgb, var(--cx-k, var(--ao-muted)) 15%, transparent); color: var(--cx-k, var(--ao-muted)); }
+.cx-step-glyph > svg { display: block; }
+/* A failure paints over the family: its glyph, name, card rule and headings all turn red. */
+.cx-chat .cx-tool.tone-failed, .cx-tool.tone-failed .cx-step-glyph { --cx-k: var(--ao-red); }
+.cx-tool.tone-running .cx-step-glyph, .cx-live-item.is-running .cx-reasoning .cx-step-glyph { animation: cx-pulse 1.4s ease-in-out infinite; }
+/* Rows lead with the glyph and keep their name beside it on the first line, however the text wraps. */
+.cx-tool summary, .cx-tool-row, .cx-reasoning summary { align-items: flex-start; }
+.cx-tool .cx-live-label, .cx-tool .cx-live-text, .cx-reasoning .cx-live-label, .cx-reasoning .cx-live-text { line-height: 18px; }
+.cx-tool[data-family] .cx-live-label, .cx-reasoning[data-family] .cx-live-label { color: var(--cx-k); }
+.cx-tool.tone-failed .cx-live-label { color: var(--ao-red); }
+/* How long the step took, at the row's end; the caret shows only when the row can be opened and is hovered or open. */
+.cx-step-time { flex: none; margin-left: auto; padding-left: 8px; color: var(--ao-muted); font-size: 11.5px; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cx-step-caret { flex: none; align-self: center; margin-left: 2px; color: var(--ao-muted); opacity: 0; transition: transform .12s ease-out, opacity .12s; }
+.cx-step-time + .cx-step-caret, .cx-step-time + .cx-approved + .cx-step-caret { margin-left: 2px; }
+.cx-live-text + .cx-step-caret, .cx-diff-count + .cx-step-caret, .cx-approved + .cx-step-caret, .cx-tool-image-count + .cx-step-caret { margin-left: auto; }
+/* An opened thought without a title says only "Thought" on its row: its caret keeps the row's end. */
+.cx-live-label + .cx-step-caret { margin-left: auto; }
+summary:hover > .cx-step-caret, details[open] > summary > .cx-step-caret { opacity: .8; }
+details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
+.cx-tool .cx-approved { align-self: center; }
+
+/* An opened step: a card ruled in its family's colour, its facts as pills, then labelled parts. */
+.cx-tool-body.cx-step-card { gap: 8px; margin: 4px 0 8px 8px; padding: 8px 10px 10px 12px; border-left: 2px solid var(--cx-k, var(--ao-line));
+  border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--cx-k, var(--ao-muted)) 5%, transparent); }
+.cx-step-facts { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; }
+.cx-fact { display: inline-flex; align-items: center; max-width: 100%; height: 20px; padding: 0 8px; overflow: hidden; border-radius: 10px;
+  background: color-mix(in srgb, var(--ao-muted) 13%, transparent); color: var(--ao-muted); font-size: 11.5px; font-weight: 500;
+  text-overflow: ellipsis; white-space: nowrap; }
+.cx-fact.is-ok { background: color-mix(in srgb, var(--ao-green) 14%, transparent); color: var(--ao-green); }
+.cx-fact.is-failed { background: color-mix(in srgb, var(--ao-red) 14%, transparent); color: var(--ao-red); }
+.cx-fact.is-running { background: color-mix(in srgb, var(--ao-amber) 16%, transparent); color: var(--ao-amber); }
+.cx-fact.is-allowed { background: color-mix(in srgb, var(--cx-k-approval, #047857) 12%, transparent); color: var(--cx-k-approval, #047857); }
+.cx-fact.is-mono { font-family: var(--claude-mono, var(--font-mono, ui-monospace, monospace)); font-weight: 400; }
+.cx-step-section { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; }
+.cx-step-section > h5 { display: flex; align-items: baseline; gap: 6px; margin: 0; color: var(--cx-k, var(--ao-muted)); font-size: 10.5px; font-weight: 600;
+  letter-spacing: .05em; text-transform: uppercase; }
+.cx-step-section > h5 > span { color: var(--ao-muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
+.cx-tool-io.is-command code::before { content: "$ "; color: var(--cx-k, var(--ao-muted)); font-weight: 600; user-select: none; }
+.cx-step-args { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; margin: 0; padding: 6px 10px; border: 1px solid var(--ao-line); border-radius: 8px;
+  background: var(--cx-tray, rgb(127 127 127 / 6%)); font: 12px/1.5 var(--claude-mono, var(--font-mono, ui-monospace, monospace)); }
+.cx-step-args > div { display: grid; grid-template-columns: minmax(64px, max-content) minmax(0, 1fr); gap: 12px; min-width: 0; }
+.cx-step-args dt { color: var(--cx-k, var(--ao-muted)); }
+.cx-step-args dd { max-height: 132px; margin: 0; overflow: auto; color: var(--color-text-primary); white-space: pre-wrap; overflow-wrap: anywhere; }
+/* An edit's files: the name, its folder muted, the counts and GitHub's five squares. */
+.cx-edit-file > header { flex-wrap: wrap; align-items: center; }
+.cx-edit-name { color: var(--color-text-primary); font-weight: 600; }
+.cx-edit-folder { min-width: 0; overflow: hidden; color: var(--ao-muted); text-overflow: ellipsis; white-space: nowrap; }
+.cx-diff-bar { display: inline-flex; gap: 1px; margin-left: 2px; }
+.cx-diff-bar > i { width: 7px; height: 7px; border-radius: 1.5px; background: color-mix(in srgb, var(--ao-red, #c0392b) 85%, transparent); }
+.cx-diff-bar > i.is-add { background: var(--ao-green, #2e9d5b); }
+/* A thought, opened: its words under a rule in the thinking colour. */
+.cx-reasoning[data-family] > .cx-reasoning-body { margin: 2px 0 8px 8px; padding: 6px 10px 6px 12px; border-left: 2px solid var(--cx-k);
+  border-radius: 0 8px 8px 0; background: color-mix(in srgb, var(--cx-k) 5%, transparent); }
+/* Rows with no tool (approvals, notices, inputs) lead with their glyph too. */
+.cx-live-item:not(.kind-message):not(.kind-steer) > .cx-step-glyph { align-self: flex-start; }
+
+/* Fold heads: the kinds of work as overlapping round glyphs before "Worked for…". */
+.cx-glyph-stack { display: inline-flex; flex: none; align-items: center; }
+.cx-glyph-stack > .cx-step-glyph { width: 16px; height: 16px; border-radius: 50%;
+  background: color-mix(in srgb, var(--cx-k) 24%, var(--color-bg-primary)); box-shadow: 0 0 0 1.5px var(--color-bg-primary); }
+.cx-glyph-stack > .cx-step-glyph + .cx-step-glyph { margin-left: -4px; }
+.cx-glyph-stack svg { width: 9px; height: 9px; }
+.cx-activity-head > .cx-step-time { padding-left: 4px; }
+.cx-work-state.is-failed { color: var(--ao-red); }
+.cx-work-state.is-stopped, .cx-work-state.is-waiting { color: var(--ao-amber); }
+
+/* An opened fold's overview: chips per kind of work, then every step in order as a coloured strip. */
+.cx-work-overview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 6px 0 12px; }
+.cx-work-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.cx-work-chip { --cx-k: var(--ao-muted); display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px 0 3px; border-radius: 12px;
+  background: color-mix(in srgb, var(--cx-k) 11%, transparent); color: color-mix(in srgb, var(--cx-k) 82%, var(--color-text-primary));
+  font-size: 12px; font-weight: 500; white-space: nowrap; }
+.cx-work-chip > .cx-step-glyph { width: 18px; height: 18px; border-radius: 50%; background: color-mix(in srgb, var(--cx-k) 20%, transparent); }
+.cx-work-chip > .cx-diff-count { margin-left: 0; }
+.cx-work-chip.is-failed { --cx-k: var(--ao-red); padding-left: 10px; }
+.cx-work-chip.is-time { padding-left: 10px; font-weight: 400; font-variant-numeric: tabular-nums; }
+.cx-step-strip { display: flex; gap: 2px; height: 6px; }
+.cx-step-strip > i { flex: 1 1 0; min-width: 3px; border-radius: 3px; background: var(--cx-k, var(--ao-muted)); opacity: .8; transition: opacity .12s, transform .12s; }
+.cx-step-strip > i.is-failed { background: var(--ao-red); opacity: 1; }
+.cx-step-strip > i:hover { opacity: 1; transform: scaleY(1.7); }
+@media (prefers-reduced-motion: reduce) {
+  .cx-tool.tone-running .cx-step-glyph, .cx-live-item.is-running .cx-reasoning .cx-step-glyph { animation: none; }
+  .cx-step-caret, .cx-step-strip > i { transition: none; }
+}
+
 .cx-answer { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
-.cx-reply > .cx-answer:not(:first-child) { padding-top: 10px; border-top: 1px solid var(--ao-line); }
-/* A reply (ChatReplyHead.tsx): one card per turn — why it failed, if it did, then its work and
-   answer, then its summary: the files it changed, a team's cards, who answered, how it stands and for
-   how long. The card's edge takes the turn's tone, so a failed or stuck reply is seen while scrolling past. */
+/* A reply (ChatReplyHead.tsx), per turn: why it failed, if it did, then its work and answer, then
+   its summary: the files it changed, a team's cards, who answered, how it stands and for how long,
+   and the turn's activity line. No card around it: a box put the answer itself inside a frame (user,
+   2026-11-07), so the reply reads as plain text, like the user's own messages; its status pill
+   carries the turn's tone (failed, stuck, working). */
 /* Live work in its own blue: the Claude palette's accent (--ao-blue there) is orange, next to Failed's red. */
 .cx-chat { --reply-live: #2f6fd6; }
 .ao-workflow[data-theme="dark"] .cx-chat, :root[data-theme="dark"] .cx-chat { --reply-live: #6ea8fe; }
-.cx-reply { --reply-tone: var(--ao-muted); display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 10px 14px 10px;
-  border: 1px solid var(--ao-line); border-left: 3px solid color-mix(in srgb, var(--reply-tone) 70%, var(--ao-line)); border-radius: 10px;
-  background: color-mix(in srgb, var(--color-text-primary) 1.5%, transparent); }
-.cx-reply[data-transcript="codex"] { padding: 0; border: 0; border-radius: 0; background: transparent; }
-.cx-reply[data-transcript="codex"] > .cx-answer { border-top: 0; padding-top: 0; }
+.cx-reply { --reply-tone: var(--ao-muted); display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 0;
+  border: 0; border-radius: 0; background: transparent; }
 .cx-reply.is-working, .cx-reply.is-queued { --reply-tone: var(--reply-live); }
 .cx-reply.is-done { --reply-tone: var(--ao-green); }
 .cx-reply.is-failed { --reply-tone: var(--ao-red); }
 .cx-reply.is-stalled, .cx-reply.is-waiting { --reply-tone: var(--ao-amber); }
 .cx-reply.is-stopped { --reply-tone: var(--ao-muted); }
 .cx-reply-head { display: flex; flex-direction: column; gap: 8px; padding-top: 9px; border-top: 1px solid var(--ao-line); }
+/* A single chat's reply closes on one quiet grey line, as Codex's does: model · time · files, then copy and retry. */
+.cx-reply-head.is-quiet { padding-top: 0; border-top: 0; }
+.cx-reply-head.is-quiet > .cx-reply-top { gap: 6px; color: var(--ao-muted); font-size: 12px; line-height: 26px; }
+.cx-reply-head.is-quiet .cx-reply-who { color: var(--ao-muted); font-weight: 400; }
+.cx-reply-head.is-quiet .cx-reply-top > * + *:not(.cx-msg-actions)::before { content: "·"; margin-right: 6px; color: var(--ao-muted); }
+.cx-reply-head.is-quiet .cx-reply-status { padding: 0; border-radius: 0; background: none; }
+.cx-reply-head.is-quiet .cx-reply-status::before { display: none; }
+.cx-reply-head.is-quiet .cx-msg-actions { margin-left: 2px; }
+.cx-reply:hover .cx-reply-head.is-quiet .cx-msg-actions { opacity: 1; }
 .cx-reply-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; font-size: 13px; line-height: 20px; }
 .cx-reply-who { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; color: var(--color-text-primary); font-weight: 600; }
 .cx-reply-who > .ao-model-logo { display: inline-grid; flex: none; place-items: center; line-height: 0; }
@@ -987,7 +1110,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   text-overflow: ellipsis; white-space: nowrap; }
 .cx-reply-file.is-more { color: var(--ao-muted); }
 /* A reply head is the turn's own summary, so the foot's line sits flush with the card's bottom. */
-.cx-reply > .cx-turn-foot { margin-top: 0; }
 @media (prefers-reduced-motion: reduce) { .cx-reply-status::before, .cx-reply-dot { animation: none !important; } }
 .cx-reply-attempt { padding: 0 7px; border-radius: 9px; background: color-mix(in srgb, var(--ao-amber) 14%, transparent); color: var(--ao-amber);
   font-size: 11px; font-weight: 600; line-height: 17px; white-space: nowrap; }
@@ -1097,8 +1219,24 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-model-judges.is-compact { flex: none; gap: 6px; font-size: 11px; white-space: nowrap; }
 .cx-auto-retry:has(input:disabled) { cursor: default; }
 @media (prefers-reduced-motion: reduce) { .cx-switch, .cx-switch::after { transition: none; } }
-.cx-to-bottom { position: sticky; bottom: 12px; left: 50%; display: grid; place-items: center; width: 32px; height: 32px; margin: -44px auto 12px; border: 1px solid var(--ao-line);
-  border-radius: 50%; background: var(--color-bg-primary); box-shadow: 0 4px 14px rgb(0 0 0 / 12%); color: var(--color-text-primary); cursor: pointer; }
+/* Codex B6l/je: anchored outside the scroller, not a sticky item at the end of its content. */
+.cx-scroll-bottom-anchor { position: relative; z-index: 30; flex: 0 0 0; height: 0; min-height: 0; pointer-events: none; }
+.cx-to-bottom { position: absolute; right: 50%; bottom: 24px; display: flex; align-items: center; justify-content: center; box-sizing: border-box; width: 32px; height: 32px; margin: 0; padding: 0;
+  border: 1px solid var(--ao-line); border-radius: 50%; background: var(--color-bg-primary); background-clip: padding-box; box-shadow: none; color: var(--color-text-secondary); cursor: pointer;
+  opacity: 0; pointer-events: none; transform: translateX(50%); transition: opacity 150ms ease-in-out, bottom 150ms ease-in-out; }
+.cx-to-bottom.is-visible { opacity: 1; pointer-events: auto; }
+.cx-to-bottom:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; }
+.cx-scroll-arrow { flex: none; color: var(--color-text-primary); }
+.cx-scroll-working { display: flex; align-items: center; justify-content: center; gap: 4px; }
+.cx-scroll-working > span { width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: .7; animation: cx-scroll-dot-wave 1.2s ease-in-out infinite; }
+.cx-scroll-working > span:nth-child(2) { animation-delay: .15s; }
+.cx-scroll-working > span:nth-child(3) { animation-delay: .3s; }
+.cx-to-bottom.is-working .cx-scroll-arrow { display: none; }
+.cx-to-bottom:is(:hover, :focus-visible) .cx-scroll-working { display: none; }
+.cx-to-bottom.is-working:is(:hover, :focus-visible) .cx-scroll-arrow { display: block; }
+@keyframes cx-scroll-dot-wave { 0%, 60%, 100% { transform: translateY(0); } 30% { transform: translateY(-2px); } }
+@media (prefers-reduced-motion: reduce) { .cx-to-bottom { transition: none; } .cx-scroll-working > span { animation: none; } }
+@media print { .cx-scroll-bottom-anchor { display: none; } }
 
 /* Markdown answers */
 .cx-md { font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
@@ -1147,13 +1285,6 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   background: var(--ao-green, #2e9d5b); content: ""; animation: cx-pulse 1.4s ease-in-out infinite; }
 @keyframes cx-turn-stats-in { from { opacity: 0; transform: translateY(-3px); } }
 @media (prefers-reduced-motion: reduce) { .cx-turn-stats, .cx-turn-stats.is-running span:first-child::before { animation: none; } }
-/* An ended turn's foot (TurnFoot): how long it worked and its own requests, quiet under its answer. */
-.cx-turn-foot { display: flex; flex-wrap: wrap; margin: 6px 0 0; padding: 0; color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
-.cx-turn-foot.is-empty { height: 1px; margin: 0; }
-.cx-turn-foot span { padding: 0 8px; white-space: nowrap; transition: color .15s ease; }
-.cx-turn-foot span:first-child { padding-left: 0; }
-.cx-turn-foot span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
-.cx-turn-foot span:hover { color: var(--color-text-primary); }
 /* The chat box's row on one 28 px grid: every control 28 px tall with 7 px corners, icons in 28 px
    squares, Send a 28 px circle. No carets and no boxes: a control is its icon or its word, and the
    hover tint says it opens. In reading order: attach, permissions, Single/Team, then the harness's

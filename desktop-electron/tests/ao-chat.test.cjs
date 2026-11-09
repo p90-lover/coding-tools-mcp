@@ -122,6 +122,20 @@ test("queued annotated messages join into one block numbered across both, and a 
   const big = "x".repeat(6000);
   const apart = chat.chatQueueAdd([{ what: "Message", message: big }], { what: "Message", message: big });
   assert.equal(apart.length, 2, "two messages that together pass 8,192 characters are sent one after the other");
+  // In bytes too: two Chinese messages under the character limit joined past the bridge's byte budget.
+  const cjk = "字".repeat(1500);
+  assert.equal(chat.chatQueueAdd([{ what: "Message", message: cjk }], { what: "Message", message: cjk }).length, 2, "4,500 + 4,500 bytes stay two messages");
+});
+
+test("the composer counts a message in UTF-8 bytes against the bridge's budget, not only in characters", () => {
+  assert.equal(chat.CHAT_MESSAGE_BYTES, 7936);
+  for (const [text, bytes] of [["a", 1], ["é", 2], ["字", 3], ["😀", 4], ["a字😀", 8]]) {
+    assert.equal(chat.chatMessageBytes(text), bytes, text);
+    assert.equal(chat.chatMessageBytes(text), Buffer.byteLength(text, "utf8"), `${text} as Node counts it`);
+  }
+  assert.equal(chat.chatMessageFits("a".repeat(7936)), true);
+  assert.equal(chat.chatMessageFits("a".repeat(7937)), false, "one byte over the budget");
+  assert.equal(chat.chatMessageFits("字".repeat(2700)), false, "2,700 characters, 8,100 bytes: refused before it is sent");
 });
 
 test("a DeepSeek turn's live heading, Think line and durations read as DeepSeek Harness's", () => {
@@ -371,6 +385,30 @@ test("chats group runs by task, newest first, titled 'New task' when the task is
   assert.deepEqual(list[0].runIds, ["r1", "r3"]);
 });
 
+test("a chat with no run in the project read's newest 100 stays listed from its lifecycle's newest run", () => {
+  // 2026-11-09: the project read holds its newest 100 runs, shared by all chats; busy goal chats
+  // filled it, and "clash of clan macro" listed 4 of its 49 chats. The workflow puts a chat's newest
+  // run on its lifecycle entry when none of its runs is in the read (withChatIndex).
+  const runs = [run("r9", "goal", [node("p", "planner", "finished")]), run("r10", "goal", [node("p", "planner", "running")])];
+  const lifecycle = [
+    { task_id: "goal", visibility: "active" },
+    { task_id: "old", title: "Old chat", visibility: "active", latest_run: { id: "r2", nodes: [{ role: "planner", state: "finished" }], run_count: 7, at: 2_000 } },
+    { task_id: "newer", title: "Newer chat", visibility: "active", latest_run: { id: "r5", nodes: [{ role: "planner", state: "failed" }], run_count: 1, at: 5_000 } },
+    { task_id: "gone", title: "Archived chat", visibility: "archived", latest_run: { id: "r1", nodes: [{ role: "planner", state: "finished" }], at: 9_000 } },
+    { task_id: "draft", title: "New task", visibility: "active" },
+  ];
+  const list = plain(chat.chatList(runs, [], lifecycle));
+  assert.deepEqual(list.map((entry) => [entry.taskId, entry.title, entry.latestRunId, entry.status, entry.runCount]), [
+    ["goal", "New task", "r10", "running", undefined],
+    ["newer", "Newer chat", "r5", "attention", 1],
+    ["old", "Old chat", "r2", "done", 7],
+  ], "after the chats in the read, newest work first; a draft with no runs stays off, an archived one stays archived");
+  assert.deepEqual(plain(chat.chatArchived(runs, [], lifecycle)).map((entry) => entry.taskId), ["gone"]);
+  // Once its runs are in the read again (a new message, or the chat's own read), those are what it shows.
+  const back = plain(chat.chatList([...runs, run("r11", "old", [node("p", "planner", "running")])], [], lifecycle));
+  assert.deepEqual(back.map((entry) => [entry.taskId, entry.latestRunId, entry.status]).slice(0, 2), [["old", "r11", "running"], ["goal", "r10", "running"]]);
+});
+
 test("a run being stopped reads as stopped at once; its working cards end, its finished ones keep their work", () => {
   const receipt = { thread_id: "s1", answer: "partial" };
   const live = run("r", "t", [node("p", "planner", "finished", { receipt }), node("w", "worker", "running", { receipt }),
@@ -515,7 +553,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   const replyHead = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatReplyHead.tsx"), "utf8"),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
-  { exports: replyHead, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat : {} });
+  { exports: replyHead, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat : name === "./ChatTurnStats" ? { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } : {} });
   const replyPlan = {};
   const replyPlanView = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/chat-reply-plan.ts"), "utf8"),
@@ -1867,6 +1905,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
       const text = chat.chatMessageWithAnnotations(chat.chatMessageWithAttachments(state.draft, state.attachments), state.annotations);
       const submit = rendererCallback("AgentOrchestratorChat.tsx", "submit", { ...globals(), commands: undefined, chatSlashParse: chat.chatSlashParse, chatMessageWithAttachments: chat.chatMessageWithAttachments,
         chatMessageWithAnnotations: chat.chatMessageWithAnnotations, canSend: true, queueing: true, queueWhileSending: false, CHAT_MESSAGE_LIMIT: 8192, enqueue,
+        CHAT_MESSAGE_BYTES: chat.CHAT_MESSAGE_BYTES, chatMessageBytes: chat.chatMessageBytes, chatMessageFits: chat.chatMessageFits,
         say: rendererCallback("AgentOrchestratorChat.tsx", "say", { setCard: set("card") }) });
       await submit(); renderSnapshot();
       return { text, queuedTask, fail: async () => { reply.reject(new Error("queue unavailable")); await new Promise(setImmediate); } };
@@ -2674,6 +2713,20 @@ test("a turn waiting on the person's answer is never called stuck, so it offers 
   assert.equal(chat.waitsForPerson("waiting for you to review its plan"), true);
   assert.equal(chat.waitsForPerson("waiting for the model"), false, "a slow model can still be stuck");
   assert.equal(chat.waitsForPerson(undefined), false);
+});
+
+test("a request the reviewer is judging, or has just answered while AO still lists it, is not \"waiting for approval\"", () => {
+  // Seen live 2026-11-09: "waiting for approval · waiting for you for 8m 22s" with Continue, a second
+  // after "Let the model judge" allowed the request, while AO had not yet dropped it.
+  const working = [run("r1", "t", [node("w", "planner", "running", { receipt: { started_at_ms: 1_000 } })])];
+  const shown = (activity) => chat.chatTurns(working, "go", { activity: { "r1:w": { activity, turn_started: true,
+    timeline: [{ id: "a", kind: "approval", status: "pending", text: "git push" }] } }, now: 60_000 })[0].steps
+    .find((step) => step.working)?.working.activity;
+  assert.equal(shown("the reviewer allowed: git push origin feat"), "the reviewer allowed: git push origin feat");
+  assert.equal(shown("the reviewer denied: git push origin main"), "the reviewer denied: git push origin main");
+  assert.equal(shown("the reviewer is checking: git push origin feat"), "the reviewer is checking: git push origin feat");
+  assert.equal(shown("running git status"), "waiting for approval", "a request nobody has answered holds the card");
+  assert.equal(chat.waitsForPerson("the reviewer allowed: git push"), false, "so no Continue is offered for it");
 });
 
 test("an open chat follows its live run once the selected one has settled", () => {

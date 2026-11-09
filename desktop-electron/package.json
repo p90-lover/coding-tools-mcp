@@ -1,6 +1,6 @@
 {
   "name": "coding-tools-full-harness-desktop",
-  "version": "0.8.95",
+  "version": "0.8.104",
   "private": true,
   "description": "Coding Tools desktop with the pinned full Codex ChatGPT Web harness",
   "author": "Coding Tools MCP Contributors",
@@ -81,6 +81,7 @@
       "vendor/tools/antigravity-cli.json",
       "vendor/bundled/cpa-plugins/**",
       "assets/icon.png",
+      "assets/chrome-profile-connector/**",
       "assets/linux-appimage-runner.sh",
       "package.json",
       {

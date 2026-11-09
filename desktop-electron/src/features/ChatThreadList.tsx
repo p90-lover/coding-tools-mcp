@@ -53,6 +53,8 @@ export type ThreadActions = {
   newChatIn: (workspaceId: string, newScreen?: boolean) => void;
   /** Opens the Edit project dialog (name and source folders). */
   editProject: (workspaceId: string) => void;
+  /** Adds a local project (the Projects heading's +): pick its folder, confirm, then a new chat there. */
+  addProject?: () => void;
   /** Asks to remove the project from this app's list; its files are never deleted. */
   removeProject?: (workspaceId: string) => void;
   /** A new chat in another project, its composer holding this chat's messages. */
@@ -951,10 +953,17 @@ export function ChatThreadList(props: ThreadListProps) {
         <section className="cx-thread-group">
           <div className="cx-group-head">
             <h3>Projects</h3>
-            <button type="button" className="cx-list-settings" aria-label="Chat list settings" title="Chat list settings" aria-expanded={Boolean(settingsAt)}
-              onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setSettingsAt(settingsAt ? null : { top: box.bottom + 4, left: box.left }); }}>
-              <ChatGlyph name="more" size={16} />
-            </button>
+            {/* Codex's Projects heading: + adds a local project folder in one click, beside the list settings. */}
+            <span className="cx-group-actions">
+              {actions.addProject ? <button type="button" className="cx-list-settings" aria-label="Add project" title="Add project"
+                onClick={() => { setSettingsAt(null); actions.addProject?.(); }}>
+                <ChatGlyph name="plus" size={16} />
+              </button> : null}
+              <button type="button" className="cx-list-settings" aria-label="Chat list settings" title="Chat list settings" aria-expanded={Boolean(settingsAt)}
+                onClick={(event) => { const box = event.currentTarget.getBoundingClientRect(); setSettingsAt(settingsAt ? null : { top: box.bottom + 4, left: box.left }); }}>
+                <ChatGlyph name="more" size={16} />
+              </button>
+            </span>
           </div>
           <ul className="cx-projects">
             {projectOrder.map((item) => {
@@ -1083,7 +1092,7 @@ export function ChatThreadList(props: ThreadListProps) {
         {hover.chat.schedule?.state === "scheduled" ? <span>◷ {scheduledStartLabel(hover.chat.schedule.due_at_ms, now)}</span> : null}
         <span>📁 {workspace?.name}</span>
         {workspace?.path ? <span className="cx-hover-path">{workspace.path}</span> : null}
-        <span>{hover.chat.runIds.length} {hover.chat.runIds.length === 1 ? "run" : "runs"}</span>
+        <span>{hover.chat.runCount ?? hover.chat.runIds.length} {(hover.chat.runCount ?? hover.chat.runIds.length) === 1 ? "run" : "runs"}</span>
       </FloatingLayer> : null}
       {projectCard && !menu ? (() => {
         const { item } = projectCard;

@@ -1,7 +1,10 @@
 # Additional harness brand assets
 
-- `kimchi.svg`, `omp.png`, `prime-agent.png`: copied without modification from the existing Agent Orchestrator frontend brand assets at `module/agent-orchestrator/frontend/src/renderer/assets/agents/`, commit `fd827d96e7bc1824fcbdccd3db68df7e86fc8b7b`. These are the same logos AO uses in its harness list.
+- `ao/*`: every harness mark, copied without modification from the Agent Orchestrator frontend's agent logos at `module/agent-orchestrator/frontend/src/renderer/assets/agents/`, AO commit `cc9a0d94aebbeeb161f54a106a57336dd61ac706` (the pin on main, 2026-11-08), with `ao/LICENSE-mimo-code.txt` as AO ships it. These are the logos AO's own `AgentAvatar` shows for each agent. `HarnessLogo.tsx` keys them as AO does.
+- The files below are model-maker marks for the model lists, not harness marks.
 - `gemini.svg`: LobeHub Icons `gemini-color.svg`, MIT licensed, fetched from <https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/gemini-color.svg>. SHA-256: `8ab0a9bafec11f7e69bcb9fc4ffd8f1bc927d1ddcbbb6ff36dee5ae8b5a9d602`. Upstream license: <https://github.com/lobehub/lobe-icons/blob/master/LICENSE>.
+
+- `../models/zhipu.svg` (GLM), `../models/minimax.svg`, `../models/stepfun.svg`: LobeHub Icons `zhipu-color.svg`, `minimax-color.svg` and `stepfun-color.svg`, MIT licensed, fetched unmodified from <https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/> on 2026-11-07. SHA-256: `8174e65ff71647d5c705c920c953a82bd723d9e3e42887bdd4ffc9dfe51207a0`, `7f7187fa6d9b341ac5f22f6c5a970523afb439dc45566d64eb4f4b9b604d6b01`, `f55afc0e6004c8854f76bd5bbcc0fce9fc0ed9316691d54fb02d088c24fab40d`.
 
 Brand marks identify their respective products; bundling them does not imply endorsement. The remaining harness assets and model icons are unchanged.
 

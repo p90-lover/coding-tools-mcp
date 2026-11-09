@@ -8,7 +8,11 @@ const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
 const { restartResume } = require("./chat-resume.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+// CPA requests (model lists, goal checks, reviews) go from a worker thread: a connect or write on
+// the main thread held every window 0.3-2.4 s at a time on a busy machine (2026-11-09).
+const { fetchOffThread } = require("./off-thread-run.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
+const { scheduleMessage, scheduleAction, createScheduleStore } = require("./chat-schedules.cjs");
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
@@ -169,10 +173,14 @@ const NAMED_WEB_MODELS = ["chatgpt-web/gpt-6-sol-instant", "chatgpt-web/gpt-6-so
 const CPA_MODEL_PREFIX = "cpa/";
 // Agents AO's daemon can point at the CPA gateway, each through its own launch variables
 // (Claude Code: ANTHROPIC_*, Codex: a CPA-only CODEX_HOME, opencode: OPENAI_*, agy:
-// AGY_LLM_GATEWAY_*). Every harness offers every pool model except WebGPT (the user's rule):
-// agy listed none, since its own catalog is empty without a Google sign-in. Its gateway mode sends
-// its tools only for Gemini ids it knows, so another model on agy can chat but not touch files.
-const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy"]);
+// AGY_LLM_GATEWAY_*, Pi: AO_PI_GATEWAY_* that AO's Pi extension registers as the
+// "coding-tools-cpa" provider, Unreal Agent: UNREAL_HARNESS_LLM_*). Every harness offers every
+// pool model except WebGPT (the user's rule): agy and Pi listed none, since their own catalogs
+// are empty without a sign-in. agy's gateway mode sends its tools only for Gemini ids it knows, so
+// another model on agy can chat but not touch files.
+const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy", "pi", "unreal-agent"]);
+// The Pi provider AO's managed Pi extension registers for a CPA session (AO ports.PiGatewayProvider).
+const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
 // Agents whose AO adapter honours the three permission modes. agy maps them onto its --mode
 // (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
 // and stopped at approvals in a terminal nobody saw, so its card never finished.
@@ -180,14 +188,10 @@ const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
 const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.";
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
-// Antigravity refuses every request whose system prompt carries Claude Code's "You are a Claude
-// agent, built on Anthropic's Claude Agent SDK." line, for its Gemini models as well as its Claude
-// ones, and calls it "Resource has been exhausted": CPA retried every Google account for about 20 s,
-// then Claude Code backed off up to ten times, and the card or subagent failed as if out of quota.
-// The same model answers in 3 s for any other client, so Claude Code is never sent to it.
-const ANTIGRAVITY_REFUSES_CLAUDE_CODE = "Antigravity refuses Claude Code's requests (it answers \"quota exhausted\", but it is not quota); "
-  + "run this model on Native Codex or another agent, or give Claude Code a model from another provider";
-const antigravityRefuses = (agent, capability) => agent === "claude-code" && /antigravity/i.test(String(capability?.provider ?? ""));
+// Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
+// by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
+// requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
+// 2026-10-30, the line passed again, only slower while CPA skipped accounts that refused.
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
@@ -333,29 +337,51 @@ function delayToMilliseconds(value, unit) {
  * reviewer would hand on or a goal round that ended needing them, is judged by the model instead,
  * chatModelJudges). Legacy autoCompact / autoCompactPercent values remain readable for older
  * callers, but do not control native token compaction or bounded task-record rollover.
+ * questionTimeout: how many seconds an agent's question waits for the person in an "Approve for me"
+ * or "Full access" chat before it gets its recommended answer; 0 keeps it (and the agent) waiting
+ * until the person answers (chatQuestionTimeout).
  * Kept in memory when no file is given (tests).
  */
 const AUTO_COMPACT_PERCENT = 95;
 const AUTO_COMPACT_MIN_PERCENT = 20;
 const autoCompactPercent = value => (Number.isSafeInteger(value) && value >= AUTO_COMPACT_MIN_PERCENT && value <= 100 ? value : AUTO_COMPACT_PERCENT);
+// The user (2026-11-08): "add a settings that allow the ask to be stay and pause or time out in X
+// seconds default is 30 seconds". It was a fixed 20 s, often before the question had been read.
+const QUESTION_TIMEOUT_SECONDS = 30;
+const QUESTION_TIMEOUT_MAX_SECONDS = 24 * 60 * 60;
+const questionTimeoutSeconds = value => (Number.isSafeInteger(value) && value >= 0 && value <= QUESTION_TIMEOUT_MAX_SECONDS ? value : QUESTION_TIMEOUT_SECONDS);
 function createChatPreferences(file) {
   let saved = {};
   try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
+  // Saved off the main thread: a synchronous write held every window 0.6 s on the busy hard disk
+  // (2026-11-09). Changes in a row are one save plus at most one more with the latest.
+  let saving = null;
+  let saveAgain = false;
+  const persist = () => {
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(file, `${JSON.stringify(saved)}\n`, { durable: true, protectDirectory: false })
+      .catch(() => { /* the old file stays; the next change saves every preference again */ })
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
+  };
+  const flushed = async () => { while (saving) await saving; };
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
-      autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent) }),
-    set(change) {
+      autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
+      questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
+    /** Takes effect at once; resolves when the change is on disk, so a restart right after keeps it. */
+    async set(change) {
       saved = { ...saved, ...change };
       if (!file) return;
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const temp = `${file}.${process.pid}.tmp`;
-      fs.writeFileSync(temp, `${JSON.stringify(saved)}\n`);
-      fs.renameSync(temp, file);
+      persist();
+      await flushed();
     },
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -400,6 +426,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Chats running a prompt again and again (/loop, chat-loops.cjs).
   const loops = createLoopStore({ file: loopsFile, now });
+  // Chats the person asked to go on by themselves later (/schedule, chat-schedules.cjs).
+  const schedules = createScheduleStore({ file: schedulesFile, now });
   // Messages waiting for their chat's turn, and steers waiting to be read (chat-queue.cjs).
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
@@ -454,6 +482,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (["finished", "failed"].includes(state.status)) void wakeupAfterRun(workspaceId, runId).catch(() => undefined);
     // A /loop round that came due while its chat worked runs now; a self-paced one that scheduled nothing ends.
     if (["finished", "failed"].includes(state.status)) void loopAfterRun(workspaceId, runId).catch(() => undefined);
+    // A /schedule that came due while its chat worked is sent now.
+    if (["finished", "failed"].includes(state.status)) void chatScheduleAfterRun(workspaceId).catch(() => undefined);
     // A turn that ended (or stopped, or is held on a failed step) lets its chat's queue go on: a steer
     // it never read goes back to the queue, and the queue's next message is sent (queueAfterRun).
     if (state.stopped || state.settled || ["finished", "failed", "held"].includes(state.status)) {
@@ -577,7 +607,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
-    const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}` : wireModel ?? node.route.model;
+    // Pi reaches CPA as the provider AO's Pi extension registers from the gateway's model.
+    const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}`
+      : wireModel && agent === "pi" ? `${PI_GATEWAY_PROVIDER}/${wireModel}` : wireModel ?? node.route.model;
     return { workspaceId, agent, model: agentModel, name: node.settings?.name || "AO worker",
       // "Approve for me" is Codex's auto-review: Codex runs its own reviewer, but Claude Code's
       // "auto" mode exists only for Claude models and otherwise falls back to asking for every
@@ -647,9 +679,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const stale = await harnessService().warmSessions?.(WARM_NAME).catch(() => []) ?? [];
     for (const id of stale) void harnessService().kill?.(id).catch(() => undefined);
   })();
+  // After a launch takes a warm session, the next one for that route starts this soon: once the
+  // taken agent's first turn is under way (it accepts the message in about 1.6 s), not beside it. It
+  // was 90 s, and a burst of chats on one model outran it (seen live 2026-11-09: chats 34 s and 56 s
+  // after a warm take both launched cold, and both cold starts hung for AO's whole 10-minute start
+  // budget). A warm start takes 15-26 s, and a launch waits for one already starting
+  // (WARM_START_BUDGET_MS), so the next chat of a burst gets an agent in seconds.
+  const REWARM_AFTER_TAKE_MS = 12_000;
   // A chat opened while the app's tools were still starting asked once and was told no; nothing
   // asked again, so the first chat after every app start launched cold. Ask again once they listen.
-  const REWARM_DELAY_MS = 90_000;
   const TOOLS_WAIT_MS = 2_000;
   const TOOLS_WAIT_TRIES = 45;
   const toolsWaits = new Map(); // workspaceId -> timer; the latest route asked for wins
@@ -881,10 +919,38 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (!planner?.route) return { ok: true, warmed: false, reason: "The team has no orchestrator to pre-warm" };
     return chatPrewarmRoute(id, planner.route, false);
   }
+  // The person's global and workspace AGENTS.md (agent-instructions.cjs): in front of a new agent's
+  // first message, and of a running agent's next one once they changed (AO session -> the version
+  // it was given). A follow-up is sent as a steer-sized message (64 KiB), not a 16 KiB spawn prompt.
+  const FOLLOW_UP_BYTES = 60 * 1024;
+  const instructionsGiven = new Map();
+  function givenInstructions(session, hash) {
+    if (!session) return;
+    instructionsGiven.delete(session);
+    instructionsGiven.set(session, hash);
+    if (instructionsGiven.size > 500) instructionsGiven.delete(instructionsGiven.keys().next().value);
+  }
+  /** Never fails a launch: unreadable files are left out (and logged), as no files are. */
+  async function launchInstructions(workspaceId, maxBytes) {
+    if (!agentInstructions || maxBytes <= 0) return { text: "", hash: "" };
+    return agentInstructions.forLaunch(workspaceId, { maxBytes }).catch((error) => {
+      logger?.warn?.("ao.instructions_unread", { message: publicText(error?.message || error, 200) });
+      return { text: "", hash: "" };
+    });
+  }
+  function agentInstructionsCall({ workspaceId = null, scope, text } = {}) {
+    if (!agentInstructions) throw new Error("Agent instructions are unavailable");
+    const id = workspaceId ? clean(workspaceId, 128) : null;
+    const files = scope === undefined ? agentInstructions.read(id) : agentInstructions.save({ scope, workspaceId: id, text });
+    return Promise.all([files, agentInstructions.projects?.().catch(() => []) ?? []])
+      .then(([read, projects]) => ({ ok: true, ...read, projects }));
+  }
   // AO session -> the turn its latest follow-up started, so the previous turn is not read as its answer.
   const expectedTurns = new Map();
   const sessionOwners = new Map(); // AO session -> the run that most recently dispatched it
   const sessionStops = new Map(); // Only in-flight stop promises; reused sessions wait for settlement.
+  const freshLaunches = new Map(); // AO session -> when this app session spawned it cold (dispatchExternal)
+  const stalledLaunches = new Set(); // fresh launches the watchdog ended (stopStalledLaunch)
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
   // nodeKey -> { at, pending }: the run loop's latest view of an AO card's parked tool requests.
   const pendingFrames = new Map();
@@ -1088,7 +1154,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // agy's gateway variables carry no window, so it takes no context-window setting. Claude Code
     // takes one for every model, Claude ones included (their picker was off): AO declares a CPA
     // alias's window and has a model Claude Code recognizes compact at it, capped at its own.
-    if (GATEWAY_AGENTS.has(agent) && agent !== "agy" && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
+    // Pi takes one only on a CPA model (AO's Pi extension declares it); Unreal Agent takes none.
+    const windowed = GATEWAY_AGENTS.has(agent) && agent !== "agy" && agent !== "unreal-agent" && (agent !== "pi" || viaCpa);
+    if (windowed && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
       capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
@@ -1144,17 +1212,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const cpaLimit = catalog?.capabilities[item.id]?.contextLimit;
         return [item.id, modelCapabilities(agent, item.id, item.contextLimit || !cpaLimit ? item : { ...item, contextLimit: cpaLimit })];
       }));
-      // Antigravity's models (Claude and Gemini) are not offered to Claude Code, which it refuses
-      // (ANTIGRAVITY_REFUSES_CLAUDE_CODE); Native Codex runs them.
-      const refused = id => antigravityRefuses(agent, catalog?.capabilities[id]);
-      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/") && !refused(id)).map(id => {
+      const cpa = !catalog ? [] : catalog.models.filter(id => !id.startsWith("chatgpt-web/")).map(id => {
         const routed = `${CPA_MODEL_PREFIX}${id}`;
         capabilities[routed] = modelCapabilities(agent, id, catalog.capabilities[id], true);
         return routed;
       });
       const routedNotes = notes => notes ? Object.fromEntries(Object.entries(notes).map(([id, why]) => [`${CPA_MODEL_PREFIX}${id}`, why])) : null;
-      const refusedNotes = Object.fromEntries((catalog?.models ?? []).filter(refused).map(id => [id, ANTIGRAVITY_REFUSES_CLAUDE_CODE]));
-      const unavailable = routedNotes(Object.keys(refusedNotes).length ? { ...catalog?.unavailable, ...refusedNotes } : catalog?.unavailable);
+      const unavailable = routedNotes(catalog?.unavailable);
       const held = routedNotes(catalog?.held);
       return { ok: true, harness, models: [...new Set([...items.map(item => item.id), ...cpa])], capabilities,
         ...(unavailable ? { unavailable } : {}), ...(held ? { held } : {}), ...(catalog?.stale ? { stale: true } : {}) };
@@ -1474,6 +1538,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // window before it, and whether it continued the chat's session, took a warm one or spawned.
       let launchedVia = "spawn";
       let launchStarted = null;
+      // A follow-up's launch in two parts: bringing its agent back (or confirming it is up) and the
+      // send itself. Continued launches took 10-17 s against ~0.3 s usually (2026-11-08), and the
+      // total alone did not say which part waited.
+      let checkMs = null, sendMs = null;
       // No warm start begins in this project while the launch runs (it would queue in front of
       // it in AO), and a route the picker asked to warm before the send is no longer wanted.
       launching.set(workspaceId, (launching.get(workspaceId) ?? 0) + 1);
@@ -1494,11 +1562,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // It is stopped (its session, worktree and conversation stay), so it cannot come back beside
         // the new agent, which starts with the chat so far (the handoff below).
         let unconfirmed = null;
+        const checkStarted = now();
         const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
           if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
           unconfirmed = error;
           return false;
         });
+        if (continued) checkMs = now() - checkStarted;
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
           // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
@@ -1509,8 +1579,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
-          sent = await harnessService().send(continued.session, continued.text, reserved.request_key)
+          // The person's AGENTS.md files go in front again only when they changed since this agent
+          // was given them (or since the app started, when that is not known).
+          const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
+          const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
+          const sendStarted = now();
+          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key)
             .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
+          sendMs = now() - sendStarted;
+          if (sent?.turnId) givenInstructions(continued.session, standing.hash);
         }
         // A follow-up that should have continued the chat's session starts a fresh one: logged with
         // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
@@ -1524,10 +1601,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
         handoffs.delete(runId);
-        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt);
+        // A new agent's first message starts with the person's AGENTS.md files, in the room the
+        // request leaves; the chat's handoff gets what is left after them.
+        const standing = sent?.turnId ? { text: "", hash: "" } : await launchInstructions(workspaceId, PROMPT_BYTES - utf8Bytes(reserved.prompt));
+        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt) - utf8Bytes(standing.text);
         if (!sent?.turnId && handoff) stage("summarising the chat for a new agent");
-        const prompt = !sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt;
+        const prompt = standing.text + (!sent?.turnId && handoff
+          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt);
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
@@ -1558,11 +1638,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         } else {
           stage(continued ? "starting a new agent (the chat's agent was gone or refused the message)" : "starting a new agent");
           session = await harnessService().spawn({ ...launch, prompt });
+          // A brand-new agent holding nothing but this message: the one kind of start the launch
+          // watchdog may end (stopStalledLaunch).
+          if (session) {
+            freshLaunches.set(session, now());
+            if (freshLaunches.size > 200) freshLaunches.delete(freshLaunches.keys().next().value);
+          }
         }
+        if (first?.turnId || (session && !sent?.turnId)) givenInstructions(session, standing.hash);
         // The next chat on this route finds a session waiting too, started once this turn is under
         // way rather than beside its first model call.
         if (warmed && !idleStopped) {
-          const timer = setTimer(() => { rewarmTimers.delete(timer); void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_DELAY_MS);
+          const timer = setTimer(() => { rewarmTimers.delete(timer); void chatPrewarmRoute(workspaceId, node.route, plain).catch(() => undefined); }, REWARM_AFTER_TAKE_MS);
           rewarmTimers.add(timer);
           timer?.unref?.();
         }
@@ -1576,7 +1663,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       const done = now();
       logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
-        prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted });
+        prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted,
+        ...(checkMs === null ? {} : { checkMs }), ...(sendMs === null ? {} : { sendMs }) });
       // A card stopped while its launch was in flight has no session to stop yet; once the launch
       // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
       const stopIfAbandoned = async () => {
@@ -1698,6 +1786,37 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return true;
   }
 
+  // A cold launch whose agent never took its message. AO starts a new chat's agent in the
+  // background and keeps the opening prompt queued until the agent is up; healthy cold starts took
+  // 15-75 s (measured 2026-11-09). Two that day hung with claude.exe running and the prompt never
+  // delivered, and their chats said "launching" for AO's whole 10-minute start budget before the
+  // automatic retry relaunched them (on a warm agent, in seconds). The turn stall stop never saw
+  // them: a cold start has no turn of its own on the card yet. With "Retry automatically" on, a
+  // fresh launch still starting after LAUNCH_STALL_MS is ended now, so that retry comes sooner.
+  // Only sessions this app session spawned for a launch qualify: they hold nothing but the queued
+  // message, while a continued chat's session holds its agent's work and is never ended here.
+  const LAUNCH_STALL_MS = 4 * 60_000;
+  const LAUNCH_STALL_FAILURE = `The agent did not start within ${LAUNCH_STALL_MS / 60_000} minutes, so its start was stopped; the step is retried on another agent.`;
+  async function stopStalledLaunch(session, observed, ownership) {
+    const launchedAt = freshLaunches.get(session);
+    if (!chatPreferences.get().autoRetry || launchedAt === undefined || stalledLaunches.has(session)
+      || observed?.provisioning !== true || observed.turnState !== "queued" || now() - launchedAt <= LAUNCH_STALL_MS) return false;
+    const { workspaceId, runId, nodeId, requestKey } = ownership;
+    const latest = await savedNode(workspaceId, runId, nodeId).catch(() => null);
+    if (latest?.mission?.cancelled || latest?.node?.state !== "running" || latest.node.receipt?.thread_id !== session
+      || (latest.node.receipt?.request_key || latest.node.request_key) !== requestKey) return false;
+    stalledLaunches.add(session);
+    if (stalledLaunches.size > 200) stalledLaunches.delete(stalledLaunches.values().next().value);
+    try { await harnessService().kill(session); }
+    catch (error) {
+      stalledLaunches.delete(session);
+      logger?.warn?.("ao.launch_stall_stop_failed", { message: publicText(error?.message || error, 200) });
+      return false;
+    }
+    logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node) });
+    return true;
+  }
+
   // AO marks a session needs_input as a permission request comes in, about 2 s before the request
   // itself shows in the conversation (sampled live 2026-10-24). Read in that gap, a routine request
   // the reviewer then allowed reported the run as "needs input" for one pass: 160 approvals in 40
@@ -1727,12 +1846,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const ownership = { workspaceId, runId, nodeId: node.id,
       turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
     const observed = await harnessService().observe(session, ownership.turnId);
+    // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
+    // the chat's work, never a fresh launch the watchdog may end.
+    if (observed?.provisioning !== true) freshLaunches.delete(session);
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
       // `pending` is observed.approvals for this card: none, or only ones already answered.
-      const stopped = nothingToAnswer(observed) && await stopStalledTurn(session, observed, ownership);
+      const stopped = nothingToAnswer(observed)
+        && (await stopStalledLaunch(session, observed, ownership) || await stopStalledTurn(session, observed, ownership));
       if (!stopped) wakeQueueOnAgentReady(workspaceId, mission, node, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
@@ -1744,7 +1867,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
       ...(observed.answer ? { answer: observed.answer } : {}),
       completed,
-      ...(!completed ? { failure: observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
+      // A start the launch watchdog ended says so, not AO's "Session start was cancelled".
+      ...(!completed ? { failure: (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
+        || observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
     if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
     return { ...result, pending_approvals: [] };
@@ -1769,6 +1894,92 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       return response;
     });
+  }
+
+  // ---- Chats past the project read's newest 100 runs ----
+  // The chat list is made from the project read's runs, and that read holds the project's newest
+  // 100 only, shared by all of its chats: busy goal chats pushed every other chat off the list, no
+  // archive involved (seen live 2026-11-09: "clash of clan macro" listed 4 of its 49 chats, this
+  // repo 9 of 41; opening one from elsewhere took it as deleted). A chat outside that window cannot
+  // change without a new run, and a new run is always in the window, so each one's newest run is
+  // read once (the chat's own read, one at a time, never holding the list's read) and kept. The list
+  // gets it as its lifecycle entry's `latest_run`. Only active chats are looked up, and a task with
+  // no runs (a draft that never started) stays off the list.
+  // A newest run still working may settle without a new run: it is read again after this long. One
+  // waiting on the person (failed or held) changes only when they act on it, so it is read less often.
+  const CHAT_INDEX_RECHECK_MS = 30_000;
+  const CHAT_INDEX_WAITING_RECHECK_MS = 5 * 60_000;
+  const CHAT_INDEX_RETRY_MS = 60_000;
+  const CHAT_SETTLED_STATES = new Set(["finished", "cancelled", "archived"]);
+  /** workspace → task → { run, count, readAt } (count null: seen only in the window), or null: no runs. */
+  const chatIndex = new Map();
+  const chatIndexQueue = new Map();
+  const chatIndexFailed = new Map();
+  let chatIndexReading = false;
+
+  /** What the list needs of a chat's newest run: its id and enough to say its status (chatRunStatus). */
+  function chatRunStub(run) {
+    const nodes = Array.isArray(run.nodes) ? run.nodes : [];
+    const times = nodes.flatMap((node) => [node.receipt?.finished_at_ms, node.receipt?.started_at_ms]).filter(Number.isFinite);
+    return { id: run.id, cancelled: run.cancelled === true, paused: run.paused === true,
+      nodes: nodes.map((node) => ({ id: node.id, role: node.role, state: node.state })), ...(times.length ? { at: Math.max(...times) } : {}) };
+  }
+  /** How long a kept newest run stays good, as the list says its status (ao-chat.ts chatRunStatus). */
+  function chatIndexFresh(stub) {
+    if (stub.cancelled) return Infinity;
+    const open = stub.nodes.filter((node) => !(node.role === "retry" && node.state === "pending") && !CHAT_SETTLED_STATES.has(node.state));
+    if (!stub.paused && !open.length) return Infinity;
+    return stub.paused || open.some((node) => !["failed", "held"].includes(node.state)) ? CHAT_INDEX_RECHECK_MS : CHAT_INDEX_WAITING_RECHECK_MS;
+  }
+
+  function readChatIndex() {
+    if (chatIndexReading) return;
+    const next = chatIndexQueue.entries().next();
+    if (next.done) return;
+    const [key, { workspaceId, taskId }] = next.value;
+    chatIndexQueue.delete(key);
+    chatIndexReading = true;
+    void runs({ workspaceId, taskId }).then((read) => {
+      const mine = chatEdits.visible(workspaceId, read.runs).filter((run) => run.project_id === taskId);
+      const index = chatIndex.get(workspaceId) ?? new Map();
+      chatIndex.set(workspaceId, index);
+      index.set(taskId, mine.length ? { run: chatRunStub(mine[mine.length - 1]), count: mine.length, readAt: now() } : null);
+      chatIndexFailed.delete(key);
+    }, (error) => {
+      chatIndexFailed.set(key, now());
+      logger?.warn?.("ao.chat_index_read_failed", { message: publicText(error?.message || error, 200) });
+    }).finally(() => {
+      chatIndexReading = false;
+      readChatIndex();
+    });
+  }
+
+  /** The project read's lifecycle, each active chat outside its runs carrying its newest run (`latest_run`). */
+  function withChatIndex(workspaceId, shown, lifecycle) {
+    if (!Array.isArray(lifecycle)) return lifecycle;
+    const index = chatIndex.get(workspaceId) ?? new Map();
+    chatIndex.set(workspaceId, index);
+    // A chat in the window is kept as it shows there, so it stays listed the moment it leaves it.
+    const windowed = new Map();
+    for (const run of shown) windowed.set(run.project_id, run);
+    for (const [taskId, run] of windowed) {
+      const known = index.get(taskId);
+      index.set(taskId, { run: chatRunStub(run), count: known?.run?.id === run.id ? known.count : null, readAt: now() });
+    }
+    const at = now();
+    const listed = lifecycle.map((entry) => {
+      const taskId = typeof entry?.task_id === "string" ? entry.task_id : "";
+      if (!taskId || windowed.has(taskId) || entry.visibility !== "active") return entry;
+      const known = index.get(taskId);
+      const key = `${workspaceId}\n${taskId}`;
+      // Read: never read yet, its run count unknown (it left the window), or a run still open (it
+      // may have settled since; it would be in the window had it started again).
+      const stale = known === undefined || (known && (known.count === null || at - known.readAt > chatIndexFresh(known.run)));
+      if (stale && !(at - (chatIndexFailed.get(key) ?? -Infinity) < CHAT_INDEX_RETRY_MS)) chatIndexQueue.set(key, { workspaceId, taskId });
+      return known ? { ...entry, latest_run: { ...known.run, ...(known.count === null ? {} : { run_count: known.count }) } } : entry;
+    });
+    readChatIndex();
+    return listed;
   }
 
   async function updateRun({ workspaceId, change } = {}) {
@@ -2048,6 +2259,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         : publicText(item.text, item.kind === "message" || item.kind === "reasoning" || item.kind === "steer" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
+      // How long a finished call or thought took (the upstream adapter's durationMs).
+      ...(Number.isFinite(item.durationMs) && item.durationMs > 0 ? { durationMs: Math.round(item.durationMs) } : {}),
       ...(item.input ? { input: publicText(item.input, toolBytes.input) } : {}),
       ...(item.output ? { output: publicText(item.output, toolBytes.output) } : {}),
       // Images a tool returned, as the files they were saved to: the chat reads one when it is opened.
@@ -2152,7 +2365,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // for approval" for the two minutes a slow review took, with no request shown to answer (seen
     // live: a PowerShell check, allowed by the reviewer after 114 s), so it looked stuck on them.
     if (permission && card?.mission && card?.node && !approvalNeedsPerson(card.mission, card.node, permission)) {
-      return `the reviewer is checking: ${publicText(permission.command || permission.path || permission.tool || "a request", 90)}`;
+      const what = publicText(permission.command || permission.path || permission.tool || "a request", 90);
+      // Answered and sent: AO drops the request in a moment, and the agent goes on.
+      const answered = approverAdvice.get(permission.approval_id);
+      if (answered?.resolved) return `the reviewer ${answered.action === "allow" ? "allowed" : "denied"}: ${what}`;
+      return `the reviewer is checking: ${what}`;
     }
     if (permission) return `waiting for approval: ${publicText(permission.command || permission.path || permission.tool || "a request", 90)}`;
     const question = requests.find(request => request.kind === "question");
@@ -2544,6 +2761,35 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
     return parts.join(" · ") || "Answered";
   }
+  /**
+   * A message typed in the composer while the agent's question waits, as that question's answer
+   * ({ action: "accept", content } in the form's shape, as the question card sends it), or null when
+   * it can't stand as one and the message should wait to be steered in after the question instead.
+   *
+   * `pending.fields`: [{ key, type: "choice" | "multi" | "text" | "boolean" | "number", title,
+   * description, options: [{ value, label, description }], customKey?, required? }]. Claude Code's
+   * AskUserQuestion gives each question a choice field `question_N` and its "Other" text `question_N_custom`.
+   * `pending.mode === "url"` asks the person to visit a page: typed text is no answer to that.
+   */
+  function typedAnswer(pending, message) {
+    const typed = String(message ?? "").trim();
+    const fields = Array.isArray(pending?.fields) ? pending.fields : [];
+    if (!typed || pending?.mode === "url" || !fields.length) return null;
+    const content = {};
+    for (const field of fields) {
+      // An option's own words pick that option ("Never ask"); anything else is the person's "Other".
+      const option = (field.options ?? []).find((entry) => entry.label.trim().toLowerCase() === typed.toLowerCase()
+        || String(entry.value).trim().toLowerCase() === typed.toLowerCase());
+      if (option && field.type === "choice") content[field.key] = option.value;
+      else if (option && field.type === "multi") content[field.key] = [option.value];
+      else if (field.customKey) content[field.customKey] = typed;
+      else if (field.type === "text") content[field.key] = typed;
+      // A yes/no, a number or a choice with no "Other" can't take free text: one it must have
+      // keeps the message waiting; an optional one is left unanswered.
+      else if (field.required) return null;
+    }
+    return Object.keys(content).length ? { action: "accept", content } : null;
+  }
 
   async function approveAoHarness({ workspaceId, runId, nodeId, approvalId, allow, response, threadId, turnId, decisionId, answer } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80), node = clean(nodeId, 80);
@@ -2853,26 +3099,224 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const restartInterrupted = (node) => RESTART_INTERRUPTED.test(String(node?.receipt?.error || ""))
     && (node.history?.length ?? 0) < RESTART_HISTORY_LIMIT;
 
-  // Requests the command approver may never allow, whatever the model says.
-  const HARD_DENY = [
-    /\brm\s+-[a-z]*[rf][a-z]*\s+(\/|~|\$HOME|[a-z]:[\\/])/i, /\bmkfs\b|\bformat\s+[a-z]:/i, /\bdd\s+if=/i,
-    /\b(curl|wget)\b[^|\n]*\|\s*(ba|z)?sh\b/i, /\b(iwr|irm|invoke-webrequest)\b[^|\n]*\|\s*iex\b/i,
-    /(^|[\\/\s])\.env(\.|\b)|id_rsa|[\\/]\.ssh[\\/]|credentials|secrets?\.(json|ya?ml|toml)/i,
-    /\bRemove-Item\b[^\n]*-Recurse[^\n]*([a-z]:\\|~|\$HOME)/i, /\bdel\s+\/[sq]\b|\brd\s+\/s\b/i,
-    /\bshutdown\b|\breg\s+delete\b|\bbcdedit\b|\bdiskpart\b/i,
+  // Requests the command approver may never allow, whatever the model says. The rules read what a
+  // request runs (its command line, or the command a tool's arguments carry) and the files it
+  // names: never a file's contents, a search pattern or the agent's own description of the request
+  // (safetyParts). Matched as single words anywhere in a request, they blocked harmless work as
+  // "Blocked by the command approver's safety rules", with no reason given: on 2026-11-06 a Grep of
+  // a log for "shutdown", a call to the project's own local API at
+  // /api/accounts/shutdown-controllers and an edit of a Markdown note naming that endpoint were each
+  // denied, and a goal chat gave its task up for two days. So quoted text is an argument ("rm -rf /"
+  // in a commit message, a search pattern, a URL) unless a shell runs it (bash -c "...",
+  // cmd /c "...", powershell -Command "...", "$(...)"); a heredoc's body is data unless an
+  // interpreter reads it; and a dangerous program counts only where a command starts.
+  const safetyRule = (why, source) => ({ why, pattern: new RegExp(source, "i") });
+  // A shell handed the rest of the line to run.
+  const SHELL_RUNS = String.raw`\bcmd(?:\.exe)?\b[^\n;|&"']*?\s\/[ck]|\b(?:ba|z|da|k)?sh(?:\.exe)?\b[^\n;|&"']*?\s-\w*c`
+    + String.raw`|\b(?:pwsh|powershell)(?:\.exe)?\b[^\n;|&"']*?\s-c(?:ommand)?|\b(?:iex|Invoke-Expression)\b(?:\s+-Command)?\s*\(?`;
+  // Where a command starts (a line, a chain, a pipe or bracket, a wrapper such as sudo, a shell's
+  // -c), then the program's folder if it is named: /sbin/shutdown, C:\Windows\System32\shutdown.exe.
+  const AT_COMMAND = String.raw`(?:^|[\n\r;&|({\x60]|\b(?:sudo|doas|exec|nohup|xargs|call|start|Start-Process(?:\s+-FilePath)?)\b|${SHELL_RUNS})\s*`
+    + String.raw`["'\x60]?(?:(?![a-z][\w+.-]*:\/\/)[^\s"'\x60|;&(){}]*[\\/])?`;
+  /** Read in a command line whose quoted text is blanked (hardDenial). */
+  const COMMAND_RULES = [
+    safetyRule("it shuts down or restarts the computer",
+      AT_COMMAND + String.raw`(?:shutdown|Stop-Computer|Restart-Computer)(?:\.exe)?(?![-\w.=])`),
+    safetyRule("it formats or wipes a disk", AT_COMMAND + String.raw`(?:format(?:\.com)?\s+[a-z]:(?![\\/]?[^\s"'\\/])`
+      + String.raw`|(?:mkfs(?:\.\w+)?|diskpart(?:\.exe)?|Format-Volume|Clear-Disk|Initialize-Disk)(?![-\w.=]))`),
+    safetyRule("it deletes registry keys or changes Windows' boot settings",
+      AT_COMMAND + String.raw`(?:reg(?:\.exe)?\s+delete|bcdedit(?:\.exe)?)(?![-\w.=])`),
+    safetyRule("it runs a script straight from the internet", String.raw`\b(?:curl|wget)(?:\.exe)?\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da|k)?sh\b`
+      + String.raw`|\b(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b[^|\n]*\|\s*(?:iex|Invoke-Expression)\b`
+      + String.raw`|\b(?:iex|Invoke-Expression)\s*\(+\s*(?:iwr|irm|Invoke-WebRequest|Invoke-RestMethod|New-Object\s+(?:System\.)?Net\.WebClient)\b`),
   ];
-  const JSON_ESCAPES = { n: "\n", r: "\r", t: "\t", b: "\b", f: "\f" };
+  const DELETES_ROOT_WHY = "it deletes a whole drive, the root folder, a system folder or a home folder";
+  const DELETES = /^(?:rm|rmdir|rd|del|erase|Remove-Item|ri)$/i;
+  // A whole drive, the root folder, a system folder or a home folder, as one argument (with /* or \*.*).
+  const ROOT_FOLDER = new RegExp(String.raw`^(?:[\\/]|~|\$HOME|\$\{HOME\}|[a-z]:`
+    + String.raw`|\$env:(?:USERPROFILE|HOMEDRIVE|SystemDrive|SystemRoot|windir|ProgramFiles)|%(?:USERPROFILE|HOMEDRIVE|SystemDrive|SystemRoot|windir|ProgramFiles)%`
+    + String.raw`|[\\/](?:bin|boot|dev|etc|home|lib|lib64|opt|root|sbin|srv|sys|usr|var|Applications|Library|System|Users)`
+    + String.raw`|[\\/](?:home|Users)[\\/][^\\/]+|[a-z]:[\\/](?:Windows|Program Files(?: \(x86\))?|ProgramData|Users(?:[\\/][^\\/]+)?))`
+    + String.raw`[\\/]?(?:\.?\*(?:\.\*)?)?$`, "i");
+  // A raw disk device, not /dev/null or another stream.
+  const DISK_DEVICE = /^of=(?:\/dev\/(?!(?:null|zero|stdout|stderr|random|urandom|tty)$|fd\/)|\\\\\.\\)/i;
+  const SECRET_WHY = "it reads or writes a secret file (.env, SSH keys or cloud credentials)";
+  // A secret file's own name, as one part of a path: never .env.example or id_rsa.pub.
+  const SECRET_NAME = /^(?:\.env(?:\.(?!(?:example|sample|template|dist|defaults?)$)[\w.-]+)?|id_(?:rsa|dsa|ecdsa|ed25519)|\.git-credentials|(?:credentials|secrets?)\.(?:json|ya?ml|toml|xml|ini))$/i;
   /**
-   * Whether the safety rules block a request. A tool's arguments arrive as JSON (an MCP tool's
-   * toolInput, the app's own approvals), where "cd app\ngit push" reads "cd app\\ngit push" and
-   * the escape hid git push from the rules' word boundaries; so does a quote before ".env". The
-   * text is checked as given and with its escapes read back and its quotes as separators.
+   * Whether a path names a secret file: .env, an SSH private key (anything in .ssh but public keys
+   * and known_hosts), cloud or Git credentials. A command's argument with a space in it is a path
+   * only when it starts like one ("C:\My Project\.env"), not text that mentions one ("add .env to
+   * .gitignore"); --env-file=.env and user@host:~/.ssh/id_rsa are read after their = or @.
    */
-  function hardDenied(text) {
+  function secretPath(word, { argument = false } = {}) {
+    const text = String(word).replace(/^[^=@<>]*[=@<>]+/, "");
+    if (argument && /\s/.test(text) && !/^(?:[a-z]:[\\/]|[\\/~$%]|\.{1,2}[\\/])/i.test(text)) return false;
+    const parts = text.split(/[\\/]+/);
+    return parts.some((part, at) => SECRET_NAME.test(part)
+      || (/^\.ssh$/i.test(part) && !/^(?:[\w.-]+\.pub|known_hosts)$/i.test(parts[at + 1] ?? ""))
+      || (/^\.aws$/i.test(part) && /^credentials$/i.test(parts[at + 1] ?? ""))
+      || (/^\.docker$/i.test(part) && /^config\.json$/i.test(parts[at + 1] ?? "")));
+  }
+  // A quoted string: "..." (with \" or a PowerShell `" inside) or '...' (with '' inside).
+  const QUOTED = /"(?:[^"\\\x60]|\\(?:"(?![\s;|&)]|$))?|\x60[\s\S])*"|'(?:[^']|'')*'/g;
+  // A command line's tokens: separators, spaces, and the parts a word is made of.
+  const SHELL_TOKEN = new RegExp(String.raw`(?<sep>[;&|()\x60\r\n]+)|(?<space>[^\S\r\n]+)|(?<part>${QUOTED.source}|[^\s;&|()\x60"']+|["'])`, "g");
+  // A heredoc: the line that opens it, its body, and the line that ends it.
+  const HEREDOC = /(<<-?[ \t]*(["']?)([\w.-]+)\2[^\n]*\n)([\s\S]*?)(\r?\n[ \t]*\3[ \t]*(?=\r?\n|\)|$)|$)/g;
+  // An interpreter reading a heredoc as its script: bash <<EOF, python - <<'EOF'.
+  const READS_SCRIPT = /(?:^|[\n\r;&|(\x60])\s*(?:sudo\s+)?(?:[^\s"'|;&()]*[\\/])?(?:(?:ba|z|da|k)?sh|pwsh|powershell|cmd|python[\d.]*|py|node|bun|deno|perl|ruby|php)(?:\.exe)?\b[^\n;&|]*$/i;
+  // A quoted string a shell runs: given to a shell's -c or Invoke-Expression, or a program run by
+  // the call operator (& "C:\Tools\x.exe"), Start-Process or Process.Start.
+  const RUNS_QUOTED = new RegExp(String.raw`(?:(?:^|[^&])&|\b(?:sudo|doas|exec|nohup|xargs|call|start|Start-Process(?:\s+-FilePath)?)\b|${SHELL_RUNS}|\]::Start\()\s*$`, "i");
+  /** A command line as segments (split at ; & | and brackets) of words, each with its quotes taken off. */
+  function shellSegments(line) {
+    const segments = [[]];
+    let word = null;
+    for (const { groups } of line.matchAll(SHELL_TOKEN)) {
+      const { part } = groups;
+      if (part !== undefined) {
+        word = (word ?? "") + (part.length > 1 && /^["']/.test(part) && part.endsWith(part[0]) ? part.slice(1, -1) : part);
+        continue;
+      }
+      if (word !== null) segments.at(-1).push(word);
+      word = null;
+      if (groups.sep !== undefined && segments.at(-1).length) segments.push([]);
+    }
+    if (word !== null) segments.at(-1).push(word);
+    return segments.filter((words) => words.length);
+  }
+  /** The command substitutions in a double-quoted string: "$(git rev-parse HEAD)". */
+  function substitutions(text) {
+    const scripts = [];
+    for (let start = text.indexOf("$("); start >= 0; start = text.indexOf("$(", start + 2)) {
+      let depth = 0, end = start + 1;
+      for (; end < text.length; end++) {
+        if (text[end] === "(") depth++;
+        else if (text[end] === ")" && --depth === 0) break;
+      }
+      scripts.push(text.slice(start + 2, end));
+    }
+    return scripts;
+  }
+  /**
+   * The command lines a request runs: the text itself, with heredoc and here-string bodies blanked
+   * and continued lines joined, then each script it hands to a shell or an interpreter.
+   */
+  function commandLines(text, depth = 0) {
+    const nested = [];
+    let line = String(text).replace(HEREDOC, (whole, head, quote, tag, body, tail, at, source) => {
+      if (depth < 3 && READS_SCRIPT.test(source.slice(Math.max(0, at - 200), at))) nested.push(...commandLines(body, depth + 1));
+      return head + body.replace(/[^\r\n]/g, " ") + tail;
+    });
+    line = line.replace(/@(["'])\r?\n[\s\S]*?\r?\n\1@/g, (whole) => whole.replace(/[^\r\n]/g, " ")).replace(/[\\\x60^]\r?\n/g, " ");
+    if (depth < 3) {
+      for (const { 0: quoted, index } of line.matchAll(QUOTED)) {
+        const inner = quoted.slice(1, -1);
+        if (RUNS_QUOTED.test(line.slice(Math.max(0, index - 200), index))) nested.push(...commandLines(inner, depth + 1));
+        else if (quoted[0] === "\"") for (const script of substitutions(inner)) nested.push(...commandLines(script, depth + 1));
+      }
+    }
+    return [line, ...nested];
+  }
+  /** Which safety rule blocks a command line, as { why, match }, or null. */
+  function hardDenial(text) {
     const value = String(text ?? "");
-    const read = value.replace(/\\(?:u([0-9a-fA-F]{4})|([^u]))/g,
-      (_, hex, char) => (hex ? String.fromCharCode(Number.parseInt(hex, 16)) : JSON_ESCAPES[char] ?? char)).replace(/"/g, " ");
-    return HARD_DENY.some((pattern) => pattern.test(value) || pattern.test(read)) || gitPushRequest(value)?.status === "blocked";
+    if (!value.trim()) return null;
+    for (const line of commandLines(value)) {
+      const blanked = line.replace(QUOTED, (quoted) => quoted[0] + " ".repeat(quoted.length - 2) + quoted[0]);
+      for (const { why, pattern } of COMMAND_RULES) {
+        const found = pattern.exec(blanked);
+        if (found) return { why, match: found[0] };
+      }
+      const segments = shellSegments(line);
+      for (const words of segments) {
+        // Each word as a program name: /bin/rm and C:\Windows\System32\cmd.exe read rm and cmd.
+        const names = words.map((word) => word.replace(/^.*[\\/]/, "").replace(/\.(?:exe|com)$/i, ""));
+        const deletes = names.findIndex((name) => DELETES.test(name));
+        const root = deletes < 0 ? null : words.slice(deletes + 1)
+          .find((word) => /^--no-preserve-root$/i.test(word) || ROOT_FOLDER.test(word.replace(/^-{1,2}[\w-]+[:=](?=.)/, "")));
+        if (root) return { why: DELETES_ROOT_WHY, match: `${words[deletes]} ${root}` };
+        const device = names.some((name) => /^dd$/i.test(name)) && words.find((word) => DISK_DEVICE.test(word));
+        if (device) return { why: "it overwrites a disk device", match: device };
+      }
+      const secret = segments.flat().find((word) => secretPath(word, { argument: true }));
+      if (secret) return { why: SECRET_WHY, match: secret };
+    }
+    return gitPushRequest(value)?.status === "blocked"
+      ? { why: "it pushes to main or master, force-pushes, or deletes on the remote", match: "" } : null;
+  }
+  // A tool argument that is the command it runs (or input typed into one), and one that names a file.
+  const COMMAND_ARGS = ["cmd", "command", "commands", "script", "commandLine", "command_line", "chars", "stdin"];
+  const PATH_ARGS = ["file_path", "filePath", "path", "paths", "notebook_path", "target_file", "cwd", "workdir"];
+  // A patch names its files in its headers: "*** Update File: .env", "+++ b/.env".
+  const PATCH_FILE = /^(?:\*\*\* (?:Add|Update|Delete) File:|\*\*\* Move to:|\+\+\+ (?:b\/)?|--- (?:a\/)?)[ \t]*(\S.*?)[ \t\r]*$/gm;
+  /** A command given as text, or as an argv whose words are quoted again where they hold a space. */
+  const argText = (value) => typeof value === "string" ? value
+    : Array.isArray(value) && value.length && value.every((part) => typeof part === "string")
+      ? value.map((part) => (/[\s"']/.test(part) ? `"${part.replace(/"/g, "\\\"")}"` : part)).join(" ") : "";
+  const argsObject = (raw) => {
+    try { const value = JSON.parse(raw); return value && typeof value === "object" && !Array.isArray(value) ? value : null; } catch { return null; }
+  };
+  /** A tool input's string fields as far as they go, when its JSON was cut short. */
+  function looseArgs(raw) {
+    const args = {};
+    for (const [, key, body] of String(raw).matchAll(/"(\w+)"\s*:\s*"((?:[^"\\]|\\[\s\S])*)/g)) {
+      if (Object.hasOwn(args, key)) continue;
+      try { args[key] = JSON.parse(`"${body.replace(/\\$/, "")}"`); } catch { args[key] = body; }
+    }
+    return args;
+  }
+  /**
+   * What the safety rules read in a request: the command lines it runs and the files it names.
+   * Takes an approval ({ kind, command, path, cwd, toolInput }), a tool's own arguments, or text:
+   * a command line, a tool's arguments as JSON, or a request summary ending "input {...}".
+   */
+  function safetyParts(value) {
+    const commands = [], paths = [];
+    const fromArgs = (args) => {
+      for (const key of COMMAND_ARGS) if (argText(args[key])) commands.push(argText(args[key]));
+      // An argv beside its program: {"command": "git", "args": ["push", "origin", "main"]}.
+      for (const key of ["args", "argv"]) {
+        if (argText(args[key])) commands.push(`${argText(args.command ?? args.cmd ?? args.program ?? args.file)} ${argText(args[key])}`.trim());
+      }
+      for (const key of PATH_ARGS) {
+        if (typeof args[key] === "string") paths.push(args[key]);
+        else if (Array.isArray(args[key])) paths.push(...args[key].filter((entry) => typeof entry === "string"));
+      }
+      for (const key of ["patch", "input", "diff"]) {
+        if (typeof args[key] === "string") for (const [, file] of args[key].matchAll(PATCH_FILE)) paths.push(file);
+      }
+    };
+    if (typeof value === "string") {
+      const input = value.indexOf(" · input {");
+      const raw = input < 0 ? null : value.slice(input + " · input ".length);
+      const args = argsObject(value) ?? (raw === null ? null : argsObject(raw) ?? looseArgs(raw));
+      if (args) fromArgs(args);
+      else commands.push(value);
+    } else if (value && typeof value === "object") {
+      if (["approval_id", "toolInput", "kind"].some((key) => Object.hasOwn(value, key))) {
+        if (argText(value.command)) commands.push(argText(value.command));
+        for (const key of ["path", "cwd"]) if (typeof value[key] === "string" && value[key]) paths.push(value[key]);
+        if (typeof value.toolInput === "string" && value.toolInput) fromArgs(argsObject(value.toolInput) ?? looseArgs(value.toolInput));
+      } else fromArgs(value);
+    }
+    return { commands, paths };
+  }
+  /** Which safety rule blocks a request (an approval, a tool's arguments or a command), as { why, match }, or null. */
+  function requestDenial(value) {
+    const { commands, paths } = safetyParts(value);
+    for (const command of commands) {
+      const denial = hardDenial(command);
+      if (denial) return denial;
+    }
+    const secret = paths.find((file) => secretPath(file));
+    return secret ? { why: SECRET_WHY, match: secret } : null;
+  }
+  /** The safety rules' reason for a denial: the rule and what it matched, never a bare "blocked". */
+  function safetyReason(denial) {
+    const match = publicText(String(denial?.match ?? "").replace(/^[\s;&|({"'\x60]+/, "").replace(/\s+/g, " ").trim(), 80);
+    return `Blocked by the safety rules: ${denial?.why ?? "it raised a block"}${match ? ` (${match})` : ""}`;
   }
   // Routine project commands "Approve for me" runs without asking, as Codex's auto-review does:
   // installing from the project's lockfile, running the project's own scripts, type checks and
@@ -3208,8 +3652,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         && (Object.hasOwn(request, "additionalPermissions") || Object.hasOwn(request, "networkApprovalContext"))
         ? { ...item, permissions: { additionalPermissions: request.additionalPermissions ?? null,
           networkApprovalContext: request.networkApprovalContext ?? null } } : item;
-      const advised = approverAdvice.has(item?.approval_id)
+      const recommended = approverAdvice.has(item?.approval_id)
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
+      // A question this chat answers for the person says when (autoAnswerStale), so its card can
+      // count down; one the person chose to keep has no deadline, and the agent waits on it.
+      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node) ? questionWaitMs() : null;
+      const opened = wait ? Math.min(pendingSeen.get(item.approval_id) ?? now(), Date.parse(item.since ?? "") || Infinity) : NaN;
+      const advised = Number.isFinite(opened) ? { ...recommended, auto_answer_at: opened + wait } : recommended;
       // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
       // is not the person's to answer. The chat popped it up as a question anyway, and the person
       // waited on (or raced) the reviewer; it now shows as being reviewed instead.
@@ -3717,6 +4166,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // for them as a question with no timer (the user's call, 2026-10-20): answering it for them,
     // after 20 s or at once, ran or refused commands nobody had judged.
     const advice = approverAdvice.get(approval.approval_id);
+    // Answered and sent, while AO still lists it for a moment: not the person's. Old enough to be
+    // overdue, it read "waiting for approval · waiting for you for 8m 22s" with Continue (restart
+    // the agent) offered, a second after "Let the model judge" allowed it (seen live 2026-11-09).
+    // One AO still lists well after the answer never reached the agent (its link to AO went, seen
+    // 2026-11-02): that one is the person's again, and Continue is how it goes on.
+    if (advice?.resolved) return !(now() - (advice.resolvedAt ?? -Infinity) < ANSWER_DELIVERY_MS);
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
     // A review that never came (no run loop to start it, a review pass that hung) hid the request as
     // "being reviewed" with nothing to answer it: a DeepSeek chat sat 85 minutes on one PowerShell
@@ -3725,6 +4180,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Longer than every review try with its retry wait, plus the decide pass: an unreviewed request past it is stuck. */
   const REVIEW_DEADLINE_MS = REVIEW_TRIES * (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15_000;
+  /** How long AO may go on listing a request after the reviewer's answer was sent (seconds, live). */
+  const ANSWER_DELIVERY_MS = 60_000;
   /** A review pass still running after this has hung; the next one starts beside it. */
   const SCREEN_PASS_STALE_MS = REVIEW_DEADLINE_MS;
   const reviewStarted = new Map(); // approval_id -> when its first review try began
@@ -3839,8 +4296,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
   async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }, { check, signal, verifyCurrent, sending }) {
     check();
+    // The safety rules read the request's own command, files and tool arguments whole, not the
+    // summary the reviewer reads.
+    const denial = requestDenial(approval);
+    const blocked = Boolean(denial);
     // The command advisor must not decide from a truncated command or permission scope.
-    const blocked = hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput);
     const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
       || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
       || JSON.stringify(approval.permissions ?? {}).length > 800;
@@ -3853,7 +4313,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
     let advice = exhausted
-      ? judges ? { action: "deny", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so it was denied (Let the model judge is on)` }
+      ? judges ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
@@ -3867,7 +4327,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : incomplete && !blocked
       ? { action: "ask", unresolved: true, reason: "The full request can't be reviewed safely. Check the command and its permissions yourself." }
       : blocked
-        ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: "Blocked by the command approver's safety rules" }
+        ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) }
           // A shell line counts only from the agent's own shell tool; the app's exec_command
           // (an MCP tool with a command) keeps going to the reviewer and the app's confirm.
           : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? "")) && routineCommand(approval.command)
@@ -3910,9 +4370,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return `The reviewer couldn't answer yet, trying again: ${why}`;
       }
       // "Let the model judge" leaves nothing to the person: a reviewer that never answered denies,
-      // in doubt, and the agent hears why and goes another way.
+      // in doubt. The agent hears that the request was not judged, so it tries again rather than
+      // giving up on it: told "try a safer way", agents dropped harmless steps for good.
       advice = judges
-        ? { action: "deny", reason: `The command reviewer couldn't answer after ${tries} tries, so it was denied (Let the model judge is on): ${why}` }
+        ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
     reviewFailures.delete(approval.approval_id);
@@ -3928,7 +4389,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // touches the other requests; this one just goes to the person.
     if (approval.source === "ao" && approver.settings?.auto_decide === true && advice.action !== "ask") {
       const decision = aoDecision(approval, advice.action === "allow");
-      const why = advice.action === "deny" ? reviewerDenial(advice.reason) : "";
+      const why = advice.action === "deny" ? reviewerDenial(advice.reason, advice) : "";
       if (!decision) {
         keepAdvice({ action: "ask", unresolved: true, unsent: advice.action,
           reason: `The reviewer's decision is not offered by this request, so choose an answer yourself. It said ${advice.action}: ${advice.reason}` });
@@ -3939,7 +4400,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const sent = await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false);
       check();
       if (sent) {
-        approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+        approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
         return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
@@ -3956,7 +4417,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       check();
       if (sent) {
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
-        approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+        approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
         return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
       keepAdvice({ action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
@@ -3968,20 +4429,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // "Approve for me" and "Full access" never leave the agent stuck on a request nobody answers: one
   // still waiting after AUTO_ANSWER_MS is answered for the person. A command or tool request is
   // allowed once (one the safety rules block is denied), a plan is accepted with edits allowed,
-  // and a question gets its recommended answer (the option marked "Recommended", else the first).
+  // and a question gets its recommended answer (the option marked "Recommended", else the first)
+  // after the person's own "Agent questions" wait (questionWaitMs; none when they chose to keep it).
   // "Ask for approval" keeps waiting for the person.
   const AUTO_ANSWER_MS = 20_000;
-  const NO_ANSWER_TEXT = "No answer from the user within 20 seconds; use your best judgment and continue.";
+  /** How long a question waits for the person before it is answered for them; null: until they answer. */
+  const questionWaitMs = () => {
+    const seconds = chatPreferences.get().questionTimeout;
+    return seconds > 0 ? seconds * 1000 : null;
+  };
+  const noAnswerText = () => `No answer from the user within ${Math.round((questionWaitMs() ?? AUTO_ANSWER_MS) / 1000)} seconds; use your best judgment and continue.`;
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
   const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
   /**
    * What an agent reads as the result of a call the reviewer or "Approve for me" denied. Claude Code
    * otherwise reports "User refused permission to run tool", and the agent took it as the person's
-   * own refusal and guessed at why.
+   * own refusal and guessed at why. A request the reviewer could not judge at all (it never
+   * answered, with "Let the model judge" on) says so, and that running it again is fine.
    */
-  const reviewerDenial = (reason) =>
-    `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
-    + "Try a safer way to reach the goal, or ask the user if only this will do.";
+  const reviewerDenial = (reason, { unavailable = false } = {}) => unavailable
+    ? `Not run, but not refused either: the command reviewer ("Approve for me") could not judge this request, and the user did not refuse it`
+      + ` (${String(reason || "the reviewer did not answer").replace(/\.$/, "")}). `
+      + "Run the same request again in a minute; if it is still not judged, tell the user the command reviewer is unavailable."
+    : `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
+      + "Try a safer way to reach the goal, or ask the user if only this will do.";
   const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
@@ -3993,7 +4464,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (field.type === "choice" && pick) content[field.key] = pick.value;
       else if (field.type === "multi" && pick) content[field.key] = [pick.value];
       else if (field.type === "boolean") content[field.key] = true;
-      else if (field.type === "text") content[field.key] = NO_ANSWER_TEXT;
+      else if (field.type === "text") content[field.key] = noAnswerText();
     }
     return { action: "accept", content };
   }
@@ -4018,8 +4489,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const approver = cardApprover(mission, node);
     if (approver && (!advice || (approver.settings?.auto_decide === true && advice.action !== "ask"))) return "wait";
     const request = describeRequest(approval);
-    if (hardDenied(request) || hardDenied(approval.command) || hardDenied(approval.toolInput)
-      || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
+    if (requestDenial(approval) || advice?.action === "deny" || advice?.unsent === "deny") return "deny";
     if (advice?.action === "allow") return "allow";
     // Publication never becomes an allow merely because nobody answered its timer.
     if (gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)) return "wait";
@@ -4041,7 +4511,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!answersForPerson(node) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
-        // A question or a plan is the person's: it waits AUTO_ANSWER_MS for them. A command or tool
+        // A question or a plan is the person's: a plan waits AUTO_ANSWER_MS for them, a question the
+        // person's "Agent questions" wait, or for good when they chose to keep it (the agent stays
+        // paused on it until they answer). A command or tool
         // request the card's reviewer screens is answered as soon as that review is in ("wait"
         // until then): the wait only held the agent up. One the reviewer left at "ask" is never
         // answered here: it waits for the person, with no timer (approvalNeedsPerson). A team whose
@@ -4050,34 +4522,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const personal = ["question", "plan"].includes(approval.kind);
         const reviewedHere = !personal && Boolean(cardApprover(mission, node));
         if (reviewedHere && approverAdvice.get(id)?.action === "ask") continue;
-        if (!reviewedHere && at - opened < AUTO_ANSWER_MS) continue;
+        const wait = approval.kind === "question" ? questionWaitMs() : AUTO_ANSWER_MS;
+        if (wait === null) continue;
+        if (!reviewedHere && at - opened < wait) continue;
         const verdict = personal ? null : autoVerdict(mission, node, approval);
         if (verdict === "wait") continue;
         autoAnswered.set(id, verdict);
         if (autoAnswered.size > 500) autoAnswered.delete(autoAnswered.keys().next().value);
+        // A denial names its rule, or the reviewer's reason, never just "blocked".
+        const advice = approverAdvice.get(id);
+        const denial = verdict === "deny" ? requestDenial(approval) : null;
+        const why = denial ? safetyReason(denial) : advice?.reason || "the command reviewer raised a block";
         try {
           if (approval.source === "ao" && approval.kind === "question") {
             const answer = recommendedAnswer(approval);
             await harnessService().resolveInput(approval.thread_id, id, answer.action, answer.content)
               .catch(() => harnessService().resolveInput(approval.thread_id, id, "decline"));
-            note = "Nobody answered the agent's question in 20 seconds, so it got the recommended answer";
+            note = `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
           } else if (approval.source === "ao") {
             const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
             if (!decision) continue;
-            const advice = approverAdvice.get(id);
-            await harnessService().resolveApproval(approval.thread_id, id, decision,
-              blocked ? reviewerDenial(advice?.action === "deny" ? advice.reason : "its safety rules block this request, or it is too long to review whole") : "");
-            note = blocked ? "Denied: blocked by the command approver's safety rules or reviewer"
+            await harnessService().resolveApproval(approval.thread_id, id, decision, blocked ? reviewerDenial(why, denial ? {} : advice) : "");
+            note = blocked ? `Denied: ${publicText(why, 160)}`
               : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Approve for me allowed the request once";
           } else if (approval.kind === "command") {
             const request = describeRequest(approval);
             const allow = verdict === "allow";
             await requestHeadless("/api/v1/ao/harness/approval", {
               workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: id, allow, confirm: false,
-              approver_reason: allow ? "Approve for me: the review raised no block" : "Blocked by the command approver's safety rules or reviewer", approver_request: request,
+              approver_reason: allow ? "Approve for me: the review raised no block" : why, approver_request: request,
             });
-            note = allow ? "Approve for me allowed the command once" : "Denied: blocked by the command approver's safety rules or reviewer";
+            note = allow ? "Approve for me allowed the command once" : `Denied: ${publicText(why, 160)}`;
           }
           logger?.info?.("ao.auto_answered", { approval_id: id, actor: "timeout_policy", decision: verdict ?? approval.kind,
             kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
@@ -4237,10 +4713,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { retry: true, attempt, name };
   }
   /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
-  function chatAutoRetry({ enabled } = {}) {
+  async function chatAutoRetry({ enabled } = {}) {
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
-      chatPreferences.set({ autoRetry: enabled });
+      await chatPreferences.set({ autoRetry: enabled });
     }
     return { ok: true, autoRetry: chatPreferences.get().autoRetry };
   }
@@ -4249,21 +4725,45 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * waiting me to judge, add a setting that allow the model to judge it … until end and it can
    * safety kill the goal". Off by default: on 2026-10-20 they wanted unjudged requests to wait.
    */
-  function chatModelJudges({ enabled } = {}) {
+  async function chatModelJudges({ enabled } = {}) {
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
-      chatPreferences.set({ modelJudges: enabled });
+      // In effect at once; the save to disk is awaited after.
+      const saving = chatPreferences.set({ modelJudges: enabled });
       // Turned on beside a request already waiting for the person: the reviewer's "ask" is dropped,
       // so the next screening pass judges it. An answer that could not be sent stays the person's.
-      if (enabled) for (const [id, advice] of approverAdvice) if (advice.action === "ask" && !advice.unsent) approverAdvice.delete(id);
+      // Its review starts now, with the whole budget: counted from its first review, a request that
+      // had waited 8 minutes was overdue at once, so it stayed "waiting for approval" while judged.
+      if (enabled) {
+        for (const [id, advice] of approverAdvice) {
+          if (advice.action !== "ask" || advice.unsent) continue;
+          approverAdvice.delete(id);
+          reviewStarted.set(id, now());
+        }
+      }
+      await saving;
     }
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
+  }
+  /**
+   * chat_question_timeout: reads "Agent questions", or sets it with `seconds`: how long a question
+   * waits for the person before it gets its recommended answer, 0 to keep it (and the agent)
+   * waiting until they answer. Only "Approve for me" and "Full access" chats answer for the person.
+   */
+  async function chatQuestionTimeout({ seconds } = {}) {
+    if (seconds !== undefined) {
+      if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > QUESTION_TIMEOUT_MAX_SECONDS) {
+        throw new Error("Choose 0 (wait for me) or a whole number of seconds up to a day");
+      }
+      await chatPreferences.set({ questionTimeout: seconds });
+    }
+    return { ok: true, seconds: chatPreferences.get().questionTimeout };
   }
   /**
    * chat_auto_compact: compatibility storage for older callers, not native model-token control.
    * Record rollover is required only at the board's hard byte limit, regardless of these values.
    */
-  function chatAutoCompact({ enabled, percent } = {}) {
+  async function chatAutoCompact({ enabled, percent } = {}) {
     const change = {};
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
@@ -4273,7 +4773,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!Number.isSafeInteger(percent) || percent < AUTO_COMPACT_MIN_PERCENT || percent > 100) throw new Error(`Choose ${AUTO_COMPACT_MIN_PERCENT}% to 100%`);
       change.autoCompactPercent = percent;
     }
-    if (Object.keys(change).length) chatPreferences.set(change);
+    if (Object.keys(change).length) await chatPreferences.set(change);
     const saved = chatPreferences.get();
     return { ok: true, autoCompact: saved.autoCompact, percent: saved.autoCompactPercent, limit: BOARD_TEXT_BYTES };
   }
@@ -5078,19 +5578,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  // The run is created against the board revision read just before. Any board change in between
+  // (another chat starting, a goal round, an archive) made the runtime refuse it with "AO board
+  // revision or initial state changed", and the message was lost (2026-11-09, twice in an hour).
+  // A refused create makes nothing, so it reads the board again and retries, a few times.
+  const BOARD_RACE = /AO board revision or initial state changed/;
+  const BOARD_RACE_ATTEMPTS = 4;
   async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}) {
-    const current = await board({ workspaceId: id });
-    const runId = randomUUID();
-    checkCurrent(true);
-    const created = await updateRun({ workspaceId: id, change: {
-      operation: "create_from_team", run_id: runId, task_id: task,
-      expected_board_revision: current.revision,
-      ...(selection.executionMode === "single" ? { execution_mode: "single", single_route: selection.singleRoute, worker_limit: 1 }
-        : { team_revision: team.revision, team_id: team.id,
-          worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
-          ...(selection.executionMode === "team" ? { execution_mode: "team" } : {}) }),
-    } });
-    return includeRun ? { runId, run: created.run } : runId;
+    for (let attempt = 1; ; attempt++) {
+      const current = await board({ workspaceId: id });
+      const runId = randomUUID();
+      checkCurrent(true);
+      try {
+        const created = await updateRun({ workspaceId: id, change: {
+          operation: "create_from_team", run_id: runId, task_id: task,
+          expected_board_revision: current.revision,
+          ...(selection.executionMode === "single" ? { execution_mode: "single", single_route: selection.singleRoute, worker_limit: 1 }
+            : { team_revision: team.revision, team_id: team.id,
+              worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
+              ...(selection.executionMode === "team" ? { execution_mode: "team" } : {}) }),
+        } });
+        return includeRun ? { runId, run: created.run } : runId;
+      } catch (error) {
+        if (attempt >= BOARD_RACE_ATTEMPTS || !BOARD_RACE.test(String(error?.message ?? ""))) throw error;
+        logger?.warn?.("ao.run_create_board_race", { attempt });
+        await new Promise((resolve) => setTimer(resolve, 100 * attempt));
+      }
+    }
   }
 
   // Restart = a fresh run of the same task with the current team; the old run stays in history.
@@ -5258,20 +5772,62 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // compacted, and every follow-up after was refused ("Text is empty, oversized or contains
   // unsupported controls", 51 times in four seconds on 2026-10-22).
   const BOARD_TEXT_BYTES = 8192;
+  // The most one message may be, in UTF-8 bytes: room is left for its "Follow-up (…)" marker and a
+  // rolled-over record's head, so any message within it fits the record however full it was. The
+  // composer checks the same number (ao-chat.ts CHAT_MESSAGE_BYTES) before it sends. A follow-up of
+  // 7.6 to 8 KB passed the old 8,192 check and then failed the rollover, the chat wedged.
+  const CHAT_MESSAGE_BYTES = BOARD_TEXT_BYTES - 256;
+  const tooLong = (text) => `This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${CHAT_MESSAGE_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`;
   const boardText = text => text.replace(/\r\n?/g, "\n").replace(/[\x7F-\x9F]/g, "");
+  // One message steered in twice: the chat's send was refused ("still running", a goal's next round
+  // had just started), the message went to the chat's queue, and the queue and a direct steer both
+  // put it into the same turn 0.6 s apart (2026-11-08: "unpause it" twice in the agent's turn and
+  // twice in the chat). A steer of the same text into the same chat waits for one already on its way
+  // and takes its answer, and one that turn already took within STEER_REPEAT_MS is not sent again.
+  const STEER_REPEAT_MS = 30_000;
+  const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
+  function chatSteer(input = {}) {
+    if (input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input);
+    const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
+    const earlier = steersInFlight.get(key);
+    if (earlier) {
+      return earlier.catch(() => null).then((answer) => answer?.steered === true ? { ...answer, duplicate: true } : steerTracked(key, input));
+    }
+    return steerTracked(key, input);
+  }
+  // The steer itself, as its caller's answer: no wait is added in front of it (the chat's note reads
+  // the message count while the caller carries on).
+  function steerTracked(key, input) {
+    const mine = chatSteerOnce(input);
+    steersInFlight.set(key, mine);
+    const forget = () => { if (steersInFlight.get(key) === mine) steersInFlight.delete(key); };
+    mine.then(forget, forget);
+    return mine;
+  }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteer({ workspaceId, taskId, message, restart = false, goal } = {}) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
     const text = objective ? goalMessage(objective, 1) : boardText(clean(message, 8192, false));
     if (!text.trim()) throw new Error("Type a message to steer the agent");
+    // A steer that cannot go in now is sent as the next turn: it must fit a chat message as well.
+    if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const saved = await runs({ workspaceId: id });
     const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
     const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
       && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
+    // This turn already took the same message moments ago: it is not handed over (or noted) again,
+    // unless the agent has asked a question since that what was typed answers (below).
+    const repeat = !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
+      .some(steer => steer.taskId === task && steer.message === text && now() - steer.at < STEER_REPEAT_MS);
+    const skipRepeat = () => {
+      logger?.info?.("ao.steer_repeat_skipped", { workspaceId: id, taskId: task });
+      return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id };
+    };
+    if (repeat && !externalAgent(card)) return skipRepeat();
     // Native Codex (WebGPT and the shared CPA pool) steers its running turn through Codex's own
     // turn/steer, as the Codex app does: the message joins the turn at the agent's next step. Its
     // chats queued every message until the turn ended ("Running. New messages send when it finishes").
@@ -5297,6 +5853,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
+    const question = !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
+    const reply = question ? typedAnswer(question, text) : null;
+    if (repeat && !reply) return skipRepeat();
     // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
     // (seen 2026-10-21: a steer into a turn waiting on an approval held the session's dispatch lock,
     // and every later steer, approval answer and stop hung for 180 s). The message waits instead.
@@ -5325,6 +5884,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reason: "The agent's process had stopped. Your message starts its next turn." };
     }
     const asking =(state) => Boolean(state?.approvals?.length || state?.needsInput);
+    // The agent asked the person something and waits on it: what they typed is their answer, as in
+    // Claude Code, where a reply typed under its question answers it. The user (2026-11-08): "fix the
+    // steer message always in queued instead auto sending to agent"; a steer typed under a question
+    // waited 30 s here, then sat in the queue until the question went (answered for them, or never).
+    if (reply) {
+      await harnessService().resolveInput(card.receipt.thread_id, question.approval_id, reply.action, reply.content);
+      rememberAnswer(question.approval_id, questionText(question), reply.action === "accept" ? questionAnswerText(question, reply.content) : "Skipped");
+      logger?.info?.("ao.steer_answered_question", { action: reply.action, fields: (question.fields ?? []).length });
+      return { ok: true, steered: true, answered: true, runId: run.id, nodeId: card.id };
+    }
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
     // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
@@ -5432,7 +6001,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const stalledNote = stalled?.note;
     if (stalled) {
       invalidateGoal(stalled);
-      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0 });
     }
     const still = goalGuard(id, task, stalled);
     try {
@@ -5461,7 +6030,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind } = {}, checkCurrent = () => {}) {
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -5476,13 +6045,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!text.trim()) throw new Error("Type a message to start the chat");
     if (rewind !== undefined && (!taskId || !rewind || !Number.isSafeInteger(rewind.index) || rewind.index < 0
       || typeof rewind.description !== "string" || goal !== undefined)) throw new Error("Choose a message to rewind in this chat");
-    // Compacting the chat cannot make room for one message over the board's byte limit by itself.
-    if (utf8Bytes(text) > BOARD_TEXT_BYTES) {
-      throw new Error(`This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${BOARD_TEXT_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`);
-    }
+    // Rolling the record over cannot make room for one message over the budget by itself.
+    if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const selectedExecutable = codexExecutable(executable);
     const saved = await runs({ workspaceId: id });
     checkCurrent();
+    if (afterRunId !== undefined) {
+      const parent = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (parent?.id !== afterRunId) throw new Error("A newer turn superseded this background continuation");
+      if (parent.cancelled || parent.paused || taskLifecycle(saved, taskId).visibility !== "active") {
+        throw new Error("This background continuation's parent was stopped or is unavailable");
+      }
+    }
     // The runs before this send, to tell whether its own run was made (withdrawFollowUp).
     const runsBefore = new Set(saved.runs.map(run => run.id));
     if (executionMode !== undefined && !["single", "team"].includes(executionMode)) throw new Error("Choose single or team execution");
@@ -5572,31 +6146,38 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
         }
         discarded = [...hidden];
+        const rewound = rewind.index === 0 ? "" : `\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+        const kept = rewind.index === 0 ? "" : before.slice(0, marks[rewind.index - 1].index);
+        // The messages kept ahead of the rewound one roll over as a send's would, when they and it
+        // no longer fit ("This rewind exceeds the chat size limit" left the message unsendable).
         rewoundDescription = rewind.index === 0 ? text
-          : `${before.slice(0, marks[rewind.index - 1].index)}\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+          : utf8Bytes(kept + rewound) <= BOARD_TEXT_BYTES ? `${kept}${rewound}`
+            : `${rolledRecord(kept, utf8Bytes(rewound), new Date(now()))}${rewound}`;
         rewindBefore = chatEdits.get(id, task);
       }
       const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
       const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
       let description = rewoundDescription ?? extended();
-      if (rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This rewind exceeds the chat size limit; shorten the conversation first");
       if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
         // This is bounded task-record storage, not the agent's token context. Only roll it over
         // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
         // nor strand a chat. Native /compact and model-token auto-compaction are independent.
+        // The rollover always makes room for a message within CHAT_MESSAGE_BYTES (compactChat).
         const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
-        let compacted;
         try {
-          compacted = await compactChat({ workspaceId: id, taskId: task, reserve });
+          await compactChat({ workspaceId: id, taskId: task, reserve });
         } catch (error) {
-          throw new Error(`This chat's task record is full and couldn't be rolled over: ${String(error?.message || error).slice(0, 200)}`);
+          throw new Error(`Couldn't make room in this chat's record: ${String(error?.message || error).slice(0, 200)}`);
         }
-        if (compacted.compacted) {
-          detail = await board({ workspaceId: id, taskId: task });
-          if (!detail.task) throw new Error("This chat's task no longer exists");
-          description = extended();
-        }
-        if (utf8Bytes(description) > BOARD_TEXT_BYTES) throw new Error("This chat's task record is full even after rollover. Shorten the message or start a new chat.");
+        detail = await board({ workspaceId: id, taskId: task });
+        if (!detail.task) throw new Error("This chat's task no longer exists");
+        description = extended();
+      }
+      // Unreachable by construction (the property test in chat-record-rollover.test.cjs); kept so a
+      // future change to the budget fails loudly here rather than at the board.
+      if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
+        logger?.error?.("ao.record_over_budget", { bytes: utf8Bytes(description), message: utf8Bytes(text), rewind: Boolean(rewind) });
+        throw new Error("This chat's record couldn't hold the message. Start a new chat and send it there.");
       }
       const saidBefore = String(detail.task.description || "");
       checkCurrent();
@@ -5772,7 +6353,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const selection = goal.team?.id ? { teamId: goal.team.id } : followUpSelection(previous, goal.route);
     const message = goalMessage(goal.objective, round, goal.feedback);
     // The reason it goes on stays readable (feedback) while the round runs; the note is for states.
-    goals.update(id, task, { round, note: "", lastMessage: message });
+    goals.update(id, task, { round, note: "", lastMessage: message, roundStartedAt: now() });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
       const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true }, (accepting = false) => {
@@ -5844,7 +6425,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!candidates.length) throw new Error("CPA has no model to check the goal with");
     // Judged from what the round was actually sent: after an edit the objective differs.
     const message = goal.lastMessage || goalMessage(goal.objective, goal.round, goal.feedback);
-    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)), { judge, ended });
+    // The previous round's verdict, so the evaluator can tell a round that only repeated it.
+    const previous = goal.round > 1 ? publicText(goal.feedback || "", 1500) : "";
+    const prompt = goalCheckPrompt(goal.objective, roundTranscript(message, roundAnswers(mission)), { judge, ended, previous });
     let failure = null;
     for (const model of candidates) {
       try {
@@ -5874,6 +6457,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // How many failed rounds (or failed checks) in a row a goal carries on through before it stalls,
   // and the pauses between: a round that failed waits 30 s, then 60 s; a check waits 2 minutes.
   const GOAL_FAILED_ROUNDS = 3;
+  // A round judged not met that ended this soon after it started is "quick"; the pause before the
+  // next round after N quick ones in a row is GOAL_QUICK_PAUSES_MS[N] (none for the first), and
+  // GOAL_QUICK_STALL in a row stall the goal. A longer round resets the count.
+  const GOAL_QUICK_ROUND_MS = 2 * 60_000;
+  const GOAL_QUICK_PAUSES_MS = [0, 0, 30_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
+  const GOAL_QUICK_STALL = 8;
   const GOAL_RETRY_DELAY_MS = 30_000;
   const GOAL_CHECK_RETRY_MS = 2 * 60_000;
   const goalTimers = new Map();
@@ -6155,16 +6744,46 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return;
       }
       if (!still()) return;
+      // Rounds in a row the evaluator saw no progress in: the agent only restated, or stayed blocked.
+      const stuckRounds = check.progress ? 0 : (goal.stuckRounds ?? 0) + 1;
       goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now(), checkFailures: 0,
         failedRounds: outcome === "failed" ? (goal.failedRounds ?? 0) + 1 : 0,
-        agentBlockedRounds: goal.agentBlockedRunId === runId ? (goal.agentBlockedRounds ?? 0) : 0, note: "", retry: null });
+        agentBlockedRounds: goal.agentBlockedRunId === runId ? (goal.agentBlockedRounds ?? 0) : 0, stuckRounds, note: "", retry: null });
       if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
       // Ended by the evaluator ("Let the model judge"): going on was unsafe or pointless. Stalled, as
       // Codex's blocked: nothing more runs, and the person can still resume it.
       if (check.stop) { goals.update(workspaceId, task, { status: "stalled", note: `Ended by the goal checker: ${check.reason}`, feedback: "" }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
+      // GOAL_FAILED_ROUNDS rounds in a row without progress: the agent is stuck on something it cannot
+      // change, and another round would only report it again (seen live: 480 rounds over 14 days on a
+      // refused approval and an unavailable account). Stalled, as Codex's blocked, whether or not the
+      // model judges: the reason says what blocks it, and resume (or the person's next message, which
+      // may clear it) carries on with this verdict as the agent's instruction.
+      if (stuckRounds >= GOAL_FAILED_ROUNDS) {
+        goals.update(workspaceId, task, { status: "stalled",
+          note: `No progress in ${stuckRounds} rounds in a row: ${check.reason} Clear what blocks it, then /goal resume` });
+        return;
+      }
       if (goal.rounds > 0 && goal.round >= goal.rounds) {
         goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.round} rounds; resume allows ${goal.rounds} more` });
+        return;
+      }
+      // Rounds that end at once without meeting the goal (the agent only says it is blocked, without
+      // update_goal) wait longer each time, then stall the goal: a goal chat ran a round every ~20 s
+      // for hours, 150+ rounds of "the account is on hold", until CPA refused its requests (2026-11-08).
+      const quickRounds = Number.isFinite(goal.roundStartedAt) && now() - goal.roundStartedAt < GOAL_QUICK_ROUND_MS ? (goal.quickRounds ?? 0) + 1 : 0;
+      goals.update(workspaceId, task, { quickRounds });
+      if (quickRounds >= GOAL_QUICK_STALL) {
+        goals.update(workspaceId, task, { status: "stalled", quickRounds: 0,
+          note: `${quickRounds} rounds in a row ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal; check what the agent says it needs, then /goal resume` });
+        logger?.warn?.("ao.goal_quick_rounds_stalled", { task: task.slice(0, 8), round: goal.round, quickRounds });
+        return;
+      }
+      const pause = GOAL_QUICK_PAUSES_MS[Math.min(quickRounds, GOAL_QUICK_PAUSES_MS.length - 1)];
+      if (pause > 0) {
+        goals.update(workspaceId, task, { note: `Round ${goal.round} ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal (${quickRounds} in a row); the next round starts in ${pause < 60_000 ? `${pause / 1000} s` : `${pause / 60_000} min`}` });
+        logger?.info?.("ao.goal_round_paced", { task: task.slice(0, 8), round: goal.round, quickRounds, pauseMs: pause });
+        goalLater(workspaceId, task, pause, runId);
         return;
       }
       await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
@@ -6257,7 +6876,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Edit goal: a new objective for the rounds still to come; the running round is left alone. An
     // achieved or stopped goal waits paused with the new objective, so Resume pursues it.
     if (action === "edit") {
-      const edited = { objective: cleanObjective(objective), evaluatedRunId: "" };
+      // A new condition starts its own count of rounds without progress.
+      const edited = { objective: cleanObjective(objective), evaluatedRunId: "", stuckRounds: 0 };
       if (goal.status !== "active") Object.assign(edited, { status: "paused", note: "Edited; resume to pursue it" });
       invalidateGoal(goal);
       return { ok: true, goal: goals.update(id, task, edited) };
@@ -6268,7 +6888,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Resuming carries on now: a pause still waiting is dropped.
     dropGoalRetry(id, task);
     invalidateGoal(goal);
-    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "" });
+    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0 });
     const still = goalGuard(id, task, goal);
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
@@ -6493,6 +7113,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (wakeups.move(workspaceId, to, taskId)) armWakeup(to, taskId);
     disarmLoop(workspaceId, taskId);
     if (loops.move(workspaceId, to, taskId)) armLoop(to, taskId);
+    disarmChatSchedule(workspaceId, taskId);
+    if (schedules.move(workspaceId, to, taskId)) armChatSchedule(to, taskId);
     chatQueue.move(workspaceId, to, taskId);
     // The agent's session works in the old folder: the next turn starts afresh in the new one.
     chatEdits.restore(to, taskId, { ...(chatEdits.get(workspaceId, taskId) ?? { deletedRuns: [] }), fresh: true });
@@ -6507,6 +7129,98 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       onRunState?.({ workspaceId: to, runId, status: "moved", moved: { from: workspaceId, to, taskId } });
     } catch { /* observational only */ }
     return to;
+  }
+
+  // ---- Command completion continuations (watch_command) ----
+
+  const commandWatchTickets = new Map();
+  const commandWatchTimers = new Map();
+  const commandWatchSending = new Set();
+  function settleCommandWatch(ticket, delivery) {
+    if (commandWatchTickets.get(ticket.id) !== ticket) return;
+    commandWatchTickets.delete(ticket.id);
+    ticket.resolve?.(delivery);
+  }
+  function armCommandWatches(workspaceId, taskId, delay = 1) {
+    const key = JSON.stringify([workspaceId, taskId]);
+    if (wakeupsDisposed || commandWatchTimers.has(key) && delay > 1) return;
+    if (commandWatchTimers.has(key)) clearTimer(commandWatchTimers.get(key));
+    const timer = setTimer(() => {
+      commandWatchTimers.delete(key);
+      void fireCommandWatches(workspaceId, taskId);
+    }, delay);
+    timer?.unref?.();
+    commandWatchTimers.set(key, timer);
+  }
+  async function fireCommandWatches(workspaceId, taskId) {
+    const key = JSON.stringify([workspaceId, taskId]);
+    if (wakeupsDisposed || commandWatchSending.has(key)) return;
+    const ticket = [...commandWatchTickets.values()].find(value => value.workspaceId === workspaceId && value.taskId === taskId && value.outcome);
+    if (!ticket) return;
+    const current = () => !wakeupsDisposed && commandWatchTickets.get(ticket.id) === ticket && ticket.isCurrent();
+    let attempted = false;
+    commandWatchSending.add(key);
+    try {
+      runReads.delete(JSON.stringify([workspaceId, ""]));
+      const saved = await runs({ workspaceId });
+      if (!current()) { settleCommandWatch(ticket, "dropped"); return; }
+      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (latest?.id !== ticket.runId || latest.cancelled || latest.paused || backgroundRuns.get(runKey(workspaceId, latest.id))?.stopped
+        || sessionStops.has(ticket.session) || taskLifecycle(saved, taskId).visibility !== "active") {
+        settleCommandWatch(ticket, "dropped"); return;
+      }
+      if (chatWorking(workspaceId, taskId, saved.runs)) { armCommandWatches(workspaceId, taskId, 60_000); return; }
+      const message = ["A registered background command watch ended. This is a tool notification, not a new user request or approval.",
+        `Command: ${ticket.commandId}`, `Your next-step note: ${ticket.reason}`, `Observed outcome: ${JSON.stringify(ticket.outcome)}`,
+        "Continue that pending next step now. Read the command's output and verify the actual result before reporting success. "
+          + "A watch deadline or observation failure is not command success or proof it stopped. Do not replay the command merely because its outcome is unknown. "
+          + "If more waiting is needed, register watch_command or schedule_wakeup and check that registration succeeded; a promise alone schedules nothing."].join("\n\n");
+      attempted = true;
+      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, () => {
+        if (!current()) throw new Error("This command watch was cancelled");
+      });
+      if (result?.ok === false || !result?.runId) { settleCommandWatch(ticket, "failed"); return; }
+      const previousRunId = ticket.runId;
+      for (const other of commandWatchTickets.values()) {
+        if (other.workspaceId === workspaceId && other.taskId === taskId && other.runId === previousRunId) other.runId = result.runId;
+      }
+      settleCommandWatch(ticket, "delivered");
+    } catch {
+      if (!current()) settleCommandWatch(ticket, "dropped");
+      else if (attempted) settleCommandWatch(ticket, "unknown");
+      else if (++ticket.failures >= 3) settleCommandWatch(ticket, "failed");
+      else armCommandWatches(workspaceId, taskId, 60_000);
+    } finally {
+      commandWatchSending.delete(key);
+      if (!wakeupsDisposed && [...commandWatchTickets.values()].some(value => value.workspaceId === workspaceId && value.taskId === taskId && value.outcome)) {
+        armCommandWatches(workspaceId, taskId, 60_000);
+      }
+    }
+  }
+  async function registerCommandWatch({ workspaceId, session, commandId, reason, isCurrent = () => true } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    const command = clean(commandId, 128), note = publicText(clean(reason, 500, false), 500);
+    if (!note.trim() || wakeupsDisposed || !isCurrent()) throw new Error("This command watch is unavailable");
+    runReads.delete(JSON.stringify([id, ""]));
+    const { run, latest } = await sessionChat(id, thread, "watch a command");
+    if (latest?.id !== run.id || run.cancelled || run.paused || sessionStops.has(thread) || !isCurrent() || wakeupsDisposed) {
+      throw new Error("A newer turn or Stop superseded this command watch");
+    }
+    if (commandWatchTickets.size >= 128) throw new Error("Too many pending command watches");
+    const ticket = { id: randomUUID(), workspaceId: id, taskId: run.project_id, runId: run.id, session: thread,
+      commandId: command, reason: note, isCurrent, failures: 0 };
+    commandWatchTickets.set(ticket.id, ticket);
+    return {
+      complete(outcome) {
+        if (commandWatchTickets.get(ticket.id) !== ticket || wakeupsDisposed) return Promise.resolve("dropped");
+        if (ticket.pending) return ticket.pending;
+        ticket.outcome = outcome;
+        ticket.pending = new Promise(resolve => { ticket.resolve = resolve; });
+        armCommandWatches(id, run.project_id);
+        return ticket.pending;
+      },
+      cancel() { settleCommandWatch(ticket, "dropped"); },
+    };
   }
 
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
@@ -6594,11 +7308,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   // When a chat's turn settles, a wake-up that came due while it ran fires now.
   async function wakeupAfterRun(workspaceId, runId) {
+    for (const ticket of commandWatchTickets.values()) {
+      if (ticket.workspaceId === workspaceId && ticket.runId === runId && ticket.outcome) armCommandWatches(workspaceId, ticket.taskId);
+    }
     const due = Object.values(wakeups.forWorkspace(workspaceId)).filter(wakeup => wakeup.due || wakeup.dueAt <= now());
     for (const wakeup of due) {
       // A self-paced /loop's round also waits out a turn the user started meanwhile.
       if (wakeup.runId === runId || wakeup.loop) await fireWakeup(workspaceId, wakeup.taskId, wakeup.id);
     }
+  }
+  /**
+   * The model a chat's AO `session` runs on now ("cpa/gpt-6.1-sol"), for the computer-control pill;
+   * the chat's newest run first, so a model switched mid-chat shows. Null when the session is not a chat's.
+   */
+  async function sessionModel({ workspaceId, session } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    let found;
+    try { found = await sessionChat(id, thread, "name its model"); } catch { return null; }
+    const holds = node => node.receipt?.thread_id === thread || (node.history || []).some(entry => entry?.thread_id === thread);
+    for (const run of [found.latest, found.run]) {
+      const model = (run?.nodes || []).find(holds)?.route?.model;
+      if (typeof model === "string" && model) return model;
+    }
+    return null;
   }
   /** The chat whose run holds an AO session: that newest run, and the chat's newest run. */
   async function sessionChat(id, thread, what) {
@@ -6978,6 +7710,106 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  // ---- /schedule (chat-schedules.cjs) ----
+
+  // A chat's schedule has its own timer. One that comes due while the chat works is sent when that
+  // turn settles (chatScheduleAfterRun). A timer longer than setTimeout allows (24.8 days) fires
+  // early and is armed again for the rest.
+  const chatScheduleTimers = new Map();
+  const chatScheduleFailures = new Map();
+  const scheduling = new Set();
+  function disarmChatSchedule(workspaceId, taskId) {
+    const key = wakeKey(workspaceId, taskId);
+    if (chatScheduleTimers.has(key)) clearTimer(chatScheduleTimers.get(key));
+    chatScheduleTimers.delete(key);
+  }
+  function armChatSchedule(workspaceId, taskId, delay = null) {
+    disarmChatSchedule(workspaceId, taskId);
+    const schedule = schedules.get(workspaceId, taskId);
+    if (wakeupsDisposed || !schedule) return;
+    const key = wakeKey(workspaceId, taskId);
+    const handle = setTimer(() => {
+      chatScheduleTimers.delete(key);
+      void runChatSchedule(workspaceId, taskId, schedule.id);
+    }, Math.min(2_147_483_647, Math.max(1, delay ?? schedule.dueAt - now())));
+    handle?.unref?.();
+    chatScheduleTimers.set(key, handle);
+  }
+  /** A due schedule: its message is sent now, held for the chat's running turn, or dropped with its chat (scheduleAction). */
+  async function runChatSchedule(workspaceId, taskId, id) {
+    const key = wakeKey(workspaceId, taskId);
+    const schedule = schedules.get(workspaceId, taskId);
+    if (wakeupsDisposed || !schedule || schedule.id !== id || scheduling.has(key)) return;
+    if (schedule.dueAt > now()) { armChatSchedule(workspaceId, taskId); return; }
+    // Deleted or replaced while this read was out: left alone from then on.
+    const current = () => !wakeupsDisposed && schedules.get(workspaceId, taskId)?.id === id;
+    let sent = false;
+    scheduling.add(key);
+    try {
+      const saved = await runs({ workspaceId });
+      if (!current()) return;
+      const chatRuns = saved.runs.filter(run => run.project_id === taskId);
+      const action = scheduleAction(schedule, {
+        active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
+        working: chatWorking(workspaceId, taskId, saved.runs),
+      });
+      if (action === "wait") { schedules.update(workspaceId, taskId, { due: true }); armChatSchedule(workspaceId, taskId, WAKE_RETRY_MS); return; }
+      if (action === "drop") {
+        schedules.clear(workspaceId, taskId, id);
+        chatScheduleFailures.delete(id);
+        logger?.info?.("ao.schedule.dropped", { workspaceId, taskId });
+        return;
+      }
+      const result = await chatSend({ workspaceId, taskId, message: scheduleMessage(schedule, now()), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      if (result?.ok === false) throw new Error(String(result.reason || "the message could not start"));
+      sent = true;
+      schedules.clear(workspaceId, taskId, id);
+      chatScheduleFailures.delete(id);
+      logger?.info?.("ao.schedule.sent", { workspaceId, taskId, lateMs: Math.max(0, now() - schedule.dueAt) });
+    } catch (error) {
+      if (sent || !current()) { chatScheduleFailures.delete(id); return; }
+      const failures = (chatScheduleFailures.get(id) ?? 0) + 1;
+      chatScheduleFailures.set(id, failures);
+      const why = publicText(error?.message || error, 200);
+      logger?.warn?.("ao.schedule.failed", { workspaceId, taskId, failures, error: why });
+      if (failures >= WAKE_RETRIES) { schedules.clear(workspaceId, taskId, id); chatScheduleFailures.delete(id); return; }
+      schedules.update(workspaceId, taskId, { due: true, note: `It could not be sent (${why}); trying again in a minute` });
+      armChatSchedule(workspaceId, taskId, WAKE_RETRY_MS);
+    } finally { scheduling.delete(key); }
+  }
+  // When a chat's turn settles, a schedule that came due meanwhile is sent.
+  async function chatScheduleAfterRun(workspaceId) {
+    for (const schedule of Object.values(schedules.forWorkspace(workspaceId))) {
+      if (schedule.due || schedule.dueAt <= now()) await runChatSchedule(workspaceId, schedule.taskId, schedule.id);
+    }
+  }
+  /**
+   * chat_schedule: "set" sends the chat `message` (or "Continue") at `dueAt` (epoch ms), replacing
+   * its schedule; `spec` is the time as the person typed it. "clear" deletes it (only `id` when given).
+   */
+  async function chatSchedule({ workspaceId, taskId, action, dueAt, message, spec, id } = {}) {
+    const workspace = clean(workspaceId, 128), task = clean(taskId, 128);
+    if (action === "clear") {
+      const cleared = schedules.clear(workspace, task, id ? clean(id, 128) : null);
+      if (cleared) disarmChatSchedule(workspace, task);
+      return { ok: true, cleared };
+    }
+    if (action !== "set") throw new Error("Choose set or clear");
+    const saved = await runs({ workspaceId: workspace });
+    if (!saved.runs.some(run => run.project_id === task)) throw new Error("Send this chat a message first, then schedule it to continue");
+    const previous = schedules.get(workspace, task);
+    const schedule = schedules.set(workspace, task, { dueAt, message: message === undefined ? "" : String(message), spec: spec === undefined ? "" : String(spec) });
+    if (previous) chatScheduleFailures.delete(previous.id);
+    armChatSchedule(workspace, task);
+    return { ok: true, schedule };
+  }
+  // Schedules saved before a restart: an overdue one is sent shortly after the app is back.
+  function restoreChatSchedules() {
+    for (const { workspaceId, taskId, schedule } of schedules.all()) {
+      if (typeof workspaceId === "string" && typeof taskId === "string") armChatSchedule(workspaceId, taskId, Math.max(WAKE_RESTORE_MS, schedule.dueAt - now()));
+    }
+  }
+
   // Codex's own compaction instruction (codex-rs core/src/tasks/compact.rs).
   const COMPACT_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.\n\nInclude:\n- Current progress and key decisions made\n- Important context, constraints, or user preferences\n- What remains to be done (clear next steps)\n- Any critical data, examples, or references needed to continue\n\nBe concise, structured, and focused on helping the next LLM seamlessly continue the work.";
   /**
@@ -7163,40 +7995,79 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, status: "in_progress", compactionId: entry.id, ...(!entry.accepted ? { uncertain: true } : {}) };
   }
 
-  // The board's bounded task record is separate from the agent's token context. This legacy
-  // helper only makes room for task metadata when appending a follow-up; /compact never calls it.
-  // `reserve` is the room, in UTF-8 bytes, left for that follow-up.
-  async function compactChat({ workspaceId, taskId, instructions = "", reserve = 0 } = {}) {
+  /**
+   * The earlier record as plain text to keep after a rollover: the markers the chat reads as its
+   * messages and steers ("Follow-up (…)", "↳ Steer (…)", an earlier summary's head) are renamed, so
+   * the kept text stays one message, the summary, as a model's summary is. Each renamed form is
+   * shorter than the marker it replaces, so the text never grows.
+   */
+  const unmarkedRecord = (text) => text
+    .replace(/^Summary of the earlier conversation \(compacted ([^)]+) UTC\):\n/, "[Earlier summary, $1 UTC]\n")
+    .replace(/\n\nFollow-up \(([^)]+) UTC\):\n/g, "\n\n[Message, $1 UTC]\n")
+    .replace(/\n\n↳ Steer \(([^)]+) UTC\): /g, "\n\n[Steer, $1 UTC] ");
+  const ROLLED_NOTE = "[The earlier messages were rolled over to make room; the newest part is kept below. Replies stay in the chat.]\n…";
+  const rolloverHead = (at) => `Summary of the earlier conversation (compacted ${at.toISOString().replace("T", " ").slice(0, 16)} UTC):\n`;
+  /** The bytes a rolled-over record has for its summary when `reserve` bytes must follow it. Never below 0. */
+  const rolloverRoom = (head, reserve) => Math.max(0, Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - reserve));
+  /** The record kept as it was, its newest part within `room` bytes: no model needed, so it cannot fail. */
+  function keptRecord(before, room) {
+    const plain = unmarkedRecord(before).trim();
+    if (utf8Bytes(plain) <= room) return plain;
+    return room > utf8Bytes(ROLLED_NOTE) ? `${ROLLED_NOTE}${utf8Tail(plain, room - utf8Bytes(ROLLED_NOTE))}` : utf8Tail(plain, room);
+  }
+  /** `before` rolled over to leave `reserve` bytes free: its head, then `summary` or the record's newest part. */
+  function rolledRecord(before, reserve, at, summary = "") {
+    const head = rolloverHead(at);
+    const room = rolloverRoom(head, reserve);
+    return `${head}${utf8Head(summary || keptRecord(before, room), room)}`.trim();
+  }
+
+  // The board's bounded task record is separate from the agent's token context. It holds the chat's
+  // own messages, and when the next one does not fit it rolls over: what came before becomes one
+  // summary under the follow-up. `reserve` is the room, in UTF-8 bytes, that follow-up needs.
+  //
+  // A rollover cannot fail (docs/fixes/chat-record-rollover.md). The user (2026-11-08, "bug fix,
+  // make a plan to avoid this forever") saw a send refused with "This chat's task record is full and
+  // couldn't be rolled over: The next message leaves no room for a summary": a long message left
+  // under 512 bytes for a model's summary, and a summary nobody answered, a short record or a steer
+  // note written meanwhile failed it too. Now a model's summary is used when there is room for one
+  // and a model answers; otherwise the newest part of the record that fits is kept as it was.
+  async function compactChat({ workspaceId, taskId, reserve = 0 } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
-    const focus = instructions ? boardText(clean(String(instructions), 1000, false)) : "";
     const saved = await runs({ workspaceId: id });
     if (chatWorking(id, task, saved.runs)) throw new Error("Compact is disabled while a chat is in progress");
-    const detail = await board({ workspaceId: id, taskId: task });
-    if (!detail.task) throw new Error("This chat's task no longer exists");
-    const before = String(detail.task.description || "");
-    if (before.length < 800) return { ok: true, compacted: false, before: before.length, after: before.length };
-    const stamp = new Date(now()).toISOString().replace("T", " ").slice(0, 16);
-    const head = `Summary of the earlier conversation (compacted ${stamp} UTC):\n`;
     const kept = Number.isSafeInteger(reserve) && reserve > 0 ? reserve : 0;
-    const room = Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - kept);
-    if (room < SUMMARY_MIN_BYTES) throw new Error("The next message leaves no room for a summary. Shorten it or start a new chat.");
-    let summary = "";
-    try {
-      summary = await handoffSummary(before, { maxChars: room, instructions: focus });
-    } catch (error) {
-      throw new Error(`Couldn't compact: no CPA model answered. ${String(error?.message || error).slice(0, 160)}`);
+    // A steer note or another write can land between the read and the write: read again, a few times.
+    for (let attempt = 1; ; attempt++) {
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task) throw new Error("This chat's task no longer exists");
+      const before = String(detail.task.description || "");
+      const at = new Date(now());
+      // A message within CHAT_MESSAGE_BYTES always leaves room for the head itself.
+      const room = rolloverRoom(rolloverHead(at), kept);
+      let summary = "";
+      if (room >= SUMMARY_MIN_BYTES && before.trim()) {
+        summary = await handoffSummary(before, { maxChars: room }).catch((error) => {
+          logger?.warn?.("ao.record_rollover_summary_failed", { message: publicText(error?.message || error, 200) });
+          return "";
+        });
+        // A model's summary may run past the length it was asked for, or carry control characters.
+        summary = boardText(String(summary || "")).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
+      }
+      const mechanical = !summary;
+      const description = rolledRecord(before, kept, at, summary);
+      const fresh = await board({ workspaceId: id, taskId: task });
+      if (!fresh.task) throw new Error("This chat's task no longer exists");
+      if (String(fresh.task.description || "") !== before) {
+        if (attempt < ROLLOVER_TRIES) continue;
+        throw new Error("The chat kept changing while its record rolled over. Send the message again.");
+      }
+      await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });
+      logger?.info?.("ao.record_rolled_over", { mechanical, before: utf8Bytes(before), after: utf8Bytes(description), reserve: kept });
+      return { ok: true, compacted: true, mechanical, before: before.length, after: description.length };
     }
-    // A model's summary may run past the length it was asked for, or carry control characters: it
-    // is cut to the room left (clean() threw on either, so a long summary failed the compaction).
-    summary = boardText(summary).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
-    if (!summary) throw new Error("The model returned no summary. The chat is unchanged.");
-    const description = `${head}${utf8Head(summary, room)}`;
-    if (utf8Bytes(description) >= utf8Bytes(before)) return { ok: true, compacted: false, before: before.length, after: before.length };
-    const fresh = await board({ workspaceId: id, taskId: task });
-    if (!fresh.task || String(fresh.task.description || "") !== before) throw new Error("The chat changed while compacting. Try again.");
-    await write(id, { expected_revision: fresh.revision, change: { operation: "edit", id: task, title: fresh.task.title, description } });
-    return { ok: true, compacted: true, before: before.length, after: description.length };
   }
+  const ROLLOVER_TRIES = 3;
 
   // Delete one message from a chat, with its reply. The message (and the steers sent during its
   // turn) leaves the task's description and its runs (the one it started, as the chat paired them,
@@ -7758,7 +8629,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const life=taskLifecycle(saved,taskId);
       if (life.visibility !== "active") continue;
       const followUps=goals.get(workspaceId,taskId)?.status === "active" || Boolean(wakeups.get(workspaceId,taskId))
-        || Boolean(loops.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
+        || Boolean(loops.get(workspaceId,taskId)) || Boolean(schedules.get(workspaceId,taskId)) || chatQueue.list(workspaceId,taskId).length > 0;
       const chatRuns=saved.runs.filter(run=>run.project_id===taskId);
       if (!idleChat(chatRuns,life,followUps,cutoff,{ restoredAt:archive.restoredAt(workspaceId,taskId),
         driven:chatRuns.some(run=>{ const state=backgroundRuns.get(runKey(workspaceId,run.id)); return Boolean(state?.starting || state?.driving || state?.status === "running"); }) })) continue;
@@ -7851,10 +8722,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     scheduleTimers.clear();
     // Saved wake-ups stay on disk and are armed again by the next app.
     wakeupsDisposed = true;
+    for (const timer of commandWatchTimers.values()) clearTimer(timer);
+    commandWatchTimers.clear();
+    for (const ticket of commandWatchTickets.values()) settleCommandWatch(ticket, "dropped");
     for (const timer of wakeTimers.values()) clearTimer(timer);
     wakeTimers.clear();
     for (const timer of loopTimers.values()) clearTimer(timer);
     loopTimers.clear();
+    // Saved schedules stay on disk too; the next app arms them (restoreChatSchedules).
+    for (const timer of chatScheduleTimers.values()) clearTimer(timer);
+    chatScheduleTimers.clear();
     // Saved goal pauses (retry) stay on disk too; the next app arms them when it reads the chat.
     goalsDisposed = true;
     for (const timer of goalTimers.values()) clearTimer(timer);
@@ -7915,8 +8792,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // queued message whose chat's settle was missed goes on.
         if (!args.runId && !args.taskId) sweepWorkspace(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
-        return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
+        const shown = chatEdits.visible(clean(args.workspaceId, 128), saved.runs);
+        // The project's chats past its newest 100 runs stay on the list (withChatIndex).
+        const lifecycle = !args.runId && !args.taskId ? withChatIndex(clean(args.workspaceId, 128), shown, saved.task_lifecycle) : saved.task_lifecycle;
+        return { ...saved, runs: shown, ...(lifecycle === undefined ? {} : { task_lifecycle: lifecycle }), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),
+          schedules: schedules.forWorkspace(clean(args.workspaceId, 128)),
           queues: chatQueue.forWorkspace(clean(args.workspaceId, 128)) };
       }
       case "chat_queue": return chatQueueCall(args);
@@ -7924,8 +8805,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
       case "chat_loop": return chatLoop(args);
+      case "chat_schedule": return chatSchedule(args);
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
+      case "agent_instructions": return agentInstructionsCall(args);
+      case "chat_question_timeout": return chatQuestionTimeout(args);
       case "chat_auto_compact": return chatAutoCompact(args);
       case "compact_chat": return compactSession(args);
       case "chat_diff": return chatDiff(args);
@@ -7979,22 +8863,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const subagentLaunchArgs = (workspaceId, route, name) => aoLaunchArgs(clean(workspaceId, 128),
     { id: "subagent", role: "worker", route, settings: { name } }, true);
   /**
-   * Why a subagent cannot run on `route`, said so a person can act on it, or null. Checked before
-   * the launch: a Claude Code subagent on an Antigravity model would otherwise wait out minutes of
-   * "quota exhausted" retries. A CPA list that cannot be read lets the launch go ahead.
-   */
-  async function subagentRouteRefusal(route) {
-    const agent = String(route?.harness_id ?? "").replace(/^ao:/, "");
-    const model = String(route?.model ?? "");
-    if (agent !== "claude-code" || !model) return null;
-    let catalog = null;
-    try { catalog = await models(); } catch { return null; }
-    // CPA lists the base model; a saved route may carry an effort suffix (…-flash-high(high)).
-    const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
-      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
-    return antigravityRefuses(agent, catalog?.capabilities?.[id]) ? `${id}: ${ANTIGRAVITY_REFUSES_CLAUDE_CODE}` : null;
-  }
-  /**
    * A saved team run as a subagent (subagents.cjs): the team works on the task as a chat of its own
    * (chat_send in team mode, started in the background as a /goal round is), and its closing cards'
    * answers are the report. Only teams whose every role has a model are offered.
@@ -8044,14 +8912,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     },
     stop: ({ workspaceId, runId }) => controlRun({ workspaceId, runId, action: "stop" }),
   };
-  /** Automatic tools/subagents have no publication-review path, so every detected push waits on a person. */
-  const blockedRequest = (text) => hardDenied(text) || Boolean(gitPushRequest(text));
+  /**
+   * Automatic tools/subagents have no publication-review path, so every detected push waits on a
+   * person. Takes an approval, a tool's arguments, or a command line (see safetyParts).
+   */
+  const blockedRequest = (value) => Boolean(requestDenial(value))
+    || safetyParts(value).commands.some((command) => Boolean(gitPushRequest(command)));
   restoreWakeups();
   restoreLoops();
+  restoreChatSchedules();
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, loopAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, subagentRouteRefusal, restoreRuns, resumeInterrupted, stopTracking });
+  /** Resolves once every /schedule change so far is on disk (saved off the main thread too). */
+  const schedulesSaved = () => schedules.saved();
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved,startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

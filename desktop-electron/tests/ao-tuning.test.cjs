@@ -16,8 +16,9 @@ const route = (harness = "ao:codex", model = "cpa/gpt") => ({
 });
 const walk = value => !value || typeof value !== "object" ? [] : Array.isArray(value) ? value.flatMap(walk) : [value, ...walk(value.props?.children)];
 /** The window sizes the Context window field suggests (its datalist), which is how it shows the allowed range. */
-const presets = tree => walk(walk(tree).find(item => item.type === "label" && item.props.children?.[0] === "Context window"))
-  .filter(item => item.type === "option").map(item => item.props.value);
+const presets = tree => walk(walk(tree).find(item => item.type === "datalist")).filter(item => item.type === "option").map(item => item.props.value);
+/** The picker's boxes carry no visible label, only an accessible name. */
+const named = (tree, name) => walk(tree).find(item => item.props?.["aria-label"] === name);
 async function picker(current, catalog) {
   let states = [], cursor = 0, effects = [];
   const editor = {};
@@ -35,8 +36,13 @@ async function picker(current, catalog) {
   render(); effects.forEach(effect => effect());
   await new Promise(resolve => setImmediate(resolve));
   const tree = render();
-  const field = name => walk(tree).find(item => item.type === "label" && item.props.children?.[0] === name)?.props.children[1];
-  return { editor, tree, field, changes, selectRoute(next) { selectedRoute = next; return render(); } };
+  const field = name => named(tree, name);
+  // Opens the model list and clicks a row, as a person would.
+  const choose = model => {
+    named(render(), "Model").props.onClick();
+    walk(render()).find(item => item.props?.["data-model"] === model).props.onClick();
+  };
+  return { editor, tree, field, changes, choose, selectRoute(next) { selectedRoute = next; return render(); } };
 }
 
 test("AO model capabilities enable only advertised effort and a real context control", async () => {
@@ -51,8 +57,8 @@ test("AO model capabilities enable only advertised effort and a real context con
   p.field("Reasoning effort").props.onChange({ target: { value: "low" } });
   assert.equal(p.changes[0].model, "cpa/gpt"); assert.equal(p.changes[0].account_id, "ao-local");
   const switched = p.selectRoute(route("ao:claude-code"));
-  const effort = walk(switched).find(item => item.type === "label" && item.props.children?.[0] === "Reasoning effort").props.children[1];
-  assert.equal(effort.props.disabled, true, "previous harness capabilities never authorize the new harness while it loads");
+  const effort = named(switched, "Reasoning effort");
+  assert.ok(!effort || effort.props.disabled, "previous harness capabilities never authorize the new harness while it loads");
 });
 
 test("every AO harness uses capabilities, including compaction semantics and unsupported models", async () => {
@@ -78,8 +84,7 @@ test("legacy catalogs stay usable without inventing AO tuning support or erasing
   assert.equal(p.field("Reasoning effort").props.disabled, true);
   assert.equal(p.field("Reasoning effort").props.value, "high");
   assert.equal(p.field("Context window").props.disabled, true);
-  const model = walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt");
-  model.props.onChange({ target: { value: "cpa/next" } });
+  p.choose("cpa/next");
   assert.equal(p.changes[0].effort, undefined, "a new model starts on its own effort");
   assert.equal(p.changes[0].context_window, 32768);
 });
@@ -98,12 +103,12 @@ test("AO card metadata reports requested tuning; Native controls and Native-to-A
 test("unsupported or unverified AO overrides can be explicitly cleared to model defaults without changing route identity", async () => {
   const current = { ...route(), effort: "high", context_window: 32768 };
   const p = await picker(current, ["cpa/gpt"]);
-  const clear = walk(p.tree).find(element => element.type === "button" && element.props.children === "Model defaults");
+  const clear = walk(p.tree).find(element => element.type === "button" && element.props["aria-label"] === "Model defaults");
   assert.ok(clear, "disabled unsupported controls still provide an explicit clear action");
   clear.props.onClick();
   assert.deepEqual(p.changes, [route()], "both requested values are removed, exact model/account identity stays unchanged");
   const native = await picker({ ...route("codex-native", "chatgpt-web/high"), effort: "high", context_window: 262144 }, []);
-  assert.equal(walk(native.tree).some(element => element.type === "button" && element.props.children === "Model defaults"), false,
+  assert.equal(walk(native.tree).some(element => element.type === "button" && element.props["aria-label"] === "Model defaults"), false,
     "Native Codex controls are unchanged");
 });
 
@@ -199,7 +204,7 @@ test("Native Codex offers its own efforts only for WebGPT; a CPA model there off
   const effort = p.field("Reasoning effort");
   assert.equal(effort.props.disabled, true);
   assert.equal(effort.props["aria-invalid"], true, "a saved effort the model does not take is flagged");
-  assert.ok(walk(p.tree).some(item => item.type === "button" && item.props.children === "Model defaults"), "and can be cleared");
+  assert.ok(walk(p.tree).some(item => item.type === "button" && item.props["aria-label"] === "Model defaults"), "and can be cleared");
 });
 
 test("a window carried to a new model is fitted to the range that model takes", async () => {
@@ -216,7 +221,7 @@ test("a window carried to a new model is fitted to the range that model takes", 
   // The editor's model list passes its catalog.
   const p = await picker({ ...route(), context_window: 1_000_000 }, { models: ["cpa/gpt", "cpa/small"],
     capabilities: { "cpa/gpt": { efforts: [], contextWindow: { min: 4096, max: 1_000_000 } }, "cpa/small": caps["cpa/small"] } });
-  walk(p.tree).find(item => item.type === "select" && item.props.value === "cpa/gpt").props.onChange({ target: { value: "cpa/small" } });
+  p.choose("cpa/small");
   assert.equal(p.changes.at(-1).context_window, 262144);
 });
 

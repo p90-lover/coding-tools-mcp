@@ -31,6 +31,7 @@ const { createSignInRetryWait } = require("./sign-in-retry-wait.cjs");
 const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
 const { codexThreadStats } = require("./codex-thread-stats.cjs");
+const { watchCodexModelCache } = require("./codex-model-cache.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
@@ -42,13 +43,14 @@ const { createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
+const { createActionTimes, timeIpcHandler, watchPageTimes } = require("./action-times.cjs");
 const { createRegisterHost, createRegisterCpaSync } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
-const { createConfiguredConnector, currentConnectorSettings, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { createConfiguredConnector, currentConnectorSettings, connectorCredentials, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
@@ -194,6 +196,14 @@ let mainWindow = null;
 const caDistrust = require("./ca-distrust.cjs");
 process.env.NODE_OPTIONS = caDistrust.childNodeOptions(path.join(launcherUserData, "runtime-preload"), process.env.NODE_OPTIONS);
 app.on("session-created", (created) => created.setCertificateVerifyProc(caDistrust.verifyCertificate));
+// Activity > Action time (action-times.cjs): tab and page timings, in memory only. Every page the
+// app opens is timed from here, so new views need no wiring of their own.
+const actionTimes = createActionTimes();
+app.on("web-contents-created", (_event, contents) => {
+  // A GPT Browser page is made only once its host has been: keep the host to name the page's account.
+  if (gptBrowser && !gptBrowserHost) void gptBrowser.then((host) => { gptBrowserHost = host; }, () => {});
+  watchPageTimes(contents, { times: actionTimes, describe: describeTimedPartition });
+});
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
@@ -214,6 +224,9 @@ let lifecycleScan = null;
 let savedChatsInUse = () => true;
 let chatgptDesktop = null;
 let gptBrowser = null;
+// The GPT Browser host once made (gptBrowser is its promise), for naming its pages' timings; kept
+// by the web-contents-created hook, so getGptBrowser stays as it was.
+let gptBrowserHost = null;
 let emailHost = null;
 let registerHost = null;
 const chatgptDesktopOwners = new WeakSet();
@@ -270,6 +283,7 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let codexModelCacheWatch = null;
 // The automatic MCP check for the running bridge: { pid, failures, retryAt }, retryAt null once it
 // passed or ran out of retries. A failed check retries after each delay below, then waits for a new
 // round (a tunnel restart, a sign-in, an account switch, the setting); one try per bridge left MCP
@@ -320,6 +334,11 @@ function userMcpServers(logger = null) {
   chatMcpServers ??= require("./chat-mcp-servers.cjs").createChatMcpServers({
     filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger });
   return chatMcpServers;
+}
+// The page hears "saved" only once the file is on disk; the write itself runs off the main thread.
+async function savedMcpServers(list) {
+  await userMcpServers().saved();
+  return list;
 }
 // The person's unified-agent-tools (vendor/unified-agent-tools), for every chat that runs a GPT model.
 let gptFileTools = null;
@@ -472,6 +491,23 @@ function getGptBrowser(logger) {
     throw error;
   });
   return gptBrowser;
+}
+
+// Names a timed page's part of the app and its account (Activity > Action time), from the
+// partition its session lives in.
+function describeTimedPartition(partition) {
+  if (!partition) return {};
+  const accountId = browserAccounts.accountIdOfPartition(partition);
+  if (accountId) {
+    const entry = browserAccounts.status().accounts.find((item) => item.id === accountId);
+    return { group: "Browser", account: entry?.email || entry?.label || accountId };
+  }
+  const gptAccount = /^persist:gpt-browser-([a-z0-9]{12})$/.exec(partition)?.[1];
+  if (gptAccount) {
+    const entry = gptBrowserHost?.status().accounts.find((item) => item.id === gptAccount);
+    return { group: "GPT Browser", account: entry?.email || entry?.label || gptAccount };
+  }
+  return {};
 }
 
 // Native fetches omit cookies by default. Explicit session reads use their registered account's
@@ -768,7 +804,10 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
   if (!credentials) return false;
   const config = knownConfig !== undefined ? knownConfig : runtimeSupervisor?.readConfig();
   if (config?.mode !== "full") return false;
-  if (health.version !== config.releaseVersion || health.pid !== runtimeSupervisor.readState()?.daemonPid) return true;
+  if (health.version !== config.releaseVersion) return true;
+  // Read off the main thread: this check repeats every 15 s while the browser is in use.
+  const ownership = await (runtimeSupervisor.readStateAsync ? runtimeSupervisor.readStateAsync() : runtimeSupervisor.readState());
+  if (health.pid !== ownership?.daemonPid) return true;
   // A ChatGPT page without its composer is still loading; the blank page the browser parks on
   // between turns has nothing to keep (counted as a draft, it held the check off for good).
   const hasDraft = await contents.executeJavaScript(`(() => {
@@ -963,6 +1002,29 @@ function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged =
     send("launcher:state-changed", state);
   }
   startCatalogVerificationMonitor({ logger, stateStore });
+  startCodexModelCacheWatch({ logger, stateStore });
+}
+
+/**
+ * Keeps "Restart Codex" shown while a Codex lists models without the bridge (codex-model-cache.cjs).
+ * The catalog check above ends at the first Codex that asks the bridge, and the app's own Codex
+ * servers ask at once, so a Codex app started before the route stayed without WebGPT models
+ * while the app said all was well (2026-11-09).
+ */
+function startCodexModelCacheWatch({ logger, stateStore }) {
+  if (codexModelCacheWatch || IS_DEV_PROFILE || !process.env.CODEX_HOME) return;
+  codexModelCacheWatch = watchCodexModelCache({
+    codexHome: process.env.CODEX_HOME,
+    routed: () => { const state = stateStore.read(); return state.codexRoute === true && state.coreSetupComplete === true; },
+    bridgeServedAt: async () => {
+      const health = await runtimeSupervisor.proxyHealthPayload(await runtimeSupervisor.readConfigAsync());
+      return Date.parse(health?.last_successful_model_catalog_request_at);
+    },
+    restartRequired: () => stateStore.read().codexRestartRequired === true,
+    setRestartRequired: (value) => send("launcher:state-changed", stateStore.update({ codexRestartRequired: value })),
+    logger,
+  });
+  app.once("will-quit", () => codexModelCacheWatch?.stop());
 }
 
 async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason = "auth" }) {
@@ -1120,7 +1182,7 @@ function startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh 
     if (runtime.status === "ready" || runtime.status === "degraded") {
       if (!runtime.bridgeConnected) {
         applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: runtime.bridgeRouteChanged === true });
-      }
+      } else startCodexModelCacheWatch({ logger, stateStore });
       return;
     }
     if (runtime.status === "not-configured") {
@@ -2040,10 +2102,12 @@ function registerIpc({ logger, stateStore }) {
     logger.info("launcher.ipc_already_registered", { reason: "idempotent" });
     return;
   }
+  // Each request from the app window is timed against the tab it was made on (Action time).
+  const isAppWindow = (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents);
   const handle = (channel, handler) => {
     if (registeredIpcChannels.has(channel)) return;
     registeredIpcChannels.add(channel);
-    registerLoggedIpc(ipcMain, logger, channel, handler);
+    registerLoggedIpc(ipcMain, logger, channel, timeIpcHandler(actionTimes, channel, handler, { isAppWindow }));
   };
   const codingTools = createCodingToolsShellBridge({
     assertFocusedMainWindow,
@@ -2717,7 +2781,7 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. Layout still needs a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm"].includes(input.operation)
-        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined));
+        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined));
     const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
     const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
@@ -2822,7 +2886,8 @@ function registerIpc({ logger, stateStore }) {
     return browserAccountsStatus();
   });
   handle("launcher:browser-account-inspect", async (event, accountId = browserAccounts.activeId()) => {
-    assertFocusedMainWindow(event, true);
+    // Metadata inspection uses an offscreen page and cannot perform MCP actions.
+    assertFocusedMainWindow(event, false, true);
     const partition = browserAccounts.partitionOf(accountId);
     const assertCurrent = () => {
       if ((browserHost?.interactionModeOverride ?? stateStore.read().browserInteractionMode) === "manual") {
@@ -2833,10 +2898,13 @@ function registerIpc({ logger, stateStore }) {
       }
     };
     assertCurrent();
-    if (!signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }))) {
+    const signedIn = signedInFromCookies(await session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }));
+    assertCurrent();
+    if (!signedIn) {
       throw new Error("Sign in to this account before checking its plan.");
     }
     await routeIdleAccountPartition(partition, logger);
+    assertCurrent();
     const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true });
     assertCurrent();
     recordBrowserWorkspaceContext(partition, context);
@@ -2913,6 +2981,14 @@ function registerIpc({ logger, stateStore }) {
     return browser;
   });
   handle("launcher:browser-passkey-login-continue", () => runtimeHost.continuePasskeyLogin());
+  handle("launcher:browser-chrome-profile-open", () => runtimeHost.openChromeProfileConnector());
+  handle("launcher:browser-chrome-profile-cancel", () => runtimeHost.cancelChromeProfileLogin());
+  handle("launcher:browser-chrome-connector-folder", async () => {
+    const folder = await runtimeHost.prepareChromeProfileConnector();
+    const error = await shell.openPath(folder);
+    if (error) throw new Error("Could not open the Chrome connector folder");
+    return true;
+  });
   handle("launcher:browser-logout", async () => {
     const browser = await browserHost.logout();
     const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });
@@ -3350,6 +3426,8 @@ function registerIpc({ logger, stateStore }) {
     const tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
     const id = tunnel?.id;
     let primarySettings = null, tunnelId = tunnel?.tunnelId;
+    // The saved runtime key, read once off the main thread (see currentConnectorSettings).
+    let credentials;
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       assertAutomaticCurrent?.();
@@ -3369,7 +3447,7 @@ function registerIpc({ logger, stateStore }) {
         throw new Error("The account's MCP tunnel changed or is not ready.");
       }
       if (!tunnel) {
-        const current = currentConnectorSettings(runtimeHost);
+        const current = currentConnectorSettings(runtimeHost, { credentials });
         if (current.name !== primarySettings.name || current.tunnelId !== tunnelId) {
           throw new Error("The MCP configuration changed during setup.");
         }
@@ -3379,7 +3457,8 @@ function registerIpc({ logger, stateStore }) {
     try {
       // The main tunnel is a candidate; the helper must still prove its fresh account/workspace ownership.
       if (!tunnel) {
-        primarySettings = currentConnectorSettings(runtimeHost);
+        credentials = await connectorCredentials(runtimeHost);
+        primarySettings = currentConnectorSettings(runtimeHost, { credentials });
         tunnelId = primarySettings.tunnelId;
       }
       assertCurrent();
@@ -3676,9 +3755,72 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, true);
     return runtimeSupervisor.extraTunnels.remove(id);
   });
-  handle("launcher:mcp-tunnel-reconnect", (event, id) => {
+  handle("launcher:mcp-tunnel-reconnect", async (event, id) => {
     assertFocusedMainWindow(event, true);
-    return runtimeSupervisor.extraTunnels.reconnect(id);
+    if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
+    const supervisor = runtimeSupervisor, host = runtimeHost, extraTunnels = supervisor?.extraTunnels;
+    const tunnel = typeof id === "string" && /^[a-f0-9]{8}$/.test(id)
+      ? extraTunnels?.status().find(candidate => candidate.id === id) : null;
+    if (!tunnel) throw new Error("That tunnel is not configured.");
+    const saved = host.runtimeConfigSnapshot(), mode = saved.config?.browserInteractionMode ?? "automatic";
+    if (!saved.configured || saved.owner !== "launcher" || saved.mode !== "full" || !saved.config?.tunnel
+      || !host.mcpCredentialsConfigured(mode)) throw new Error("Start the MCP runtime before reconnecting a tunnel.");
+    const { accountId, tunnelId } = tunnel;
+    const partition = accountId ? browserAccounts.partitionOf(accountId) : null;
+    const operationBrowser = browserHost, operationPartition = operationBrowser?.partition;
+    const assertCurrent = () => {
+      if (quitting || shutdownInProgress || supervisor !== runtimeSupervisor || host !== runtimeHost
+        || extraTunnels !== supervisor.extraTunnels || browserHost !== operationBrowser || browserHost?.partition !== operationPartition
+        || browserAccountsStatus().switching || (accountId && browserAccounts.partitionOf(accountId) !== partition)
+        || !extraTunnels.status().some(current => current.id === id && current.accountId === accountId && current.tunnelId === tunnelId)) {
+        throw new Error("The account's MCP tunnel changed during reconnect.");
+      }
+      const current = host.runtimeConfigSnapshot();
+      // Managed startup may migrate its version, name and credential paths, never this tunnel/mode.
+      if (!current.configured || current.owner !== "launcher" || current.mode !== "full"
+        || (current.config?.browserInteractionMode ?? "automatic") !== mode
+        || current.config?.tunnel?.tunnelId !== saved.config.tunnel.tunnelId
+        || stateStore.read().browserInteractionMode !== mode || !host.mcpCredentialsConfigured(mode)) {
+        throw new Error("The MCP configuration changed during reconnect.");
+      }
+      return current.config;
+    };
+    assertCurrent();
+    const previousOperation = lastOperation;
+    let startup = runtimeStartupInFlight;
+    await startup;
+    if (lastOperation !== previousOperation && lastOperation?.name === "runtime-start" && lastOperation.status === "failed") {
+      throw new Error(lastOperation.message);
+    }
+    let config = assertCurrent();
+    let health = await supervisor.ownedRuntimeCheck(config);
+    assertCurrent();
+    const primaryFailures = ["tunnel_missing", "tunnel_health"];
+    if (runtimeStartupInFlight !== startup || !extraTunnels.config || host.managedRuntimeUpgradeRequired()
+      || (!health.ready && !primaryFailures.includes(health.failed))) {
+      if (runtimeStartupInFlight === startup) {
+        if (host.currentOperation() || operationBrowser?.currentOperation() || operationBrowser?.activeTraceId) {
+          throw new Error("Wait for the active browser or runtime operation before reconnecting a tunnel.");
+        }
+        runtimeStartupInFlight = startManagedRuntime({ logger, stateStore,
+          startupAuthenticationRefresh: Promise.resolve(operationBrowser?.snapshot()) });
+      }
+      startup = runtimeStartupInFlight;
+      await startup;
+      if (lastOperation !== previousOperation && lastOperation?.name === "runtime-start" && lastOperation.status === "failed") {
+        throw new Error(lastOperation.message);
+      }
+      config = assertCurrent();
+      health = await supervisor.ownedRuntimeCheck(config);
+      assertCurrent();
+    }
+    if (runtimeStartupInFlight !== startup || host.currentOperation()) throw new Error("Runtime setup changed during reconnect. Retry when it finishes.");
+    if (!extraTunnels.config || host.managedRuntimeUpgradeRequired() || (!health.ready && !primaryFailures.includes(health.failed))) {
+      throw new Error((lastOperation?.name === "runtime-start" && lastOperation.status === "failed" ? lastOperation.message : supervisor.readState()?.detail)
+        || "The MCP runtime did not become ready. Check Setup before reconnecting this tunnel.");
+    }
+    assertFocusedMainWindow(event, true);
+    return extraTunnels.reconnect(id);
   });
   handle("launcher:mcp-tunnel-settings", async (event, id) => {
     assertFocusedMainWindow(event, true);
@@ -3871,15 +4013,15 @@ function registerIpc({ logger, stateStore }) {
     // "Use my GitHub CLI sign-in": the token is read here and never passes through the page.
     const input = options?.githubCliToken === true
       ? await require("./chat-mcp-servers.cjs").withGithubCliToken(server) : server;
-    return userMcpServers(logger).save(input);
+    return savedMcpServers(userMcpServers(logger).save(input));
   });
   handle("mcp-servers:remove", (event, id) => {
     assertFocusedMainWindow(event, true);
-    return userMcpServers(logger).remove(String(id));
+    return savedMcpServers(userMcpServers(logger).remove(String(id)));
   });
   handle("mcp-servers:set-enabled", (event, id, enabled) => {
     if (enabled === true) assertFocusedMainWindow(event, true);
-    return userMcpServers(logger).setEnabled(String(id), enabled === true);
+    return savedMcpServers(userMcpServers(logger).setEnabled(String(id), enabled === true));
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
@@ -3912,6 +4054,18 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
+  // Activity > Action time. The renderer reports each tab it shows and how long that took.
+  handle("launcher:action-time-tab", (event, input) => {
+    if (!isAppWindow(event.sender)) throw new Error("Tab timings come only from the app window");
+    actionTimes.tabRendered(input);
+    return true;
+  });
+  handle("launcher:action-times", () => actionTimes.snapshot());
+  handle("launcher:action-times-clear", (event) => {
+    assertFocusedMainWindow(event, true);
+    actionTimes.clear();
+    return actionTimes.snapshot();
+  });
   handle("launcher:export-logs", async () => {
     const date = new Date().toISOString().slice(0, 10);
     const copy = nativeCopyFor(stateStore.read().language);
@@ -4026,10 +4180,10 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal or browser-account change still being saved (off the main thread) lands before the app
-    // goes; a disk that hangs holds the quit 5 s at most, and each file keeps the change before.
+    // A goal, /schedule or browser-account change still being saved (off the main thread) lands before
+    // the app goes; a disk that hangs holds the quit 5 s at most, and each file keeps the change before.
     await Promise.race([
-      Promise.all([missionWorkflowRuntime?.goalsSaved(), browserAccounts.saved()]),
+      Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(), browserAccounts.saved()]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
     const runtimeOperation = runtimeHost?.currentOperation();
@@ -4644,7 +4798,6 @@ async function start() {
         harness: () => agentOrchestratorUpstream?.harness ?? null,
         blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
-        routeRefusal: (route) => missionWorkflowRuntime?.subagentRouteRefusal?.(route) ?? null,
         // A model the chat agent picks runs on Claude Code and is checked against its catalog; a
         // saved team can run as one subagent.
         models: (workspaceId) => missionWorkflowRuntime?.call("models", { harness: "ao:claude-code", workspaceId }) ?? null,
@@ -4702,6 +4855,8 @@ async function start() {
         computerControl,
         // Every call that sees or drives the screen goes to the chat's reviewer first (Codex's auto-review).
         reviewCall: (input) => missionWorkflowRuntime?.reviewToolCall?.(input) ?? { action: "ask", reason: "" },
+        // The model a chat runs on, named on the computer-control pill.
+        sessionModel: (input) => missionWorkflowRuntime?.sessionModel?.(input) ?? null,
         // "Approve for me" runs the same routine project commands through the app's terminal as it
         // allows from the agent's own shell (the workflow's list), without a dialog each.
         // The workflow running now: these tools outlive the backend start that created them, and
@@ -4752,6 +4907,12 @@ async function start() {
           schedule: (request) => {
             if (!missionWorkflowRuntime?.scheduleWakeup) throw new Error("Agent Orchestrator is not ready yet");
             return missionWorkflowRuntime.scheduleWakeup(request);
+          },
+        },
+        commandEvents: {
+          register: request => {
+            if (!missionWorkflowRuntime?.registerCommandWatch) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.registerCommandWatch(request);
           },
         },
         // get_goal, create_goal, update_goal: Codex's goal tools, on the chat's /goal.
@@ -4890,7 +5051,8 @@ async function start() {
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
-        // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
+        // RTK's Claude Code and Codex hooks, which AO puts in each Claude session's own settings and
+        // on each Codex app-server's command line (empty: off).
         try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
         // AO hands this environment to every Claude Code chat agent. Claude Code's own scheduler
         // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
@@ -4955,6 +5117,8 @@ async function start() {
       wakeupsFile: path.join(app.getPath("userData"), "integrations", "chat-wakeups.json"),
       // So do the chats' loops (/loop).
       loopsFile: path.join(app.getPath("userData"), "integrations", "chat-loops.json"),
+      // So do the chats' schedules (/schedule).
+      schedulesFile: path.join(app.getPath("userData"), "integrations", "chat-schedules.json"),
       // So do the chats' queued messages, sent with the chat closed too (chat-queue.cjs).
       chatQueueFile: path.join(app.getPath("userData"), "integrations", "chat-queue.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
@@ -4962,6 +5126,12 @@ async function start() {
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
       // The chat's own preferences ("Retry automatically").
       chatPreferencesFile: path.join(app.getPath("userData"), "integrations", "chat-preferences.json"),
+      // Settings › Instructions: the global AGENTS.md and each project's own, put in front of every
+      // agent's first message (agent-instructions.cjs ships with the app, not the backend bundle).
+      agentInstructions: require("./agent-instructions.cjs").createAgentInstructions({
+        globalFile: path.join(app.getPath("userData"), "instructions", "AGENTS.md"),
+        workspaces: listHeadlessWorkspaces,
+      }),
       // Points per model from finished Team rounds (model-scores.cjs).
       modelScoresFile: path.join(app.getPath("userData"), "integrations", "model-scores.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),
@@ -5275,8 +5445,9 @@ async function start() {
       getConnectorName: () => runtimeHost.browserConnectorName(),
       helper: { executable: process.execPath, script: BROWSER_HELPER_PATH },
       logger,
-      loginWithPasskey: async (partition, route) => (await providerNetworkReady()).withBrowserLoginProxy(
-        partition, route, loginRoute => runtimeHost.capturePasskeyLogin(loginRoute)),
+      // The approved extension connects the current Chrome profile. App-side fresh verification
+      // still uses this account's routed partition; ordinary Chrome's routing is never changed.
+      loginWithPasskey: () => runtimeHost.captureCurrentChromeLogin({ safeStorage }),
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,
       publishState: (state) => {

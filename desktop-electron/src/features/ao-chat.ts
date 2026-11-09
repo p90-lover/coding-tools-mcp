@@ -129,6 +129,8 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  /** How long a finished tool call or thought took, from AO's first and last update of it. */
+  durationMs?: number;
   /** Images a tool call returned (a screenshot, a picture it read), as the files Claude Code saved them to. */
   images?: string[];
   /** For kind "edit": the files it changed (Claude Code's "Edited <file> +12 −3"). */
@@ -623,6 +625,12 @@ export type TaskLifecycleView = {
   task_id: string; title?: string; workspace_id?: string; revision?: number; visibility?: "active" | "archived" | "deleted";
   reconfigure?: { id: string; previous_run_id: string; replacement_run_id?: string | null; phase: string; handoff?: string }[];
   schedule?: { id: string; run_id: string; due_at_ms: number; state: string; revision: number } | null;
+  /**
+   * A chat's newest run when none of its runs is in the project read's newest 100 (the workflow's
+   * withChatIndex): its id, what its status is made from, how many runs it has, and when it last
+   * worked (ms). Without it such a chat dropped off the list.
+   */
+  latest_run?: { id: string; cancelled?: boolean; paused?: boolean; nodes?: { id?: string; role: string; state: string }[]; run_count?: number; at?: number };
 };
 export type ChatRun = {
   replaces_run_id?: string;
@@ -647,6 +655,8 @@ export type ChatSummary = {
   taskId: string;
   title: string;
   runIds: string[];
+  /** How many runs the chat has, when `runIds` holds only its newest (a chat past the project read's newest 100). */
+  runCount?: number;
   latestRunId: string;
   status: ChatStatus;
   /** When the chat's task last changed (Unix ms), for the list's relative age. */
@@ -812,12 +822,23 @@ function chatSummaries(runs: ChatRun[], tasks: ChatTask[], lifecycle: TaskLifecy
   const lifeByTask = new Map(lifecycle.map(item => [item.task_id, item]));
   const titles = new Map(tasks.map((task) => [task.id, task.title]));
   const byId = new Map(tasks.map((task) => [task.id, task]));
-  const byTask = new Map<string, { runs: ChatRun[]; lastIndex: number }>();
+  const byTask = new Map<string, { runs: ChatRun[]; lastIndex: number; count?: number }>();
   runs.forEach((run, index) => {
     const entry = byTask.get(run.project_id) ?? { runs: [], lastIndex: index };
     entry.runs.push(run);
     entry.lastIndex = index;
     byTask.set(run.project_id, entry);
+  });
+  // A chat none of whose runs is in the read (the project read holds its newest 100, shared by all of
+  // its chats) comes with its newest run on its lifecycle entry. All its runs are older than every
+  // run here, so it lists after the chats that have one, its own newest work first.
+  const past = lifecycle.filter((item) => item.latest_run?.id && !byTask.has(item.task_id))
+    .sort((a, b) => (b.latest_run!.at ?? 0) - (a.latest_run!.at ?? 0));
+  past.forEach((item, index) => {
+    const latest = item.latest_run!;
+    const stub: ChatRun = { id: latest.id, project_id: item.task_id, cancelled: latest.cancelled === true, paused: latest.paused === true,
+      nodes: (latest.nodes ?? []).map((node, at) => ({ id: node.id ?? `${latest.id}:${at}`, role: node.role, state: node.state }) as ChatNode) };
+    byTask.set(item.task_id, { runs: [stub], lastIndex: -1 - index, count: latest.run_count });
   });
   return [...byTask.entries()]
     .sort((a, b) => b[1].lastIndex - a[1].lastIndex)
@@ -828,6 +849,7 @@ function chatSummaries(runs: ChatRun[], tasks: ChatTask[], lifecycle: TaskLifecy
         taskId,
         title: titles.get(taskId) || lifeByTask.get(taskId)?.title || CHAT_DEFAULT_TITLE,
         runIds: entry.runs.map((run) => run.id),
+        ...(entry.count ? { runCount: entry.count } : {}),
         latestRunId: latest.id,
         visibility,
         schedule: lifeByTask.get(taskId)?.schedule,
@@ -1124,9 +1146,10 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     // A request nobody has answered yet holds the card: it said "working" or its last tool meanwhile.
     const newest = timeline.at(-1);
     const asking = newest?.kind === "approval" && /pending|waiting/i.test(newest.status);
-    // A request "Approve for me" is reviewing says so ("the reviewer is checking: …"): it is not the
-    // person's to answer, and "waiting for approval" with no request shown read as stuck on them.
-    const reviewing = /^the reviewer is checking/i.test(textOf(live?.activity));
+    // A request "Approve for me" is reviewing says so ("the reviewer is checking: …"), as does one it
+    // has just answered while AO still lists it ("the reviewer allowed: …"): neither is the person's
+    // to answer, and "waiting for approval" with no request shown read as stuck on them.
+    const reviewing = /^the reviewer (is checking|allowed|denied)/i.test(textOf(live?.activity));
     step.working = { ...working, ...(asking && !reviewing ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
       ...(timeline.length ? { timeline } : {}), ...(typeof live?.turn_started === "boolean" ? { taken: live.turn_started } : {}) };
     // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
@@ -1644,6 +1667,8 @@ export type ChatSlashCommand = { name: string; hint: string; args?: string; need
 export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "goal", hint: "Set a goal to keep pursuing", args: "<objective> | pause | resume | edit | clear" },
   { name: "loop", hint: "Run a prompt or command on a recurring interval", args: "[interval] <prompt or /review, /init> | stop", needsChat: true },
+  { name: "schedule", hint: "Continue this chat by itself later (5h, 90m, 9:30, tomorrow 9am)", args: "<when> [message] | clear", needsChat: true },
+  { name: "clearschedule", hint: "Delete this chat's schedule", needsChat: true },
   { name: "plan", hint: "Turn plan mode on or off" },
   { name: "compact", hint: "Compact this chat's context", needsChat: true },
   { name: "autocompact", hint: "Turn auto-compact on or off, or set how full the chat gets first", args: "[on | off | <percent>]" },
@@ -1759,6 +1784,86 @@ export function loopLabel(loop: Pick<ChatLoop, "minutes" | "round" | "nextAt" | 
     : `next in ${seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.ceil(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`}`;
   return `Every ${loopInterval(loop.minutes)} · ${next}`;
 }
+/**
+ * A chat's schedule (/schedule), as the bridge keeps it (chat-schedules.cjs): at `dueAt` the chat is
+ * sent `message` ("Continue" when the person gave none). `spec` is the time as they typed it, `due`
+ * means it waits for the chat's running turn, and `note` says why its last send failed.
+ */
+export type ChatSchedule = {
+  id: string; message: string; custom?: boolean; spec?: string; scheduledAt: number; dueAt: number; due?: boolean; note?: string;
+};
+export const SCHEDULE_MIN_MS = 60_000;
+export const SCHEDULE_MAX_MS = 30 * 86_400_000;
+const SCHEDULE_UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+const SCHEDULE_UNIT = "(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?)";
+// "5h", "1h30m", "1h 30m", "1.5 hours", "in 90 minutes", "2 days and 3 hours": one or more amounts with a unit.
+const SCHEDULE_DURATION = new RegExp(`^(?:in\\s+)?((?:\\d+(?:\\.\\d+)?\\s*${SCHEDULE_UNIT}(?![a-z])(?:\\s*,?\\s*(?:and\\s+)?)?)+)`, "i");
+// "9:30", "21:00", "9pm", "9:30 pm", "at 9am", "tomorrow 9am", "tonight 11:30": a clock time, today or tomorrow.
+const SCHEDULE_CLOCK = /^(?:(today|tonight|tomorrow|tmrw?)\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?(?![\w:])/i;
+
+/**
+ * /schedule's argument: when, then what to send (optional). "5h" is five hours from now; "1h30m",
+ * "90m", "1.5h", "2 days", "in 45 minutes" and "1w" work too. A clock time ("9:30", "21:00", "9pm",
+ * "tomorrow 9am") is its next time: today, or tomorrow once it has passed. What follows is the
+ * message ("/schedule 5h run the tests again"); with none the chat is told to continue.
+ */
+export function chatScheduleParse(arg: string, at = Date.now()): { dueAt: number; message: string; spec: string } | { error: string } {
+  const text = arg.trim();
+  const usage = "Say when: /schedule 5h, /schedule 1h30m, /schedule 9:30 or /schedule tomorrow 9am, then what to send if not \"Continue\"";
+  if (!text) return { error: usage };
+  const tail = (spec: string) => text.slice(spec.length).replace(/^\s*(?:[:,\-–—]|then\b)?\s*/i, "").trim();
+  const duration = SCHEDULE_DURATION.exec(text);
+  if (duration) {
+    let ms = 0;
+    for (const [, amount, unit] of duration[1].matchAll(/(\d+(?:\.\d+)?)\s*([a-z]+)/gi)) ms += Number(amount) * SCHEDULE_UNIT_MS[unit[0].toLowerCase()];
+    if (ms < SCHEDULE_MIN_MS) return { error: "A schedule must be at least 1 minute from now" };
+    if (ms > SCHEDULE_MAX_MS) return { error: "A schedule can be at most 30 days from now" };
+    return { dueAt: Math.round(at + ms), message: tail(duration[0]), spec: duration[0].trim() };
+  }
+  const clock = SCHEDULE_CLOCK.exec(text);
+  if (clock && (clock[3] !== undefined || clock[4] !== undefined)) {
+    const day = (clock[1] ?? "").toLowerCase(), meridiem = (clock[4] ?? "").toLowerCase().replace(/\./g, "");
+    let hour = Number(clock[2]);
+    const minute = Number(clock[3] ?? 0);
+    if (minute > 59 || (meridiem ? hour < 1 || hour > 12 : hour > 23)) return { error: `${clock[0].trim()} is not a time of day` };
+    if (meridiem) hour = hour % 12 + (meridiem === "pm" ? 12 : 0);
+    else if (day === "tonight" && hour < 12) hour += 12;
+    const due = new Date(at);
+    due.setHours(hour, minute, 0, 0);
+    if (day.startsWith("tom") || day.startsWith("tmr")) due.setDate(due.getDate() + 1);
+    else if (due.getTime() <= at) {
+      if (day) return { error: `${clock[0].trim()} has already passed` };
+      due.setDate(due.getDate() + 1);
+    }
+    if (due.getTime() - at < SCHEDULE_MIN_MS) return { error: "A schedule must be at least 1 minute from now" };
+    return { dueAt: due.getTime(), message: tail(clock[0]), spec: clock[0].trim() };
+  }
+  if (/^\d+(?:\.\d+)?(?:\s|$)/.test(text)) return { error: `Add a unit or a time: ${text.split(/\s/)[0]}h for hours, ${text.split(/\s/)[0]}m for minutes, or ${text.split(/\s/)[0]}:00 or ${text.split(/\s/)[0]}pm for a time of day` };
+  return { error: usage };
+}
+/** 42_000 -> "42s"; 185_000 -> "4m"; 17_940_000 -> "4h 59m"; 97_200_000 -> "1d 3h". */
+export function scheduleCountdown(ms: number): string {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
+  return `${Math.floor(seconds / 86_400)}d ${Math.floor(seconds % 86_400 / 3600)}h`;
+}
+/** When a schedule fires, in local time: "today 19:32", "tomorrow 09:00", "Tue 12 Nov 09:00". */
+export function scheduleWhen(dueAt: number, at = Date.now()): string {
+  const due = new Date(dueAt), today = new Date(at);
+  const clock = `${String(due.getHours()).padStart(2, "0")}:${String(due.getMinutes()).padStart(2, "0")}`;
+  const dayOf = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.round((dayOf(due) - dayOf(today)) / 86_400_000);
+  if (days === 0) return `today ${clock}`;
+  if (days === 1) return `tomorrow ${clock}`;
+  return `${due.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "")} ${clock}`;
+}
+/** The schedule bar's words: "Continues in 4h 59m", or, once due while the chat works, "Continues after this turn". */
+export function scheduleLabel(schedule: Pick<ChatSchedule, "dueAt" | "due">, at = Date.now()): string {
+  if (schedule.due || schedule.dueAt <= at) return "Continues after this turn";
+  return `Continues in ${scheduleCountdown(schedule.dueAt - at)}`;
+}
 /** Codex's goal summary words for each state. */
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
@@ -1797,7 +1902,7 @@ export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage
     const before = chatAnnotationsSplit(last.message), after = chatAnnotationsSplit(item.message);
     const message = chatMessageWithAnnotations([before.rest.trim(), after.rest.trim()].filter(Boolean).join("\n\n"),
       [...before.annotations, ...after.annotations]);
-    if (message.length <= CHAT_MESSAGE_LIMIT) return [...queue.slice(0, -1), { ...last, message }];
+    if (chatMessageFits(message)) return [...queue.slice(0, -1), { ...last, message }];
   }
   return [...queue, item];
 }
@@ -1821,6 +1926,10 @@ export type ChatCommands = {
   loop?: ChatLoop | null;
   startLoop?: (loop: { prompt: string; minutes: number | null }) => Promise<void>;
   stopLoop?: () => Promise<void>;
+  /** The chat's schedule (/schedule): a message it is sent by itself at a time the person chose. */
+  schedule?: ChatSchedule | null;
+  setSchedule?: (schedule: { dueAt: number; message: string; spec: string }) => Promise<void>;
+  clearSchedule?: () => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
   /** Compacts the live agent session and waits for provider completion, as local Codex does. */
@@ -1901,6 +2010,23 @@ const ANNOTATIONS_BLOCK = /^# Response annotations:\n[^\n]*\n<response-annotatio
 
 /** The longest message the chat sends (chat_send keeps 8,192 characters and refuses more). */
 export const CHAT_MESSAGE_LIMIT = 8192;
+/**
+ * The most one message may be in UTF-8 bytes, as the bridge counts it (agent-orchestrator-workflow.cjs
+ * CHAT_MESSAGE_BYTES): the chat's 8,192-byte record less room for the message's marker and a
+ * rolled-over head. Counted in characters only, Chinese text or emoji passed here and the send failed.
+ */
+export const CHAT_MESSAGE_BYTES = 8192 - 256;
+/** UTF-8 bytes, counted by code point (no TextEncoder: tests evaluate this module in a bare context). */
+export function chatMessageBytes(text: string): number {
+  let bytes = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+  }
+  return bytes;
+}
+/** Whether the bridge takes this message: within both the character and the byte limit. */
+export const chatMessageFits = (text: string): boolean => text.length <= CHAT_MESSAGE_LIMIT && chatMessageBytes(text) <= CHAT_MESSAGE_BYTES;
 
 /** The message with its annotations in front, as Codex sends them. */
 export function chatMessageWithAnnotations(message: string, annotations: ChatAnnotation[]): string {

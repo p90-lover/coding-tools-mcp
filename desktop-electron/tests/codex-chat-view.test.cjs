@@ -118,12 +118,15 @@ function mount(props, { effects = false, objectUrls } = {}) {
     : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, { window: timers, clearTimeout() {} });
   // The reply's head renders inline too, so a turn's who, status and files can be read.
   const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-    : name === "./ao-chat" ? chat : name === "./ChatChangedFiles" ? changedFiles : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" } : {}, { window: timers });
+    : name === "./ao-chat" ? chat : name === "./ChatChangedFiles" ? changedFiles : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
+    : name === "./ChatTurnStats" ? { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } : {}, { window: timers });
   // The reply's steps (chat-reply-plan) and their views, real too.
   const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
   const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./chat-transcript" ? transpile("chat-transcript.ts", name => name === "./ao-chat" ? chat : {})
+    // Settings › Chat's mission switch reads this mount's storage: "off" in workbenchStorage turns it off.
+    : name === "./chat-view-settings" ? transpile("chat-view-settings.ts", () => ({}), { localStorage: timers.localStorage, window: timers })
     : name === "./ao-chat" ? chat : name === "./ChatReplyHead" ? replyHead : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView : name === "./codex-prompts" ? prompts : name === "../icons" ? { Icon: "Icon" } : name === "./ChatMarkdown" ? { ChatMarkdown: "Markdown" }
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
@@ -304,7 +307,7 @@ test("the reviewer's answer closes the turn in full, with Retry on the latest se
   const answer = walk(view).find((element) => element.props?.className === "cx-answer has-verdict");
   assert.ok(answer);
   assert.equal(walk(answer).find((element) => element.type === "Markdown").props.text, "APPROVED — **done**");
-  assert.equal(text(walk(view).find((element) => element.props?.className === "cx-work-head")), "Turn completedNo tool calls");
+  assert.equal(text(walk(view).find((element) => element.props?.className === "cx-work-head")), "WorkedNo tool calls");
   walk(answer).find((element) => element.props?.["aria-label"] === "Retry this mission").props.onClick();
   assert.deepEqual(calls, [["restart", "r1"]]);
 });
@@ -321,7 +324,7 @@ test("the agent whose reply closes the turn keeps its row under Worked, without 
   const chatView = mount(props);
   let view = chatView.render();
   const head = walk(view).find((element) => element.props?.className === "cx-work-head");
-  assert.equal(text(head), "Turn completedActivity not loaded yet");
+  assert.equal(text(head), "WorkedActivity not loaded yet");
   head.props.onClick();
   view = chatView.render();
   const work = walk(view).find((element) => element.props?.className === "cx-work");
@@ -1436,48 +1439,78 @@ test("a finished single-model chat says a changed model or effort starts a new a
     composer: { mode: "single", route: { ...route }, onModeChange() {}, onRouteChange() {} } }).props).render();
   assert.equal(walk(same).some((element) => element.props?.className === "cx-route-note"), false, "the same route continues the same agent");
 });
-test("a working card's reasoning shows Codex-style: its title as one line, the rest folded", () => {
-  const { props } = base({ selectedTaskId: "t", working: true,
+test("a working card's reasoning shows Codex-style: open on its mission with its title on its row once, folded with the switch off", () => {
+  const working = () => base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/gpt-6-luna" } })], { execution_mode: "single" })],
     activity: { "r1:w": { activity: "thinking", last_event_at_ms: Date.now(), turn_started: true, timeline: [
-      { id: "r", kind: "reasoning", status: "completed", text: "**Inspecting the register route**\n\nThe form posts to /api/register." }] } } });
-  const page = mount(props);
-  const initial = page.render();
-  assert.equal(walk(initial).some((element) => element.props?.className === "cx-reasoning"), false, "thought details stay folded");
-  walk(initial).find((element) => element.props?.className === "cx-activity-head").props.onClick();
-  const reasoning = walk(page.render()).find((element) => element.type === "details" && element.props?.className === "cx-reasoning");
-  assert.ok(reasoning, "opening the activity group exposes its original reasoning");
-  assert.match(text(reasoning), /Thought\s*Inspecting the register route/);
+      { id: "r", kind: "reasoning", status: "completed", text: "**Inspecting the register route**\n\nThe form posts to /api/register." }] } } }).props;
+  // On a mission (the default), with no click: the group lists the thought and the thought is open,
+  // its title on its row and only the words under it below (the user: "when on mission all thoughts
+  // etc should be keep expanded").
+  const page = mount(working());
+  const thought = () => walk(page.render()).find((element) => element.type === "details" && element.props?.className === "cx-reasoning");
+  assert.equal(thought().props.open, true, "the thought is open while its turn works");
+  assert.match(text(thought()), /^Thought\s*Inspecting the register route$/);
+  const body = walk(thought()).find((element) => element.props?.className === "cx-reasoning-body");
+  assert.equal(walk(body).find((element) => element.type === "Markdown").props.text, "The form posts to /api/register.", "the title is said once, on the row");
+  // The person folds it: their choice holds through the turn's next updates.
+  thought().props.onToggle({ currentTarget: { open: false } });
+  for (let poll = 0; poll < 2; poll++) assert.equal(thought().props.open, false);
+  assert.equal(walk(thought()).some((element) => element.props?.className === "cx-reasoning-body"), false, "a folded thought draws no body");
+  // Turned off in Settings › Chat: folded behind its group, as before.
+  const saved = workbenchStorage;
+  try {
+    workbenchStorage = new Map([["coding-tools:ao:mission-work", "off"]]);
+    const off = mount(working());
+    const initial = off.render();
+    assert.equal(walk(initial).some((element) => element.props?.className === "cx-reasoning"), false, "thought details stay folded");
+    walk(initial).find((element) => element.props?.className === "cx-activity-head").props.onClick();
+    const reasoning = walk(off.render()).find((element) => element.type === "details" && element.props?.className === "cx-reasoning");
+    assert.ok(reasoning, "opening the activity group exposes its original reasoning");
+    assert.equal(reasoning.props.open, false, "and the thought itself stays a click away");
+    assert.match(text(reasoning), /Thought\s*Inspecting the register route/);
+  } finally { workbenchStorage = saved; }
 });
 
-test("a tool call opens on what it ran and what came back, with a dot for how it ended (Claude Code's tool rows)", () => {
+test("a tool call opens on a card of what it ran and what came back, led by its kind's glyph (Claude Code's tool rows)", () => {
   const { props } = base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
     activity: { "r1:w": { activity: "running", last_event_at_ms: Date.now(), turn_started: true, timeline: [
-      { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool" },
+      { id: "c", kind: "command", status: "failed", text: "npm config list", description: "Inspect npm registry configuration", output: "User refused permission to run tool", durationMs: 1200 },
       { id: "m", kind: "tool", status: "completed", label: "MCP", text: "mcp__coding-tools__read_file", input: "{\"path\":\"main.py\"}", output: "from fastapi import FastAPI" },
       { id: "p", kind: "tool", status: "pending", label: "Read", text: "Read x" }] } } });
-  // Compact activity folds the run of calls into one line, named with DeepSeek's label for what is
-  // happening now (the pending Read); opening it shows every row.
+  // Compact activity heads the run of calls with one line, named with DeepSeek's label for what is
+  // happening now (the pending Read); on the turn's mission it lists every row with no click.
   const view = mount(props);
   const group = walk(view.render()).find((element) => element.props?.className === "cx-activity-head");
   assert.match(text(group), /Reading files/);
-  group.props.onClick();
-  const tools = walk(view.render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
-  const [command, mcp, waiting] = tools;
+  assert.equal(group.props["aria-expanded"], true, "the group is open while its turn works");
+  const rows = () => walk(view.render()).filter((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? ""));
+  assert.equal(rows().length, 3, "every call is listed");
+  const [closed] = rows();
+  assert.doesNotMatch(text(closed), /User refused/, "a closed row draws no card");
+  // Opening a row (the browser's toggle event) draws its card.
+  for (const row of rows().filter((element) => element.type === "details")) row.props.onToggle({ currentTarget: { open: true } });
+  const [command, mcp, waiting] = rows();
   assert.equal(command.type, "details");
   assert.match(command.props.className, /tone-failed/);
+  assert.equal(command.props["data-family"], "command", "coloured as a command; the failure paints over it");
   assert.match(text(command), /Ran/);
+  assert.match(text(command), /1\.2s/, "how long it took, on the row");
   assert.match(text(command), /npm config list/);
+  assert.match(text(command), /Failed/);
   assert.match(text(command), /User refused permission to run tool/, "the output is in the opened row");
   assert.match(mcp.props.className, /tone-ok/);
-  assert.match(text(mcp), /"path":"main\.py"/);
+  assert.equal(mcp.props["data-family"], "read", "an MCP read_file is a read, whatever its label");
+  assert.match(text(mcp), /read_file/, "named by its tool, not by its MCP label");
+  assert.match(text(mcp), /coding-tools · read_file/, "its server and tool, opened");
+  assert.match(text(mcp), /path\s*main\.py/, "its arguments as names and values");
   assert.match(text(mcp), /from fastapi import FastAPI/);
   assert.equal(waiting.type, "div", "nothing to open on yet");
   assert.match(waiting.props.className, /tone-running/);
 });
 
-test("a single model's thinking and tool calls stay folded under its answer once it lands, and an older one loads when opened", () => {
+test("a single model's thinking and tool calls stay under its answer once it lands (open, watched on its mission), and an older one loads when opened", () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/m" };
   const timeline = [{ id: "r", kind: "reasoning", status: "completed", text: "Checking the route" },
     { id: "c", kind: "command", status: "completed", text: "ls", output: "main.py" }];
@@ -1491,11 +1524,88 @@ test("a single model's thinking and tool calls stay folded under its answer once
   const head = walk(finished).find((element) => element.props?.className === "cx-work-head");
   assert.ok(head, "the work is still there after the answer");
   assert.match(text(head), /Ran a command/, "headed like Claude Code's work summary");
+  assert.equal(head.props["aria-expanded"], true, "watched on its mission, it stays expanded");
   assert.ok(walk(finished).some((element) => element.type === "Markdown" && element.props.text === "All set."), "and the answer below it");
 
   const older = mount(base({ selectedTaskId: "t",
     runs: [run("r0", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s0", answer: "Done before." } })], { execution_mode: "single" })] }).props).render();
-  assert.match(text(walk(older).find((element) => element.props?.className === "cx-work-head")), /^Turn completed.*Activity not loaded yet/, "a historical card distinguishes unknown activity from zero tools");
+  const olderHead = walk(older).find((element) => element.props?.className === "cx-work-head");
+  assert.match(text(olderHead), /^Worked.*Activity not loaded yet/, "a historical card distinguishes unknown activity from zero tools");
+  assert.equal(olderHead.props["aria-expanded"], false, "a turn that ended before the chat was opened stays folded, keeping a long chat light");
+});
+
+test("a watched turn keeps its work expanded as its answer lands, and what the person folded stays folded", () => {
+  const route = { harness_id: "ao:claude-code", model: "cpa/m" };
+  const timeline = [
+    { id: "r1", kind: "reasoning", status: "completed", text: "**Reading the router**\n\nThe routes live in app.ts." },
+    { id: "c1", kind: "command", status: "completed", text: "npm test", output: "ok" },
+    { id: "r2", kind: "reasoning", status: "completed", text: "Tests pass; writing the answer." },
+  ];
+  const view = mount(base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route, receipt: { thread_id: "s1" } })], { execution_mode: "single" })],
+    activity: { "r1:w": { activity: "thinking", last_event_at_ms: Date.now(), turn_started: true, timeline } } }).props);
+  const thoughts = (tree) => walk(tree).filter((element) => element.type === "details" && element.props?.className === "cx-reasoning");
+  const live = view.render();
+  assert.deepEqual(thoughts(live).map((element) => element.props.open), [true, true], "every thought is open while it works");
+  // A thought without a bold title keeps only "Thought" on its row while open: its words are below.
+  assert.equal(text(walk(thoughts(live)[1]).find((element) => element.type === "summary")), "Thought");
+  thoughts(live)[1].props.onToggle({ currentTarget: { open: false } });
+  // The answer lands: the card's work moves from its running row to the "Worked for" fold.
+  const answered = { working: false, activity: {},
+    runs: [run("r1", "t", [node("w", "planner", "finished", { route, receipt: { thread_id: "s1", answer: "All set." } })], { execution_mode: "single" })] };
+  const landed = view.render(answered);
+  const head = walk(landed).find((element) => element.props?.className === "cx-work-head");
+  assert.equal(head.props["aria-expanded"], true, "the fold stays open");
+  assert.equal(walk(landed).find((element) => element.props?.className === "cx-activity-head").props["aria-expanded"], true, "its group still lists the steps");
+  assert.ok(walk(landed).some((element) => /(^|\s)cx-tool(\s|$)/.test(element.props?.className ?? "")), "the command's row is there to open");
+  assert.deepEqual(thoughts(landed).map((element) => element.props.open), [true, false], "the thought the person folded stays folded");
+  // Folding the whole turn is the person's call too.
+  head.props.onClick();
+  assert.equal(walk(view.render(answered)).find((element) => element.props?.className === "cx-work-head").props["aria-expanded"], false);
+});
+
+test("while a goal is pursued its earlier rounds show their work expanded too; once it ends, a round the chat did not watch folds", async (t) => {
+  const route = { harness_id: "ao:codex", model: "gpt-6.1-sol" };
+  const runs = [
+    run("round-1", "t", [node("p", "planner", "finished", { route, receipt: { thread_id: "g1", started_at_ms: 1000, finished_at_ms: 4000, answer: "Fixed one test." } })], { execution_mode: "single" }),
+    run("round-2", "t", [node("p", "planner", "running", { route, receipt: { thread_id: "g2", started_at_ms: 5000 } })], { execution_mode: "single" }),
+  ];
+  const goal = (status) => ({ goal: { objective: "fix the flaky tests", status, round: 2, rounds: 0, startedAt: 1000, updatedAt: 5000 }, goalAction: async () => {} });
+  const firstRound = async (status) => {
+    const page = mount(base({ selectedTaskId: "t", working: true, runs, commands: goal(status),
+      loadWork: async () => [{ id: "c", kind: "command", status: "completed", text: "npm test" }],
+      pendingMessage: "fix the flaky tests\n\nFollow-up (2026-11-08 10:00 UTC):\nStop hook feedback:\n[fix the flaky tests]: two tests still fail" }).props, { effects: true });
+    t.after(() => page.unmount());
+    page.render();
+    await new Promise(setImmediate);
+    // Round 2 works with no head of its own; the first head is round 1's "Worked for".
+    return walk(page.render()).filter((element) => element.props?.className === "cx-work-head")[0];
+  };
+  assert.equal((await firstRound("active")).props["aria-expanded"], true, "round 1 is part of the goal still being pursued");
+  assert.equal((await firstRound("achieved")).props["aria-expanded"], false, "a met goal's round the chat never watched folds as before");
+});
+
+test("a row's own choice outlives the row: its turn keeps it by card, so a thought folded on the running card stays folded in the answer's fold", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const tree = ts.createSourceFile("AgentOrchestratorChat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  let hook;
+  const visit = (item) => { if (ts.isFunctionDeclaration(item) && item.name?.text === "useWorkOpen") hook = item.getText(tree); ts.forEachChild(item, visit); };
+  visit(tree);
+  assert.ok(hook, "the chat's one hook for a disclosure in a turn's work");
+  // Each call is a row mounting afresh with its own state, as the "Worked for" fold mounts new rows.
+  const exports = {};
+  vm.runInNewContext(ts.transpileModule(`exports.useWorkOpen = ${hook}`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+    { exports, useState: (initial) => { let value = typeof initial === "function" ? initial() : initial; return [value, (next) => { value = next; }]; } });
+  const row = (...args) => exports.useWorkOpen(...args);
+  const turn = { open: true, chosen: new Map(), card: "r1:planner" };
+  const [open, choose] = row(turn, "r2");
+  assert.equal(open, true, "open on a mission");
+  choose(false);
+  assert.equal(row(turn, "r2")[0], false, "drawn again in the answer's fold, the row keeps the person's fold");
+  assert.equal(row(turn, "r1")[0], true, "the turn's other rows stay open");
+  assert.equal(row({ ...turn, card: "r1:reviewer" }, "r2")[0], true, "another card's row with the same id is its own");
+  assert.equal(row(undefined, "group:a", true)[0], true, "off a mission a row opens by its own default");
+  assert.equal(row(undefined, "group:a")[0], false);
 });
 
 test("folding a live work row keeps native assistant messages visible and expanded work interleaved", () => {
@@ -1512,13 +1622,13 @@ test("folding a live work row keeps native assistant messages visible and expand
   const shown = marker => walk(page.render()).filter(element => element.props?.text === marker);
   const initial = page.render();
   const rows = walk(initial).filter(element => element.type === "li" && /\bcx-live-item\b/.test(element.props?.className || ""));
-  assert.deepEqual(rows.map(element => /kind-(\w+)/.exec(element.props.className)?.[1]), ["message", "group", "message"],
-    "expanded work preserves assistant/tool/assistant order");
+  assert.deepEqual(rows.map(element => /kind-(\w+)/.exec(element.props.className)?.[1]), ["message", "group", "command", "message"],
+    "expanded work preserves assistant/tool/assistant order, its group listing the command while the turn works");
   assert.equal(shown(timeline[0].text).length, 1);
   assert.equal(shown(timeline[2].text).length, 1);
-  walk(initial).find(element => element.props?.className === "cx-step-head").props.onClick();
-  assert.equal(shown(timeline[0].text).length, 1, "folding work cannot hide earlier assistant speech");
-  assert.equal(shown(timeline[2].text).length, 1, "folding work cannot hide the streaming assistant response");
+  // A single card has no head of its own (nothing to fold it by): its request, steers and work read as one column.
+  assert.equal(walk(initial).some(element => element.props?.className === "cx-step-head"), false, "one card, no agent header");
+  assert.ok(walk(initial).some(element => element.props?.className === "cx-step tone-working is-solo"));
 });
 
 test("folding team work keeps a finished assistant receipt visible before the reviewer answers", () => {
@@ -1636,13 +1746,17 @@ test("a joined finished receipt keeps research and bug findings between compact 
   const view = page.render();
   for (const text of speech) assert.equal(walk(view).filter(row => row.props?.text === text).length, 1, text);
   const rows = walk(view).filter(row => row.type === "li" && /cx-live-item/.test(row.props?.className ?? ""));
-  assert.deepEqual(rows.map(row => /kind-(\w+)/.exec(row.props.className)?.[1]), ["message", "group", "message", "group"]);
+  // Folded under "Worked for", as Codex folds it: what the agent said stays, its tool calls wait behind the head.
+  assert.deepEqual(rows.map(row => /kind-(\w+)/.exec(row.props.className)?.[1]), ["message", "message"]);
   const head = walk(view).find(row => row.props?.className === "cx-work-head");
   assert.equal(head.props["aria-expanded"], false);
-  assert.match(text(head), /Turn completed.*Edited a file, read a file/);
+  assert.match(text(head), /^Worked for 3s.*Edited a file, read a file/);
   assert.equal(reads.length, 1, "summary, narrative and final answer share the read");
   assert.equal(walk(view).some(row => row.props?.className?.includes("cx-tool ")), false, "tool bodies are not mounted by preload");
-  walk(view).find(row => row.props?.className === "cx-activity-head").props.onClick();
+  head.props.onClick();
+  const opened = walk(page.render()).filter(row => row.type === "li" && /cx-live-item/.test(row.props?.className ?? ""));
+  assert.deepEqual(opened.map(row => /kind-(\w+)/.exec(row.props.className)?.[1]), ["message", "group", "tool", "message", "group", "edit"], "opened, each tool group opens between what was said");
+  walk(page.render()).find(row => row.props?.className === "cx-activity-head").props.onClick();
   assert.ok(walk(page.render()).some(row => /cx-tool/.test(row.props?.className ?? "")), "the recorded tool remains inspectable");
 });
 
@@ -1778,4 +1892,25 @@ test("the chat header has a Preview button that opens the chat's browser with no
   try {
     assert.ok(!preview(), "while a hidden page is open the browser chip takes its place");
   } finally { openPage = null; }
+});
+
+test("a failed work read waits instead of being retried on every poll while AO is slow", async t => {
+  // Seen live 2026-11-09: seven cards' turn_timeline reads timed out together every 30 s while AO
+  // was already slow; each chat poll rendered the turn anew and asked again.
+  const route = { harness_id: "ao:codex", model: "gpt-6.1-sol" };
+  const reads = [];
+  const { props } = base({ selectedTaskId: "t", runs: [run("slow-ao", "t", [node("p", "planner", "finished", {
+    route, receipt: { thread_id: "slow-ao-thread", started_at_ms: 7000, finished_at_ms: 9000, answer: "Done." },
+  })], { execution_mode: "single" })], loadWork: async (runId) => {
+    reads.push(runId);
+    throw new Error("The operation was aborted due to timeout");
+  } });
+  const page = mount(props, { effects: true });
+  t.after(() => page.unmount());
+  for (let poll = 0; poll < 5; poll++) {
+    page.render();
+    await new Promise(setImmediate);
+  }
+  assert.equal(reads.length, 1, "five polls after a failed read ask AO once");
+  assert.match(text(page.render()), /Done/, "the answer still shows without its activity");
 });

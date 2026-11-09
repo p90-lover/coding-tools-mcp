@@ -7,7 +7,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 // AO takes at most 8 servers per session; the app's own server is one of them.
 const MAX_SESSION_SERVERS = 8;
@@ -133,14 +133,34 @@ function createChatMcpServers({ filePath, logger = null }) {
     }
     return servers;
   };
+  // Saves run off the main thread: written synchronously, one save held every window for 0.5 s on
+  // the busy hard disk. The list changes at once; a burst of changes is one write plus at most one
+  // more with the latest list, and saved() reports a failed write (the next change writes it all).
+  let saving = null;
+  let saveAgain = false;
+  let saveFailure = null;
+  const persist = () => {
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(filePath, `${JSON.stringify({ version: 1, servers }, null, 2)}\n`)
+      .then(() => { saveFailure = null; }, (error) => { saveFailure = error; })
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
+  };
   const store = (next) => {
-    writePrivateFileAtomic(filePath, `${JSON.stringify({ version: 1, servers: next }, null, 2)}\n`);
     servers = next;
+    persist();
     return list();
   };
   const list = () => load().map((server) => structuredClone(server));
   return Object.freeze({
     list,
+    /** Resolves once every change so far is on disk; rejects when the last write failed. */
+    async saved() {
+      while (saving) await saving;
+      if (saveFailure) throw saveFailure;
+    },
     /** Adds a server, or replaces the one with the same id; returns the new list. */
     save(input) {
       const current = load();

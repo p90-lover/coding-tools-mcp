@@ -2,19 +2,34 @@
 .cx-chat-page { display: flex; flex: 1; min-width: 0; min-height: 0; overflow: hidden; }
 .cx-chat-page[hidden] { display: none; }
 .cx-chat-page > .ao-workflow { flex: 1; min-width: 0; }
-.cx-pages-bar { display: flex; align-items: center; gap: 4px; flex: 0 0 38px; min-width: 0; padding: 3px 8px;
-  border-bottom: 1px solid var(--color-border); background: var(--color-background-elevated); color: var(--color-text-primary);
-  font-family: var(--font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); }
-.cx-page-tabs { display: flex; align-items: center; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: thin; }
-.cx-pages-bar button { border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font: inherit; }
-.cx-page-tabs button { flex: 0 0 auto; padding: 5px 12px; color: var(--color-text-secondary); font-size: 12px; white-space: nowrap; }
-.cx-pages-bar button:hover { background: var(--color-background-control-hover); }
-.cx-page-tabs button[aria-selected="true"] { background: var(--color-background-control-hover); color: var(--color-text-primary); font-weight: 500; }
-.cx-page-step { flex: 0 0 28px; height: 28px; padding: 0; font-size: 20px !important; line-height: 1; }
-.cx-pages-bar button:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: -2px; }
-.cx-pages-bar button:disabled { cursor: default; opacity: .35; }
+/* Page tabs: in the chat column's title-bar strip (.ao-dragstrip), which stays draggable around them.
+   They keep clear of the window's caption buttons on the right. Colours follow the chat's palette
+   beside a chat (claude-theme.css), the app's elsewhere. */
+.ao-dragstrip:has(> .cx-page-tabs) { display: flex; align-items: center; min-width: 0; }
+.cx-page-tabs {
+  --cx-page-text: var(--color-text-secondary); --cx-page-strong: var(--color-text-primary);
+  --cx-page-hover: var(--color-background-control-hover); --cx-page-on: var(--color-background-control-hover);
+  display: flex; align-items: center; gap: 2px; min-width: 0; max-width: calc(100% - 160px); margin-left: 10px;
+  font-family: var(--font-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif); -webkit-app-region: no-drag;
+}
+.ao-workflow .ao-main:has(> .ao-stage .cx-chat) .cx-page-tabs {
+  --cx-page-text: #73726c; --cx-page-strong: #141413; --cx-page-hover: rgb(31 30 29 / 5%); --cx-page-on: rgb(31 30 29 / 8%);
+}
+.ao-workflow[data-theme="dark"] .ao-main:has(> .ao-stage .cx-chat) .cx-page-tabs {
+  --cx-page-text: #a6a39a; --cx-page-strong: #faf9f5; --cx-page-hover: rgb(250 249 245 / 6%); --cx-page-on: rgb(250 249 245 / 10%);
+}
+.cx-page-tabs [role="tablist"] { display: flex; align-items: center; gap: 2px; min-width: 0; overflow: hidden; }
+.cx-page-tabs button {
+  display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; min-width: 24px; height: 24px; padding: 0 6px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--cx-page-text); cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums;
+}
+.cx-page-tabs button:hover { background: var(--cx-page-hover); color: var(--cx-page-strong); }
+.cx-page-tabs button[aria-selected="true"] { background: var(--cx-page-on); color: var(--cx-page-strong); }
+.cx-page-tabs button:focus-visible { outline: 2px solid var(--color-border-focus, #d97757); outline-offset: -2px; }
+.cx-page-tabs .cx-page-add { width: 24px; padding: 0; }
 .cxs-shortcut { width: 148px; min-width: 0; padding: 6px 10px; border: 1px solid var(--cxs-border); border-radius: 8px;
   background: var(--cxs-panel); color: inherit; font: inherit; font-size: 13px; text-align: center; cursor: pointer; }
 .cxs-shortcut:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
 .cxs-shortcut:disabled { cursor: default; opacity: .45; }
-@media (max-width: 480px) { .cx-page-tabs button { padding: 5px 8px; } .cxs-shortcut { width: 112px; } }
+@media (max-width: 480px) { .cxs-shortcut { width: 112px; } }

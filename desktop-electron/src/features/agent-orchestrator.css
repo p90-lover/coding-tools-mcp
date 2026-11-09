@@ -298,10 +298,32 @@
 /* The role editor reuses the movable sheet and stays inside the graph viewport. */
 .ao-role-popup { z-index: 6; width: min(370px, calc(100% - 16px)); max-height: calc(100% - 16px); }
 .ao-role-inspector { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 0 14px 14px; }
-.ao-route-tuning { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-column: 1 / -1; gap: 8px; min-width: 0; margin: 0; padding: 8px 10px 10px; border: 1px solid var(--ao-line); border-radius: 8px; }
-.ao-route-tuning legend { padding: 0 4px; color: var(--color-text-primary); font-size: 11px; font-weight: 600; }
-.ao-route-tuning label { display: grid; gap: 5px; min-width: 0; color: var(--ao-muted); font-size: 11px; }
-.ao-route-tuning input:disabled, .ao-route-tuning select:disabled { opacity: .55; }
+/* Model picker: one slim row (model, agent, effort, context, reset); the list opens below it. */
+.ao-route-picker { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ao-route-bar { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.ao-route-bar > * { flex: none; height: 28px; margin: 0; border: 1px solid var(--ao-line); border-radius: 6px; background: var(--color-bg-primary); color: var(--color-text-primary); font: inherit; font-size: 12px; }
+.ao-route-bar > :disabled { opacity: .5; cursor: default; }
+.ao-route-model { display: flex; flex: 1 1 auto !important; align-items: center; gap: 6px; min-width: 0; padding: 0 8px; text-align: left; cursor: pointer; }
+.ao-route-model > span:not(.ao-harness-logo) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-route-model.is-warning { border-color: var(--ao-amber, #d29922); }
+.ao-route-caret { flex: none; width: 6px; height: 6px; margin: -3px 2px 0; border: solid var(--ao-muted); border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+.ao-route-model[aria-expanded="true"] .ao-route-caret { margin-top: 3px; transform: rotate(-135deg); }
+.ao-route-agents { display: flex; align-items: center; gap: 1px; padding: 0 2px; }
+.ao-route-agents > button { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; opacity: .45; cursor: pointer; }
+.ao-route-agents > button[aria-checked="true"] { background: rgb(127 127 127 / 18%); opacity: 1; }
+.ao-workflow .ao-route-bar select.ao-route-effort { width: 70px; padding: 0 2px 0 6px; }
+.ao-workflow .ao-route-bar input.ao-route-context { width: 70px; padding: 0 6px; }
+.ao-route-reset { width: 28px; padding: 0; color: var(--ao-muted) !important; cursor: pointer; }
+.ao-route-reset:hover:not(:disabled) { color: var(--color-text-primary) !important; }
+.ao-route-list { display: flex; flex-direction: column; gap: 2px; max-height: 280px; padding: 4px; overflow-y: auto; border: 1px solid var(--ao-line); border-radius: 8px; background: var(--color-bg-primary); }
+.ao-workflow .ao-route-list .ao-route-search { flex: none; height: 26px; margin-bottom: 2px; padding: 0 8px; }
+.ao-route-group h4 { display: flex; align-items: center; gap: 5px; margin: 6px 6px 2px; color: var(--ao-muted); font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.ao-route-option { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 26px; padding: 0 6px; border: 0; border-radius: 5px; background: transparent; color: var(--color-text-primary); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.ao-route-option > span:not(.ao-harness-logo) { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ao-route-option:hover, .ao-route-option:focus-visible { background: rgb(127 127 127 / 14%); outline: none; }
+.ao-route-option[aria-selected="true"] { background: color-mix(in srgb, var(--ao-blue) 18%, transparent); }
+.ao-route-empty { margin: 0; padding: 6px; color: var(--ao-muted); font-size: 12px; }
+.ao-route-option small { flex: none; color: var(--ao-muted); font-size: 10px; }
 .ao-role-inspector form { display: flex; flex-direction: column; gap: 10px; }
 .ao-inspector-tabs { display: flex; gap: 2px; padding: 2px; border-radius: 7px; background: rgb(255 255 255 / 5%); }
 .ao-inspector-tabs button { flex: 1 1 0; min-width: 0; height: 26px; border: 0; border-radius: 5px; background: transparent; color: var(--ao-muted); text-transform: capitalize; font-size: 12px; }
@@ -482,32 +504,43 @@
 /* Monochrome brand glyphs turn white on the dark theme. */
 .ao-workflow[data-theme="dark"] .ao-harness-mark.is-mono, :root[data-theme="dark"] .ao-harness-mark.is-mono { filter: invert(1); }
 .ao-workflow .ao-harness-option { display: flex; align-items: center; gap: 8px; min-width: 0; }
-/* The harness list is one slim line per harness: logo and name, no state words. A missing harness
-   is greyed and folded under "+N", one that needs a sign-in has a dot on its logo, and the tooltip
-   says which. The pick is marked by its tint and check, so the rows need no radio. The panel rises
-   in, its rows follow one by one, the check pops and a hovered logo tips toward the pointer. */
-.ao-workflow .ao-composer-popover.ao-harness-popup { width: min(160px, calc(100vw - 32px)); max-height: min(280px, 44dvh, var(--ao-picker-room, 100dvh)); padding: 4px; border-radius: 10px;
-  overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable;
+/* The harness menu is a slim strip of logos, every harness in one column that scrolls (no fold).
+   No names or state words on the rows: a hovered or focused logo shows its name in a bubble beside
+   the strip, a missing harness has a red dot on its logo and one that needs a sign-in an amber dot.
+   The column fades at an end only while more logos lie past it. The pick is a tinted, ringed tile.
+   The panel rises in, its rows follow one by one and a hovered logo tips toward the pointer. The
+   panel itself never scrolls or clips, so the bubble can sit outside it; the column scrolls. */
+.ao-workflow .ao-composer-popover.ao-harness-popup { width: auto; max-height: none; padding: 3px; border-radius: 12px; overflow: visible;
   transform-origin: 16px 100%; animation: ao-popover-in .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+.ao-workflow .ao-tuning-popup .ao-harness-list { max-height: min(280px, 44dvh, calc(var(--ao-picker-room, 100dvh) - 6px)); overflow-y: auto;
+  overscroll-behavior: contain; scrollbar-width: none; }
+.ao-workflow .ao-harness-list::-webkit-scrollbar { display: none; }
+.ao-workflow .ao-harness-list[data-fade="top"] { mask-image: linear-gradient(to bottom, transparent, #000 26px); }
+.ao-workflow .ao-harness-list[data-fade="bottom"] { mask-image: linear-gradient(to top, transparent, #000 26px); }
+.ao-workflow .ao-harness-list[data-fade="both"] { mask-image: linear-gradient(to bottom, transparent, #000 26px, #000 calc(100% - 26px), transparent); }
+.ao-workflow .ao-harness-tip { position: absolute; z-index: 1; top: var(--tip-y, 50%); left: calc(100% + 8px); transform: translateY(-50%);
+  display: flex; align-items: baseline; gap: 6px; padding: 4px 9px; border-radius: 7px; background: var(--claude-text, #1d2939); color: var(--claude-bg, #fff);
+  font-size: 12px; font-weight: 500; white-space: nowrap; pointer-events: none; box-shadow: 0 4px 14px rgb(15 23 42 / 18%);
+  animation: ao-tip-in .14s ease-out backwards; }
+.ao-workflow .ao-harness-tip small { font-size: 11px; font-weight: 400; opacity: .72; }
+@keyframes ao-tip-in { from { opacity: 0; transform: translate(-4px, -50%); } }
 .ao-workflow .ao-harness-popup > header { margin: 0 2px 4px 8px; }
 .ao-workflow .ao-harness-popup h3 { font-size: 13px; }
 .ao-workflow .ao-harness-popup .ao-popover-close { flex-basis: 22px; width: 22px; height: 22px; border-radius: 6px; transition: transform .2s ease, background-color .16s ease; }
 .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: rotate(90deg); background: var(--cx-hover, #eef3f8); }
 .ao-workflow .ao-harness-list { gap: 1px; }
-.ao-workflow .ao-harness-list .ao-picker-option { margin: 0; padding: 4px 6px; gap: 6px; border-radius: 6px; font-size: 12px;
-  transition: background-color .16s ease, transform .16s ease;
-  animation: ao-row-in .3s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(var(--row, 0) * 18ms + 50ms); }
-.ao-workflow .ao-harness-list .ao-option-radio { display: none; }
-.ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled) { transform: translateX(2px); }
+.ao-workflow .ao-harness-list .ao-picker-option { justify-content: center; margin: 0; padding: 6px; gap: 0; border-radius: 8px;
+  transition: background-color .16s ease, box-shadow .16s ease;
+  animation: ao-row-in .3s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(min(var(--row, 0), 10) * 18ms + 50ms); }
+.ao-workflow .ao-harness-list .ao-picker-option > span:nth-child(2) { flex: none; }
+.ao-workflow .ao-harness-list .ao-option-radio, .ao-workflow .ao-harness-list .ao-picker-option > svg { display: none; }
+.ao-workflow .ao-harness-list .ao-picker-option[aria-checked="true"] { background: var(--claude-accent-soft, #e8f1ff);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--claude-accent, #1677ff) 45%, transparent); }
 .ao-workflow .ao-harness-list .ao-harness-logo { transition: transform .22s cubic-bezier(.3, 1.6, .5, 1); }
 .ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled) .ao-harness-logo { transform: scale(1.14) rotate(-6deg); }
-.ao-workflow .ao-harness-list .ao-picker-option > svg { flex: none; width: 14px; height: 14px; color: var(--claude-accent, #1677ff);
-  animation: ao-check-pop .34s cubic-bezier(.3, 1.6, .5, 1) .12s backwards; }
-.ao-workflow .ao-harness-list .ao-harness-option strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
 .ao-workflow .ao-harness-list .ao-picker-option:disabled { opacity: 0.55; cursor: default; }
-/* Installation state dims the name, not the brand: every logo keeps its real colour and contrast. */
+/* Installation state is the red dot, not a faded brand: every logo keeps its real colour and contrast. */
 .ao-workflow .ao-harness-list .ao-picker-option:disabled:has(.is-missing) { opacity: 1; }
-.ao-workflow .ao-harness-option.is-missing strong { color: var(--claude-text-2, #7a879c); }
 .ao-workflow .ao-harness-face { position: relative; display: inline-grid; flex: none; }
 .ao-workflow .ao-harness-signin { position: absolute; top: -2px; right: -3px; width: 7px; height: 7px; border-radius: 50%;
   background: var(--ao-amber, #c98a12); box-shadow: 0 0 0 2px var(--claude-raised, #fff); animation: ao-check-pop .34s cubic-bezier(.3, 1.6, .5, 1) .3s backwards; }
@@ -515,25 +548,14 @@
 .ao-workflow .ao-harness-missing { position: absolute; top: -2px; left: -3px; width: 7px; height: 7px; border-radius: 50%;
   background: var(--ao-red, #e5484d); box-shadow: 0 0 0 2px var(--claude-raised, #fff); animation: ao-missing-blink 1.2s ease-in-out infinite; }
 @keyframes ao-missing-blink { 50% { opacity: .25; } }
-.ao-workflow .ao-harness-more > summary { display: flex; align-items: center; gap: 6px; margin-top: 2px; padding: 4px 8px; border-radius: 8px;
-  color: var(--claude-text-2, #7a879c); font-size: 11.5px; list-style: none; cursor: pointer; transition: background-color .16s ease, color .16s ease; }
-.ao-workflow .ao-harness-more > summary::-webkit-details-marker { display: none; }
-.ao-workflow .ao-harness-more > summary:hover { background: var(--cx-hover, #eef3f8); color: var(--claude-text, #27384f); }
-.ao-workflow .ao-harness-more > summary:focus-visible { outline: 2px solid var(--claude-accent, #1677ff); outline-offset: -2px; }
-.ao-workflow .ao-harness-more > summary svg { transition: transform .22s cubic-bezier(.2, .8, .2, 1); }
-.ao-workflow .ao-harness-more[open] > summary svg { transform: rotate(90deg); }
-/* Folded rows unfold when opened: the animation's name changes then, which starts it again. */
-.ao-workflow .ao-harness-more[open] .ao-picker-option { animation-name: ao-row-unfold; animation-delay: calc(var(--row, 0) * 14ms); }
 @keyframes ao-popover-in { from { opacity: 0; transform: translateY(8px) scale(.94); filter: blur(4px); } }
 @keyframes ao-row-in { from { opacity: 0; transform: translateY(4px); } }
-@keyframes ao-row-unfold { from { opacity: 0; transform: translateY(-4px); } }
 @keyframes ao-check-pop { from { opacity: 0; transform: scale(.3) rotate(-25deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .ao-workflow .ao-harness-popup, .ao-workflow .ao-harness-list .ao-picker-option, .ao-workflow .ao-harness-list .ao-picker-option > svg,
+  .ao-workflow .ao-harness-popup, .ao-workflow .ao-harness-list .ao-picker-option, .ao-workflow .ao-harness-tip,
   .ao-workflow .ao-harness-signin, .ao-workflow .ao-harness-missing { animation: none !important; }
   .ao-workflow .ao-harness-list *, .ao-workflow .ao-harness-popup .ao-popover-close { transition: none !important; }
-  .ao-workflow .ao-harness-list .ao-picker-option:hover:not(:disabled), .ao-workflow .ao-harness-list .ao-picker-option:hover .ao-harness-logo,
-  .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: none; }
+  .ao-workflow .ao-harness-list .ao-picker-option:hover .ao-harness-logo, .ao-workflow .ao-harness-popup .ao-popover-close:hover { transform: none; }
 }
 .ao-workflow .ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
 .ao-workflow .ao-tuning-popup [role="radiogroup"] { display: grid; gap: 2px; }
@@ -549,12 +571,15 @@
 .ao-workflow .ao-composer-popover input, .ao-workflow .ao-composer-popover select { border-color: var(--ao-line); background: #fff; font: inherit; font-size: 12px; }
 .ao-workflow .ao-composer-popover label { color: #25354e; font-size: 12px; }
 .ao-workflow .ao-composer-popover .ao-hint, .ao-workflow .ao-popup-muted { color: #7a879c; font-size: 11px; line-height: 1.45; }
-.ao-workflow .ao-composer-popover.ao-model-popup { display: flex; flex-direction: column; gap: 6px; width: min(300px, calc(100vw - 32px));
-  max-height: min(360px, 52dvh, var(--ao-picker-room, 100dvh)); overflow: hidden; padding: 8px; }
+.ao-workflow .ao-composer-popover.ao-model-popup { display: flex; flex-direction: column; gap: 4px; width: min(248px, calc(100vw - 32px));
+  max-height: min(320px, 52dvh, var(--ao-picker-room, 100dvh)); overflow: hidden; padding: 6px; }
 .ao-workflow .ao-composer-popover:is(.ao-harness-popup, .ao-model-popup) { background: color-mix(in srgb, var(--claude-raised, #fff) 90%, transparent);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
-.ao-workflow .ao-model-popup .ao-model-search { flex: none; }
-.ao-workflow .ao-model-popup .ao-picker-option { margin: 1px 0; padding: 6px; gap: 7px; font-size: 12px; }
+.ao-workflow .ao-model-popup .ao-model-search { flex: none; height: 28px; min-height: 28px; padding: 0 8px; }
+.ao-workflow .ao-model-popup .ao-picker-option { margin: 0; min-height: 24px; padding: 4px 6px; gap: 6px; font-size: 12px; }
+.ao-workflow .ao-model-popup .ao-option-radio { display: none; }
+.ao-workflow .ao-model-popup .ao-model-row { display: flex; gap: 6px; }
+.ao-workflow .ao-model-popup .ao-model-group > h4 { margin: 4px 6px 2px; }
 .ao-workflow .ao-model-popup > header { order: 0; margin-bottom: 0; }
 .ao-workflow .ao-model-search { order: 1; }
 .ao-workflow .ao-model-popup .ao-field-row { display: contents; }
@@ -562,9 +587,6 @@
 .ao-workflow .ao-model-popup > h4 { order: 3; margin: 3px 0 -4px; font-size: 12px; }
 /* Only the rows scroll: the search stays put, and short split panes can shrink the list. */
 .ao-workflow .ao-model-options { order: 4; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-gutter: stable; }
-.ao-workflow .ao-model-popup .ao-route-tuning { order: 5; display: grid; grid-template-columns: 1fr; gap: 10px; margin: 4px 0 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--ao-line); }
-.ao-workflow .ao-model-popup .ao-route-tuning legend { display: none; }
-.ao-workflow .ao-model-popup .ao-route-tuning label { display: grid; gap: 7px; }
 .ao-workflow .ao-picker-option { display: flex; align-items: center; width: 100%; gap: 10px; margin: 3px 0; padding: 9px 8px; border: 0; border-radius: 7px; background: #fff; color: #27384f; text-align: left; cursor: pointer; }
 .ao-workflow .ao-picker-option[aria-checked="true"] { background: #edf6ff; color: #122742; }
 .ao-workflow .ao-picker-option > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -666,6 +688,8 @@ pre.cdx-command:focus-visible { outline: 2px solid var(--ao-blue, #2f6fdd); outl
 .cdx-foot .cx-computer-lead { margin-right: auto; }
 /* Codex's footer: px-3 pb-3 with gap-2, composer-size buttons. */
 .cdx-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 0 12px 12px; }
+/* A question this chat answers for the person: how long it still waits, at the foot's start. */
+.cdx-countdown { align-self: center; color: var(--cdx-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
 .cdx-button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 999px;
   font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; }
 .cdx-button:disabled { opacity: .45; cursor: default; }

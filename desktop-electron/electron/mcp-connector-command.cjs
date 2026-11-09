@@ -3,6 +3,7 @@
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+const { SETUP_CHECK_MESSAGE } = require("./chatgpt-cloudflare-check.cjs");
 
 const PREFLIGHT_FAILURES = new Map([
   ["manual_browser_inspection_disabled", "MCP connector setup is disabled in Zero Risk mode."],
@@ -30,13 +31,43 @@ const PREFLIGHT_FAILURES = new Map([
   ["busy", "Browser account switching or shutdown is in progress"],
   ["creation_failed", "The account's MCP tunnel is not ready. Reconnect it before creating the connector."],
   ["creation_failed", "The account's MCP tunnel changed or is not ready."],
+  ["verification_required", SETUP_CHECK_MESSAGE],
 ].map(([code, message]) => [message, { code, message }]));
+
+// The setup's own words for the ChatGPT page step that did not happen. Each names what to look at,
+// where the catch-all "Connector creation failed" named nothing: on 2026-11-09 every Connect
+// showed that line while the real cause was "ChatGPT did not confirm the selected workspace."
+// Only these exact texts pass; anything else could carry the page's own words.
+const CHATGPT_PAGE_FAILURES = new Set([
+  "ChatGPT did not confirm the selected workspace.",
+  "ChatGPT did not confirm connector creation.",
+  "ChatGPT did not confirm the exact connector consent.",
+  "ChatGPT did not confirm the exact connector state.",
+  "ChatGPT did not confirm this plugin connection.",
+  "ChatGPT did not confirm the connector and target workspace for publishing.",
+  "ChatGPT did not expose one Personal plugins tab.",
+  "ChatGPT did not expose one Tunnel option.",
+  "ChatGPT did not expose one enabled Create action.",
+  "ChatGPT did not expose one matching workspace. Select it in that account and retry.",
+  "ChatGPT did not expose one workspace menu.",
+  "ChatGPT did not expose the exact workspace connector.",
+  "ChatGPT did not expose the name and Tunnel ID fields.",
+  "ChatGPT did not expose the target workspace name.",
+  "ChatGPT did not expose this plugin connection confirmation.",
+  "ChatGPT did not finish loading this plugin connection.",
+  "ChatGPT did not open its connector form.",
+  "ChatGPT did not open its custom MCP server form.",
+  "ChatGPT did not prepare the exact connector consent.",
+  "ChatGPT did not prepare the exact tunnel connector.",
+  "ChatGPT did not retain the configured connector values.",
+]);
 
 function mcpConnectorCommandFailure(error, action = "create") {
   if (action === "add-tunnel") return { code: "tunnel_add_failed", message: "MCP tunnel connection failed. The private input was retained for retry." };
   const text = String(error?.message || error || "");
   const known = PREFLIGHT_FAILURES.get(text);
   if (known) return { ...known };
+  if (CHATGPT_PAGE_FAILURES.has(text)) return { code: "creation_failed", message: text };
   const [code, message] = /denied access/i.test(text)
     ? ["mcp_access_denied", "The MCP server denied access. Check its authentication and workspace access."]
     : /verification|authenticate|sign.?in|cloudflare/i.test(text)

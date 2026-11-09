@@ -603,7 +603,7 @@ test("a long project shows 5 chats and Show more, like Codex; the count is a lis
   more().props.onClick();
   assert.equal(projectRows(list.render()).length, 8);
   assert.equal(text(more()), "Show less");
-  walk(list.render()).find((element) => element.props?.className === "cx-list-settings")
+  walk(list.render()).find((element) => element.props?.["aria-label"] === "Chat list settings")
     .props.onClick({ currentTarget: { getBoundingClientRect: () => ({ bottom: 10, left: 20 }) } });
   const popover = walk(list.render()).find((element) => element.type === "FloatingLayer" && element.props.className === "cx-popover");
   walk(popover).find((element) => element.props?.["aria-label"] === "Chats shown per project").props.onChange({ target: { value: "3" } });
@@ -637,6 +637,29 @@ test("Codex's compose icon and project ellipsis open their working actions", () 
   create.props.onClick({ shiftKey: true });
   button("New chat in Beta").props.onClick({ shiftKey: true });
   assert.deepEqual(calls.slice(-2), [["newChat", true], ["newChatIn", "b", true]], "Shift reaches the page owner from either compose button");
+});
+
+test("the Projects heading's + adds a local project in one click, beside the list settings", () => {
+  const { props, calls } = fixture();
+  const list = mount("ChatThreadList.tsx", props);
+  const heading = () => walk(list.render()).find((element) => element.props?.className === "cx-group-head" && text(element).startsWith("Projects"));
+  const button = (label) => walk(heading()).find((element) => element.type === "button" && element.props["aria-label"] === label);
+  const actions = walk(heading()).find((element) => element.props?.className === "cx-group-actions");
+  assert.deepEqual(walk(actions).filter((element) => element.type === "button").map((element) => element.props["aria-label"]),
+    ["Add project", "Chat list settings"], "+ comes first; both sit together at the heading's right");
+  assert.equal(walk(button("Add project")).find((element) => element.type === "ChatGlyph").props.name, "plus");
+  button("Chat list settings").props.onClick({ currentTarget: { getBoundingClientRect: () => ({ bottom: 20, left: 10 }) } });
+  assert.equal(button("Chat list settings").props["aria-expanded"], true);
+  button("Add project").props.onClick();
+  assert.deepEqual(calls, [["addProject"]]);
+  assert.equal(button("Chat list settings").props["aria-expanded"], false, "the folder picker never opens under the settings popover");
+
+  // A page without the action shows no + rather than a dead one.
+  const { props: bare } = fixture();
+  const plain = mount("ChatThreadList.tsx", { ...bare, actions: { newChat() {}, newChatIn() {}, editProject() {}, select() {} } });
+  const plainHeading = walk(plain.render()).find((element) => element.props?.className === "cx-group-head" && text(element).startsWith("Projects"));
+  assert.ok(!walk(plainHeading).some((element) => element.props?.["aria-label"] === "Add project"));
+  assert.ok(walk(plainHeading).some((element) => element.props?.["aria-label"] === "Chat list settings"));
 });
 
 test("archived chats sit in their own section and can be restored", () => {

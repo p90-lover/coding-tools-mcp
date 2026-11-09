@@ -1,4 +1,5 @@
 "use strict";
+const { fetchOffThread } = require("./off-thread-run.cjs");
 
 const { MODEL_PRICES } = require("./cpa-model-prices.cjs");
 
@@ -314,7 +315,7 @@ async function mapLimited(items, limit, fn) {
   return results;
 }
 
-function createCpaUsage({ getConnection, quota = null, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
+function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThread, now = Date.now, logger = console } = {}) {
   const cache = new Map(); // range -> { at, value }
   const pending = new Map(); // range or turn key -> Promise
   let recordReads = 0;

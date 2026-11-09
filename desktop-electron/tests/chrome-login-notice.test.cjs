@@ -39,10 +39,29 @@ test("a continuation already requested on Browser stays disabled when another pa
  const f=fixture(),tree=f.render({operation:{...f.props.operation,message:"Capturing and verifying the passkey session"}});
  assert.equal(button(tree,"Verifying sign-in…").props.disabled,true);button(tree,"Verifying sign-in…").props.onClick();assert.deepEqual(f.calls,[]);
 });
+test("a continued login waiting on open Chrome does not claim importing or allow another Continue",()=>{
+ const f=fixture(),operation={...f.props.operation,message:"Waiting for the dedicated Chrome window to close before importing"};
+ const tree=f.render({operation});
+ assert.match(text(tree),/Continue (?:was |has been )?received|already accepted/i);
+ assert.match(text(tree),/close.*Chrome window/i);
+ assert.doesNotMatch(text(tree),/Verifying sign-in/);
+ const waiting=button(tree,"Waiting for Chrome to close…");assert(waiting);assert.equal(waiting.props.disabled,true);
+ waiting.props.onClick();assert.deepEqual(f.calls,[]);
+ assert(f.chromeLoginContinuationPending(operation));
+ assert(f.chromeLoginWaitingForClose(operation));
+ const capture={...operation,message:"Capturing and verifying the Chrome session"};
+ assert(f.chromeLoginContinuationPending(capture));assert(!f.chromeLoginWaitingForClose(capture));
+ assert(!f.chromeLoginContinuationPending({...operation,status:"failed"}));
+ const app=fs.readFileSync(path.join(__dirname,"../src/App.tsx"),"utf8");
+ assert.match(app,/passkeyContinuationRequested \|\| chromeLoginContinuationPending\(operation\)/);
+ assert.match(app,/disabled=\{passkeyWaiting && passkeyContinuationPending\}/);
+ assert.match(app,/passkeyWaitingForClose \? copy\.passkeyWaitingForCloseBody/);
+});
+
 test("closed or completed notices take no space and both locales have readable actions",()=>{
  const f=fixture();assert.equal(f.render({open:false}),null);assert.match(text(f.render({language:"zh-TW"})),/完成 Chrome 登入/);assert(button(f.render({language:"zh-TW"}),"繼續"));
  const app=fs.readFileSync(path.join(__dirname,"../src/App.tsx"),"utf8");
- assert.match(app,/surface !== "browser" && chromeLoginPending\(operation, browser\?\.authenticated\)/);
+ assert.match(app,/\(surface !== "browser" \|\| operation\?\.name === "chrome-profile-login"\) && chromeLoginPending\(operation, browser\?\.authenticated\)/);
  assert.match(app,/<ChromeLoginNotice[\s\S]*?continueLogin=\{\(\) => api!\.continuePasskeyLogin\(\)\}/);
  const css=fs.readFileSync(path.join(__dirname,"../src/chrome-login-notice.css"),"utf8");
  assert.match(css,/\.workspace\.has-chrome-login-notice > \.surface-transition\s*\{[^}]*min-height:\s*0/);

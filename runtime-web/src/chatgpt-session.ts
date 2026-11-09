@@ -138,7 +138,10 @@ export async function readChatGptPickerStop(menu: Locator, expectedModelName?: s
     max: root.querySelector('[data-model-picker-power-slider] [role="slider"]')?.getAttribute("aria-valuemax") ?? null,
     value: root.querySelector('[data-model-picker-power-slider] [role="slider"]')?.getAttribute("aria-valuenow") ?? null,
     status: root.querySelector('[role="status"]')?.textContent?.trim() ?? "",
-    ticks: Array.from(root.querySelectorAll('[data-model-picker-power-slider] [data-locked][data-selected]'), tick => ({
+    // Only the ticks carry data-selected. Since 2026-11-08 an enabled slider's open ticks have no
+    // data-locked (only its root does), as readChatGptEffortSnapshot already reads them.
+    enabled: Boolean(root.querySelector('[data-model-picker-power-slider] [data-orientation="horizontal"][aria-disabled="false"]')),
+    ticks: Array.from(root.querySelectorAll('[data-model-picker-power-slider] [data-selected]'), tick => ({
       locked: tick.getAttribute("data-locked"), selected: tick.getAttribute("data-selected"),
     })),
   })).catch(() => undefined);
@@ -153,9 +156,17 @@ export async function readChatGptPickerStop(menu: Locator, expectedModelName?: s
   if (!state || !status) return undefined;
   // The status line trails the thumb for a frame; a reading counts once both name the same stop.
   if (Number(status[2]) !== state.value - state.min + 1 || Number(status[3]) !== state.max - state.min + 1) return undefined;
-  const snapshot = parseChatGptEffortTicks(raw.ticks.map(tick => tick.locked), state.max - state.min + 1);
+  const snapshot = parseChatGptEffortTicks(
+    raw.ticks.map(tick => tick.locked ?? (raw.enabled ? "false" : null)),
+    state.max - state.min + 1,
+  );
+  // The ticks must agree with the thumb too. ChatGPT marked the thumb's tick alone; since
+  // 2026-11-08 it fills every tick up to the thumb (at 4 of 0–4, all five; one stop left, the first four).
+  const position = state.value - state.min;
   const selected = raw.ticks.flatMap((tick, index) => tick.selected === "true" ? [index] : []);
-  if (!snapshot || selected.length !== 1 || selected[0] !== state.value - state.min) return undefined;
+  const marksThumb = selected.length === 1 && selected[0] === position;
+  const fillsToThumb = selected.length === position + 1 && selected.every((tick, index) => tick === index);
+  if (!snapshot || !(marksThumb || fillsToThumb)) return undefined;
   // Plain labels identify an effort only after the exact checked GPT-6 row has been proved.
   const effort = /^(?:6 )?(Instant|Medium|High|Extra High|Pro)$/.exec(status[1]!)?.[1];
   if (!effort) throw new Error("the GPT-6 effort slider shows an unrecognized stop");

@@ -17,6 +17,189 @@ test("workspace-owner refusal stays actionable across command and UI error bound
   });
 });
 
+function reconnectFixture(options = {}) {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const startupStart = source.indexOf("function startManagedRuntime(");
+  const startup = source.slice(startupStart, source.indexOf("\n// Browser-tab accounts", startupStart));
+  const handlerStart = source.indexOf('  handle("launcher:mcp-tunnel-reconnect",');
+  const handlerSource = source.slice(handlerStart, source.indexOf('  handle("launcher:mcp-tunnel-settings",', handlerStart));
+  assert(startupStart > 0 && handlerStart > 0);
+  const tunnel = { id: "abc12345", accountId: "account-1", tunnelId: `tunnel_${"b".repeat(32)}`, state: "stopped" };
+  const config = { mode: "full", browserHost: "launcher", browserInteractionMode: "automatic", releaseVersion: options.current ? "6.1.17" : "5.0.6",
+    tunnel: { tunnelId: `tunnel_${"a".repeat(32)}`, runtimeKeyFile: "G:/fixture/saved.key" }, useSavedChats: true };
+  const state = { codexRoute: false, browserInteractionMode: "automatic", useSavedChats: true, coreSetupComplete: false };
+  const events = [], world = { ready: options.ready === true, configured: true, owner: "launcher", config, entries: [tunnel], partition: "persist:account-1", failure: null };
+  let handler, release, healthReads = 0;
+  const barrier = options.wait ? new Promise(resolve => { release = resolve; }) : Promise.resolve();
+  const manager = { config: options.managerStarted ? structuredClone(config) : null,
+    status: () => world.entries,
+    reconnect: async id => {
+      if (!manager.config) throw new Error("Start the MCP runtime before reconnecting a tunnel.");
+      events.push(`reconnect:${id}`);
+      const target = world.entries.find(entry => entry.id === id);
+      if (!target) throw new Error("That tunnel is not configured.");
+      return { ...target, state: "ready" };
+    } };
+  const host = { partition: "persist:account-1", activeTraceId: null, currentOperation: () => null,
+    snapshot: () => ({ authenticated: true }) };
+  const snapshot = () => ({ configured: world.configured, owner: world.owner, mode: config.mode, config: structuredClone(config) });
+  const runtime = { currentOperation: () => null, runtimeConfigSnapshot: snapshot,
+    mcpCredentialsConfigured: () => !options.noCredentials,
+    managedRuntimeUpgradeRequired: () => config.releaseVersion !== "6.1.17",
+    upgradeManagedRuntime: async () => {
+      events.push("upgrade");
+      await barrier;
+      options.duringStartup?.({ world, host, manager, context, state });
+      if (options.upgradeFailure) throw new Error("The saved runtime upgrade was blocked by ChatGPT verification.");
+      const fromVersion = config.releaseVersion;
+      config.releaseVersion = "6.1.17";
+      return { updated: fromVersion !== config.releaseVersion, mode: "full", fromVersion, toVersion: config.releaseVersion };
+    } };
+  const supervisor = { extraTunnels: manager, readConfig: () => structuredClone(config),
+    readState: () => ({ status: world.ready ? options.degraded ? "degraded" : "ready" : "failed", detail: world.failure }),
+    ownedRuntimeCheck: async () => {
+      const health = world.ready && !options.healthFailure
+        ? options.degraded ? { ready: false, failed: "tunnel_health" } : { ready: true }
+        : { ready: false, failed: "daemon_missing" };
+      await options.duringHealth?.({ world, host, manager, context, state, read: ++healthReads });
+      return health;
+    },
+    startIfConfigured: async () => {
+      events.push("start");
+      if (config.releaseVersion !== "6.1.17") return { status: "needs-setup", detail: "Config requires bridge 5.0.6; bundled bridge is 6.1.17" };
+      if (options.startFailure) throw new Error("The saved runtime could not start its daemon.");
+      world.ready = true; manager.config = structuredClone(config);
+      return { status: options.degraded ? "degraded" : "ready" };
+    } };
+  const logger = { info() {}, warn() {}, error() {} };
+  const stateStore = { read: () => ({ ...state }), update: patch => Object.assign(state, patch) };
+  const context = { Error, Promise, JSON, Boolean, IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false,
+    runtimeStartupInFlight: Promise.resolve(), lastOperation: null,
+    runtimeHost: runtime, runtimeSupervisor: supervisor, browserHost: host,
+    browserAccounts: { has: id => world.entries.some(entry => entry.accountId === id),
+      partitionOf: id => id === "account-1" ? world.partition : "persist:account-2" },
+    browserAccountsStatus: () => ({ switching: false }), stateStore, logger,
+    assertFocusedMainWindow: () => { if (options.unfocused) throw new Error("Coding Tools must be focused"); },
+    handle: (_name, callback) => { handler = callback; },
+    whenRuntimeHostIdle: (_logger, _step, run) => run(),
+    connectCodexBridgeAfterAuthentication: async () => ({ connected: false, changed: false }),
+    restoreCodexRouteAfterRuntimeFailure: async () => ({ restored: false }),
+    applyReadyRuntimeAfterBridge: () => { state.coreSetupComplete = true; }, send() {},
+    publishOperation: operation => { context.lastOperation = operation; if (operation.status === "failed") world.failure = operation.message; },
+    delay: () => new Promise(() => {}), STARTUP_AUTH_WAIT_MS: 20_000 };
+  vm.runInNewContext(`${startup}\n${handlerSource}`, context);
+  return { context, world, events, manager, state, tunnel, host, release,
+    run: (id = tunnel.id) => handler({}, id),
+    startPending: () => (context.runtimeStartupInFlight = context.startManagedRuntime({ logger, stateStore,
+      startupAuthenticationRefresh: Promise.resolve(host.snapshot()) })) };
+}
+
+test("saved tunnel reconnect runs the real managed upgrade before reconnecting a stopped account", async () => {
+  const f = reconnectFixture();
+  const result = await f.run();
+  assert.equal(result.id, f.tunnel.id);
+  assert.deepEqual(f.events, ["upgrade", "start", `reconnect:${f.tunnel.id}`]);
+  assert.equal(f.world.config.releaseVersion, "6.1.17");
+  assert.equal(f.state.codexRoute, false, "startup preserves the existing route preference");
+  assert.equal(f.world.config.tunnel.runtimeKeyFile, "G:/fixture/saved.key");
+});
+
+test("saved tunnel reconnect preserves a ready runtime and accepts a degraded primary tunnel", async () => {
+  const ready = reconnectFixture({ current: true, ready: true, managerStarted: true });
+  assert.equal((await ready.run()).state, "ready");
+  assert.deepEqual(ready.events, [`reconnect:${ready.tunnel.id}`]);
+  const degraded = reconnectFixture({ degraded: true });
+  assert.equal((await degraded.run()).state, "ready");
+  assert.deepEqual(degraded.events, ["upgrade", "start", `reconnect:${degraded.tunnel.id}`]);
+});
+
+test("saved tunnel reconnect validates IDs and saved full ownership before any startup side effect", async t => {
+  for (const scenario of [
+    { name: "unknown ID", id: "deadbeef" },
+    { name: "malformed ID", id: { id: "abc12345" } },
+    { name: "missing setup", change: f => { f.world.configured = false; } },
+    { name: "external setup", change: f => { f.world.owner = "external"; } },
+    { name: "browser-only setup", change: f => { f.world.config.mode = "browser-only"; } },
+    { name: "missing saved credentials", options: { noCredentials: true } },
+    { name: "unfocused window", options: { unfocused: true } },
+    { name: "DEV profile", change: f => { f.context.IS_DEV_PROFILE = true; } },
+  ]) await t.test(scenario.name, async () => {
+    const f = reconnectFixture(scenario.options);
+    scenario.change?.(f);
+    await assert.rejects(f.run(scenario.id));
+    assert.deepEqual(f.events, []);
+    assert.equal(f.world.config.releaseVersion, "5.0.6");
+  });
+});
+
+test("saved tunnel reconnect does not use stale manager config after a failed upgrade or startup", async () => {
+  for (const options of [{ upgradeFailure: true, managerStarted: true, ready: true }, { startFailure: true, managerStarted: true }]) {
+    const f = reconnectFixture(options);
+    await assert.rejects(f.run(), options.upgradeFailure ? /saved runtime upgrade was blocked/ : /saved runtime could not start its daemon/);
+    assert.equal(f.manager.config.releaseVersion, "5.0.6", "an old non-null manager must not bypass failed startup");
+    assert.equal(f.events.filter(value => value.startsWith("reconnect:")).length, 0);
+    assert.equal(f.events.filter(value => value === "upgrade").length, 1);
+    assert.equal(f.context.lastOperation.status, "failed");
+  }
+  const unready = reconnectFixture({ healthFailure: true });
+  await assert.rejects(unready.run(), /did not become ready/);
+  assert.deepEqual(unready.events, ["upgrade", "start"], "unproven readiness cannot retry startup or reconnect");
+});
+
+test("saved tunnel reconnect joins a captured startup and propagates its failure without another attempt", async () => {
+  for (const failure of [false, true]) {
+    const f = reconnectFixture({ wait: true, upgradeFailure: failure, managerStarted: true, ready: true });
+    f.startPending();
+    const pending = f.run();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(f.events, ["upgrade"]);
+    f.release();
+    if (failure) await assert.rejects(pending, /saved runtime upgrade was blocked/);
+    else assert.equal((await pending).state, "ready");
+    assert.equal(f.events.filter(value => value === "upgrade").length, 1);
+    assert.equal(f.events.filter(value => value.startsWith("reconnect:")).length, failure ? 0 : 1);
+  }
+});
+
+test("saved tunnel reconnect joins a startup begun by another caller during its health await", async () => {
+  let other;
+  const f = reconnectFixture({ wait: true, managerStarted: true, ready: true,
+    duringHealth: async ({ read }) => {
+      if (read !== 1) return;
+      other = f.run("def23456");
+      await new Promise(resolve => setImmediate(resolve));
+    } });
+  f.world.entries.push({ id: "def23456", accountId: "account-2", tunnelId: `tunnel_${"c".repeat(32)}`, state: "stopped" });
+  const pending = f.run();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.events, ["upgrade"]);
+  f.release();
+  const results = await Promise.all([pending, other]);
+  assert.deepEqual(results.map(result => result.id).sort(), ["abc12345", "def23456"]);
+  assert.equal(f.events.filter(value => value === "upgrade").length, 1);
+  assert.equal(f.events.filter(value => value === "start").length, 1);
+  assert.equal(f.events.filter(value => value.startsWith("reconnect:")).length, 2);
+});
+
+test("saved tunnel reconnect rejects assignment or configuration drift after startup and health awaits", async t => {
+  const changes = [
+    ["target tunnel", ({ world }) => { world.entries[0].tunnelId = `tunnel_${"d".repeat(32)}`; }],
+    ["account assignment", ({ world }) => { world.entries[0].accountId = "account-other"; }],
+    ["account partition", ({ world }) => { world.partition = "persist:remapped"; }],
+    ["active browser partition", ({ host }) => { host.partition = "persist:other"; }],
+    ["runtime owner", ({ world }) => { world.owner = "external"; }],
+    ["runtime mode", ({ world }) => { world.config.mode = "browser-only"; }],
+    ["interaction mode", ({ world }) => { world.config.browserInteractionMode = "manual"; }],
+    ["main tunnel", ({ world }) => { world.config.tunnel.tunnelId = `tunnel_${"e".repeat(32)}`; }],
+    ["shutdown", ({ context }) => { context.quitting = true; }],
+  ];
+  for (const phase of ["duringStartup", "duringHealth"]) for (const [name, change] of changes) await t.test(`${phase}: ${name}`, async () => {
+    const f = reconnectFixture({ [phase]: change, ...(phase === "duringHealth" ? { current: true, ready: true, managerStarted: true } : {}) });
+    await assert.rejects(f.run(), /changed during reconnect/);
+    assert.equal(f.events.filter(value => value.startsWith("reconnect:")).length, 0);
+  });
+});
+
 // The receipt is written off the main thread: wait for it, then for the command to start running.
 async function ran(command) {
   await command.written();
@@ -226,6 +409,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
         recordConnector: (_id, value) => { if (value.bound) calls.bound++; return true; } },
       browserHost: host, runtimeHost: { currentOperation: () => runtimeOperation, runtimeConfigSnapshot: () => ({ configured: false }) },
       currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
+      connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
       session: { fromPartition: () => ({ cookies: { get: async () => { if (scenario.cookieSwitch) host.partition = "persist:other"; return []; } } }) },
       signedInFromCookies: () => true,
       routeIdleAccountPartition: async () => { if (scenario.remap) partition = "persist:remapped"; },
@@ -268,7 +452,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
   const start = source.indexOf('  const connectAccountMcp =');
   const end = source.indexOf('\n  let accountMcpConfig =', start);
   assert(start >= 0 && end > start);
-  const { currentConnectorSettings } = require("../electron/mcp-connector-setup.cjs");
+  const { currentConnectorSettings, connectorCredentials } = require("../electron/mcp-connector-setup.cjs");
   for (const scenario of [
     { name: "connects after the helper confirms the exact main tunnel", completes: true },
     { name: "another account's extra tunnel does not hide the main tunnel", unrelated: true, completes: true },
@@ -302,7 +486,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
       browserHost: host, runtimeHost: { currentOperation: () => null,
         runtimeConfigSnapshot: () => ({ configured: !scenario.unconfigured, owner: "launcher", config }),
         mcpCredentialsConfigured: () => !scenario.noCredentials, mcpConnectorName: () => name },
-      currentConnectorSettings,
+      currentConnectorSettings, connectorCredentials,
       session: { fromPartition: () => ({ cookies: { get: async () => {
         if (scenario.cookieRename) name = "Changed connector";
         return [];
@@ -736,6 +920,30 @@ test("preflight receipts classify only exact safe failures and never log private
     assert.equal(report.error.code, code);
     assert.deepEqual(warnings, [{ event: "mcp.connector_creation_failed", ...report.error }]);
     assert.doesNotMatch(JSON.stringify([report, warnings]), /PRIVATE_REMOTE_BODY|PRIVATE_TOKEN/);
+  }
+});
+
+test("the setup's own ChatGPT page messages reach the account card; anything else stays generic", () => {
+  // 2026-11-09: every Connect read "Connector creation failed" while the setup had said exactly
+  // which page step did not happen.
+  const { SETUP_CHECK_MESSAGE } = require("../electron/chatgpt-cloudflare-check.cjs");
+  const electron = path.join(__dirname, "../electron");
+  const helperMessages = new Set();
+  for (const file of ["mcp-connector-setup.cjs", "chatgpt-workspace.cjs", "extensions/fast-access/content.js"]) {
+    for (const [, message] of fs.readFileSync(path.join(electron, file), "utf8").matchAll(/new Error\(['"](ChatGPT did not [^'"]+)['"]/g)) {
+      helperMessages.add(message);
+    }
+  }
+  assert(helperMessages.has("ChatGPT did not confirm the selected workspace."));
+  for (const message of helperMessages) {
+    const failure = mcpConnectorCommandFailure(new Error(message));
+    assert.notEqual(failure.message, "Connector creation failed. Check Configuration in Coding Tools.", `${message} names its step`);
+  }
+  assert.deepEqual(mcpConnectorCommandFailure(new Error("ChatGPT did not open its connector form.")),
+    { code: "creation_failed", message: "ChatGPT did not open its connector form." });
+  assert.deepEqual(mcpConnectorCommandFailure(new Error(SETUP_CHECK_MESSAGE)), { code: "verification_required", message: SETUP_CHECK_MESSAGE });
+  for (const text of ["ChatGPT did not open its connector form. PRIVATE_PAGE_TEXT", "PRIVATE_PAGE_TEXT ChatGPT did not open its connector form."]) {
+    assert.equal(mcpConnectorCommandFailure(new Error(text)).message, "Connector creation failed. Check Configuration in Coding Tools.");
   }
 });
 

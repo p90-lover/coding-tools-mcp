@@ -285,10 +285,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   let daemonLines = "";
   const keepDaemonLines = (text) => { daemonLines = (daemonLines + text).slice(-DAEMON_LINES_CHARS); };
-  /** Removes the log files an older build wrote. */
+  /** Removes the log files an older build wrote, off the main thread (each rmSync held it 0.34 s, 2026-11-09). */
   function removeOldDaemonLogs() {
     for (const name of ["ao-daemon.log", "ao-daemon.log.1"]) {
-      try { fs.rmSync(path.join(dataRoot, "logs", name), { force: true }); } catch {}
+      // Any failure, thrown or rejected, leaves the file for the next start: it never fails a start.
+      Promise.resolve().then(() => fs.promises.rm(path.join(dataRoot, "logs", name), { force: true })).catch(() => {});
     }
   }
   let missionSelection = null;
@@ -651,22 +652,34 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   function turnTimeline(conversation, turnId, turnOver = false) {
     if (typeof turnId !== "string") return [];
+    const starts = new Map(); // item -> when AO created it (ms), to time recovered thoughts below
+    const started = (item, source) => { starts.set(item, Date.parse(source.createdAt ?? "")); return item; };
     const items = [
       ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
-        .map(message => ({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
+        .map(message => started({ id: String(message.id), sequence: Number(message.sequence) || 0, kind: "message",
           // Streaming or finished, a message keeps up to TIMELINE_TEXT_BYTES: a 4 KB cut froze the
           // live answer until the turn ended, and cut a finished one mid-word.
-          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), TIMELINE_TEXT_BYTES) })),
+          status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), TIMELINE_TEXT_BYTES) }, message)),
       ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
-        .map(activity => activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
+        .map(activity => started(activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
           // AO records a steer as a system row tagged event "steer"; it is the user's own words.
           ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
             text: utf8Prefix(activity.detail.text.trim(), TIMELINE_TEXT_BYTES) }
-          : timelineActivity(activity)),
+          : timelineActivity(activity), activity)),
     ];
-    return items.sort((a, b) => a.sequence - b.sequence).slice(-TIMELINE_ITEMS);
+    items.sort((a, b) => a.sequence - b.sequence);
+    // A thought AO closed as "recovered" has no end of its own (timelineActivity). The model thinks
+    // until it acts or writes, so it ends where the next step that has a time begins; the turn's
+    // last thought, with nothing after it, stays untimed.
+    items.forEach((item, at) => {
+      if (item.kind !== "reasoning" || !/^recovered$/i.test(item.status)) return;
+      const begun = starts.get(item);
+      const next = items.slice(at + 1).map(later => starts.get(later)).find(Number.isFinite);
+      if (Number.isFinite(begun) && next > begun) item.durationMs = Math.min(next - begun, 24 * 3600_000);
+    });
+    return items.slice(-TIMELINE_ITEMS);
   }
   // Callers of a working chat's observe() (the run loop, the chat's activity poll and its follow-ups,
   // the approval screen, the panel's status poll) share one tail read, but each built its timeline
@@ -893,23 +906,33 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     // loop can tell a long call still within it from one whose result never came back.
     const stated = Number(input.timeout);
     const timeout = Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {};
+    // How long a finished call or thought took, from AO's first and last update of it, for the
+    // chat's "1.2s" and "Thought for 4s". Left out while it runs and when no time passed.
+    // A "recovered" item never reported its end: AO's restart repair closed it, and its updatedAt
+    // is that restart, stamped again at every later one. Seen 2026-11-08: a GPT turn's 27 thoughts
+    // were left open by the harness, each read as ~12 h, and an 80-minute turn said "Steps took
+    // 316h". A recovered thought is timed to the next step instead (turnTimeline).
+    const begun = Date.parse(activity.createdAt ?? ""), ended = Date.parse(activity.updatedAt ?? "");
+    const recovered = /^recovered$/i.test(base.status);
+    const took = !recovered && !/^(running|pending|in_progress)$/i.test(base.status) && Number.isFinite(begun) && Number.isFinite(ended) && ended > begun
+      ? { durationMs: Math.min(ended - begun, 24 * 3600_000) } : {};
     // A file edit shows as Claude Code shows one: "Edited <file> +12 −3", opening on the diff.
     const edit = editedFiles(activity, detail, input);
-    if (edit) return { ...base, kind: "edit", label: edit.label, text: utf8Prefix(edit.files.map(file => file.path).join(", "), 400), files: edit.files };
+    if (edit) return { ...base, kind: "edit", label: edit.label, text: utf8Prefix(edit.files.map(file => file.path).join(", "), 400), files: edit.files, ...took };
     // A shell call (Bash, PowerShell) shows as the command it ran, like Codex.
     if (activity.activityKind === "mcp_tool" && typeof input.command === "string" && input.command.trim()) {
-      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input), ...timeout };
+      return { ...base, kind: "command", text: utf8Prefix(input.command.trim(), 400), ...toolDetails(detail, input), ...timeout, ...took };
     }
     if (activity.activityKind === "mcp_tool") {
       return { ...base, kind: "tool", label: toolLabel(detail, summary), text: utf8Prefix(summary || detail.toolKind || "tool", 400),
-        ...toolDetails(detail, input), ...timeout };
+        ...toolDetails(detail, input), ...timeout, ...took };
     }
     // The model's reasoning summary: AO streams it into the activity's text (detail.text); its
     // summary is only the word "Reasoning".
     if (activity.activityKind === "reasoning") {
       const text = typeof detail.text === "string" ? detail.text.trim() : "";
       // While the model thinks, its newest thought is the progress to show; once done, all of it.
-      return { ...base, kind: "reasoning", text: base.status === "running" ? utf8Suffix(text, 4096) : utf8Prefix(text, TIMELINE_TEXT_BYTES) };
+      return { ...base, kind: "reasoning", text: base.status === "running" ? utf8Suffix(text, 4096) : utf8Prefix(text, TIMELINE_TEXT_BYTES), ...took };
     }
     // A request nobody answered: AO marks it resolved by the provider when its 30-minute wait runs
     // out, or when the turn ends first. The agent then only says it was "blocked by permissions",
@@ -1057,6 +1080,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // Sessions whose failed background start was resumed once: id -> { resumed: Promise<boolean>,
   // after: the observe() read count when AO answered the resume }.
   const provisionRetried = new Map();
+  // A session the app ended on purpose (kill, or a Stop while its agent was starting) is never
+  // resumed: cancelling a background start leaves AO's reason "context canceled", which reads as
+  // transient, and the resume would have brought back an agent whose card had moved on.
+  const endedOnPurpose = (id) => {
+    provisionRetried.set(id, { after: Infinity, resumed: Promise.resolve(false) });
+    if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.keys().next().value);
+  };
   let observeReads = 0;
   // One session read in flight serves every observe() of that session that asks meanwhile. The run
   // loop, the chat's activity poll and the approvals poll each observed the same session, several
@@ -1172,23 +1202,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // Each session's last good context reading (steadyContext), bounded like launchWindows. Kept on
   // disk too: after an app restart (an update) the first steer's zero snapshot had nothing to fall
   // back on, and the meter showed an empty context for a long chat.
-  // Loaded on the meter's first read.
+  // Loaded on the meter's first read, off the main thread (read synchronously, it held every window
+  // for 0.9 s on the busy hard disk); the meters asking at the same time share the one read.
   let contextReadings = null;
+  let readingsLoad = null;
   let readingsSaved = "";
   let readingsTimer = null;
   let readingsWrite = Promise.resolve();
   const readingsFile = () => path.join(dataRoot, "coding-tools-context-readings.json");
   const readings = () => {
-    if (contextReadings) return contextReadings;
-    let saved = [];
-    try {
-      const parsed = JSON.parse(fs.readFileSync(readingsFile(), "utf8"));
-      if (Array.isArray(parsed)) saved = parsed.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string"
-        && entry[1] && typeof entry[1] === "object" && entry[1].usage && typeof entry[1].usage === "object").slice(-64);
-    } catch { /* no readings yet */ }
-    contextReadings = new Map(saved);
-    readingsSaved = JSON.stringify(saved);
-    return contextReadings;
+    if (contextReadings) return Promise.resolve(contextReadings);
+    readingsLoad ??= fs.promises.readFile(readingsFile(), "utf8").then((text) => {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string"
+        && entry[1] && typeof entry[1] === "object" && entry[1].usage && typeof entry[1].usage === "object").slice(-64) : [];
+    }).catch(() => [] /* no readings yet */).then((saved) => {
+      contextReadings = new Map(saved);
+      readingsSaved = JSON.stringify(saved);
+      return contextReadings;
+    });
+    return readingsLoad;
   };
   const persistReadings = () => {
     readingsWrite = readingsWrite.then(async () => {
@@ -1509,6 +1542,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(sessionStamps.length ? { sessionActivityAt: Math.max(...sessionStamps) } : {}),
         sessionTools,
         ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
+        // AO is still starting this chat's agent in the background (spawn's async), so nothing has
+        // taken its opening message yet: the run loop can tell a start that hung (stopStalledLaunch).
+        ...(session?.session?.provisionState === "provisioning" ? { provisioning: true } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         // No agent process behind this session (released while idle, or it exited): nothing runs,
         // so a stop has nothing to wait for and a steer nothing to reach.
@@ -1815,6 +1851,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     /** Ends a session and its agent (a pre-warmed one nobody used). */
     async kill(id) {
       agentTools?.cancelSessionCalls?.(id);
+      endedOnPurpose(id);
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
       agentTools?.forgetSession?.(id);
       return { ok: true };
@@ -1954,6 +1991,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) throw error;
         const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
         if (record?.session?.provisionState === "provisioning") {
+          endedOnPurpose(id);
           await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
           return;
@@ -2031,7 +2069,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     await closingGateway?.close();
     if (child && child.exitCode === null && child.signalCode === null) {
       const stoppingChild = child;
-      try { await fetch(`http://127.0.0.1:${daemonPort}/shutdown`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(2000) }); } catch {}
+      try { await fetchOffThread(`http://127.0.0.1:${daemonPort}/shutdown`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(2000) }); } catch {}
       await new Promise((resolve) => {
         const timer = setTimeout(() => { stoppingChild.kill(); resolve(); }, 5000);
         stoppingChild.once("exit", () => { clearTimeout(timer); resolve(); });
@@ -2252,7 +2290,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
           }
           try {
-            const response = await fetch(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", signal: AbortSignal.timeout(1000) });
+            const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(1000) });
             checkStartup();
             const ready = await response.json();
             checkStartup();
@@ -2472,7 +2510,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (!conversation || typeof conversation !== "object") return;
         const reported = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
         const compactedAt = typeof conversation.compactedAt === "string" ? conversation.compactedAt : null;
-        const usage = steadyContext(readings(), id, reported, compactedAt);
+        const usage = steadyContext(await readings(), id, reported, compactedAt);
         saveReadings();
         const limits = conversation.rateLimits && typeof conversation.rateLimits === "object" ? conversation.rateLimits : null;
         sessions[id] = {

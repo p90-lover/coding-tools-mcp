@@ -11,12 +11,33 @@ function logos() {
   }).outputText, { exports, require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : { __esModule: true, default: name } });
   return exports;
 }
+// Every harness shows the mark AO's own AgentAvatar shows for it (assets/harness/ao).
 const harnesses = {
-  "claude-code": "claude-code.png", codex: "openai.png", "codex-native": "openai.png", agy: "antigravity.png", antigravity: "antigravity.png", opencode: "opencode.png",
-  aider: "aider.png", amp: "amp.svg", auggie: "augment.png", autohand: "autohand.png", cline: "cline.svg", continue: "continue.png", crush: "charm.png", cursor: "cursor.svg",
-  deepseek: "deepseek.svg", devin: "devin.svg", droid: "factory.png", gemini: "gemini.svg", "gemini-cli": "gemini.svg", copilot: "github-copilot.svg", goose: "goose.svg", grok: "grok.svg",
-  kilocode: "kilocode.svg", kimi: "kimi.svg", kimchi: "kimchi.svg", kiro: "kiro.svg", muse: "meta.svg", omp: "omp.png", pi: "earendil.png", "prime-agent": "prime-agent.png", qwen: "qwen.svg", "unreal-agent": "unreal.svg", vibe: "mistral.svg",
+  "claude-code": "claude-code.svg", codex: "codex.svg", "codex-native": "codex.svg", agy: "agy.png", antigravity: "agy.png", opencode: "opencode.svg",
+  "opencode-v2": "opencode.svg", aider: "aider.png", amp: "amp.svg", auggie: "auggie.svg", autohand: "autohand.svg", cline: "cline.svg", continue: "continue.png",
+  crush: "crush.png", cursor: "cursor.svg", deepseek: "deepseek-harness.svg", "deepseek-harness": "deepseek-harness.svg", devin: "devin.png", droid: "droid.png",
+  fx: "fx.svg", gemini: "gemini.svg", "gemini-cli": "gemini.svg", copilot: "copilot.svg", goose: "goose.svg", grok: "grok.png", kilocode: "kilocode.svg",
+  kimi: "kimi.png", kimchi: "kimchi.svg", kiro: "kiro.png", "mimo-code": "mimo-code.svg", muse: "muse.png", omp: "omp.png", pi: "pi.png",
+  "prime-agent": "prime-agent.png", qwen: "qwen.png", "unreal-agent": "unreal-agent.png", vibe: "vibe.png",
 };
+// A logo's bytes, with an SVG's line endings read as LF: core.autocrlf checks a text SVG out with
+// CRLF in the app's checkout but kept the AO submodule's copy LF, and 0.8.100's release build
+// failed on codex.svg though the two differ by nothing else. Images are compared byte for byte.
+const logoBytes = (file) => (file.endsWith(".svg") ? Buffer.from(fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n")) : fs.readFileSync(file));
+test("every harness shows AO's own mark for it, never another brand's", () => {
+  const { harnessMark } = logos();
+  for (const [id, asset] of Object.entries(harnesses)) {
+    const src = harnessMark(`ao:${id}`, "Localized label")(18).props.src;
+    assert.equal(path.dirname(src), "../assets/harness/ao", `${id} uses AO's agent logo`);
+    const ao = path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/assets/agents", asset);
+    // AO's file unmodified where the AO checkout is present (CI may not check the submodule out).
+    if (fs.existsSync(ao)) assert.ok(logoBytes(ao).equals(logoBytes(path.resolve(root, src))), `${asset} is AO's file unmodified`);
+  }
+  // The marks that were wrong: the Claude app's starburst, OpenAI's knot, Earendil's avatar, Unreal Engine.
+  for (const [id, wrong] of [["claude-code", "claude-code.png"], ["codex", "openai.png"], ["pi", "earendil.png"], ["unreal-agent", "unreal.svg"]]) {
+    assert.notEqual(path.basename(harnessMark(`ao:${id}`, id)(16).props.src), wrong, id);
+  }
+});
 test("every known harness has its bundled brand image, including missing agents", () => {
   const { harnessMark } = logos();
   for (const [id, asset] of Object.entries(harnesses)) {
@@ -31,7 +52,7 @@ test("every known harness has its bundled brand image, including missing agents"
 });
 test("display-name aliases identify known brands without guessing an unknown harness", () => {
   const { harnessMark } = logos();
-  for (const [label, asset] of [["Gemini CLI", "gemini.svg"], ["DeepSeek", "deepseek.svg"], ["Prime Agent", "prime-agent.png"], ["Kilo Code", "kilocode.svg"], ["GitHub Copilot", "github-copilot.svg"]]) {
+  for (const [label, asset] of [["Gemini CLI", "gemini.svg"], ["DeepSeek", "deepseek-harness.svg"], ["Prime Agent", "prime-agent.png"], ["Kilo Code", "kilocode.svg"], ["GitHub Copilot", "copilot.svg"], ["Unreal Agent", "unreal-agent.png"]]) {
     assert.equal(path.basename(harnessMark("custom-id", label)(16).props.src), asset, label);
   }
   assert.equal(harnessMark("unknown-agent", "Unknown")(16).type, "svg", "unknown brands keep an honest neutral fallback");

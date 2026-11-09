@@ -287,7 +287,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         let decision;
         if (approval.kind === "plan") {
           decision = decisions.find((item) => /acceptEdits/i.test(item.id)) ?? decisions.find((item) => item.kind === "allow_once");
-        } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(request)
+        } else if (Buffer.byteLength(request, "utf8") >= MAX_CHECKED_REQUEST || blockedRequest(approval)
           || gitPushRequest(approval.command) || gitPushRequest(approval.toolInput)) {
           // Too long to be sure of (AO's upstream cuts a tool's input at 1500 bytes and a command
           // at 4000, so the blocked part may sit past the cut): denied, as "Approve for me" does.

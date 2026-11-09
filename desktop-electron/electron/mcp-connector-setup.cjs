@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+const { loadPastCloudflareCheck, matchBrowserUserAgent, SETUP_CHECK_WAIT_MS } = require("./chatgpt-cloudflare-check.cjs");
 // An original result object is usable once during a held workspace operation, never after JSON persistence.
 const freshConnectorResults = new WeakMap();
 const UNVERIFIED_CONNECTOR = "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.";
@@ -176,8 +177,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
         }
         return;
       }
-      if (url.origin === "https://chatgpt.com" && request.method === "POST"
-        && url.pathname === "/backend-api/aip/connectors/mcp/list_accessible") kind = "chatgpt";
+      // The plugins page's own list request names the workspace it shows. ChatGPT replaced the
+      // POST list_accessible with GET ps/plugins/list (seen live 2026-11-09); with only the old
+      // one known, no workspace was ever confirmed and every Connect failed.
+      if (url.origin === "https://chatgpt.com" && ((request.method === "POST"
+        && url.pathname === "/backend-api/aip/connectors/mcp/list_accessible")
+        || (request.method === "GET" && url.pathname === "/backend-api/ps/plugins/list"))) kind = "chatgpt";
       if (url.origin === "https://api.openai.com") {
         if (request.method === "POST" && url.pathname === "/v1/dashboard/onboarding/login") kind = "login";
         else if (request.method === "GET" && url.pathname === "/v1/dashboard/organization/permissions") kind = "permissions";
@@ -318,11 +323,26 @@ function requireAutomaticConnectorSetup(runtimeHost, browserHost) {
   }
 }
 
-function currentConnectorSettings(runtimeHost) {
+/**
+ * Whether the automatic tunnel's runtime key is saved, read off the main thread once for a whole
+ * connector operation; undefined when the host can only check it synchronously.
+ */
+async function connectorCredentials(runtimeHost) {
+  if (typeof runtimeHost.mcpCredentialsConfiguredAsync !== "function") return undefined;
+  return runtimeHost.mcpCredentialsConfiguredAsync(runtimeHost.runtimeConfigSnapshot().config, "automatic");
+}
+
+/**
+ * The main tunnel's connector name and tunnel ID. `credentials` is connectorCredentials()'s answer
+ * for an operation that checks again and again (every 50 ms while ChatGPT confirms a workspace):
+ * the key file was then looked up on the main thread each time, and on the busy hard disk one
+ * lookup held every window for up to 17.9 s (seen live 2026-11-09). Its config is cached.
+ */
+function currentConnectorSettings(runtimeHost, { credentials } = {}) {
   const snapshot = runtimeHost.runtimeConfigSnapshot();
   const config = snapshot.config;
   if (!snapshot.configured || snapshot.owner !== "launcher" || config?.mode !== "full"
-    || config.browserInteractionMode === "manual" || !runtimeHost.mcpCredentialsConfigured("automatic")) {
+    || config.browserInteractionMode === "manual" || !(credentials ?? runtimeHost.mcpCredentialsConfigured("automatic"))) {
     throw new Error("Connect the saved automatic MCP harness before creating its ChatGPT connector.");
   }
   const tunnel = config.automaticTunnel || (!config.manualTunnel ? config.tunnel : null);
@@ -529,7 +549,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     }, 40_000);
     if (!listed) throw new Error('The Personal plugins list did not finish loading, so the connector was not created.');
     if (listed.card) {
-      if (phase === 'prepare') {
+      if (phase === 'prepare' || phase === 'existing') {
         const href = new URL(listed.card.getAttribute('href'), location.origin);
         if (href.origin !== location.origin || href.username || href.password || !isPluginDetailUrl(href.href)) {
           throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
@@ -539,6 +559,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       }
       return { created: false, href: listed.card.getAttribute('href') };
     }
+    if (phase === 'existing') throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
     const add = allClickable(document.querySelector('main')).filter(el =>
       !el.closest('[role="dialog"],form') && textMatches(el, ['Add'], true)
       && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
@@ -712,7 +733,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
   globalThis.__codingToolsConnectorHelpers = Object.freeze({
     activeSurface, acknowledgeCustomServerTrust, allClickable, canonicalAppIdentity,
     cardDetailUrl, clearPluginSearch, connectControlIn, elementLabels, ensurePersonalView, findClickable, findExactAppNode,
-    prepareTunnelConnector: settings => createTunnelConnector(settings, 'prepare'), submitPreparedTunnelConnector, inspectTunnelConnectorIdentity,
+    prepareTunnelConnector: (settings, existingOnly = false) => createTunnelConnector(settings, existingOnly ? 'existing' : 'prepare'), submitPreparedTunnelConnector, inspectTunnelConnectorIdentity,
     prepareTunnelConnectorConnection, openTunnelConnectorConsent, confirmTunnelConnectorConsent,
     ${testLegacy ? "createTunnelConnector, ensureTunnelConnectorConnected," : ""}
     findGridArticle, findInput, findManagedAppCard, isPersonalPluginsPage, observeAppConnection, personalPluginsLoaded,
@@ -727,13 +748,15 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
  * an extra tunnel in its account's browser partition; the caller records an extra tunnel's connector.
  */
 async function createConfiguredConnector({ app, BrowserWindow, browserHost, runtimeHost, target, assertCurrent,
-  operationHeld = false, expectedContext, selectWorkspace = false, shared, onContext, preserveSurface = false }) {
+  operationHeld = false, expectedContext, selectWorkspace = false, shared, onContext, preserveSurface = false, existingOnly = false }) {
   requireAutomaticConnectorSetup(runtimeHost, browserHost);
   if (operationHeld && browserHost.currentOperation?.() !== "MCP connector creation") throw new Error("MCP connector setup is busy");
   const extra = target?.tunnelId !== undefined;
+  // Read once here; checkHost runs on every step of the setup.
+  const credentials = extra ? undefined : await connectorCredentials(runtimeHost);
   const settings = extra
     ? extraConnectorSettings(runtimeHost, target.tunnelId)
-    : currentConnectorSettings(runtimeHost);
+    : currentConnectorSettings(runtimeHost, { credentials });
   const partition = target?.partition ?? browserHost.partition;
   const sharedProof = shared && freshConnectorResults.get(shared.creationResult);
   if (shared) {
@@ -753,7 +776,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     if (browserHost.partition !== activePartition) throw new Error("The browser account changed during MCP setup.");
     assertCurrent?.();
     if (shared) sharedProof.assertCurrent?.();
-    const current = extra ? extraConnectorSettings(runtimeHost, settings.tunnelId) : currentConnectorSettings(runtimeHost);
+    const current = extra ? extraConnectorSettings(runtimeHost, settings.tunnelId) : currentConnectorSettings(runtimeHost, { credentials });
     if (current.name !== settings.name || current.tunnelId !== settings.tunnelId) throw new Error("The MCP configuration changed during setup.");
   };
   const run = async () => {
@@ -777,12 +800,18 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       },
     });
     let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
-    let expectedPath = null, platformPhase = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (!popup.isDestroyed()) popup.destroy();
-    }, target ? 120_000 : 75_000);
-    timer.unref?.();
+    let expectedPath = null, platformPhase = false, recheckExistingFailure = null, timer;
+    // A Cloudflare check restarts the clock with its own wait added (loadPastCloudflareCheck).
+    const budget = target ? 120_000 : 75_000;
+    const arm = ms => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        if (!popup.isDestroyed()) popup.destroy();
+      }, ms);
+      timer.unref?.();
+    };
+    arm(budget);
     const navigation = (_event, value, inPlace, mainFrame) => {
       if (mainFrame === false) return;
       navigationVersion++;
@@ -793,6 +822,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     };
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      matchBrowserUserAgent(popup);
       // Initialize the hidden renderer before awaiting CDP Network.enable.
       await popup.loadURL("about:blank");
       checkHost();
@@ -812,7 +842,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       observer = await observeMcpSetupContext(popup.webContents, settings.tunnelId);
       const navigate = async value => {
         checkHost(); expectedPath = new URL(value).pathname; navigating = true;
-        try { await popup.loadURL(value); } finally { navigating = false; }
+        try { await loadPastCloudflareCheck(popup, value, { onCheck: () => arm(SETUP_CHECK_WAIT_MS + budget) }); } finally { navigating = false; }
         checkHost();
       };
       const evidence = async ready => {
@@ -853,10 +883,12 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         || context.workspaceRole !== expectedContext.workspaceRole || context.workspaceStructure !== expectedContext.workspaceStructure)) {
         throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
       }
-      // Reject unverified/non-owner workspaces before Platform login or connector-form work.
+      if (existingOnly && (context.workspaceStructure !== "workspace"
+        || !["account-owner", "account-admin", "standard-user"].includes(context.workspaceRole))) throw new Error(WORKSPACE_OWNER_REQUIRED);
+      // Existing-only use verifies the app's saved identity without borrowing Platform authority.
       // Returning from Platform establishes a new observation baseline; freshContext still checks
       // the original user/workspace/role before any creation or consent mutation.
-      if (!shared) {
+      if (!shared && !existingOnly) {
         requireMcpWorkspaceOwner(context);
         platformPhase = true;
         await navigate("https://platform.openai.com/settings/organization/tunnels");
@@ -888,20 +920,22 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
             || shared.memberUserId !== current.userId || shared.tunnelId !== settings.tunnelId) {
             throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
           }
-        } else {
+        } else if (!existingOnly) {
           requireMcpWorkspaceOwner(current);
           platformMcpOwnerContext(after.platform, settings.tunnelId, current);
         }
         return current;
       };
+      recheckExistingFailure = freshContext;
       await onContext?.(partition, await freshContext());
       const bindingPath = path.join(app.getPath("userData"), "mcp-account-connector-bindings.json");
       const saved = await readAccountConnectorBindings(app);
       await freshContext();
       await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
       const prepared = shared ? { prepared: true, existing: true, href: sharedProof.href }
-        : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)})`, true);
+        : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)}, ${existingOnly})`, true);
       if (prepared?.prepared !== true) throw new Error("ChatGPT did not prepare the exact tunnel connector.");
+      if (existingOnly && prepared.existing !== true) throw new Error(UNVERIFIED_CONNECTOR);
       await freshContext();
       let result;
       if (prepared.existing === true) result = { created: false, href: prepared.href };
@@ -964,12 +998,18 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         await freshContext();
       }
       const connected = { created: result.created, name: settings.name, href, binding, connected: true };
-      if (!shared) freshConnectorResults.set(connected, { browserHost, runtimeHost, partition, assertCurrent,
+      if (!shared && !existingOnly) freshConnectorResults.set(connected, { browserHost, runtimeHost, partition, assertCurrent,
         ...binding, workspaceRole: stable.workspaceRole, workspaceStructure: stable.workspaceStructure,
         name: settings.name, href, at: Date.now() });
       return connected;
     } catch (error) {
       if (timedOut) throw new Error("ChatGPT connector setup took too long. Retry from Configuration.");
+      if (existingOnly && !mutationStarted && error?.message === UNVERIFIED_CONNECTOR) {
+        // A rejected helper skips its normal post-read check. Context changes must stop setup,
+        // not become a recoverable identity failure that permits owner mutations afterward.
+        if (!recheckExistingFailure) throw new Error("The MCP account or workspace context changed. Retry in the intended workspace.");
+        await recheckExistingFailure();
+      }
       if (error instanceof Error) error.mcpMutationStarted = mutationStarted;
       throw error;
     } finally {
@@ -1003,6 +1043,7 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
     timer.unref?.();
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      matchBrowserUserAgent(popup);
       const guardNavigation = (event, value) => {
         try {
           const url = new URL(value);
@@ -1024,4 +1065,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

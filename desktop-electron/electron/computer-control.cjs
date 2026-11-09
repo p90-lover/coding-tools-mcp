@@ -96,25 +96,155 @@ function createAppApprovals({ file = null, now = Date.now } = {}) {
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const pageUrl = (html) => `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
-const STYLE = `body{font:13px system-ui,"Segoe UI",sans-serif;margin:0;color:#1f1f1f;background:#fff}
-@media(prefers-color-scheme:dark){body{color:#ececec;background:#1e1e1e}.row:hover{background:#2a2a2a!important}}
-button{font:inherit;padding:6px 14px;border-radius:6px;border:1px solid #8884;background:transparent;color:inherit;cursor:pointer}
-button.primary{background:#2563eb;border-color:#2563eb;color:#fff}button:disabled{opacity:.5;cursor:default}`;
 
 // The bar's Stop tells the app by renaming its page: a data: page never navigates in-page, so a
 // hash change there never fired did-navigate-in-page and Stop did nothing (the 0.8.39 picker's
 // Start was dead the same way, 2026-10-31). page-title-updated fires for any page, with no preload.
 const STOP_TITLE = "stop-computer-control";
 
-/** The bar shown while control is on: what is controlled, time left, and Stop. */
-function barPage({ title }) {
-  return `<!doctype html><html><head><meta charset="utf-8"><title>Computer control is on</title><style>${STYLE}
-body{display:flex;align-items:center;gap:10px;padding:0 10px;height:100vh;box-sizing:border-box;-webkit-app-region:drag;
-border:2px solid #dc2626;border-radius:8px}b{color:#dc2626}span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-button{-webkit-app-region:no-drag;background:#dc2626;border-color:#dc2626;color:#fff}</style></head>
-<body><b>●</b><span>A chat controls “${escapeHtml(title)}” <small id="left"></small></span><button id="stop">Stop</button>
-<script>document.getElementById("stop").onclick = () => { document.title = ${JSON.stringify(STOP_TITLE)}; };
-window.showLeft = (text) => { document.getElementById("left").textContent = text; };</script></body></html>`;
+// The pill's history button opens and closes its list the same way (page-title-updated).
+const HISTORY_TITLE = "computer-control-history:";
+
+// The pill's size, in DIPs: one row, wide enough for agent and model, the step, the app and the
+// buttons. With its history open the window grows down by HISTORY_HEIGHT, and only then.
+const PILL_WIDTH = 620;
+const PILL_HEIGHT = 40;
+const HISTORY_HEIGHT = 268;
+// Steps the history keeps, newest first.
+const HISTORY_LIMIT = 50;
+// After a step the pill keeps naming it this long, so a run of quick steps reads as one line, not a flicker.
+const IDLE_LINGER_MS = 1_200;
+const IDLE_TEXT = "waiting for its next step";
+
+/** Untrusted text (a control's name) as a short quoted phrase, or "" when there is none. */
+function quoted(value, max = 40) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return `“${text.length > max ? `${text.slice(0, max - 1)}…` : text}”`;
+}
+
+const KEY_NAMES = Object.freeze({ pageup: "Page Up", pagedown: "Page Down", backspace: "Backspace", escape: "Esc", ctrl: "Ctrl" });
+/** "ctrl+s" → "Ctrl+S", "pageup" → "Page Up". */
+const keyName = (key) => String(key ?? "").split("+").map((part) => part.trim().toLowerCase()).filter(Boolean)
+  .map((part) => KEY_NAMES[part] ?? (part.length === 1 ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1))).join("+") || "a key";
+
+/** One computer_action step in words. Typed text is never shown, only its length: the pill is on screen for anyone to see. */
+function stepLabel(step) {
+  const control = quoted(step?.selector?.name || step?.selector?.automation_id);
+  const at = control || (Number.isInteger(step?.x) && Number.isInteger(step?.y) ? `at ${step.x}, ${step.y}` : "");
+  const on = (verb) => (at ? `${verb} ${at}` : verb);
+  switch (step?.action) {
+    case "click": return on(step.button === "double" ? "Double-clicking" : step.button === "right" ? "Right-clicking" : "Clicking");
+    case "move": return on("Pointing");
+    case "type": {
+      const count = [...String(step.text ?? "")].length;
+      return `Typing ${count} character${count === 1 ? "" : "s"}${control ? ` into ${control}` : ""}`;
+    }
+    case "key": return `Pressing ${keyName(step.key)}`;
+    case "scroll": return `Scrolling ${Number(step.amount) < 0 ? "down" : "up"}${control ? ` in ${control}` : ""}`;
+    case "wait": return control ? `Waiting for ${control}` : "Waiting";
+    case "verify": return control ? `Checking ${control}` : "Checking the window";
+    case "find": return control ? `Looking for ${control}` : "Looking for a control";
+    default: return "Working in the window";
+  }
+}
+
+/** What a computer_* call is doing, for the pill; null for one that does nothing on screen (status, route, stop). */
+function describeAction(tool, args = {}) {
+  switch (tool) {
+    case "computer_action": return stepLabel(args?.step);
+    case "computer_sequence": {
+      const steps = Array.isArray(args?.steps) ? args.steps : [];
+      if (!steps.length) return "Continuing its steps";
+      const more = steps.length - 1;
+      return `${stepLabel(steps[0])}${more ? ` (+${more} more step${more === 1 ? "" : "s"})` : ""}`;
+    }
+    case "computer_snapshot": return "Looking at the window";
+    case "computer_find_control": return `Looking for ${quoted(args?.selector?.name || args?.selector?.automation_id) || "a control"}`;
+    case "computer_wait": return `Waiting for ${quoted(args?.selector?.name || args?.selector?.automation_id) || "a control"}`;
+    case "computer_select_window": return args?.activate ? "Bringing the window forward" : null;
+    default: return null;
+  }
+}
+
+/** Calls that send pointer input: the pill lets clicks through while one runs (see activity). */
+const POINTER_TOOLS = new Set(["computer_action", "computer_sequence"]);
+
+/** A model's route id as people know it: "cpa/gpt-6.1-sol" → "gpt-6.1-sol", "opencode-go/deepseek-v4.1-flash" → "deepseek-v4.1-flash". */
+function modelLabel(model) {
+  const text = String(model ?? "").trim();
+  return text ? text.split("/").filter(Boolean).at(-1).slice(0, 48) : "";
+}
+
+/**
+ * The pill shown while control is on: the agent and its model, the step it is on, the app it
+ * controls (a bright chip, never cut short), its history (▾) and Stop. Static: no animation or
+ * transition, so it draws only when its text changes (window.show, window.showHistory).
+ */
+function barPage({ title = "", agent = "A chat", app = "", model = "" } = {}) {
+  const where = app || title;
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Computer control is on</title><style>
+html,body{margin:0;height:100%;background:transparent;overflow:hidden}
+body{font:13px system-ui,"Segoe UI",sans-serif;color:#f4f4f5;user-select:none;cursor:default}
+.pill{box-sizing:border-box;height:${PILL_HEIGHT}px;display:flex;align-items:center;gap:8px;padding:0 4px 0 12px;border-radius:999px;
+background:#18181b;border:1px solid #52525b;-webkit-app-region:drag}
+.dot{flex:none;width:9px;height:9px;border-radius:50%;background:#f97316;opacity:.45}
+.pill[data-busy] .dot{opacity:1}
+.who{flex:none;max-width:210px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model{color:#fdba74;font-weight:600}
+.what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e4e4e7}
+.pill:not([data-busy]) .what{color:#a1a1aa}
+.app{flex:none;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700;font-size:13px;
+color:#111827;background:#fde68a;border-radius:999px;padding:3px 10px}
+.app:empty{display:none}
+button{-webkit-app-region:no-drag;flex:none;font:inherit;font-weight:600;border:0;border-radius:999px;padding:5px 12px;cursor:pointer}
+#toggle{background:#3f3f46;color:#f4f4f5;padding:5px 9px}#toggle:hover{background:#52525b}
+#stop{background:#dc2626;color:#fff}#stop:hover{background:#b91c1c}
+.panel{display:none;box-sizing:border-box;margin-top:6px;height:${HISTORY_HEIGHT - 6}px;overflow-y:auto;border-radius:14px;
+background:#18181b;border:1px solid #52525b;padding:4px 0}
+body[data-open] .panel{display:block}
+.row{display:grid;grid-template-columns:62px 1fr auto 18px;gap:8px;align-items:center;padding:5px 12px;border-bottom:1px solid #27272a}
+.row:last-child{border-bottom:0}.time{color:#a1a1aa;font-variant-numeric:tabular-nums;font-size:12px}
+.act{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.act small{color:#a1a1aa}
+.row .app{font-size:11.5px;padding:1px 8px;max-width:150px}
+.mark{text-align:center;font-weight:700}.done{color:#4ade80}.failed{color:#f87171}.running{color:#fdba74}
+.empty{color:#a1a1aa;padding:10px 12px}</style></head>
+<body><div class="pill" id="pill"><span class="dot"></span>
+<span class="who"><b id="who">${escapeHtml(agent)}</b><span class="model" id="model">${model ? ` · ${escapeHtml(model)}` : ""}</span></span>
+<span class="what" id="what">${escapeHtml(IDLE_TEXT)}</span><span class="app" id="app">${escapeHtml(where)}</span>
+<button id="toggle" title="Show what it did">▾</button><button id="stop" title="Stop computer control">Stop</button></div>
+<div class="panel" id="panel"><div class="empty">Nothing done yet.</div></div>
+<script>const $ = (id) => document.getElementById(id);
+let flips = 0;
+$("stop").onclick = () => { document.title = ${JSON.stringify(STOP_TITLE)}; };
+$("toggle").onclick = () => {
+  const open = !document.body.hasAttribute("data-open");
+  document.body.toggleAttribute("data-open", open);
+  $("toggle").textContent = open ? "▴" : "▾";
+  document.title = ${JSON.stringify(HISTORY_TITLE)} + (open ? "open:" : "closed:") + (++flips);
+};
+window.show = (state) => {
+  $("who").textContent = String(state.agent || "A chat");
+  $("model").textContent = state.model ? " · " + String(state.model) : "";
+  $("what").textContent = String(state.action || ${JSON.stringify(IDLE_TEXT)});
+  $("app").textContent = String(state.app || "");
+  $("pill").toggleAttribute("data-busy", Boolean(state.action));
+};
+const cell = (tag, className, text) => { const node = document.createElement(tag); node.className = className; node.textContent = text; return node; };
+window.showHistory = (entries) => {
+  const panel = $("panel");
+  panel.replaceChildren();
+  if (!entries.length) { panel.append(cell("div", "empty", "Nothing done yet.")); return; }
+  for (const entry of entries) {
+    const row = cell("div", "row", "");
+    const act = cell("span", "act", String(entry.action));
+    act.append(cell("small", "", "  " + String(entry.agent) + (entry.model ? " · " + String(entry.model) : "")));
+    row.append(cell("span", "time", String(entry.time)), act, cell("span", "app", String(entry.app || "")),
+      cell("span", "mark " + String(entry.outcome), entry.outcome === "done" ? "✓" : entry.outcome === "failed" ? "✕" : "…"));
+    row.title = String(entry.action);
+    panel.append(row);
+  }
+};</script></body></html>`;
 }
 
 function createComputerControl({ request, BrowserWindow, screen, logger = null, ownPids = () => [process.pid], onRequests = () => undefined,
@@ -122,6 +252,18 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   const approvals = createAppApprovals({ file: approvalsFile, now });
   let bar = null;
   let heartbeat = null;
+  // What the pill shows, the text last sent to it, the calls running (pointer ones apart), and the
+  // timer that clears the last step's name.
+  let shown = { agent: "A chat", model: "", action: null, app: "" };
+  let painted = null;
+  let running = 0;
+  let pointing = 0;
+  let idleTimer = null;
+  // The steps it took, newest first ({ time, agent, model, action, app, outcome }), kept while the
+  // app runs; sent to the pill only while its history is open.
+  const history = [];
+  let historyOpen = false;
+  const clock = (at) => new Date(at).toTimeString().slice(0, 8);
   // The window control was last started on, by this app ({ window_id, pid, title, app }).
   let controlled = null;
   // The requests waiting for the person: { public, finish, workspace, captureOff, target, conversation }.
@@ -132,9 +274,42 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
 
   const status = async () => (await request("/api/v1/computer/status", null, { method: "GET" }))?.status ?? { state: "stopped" };
 
+  /** Sends the pill its text, only when it changed: an unchanged pill is never redrawn. */
+  function paint() {
+    if (!bar || bar.isDestroyed()) return;
+    const state = JSON.stringify(shown);
+    if (state === painted) return;
+    painted = state;
+    void bar.webContents.executeJavaScript(`window.show(${state})`).catch(() => { painted = null; });
+  }
+
+  /** The history list, sent only while it is open: a closed pill gets nothing more to draw. */
+  function paintHistory() {
+    if (!historyOpen || !bar || bar.isDestroyed()) return;
+    void bar.webContents.executeJavaScript(`window.showHistory(${JSON.stringify(history)})`).catch(() => undefined);
+  }
+
+  /** The person opened or closed the history: the window grows down to hold it, or back to the pill alone. */
+  function toggleHistory(own, open) {
+    if (bar !== own || own.isDestroyed()) return;
+    historyOpen = open;
+    try {
+      const bounds = own.getBounds();
+      own.setBounds({ ...bounds, height: PILL_HEIGHT + (open ? HISTORY_HEIGHT : 0) });
+    } catch { /* stays its size */ }
+    paintHistory();
+  }
+
   function closeBar() {
     if (heartbeat) clearInterval(heartbeat);
     heartbeat = null;
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
+    running = 0;
+    pointing = 0;
+    painted = null;
+    historyOpen = false;
+    for (const entry of history) if (entry.outcome === "running") entry.outcome = "failed";
     const open = bar;
     bar = null;
     if (open && !open.isDestroyed()) open.destroy();
@@ -155,39 +330,102 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   }
 
-  function openBar(title) {
+  function openBar({ title, agent = "A chat", app = "", model = "" }) {
     closeBar();
-    const area = screen.getPrimaryDisplay().workArea;
-    const width = Math.min(520, area.width);
+    shown = { agent, model: modelLabel(model), action: null, app: app || title };
+    // On the screen the person is looking at (the pointer's), at its top centre.
+    let display = null;
+    try { display = screen.getDisplayNearestPoint?.(screen.getCursorScreenPoint()) ?? null; } catch { display = null; }
+    const area = (display ?? screen.getPrimaryDisplay()).workArea;
+    const width = Math.min(PILL_WIDTH, area.width);
     bar = new BrowserWindow({
-      width, height: 44, x: Math.round(area.x + (area.width - width) / 2), y: area.y + 8,
+      width, height: PILL_HEIGHT, x: Math.round(area.x + (area.width - width) / 2), y: area.y + 8,
       frame: false, resizable: false, minimizable: false, maximizable: false, skipTaskbar: true, alwaysOnTop: true, show: false,
+      // A pill: a transparent window around a rounded page. It never takes the focus (focusable:
+      // false, showInactive), so Stop does not pull the controlled app out of the foreground, and
+      // as a tool window it stays out of Alt+Tab.
+      transparent: true, backgroundColor: "#00000000", hasShadow: false, focusable: false, type: "toolbar", fullscreenable: false,
       webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, spellcheck: false, backgroundThrottling: false },
     });
+    // "screen-saver" is the highest band: above other always-on-top windows and borderless full-screen apps.
     bar.setAlwaysOnTop(true, "screen-saver");
     lockDown(bar);
     const own = bar;
     own.on("closed", () => { if (bar === own) void stop("control bar closed"); });
     own.webContents.on("page-title-updated", (event, pageTitle) => {
-      if (pageTitle !== STOP_TITLE) return;
-      event.preventDefault?.();
-      if (bar === own) void stop("Stop pressed");
+      if (pageTitle === STOP_TITLE) {
+        event.preventDefault?.();
+        if (bar === own) void stop("Stop pressed");
+      } else if (String(pageTitle).startsWith(HISTORY_TITLE)) {
+        event.preventDefault?.();
+        toggleHistory(own, String(pageTitle).slice(HISTORY_TITLE.length).startsWith("open:"));
+      }
     });
-    void own.loadURL(pageUrl(barPage({ title }))).then(() => { if (!own.isDestroyed()) own.showInactive(); });
+    void own.loadURL(pageUrl(barPage({ title, agent: shown.agent, app: shown.app, model: shown.model }))).then(() => {
+      if (own.isDestroyed() || bar !== own) return;
+      own.showInactive();
+      // A step that started while the page loaded.
+      painted = JSON.stringify({ ...shown, action: null });
+      paint();
+    });
     // The bar's heartbeat keeps input allowed; a bar hidden or gone sends none, and input stops.
+    // Control is on until the person stops it, so there is no time left to redraw each second.
     heartbeat = setInterval(async () => {
       if (bar !== own || own.isDestroyed()) return;
       if (!own.isVisible()) return;
+      // Back on top of a window that took the top of the always-on-top band since (a full-screen
+      // player, another app's overlay). No activation, so the focus stays where it is.
+      try { own.moveTop?.(); } catch { /* stays where it is */ }
       try {
         const current = (await request("/api/v1/computer/status?heartbeat=true", null, { method: "GET", localConfirmation: true }))?.status;
         if (bar !== own || own.isDestroyed()) return;
         if (!current || current.state === "stopped") { closeBar(); controlled = null; return; }
-        const left = Number.isInteger(current.remaining_seconds)
-          ? `· ${Math.floor(current.remaining_seconds / 60)}:${String(current.remaining_seconds % 60).padStart(2, "0")} left` : "· until you stop it";
-        void own.webContents.executeJavaScript(`window.showLeft(${JSON.stringify(left)})`).catch(() => undefined);
       } catch { /* a missed beat only pauses input; the next one restores it */ }
     }, HEARTBEAT_MS);
     heartbeat.unref?.();
+  }
+
+  /**
+   * A chat's computer_* call is about to run: the pill names it (describeAction) until it ends,
+   * then a moment longer. Returns the function to call when it ends. While a call that sends
+   * pointer input runs, the pill lets clicks through: headless refuses a click on a point another
+   * window covers (TARGET_OCCLUDED), and the pill is always on top. This uses no mouse hook, which
+   * would slow every mouse move on the computer whenever this app is busy.
+   */
+  function activity({ agent = null, model = null, tool, args } = {}) {
+    const action = describeAction(tool, args);
+    const own = bar;
+    if (!action || !own || own.isDestroyed()) return () => undefined;
+    const pointer = POINTER_TOOLS.has(tool);
+    running += 1;
+    if (pointer && pointing++ === 0) own.setIgnoreMouseEvents?.(true);
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
+    shown = { ...shown, agent: agent || shown.agent, model: model ? modelLabel(model) : shown.model, action };
+    paint();
+    const step = { time: clock(now()), agent: shown.agent, model: shown.model, action, app: shown.app, outcome: "running" };
+    history.unshift(step);
+    history.length = Math.min(history.length, HISTORY_LIMIT);
+    paintHistory();
+    let ended = false;
+    /** `outcome`: "done", or "failed" when the call came back as an error. */
+    return (outcome = "done") => {
+      if (ended) return;
+      ended = true;
+      step.outcome = outcome === "failed" ? "failed" : "done";
+      if (bar !== own || own.isDestroyed()) return;
+      paintHistory();
+      running = Math.max(0, running - 1);
+      if (pointer && --pointing <= 0) { pointing = 0; own.setIgnoreMouseEvents?.(false); }
+      if (running) return;
+      idleTimer = setTimeout(() => {
+        idleTimer = null;
+        if (bar !== own || running) return;
+        shown = { ...shown, action: null };
+        paint();
+      }, IDLE_LINGER_MS);
+      idleTimer.unref?.();
+    };
   }
 
   /** The windows a chat may ask for, with the program each belongs to; never this app's own. */
@@ -280,12 +518,12 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
    * person stops it on the control bar, and resolves headless's status (its session_id). Control
    * already on another window moves to this one.
    */
-  async function start({ workspaceId, target }) {
+  async function start({ workspaceId, target, agent = "A chat", model = "" }) {
     const started = await request("/api/v1/computer/start", { workspace_id: workspaceId, window_id: target.window_id, pid: target.pid,
       duration_seconds: 0, always_enabled: true }, { localConfirmation: true });
     controlled = { window_id: target.window_id, pid: target.pid, title: target.title, app: appKey(target.app) };
     logger?.info?.("computer.started", { pid: target.pid, app: controlled.app });
-    openBar(`${appName(target.app, target.title)} · ${target.title}`);
+    openBar({ title: target.title, agent, model, app: appName(target.app, target.title) });
     return started?.status ?? await status();
   }
 
@@ -295,10 +533,11 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   }
 
   return Object.freeze({
-    status, targets, askApp, answer, start, requests, stop, dispose, controlled: () => controlled, appName,
+    status, targets, askApp, answer, start, requests, stop, dispose, activity, history: () => history.map((entry) => ({ ...entry })),
+    controlled: () => controlled, appName,
     allowedApps: () => approvals.list(), forgetApp: (app) => approvals.remove(app),
     appAllowed: (app, workspaceId, aoSession) => approvals.allowed(app, `${workspaceId}:${aoSession ?? ""}`),
   });
 }
 
-module.exports = { createComputerControl, createAppApprovals, barPage, appName, appKey };
+module.exports = { createComputerControl, createAppApprovals, barPage, describeAction, modelLabel, appName, appKey };

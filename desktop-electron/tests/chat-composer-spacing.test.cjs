@@ -27,5 +27,5 @@ test("composer height stays content-sized and optional goal controls do not rese
   assert.match(textarea, /field-sizing:\s*content/);
   assert.match(textarea, /max-height:\s*240px/);
   assert.match(chat, /<textarea ref=\{input\}[^>]*rows=\{1\}/);
-  assert.match(chat, /commands\?\.goal \|\| commands\?\.planMode \|\| commands\?\.wakeup \|\| commands\?\.loop \? <div className="cx-composer-modes">/);
+  assert.match(chat, /commands\?\.goal \|\| commands\?\.planMode \|\| commands\?\.wakeup \|\| commands\?\.loop \|\| commands\?\.schedule \? <div className="cx-composer-modes">/);
 });

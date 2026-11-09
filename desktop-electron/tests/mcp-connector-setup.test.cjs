@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
-const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 
 function fakeMcpNetwork() {
   const debuggerClient = new EventEmitter(), bodies = new Map(), bodyWaits = new Map(), commands = [];
@@ -189,6 +189,28 @@ test("MCP observation uses normal list requests and bounded public Platform meta
   assert(commands.every(call => ["Network.enable", "Network.getResponseBody"].includes(call.method)), "observation must not issue API requests or app actions");
 });
 
+test("the plugins page's current list request (GET ps/plugins/list) names the selected workspace", async t => {
+  // Live on 2026-11-09 the page no longer sent POST list_accessible; this request carries the
+  // selected workspace now, and without it no Connect could confirm a workspace.
+  const businessId = "602b5d8d-e211-49b1-9762-206108d52954", otherId = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
+  const { debuggerClient, observed } = fakeMcpNetwork();
+  const observer = await observeMcpSetupContext({ debugger: debuggerClient }, null);
+  t.after(() => observer.dispose());
+  for (const [method, url] of [["POST", "https://chatgpt.com/backend-api/ps/plugins/list"],
+    ["GET", "https://chatgpt.com/backend-api/ps/plugins/installed"], ["GET", "https://evil.example/backend-api/ps/plugins/list"]]) {
+    observed(method, url, { "chatgpt-account-id": otherId }, {});
+    assert.equal(observer.snapshot().activeAccountId, null, `${method} ${url} is no workspace proof`);
+  }
+  observed("GET", "https://chatgpt.com/backend-api/ps/plugins/list?limit=50", { "ChatGPT-Account-ID": businessId }, {});
+  const selected = observer.snapshot();
+  assert.equal(selected.activeAccountId, businessId);
+  observed("GET", "https://chatgpt.com/backend-api/ps/plugins/list", { "chatgpt-account-id": businessId }, {});
+  assert.equal(observer.snapshot().selectionVersion, selected.selectionVersion, "the same workspace listed again is no switch");
+  observed("POST", "https://chatgpt.com/backend-api/aip/connectors/mcp/list_accessible", { "chatgpt-account-id": otherId }, {});
+  assert.equal(observer.snapshot().activeAccountId, otherId, "the older request still counts");
+  assert(observer.snapshot().selectionVersion > selected.selectionVersion, "another workspace invalidates the captured context");
+});
+
 test("a new Platform login cannot combine its identity with the previous user's org proof", async t => {
   const network = fakeMcpNetwork(), tunnelId = `tunnel_${"a".repeat(32)}`, org = "org-fixture";
   const observer = await observeMcpSetupContext({ debugger: network.debuggerClient }, tunnelId);
@@ -230,6 +252,14 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "Business succeeds with its distinct binding", business: true },
     { name: "a team admin cannot create even when the tunnel belongs to that user", business: true, creatorRole: "account-admin", error: /verified owner/ },
     { name: "a team member cannot create even when the tunnel belongs to that user", business: true, creatorRole: "standard-user", error: /verified owner/ },
+    { name: "a team admin reuses exact fresh saved identity without Platform access", business: true, creatorRole: "account-admin", existingOnly: true, existing: true },
+    { name: "a team member reuses exact fresh saved identity without Platform access", business: true, creatorRole: "standard-user", existingOnly: true, existing: true },
+    { name: "existing-only cannot create when the renderer returns a new form", business: true, creatorRole: "standard-user", existingOnly: true, error: /unverified/i },
+    { name: "a member cannot reuse unreadable saved identity", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, identityMissing: true, error: /unverified/i },
+    { name: "a member cannot reuse a different saved tunnel", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, identityWrong: true, error: /unverified/i },
+    { name: "a member's workspace change during saved identity inspection stops consent", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, change: "reuse-workspace", error: /context|workspace.*changed/i },
+    { name: "a rejected identity read cannot hide a simultaneous member workspace change", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, change: "reuse-workspace-reject", error: /context|workspace.*changed/i },
+    { name: "a rejected existing-app lookup cannot hide a simultaneous workspace change", business: true, creatorRole: "standard-user", existingOnly: true, existing: true, change: "reuse-prepare-workspace-reject", error: /context|workspace.*changed/i },
     { name: "an unknown workspace role cannot grant creation access", business: true, creatorRole: "future-role", error: /verified owner/ },
     { name: "owner authority revoked after prepare cannot submit", business: true, change: "owner-role", error: /context.*changed/i },
     { name: "another Platform creator cannot be reused", nonOwner: true, error: /different Platform user/ },
@@ -310,6 +340,10 @@ test("the production connector action verifies fresh owner and workspace proof b
         const phase = script.match(/__codingToolsConnectorHelpers\.(\w+)\(/)?.[1];
         if (phase === "selectWorkspace") { accountId = businessId; select(accountId); return { selected: true }; }
         if (phase === "prepareTunnelConnector") {
+          if (scenario.change === "reuse-prepare-workspace-reject") {
+            accountId = personalId; select(accountId);
+            throw new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.");
+          }
           if (scenario.existing) {
             return { prepared: true, existing: true, href: "/plugins/plugin_fixture" };
           }
@@ -324,7 +358,12 @@ test("the production connector action verifies fresh owner and workspace proof b
         }
         if (phase === "submitPreparedTunnelConnector" || phase === "createTunnelConnector") { counts.create++; return { created: true, href: "/plugins/plugin_fixture" }; }
         if (phase === "inspectTunnelConnectorIdentity") {
+          if (scenario.change === "reuse-workspace-reject") {
+            accountId = personalId; select(accountId);
+            throw new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.");
+          }
           if (scenario.identityMissing) throw new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.");
+          if (scenario.change === "reuse-workspace") { accountId = personalId; select(accountId); }
           return { verified: true, name: currentConnectorSettings(runtime()).name, href: "/plugins/plugin_fixture",
             tunnelId: scenario.identityWrong ? `tunnel_${"b".repeat(32)}` : tunnelId };
         }
@@ -374,6 +413,7 @@ test("the production connector action verifies fresh owner and workspace proof b
     }
     const action = () => createConfiguredConnector({ app: { getPath: () => userData }, BrowserWindow: Window, browserHost: host, runtimeHost,
       target: { ...(scenario.primary ? {} : { tunnelId }), partition: "persist:fixture", requireTunnelMatch: true },
+      existingOnly: scenario.existingOnly === true,
       ...(scenario.shared ? { expectedContext: { userId: initialUser, workspaceId: businessId,
         workspaceRole: "standard-user", workspaceStructure: "workspace" },
       operationHeld: scenario.transient === true,
@@ -449,6 +489,28 @@ test("connector setup reads current names and tunnel keys on every action withou
   assert.doesNotMatch(JSON.stringify(renewed), /private-key-file|DO_NOT_EXPORT/);
 });
 
+test("an operation's repeated checks read the saved key once, off the main thread, never per check", async () => {
+  // Live 2026-11-09: assertCurrent ran every 50 ms while ChatGPT confirmed a workspace, each run an
+  // existsSync of the key file on the main thread; on the busy hard disk one held every window 17.9 s.
+  const host = runtime();
+  let syncChecks = 0;
+  const asked = [];
+  host.mcpCredentialsConfigured = () => { syncChecks += 1; throw new Error("checked on the main thread"); };
+  host.mcpCredentialsConfiguredAsync = async (config, mode) => { asked.push([config.automaticTunnel.tunnelId, mode]); return true; };
+  const credentials = await connectorCredentials(host);
+  assert.equal(credentials, true);
+  assert.deepEqual(asked, [[host.config.automaticTunnel.tunnelId, "automatic"]]);
+  for (let check = 0; check < 240; check += 1) assert.equal(currentConnectorSettings(host, { credentials }).name, "Team Harness A");
+  assert.equal(syncChecks, 0, "no check looked the key up again");
+  // A missing key still refuses, and a renamed connector is still seen (the config is read each time).
+  assert.throws(() => currentConnectorSettings(host, { credentials: false }), /automatic MCP harness/);
+  host.config.automaticAppName = "Renamed";
+  assert.equal(currentConnectorSettings(host, { credentials }).name, "Renamed");
+  // A host that can only check synchronously keeps doing so.
+  assert.equal(await connectorCredentials(runtime()), undefined);
+  assert.equal(currentConnectorSettings(runtime()).name, "Team Harness A");
+});
+
 test("automatic setup cannot borrow a manual profile or an external runtime", () => {
   const host = runtime();
   host.config.browserInteractionMode = "manual";
@@ -512,15 +574,22 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     assert.equal(clicks, changed ? 0 : 1, `${changed || "valid"}: validate the current form before Create`);
   }
   const document = { title: "Plugins", body: { innerText: "Plugins" }, querySelectorAll: () => [{ textContent: "Personal", getAttribute: () => "true" }] };
-  const prepare = phase("createTunnelConnector", "async function submitPreparedTunnelConnector", {
+  const prepareContext = {
     location: { origin: "https://chatgpt.com" }, URL, document, isPersonalPluginsPage: () => true, isPluginDetailUrl: () => true,
     visible: () => true, textMatches: matches, PERSONAL_VIEW_LABELS: ["Personal"],
     waitFor: async read => read(), personalPluginsLoaded: () => true, clearPluginSearch: async () => {},
     findManagedAppCard: () => ({ getAttribute: () => "/plugins/existing" }),
     allClickable: () => { throw new Error("Existing connector must not open Create"); },
-  });
+  };
+  const prepare = phase("createTunnelConnector", "async function submitPreparedTunnelConnector", prepareContext);
   assert.deepEqual({ ...await prepare(settings, "prepare") },
     { prepared: true, existing: true, href: "/plugins/existing" });
+  assert.deepEqual({ ...await prepare(settings, "existing") },
+    { prepared: true, existing: true, href: "/plugins/existing" });
+  const absent = phase("createTunnelConnector", "async function submitPreparedTunnelConnector", {
+    ...prepareContext, findManagedAppCard: () => null, pluginCardLinks: () => [], pluginsPageRenderState: () => "empty",
+  });
+  await assert.rejects(absent(settings, "existing"), /unverified/i, "a missing app must stop before Add or Create is inspected");
   for (const existingHref of ["/plugins/other", "https://elsewhere.invalid/plugins/existing"]) {
     assert.equal((await prepare({ ...settings, existingHref }, "prepare")).href, "/plugins/existing",
       "a cached pathname supplies no authority or alternate navigation target");
@@ -732,6 +801,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
         binding: { userId: "user-fixture", workspaceId: "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", tunnelId: tunnels[0].tunnelId } };
     }, app: {}, BrowserWindow: {}, browserHost: { partition: "persist:main", ready: async () => {}, currentOperation: () => null }, runtimeHost: { currentOperation: () => null, runtimeConfigSnapshot: () => ({ configured: false }) }, publishBrowserAccounts() { assert(records.length > 0, "account persistence resolves before its update is published"); }, publishOperation() {},
     currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
+    connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
     mcpConnectorCommandFailure: error => ({ code: "fixture_failure", message: error.message }),
   };
   vm.runInNewContext(snippet, context);

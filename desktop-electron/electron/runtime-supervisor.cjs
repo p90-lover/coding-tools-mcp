@@ -12,7 +12,7 @@ const {
   terminateOwnedProcessTreeAsync,
 } = require("./process-tree.cjs");
 const { runtimeInvocation, runtimeReleaseVersion } = require("./runtime-command.cjs");
-const { runOffThread, spawnOffThread, watchOffThread } = require("./off-thread-run.cjs");
+const { runOffThread, spawnOffThread, watchOffThread, fetchOffThread } = require("./off-thread-run.cjs");
 const { ExtraTunnels } = require("./extra-tunnels.cjs");
 
 const RESTART_WINDOW_MS = 60_000;
@@ -140,6 +140,12 @@ function tunnelRuntimeAbsent(value) {
 function tunnelRuntimeStopped(health) {
   return health?.absent === true
     || (health?.state === "stopped" && health?.processRunning === false);
+}
+
+/** An ownership state without its write time: two writes of the same state compare equal. */
+function stateKey(state) {
+  const { updatedAt: _updatedAt, ...content } = state;
+  return JSON.stringify(content);
 }
 
 function runtimeOwnershipPredatesCurrentBoot(state) {
@@ -743,7 +749,11 @@ class RuntimeSupervisor {
   }
 
   readState() {
-    if (!fs.existsSync(this.statePath)) return null;
+    if (!fs.existsSync(this.statePath)) {
+      this.writtenStateKey = null;
+      this.writtenState = null;
+      return null;
+    }
     // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
     // processes it named died with the machine. Failing on it stopped every watchdog restart until
     // something rewrote the file; it is set aside as if it were missing, its bytes kept in Trash first.
@@ -762,24 +772,53 @@ class RuntimeSupervisor {
       return null;
     }
     try {
-      const state = JSON.parse((bytes ?? fs.readFileSync(this.statePath)).toString("utf8"));
-      const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
-      if (!state
-        || state.version !== 1
-        || !Number.isInteger(state.ownerPid)
-        || state.ownerPid < 1
-        || !validPid(state.daemonPid)
-        || !validPid(state.tunnelPid)
-        || typeof state.status !== "string"
-        || typeof state.updatedAt !== "string"
-        || Number.isNaN(Date.parse(state.updatedAt))) {
-        throw new Error("state shape is invalid");
-      }
-      return state;
+      return this.acceptState(JSON.parse((bytes ?? fs.readFileSync(this.statePath)).toString("utf8")));
     } catch (error) {
       if (bytes && this.setAsideUnreadableStateFromBeforeBoot(bytes, error)) return null;
       throw new Error(`Launcher runtime ownership state is invalid at ${this.statePath}: ${errorMessage(error)}`);
     }
+  }
+
+  /** A parsed ownership marker, checked; throws when its shape is invalid. */
+  acceptState(state) {
+    const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
+    if (!state
+      || state.version !== 1
+      || !Number.isInteger(state.ownerPid)
+      || state.ownerPid < 1
+      || !validPid(state.daemonPid)
+      || !validPid(state.tunnelPid)
+      || typeof state.status !== "string"
+      || typeof state.updatedAt !== "string"
+      || Number.isNaN(Date.parse(state.updatedAt))) {
+      throw new Error("state shape is invalid");
+    }
+    if (this.writtenStateKey && stateKey(state) !== this.writtenStateKey) {
+      this.writtenStateKey = null;
+      this.writtenState = null;
+    }
+    return state;
+  }
+
+  /**
+   * readState for a timer on the main thread: the marker is read off it. On the busy hard disk the
+   * MCP check's synchronous read (every 15 s while the browser waits) held every window (seen live
+   * 2026-11-09). A marker that is torn or does not parse goes through readState's repair, as rare as
+   * the power cut or crash that leaves one.
+   */
+  async readStateAsync() {
+    let bytes;
+    try {
+      bytes = await fs.promises.readFile(this.statePath);
+    } catch (error) {
+      if (error?.code !== "ENOENT") return this.readState();
+      this.writtenStateKey = null;
+      this.writtenState = null;
+      return null;
+    }
+    let state;
+    try { state = JSON.parse(bytes.toString("utf8")); } catch { return this.readState(); }
+    try { return this.acceptState(state); } catch { return this.readState(); }
   }
 
   /**
@@ -829,7 +868,16 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
+    // The write is flushed to disk on the main thread, which held every window 0.4-1.5 s on the hard
+    // disk each time the watchdog re-checked a bridge that needs setup (every 20-40 min, 2026-11-08).
+    // Nothing in it had changed, so the same state this process last wrote is kept. It is forgotten
+    // when the file is cleared or set aside (clearState) and when a read finds other content in it
+    // (another launcher's), so those are written again; no extra disk call checks the file here.
+    const key = stateKey(state);
+    if (key === this.writtenStateKey && this.writtenState) return this.writtenState;
     writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
+    this.writtenStateKey = key;
+    this.writtenState = state;
     return state;
   }
 
@@ -854,6 +902,8 @@ class RuntimeSupervisor {
 
   clearState() {
     fs.rmSync(this.statePath, { force: true });
+    this.writtenStateKey = null;
+    this.writtenState = null;
   }
 
   prepareExternalMigration() {
@@ -1103,7 +1153,9 @@ class RuntimeSupervisor {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`http://${config.host}:${config.port}/healthz`, { signal: controller.signal });
+      // From a worker thread: the watchdog and the MCP check ask every 15-60 s, and a connect on the
+      // main thread held every window 0.3-2.4 s at a time when the machine was busy (2026-11-09).
+      const response = await fetchOffThread(`http://${config.host}:${config.port}/healthz`, { signal: controller.signal, maxBytes: 1024 * 1024 });
       if (!response.ok) return null;
       return await response.json();
     } catch {
@@ -1250,7 +1302,7 @@ class RuntimeSupervisor {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${this.tunnelHealthBaseUrl}${pathname}`, {
+      const response = await fetchOffThread(`${this.tunnelHealthBaseUrl}${pathname}`, {
         method: "GET",
         signal: controller.signal,
       });
@@ -1278,7 +1330,7 @@ class RuntimeSupervisor {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${this.tunnelHealthBaseUrl}/api/logs?limit=100`, {
+      const response = await fetchOffThread(`${this.tunnelHealthBaseUrl}/api/logs?limit=100`, {
         method: "GET",
         signal: controller.signal,
       });
@@ -2074,7 +2126,7 @@ class RuntimeSupervisor {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 5_000);
     try {
-      const response = await fetch(`http://${config.host}:${config.port}/admin/${action}`, {
+      const response = await fetchOffThread(`http://${config.host}:${config.port}/admin/${action}`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${config.controlToken}`,

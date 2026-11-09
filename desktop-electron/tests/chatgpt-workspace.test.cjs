@@ -6,7 +6,15 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const setup = require("../electron/mcp-connector-setup.cjs");
+const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 const { ADMIN_REQUIRED, PUBLISH_REQUIRED, isWorkspaceAdmin } = require("../electron/chatgpt-workspace.cjs");
+const cloudflareCheck = require("../electron/chatgpt-cloudflare-check.cjs");
+// The vm-loaded workspace module gets the real Cloudflare check helper and the test's setup stub.
+const workspaceRequire = setupModule => name => {
+  if (name === "./chatgpt-cloudflare-check.cjs") return cloudflareCheck;
+  assert.equal(name, "./mcp-connector-setup.cjs");
+  return setupModule;
+};
 const workspaceId = "602b5d8d-e211-49b1-9762-206108d52954";
 const otherWorkspace = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
 
@@ -27,11 +35,64 @@ test("an inspection timeout preserves its actionable error after the native wind
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/chatgpt-workspace.cjs"), "utf8"), {
     module, URL, Date, clearTimeout() {},
     setTimeout(callback) { expire = callback; return { unref() {} }; },
-    require: () => ({ observeMcpSetupContext: async () => ({ dispose() { disposed++; } }) }),
+    require: workspaceRequire({ observeMcpSetupContext: async () => ({ dispose() { disposed++; } }) }),
   });
   await assert.rejects(module.exports.inspectChatGptAccount({ BrowserWindow: Window, partition: "persist:member" }),
     /ChatGPT workspace inspection timed out\. Retry this account's action\./);
   assert.equal(disposed, 1);
+});
+
+test("a Refresh waits through Cloudflare's check: its reload is no context change, and its time is added", async () => {
+  // Live 2026-11-09: /plugins answered 403 with Cloudflare's check; the inspection gave up first.
+  const delays = [], agents = [];
+  let pageLoaded = false;
+  class Window {
+    constructor(config) {
+      assert.equal(config.show, false);
+      const contents = this.webContents = new EventEmitter();
+      contents.setWindowOpenHandler = () => {};
+      contents.getUserAgent = () => "Mozilla/5.0 (Windows NT 10.0) Chrome/156.0 CodingTools/0.8.102 Electron/45.2.2 Safari/537.36";
+      contents.setUserAgent = value => agents.push(value);
+      contents.executeJavaScript = async script => {
+        if (script.startsWith("(function isCloudflareCheckPage")) {
+          // The check passes a moment later and reloads the page itself.
+          setImmediate(() => {
+            contents.emit("did-start-navigation", {}, "https://chatgpt.com/plugins?view=personal", false, true);
+            contents.emit("did-navigate", {}, "https://chatgpt.com/plugins?view=personal", 200);
+            pageLoaded = true;
+            contents.emit("did-finish-load");
+          });
+          return true;
+        }
+        const id = script.match(/activeAccountId: "([a-f0-9-]+)"/)?.[1];
+        assert.equal(id, workspaceId);
+        return setup.chatGptMcpContext({ user: { id: "user-member" }, auth: { chatgpt_user_id: "user-member" }, activeAccountId: id,
+          accounts: { [id]: { can_access_with_session: true, account: { account_id: id, account_user_role: "standard-user",
+            structure: "workspace", is_deactivated: false, plan_type: "team", name: "Target workspace" } } } });
+      };
+      this.destroyed = false;
+    }
+    isDestroyed() { return this.destroyed; }
+    destroy() { this.destroyed = true; }
+    async loadURL(url) {
+      if (url === "about:blank") return;
+      this.webContents.emit("did-start-navigation", {}, url, false, true);
+      this.webContents.emit("did-navigate", {}, url, 403);
+      this.webContents.emit("did-finish-load");
+    }
+  }
+  const module = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/chatgpt-workspace.cjs"), "utf8"), {
+    module, URL, Date, clearTimeout,
+    setTimeout: (callback, ms) => { delays.push(ms); return setTimeout(callback, ms); },
+    require: workspaceRequire({ ...setup, observeMcpSetupContext: async () => ({ dispose() {}, snapshot: () => ({
+      activeAccountId: null, selectionVersion: 1, navigationVersion: pageLoaded ? 2 : 1,
+      navigationAccountId: pageLoaded ? workspaceId : null, error: null }) }) }),
+  });
+  const context = await module.exports.inspectChatGptAccount({ BrowserWindow: Window, partition: "persist:member", metadataOnly: true });
+  assert.equal(context.workspaceId, workspaceId);
+  assert.deepEqual(delays.filter(ms => ms >= 30_000), [60_000, 120_000], "a 60 s Refresh gets the check's 60 s on top");
+  assert.deepEqual(agents, ["Mozilla/5.0 (Windows NT 10.0) Chrome/156.0 Safari/537.36"], "the window speaks as the Browser tab does");
 });
 
 function fixture(options = {}) {
@@ -102,6 +163,13 @@ function fixture(options = {}) {
       const partition = input.target.partition, profile = profiles[partition];
       assert.equal(input.expectedContext.userId, profile.userId);
       assert.equal(input.expectedContext.workspaceId, workspaceId);
+      if (input.existingOnly) {
+        calls.push(["inspect-existing", partition]);
+        if (options.reuseError) throw Object.assign(new Error(options.reuseError), { mcpMutationStarted: options.reuseMutation });
+        if (!options.existingVerified) throw Object.assign(new Error(setup.UNVERIFIED_CONNECTOR), { mcpMutationStarted: false });
+        return { created: false, name: "Coding Tools", href: "/plugins/exact-fixture", connected: true,
+          binding: { userId: profile.userId, workspaceId, tunnelId: `tunnel_${"a".repeat(32)}` } };
+      }
       if (partition === "persist:member" && !input.shared && !options.memberCanCreate) throw new Error("ChatGPT did not open its connector form.");
       if (partition === "persist:owner" && options.wrongTunnelOwner) {
         throw Object.assign(new Error("The selected tunnel belongs to a different Platform user. Choose a tunnel created by the signed-in account."), { mcpMutationStarted: false });
@@ -123,7 +191,7 @@ function fixture(options = {}) {
   };
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/chatgpt-workspace.cjs"), "utf8"), {
-    module, require: name => { assert.equal(name, "./mcp-connector-setup.cjs"); return dependency; },
+    module, require: workspaceRequire(dependency),
     URL, Date, setTimeout, clearTimeout,
   });
   const candidates = ["admin", ...(options.owner ? ["owner"] : [])].map(id => ({ id, partition: `persist:${id}`,
@@ -156,6 +224,27 @@ test("same-workspace owner is preferred, publishes there, and connects the origi
   assert.equal(f.locks(), 1);
   assert(f.windows.every(window => window.isDestroyed()));
   assert(f.contexts.some(value => value.partition === "persist:member" && value.context.planType === "team"));
+});
+
+test("a member or admin uses fresh exact existing connector identity before looking for an owner", async () => {
+  for (const role of ["standard-user", "account-admin"]) {
+    const f = fixture({ existingVerified: true });
+    f.profiles["persist:member"].memberships[workspaceId] = role;
+    f.input.accountCandidates = async () => { throw new Error("An existing verified connector must not seek owner authority"); };
+    const result = await f.run();
+    assert.equal(result.connected, true);
+    assert.equal(result.created, false);
+    assert.deepEqual(f.calls, [["inspect-existing", "persist:member"]]);
+    assert(f.windows.every(window => window.isDestroyed()));
+  }
+});
+
+test("consent, uncertain mutation, and changed context failures cannot fall back to owner creation", async () => {
+  for (const [message, mutation] of [[setup.UNVERIFIED_CONNECTOR, true], [setup.UNVERIFIED_CONNECTOR, undefined], ["Workspace context changed", false]]) {
+    const f = fixture({ owner: true, reuseError: message, reuseMutation: mutation });
+    await assert.rejects(f.run(), error => error.message === message);
+    assert.deepEqual(f.calls, [["inspect-existing", "persist:member"]]);
+  }
 });
 
 test("same-page directory filters keep the verified workspace inspection usable", async () => {
@@ -191,7 +280,7 @@ test("another workspace's owner and another partition of the same member cannot 
       f.profiles["persist:owner"].memberships = { [otherWorkspace]: "account-owner" };
     } else if (kind === "same-user") f.profiles["persist:owner"].userId = "user-member";
     else f.profiles["persist:owner"].memberships[workspaceId] = "standard-user";
-    await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+    await assert.rejects(f.run(), error => error.message.endsWith(ADMIN_REQUIRED));
     assert.equal(f.calls.some(call => ["create", "publish", "connect-member"].includes(call[0])), false);
     assert(f.windows.every(window => window.isDestroyed()));
   });
@@ -199,7 +288,7 @@ test("another workspace's owner and another partition of the same member cannot 
 
 test("a delegated member cannot create even when ChatGPT exposes an Add control", async () => {
   const f = fixture({ memberCanCreate: true });
-  await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+  await assert.rejects(f.run(), error => error.message.endsWith(ADMIN_REQUIRED));
   assert.equal(f.calls.some(call => ["create", "publish", "connect-member"].includes(call[0])), false);
 });
 
@@ -221,7 +310,12 @@ test("cached shared provenance cannot reconnect without fresh publisher verifica
   const f = fixture({ bindings: { "persist:admin": publisher,
     "persist:member": { ...publisher, userId: "user-member", publisherPartition: "persist:admin", publisherUserId: "user-admin" } } });
   f.input.accountCandidates = async () => [];
-  await assert.rejects(f.run(), error => error.message === ADMIN_REQUIRED);
+  await assert.rejects(f.run(), error => {
+    assert.equal(mcpConnectorCommandFailure(error).code, "workspace_owner_required",
+      "the native caller must retain the actionable owner requirement");
+    assert.equal(error.cause?.message, setup.UNVERIFIED_CONNECTOR);
+    return error.message.endsWith(ADMIN_REQUIRED);
+  });
   assert.deepEqual(f.calls.filter(call => call[0] === "connect-member"), []);
 });
 
@@ -296,17 +390,20 @@ test("creation or publishing is never mistaken for member connection", async () 
 test("plan labels use subscription metadata while model access remains a separate detail", () => {
   const ts = require("typescript");
   const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatGptBrowserManagement.tsx"), "utf8");
-  const code = source.slice(source.indexOf("function planText("), source.indexOf("const TUNNEL_TONE"));
+  const code = source.slice(source.indexOf("const PLAN_LABELS"), source.indexOf("const TUNNEL_TONE"));
   const format = vm.runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText + ";planText;", { ago: () => "just now" });
-  const metadata = { planCheckedAt: 123, workspaceRole: "account-admin", workspaceStructure: "workspace", workspaceName: "Workspace" };
-  for (const [type, label] of [["team", "Business (Team)"], ["pro", "Pro"], ["plus", "Plus"], ["free", "Free"], ["future-plan", "Unknown plan"]]) {
-    const result = format({ ...metadata, planType: type, solAvailable: true, proAvailable: true, checkedAt: 123 }, true);
-    assert.equal(result.label, label);
-    assert.match(result.detail, /Admin/);
-    assert.match(result.detail, /Model access/);
+  const metadata = { planCheckedAt: 123, workspaceRole: "account-admin", workspaceStructure: "workspace", workspaceName: "Team space" };
+  for (const [type, label] of [["team", "Business"], ["pro", "Pro"], ["plus", "Plus"], ["free", "Free"], ["future-plan", null], ["toString", null]]) {
+    const result = format({ ...metadata, planType: type, solAvailable: true, proAvailable: true, checkedAt: 123 });
+    assert.equal(result.label, label, "an unknown plan shows no pill rather than a guess");
+    assert.equal(result.workspace, "Team space · Admin · checked just now", "one line: workspace, role, when");
+    assert.match(result.models, /Model access up to 6 Pro/, "model access stays out of the line, as the pill's tooltip");
   }
-  assert.equal(format({ solAvailable: true, proAvailable: true, checkedAt: 123 }, true).label, "Not verified");
-  assert.equal(format({ ...metadata, planType: "team" }, false).label, "Last known Business (Team)");
+  assert.equal(format({ ...metadata, workspaceRole: "constructor", planType: "team" }).workspace, "Team space · checked just now");
+  assert.equal(format({ ...metadata, workspaceStructure: "personal", planType: "plus" }).workspace, "Personal · Admin · checked just now");
+  const unchecked = format({ solAvailable: true, proAvailable: true, checkedAt: 123 });
+  assert.equal(unchecked.label, null);
+  assert.equal(unchecked.workspace, "Not checked yet");
 });
 
 test("connection scope rejects known identity changes without racing a delayed metadata event", () => {

@@ -194,6 +194,7 @@ test("main's startup, failed by Cloudflare's check at launch, brings the bridge 
     },
     restoreCodexRouteAfterRuntimeFailure: async () => ({ restored: false }),
     applyReadyRuntimeAfterBridge: () => events.push("ready-without-connect"),
+    startCodexModelCacheWatch: () => { world.cacheWatches = (world.cacheWatches ?? 0) + 1; },
     publishOperation: (operation) => events.push(`${operation.name}:${operation.status}`),
     send: () => {},
     delay: () => new Promise(() => {}),
@@ -230,6 +231,7 @@ test("main's startup, failed by Cloudflare's check at launch, brings the bridge 
   assert.equal(world.bridge, "6.1.17");
   assert.equal(state.coreSetupComplete, true);
   assert.equal(state.codexRestartRequired, true, "Codex picks up the upgraded bridge on its next start");
+  assert.equal(world.cacheWatches, 1, "a startup that connected the bridge also watches Codex's model cache");
 });
 
 test("main wires the retry to launch's startup and to the browser's sign-in", () => {

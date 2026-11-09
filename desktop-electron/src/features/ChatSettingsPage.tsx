@@ -5,6 +5,7 @@ import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } 
 import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, recordPageShortcut, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
+import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
 import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
 
@@ -28,15 +29,95 @@ const LIST_SHORTCUTS: { label: string; keys: string }[] = [
  * sidebar's Settings row or Ctrl+, (pressed again, it closes, as in Codex).
  */
 
-type Section = "general" | "chat" | "computer-use" | "updates";
+type Section = "general" | "chat" | "instructions" | "computer-use" | "updates";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "general", label: "General" },
   { id: "chat", label: "Chat" },
+  { id: "instructions", label: "Instructions" },
   { id: "computer-use", label: "Computer use" },
   { id: "updates", label: "Updates" },
 ];
-const SECTION_GLYPHS = { general: "gear", chat: "compose", "computer-use": "monitor", updates: "update" } as const;
+const SECTION_GLYPHS = { general: "gear", chat: "compose", instructions: "edit", "computer-use": "monitor", updates: "update" } as const;
+
+/** What agent_instructions answers: both AGENTS.md files and the projects that can have one. */
+type InstructionFiles = { global: string; globalFile: string; workspace: string | null; workspaceFile: string | null;
+  projects: { id: string; name: string; path: string }[] };
+
+/** One AGENTS.md: the text, where it is kept, and Save once it differs from what is on disk. */
+function InstructionEditor({ label, file, value, saved, placeholder, onChange, onSave }: { label: string; file: string | null; value: string;
+  saved: string; placeholder: string; onChange: (next: string) => void; onSave: () => void }) {
+  const dirty = value !== saved;
+  return <div className="cxs-instructions">
+    <textarea className="cxs-textarea" aria-label={label} value={value} placeholder={placeholder} spellCheck={false}
+      onChange={(event) => onChange(event.target.value)}
+      onKeyDown={(event) => { if ((event.ctrlKey || event.metaKey) && event.key === "s") { event.preventDefault(); if (dirty) onSave(); } }} />
+    <div className="cxs-instructions-foot">
+      <span className="cxs-instructions-file" title={file ?? undefined}>{file ?? ""}</span>
+      <span className="cxs-instructions-state">{dirty ? "Unsaved changes" : saved.trim() ? "Saved" : ""}</span>
+      <button type="button" className="cxs-button" disabled={!dirty} onClick={onSave}>Save</button>
+    </div>
+  </div>;
+}
+
+/**
+ * Settings › Instructions, as Codex's custom instructions: the global AGENTS.md every agent follows
+ * in every project, and the open project's own AGENTS.md. Every new agent's first message starts
+ * with both, and a running agent's next message once either changed (agent-instructions.cjs).
+ */
+function InstructionsSection({ workspaceId, onError }: { workspaceId?: string | null; onError: (message: string) => void }) {
+  const [files, setFiles] = useState<InstructionFiles | null>(null);
+  const [project, setProject] = useState<string | null>(workspaceId ?? null);
+  const [global, setGlobal] = useState("");
+  const [workspace, setWorkspace] = useState("");
+  const [failed, setFailed] = useState(false);
+  const take = (next: InstructionFiles, keep: { global?: boolean; workspace?: boolean } = {}) => {
+    setFiles(next);
+    if (!keep.global) setGlobal(next.global);
+    if (!keep.workspace) setWorkspace(next.workspace ?? "");
+  };
+  useEffect(() => {
+    let live = true;
+    void chatCall("agent_instructions", project ? { workspaceId: project } : {}).then((result) => {
+      if (!live) return;
+      const next = result as unknown as InstructionFiles;
+      // A project picked by default that has no folder gives way to the first that has one.
+      if (!project && next.projects?.length) { setProject(next.projects[0].id); return; }
+      take(next, { global: files !== null });
+    }, () => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [project]);
+  const save = (scope: "global" | "workspace") => {
+    void chatCall("agent_instructions", { scope, text: scope === "global" ? global : workspace, ...(project ? { workspaceId: project } : {}) })
+      .then((result) => take(result as unknown as InstructionFiles, scope === "global" ? { workspace: true } : { global: true }),
+        (cause: unknown) => onError(cause instanceof Error ? cause.message : String(cause)));
+  };
+  const choose = (next: string) => {
+    if (files && workspace !== (files.workspace ?? "") && !window.confirm("Discard the unsaved changes to this project's AGENTS.md?")) return;
+    setProject(next);
+  };
+  if (failed) return <Group><Row label="Unable to load the instructions."><span /></Row></Group>;
+  const projects = files?.projects ?? [];
+  return <>
+    <Group title="Global AGENTS.md">
+      <Row label="For every agent, in every project" description="Every new agent starts with these instructions, and a running agent gets them again with your next message once you change them"><span /></Row>
+      <InstructionEditor label="Global AGENTS.md" file={files?.globalFile ?? null} value={global} saved={files?.global ?? ""}
+        placeholder={"# How I work\n\n- Answer in English\n- Run the tests before you say it works"} onChange={setGlobal} onSave={() => save("global")} />
+    </Group>
+    <Group title="Workspace AGENTS.md">
+      <Row label="Project" description="The AGENTS.md at the root of the project's folder. Agents in this project get it after the global one">
+        <select className="cxs-select" aria-label="Project" value={project ?? ""} disabled={!projects.length}
+          onChange={(event) => choose(event.target.value)}>
+          {projects.length ? null : <option value="">No project folders</option>}
+          {projects.map((item) => <option key={item.id} value={item.id} title={item.path}>{item.name}</option>)}
+        </select>
+      </Row>
+      {files?.workspaceFile ? <InstructionEditor label="Workspace AGENTS.md" file={files.workspaceFile} value={workspace} saved={files.workspace ?? ""}
+        placeholder={"# This project\n\n- Build with bun run build\n- Never commit to main"} onChange={setWorkspace} onSave={() => save("workspace")} />
+        : <Row label={files ? "This project has no folder" : "Loading…"}><span /></Row>}
+    </Group>
+  </>;
+}
 
 /**
  * Codex's "Always-allowed apps" (settings.computerUse.allowedApps): the apps a chat agent may use
@@ -71,7 +152,27 @@ function AllowedApps({ onError }: { onError: (message: string) => void }) {
 const COMPACT_CHOICES = [50, 60, 70, 80, 90, 95, 100];
 
 /** The chat's own preferences, kept by the bridge (agent-orchestrator-workflow.cjs), as Claude Code's settings. */
-type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean };
+type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; questionTimeout: number };
+// "Agent questions": how long a question waits before it is answered for you (chat_question_timeout).
+// 0 keeps it, and the agent paused on it, until you answer.
+const QUESTION_TIMEOUT_DEFAULT = 30;
+const QUESTION_TIMEOUT_MAX = 24 * 60 * 60;
+const questionSeconds = (value: unknown) => (Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : QUESTION_TIMEOUT_DEFAULT);
+
+/** The seconds an "Agent questions" wait is typed in, saved when it is left or Enter is pressed. */
+function QuestionSeconds({ value, disabled, onChange }: { value: number; disabled: boolean; onChange: (seconds: number) => void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  const commit = () => {
+    const seconds = Number(text);
+    if (Number.isSafeInteger(seconds) && seconds >= 1 && seconds <= QUESTION_TIMEOUT_MAX) { if (seconds !== value) onChange(seconds); }
+    else setText(String(value));
+  };
+  return <input className="cxs-select cxs-seconds" type="number" min={1} max={QUESTION_TIMEOUT_MAX} step={1} inputMode="numeric"
+    aria-label="Seconds before the agent's question is answered for you" value={text} disabled={disabled}
+    onChange={(event) => setText(event.target.value)} onBlur={commit}
+    onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }} />;
+}
 const chatCall = (operation: string, args: JsonObject = {}) => getCodingToolsClient().apps
   .call({ moduleId: "agent-orchestrator", operation, arguments: args })
   .then((outer) => ((outer as { result?: Record<string, unknown> }).result ?? outer) as Record<string, unknown>);
@@ -144,7 +245,7 @@ function PageShortcut({ label, value, disabled, onChange }: { label: string; val
  * `onArchiveChanged` tells the chat list the archive days changed, so its Archived section and
  * popover read them again.
  */
-export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () => void; onArchiveChanged?: () => void }) {
+export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null }: { onClose: () => void; onArchiveChanged?: () => void; workspaceId?: string | null }) {
   const api = window.codexWebLauncher;
   const [section, setSection] = useState<Section>("general");
   const [state, setState] = useState<LauncherState | null>(null);
@@ -168,9 +269,10 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
   }, [api]);
   useEffect(() => {
     let live = true;
-    void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges")])
-      .then(([compact, retry, judges]) => {
-        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true });
+    void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges"), chatCall("chat_question_timeout")])
+      .then(([compact, retry, judges, questions]) => {
+        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true,
+          questionTimeout: questionSeconds(questions.seconds) });
       }, () => undefined);
     return () => { live = false; };
   }, []);
@@ -191,11 +293,15 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
       ...(operation === "chat_auto_compact" ? { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || current.percent } : {}),
       ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
       ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true } : {}),
+      ...(operation === "chat_question_timeout" ? { questionTimeout: questionSeconds(result.seconds) } : {}),
     })));
   };
   // The chat list's own settings, shared with its popover in the sidebar.
   const [list, setList] = useState(readChatListSettings);
   useEffect(() => onChatListSettings(setList), []);
+  // How chats draw their work, kept on this computer; open chats follow a change at once.
+  const [missionWork, setMissionWork] = useState(readMissionWork);
+  useEffect(() => onMissionWork(setMissionWork), []);
   // The archive days, kept by the bridge (chat-archive.cjs) like the preferences above.
   const [archive, setArchive] = useState<{ days: number; idleDays: number } | null>(null);
   useEffect(() => {
@@ -272,15 +378,15 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
               </Row>
             </Group>
             <Group title="Chat pages">
-              <Row label="Show page tabs" description="Keep separate sets of chat sessions on pages. Hiding the tabs keeps your current page and running chats">
-                <Toggle label="Show page tabs" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
+              <Row label="Use pages" description="When every screen on a page holds a chat, New chat opens on the next page. Turning pages off keeps your current page and running chats">
+                <Toggle label="Use pages" checked={pages.enabled} onChange={(enabled) => setPagePreference({ enabled })} />
               </Row>
               <Row label="Open pages" description={`${pages.pageCount} of ${CHAT_PAGE_LIMIT} pages. Each new page starts with a new chat and keeps its own split layout`}>
                 <button type="button" className="cxs-button" disabled={!pages.enabled || pages.pageCount >= CHAT_PAGE_LIMIT}
                   onClick={() => setPagePreference({ pageCount: pages.pageCount + 1 })}>Add page</button>
               </Row>
-              <Row label="Scroll over the page bar to switch" description="Over the page bar, scroll up for the previous page and down for the next. Scrolling messages stays unchanged">
-                <Toggle label="Scroll over the page bar to switch" checked={pages.wheel} disabled={!pages.enabled}
+              <Row label="Scroll to switch pages" description="Scroll over the page numbers, or sideways anywhere in Chat (a touchpad swipe or Shift+scroll). Scrolling messages stays unchanged">
+                <Toggle label="Scroll to switch pages" checked={pages.wheel} disabled={!pages.enabled}
                   onChange={(wheel) => setPagePreference({ wheel })} />
               </Row>
               <Row label="Page keyboard shortcuts" description="Switch pages without clicking. Shortcuts pause while typing or using a dialog">
@@ -318,12 +424,30 @@ export function ChatSettingsPage({ onClose, onArchiveChanged }: { onClose: () =>
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
               </Row>
+              <Row label="Agent questions" description={chat?.questionTimeout === 0
+                ? "A question the agent asks waits for your answer, and the agent pauses until you answer it"
+                : "With Approve for me or Full access, a question nobody answers gets its recommended answer after this many seconds"}>
+                <span className="cxs-inline">
+                  <select className="cxs-select" aria-label="Agent questions" value={chat?.questionTimeout === 0 ? "wait" : "timeout"} disabled={!chat}
+                    onChange={(event) => setChatPreference("chat_question_timeout", { seconds: event.target.value === "wait" ? 0 : QUESTION_TIMEOUT_DEFAULT })}>
+                    <option value="wait">Wait for my answer</option>
+                    <option value="timeout">Answer for me after</option>
+                  </select>
+                  {chat && chat.questionTimeout > 0 ? <><QuestionSeconds value={chat.questionTimeout} disabled={!chat}
+                    onChange={(seconds) => setChatPreference("chat_question_timeout", { seconds })} /><span className="cxs-unit">s</span></> : null}
+                </span>
+              </Row>
+              <Row label="Keep work expanded on a mission" description="Thoughts and steps stay open while a chat or its goal is working. Anything you fold stays folded">
+                <Toggle label="Keep work expanded on a mission" checked={missionWork} onChange={(next) => setMissionWork(saveMissionWork(next))} />
+              </Row>
             </Group>
             <Group title="Keyboard shortcuts">
               {LIST_SHORTCUTS.map((item) => <Row key={item.label} label={item.label}>
                 <kbd className="cxs-kbd">{item.keys}</kbd>
               </Row>)}
             </Group>
+          </div> : section === "instructions" ? <div className="cxs-sections">
+            <InstructionsSection workspaceId={workspaceId} onError={setError} />
           </div> : section === "computer-use" ? <div className="cxs-sections">
             <Group title="Always-allowed apps">
               <AllowedApps onError={setError} />

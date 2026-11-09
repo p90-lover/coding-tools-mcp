@@ -271,6 +271,11 @@ async function loginCommand(args: string[]): Promise<void> {
       continuation: continuation.promise,
       proxyServer,
       onBrowserReady: () => { stdout.write(`${JSON.stringify({ version: 1, type: "passkey-login-ready" })}\n`); },
+      onProgress: phase => {
+        stdout.write(phase === "waiting-for-browser-close"
+          ? "Waiting for the dedicated Chrome window to close before importing\n"
+          : "Capturing and verifying the Chrome session\n");
+      },
     });
   } finally {
     continuation.close();

@@ -118,6 +118,8 @@ test("CPA config follows the selected authenticated global profile", async () =>
     keyPath: path.join(root, "external-services.key"),
     env: {}, resolveRuntimeExecutable: () => process.execPath,
   });
+  // A snapshot shows the route the controller last read off the main thread.
+  assert.equal(await controller.refreshDiskState(), true);
   const cpa = controller.snapshot().services.find((service) => service.id === "cpa");
   assert.equal(cpa.outboundProxy.profileId, "owned");
   assert.equal(cpa.outboundProxy.configMatches, false);
@@ -143,7 +145,7 @@ test("CPA config follows the selected authenticated global profile", async () =>
 });
 
 // Each snapshot read the proxy settings synchronously on main, up to 12.8 s on the busy disk (0.8.48).
-test("a services snapshot reuses the proxy route until the saved settings change", async (t) => {
+test("a services snapshot reads the proxy route off the main thread, again only when it changes", async (t) => {
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-route-cache-"));
   const providers = path.join(root, "providers");
   fs.mkdirSync(providers, { recursive: true });
@@ -165,22 +167,43 @@ test("a services snapshot reuses the proxy route until the saved settings change
     publish: (snapshot) => published.push(snapshot),
   });
   const realRead = fs.readFileSync;
+  const realReadAsync = fs.promises.readFile;
   let reads = 0;
+  let syncReads = 0;
   fs.readFileSync = function (file, ...rest) {
-    if (String(file).endsWith("provider-network.json")) reads += 1;
+    if (String(file).endsWith("provider-network.json")) syncReads += 1;
     return realRead.call(this, file, ...rest);
   };
-  t.after(() => { fs.readFileSync = realRead; controller.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
+  fs.promises.readFile = function (file, ...rest) {
+    if (String(file).endsWith("provider-network.json")) reads += 1;
+    return realReadAsync.call(this, file, ...rest);
+  };
+  t.after(() => {
+    fs.readFileSync = realRead;
+    fs.promises.readFile = realReadAsync;
+    controller.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const cpaOf = (snapshot) => snapshot.services.find((service) => service.id === "cpa");
+  const waitFor = async (check) => {
+    const deadline = Date.now() + 5_000;
+    while (!check() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+  };
 
+  // The first snapshot shows no route yet and starts the read, which publishes what it found.
+  assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, null);
+  await waitFor(() => published.some((snapshot) => cpaOf(snapshot).outboundProxy.profileId === "owned"));
   assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, "owned");
+  // The folder is watched from a worker, which reports once when the watch is in place.
+  await new Promise((resolve) => setTimeout(resolve, 300));
   const afterFirst = reads;
   assert.ok(afterFirst > 0);
   for (let index = 0; index < 5; index += 1) assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, "owned");
   assert.equal(reads, afterFirst, "later snapshots don't read the saved proxy settings again");
+  assert.equal(syncReads, 0, "no snapshot read them on the main thread");
   // A route resolved outside a snapshot (a start) is always read afresh.
   assert.equal(resolveCpaProxyRoute(path.join(root, "integrations"), safeStorage).profileId, "owned");
-  assert.ok(reads > afterFirst);
+  assert.ok(syncReads > 0);
 
   // Changing the route is seen through the folder's watch, which publishes a fresh snapshot.
   published.length = 0;
@@ -193,7 +216,7 @@ test("a services snapshot reuses the proxy route until the saved settings change
   assert.equal(cpaOf(controller.snapshot()).outboundProxy.profileId, null);
 });
 
-test("a services snapshot reads CPA's config once, and again only after CPA rewrites it", async (t) => {
+test("a services snapshot reads CPA's config off the main thread, again only after CPA rewrites it", async (t) => {
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-config-cache-"));
   const cpaState = path.join(root, "integrations", "state", "cpa");
   fs.mkdirSync(path.join(cpaState, "plugin-data"), { recursive: true });
@@ -208,16 +231,28 @@ test("a services snapshot reads CPA's config once, and again only after CPA rewr
     publish: (snapshot) => published.push(snapshot),
   });
   const realRead = fs.readFileSync;
+  const realReadAsync = fs.promises.readFile;
   let reads = 0;
+  let syncReads = 0;
   fs.readFileSync = function (file, ...rest) {
-    if (path.basename(String(file)) === "config.yaml") reads += 1;
+    if (path.basename(String(file)) === "config.yaml") syncReads += 1;
     return realRead.call(this, file, ...rest);
   };
-  t.after(() => { fs.readFileSync = realRead; controller.dispose(); fs.rmSync(root, { recursive: true, force: true }); });
+  fs.promises.readFile = function (file, ...rest) {
+    if (path.basename(String(file)) === "config.yaml") reads += 1;
+    return realReadAsync.call(this, file, ...rest);
+  };
+  t.after(() => {
+    fs.readFileSync = realRead;
+    fs.promises.readFile = realReadAsync;
+    controller.dispose();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const settle = () => new Promise((resolve) => setTimeout(resolve, 300));
 
   controller.snapshot();
   assert.equal(reads, 1);
+  assert.equal(syncReads, 0);
   // The folder is watched from a worker. Once the watch is in place it reports that something may
   // have changed (a write before then would otherwise be missed), so the config is read once more.
   await settle();
@@ -240,7 +275,8 @@ test("a services snapshot reads CPA's config once, and again only after CPA rewr
   const deadline = Date.now() + 5_000;
   while (!published.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
   assert.ok(published.length > 0, "a rewritten config publishes a snapshot");
-  assert.equal(reads, watched + 1, "and is read again");
+  assert.ok(reads > watched, "and is read again");
+  assert.equal(syncReads, 0, "never on the main thread");
 });
 
 test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {

@@ -15,6 +15,7 @@ const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { browserPartitionForLauncherProfile, isBrowserAccountPartition } = require("./profile.cjs");
 const { browsableUrl, cleanUserAgent } = require("./gpt-browser.cjs");
+const { isCloudflareCheckPage } = require("./chatgpt-cloudflare-check.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
   refreshTurnLeasesAfterSuspension,
@@ -33,7 +34,8 @@ const {
 const TEMPORARY_CHAT_URL = "https://chatgpt.com/?temporary-chat=true";
 const SAVED_CHAT_URL = "https://chatgpt.com/";
 // The Browser tab's own page (startup, sign-in, sign-out, a new tab) is ChatGPT's plain home whatever
-// "Save chats in ChatGPT" says; only task turns and connector verification open Temporary Chat.
+// "Save chats in ChatGPT" says. Account and connector checks keep that home;
+// task turns choose their own chat kind.
 const HOME_URL = SAVED_CHAT_URL;
 function authenticationContextFor(host, session) {
   host.authenticationContexts ??= new WeakMap();
@@ -208,20 +210,6 @@ function authenticatedChatGptSession(payload, now = Date.now()) {
 // person can pass it, and the wait for ChatGPT then ran out as a "login" that was never the problem
 // (seen live 2026-11-03: the bridge upgrade failed this way on two launches in a row).
 const CHATGPT_SECURITY_CHECK_MESSAGE = "ChatGPT is showing a Cloudflare security check. Open the Browser tab, complete the check, then run Setup → Install models.";
-
-/**
- * Runs inside the page (injected with toString, like authenticatedChatGptSession): true while the
- * document is Cloudflare's check page in place of ChatGPT. `doc` and `win` are the page's document
- * and window, passed in so the check can be tested without a browser.
- */
-function isCloudflareCheckPage(doc, win) {
-  // The check page sets _cf_chl_opt and loads Cloudflare's challenge "orchestrate" script, in every
-  // language; its title is translated, and the old #challenge-form markup is gone (checked live).
-  // ChatGPT's own pages load Cloudflare's bot-detection script from /cdn-cgi/challenge-platform/
-  // too (scripts/jsd/), so that folder alone does not mean a check is showing.
-  if (win?._cf_chl_opt && typeof win._cf_chl_opt === "object") return true;
-  return [...(doc?.scripts ?? [])].some((script) => /\/cdn-cgi\/challenge-platform\/.*\/orchestrate\/chl_page\//.test(script.src || ""));
-}
 
 const WINDOW_VISIBILITY_EVENTS = ["show", "hide", "minimize", "restore"];
 // How long a page showing Cloudflare's check renders off-screen, and how many times in a row, before
@@ -2006,18 +1994,16 @@ class BrowserHost {
     });
   }
 
-  async refreshChatGptHomeDocument(useSavedChats = false) {
-    // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
-    // existing new-chat document of the requested kind so the helper observes one authoritative
-    // SPA bootstrap (and, for verification, the same kind of chat the task turns use).
-    const targetUrl = useSavedChats ? SAVED_CHAT_URL : TEMPORARY_CHAT_URL;
+  async refreshChatGptHomeDocument() {
+    // Maintenance uses the person's home page, not the task-turn privacy setting.
+    const targetUrl = HOME_URL;
     // Cloudflare's check page reloads itself until it passes; a reload from here only adds a request
     // and a flash, then times out on the same check. Name the check at once instead.
     if (await this.cloudflareCheckShown()) {
       this.logger.warn("browser.cloudflare_check_page", { url: urlWithoutQuery(this.view.webContents.getURL()) });
       throw new Error(CHATGPT_SECURITY_CHECK_MESSAGE);
     }
-    if (isNewChatUrl(this.view.webContents.getURL(), useSavedChats)) {
+    if (isNewChatUrl(this.view.webContents.getURL(), true)) {
       await this.hardRefreshHome();
     } else {
       await this.view.webContents.loadURL(targetUrl);
@@ -3839,7 +3825,7 @@ class BrowserHost {
     }
     this.authNavigationError = null;
     if (this.externalLogin) this.hide();
-    this.setState({ authenticated: false, status: "loading", message: "Finish signing in in Chrome, close that dedicated window, then choose Continue", loading: true });
+    this.setState({ authenticated: false, status: "loading", message: "Sign in to ChatGPT in Chrome. Coding Tools will independently verify the session.", loading: true });
     this.logger.info("browser.passkey_login_started");
     const transfer = await this.loginWithPasskey(partition, { proxyRules: routes[0] });
     if (this.destroyed || this.partition !== partition || this.view?.webContents !== contents || contents?.isDestroyed()) {
@@ -3891,14 +3877,20 @@ class BrowserHost {
     let sessionDiscarded = false;
     let state;
     try {
+      transfer.assertCurrent?.();
       state = validatePasskeyLoginState(transfer.storageState);
       const contents = this.view?.webContents;
       if (!contents || contents.isDestroyed()) throw new Error("Owned ChatGPT browser session is unavailable");
       sessionMutated = true;
       await this.clearOwnedSessionForPasskey();
-      for (const cookie of state.cookies) await contents.session.cookies.set(cookie);
+      transfer.assertCurrent?.();
+      for (const cookie of state.cookies) {
+        transfer.assertCurrent?.();
+        await contents.session.cookies.set(cookie);
+      }
       contents.session.flushStorageData();
       await contents.session.cookies.flushStore();
+      transfer.assertCurrent?.();
       await contents.loadURL(HOME_URL);
       if (state.localStorage.length > 0) {
         const entries = javaScriptLiteral(state.localStorage);
@@ -3910,8 +3902,11 @@ class BrowserHost {
         })()`, true);
         await contents.loadURL(HOME_URL);
       }
-      result = await this.waitForAuthenticated(60_000);
+      transfer.assertCurrent?.();
+      result = await this.waitForAuthenticated(60_000, () => { transfer.assertCurrent?.(); return false; });
+      transfer.assertCurrent?.();
       await this.runSessionInspection(false);
+      transfer.assertCurrent?.();
       this.activateHomeSurface();
       this.show();
       this.logger.info("browser.passkey_login_imported");
@@ -3942,8 +3937,14 @@ class BrowserHost {
         error = combinedError(error, "retrying partial passkey session cleanup failed", cleanupError);
       }
     }
-    if (error) throw error;
-    if (!result?.authenticated) throw new Error("Passkey sign-in completed without an authenticated Launcher session");
+    if (error) {
+      transfer.complete?.(false);
+      // Never expose imported cookie values through a low-level cookie/import exception.
+      if (transfer.source === "approved-chrome-profile-connector") throw new Error("Chrome profile session verification failed. Check the selected account and its network route in Coding Tools, then reconnect your Chrome profile.");
+      throw error;
+    }
+    if (!result?.authenticated) { transfer.complete?.(false); throw new Error("Passkey sign-in completed without an authenticated Launcher session"); }
+    transfer.complete?.(true);
     return this.snapshot();
   }
 
@@ -4280,14 +4281,13 @@ class BrowserHost {
     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
     const connectorName = validateConnectorName(appName);
     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
-    const useSavedChats = useSavedChatsFor(this);
-    await this.refreshChatGptHomeDocument(useSavedChats);
+    await this.refreshChatGptHomeDocument();
     try {
       const result = await this.verifyConnectorWithBrowserHelper({
         helper: this.helper,
         descriptorPath: this.descriptorPath,
         appName: connectorName,
-        useSavedChats,
+        useSavedChats: true,
         logger: this.logger,
       });
       this.logger.info("connector.verified", { appName: connectorName });

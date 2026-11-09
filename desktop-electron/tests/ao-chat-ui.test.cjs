@@ -8,16 +8,18 @@ const React = require("react");
 const { renderToStaticMarkup } = require("react-dom/server");
 const { randomUUID } = require("node:crypto");
 
-function load(file, imports = {}) {
+function load(file, imports = {}, globals = {}) {
   const exports = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, { exports, structuredClone, crypto: { randomUUID },
-    require: name => name === "react" || name === "react/jsx-runtime" ? require(name) : imports[name] ?? {} });
+    require: name => name === "react" || name === "react/jsx-runtime" ? require(name) : imports[name] ?? {}, ...globals });
   return exports;
 }
 const chat = load("ao-chat.ts");
-const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat, "./model-scores": load("model-scores.ts") });
+// The model picker draws logos; markup tests stand them in.
+const roles = load("AgentOrchestratorRoleEditor.tsx", { "./ao-chat": chat, "./model-scores": load("model-scores.ts"),
+  "./HarnessLogo": { GroupLogo: () => null, HarnessLogo: () => null, ModelLogo: () => null } });
 const markdown = load("ChatMarkdown.tsx", { "./chat-markdown": load("chat-markdown.ts") });
 
 test("visualize references are inert Markdown unless a completed answer supplies its Preview action", () => {
@@ -42,10 +44,12 @@ const clawd = load("Clawd.tsx");
 const petHome = load("chat-pet-home.ts");
 const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts"), "./chat-pet-home": petHome, "./page-visibility": visibility });
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
-const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./chat-transcript": load("chat-transcript.ts", { "./ao-chat": chat }), "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
+// Settings › Chat's mission switch, as this computer keeps it: on unless `saved` is "off".
+const viewSettings = (saved = null) => load("chat-view-settings.ts", {}, { localStorage: { getItem: () => saved, setItem() {} } });
+const uiImports = { "./ao-chat": chat, "./chat-transcript": load("chat-transcript.ts", { "./ao-chat": chat }), "./chat-view-settings": viewSettings(), "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./image-markup": load("image-markup.ts"),
-  "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"),
+  "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"), "./ChatScrollToBottom": load("ChatScrollToBottom.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client, "./page-visibility": visibility }),
   "./codex-prompts": load("codex-prompts.ts"),
   // The branch bar reads git asynchronously and renders nothing until then, as here; composer
@@ -53,7 +57,7 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./chat-transc
   "./ChatBranchBar": { ChatBranchBar: () => null },
   "./HarnessLogo": { ModelLogo: () => null },
   "./AgentOrchestratorRoleEditor": roles,
-  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") }),
+  "./ChatReplyHead": load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx"), "./ChatTurnStats": { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } }),
   "./ChatReplyPlan": load("ChatReplyPlan.tsx"),
   "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }),
   // Annotations are the real module: with no transcript mounted (server render) the selection bar draws nothing.
@@ -63,7 +67,8 @@ const ui = load("AgentOrchestratorChat.tsx", { "./ao-chat": chat, "./chat-transc
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
   "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
-  "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu, "./chat-list-settings": load("chat-list-settings.ts") }) });
+  "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu, "./chat-list-settings": load("chat-list-settings.ts") }) };
+const ui = load("AgentOrchestratorChat.tsx", uiImports);
 
 test("visualize controls appear only in successful native WebGPT final answers", () => {
   const answer = 'visualize{"path":"G:/task/counter.html","title":"Counter"}';
@@ -187,6 +192,15 @@ test("a DeepSeek turn renders as DeepSeek Desktop's Standard view: a live group 
   const earlier = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("older"), live: false, expanded: false, useWork: doneWork }));
   assert.match(earlier, /dsh-turn-process-label">Completed<\/span>/, "an earlier turn says Completed");
   assert.doesNotMatch(earlier, /dsh-group/, "and stays folded until opened");
+  // On a mission, the running group and its Think row start open; an ended round of a goal being
+  // pursued opens its work under "Completed" the same way.
+  const onMission = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: false, useWork, mission: true }));
+  assert.match(onMission, /class="dsh-group" data-open="true"/);
+  assert.match(onMission, /dsh-title">Think<\/span><\/span><\/div><div class="dsh-think-body">/, "the thought is open, its words below");
+  assert.match(onMission, /dsh-group-label dsh-shimmer">Reading files · README\.md</, "the live heading still reads what it does now");
+  const round = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn: settled("round"), live: false, expanded: false, useWork: doneWork, mission: true }));
+  assert.match(round, /dsh-turn-process" data-open="true"/);
+  assert.match(round, /class="dsh-group" data-open="true"/);
 });
 
 test("the default transcript shows real task progress for both ordinary and DeepSeek models", () => {
@@ -233,11 +247,39 @@ test("ordinary model activity uses specific DeepSeek headings rather than unexpl
   }));
   assert.match(html, /cx-group-verb cx-shimmer">Reading files · README\.md</);
   assert.doesNotMatch(html, /cx-group-verb[^>]*>Working</);
-  assert.doesNotMatch(html, /cx-group-now|cx-tool-io/, "the active tool stays compact until its group is opened");
+  assert.doesNotMatch(html, /cx-group-now|cx-tool-io/, "the active tool's card is drawn only once its row is opened");
+});
+
+test("a chat on a mission draws its thoughts and steps expanded, for every model's transcript; Settings › Chat turns it off", () => {
+  const props = (model) => ({ runs: [{ id: `mission:${model}`, project_id: "task", execution_mode: "single", nodes: [
+    { id: "lead", role: "planner", state: "running", route: { harness_id: "ao:codex", model } }] }],
+  tasks: [{ id: "task", title: "Task", description: "Check the routes" }], selectedTaskId: "task", busy: false, approvals: [],
+  activity: { [`mission:${model}:lead`]: { started_at_ms: Date.now(), timeline: [
+    { id: "r1", kind: "reasoning", status: "completed", text: "**Reading the router**\n\nThe routes live in app.ts." },
+    { id: "c1", kind: "command", status: "running", text: "npm test", description: "Run the tests" }] } },
+  loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} });
+  const render = (chat, model) => renderToStaticMarkup(React.createElement(chat.AgentOrchestratorChat, props(model)));
+  const html = render(ui, "cpa/gpt-6.1-sol");
+  assert.match(html, /class="cx-activity-head" aria-expanded="true"/, "the step group lists its steps with no click");
+  assert.match(html, /<details class="cx-reasoning" data-family="think" open="">/, "the thought is open");
+  assert.match(html, /The routes live in app\.ts\./);
+  assert.equal(html.split("Reading the router").length - 1, 1, "its title is said once, on its row");
+  assert.match(html, /<details class="cx-tool tone-running" data-family="command"><summary>/, "the command's row is listed, its card folded");
+  assert.doesNotMatch(html, /cx-step-card|cx-tool-io/, "no step's card is drawn before its row is opened");
+  // A DeepSeek turn's groups and Think rows open the same way.
+  const deepseek = render(ui, "cpa/deepseek-v4.1-flash");
+  assert.match(deepseek, /class="dsh-group" data-open="true"/);
+  assert.match(deepseek, /dsh-think-body/, "its thought is open");
+  // Off: as before, one line per run of steps.
+  const off = load("AgentOrchestratorChat.tsx", { ...uiImports, "./chat-view-settings": viewSettings("off") });
+  const folded = render(off, "cpa/gpt-6.1-sol");
+  assert.match(folded, /class="cx-activity-head" aria-expanded="false"/);
+  assert.doesNotMatch(folded, /cx-reasoning/);
+  assert.doesNotMatch(render(off, "cpa/deepseek-v4.1-flash"), /data-open="true"|dsh-think-body/);
 });
 
 test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
-  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx") });
+  const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx"), "./ChatTurnStats": { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } });
   const edit = (path, additions, deletions) => ({ id: `${path}${additions}`, kind: "edit", status: "completed", text: "", files: [{ path, additions, deletions }] });
   // Seven one-line edits of one file read as that file once, with their lines summed.
   const changes = head.turnChanges([edit("src/aistudio.js", 1, 1), { id: "c", kind: "command", status: "completed", text: "npm test" },
@@ -246,7 +288,7 @@ test("a reply's head says who answered, how it stands, why it failed, a team's c
     JSON.stringify([["src/aistudio.js", 5, 3], ["tests/aistudio.test.cjs", 2, 0]]));
   const single = renderToStaticMarkup(React.createElement(head.ReplyHead, { team: false, name: "GPT-6.1 Sol", tone: "failed",
     startedAtMs: 1_000, endedAtMs: 155_000, members: [], changes }));
-  assert.match(single, /^<footer class="cx-reply-head">/, "the summary closes the reply, under the answer");
+  assert.match(single, /^<footer class="cx-reply-head is-quiet">/, "a single chat's summary is one quiet line under the answer");
   assert.match(single, /cx-reply-who-name">GPT-6\.1 Sol</);
   assert.match(single, /cx-reply-status is-failed">Failed</);
   assert.match(single, /cx-reply-time[^>]*>2m 34s</, "how long it ran");
@@ -398,7 +440,9 @@ test("the first prompt and its attachments stay inside the agent reply, exactly 
         assert.match(reply, /cx-sent-attachments/, "its attachment stays with it");
         assert.equal(html.split(prompt).length - 1, 1, "no duplicate outside bubble");
         assert.doesNotMatch(reply, /Attached image:/, "the attachment is rendered, not printed as a raw path");
-        assert.ok(reply.indexOf(prompt) < reply.indexOf("cx-reply-head"), "the request precedes the agent summary");
+        // A running single chat has no summary yet: its running line says who works and for how long.
+        if (reply.includes("cx-reply-head")) assert.ok(reply.indexOf(prompt) < reply.indexOf("cx-reply-head"), "the request precedes the agent summary");
+        else assert.ok(mode === "single" && state !== "finished", `${model} ${mode} ${state}: only a running single chat leaves the summary out`);
         assert.match(reply, /Copy message/, "message actions stay inside the card");
       }
     }
@@ -636,6 +680,8 @@ test("a finished turn's work is skipped on re-render unless it changed; a live t
   assert.equal(ui.sameWork(props(), props({ turn: turn({ steps: [step(), step({ key: "r:b" })] }) })), false, "a step was added");
   assert.equal(ui.sameWork(props(), props({ turn: turn({ steps: [step({ verdict: "APPROVED" })] }) })), false, "a verdict arrived");
   assert.equal(ui.sameWork(props(), props({ expanded: true })), false, "details shown");
+  assert.equal(ui.sameWork(props(), props({ mission: true })), false, "the turn went on a mission (a goal's round)");
+  assert.equal(ui.sameWork(props({ mission: false }), props()), true, "no mission either way");
   assert.equal(ui.sameWork(props(), props({ loadWork: async () => [] })), false);
   const live = props({ turn: turn({ status: "running", steps: [step({ state: "running", working: { detail: "running 3s", stalled: false } })] }) });
   assert.equal(ui.sameWork(live, { ...live, turn: { ...live.turn } }), false, "a live turn re-renders on every update");
