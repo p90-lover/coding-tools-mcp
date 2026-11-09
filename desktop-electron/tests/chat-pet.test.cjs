@@ -205,3 +205,72 @@ test("the pet's flight tells the Preview pane where it is, once per move, and wh
   assert.equal(stage.petOverlaps({ left: 150, top: 120, right: 199, bottom: 160 }, pane, 48), true, "near enough to swap in the still");
   assert.equal(stage.petOverlaps({ left: 300, top: 200, right: 372, bottom: 248 }, pane), true);
 });
+
+test("Clawd's house goes in the yard under its own page's chat list, not a hidden page's", () => {
+  // Seen 2026-11-09 on page 2 of a split chat: page 1's surface stays mounted while hidden, chat list
+  // and yard included, and the whole-document lookup found that yard (0 px wide), so the house stood
+  // on a pane's chat box over its last messages instead of under the list, above Settings.
+  const yardOf = (name) => ({ name });
+  const page = (name) => ({ querySelector: (selector) => selector === stage.PET_YARD ? yardOf(name) : null });
+  const doc = page("first page in the document");
+  const inPage2 = { closest: (selector) => selector === ".cx-chat-page" ? page("page 2") : null, ownerDocument: doc };
+  assert.equal(stage.findPetYard(inPage2).name, "page 2");
+  const noPages = { closest: () => null, ownerDocument: doc };
+  assert.equal(stage.findPetYard(noPages).name, "first page in the document", "without chat pages: the document's");
+  assert.equal(stage.findPetYard(null), null);
+  const petSource = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  assert.match(petSource, /findPetYard<HTMLElement>\(box\.current\)/);
+  assert.doesNotMatch(petSource, /document\.querySelector<HTMLElement>\(YARD\)/);
+  // With the chat list hidden there is no house in split view: Clawd naps on its box.
+  assert.match(petSource, /: loop && !split \? rooms\(housePlace\(loop\), null\) : null;/);
+  assert.match(petSource, /if \(split && !yardNow\.current\) \{ if \(nap\) napHere\(\); return; \}/);
+});
+
+test("a leap arcs clear of both ends, even between two boxes at one height", () => {
+  // Between split panes (and from the box to the house under the list) both ends are about level:
+  // the old curve rose only by the drop between them, so the leap was a flat slide.
+  const level = motion.petLeap({ x: 300, y: 700 }, { x: 1300, y: 700 });
+  assert(level.arc >= 120, `a long level leap arcs high (${level.arc} px)`);
+  assert(level.ms >= 800 && level.ms <= 950, `and takes under a second (${level.ms} ms)`);
+  const short = motion.petLeap({ x: 300, y: 700 }, { x: 380, y: 700 });
+  assert(short.arc >= 36 && short.ms >= 420, "a short hop still hops");
+  const up = motion.petLeap({ x: 200, y: 900 }, { x: 260, y: 600 });
+  assert(up.arc - 300 / 2 >= 28, "up onto a higher spot it rises past it");
+  assert.deepEqual({ ...motion.petLeap({ x: 0, y: 0 }, { x: Number.NaN, y: 0 }) }, { ms: 0, arc: 0 });
+});
+
+test("Clawd's porch is in front of its house, as far into the yard as it fits whole", () => {
+  // The yard under a 288 px chat list is 272 px wide; the house is 160 px and Clawd 72 px.
+  const porch = motion.petPorchX(272, 160, 72, 104);
+  assert.equal(porch, 178);
+  assert(porch + 72 / 2 <= 160 + (272 - 160) / 2, "all of Clawd stays inside the yard (the list clips it)");
+  assert.equal(motion.petPorchX(160, 160, 72, 104), 122, "no room beside the house: in front of its right side");
+  assert.equal(motion.petPorchX(Number.NaN, 160, 72, 104), 122);
+  assert.equal(motion.petPorchX(100, 160, 72, 130), 130, "never inside the entry");
+});
+
+test("every way out of the house walks out the way it came; only a drag lifts Clawd straight out", () => {
+  // The user (2026-11-09): "when its in its house, then it try to goes out, it just straight teleport
+  // to the platform instead of walking to platform". A turn starting, or another pane calling, popped
+  // it from wherever it was in the house (in bed, upstairs) onto the box at full size in one frame.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  const calls = [...source.matchAll(/leaveHome\(false\)/g)];
+  assert.equal(calls.length, 1, "leaveHome(false) has one caller");
+  const dragMove = source.slice(source.indexOf("const dragMove ="), source.indexOf("const dragDrop ="));
+  assert.match(dragMove, /leaveHome\(false\)/, "and it is the drag");
+  const goOut = source.slice(source.indexOf("const goOut ="), source.indexOf("const leaveHome ="));
+  assert.match(goOut, /homeRun\(exitBeats\(homePlace\(\)\)/, "goOut climbs out of bed and down the ladder first");
+  const moodEffect = source.slice(source.indexOf("// React to the agent"), source.indexOf("// Split view: another pane's chat calls it over"));
+  assert.match(moodEffect, /if \(homeNow\.current \|\| doorNow\.current \|\| doorWay\.current\) goOut\(\);/);
+  const calledOver = source.slice(source.indexOf("// Split view: another pane's chat calls it over"), source.indexOf("const full ="));
+  assert.match(calledOver, /goOut\(event\.pane\)/);
+  const wake = source.slice(source.indexOf("const wake = () =>"), source.indexOf("/** Feet on the box at"));
+  assert.match(wake, /if \(homeNow\.current\) goOut\(\);/);
+  // Out of the house under the list it walks onto the porch (growing to full size) before it leaps;
+  // in, it lands on the porch and walks in (shrinking) before it is inside.
+  const leaveHome = source.slice(source.indexOf("const leaveHome ="), source.indexOf("const leapOut ="));
+  assert.match(leaveHome, /setDoor\(true\);[\s\S]*doorTimer\.current = window\.setTimeout\(leapOut, still \? 0 : DOOR_MS\);/);
+  assert.match(source, /const onPorch = yard && door && !home/);
+  // From the doorstep beside the box it steps up onto the box's side instead of being put there.
+  assert.match(leaveHome, /setGlide\(true\);[\s\S]*window\.setTimeout\(walkOn, STEP_MS\)/);
+});
