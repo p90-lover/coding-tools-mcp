@@ -26,11 +26,18 @@ async function workspaceUi(action, input) {
   const one = values => values.length === 1 ? values[0] : null;
   if (location.origin !== "https://chatgpt.com" || !h) throw new Error("ChatGPT workspace controls are unavailable.");
   if (action === "creation-access") {
-    const personal = await h.waitFor(() => one([...document.querySelectorAll('main [role="tab"]')]
-      .filter(tab => h.visible(tab) && h.textMatches(tab, ['Personal'], true))), 5000);
+    const personal = await h.waitFor(() => {
+      const tabs = [...document.querySelectorAll('main [role="tab"]')].filter(tab => h.visible(tab) && h.textMatches(tab, ['Personal'], true));
+      return tabs.length === 1 ? tabs[0] : tabs.length === 0 && h.personalListEmpty() ? "empty" : null;
+    }, 5000);
     if (!personal) return { allowed: null };
-    if (personal.getAttribute('aria-selected') !== 'true') h.pointerActivate(personal);
-    if (!await h.waitFor(() => h.personalPluginsLoaded(), 10_000)) return { allowed: null };
+    // An account with no personal plugins has no Personal tab; its Add action is the one to read.
+    if (personal === "empty") {
+      if (!await h.personalListSettledEmpty()) return { allowed: null };
+    } else {
+      if (personal.getAttribute('aria-selected') !== 'true') h.pointerActivate(personal);
+      if (!await h.waitFor(() => h.personalPluginsLoaded(), 10_000)) return { allowed: null };
+    }
     const main = document.querySelector('main');
     if (h.findManagedAppCard(input.name)) return { allowed: null };
     const add = one(controls(main, ['Add']));

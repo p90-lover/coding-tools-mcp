@@ -983,3 +983,48 @@ test("missing ChatGPT form fields do not request a harness configuration change"
     assert.equal(report.error.code, code);
   }
 });
+
+test("every fixed text the setup throws reaches the card in its own words or a named category", () => {
+  // On 2026-11-09 thirty of these fell through to "Connector creation failed. Check Configuration",
+  // so a card could not say that a list never loaded or a page showed two Add buttons.
+  const catchAll = "Connector creation failed. Check Configuration in Coding Tools.";
+  // Texts that deliberately map to a category's own sentence.
+  const categorized = new Set([
+    "MCP connector setup is busy",
+    "Complete Cloudflare verification in Coding Tools Browser, then try again.",
+    "Complete ChatGPT verification in Coding Tools Browser before creating its connector.",
+    "ChatGPT verification is required in the intended account.",
+    "ChatGPT connector setup took too long. Retry from Configuration.",
+    "MCP tunnel settings timed out",
+    "ChatGPT workspace inspection timed out. Retry this account's action.",
+    "Connect the saved automatic MCP harness before creating its ChatGPT connector.",
+    "The active MCP configuration has no tunnel ID.",
+    "The MCP server denied access. Check your authentication settings and, if using a tunnel, its workspace access.",
+  ]);
+  // A caller's programming error, not a page step: the catch-all is enough.
+  const internal = new Set(["Subscription inspection cannot perform MCP actions.", "Unsupported workspace action."]);
+  const texts = new Set();
+  for (const file of ["mcp-connector-setup.cjs", "chatgpt-workspace.cjs"]) {
+    const source = fs.readFileSync(path.join(__dirname, "../electron", file), "utf8");
+    for (const match of source.matchAll(/new Error\((['"])((?:(?!\1).)+)\1\)/g)) texts.add(match[2]);
+  }
+  assert(texts.size > 40, "the scan still finds the setup's texts");
+  for (const text of texts) {
+    const failure = mcpConnectorCommandFailure(new Error(text));
+    if (internal.has(text)) continue;
+    if (categorized.has(text)) assert.notEqual(failure.message, catchAll, text);
+    else assert.equal(failure.message, text, `${text} reaches the card as written`);
+  }
+  // ChatGPT's own words on its form stay out; where it stopped does not.
+  const form = mcpConnectorCommandFailure(new Error("ChatGPT connector creation failed: PRIVATE_PAGE_TEXT"));
+  assert.equal(form.code, "creation_failed");
+  assert.doesNotMatch(form.message, /PRIVATE_PAGE_TEXT/);
+  assert.notEqual(form.message, catchAll);
+  // The click's own preflight texts are not mistaken for a ChatGPT verification or the catch-all.
+  for (const text of ["Sign in to this account in the Browser tab before connecting MCP.",
+    "Wait for the current runtime setup to finish before connecting MCP.",
+    "Automatic MCP setup is waiting for the focused, idle app and current account."]) {
+    assert.equal(mcpConnectorCommandFailure(new Error(text)).message, text);
+  }
+  assert.equal(mcpConnectorCommandFailure(new Error("PRIVATE_REMOTE_DOM_ALERT")).message, catchAll, "unknown text never passes");
+});
