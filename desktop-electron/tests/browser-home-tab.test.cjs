@@ -69,6 +69,45 @@ test("a home load taken over by a newer navigation still opens the account; a re
   await assert.rejects(host.openHomePage(), /ERR_PROXY_CONNECTION_FAILED/);
 });
 
+test("after a switch, ChatGPT opens without holding the switch, and operations wait for the shown page", async () => {
+  const { host, calls } = fixture();
+  let finish;
+  host.view.webContents.loadURL = (value) => new Promise((resolve) => { finish = () => { calls.push(value); resolve(); }; });
+  host.show = () => calls.push("show");
+  const done = host.presentHome({ show: true, inspectSession: false });
+  assert.deepEqual(calls, ["show"], "the Browser tab shows the account before ChatGPT has loaded");
+  let opened = false;
+  const waited = host.homeOpened().then(() => { opened = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(opened, false, "an operation waits for the page the switch opened");
+  finish();
+  await done;
+  await waited;
+  assert.deepEqual(calls, ["show", "https://chatgpt.com/"]);
+  assert.equal(host.homeOpening, null);
+
+  // A page parked by a later switch, or one that never loads, holds nothing for long.
+  host.view.webContents.loadURL = () => new Promise(() => {});
+  void host.presentHome({ inspectSession: false });
+  const started = Date.now();
+  await host.homeOpened(20);
+  assert.ok(Date.now() - started < 1_000, "the wait is bounded");
+  host.view = { webContents: host.view.webContents };
+  await host.homeOpened(60_000);
+});
+
+test("a page that fails to open after a switch is logged, not thrown at the switch", async () => {
+  const { host } = fixture();
+  const warnings = [];
+  host.logger = { info() {}, error() {}, warn: (event, fields) => warnings.push([event, fields.message]) };
+  host.view.webContents.loadURL = async () => { throw new Error("ERR_PROXY_CONNECTION_FAILED (-130) loading 'https://chatgpt.com/'"); };
+  await host.presentHome();
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0][0], "browser.home_open_failed");
+  assert.match(warnings[0][1], /ERR_PROXY_CONNECTION_FAILED \(-130\)/);
+  assert.equal(host.homeOpening, null);
+});
+
 test("new user tabs default to normal ChatGPT without changing the task privacy setting", () => {
   const { host } = fixture();
   host.show = () => {};
