@@ -94,15 +94,15 @@ test("each Auth Files card shows its own current windows, matched by auth file n
   const [first, second, quiet] = p.cards.map((card) => card.children.find((child) => "codingToolsUsage" in child.dataset));
   assert.equal(p.cards[0].children.indexOf(first), 3, "the lines sit right under the card's size and date line");
   assert.deepEqual(first.innerLines, [
-    "Last 5 h12 requests (2 failed) · 1.3M tokens · ≈$0.842",
-    "Last 7 days340 requests · 45M tokens · $21.30",
-    "Current 5 h12 requests (2 failed) · 1.3M tokens · ≈$0.842",
-    "Current week340 requests · 45M tokens · $21.30",
+    "5-hour12 requests · 1.3M tokens · ≈$0.842",
+    "Weekly340 requests · 45M tokens · $21.30",
   ]);
-  assert.match(first.children[2].title, /in 1\.2M · out 50K/);
-  assert.match(first.children[2].title, /Since last limit reset/);
-  assert.deepEqual(second.innerLines, ["Last 5 hNo requests", "Last 7 days1 request · 900 tokens · ≈$0.004+", "Current hoursWaiting for limit reset", "Current week1 request · 900 tokens · ≈$0.004+"]);
-  assert.deepEqual(quiet.innerLines, ["Last 5 hNo requests", "Last 7 daysNo requests"], "non-Codex cards retain rolling history");
+  assert.match(first.children[0].title, /Input 1\.2M · output 50K/);
+  assert.match(first.children[0].title, /Since last limit reset/);
+  assert.match(first.children[0].title, /2 failed requests/);
+  assert.doesNotMatch(first.textContent, /Last|Current|failed|reset/);
+  assert.deepEqual(second.innerLines, ["5-hourPending reset", "Weekly1 request · 900 tokens · ≈$0.004+"]);
+  assert.deepEqual(quiet.innerLines, ["Last 5 h0 requests", "Last 7 days0 requests"], "non-Codex cards retain rolling history");
   assert.ok(p.storage.has("coding-tools-card-usage-v2"), "only reset-aligned answers are kept for the next page load");
 });
 
@@ -123,8 +123,8 @@ test("an active window with unknown price displays Null, and a failed history re
   p.run(); await settle();
   assert.match(p.cards[0].textContent, /30 tokens · Null/);
   assert.doesNotMatch(p.cards[0].textContent, /cost unknown|cost unavailable/);
-  assert.match(p.cards[1].textContent, /Usage unavailable/);
-  assert.match(p.cards[1].children.find((child) => 'codingToolsUsage' in child.dataset).innerLines[2], /Usage unavailable/);
+  assert.match(p.cards[1].textContent, /Unavailable/);
+  assert.match(p.cards[1].children.find((child) => 'codingToolsUsage' in child.dataset).innerLines[0], /Unavailable/);
 });
 
 test("cached totals expire at each reset even before the next scheduled refresh and after reload", async () => {
@@ -134,11 +134,12 @@ test("cached totals expire at each reset even before the next scheduled refresh 
   assert.match(p.cards[0].textContent, /7 requests/);
   p.clock(NOW + 1000); p.tick();
   const box = p.cards[0].children.find((child) => "codingToolsUsage" in child.dataset);
-  assert.match(box.innerLines[2], /Waiting for limit reset/);
-  assert.match(box.innerLines[3], /7 requests/, "weekly total does not reset with the short-hour total");
+  assert.equal(box.children.length, 2);
+  assert.match(box.innerLines[0], /Pending reset/);
+  assert.match(box.innerLines[1], /7 requests/, "weekly total does not reset with the short-hour total");
   const reloaded = page(["codex-a"], () => ({ available: false }), { storage: p.storage });
   reloaded.clock(NOW + 1000); reloaded.run();
-  assert.match(reloaded.cards[0].textContent, /Waiting for limit reset/);
+  assert.match(reloaded.cards[0].textContent, /Pending reset/);
 });
 
 test("the old rolling cache is ignored, never relabelled as since-reset usage", async () => {
@@ -146,4 +147,13 @@ test("the old rolling cache is ignored, never relabelled as since-reset usage", 
   const p = page(["a"], () => ({ available: false }), { storage });
   p.run(); await settle();
   assert.doesNotMatch(p.cards[0].textContent, /999|Last 5|Current/);
+});
+
+test("provider metadata selects the two concise rows even for a custom Codex filename", async () => {
+  const p = page(["custom-account"], (range) => ({ available: true, range,
+    accounts: [row("custom-account", { provider: "codex", requests: 3 })] }));
+  p.run(); await settle();
+  const box = p.cards[0].children.find((child) => 'codingToolsUsage' in child.dataset);
+  assert.equal(box.children.length, 2);
+  assert.deepEqual(box.innerLines, ["5-hour3 requests · 0 tokens · ≈$0.000", "Weekly3 requests · 0 tokens · ≈$0.000"]);
 });

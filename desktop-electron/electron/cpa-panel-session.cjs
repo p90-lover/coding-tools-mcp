@@ -772,7 +772,7 @@ function authFilesUsageScript(marker) {
     if (window.__codingToolsCardUsage) return 'running';
     window.__codingToolsCardUsage = true;
     const SAVED = 'coding-tools-card-usage-v2';
-    const RANGES = [['5h', 'Last 5 h'], ['7d', 'Last 7 days'], ['session', 'Current hours'], ['week', 'Current week']];
+    const RANGES = [['5h', 'Last 5 h'], ['7d', 'Last 7 days'], ['session', '5-hour'], ['week', 'Weekly']];
     const REFRESH_MS = 2 * 60e3;
     const MONO = 'ui-monospace,SF Mono,Cascadia Mono,JetBrains Mono,Menlo,Consolas,monospace';
     const read = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } };
@@ -842,21 +842,21 @@ function authFilesUsageScript(marker) {
       && row.window.from <= Date.now() && row.window.to > Date.now();
     function line(range, label, row) {
       const div = document.createElement('div');
-      div.style.cssText = 'display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px;align-items:baseline;overflow-wrap:anywhere';
+      div.style.cssText = 'display:grid;grid-template-columns:72px minmax(0,1fr);gap:6px;align-items:baseline;overflow-wrap:anywhere';
       const current = range === 'session' || range === 'week';
       const name = document.createElement('span');
-      name.style.cssText = 'color:var(--text-tertiary);min-width:76px';
-      name.textContent = range === 'session' && row?.window ? 'Current ' + ((row.window.to - row.window.from) / 36e5) + ' h' : label;
+      name.style.cssText = 'color:var(--text-tertiary);min-width:0;white-space:nowrap';
+      name.textContent = range === 'session' && row?.window ? ((row.window.to - row.window.from) / 36e5) + '-hour' : label;
       const value = document.createElement('span');
       value.style.cssText = 'color:var(--text-secondary,inherit)';
       const requests = row ? row.requests || 0 : 0;
-      const failed = row?.failed ? ' (' + row.failed + ' failed)' : '';
-      value.textContent = current && !active(row) ? 'Waiting for limit reset' : current && !row.usageAvailable ? 'Usage unavailable'
-        : requests ? requests + (requests === 1 ? ' request' : ' requests') + failed + ' · ' + compact(row.totalTokens) + ' tokens · ' + money(row) : 'No requests';
-      div.title = current && !active(row) ? 'Counting starts when CPA reports an active limit window; previous-window usage is not included.'
+      value.textContent = current && !active(row) ? 'Pending reset' : current && !row.usageAvailable ? 'Unavailable'
+        : requests ? requests + (requests === 1 ? ' request' : ' requests') + ' · ' + compact(row.totalTokens) + ' tokens · ' + money(row) : '0 requests';
+      div.title = current && !active(row) ? 'Totals start at a confirmed limit reset; previous-cycle usage is excluded.'
+        : current && !row.usageAvailable ? 'Usage history could not be read.'
         : (current ? 'Since last limit reset: ' + new Date(row.window.from).toLocaleString() + ' · resets ' + new Date(row.window.to).toLocaleString() + ' · ' : 'Rolling history · ')
-          + 'in ' + compact(row?.inputTokens) + ' · out ' + compact(row?.outputTokens) + ' · cached ' + compact(row?.cachedTokens)
-          + ' · reasoning ' + compact(row?.reasoningTokens) + (row?.failed ? ' · ' + row.failed + ' failed' : '')
+          + 'Input ' + compact(row?.inputTokens) + ' · output ' + compact(row?.outputTokens) + ' · cached ' + compact(row?.cachedTokens)
+          + ' · reasoning ' + compact(row?.reasoningTokens) + (row?.failed ? ' · ' + row.failed + ' failed requests' : '')
           + ' · API-price estimate, not subscription charges';
       div.append(name, value);
       return div;
@@ -867,7 +867,7 @@ function authFilesUsageScript(marker) {
         const card = nameNode.closest('article') || nameNode.parentElement;
         const file = nameNode.textContent.trim().replace(/[.]json$/i, '');
         const codex = /^codex-/.test(file) || ['session', 'week'].some((range) => byRange[range]?.some((row) => row.file === file && row.provider === 'codex'));
-        const ranges = codex ? RANGES : RANGES.slice(0, 2);
+        const ranges = codex ? RANGES.slice(2) : RANGES.slice(0, 2);
         const rows = ranges.map(([range]) => byRange[range]?.find((row) => row.file === file));
         const key = file + '|' + loadedAt + '|' + rows.map(active).join('|');
         let box = card.querySelector(':scope > [data-coding-tools-usage]');

@@ -17,7 +17,7 @@ cpa_usage accepts range session or week in addition to 5h/24h/7d/30d/all. Curren
 
 ## 文件结构
 - desktop-electron/electron/cpa-usage.cjs: current-window loading and cache gate.
-- desktop-electron/electron/cpa-panel-session.cjs: reset-aware Codex rows and versioned cache, retaining rolling history for every provider.
+- desktop-electron/electron/cpa-panel-session.cjs: two concise reset-aware Codex rows with detail in tooltips, retaining rolling rows for non-Codex providers.
 - desktop-electron/src/features/cpa-usage.ts: range and metadata types.
 - desktop-electron/src/features/cpa-provider-usage-bridge.ts: allowlisted ranges and safe projection.
 - desktop-electron/tests/cpa-reset-usage.test.cjs: window/query/cache boundaries.
