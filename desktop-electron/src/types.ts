@@ -728,6 +728,41 @@ export interface LogRecord {
   detail: Record<string, unknown>;
 }
 
+/** Recent samples of one timing (action-times.cjs): median and 95th percentile of the last 40. */
+export interface ActionTimeSeries {
+  count: number;
+  lastMs: number | null;
+  medianMs: number | null;
+  p95Ms: number | null;
+  maxMs: number | null;
+}
+
+export interface ActionTimes {
+  currentTab: string | null;
+  tabs: Array<{
+    tab: string;
+    /** Its first mount; later switches only show it again. */
+    firstMs: number | null;
+    render: ActionTimeSeries;
+    /** How long the app took to answer the requests made while this tab was shown. */
+    response: ActionTimeSeries;
+    slowest: { channel: string; ms: number } | null;
+    lastAt: string | null;
+  }>;
+  pages: Array<{
+    group: string;
+    account: string | null;
+    /** Host and path with ids collapsed, e.g. chatgpt.com/c/:id. */
+    page: string;
+    response: ActionTimeSeries;
+    render: ActionTimeSeries;
+    lastStatus: number | null;
+    failures: number;
+    lastError: string | null;
+    lastAt: string | null;
+  }>;
+}
+
 export interface DoctorCheck {
   id: string;
   status: "ok" | "warning" | "error";
@@ -1265,6 +1300,11 @@ export interface LauncherApi {
   onNovaChanged(listener: (state: NovaState) => void): () => void;
   logs(limit?: number): Promise<LogRecord[]>;
   exportLogs(): Promise<string | null>;
+  /** Activity > Action time: tab and page timings kept in memory by the main process. */
+  actionTimes(): Promise<ActionTimes>;
+  clearActionTimes(): Promise<ActionTimes>;
+  /** The tab now shown and how long it took to draw; `first` marks its first mount. */
+  reportTabRender(input: { tab: Surface; ms: number; first: boolean }): Promise<boolean>;
   checkForUpdates(): Promise<UpdateState>;
   setAutomaticUpdates(enabled: boolean): Promise<LauncherState>;
   /** Settings → Updates: reads them, or changes the given ones (main checks every value). */
