@@ -4,11 +4,13 @@
 // compact equivalents ("git status" -> "rtk git status"), so the model reads a fraction of their
 // output. Coding Tools uses the person's rtk, installing it with winget at startup when it is
 // missing (autoInstall), and never edits their global agent settings: an AO agent's commands
-// reach it two ways, each per session.
+// reach it these ways, each per session.
 // - Every command a chat agent runs through Coding Tools' terminal tool (any harness) is passed
 //   through `rtk rewrite` first (rewrite below).
 // - Claude Code's own Bash tool gets RTK's PreToolUse hook in its session settings: AO reads the
 //   hook command from CODING_TOOLS_RTK_CLAUDE_HOOK (daemonEnvironment below).
+// - Codex's own shell gets RTK's PreToolUse hook on its app-server command line, trusted for that
+//   process only: AO reads it from CODING_TOOLS_RTK_CODEX_HOOK.
 // Off in Settings, or with no rtk found, commands run exactly as written.
 
 const fs = require("node:fs");
@@ -18,6 +20,8 @@ const { runOffThread } = require("./off-thread-run.cjs");
 
 /** `rtk rewrite` landed in 0.23.0. */
 const MIN_VERSION = [0, 23, 0];
+/** The oldest rtk seen with `rtk hook codex`; an older one would fail every hook run. */
+const CODEX_HOOK_VERSION = [1, 0, 1];
 const FIND_TTL_MS = 60_000;
 const AUTO_INSTALL_RETRY_MS = 24 * 60 * 60 * 1000;
 const REWRITE_TIMEOUT_MS = 3_000;
@@ -197,6 +201,17 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     const tool = active();
     return tool ? `${quoted(tool.path)} hook claude` : "";
   };
+  /**
+   * RTK's Codex hook command, or "" when rtk is off, missing or too old for it. Codex runs a hook
+   * with the turn's own shell, PowerShell on Windows, where a quoted path followed by arguments is a
+   * syntax error (every run failed with exit 1). So rtk is named bare: binDir puts its folder first
+   * on the agents' PATH, which the command rtk returns ("rtk git status") needs as well. Without it
+   * the hook fails and Codex runs the command as written.
+   */
+  const codexHook = () => {
+    const tool = active();
+    return tool && atLeast(tool.version.split(".").map(Number), CODEX_HOOK_VERSION) ? "rtk hook codex" : "";
+  };
   /** The folder holding rtk, for the agents' PATH (a rewritten command calls `rtk`). */
   const binDir = () => {
     const tool = active();
@@ -207,7 +222,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
   /** What AO's daemon passes to every chat agent. An empty hook turns it off. */
   const daemonEnvironment = () => {
     const hook = claudeHook();
-    return { CODING_TOOLS_RTK_CLAUDE_HOOK: hook, ...(hook ? QUIET : {}) };
+    return { CODING_TOOLS_RTK_CLAUDE_HOOK: hook, CODING_TOOLS_RTK_CODEX_HOOK: codexHook(), ...(hook ? QUIET : {}) };
   };
 
   /** RTK's own savings report (`rtk gain`), as text and, when rtk can give it, JSON (resolves). */
@@ -332,7 +347,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     });
   }
 
-  return { locate, active, rewrite, unwrap, claudeHook, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
+  return { locate, active, rewrite, unwrap, claudeHook, codexHook, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
 }
 
 module.exports = { createRtk };
