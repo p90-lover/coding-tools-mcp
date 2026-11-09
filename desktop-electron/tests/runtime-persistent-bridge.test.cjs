@@ -195,3 +195,32 @@ test("a persistent launcher keeps the bridge up when the MCP tunnel is not ready
   assert.ok(events.every(([event]) => event !== "runtime.startup_failed"));
   supervisor.daemon = null;
 });
+
+test("timers read the ownership marker and the bridge's health off the main thread", async () => {
+  // Live 2026-11-09: the MCP check (every 15 s while the browser waits) read the marker with
+  // openSync/readFileSync, and every health check connected from the main thread, each holding
+  // every window 0.3-2.4 s on the busy hard disk.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "persistent-bridge-"));
+  const { supervisor } = supervisorFor(root);
+  assert.equal(await supervisor.readStateAsync(), null, "no marker yet");
+  writeOwnership(root, { ownerPid: process.pid, daemonPid: 4242 });
+  assert.deepEqual(await supervisor.readStateAsync(), supervisor.readState(), "the same marker readState reads");
+  assert.equal((await supervisor.readStateAsync()).daemonPid, 4242);
+  // A marker a power cut tore goes through readState's repair: set aside, read as missing.
+  const marker = path.join(root, "runtime", "launcher-supervisor.json");
+  fs.writeFileSync(marker, Buffer.alloc(64));
+  assert.equal(await supervisor.readStateAsync(), null);
+  assert.equal(fs.existsSync(marker), false, "the torn marker was cleared");
+
+  const http = require("node:http");
+  const health = { service: "codex-chatgpt-web", status: "ok", pid: 4242, mode: "full" };
+  const server = http.createServer((request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(request.url === "/healthz" ? JSON.stringify(health) : "{}");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    assert.deepEqual(await supervisor.proxyHealthPayload({ host: "127.0.0.1", port: server.address().port }), health);
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+  assert.equal(await supervisor.proxyHealthPayload({ host: "127.0.0.1", port: 1 }, 500), null, "nothing listening reads as no health");
+});

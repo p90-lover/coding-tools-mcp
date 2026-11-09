@@ -8,6 +8,9 @@ const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
 const { restartResume } = require("./chat-resume.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+// CPA requests (model lists, goal checks, reviews) go from a worker thread: a connect or write on
+// the main thread held every window 0.3-2.4 s at a time on a busy machine (2026-11-09).
+const { fetchOffThread } = require("./off-thread-run.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
 const { scheduleMessage, scheduleAction, createScheduleStore } = require("./chat-schedules.cjs");
 const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
@@ -350,22 +353,35 @@ const questionTimeoutSeconds = value => (Number.isSafeInteger(value) && value >=
 function createChatPreferences(file) {
   let saved = {};
   try { if (file) saved = JSON.parse(fs.readFileSync(file, "utf8")) || {}; } catch { saved = {}; }
+  // Saved off the main thread: a synchronous write held every window 0.6 s on the busy hard disk
+  // (2026-11-09). Changes in a row are one save plus at most one more with the latest.
+  let saving = null;
+  let saveAgain = false;
+  const persist = () => {
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(file, `${JSON.stringify(saved)}\n`, { durable: true, protectDirectory: false })
+      .catch(() => { /* the old file stays; the next change saves every preference again */ })
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
+  };
+  const flushed = async () => { while (saving) await saving; };
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
       autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
       questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
-    set(change) {
+    /** Takes effect at once; resolves when the change is on disk, so a restart right after keeps it. */
+    async set(change) {
       saved = { ...saved, ...change };
       if (!file) return;
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      const temp = `${file}.${process.pid}.tmp`;
-      fs.writeFileSync(temp, `${JSON.stringify(saved)}\n`);
-      fs.renameSync(temp, file);
+      persist();
+      await flushed();
     },
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -4685,10 +4701,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { retry: true, attempt, name };
   }
   /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
-  function chatAutoRetry({ enabled } = {}) {
+  async function chatAutoRetry({ enabled } = {}) {
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
-      chatPreferences.set({ autoRetry: enabled });
+      await chatPreferences.set({ autoRetry: enabled });
     }
     return { ok: true, autoRetry: chatPreferences.get().autoRetry };
   }
@@ -4697,13 +4713,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * waiting me to judge, add a setting that allow the model to judge it … until end and it can
    * safety kill the goal". Off by default: on 2026-10-20 they wanted unjudged requests to wait.
    */
-  function chatModelJudges({ enabled } = {}) {
+  async function chatModelJudges({ enabled } = {}) {
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
-      chatPreferences.set({ modelJudges: enabled });
+      // In effect at once; the save to disk is awaited after.
+      const saving = chatPreferences.set({ modelJudges: enabled });
       // Turned on beside a request already waiting for the person: the reviewer's "ask" is dropped,
       // so the next screening pass judges it. An answer that could not be sent stays the person's.
       if (enabled) for (const [id, advice] of approverAdvice) if (advice.action === "ask" && !advice.unsent) approverAdvice.delete(id);
+      await saving;
     }
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
   }
@@ -4712,12 +4730,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * waits for the person before it gets its recommended answer, 0 to keep it (and the agent)
    * waiting until they answer. Only "Approve for me" and "Full access" chats answer for the person.
    */
-  function chatQuestionTimeout({ seconds } = {}) {
+  async function chatQuestionTimeout({ seconds } = {}) {
     if (seconds !== undefined) {
       if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > QUESTION_TIMEOUT_MAX_SECONDS) {
         throw new Error("Choose 0 (wait for me) or a whole number of seconds up to a day");
       }
-      chatPreferences.set({ questionTimeout: seconds });
+      await chatPreferences.set({ questionTimeout: seconds });
     }
     return { ok: true, seconds: chatPreferences.get().questionTimeout };
   }
@@ -4725,7 +4743,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * chat_auto_compact: compatibility storage for older callers, not native model-token control.
    * Record rollover is required only at the board's hard byte limit, regardless of these values.
    */
-  function chatAutoCompact({ enabled, percent } = {}) {
+  async function chatAutoCompact({ enabled, percent } = {}) {
     const change = {};
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
@@ -4735,7 +4753,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!Number.isSafeInteger(percent) || percent < AUTO_COMPACT_MIN_PERCENT || percent > 100) throw new Error(`Choose ${AUTO_COMPACT_MIN_PERCENT}% to 100%`);
       change.autoCompactPercent = percent;
     }
-    if (Object.keys(change).length) chatPreferences.set(change);
+    if (Object.keys(change).length) await chatPreferences.set(change);
     const saved = chatPreferences.get();
     return { ok: true, autoCompact: saved.autoCompact, percent: saved.autoCompactPercent, limit: BOARD_TEXT_BYTES };
   }
@@ -5540,19 +5558,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
 
+  // The run is created against the board revision read just before. Any board change in between
+  // (another chat starting, a goal round, an archive) made the runtime refuse it with "AO board
+  // revision or initial state changed", and the message was lost (2026-11-09, twice in an hour).
+  // A refused create makes nothing, so it reads the board again and retries, a few times.
+  const BOARD_RACE = /AO board revision or initial state changed/;
+  const BOARD_RACE_ATTEMPTS = 4;
   async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}) {
-    const current = await board({ workspaceId: id });
-    const runId = randomUUID();
-    checkCurrent(true);
-    const created = await updateRun({ workspaceId: id, change: {
-      operation: "create_from_team", run_id: runId, task_id: task,
-      expected_board_revision: current.revision,
-      ...(selection.executionMode === "single" ? { execution_mode: "single", single_route: selection.singleRoute, worker_limit: 1 }
-        : { team_revision: team.revision, team_id: team.id,
-          worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
-          ...(selection.executionMode === "team" ? { execution_mode: "team" } : {}) }),
-    } });
-    return includeRun ? { runId, run: created.run } : runId;
+    for (let attempt = 1; ; attempt++) {
+      const current = await board({ workspaceId: id });
+      const runId = randomUUID();
+      checkCurrent(true);
+      try {
+        const created = await updateRun({ workspaceId: id, change: {
+          operation: "create_from_team", run_id: runId, task_id: task,
+          expected_board_revision: current.revision,
+          ...(selection.executionMode === "single" ? { execution_mode: "single", single_route: selection.singleRoute, worker_limit: 1 }
+            : { team_revision: team.revision, team_id: team.id,
+              worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
+              ...(selection.executionMode === "team" ? { execution_mode: "team" } : {}) }),
+        } });
+        return includeRun ? { runId, run: created.run } : runId;
+      } catch (error) {
+        if (attempt >= BOARD_RACE_ATTEMPTS || !BOARD_RACE.test(String(error?.message ?? ""))) throw error;
+        logger?.warn?.("ao.run_create_board_race", { attempt });
+        await new Promise((resolve) => setTimer(resolve, 100 * attempt));
+      }
+    }
   }
 
   // Restart = a fresh run of the same task with the current team; the old run stays in history.

@@ -645,17 +645,32 @@ const CHAT_WORK_LIVE = new Set<string>();
 const CHAT_WORK_READ = new Map<string, Promise<ChatLiveItem[]>>();
 type LoadWork = (runId: string, nodeId: string) => Promise<ChatLiveItem[]>;
 
+/**
+ * A read that failed waits before it is tried again: every chat poll renders the turn anew, so a
+ * failed read was retried on each one, and while AO was slow seven cards' reads timed out together
+ * every 30 s, adding to its load (2026-11-09). The wait starts at 30 s and doubles to 5 minutes.
+ */
+const CHAT_WORK_FAILED = new Map<string, { at: number; waitMs: number }>();
+const WORK_RETRY_MS = 30_000;
+const WORK_RETRY_MAX_MS = 300_000;
+
 /** The summary, narrative and details share one read, including the final live-to-ended refresh. */
 function readStepWork(step: ChatStep, runId: string, loadWork: LoadWork): Promise<ChatLiveItem[]> {
   const key = stepWorkKey(step);
   const pending = CHAT_WORK_READ.get(key);
   if (pending) return pending;
+  const failed = CHAT_WORK_FAILED.get(key);
+  if (failed && Date.now() - failed.at < failed.waitMs) return Promise.reject(new Error("This card's activity could not be read; it is tried again shortly."));
   const settled = !step.working;
   const read = loadWork(runId, step.nodeId).then((items) => {
     const merged = mergeTimeline(CHAT_WORK.get(key), items, { cap: Infinity });
     CHAT_WORK.set(key, merged);
+    CHAT_WORK_FAILED.delete(key);
     if (settled) CHAT_WORK_LIVE.delete(key);
     return merged;
+  }, (error: unknown) => {
+    CHAT_WORK_FAILED.set(key, { at: Date.now(), waitMs: failed ? Math.min(failed.waitMs * 2, WORK_RETRY_MAX_MS) : WORK_RETRY_MS });
+    throw error;
   }).finally(() => { CHAT_WORK_READ.delete(key); });
   CHAT_WORK_READ.set(key, read);
   return read;

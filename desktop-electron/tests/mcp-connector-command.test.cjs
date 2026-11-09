@@ -409,6 +409,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
         recordConnector: (_id, value) => { if (value.bound) calls.bound++; return true; } },
       browserHost: host, runtimeHost: { currentOperation: () => runtimeOperation, runtimeConfigSnapshot: () => ({ configured: false }) },
       currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
+      connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
       session: { fromPartition: () => ({ cookies: { get: async () => { if (scenario.cookieSwitch) host.partition = "persist:other"; return []; } } }) },
       signedInFromCookies: () => true,
       routeIdleAccountPartition: async () => { if (scenario.remap) partition = "persist:remapped"; },
@@ -451,7 +452,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
   const start = source.indexOf('  const connectAccountMcp =');
   const end = source.indexOf('\n  let accountMcpConfig =', start);
   assert(start >= 0 && end > start);
-  const { currentConnectorSettings } = require("../electron/mcp-connector-setup.cjs");
+  const { currentConnectorSettings, connectorCredentials } = require("../electron/mcp-connector-setup.cjs");
   for (const scenario of [
     { name: "connects after the helper confirms the exact main tunnel", completes: true },
     { name: "another account's extra tunnel does not hide the main tunnel", unrelated: true, completes: true },
@@ -485,7 +486,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
       browserHost: host, runtimeHost: { currentOperation: () => null,
         runtimeConfigSnapshot: () => ({ configured: !scenario.unconfigured, owner: "launcher", config }),
         mcpCredentialsConfigured: () => !scenario.noCredentials, mcpConnectorName: () => name },
-      currentConnectorSettings,
+      currentConnectorSettings, connectorCredentials,
       session: { fromPartition: () => ({ cookies: { get: async () => {
         if (scenario.cookieRename) name = "Changed connector";
         return [];

@@ -73,6 +73,17 @@ function planText(plan: BrowserAccount["plan"]) {
 const TUNNEL_TONE: Record<McpTunnel["state"], string> = { ready: "ok", starting: "idle", stopped: "warn", failed: "error" };
 const TUNNEL_LABEL: Record<McpTunnel["state"], string> = { ready: "Ready", starting: "Starting", stopped: "Stopped", failed: "Failed" };
 
+// An automatic plan check holds a hidden ChatGPT window for up to 60 s. One that failed (ChatGPT
+// never confirmed the workspace, or timed out) waits as long as a successful one before it runs
+// again, instead of on every visit to this page; the account's Plan button still checks at once.
+const PLAN_CHECK_MS = 300_000;
+const failedPlanChecks = new Map<string, number>();
+export function planCheckDue(account: BrowserAccount, key: string, now = Date.now(), failures = failedPlanChecks) {
+  if (account.plan?.planCheckedAt && now - account.plan.planCheckedAt < PLAN_CHECK_MS) return false;
+  const failedAt = failures.get(key);
+  return failedAt === undefined || now - failedAt >= PLAN_CHECK_MS;
+}
+
 /**
  * What MCP setup may do for an account. Workspace details count for 5 minutes; older ones are not
  * a dead end any more: `refresh` says Connect reads them again first (2026-11-09: every card said
@@ -226,9 +237,13 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
         const key = `${account.id}:${account.email ?? ""}`;
         const signedIn = accountSignedIn(account, accounts.activeId, browser?.authenticated);
         if (signedIn !== true) { planChecks.current.delete(key); continue; }
-        if (planChecks.current.has(key) || (account.plan?.planCheckedAt && Date.now() - account.plan.planCheckedAt < 300_000)) continue;
+        if (planChecks.current.has(key) || !planCheckDue(account, key)) continue;
         planChecks.current.add(key);
-        try { const next = await api.inspectBrowserAccount(account.id); if (live) setAccounts(next); } catch {}
+        try {
+          const next = await api.inspectBrowserAccount(account.id);
+          failedPlanChecks.delete(key);
+          if (live) setAccounts(next);
+        } catch { failedPlanChecks.set(key, Date.now()); }
       }
     })();
     return () => { live = false; };

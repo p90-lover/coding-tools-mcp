@@ -1188,10 +1188,15 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       ? (singleRoute.model && singleRoute.model !== "default" ? { singleRoute: { ...singleRoute } as unknown as JsonObject } : null)
       : { teamId: composerTeamId };
     if (!pick) return;
+    // A goal change is a write, which the app takes only from its focused window. Sent while the
+    // window was in the background, it was refused ("Click into the Coding Tools window", 2026-11-09)
+    // and the goal kept its old model; it now goes when the window is focused again.
+    const send = () => void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", ...pick }).catch(() => undefined);
     const timer = setTimeout(() => {
-      void moduleCall("chat_goal", { workspaceId, taskId: chatTaskId, action: "route", ...pick }).catch(() => undefined);
+      if (document.hasFocus()) send();
+      else window.addEventListener("focus", send, { once: true });
     }, 600);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); window.removeEventListener("focus", send); };
   }, [goalRouteKey]);
   const [planMode, setPlanMode] = useState(false);
   useEffect(() => {

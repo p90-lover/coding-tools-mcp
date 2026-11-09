@@ -17,8 +17,8 @@ const ELECTRON = path.join(__dirname, "..", "electron");
 const SYNC_CALL = /\b[A-Za-z]+Sync(?:\.native)?\s*\(/g;
 
 const ALLOWED = {
-  "agent-orchestrator-accounting.cjs": 2, "agent-orchestrator-gateway.cjs": 4, "agent-orchestrator-upstream.cjs": 10,
-  "agent-orchestrator-workflow.cjs": 10, "agent-orchestrator-workspace.cjs": 1, "antigravity-cli.cjs": 19,
+  "agent-orchestrator-accounting.cjs": 2, "agent-orchestrator-gateway.cjs": 4, "agent-orchestrator-upstream.cjs": 6,
+  "agent-orchestrator-workflow.cjs": 7, "agent-orchestrator-workspace.cjs": 1, "antigravity-cli.cjs": 19,
   "ao-db-maintenance.cjs": 3, "ao-dependency-links.cjs": 7, "app-handler-paths.cjs": 1, "app-plugins.cjs": 10, "app-update-worker.cjs": 50,
   "app-update.cjs": 19, "atomic-file.cjs": 11, "autostart.cjs": 2, "backend-bundle.cjs": 18, "browser-accounts.cjs": 1,
   // createBrowserAccountMcpSync (#1089) is a factory named for the account MCP sync, not a synchronous call:
@@ -26,7 +26,7 @@ const ALLOWED = {
   "browser-account-mcp.cjs": 1,
   // The prior port record is captured before the first await; ready apps are rejected before IO.
   "browser-debugging.cjs": 1,
-  "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 10, "chat-archive.cjs": 4, "chat-edits.cjs": 4,
+  "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 6, "chat-archive.cjs": 4, "chat-edits.cjs": 4,
   "chat-goals.cjs": 2, "chat-loops.cjs": 4, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 4,
   // /schedule reads its saved schedules once, when the workflow is created at startup; it saves off the main thread.
   "chat-schedules.cjs": 1,

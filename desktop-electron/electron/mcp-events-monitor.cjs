@@ -4,7 +4,7 @@
 // service, whose MCP event hub delivers them as signed webhooks to ChatGPT subscriptions.
 // Each incident is reported once; the same condition re-arms only after it recovered.
 
-const { probeTcpOffThread } = require("./off-thread-run.cjs");
+const { probeTcpOffThread, fetchOffThread } = require("./off-thread-run.cjs");
 
 const EVENTS = Object.freeze({
   webTurnFailed: "coding_tools.web_turn.failed",
@@ -67,7 +67,7 @@ async function httpProbe(url, timeoutMs = 3_000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetchOffThread(url, { signal: controller.signal, maxBytes: 1024 * 1024 });
     return { ok: response.ok, code: response.ok ? null : `HTTP_${response.status}` };
   } catch (error) {
     return { ok: false, code: error?.name === "AbortError" ? "ETIMEDOUT" : (error?.cause?.code || "ECONNREFUSED") };

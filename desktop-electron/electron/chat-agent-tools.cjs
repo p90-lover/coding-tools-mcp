@@ -1519,10 +1519,18 @@ function createChatAgentTools({
   }
   restored = readLeases();
 
-  /** AO's worktrees folder, resolved, when the app named it. */
+  /**
+   * AO's worktrees folder, resolved, when the app named it. Resolved once, off the main thread: an
+   * agent's tool calls run on main, and a synchronous realpath held every window 0.7 s on the busy
+   * hard disk (2026-11-09). A folder that could not be resolved yet is tried again next time.
+   */
+  let worktreesBaseResolved = null;
   function worktreesBase() {
-    if (typeof worktreesRoot !== "string" || !path.isAbsolute(worktreesRoot)) return null;
-    try { return fs.realpathSync.native(worktreesRoot); } catch { return path.resolve(worktreesRoot); }
+    if (typeof worktreesRoot !== "string" || !path.isAbsolute(worktreesRoot)) return Promise.resolve(null);
+    return worktreesBaseResolved ??= fs.promises.realpath(worktreesRoot).catch(() => {
+      worktreesBaseResolved = null;
+      return path.resolve(worktreesRoot);
+    });
   }
 
   /** The session's worktree, as AO reports it; throws a message for the agent when it is not usable. */
@@ -1547,17 +1555,17 @@ function createChatAgentTools({
     if (!reported) throw new ScopeError("This chat's session workspace is not ready yet; try again in a moment.");
     let real;
     try {
-      if (!fs.statSync(reported).isDirectory()) throw new Error("not a directory");
-      real = fs.realpathSync.native(reported);
+      if (!(await fs.promises.stat(reported)).isDirectory()) throw new Error("not a directory");
+      real = await fs.promises.realpath(reported);
     } catch {
       throw new ScopeError("This chat's session workspace is not ready yet; try again in a moment.");
     }
-    const base = worktreesBase();
+    const base = await worktreesBase();
     // A folder-mode project's session works in the project folder itself; AO's side (see
     // sessionWorkspace) names it only for this chat workspace's own project, and only exactly it.
     let folder = null;
     if (typeof found?.projectFolder === "string" && path.isAbsolute(found.projectFolder)) {
-      try { folder = fs.realpathSync.native(found.projectFolder); } catch { folder = null; }
+      folder = await fs.promises.realpath(found.projectFolder).catch(() => null);
     }
     // A root admitted as the project's folder stays admitted while it is the same folder: a
     // recheck that could not confirm the folder this time (AO slow to answer, a project lookup
