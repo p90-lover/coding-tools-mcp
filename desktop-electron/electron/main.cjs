@@ -26,7 +26,7 @@ const {
   powerMonitor,
   powerSaveBlocker,
 } = require("electron");
-const { BrowserHost, navigationErrorForLog, writeRestartMarker } = require("./browser-host.cjs");
+const { BrowserHost, navigationErrorForLog, waitForManualOperation, writeRestartMarker } = require("./browser-host.cjs");
 const { createSignInRetryWait } = require("./sign-in-retry-wait.cjs");
 const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
@@ -295,6 +295,9 @@ let codexModelCacheWatch = null;
 // unconnected for the whole session after one slow ChatGPT page.
 let automaticMcpAttempt = null;
 let automaticAccountMcp = null;
+// How long an account's Connect waits for the browser's current operation (the background setup
+// giving way, a page's account check) before it is refused as busy.
+const MANUAL_MCP_CONNECT_WAIT_MS = 60_000;
 const AUTOMATIC_MCP_RETRY_DELAYS_MS = [60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
 let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
@@ -3567,7 +3570,17 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:mcp-create-connector", async (event, accountId) => {
     assertFocusedMainWindow(event, true);
     if (accountId === undefined) return mcpConnectorCommand.request("create", "settings");
-    return connectAccountMcp(accountId);
+    // A Connect the user asked for comes first. On 2026-11-09 a Connect for every account was refused
+    // for all 22 in 8 s ("Finish the active browser or setup operation…") because the background
+    // setup held the browser. Now that setup gives way at its next step, and the page's own account
+    // checks end in seconds; other operations are waited for up to a minute, a Codex turn not at all.
+    const release = automaticAccountMcp?.hold();
+    try {
+      if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+      return await connectAccountMcp(accountId);
+    } finally {
+      release?.();
+    }
   });
 
   let accountMcpConfig = null;

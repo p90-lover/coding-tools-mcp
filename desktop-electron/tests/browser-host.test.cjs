@@ -25,6 +25,7 @@ const {
   navigationErrorForLog,
   navigationOriginForLog,
   waitForConnectorVerification,
+  waitForManualOperation,
 } = require("../electron/browser-host.cjs");
 const { BrowserHost: StandaloneBrowserHost, loadCommittedBrowserSurface: loadStandaloneBrowserSurface } = require("../../runtime-web/launcher/electron/browser-host.cjs");
 const SAVED_CONVERSATION_ID = "0f8e2a5c-6b1d-4c3e-9a7b-1d2e3f4a5b6c";
@@ -4221,6 +4222,23 @@ test("the wait for a connector check is bounded, and the caller then refuses the
   await waitForConnectorVerification(host, 30);
   assert.ok(Date.now() - started < 1_000);
   assert.equal(host.manualOperation, "connector verification");
+});
+
+test("an account's Connect waits for whatever operation holds the browser, and only so long", async () => {
+  let settle;
+  const host = { manualOperation: "session inspection", manualOperationSettled: new Promise(resolve => { settle = resolve; }) };
+  const waiting = waitForManualOperation(host, 5_000);
+  setTimeout(() => { host.manualOperation = null; host.manualOperationSettled = null; settle(); }, 20);
+  const started = Date.now();
+  await waiting;
+  assert.ok(Date.now() - started < 1_000, "it returns when the operation ends, not at its limit");
+
+  const stuck = { manualOperation: "MCP connector creation", manualOperationSettled: new Promise(() => {}) };
+  const before = Date.now();
+  await waitForManualOperation(stuck, 30);
+  assert.ok(Date.now() - before < 1_000, "an operation that never ends is waited for only up to the limit");
+  assert.equal(stuck.manualOperation, "MCP connector creation", "the caller then refuses as before");
+  await waitForManualOperation({ manualOperation: null, manualOperationSettled: null }, 5_000);
 });
 
 test("a manual operation tells waiting turns when it ends, failed or not", async () => {
