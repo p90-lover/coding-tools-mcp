@@ -65,6 +65,7 @@ const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
 const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
 const { createCommandWatches, WATCH_TOOL_DEFS, WATCH_TOOLS } = require("./chat-command-watches.cjs");
+const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { DUPLICATE_TOOLS: UNIFIED_DUPLICATE_TOOLS, FILE_TOOLS: UNIFIED_FILE_TOOLS, SERVER_NAME: UNIFIED_SERVER } = require("./unified-agent-tools.cjs");
 
@@ -317,6 +318,7 @@ const DESKTOP_TOOLS = new Set([
   "computer_status", "computer_route", "computer_snapshot", "computer_list_windows", "computer_select_window",
   "computer_find_control", "computer_wait", "computer_action", "computer_sequence", "computer_stop",
   "capture_screenshot", "capture_window", "capture_process", "ocr_screen", "list_windows", "list_displays", "vision_status",
+  "computer_guide",
 ]);
 // The app's own vision tool (built on headless's list_windows and capture_window): an image of a
 // program's window, named by its process. The image goes to the model as the tool's result and is
@@ -356,7 +358,7 @@ const CONFIRMED_TOOLS = new Map([
 ]);
 // Desktop calls that see and touch nothing: control's state, stopping it, headless's advice on
 // which tool fits, and whether vision is available. Every other desktop call is reviewed.
-const UNREVIEWED_DESKTOP = new Set(["computer_status", "computer_stop", "computer_route", "vision_status"]);
+const UNREVIEWED_DESKTOP = new Set(["computer_status", "computer_stop", "computer_route", "vision_status", "computer_guide"]);
 // Calls that act on the window under control: its app must be one the chat may use.
 const CONTROL_TOOLS = new Set([
   "computer_select_window", "computer_find_control", "computer_wait", "computer_action", "computer_sequence",
@@ -520,6 +522,12 @@ const MAX_QUICK_ANSWERS = 3;
 // within this long (or that cannot be shown, the app not being focused) is allowed once, so the
 // agent keeps working. Whatever the command approver's safety rules block still needs the person.
 const AUTO_ANSWER_MS = 20_000;
+// A tools/call still running after STREAM_AFTER_MS is answered as an event stream (when the agent's
+// client accepts one), which carries a keep-alive or progress notice every KEEP_ALIVE_MS until the
+// result: an agent's MCP client then waits for a call that waits for the person, instead of timing
+// out while the person reads its permission card (2026-11-09: computer_select_window "timed out").
+const STREAM_AFTER_MS = 2_000;
+const KEEP_ALIVE_MS = 10_000;
 
 const ROOT_RECHECK_MS = 30_000;
 const UNBOUND_TTL_MS = 10 * 60_000;
@@ -1187,7 +1195,9 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
         + "runs, and one the reviewer cannot judge waits for the user. To use an app, call computer_list_windows, then "
         + "computer_select_window with the window_id and pid of its window: the user is asked to allow that app for this chat "
         + "(the call waits for their answer), and control starts on that window; use the session_id it returns with the other "
-        + "computer_* tools. Control acts only on that window. "
+        + "computer_* tools. Control acts only on that window. Before your first computer_action, read computer_guide: it gives "
+        + "every method's parameters, how to find a control (accessibility index first, vision last) and the fastest way to a "
+        + "web page's content. "
       : "")
     + (groups.includes("subagents")
       ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
@@ -1314,6 +1324,8 @@ function createChatAgentTools({
   // Computer control (computer-control.cjs): the agent asks for a window and the person allows its
   // app on a card in the chat (askApp), then control starts on it (start). Without it control can't start.
   computerControl = null,
+  // The person's own notes on using an app (computer-guides.cjs), one Markdown file per app: read, never written.
+  computerGuidesDir = null,
   // Codex's auto-review of one call that sees or drives the screen (the workflow's reviewToolCall):
   // ({ workspaceId, session, tool, args }) => { action: "allow" | "deny" | "ask", reason }.
   reviewCall = null,
@@ -1327,10 +1339,12 @@ function createChatAgentTools({
   // on a monotonic clock.
   minAnswerMs = MIN_ANSWER_MS, answerClock = () => performance.now(),
   autoAnswerMs = AUTO_ANSWER_MS,
+  streamAfterMs = STREAM_AFTER_MS, keepAliveMs = KEEP_ALIVE_MS,
 } = {}) {
   if (typeof requestHeadless !== "function") throw new Error("The headless tool service is required");
   // Identifies this server's lifetime in warm-session keys without exposing any credential.
   const instance = crypto.randomUUID();
+  const guides = createComputerGuides({ notesDir: computerGuidesDir, logger });
   const sessions = new Map(); // key -> session entry (see mint)
   const paneEntries = new Map(); // AO session -> retained command owner, independent of credentials
   const commandWatches = createCommandWatches({ now });
@@ -1597,12 +1611,12 @@ function createChatAgentTools({
       ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
-      ...(captureApp ? VIEW_APP_DEFS : [])];
+      ...(captureApp ? VIEW_APP_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
+        && tool?.name !== "view_app" && tool?.name !== "computer_guide" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
         && tool?.name !== "list_commands" && !WATCH_TOOLS.has(tool?.name)), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
@@ -1791,9 +1805,15 @@ function createChatAgentTools({
    * starts on that window. Every other control call acts on that window, whose app this chat must
    * be allowed to use. Returns the call's result when it was answered here, else null (headless runs it).
    */
-  async function computerUse(entry, name, args, signal) {
+  async function computerUse(entry, name, args, signal, progress = null) {
+    // What the person answered, in words the model cannot misread: the call returns only once
+    // they did (callChannel keeps the agent's client waiting meanwhile).
     const refusedApp = (app, answer) => failedCall(`The user did not allow ${agentName(entry)} to use ${app}`
-      + `${answer?.reason ? ` (${answer.reason})` : ""}; nothing was done.`);
+      + `${answer?.reason ? ` (${answer.reason})` : ""}; nothing was done.`, { code: "APPROVAL_DECLINED", execution_status: "not_started",
+      next_action: `Tell the person ${app} was not allowed and wait for new instructions; do not ask for it again or work around it.` });
+    const grantedApp = (app, answer) => answer?.decision === "always" ? `The user allowed ${agentName(entry)} to use ${app} from now on.`
+      : answer?.decision === "conversation" ? `The user allowed ${agentName(entry)} to use ${app} for this conversation.`
+        : `${app} was already allowed for this chat.`;
     if (name === "computer_list_windows") {
       // Listed by the app itself, each window with its program: headless lists titles only while control is on.
       let windows;
@@ -1813,16 +1833,23 @@ function createChatAgentTools({
       let target = null;
       try { target = (await computerControl.targets()).find((item) => item.window_id === Number(args.window_id) && item.pid === Number(args.pid)) ?? null; } catch { target = null; }
       if (!target) return failedCall("That window is not open any more, or it is this app's own; call computer_list_windows again.");
+      if (!computerControl.appAllowed(target.app, entry.workspaceId, entry.aoSession)) {
+        progress?.(`Waiting for the person to allow ${agentName(entry)} to use ${target.appName} in the chat.`);
+      }
       const answer = await computerControl.askApp({ workspaceId: entry.workspaceId, aoSession: entry.aoSession, agent: agentName(entry), target, signal });
       if (!answer?.allowed) return refusedApp(target.appName, answer);
+      // An agent that hung up while the person answered never hears of the control: none starts.
+      if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
+      const permission = grantedApp(target.appName, answer);
+      const guide = await guides.brief(target.app);
       // The window already under control: headless selects it (and brings it forward when asked);
       // without a session to name, the agent is given the current one.
       if (controlled && controlled.window_id === target.window_id && controlled.pid === target.pid) {
-        return args.session_id ? null : plainResult({ ...current, app: target.appName, note: "Control is already on for this window; use this session_id." });
+        return args.session_id ? null : plainResult({ ...current, app: target.appName, permission, guide, note: "Control is already on for this window; use this session_id." });
       }
       try {
         const status = await computerControl.start({ workspaceId: entry.workspaceId, target, agent: agentName(entry), model: await pillModel(entry) });
-        return plainResult({ ...status, app: target.appName, note: "Control is on for this window; use this session_id with the other computer_* tools." });
+        return plainResult({ ...status, app: target.appName, permission, guide, note: "Control is on for this window; use this session_id with the other computer_* tools." });
       } catch (error) { return failedCall(`Control did not start: ${errorMessage(error)}`); }
     }
     if (!controlled) {
@@ -1830,6 +1857,7 @@ function createChatAgentTools({
         + "of the window you need; the user is asked to allow its app.");
     }
     if (!computerControl.appAllowed(controlled.app, entry.workspaceId, entry.aoSession)) {
+      progress?.(`Waiting for the person to allow ${agentName(entry)} to use ${computerControl.appName(controlled.app, controlled.title)} in the chat.`);
       const answer = await computerControl.askApp({ workspaceId: entry.workspaceId, aoSession: entry.aoSession, agent: agentName(entry),
         target: { ...controlled, appName: computerControl.appName(controlled.app, controlled.title) }, signal });
       if (!answer?.allowed) return refusedApp(computerControl.appName(controlled.app, controlled.title), answer);
@@ -2166,7 +2194,7 @@ function createChatAgentTools({
     }
   }
 
-  async function callTool(entry, params) {
+  async function callTool(entry, params, channel = {}) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
     if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off in Settings.");
@@ -2197,6 +2225,13 @@ function createChatAgentTools({
     if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
     if (name === "app_processes") return listProcesses(given);
     if (name === "view_app") return viewApp(given);
+    if (name === "computer_guide") {
+      if ((given.app !== undefined && typeof given.app !== "string") || (given.topic !== undefined && typeof given.topic !== "string")) {
+        return inputError("topic and app must be strings; nothing was read.");
+      }
+      try { return { content: [{ type: "text", text: await guides.guide(given) }], isError: false }; }
+      catch (error) { return inputError(`${errorMessage(error)}; nothing was read.`); }
+    }
     if (GOAL_TOOLS.has(name)) return goalCall(entry, name, given);
     if (name === "rename_chat") return renameChat(entry, given);
     if (name === "move_chat") return moveChat(entry, given, signal);
@@ -2258,30 +2293,38 @@ function createChatAgentTools({
     // review too (computer-control.cjs). Until 2026-11-09 it appeared only once the call ran, so a
     // call that waited minutes for its review never showed on the pill.
     const reviewed = group === "desktop" && !UNREVIEWED_DESKTOP.has(name);
+    // A screen call whose agent hung up is abandoned: its review or permission card is withdrawn,
+    // never left open to start control (or act) after the agent was told the call failed.
+    const waits = group === "desktop" && channel.signal ? AbortSignal.any([signal, channel.signal]) : signal;
+    const progress = typeof channel.progress === "function" ? channel.progress : null;
     const shown = computerControl && name.startsWith("computer_") && computerControl.controlled?.()
       ? computerControl.activity?.({ agent: agentName(entry), model: await pillModel(entry), tool: name, args, waiting: reviewed }) : null;
-    if (!shown) return reviewAndRun(entry, name, args, root, group, signal, null);
+    if (!shown) return reviewAndRun(entry, name, args, root, group, waits, null, progress);
     let result = null;
     try {
-      result = await reviewAndRun(entry, name, args, root, group, signal, shown);
+      result = await reviewAndRun(entry, name, args, root, group, waits, shown, progress);
       return result;
     } finally {
       shown(result && !result.isError ? "done" : "failed");
     }
   }
 
-  /** callTool from the review on. `shown` is the call's line on the control pill, if it has one. */
-  async function reviewAndRun(entry, name, args, root, group, signal, shown) {
+  /**
+   * callTool from the review on. `shown` is the call's line on the control pill, if it has one;
+   * `progress(text)` tells the agent's client what the call is waiting for (callChannel).
+   */
+  async function reviewAndRun(entry, name, args, root, group, signal, shown, progress = null) {
     // Every call that sees or drives the screen is reviewed first, whatever the chat's approval
     // mode (reviewDesktop); as in Codex's Computer Use, control is then of an app the person allowed
     // this chat to use (computerUse).
     if (group === "desktop" && !UNREVIEWED_DESKTOP.has(name)) {
+      progress?.(`Waiting for ${name} to be reviewed; the person may be asked in the chat.`);
       const verdict = await reviewDesktop(entry, name, args, signal);
       if (verdict !== true) return verdict;
     }
     shown?.proceed?.();
     if (computerControl && (CONTROL_TOOLS.has(name) || name === "computer_snapshot" || name === "computer_list_windows")) {
-      const handled = await computerUse(entry, name, args, signal);
+      const handled = await computerUse(entry, name, args, signal, progress);
       if (handled) return handled;
     }
     // Reviewed above like every screen observation; it captures only after that answer.
@@ -2502,7 +2545,7 @@ function createChatAgentTools({
     return true;
   }
 
-  async function dispatch(entry, message) {
+  async function dispatch(entry, message, channel = {}) {
     if (!message || typeof message !== "object" || message.jsonrpc !== "2.0" || typeof message.method !== "string") {
       return rpcError(message?.id ?? null, -32600, "Invalid request");
     }
@@ -2525,7 +2568,7 @@ function createChatAgentTools({
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
         case "tools/list": return { jsonrpc: "2.0", id, result: { tools: await listTools(entry) } };
-        case "tools/call": return { jsonrpc: "2.0", id, result: await callTool(entry, params) };
+        case "tools/call": return { jsonrpc: "2.0", id, result: await callTool(entry, params, channel) };
         default: return rpcError(id, -32601, `Method not found: ${method}`);
       }
     } catch (error) {
@@ -2548,6 +2591,59 @@ function createChatAgentTools({
       "cache-control": "no-store", connection: "close", ...headers,
     });
     response.end(payload);
+  }
+
+  /**
+   * One request's link to the agent that sent it. `signal` aborts when the agent hangs up before
+   * the answer. A single tools/call still running after streamAfterMs is answered as an event
+   * stream when the client accepts one (MCP Streamable HTTP): every keepAliveMs it carries a
+   * notifications/progress with what the call waits for (`progress(text)`) when the call came
+   * with a progressToken, else a comment, so the client keeps waiting for a call that waits for
+   * the person. `finish(answer)` sends the answer, as JSON when the stream never opened.
+   */
+  function callChannel(request, response, call) {
+    const hangUp = new AbortController();
+    response.once("close", () => { if (!response.writableFinished) hangUp.abort(); });
+    const token = call?.params?._meta?.progressToken;
+    const progressToken = (typeof token === "string" && token.length <= 256) || Number.isSafeInteger(token) ? token : null;
+    const accepts = Boolean(call) && /\btext\/event-stream\b/i.test(String(request.headers.accept || ""));
+    let streaming = false, step = 0, status = "", beat = null;
+    const event = (body) => `event: message\ndata: ${JSON.stringify(body)}\n\n`;
+    const gone = () => response.writableEnded || response.destroyed;
+    const pulse = () => {
+      if (!streaming || gone()) return;
+      if (progressToken === null || !status) { response.write(": waiting\n\n"); return; }
+      step += 1;
+      response.write(event({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken, progress: step, message: status } }));
+    };
+    const open = () => {
+      if (streaming || response.headersSent || gone()) return;
+      streaming = true;
+      response.shouldKeepAlive = false;
+      response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "close" });
+      pulse();
+      beat = setInterval(pulse, keepAliveMs);
+      beat.unref?.();
+    };
+    const opening = accepts ? setTimeout(open, streamAfterMs) : null;
+    opening?.unref?.();
+    return {
+      signal: hangUp.signal,
+      progress(text) {
+        const next = String(text ?? "").slice(0, 300);
+        if (next === status) return;
+        status = next;
+        pulse();
+      },
+      finish(answer) {
+        clearTimeout(opening);
+        clearInterval(beat);
+        if (gone()) return;
+        if (streaming) response.end(answer ? event(answer) : "");
+        else if (answer) send(response, 200, answer);
+        else send(response, 202, undefined);
+      },
+    };
   }
 
   function handle(request, response) {
@@ -2605,13 +2701,15 @@ function createChatAgentTools({
       if (!messages.length || messages.length > 32) { send(response, 400, rpcError(null, -32600, "Invalid request")); return; }
       // One message at a time: a batch of calls that each need the user's confirmation asks
       // about them one after another, never all at once.
+      const single = batch ? null : messages[0];
+      const channel = callChannel(request, response,
+        single?.method === "tools/call" && Object.hasOwn(single, "id") ? single : null);
       const answers = [];
       for (const message of messages) {
-        const answer = await dispatch(entry, message);
+        const answer = await dispatch(entry, message, channel);
         if (answer) answers.push(answer);
       }
-      if (!answers.length) send(response, 202, undefined);
-      else send(response, 200, batch ? answers : answers[0]);
+      channel.finish(!answers.length ? null : batch ? answers : answers[0]);
     });
   }
 

@@ -25,7 +25,15 @@ function fixture(overrides = {}) {
 test('a refused call keeps the worker; a closed engine, Escape or a changed window ends it', async () => {
   const coded = code => Object.assign(new Error(code), { code });
   // A stale element index, as the real engine refused it on 2026-11-09, must not end control.
-  assert.deepEqual(failureReply(new Error('element index 99999 is out of range')), { ok: false, code: 'CODEX_ENGINE_FAILED', fatal: false });
+  assert.deepEqual(failureReply(new Error('element index 99999 is out of range')), { ok: false, code: 'CODEX_ELEMENT_INVALID', fatal: false });
+  // An uncoded failure keeps its kind, never its text: a failing screenshot is told from the rest.
+  assert.deepEqual(failureReply(new Error('Failed to capture screenshot of "Inbox - secret.txt"')), { ok: false, code: 'CODEX_CAPTURE_FAILED', fatal: false });
+  assert.equal(failureReply(new Error('request timed out after 15000ms')).code, 'CODEX_ENGINE_TIMEOUT');
+  // The engine's own screenshot call, as a peer session reproduced it on 2026-11-09: a bare Error("timeout").
+  assert.deepEqual(failureReply(new Error('timeout')), { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: false });
+  assert.equal(failureReply(new Error('Access is denied. (os error 5)')).code, 'CODEX_ACCESS_DENIED');
+  assert.equal(failureReply(new Error('UI Automation tree unavailable')).code, 'CODEX_ACCESSIBILITY_FAILED');
+  assert.equal(failureReply(new Error('something else entirely')).code, 'CODEX_ENGINE_FAILED');
   assert.deepEqual(failureReply(coded('INVALID_CODEX_PARAMS')), { ok: false, code: 'INVALID_CODEX_PARAMS', fatal: false });
   // The engine lists no ChatGPT or Codex window: seen live as "window id 525084 was not found. Current windows: []".
   assert.deepEqual(failureReply(new Error('window id 525084 was not found. Current windows: []')), { ok: false, code: 'CODEX_WINDOW_HIDDEN', fatal: false });

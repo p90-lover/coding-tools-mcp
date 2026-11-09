@@ -300,6 +300,13 @@ pub fn local_target_app(pid: u32) -> String {
         })
         .unwrap_or_default()
 }
+/// The program's full executable path, for its icon on the app's control bar; None when the
+/// process cannot be inspected. Only the local UI reads it: agents are never given it.
+pub fn local_target_path(pid: u32) -> Option<String> {
+    native::executable_path(pid)
+        .ok()
+        .and_then(|path| path.to_str().map(str::to_string))
+}
 #[cfg(test)]
 pub fn local_arm(root: PathBuf, target: Target, duration_seconds: u64) -> Result<Value> {
     local_arm_with_mode(root, target, duration_seconds, false)

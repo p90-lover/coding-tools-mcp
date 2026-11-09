@@ -6997,7 +6997,9 @@ async fn computer_targets(State(state): State<ServiceState>, headers: HeaderMap)
                 .into_iter()
                 .map(|target| {
                     let app = tools::computer::local_target_app(target.pid);
-                    json!({"window_id": target.window_id, "pid": target.pid, "title": target.title, "app": app})
+                    // Its full path, for the program's icon on the control bar.
+                    let path = tools::computer::local_target_path(target.pid);
+                    json!({"window_id": target.window_id, "pid": target.pid, "title": target.title, "app": app, "path": path})
                 })
                 .collect::<Vec<_>>()
         })

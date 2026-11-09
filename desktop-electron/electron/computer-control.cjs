@@ -115,6 +115,10 @@ const PREVIEW_HEIGHT = 320;
 // The preview the bar shows: a JPEG data URL headless made from the agent's own frame, and no bigger.
 const PREVIEW_URL = /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/;
 const PREVIEW_MAX_CHARS = 4_000_000;
+// A program's icon on the bar: a PNG data URL from app.getFileIcon (32 px), at most this long; this many kept.
+const ICON_URL = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+const MAX_ICON_CHARS = 200_000;
+const MAX_ICONS = 64;
 // Steps the history keeps, newest first.
 const HISTORY_LIMIT = 50;
 // After a step the pill keeps naming it this long, so a run of quick steps reads as one line, not a flicker.
@@ -204,9 +208,11 @@ background:#18181b;border:1px solid #52525b;-webkit-app-region:drag}
 .model{color:#fdba74;font-weight:600}
 .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e4e4e7}
 .pill:not([data-busy]) .what{color:#a1a1aa}
-.app{flex:none;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700;font-size:13px;
-color:#111827;background:#fde68a;border-radius:999px;padding:3px 10px}
-.app:empty{display:none}
+.app{flex:none;display:flex;align-items:center;gap:5px;max-width:190px;overflow:hidden;white-space:nowrap;font-weight:700;font-size:13px;
+color:#111827;background:#fde68a;border-radius:999px;padding:3px 10px 3px 8px}
+.app[data-empty]{display:none}
+.app .name{overflow:hidden;text-overflow:ellipsis}
+.ico{flex:none;width:16px;height:16px;object-fit:contain}.ico[hidden]{display:none}
 button{-webkit-app-region:no-drag;flex:none;font:inherit;font-weight:600;border:0;border-radius:999px;padding:5px 12px;cursor:pointer}
 #toggle{background:#3f3f46;color:#f4f4f5;padding:5px 9px}#toggle:hover{background:#52525b}
 #stop{background:#dc2626;color:#fff}#stop:hover{background:#b91c1c}
@@ -224,13 +230,14 @@ body[data-frame] .shot{display:flex}
 .row{display:grid;grid-template-columns:62px 1fr auto 18px;gap:8px;align-items:center;padding:5px 12px;border-bottom:1px solid #27272a}
 .row:last-child{border-bottom:0}.time{color:#a1a1aa;font-variant-numeric:tabular-nums;font-size:12px}
 .act{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.act small{color:#a1a1aa}
-.row .app{font-size:11.5px;padding:1px 8px;max-width:150px}
+.row .app{font-size:11.5px;padding:1px 8px 1px 6px;max-width:150px;gap:4px}
+.row .ico{width:13px;height:13px}
 .mark{text-align:center;font-weight:700}.done{color:#4ade80}.failed{color:#f87171}.running{color:#fdba74}
 .empty{color:#a1a1aa;padding:10px 12px}</style></head>
 <body><div class="pill" id="pill"><span class="dot"></span>
 <button id="thumb" class="thumb" title="What it saw: open the preview" hidden><img id="thumbimg" alt=""></button>
 <span class="who"><b id="who">${escapeHtml(agent)}</b><span class="model" id="model">${model ? ` · ${escapeHtml(model)}` : ""}</span></span>
-<span class="what" id="what">${escapeHtml(IDLE_TEXT)}</span><span class="app" id="app">${escapeHtml(where)}</span>
+<span class="what" id="what">${escapeHtml(IDLE_TEXT)}</span><span class="app" id="app"${where ? "" : " data-empty"}><img class="ico" id="appicon" alt="" hidden><span class="name" id="appname">${escapeHtml(where)}</span></span>
 <button id="toggle" title="Show what it did">▾</button><button id="stop" title="Stop computer control">Stop</button></div>
 <div class="panel" id="panel"><div class="shot"><img id="shot" alt="What the agent saw"><div class="cap" id="cap"></div></div>
 <div class="list" id="list"><div class="empty">Nothing done yet.</div></div></div>
@@ -256,11 +263,16 @@ window.show = (state) => {
   $("who").textContent = String(state.agent || "A chat");
   $("model").textContent = state.model ? " · " + String(state.model) : "";
   $("what").textContent = String(state.action || ${JSON.stringify(IDLE_TEXT)});
-  $("app").textContent = String(state.app || "");
+  $("appname").textContent = String(state.app || "");
+  $("app").toggleAttribute("data-empty", !state.app);
+  // The app's own icon, left of its name, once the app has read it from the program.
+  const icon = String(state.icon || "");
+  if (icon && $("appicon").getAttribute("src") !== icon) $("appicon").src = icon;
+  $("appicon").hidden = !icon;
   $("pill").toggleAttribute("data-busy", Boolean(state.action));
 };
 const cell = (tag, className, text) => { const node = document.createElement(tag); node.className = className; node.textContent = text; return node; };
-window.showHistory = (entries) => {
+window.showHistory = (entries, icons = {}) => {
   const panel = $("list");
   panel.replaceChildren();
   if (!entries.length) { panel.append(cell("div", "empty", "Nothing done yet.")); return; }
@@ -268,7 +280,12 @@ window.showHistory = (entries) => {
     const row = cell("div", "row", "");
     const act = cell("span", "act", String(entry.action));
     act.append(cell("small", "", "  " + String(entry.agent) + (entry.model ? " · " + String(entry.model) : "")));
-    row.append(cell("span", "time", String(entry.time)), act, cell("span", "app", String(entry.app || "")),
+    const app = cell("span", "app", "");
+    const icon = entry.app && Object.hasOwn(icons, entry.app) ? String(icons[entry.app]) : "";
+    if (icon) { const img = document.createElement("img"); img.className = "ico"; img.alt = ""; img.src = icon; app.append(img); }
+    app.append(cell("span", "name", String(entry.app || "")));
+    if (!entry.app) app.setAttribute("data-empty", "");
+    row.append(cell("span", "time", String(entry.time)), act, app,
       cell("span", "mark " + String(entry.outcome), entry.outcome === "done" ? "✓" : entry.outcome === "failed" ? "✕" : "…"));
     row.title = String(entry.action);
     panel.append(row);
@@ -277,13 +294,13 @@ window.showHistory = (entries) => {
 }
 
 function createComputerControl({ request, BrowserWindow, screen, logger = null, ownPids = () => [process.pid], onRequests = () => undefined,
-  approvalsFile = null, now = Date.now }) {
+  approvalsFile = null, now = Date.now, fileIcon = null }) {
   const approvals = createAppApprovals({ file: approvalsFile, now });
   let bar = null;
   let heartbeat = null;
   // What the pill shows, the text last sent to it, the calls running (pointer ones apart), and the
   // timer that clears the last step's name.
-  let shown = { agent: "A chat", model: "", action: null, app: "" };
+  let shown = { agent: "A chat", model: "", action: null, app: "", icon: "" };
   let painted = null;
   let running = 0;
   let pointing = 0;
@@ -298,6 +315,19 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   let hasFrame = false;
   let frameLoading = false;
   const clock = (at) => new Date(at).toTimeString().slice(0, 8);
+  // Each program's icon, read once (fileIcon: Electron's app.getFileIcon) and kept as a PNG data URL,
+  // or null when it has none; by app name too, for the history's rows.
+  const icons = new Map();
+  const appIcons = new Map();
+  function iconOf(file) {
+    if (typeof fileIcon !== "function" || typeof file !== "string" || !file) return Promise.resolve(null);
+    if (!icons.has(file)) {
+      if (icons.size >= MAX_ICONS) icons.delete(icons.keys().next().value);
+      icons.set(file, Promise.resolve().then(() => fileIcon(file))
+        .then((url) => (typeof url === "string" && url.length <= MAX_ICON_CHARS && ICON_URL.test(url) ? url : null), () => null));
+    }
+    return icons.get(file);
+  }
   // The window control was last started on, by this app ({ window_id, pid, title, app }).
   let controlled = null;
   // The requests waiting for the person: { public, finish, workspace, captureOff, target, conversation }.
@@ -320,7 +350,9 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   /** The history list, sent only while it is open: a closed pill gets nothing more to draw. */
   function paintHistory() {
     if (!historyOpen || !bar || bar.isDestroyed()) return;
-    void bar.webContents.executeJavaScript(`window.showHistory(${JSON.stringify(history)})`).catch(() => undefined);
+    const used = {};
+    for (const entry of history) if (appIcons.has(entry.app)) used[entry.app] = appIcons.get(entry.app);
+    void bar.webContents.executeJavaScript(`window.showHistory(${JSON.stringify(history)}, ${JSON.stringify(used)})`).catch(() => undefined);
   }
 
   /** The window's height: the pill, and with its panel open the history and, once there is one, the preview. */
@@ -402,7 +434,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
 
   function openBar({ title, agent = "A chat", app = "", model = "" }) {
     closeBar();
-    shown = { agent, model: modelLabel(model), action: null, app: app || title };
+    shown = { agent, model: modelLabel(model), action: null, app: app || title, icon: "" };
     // On the screen the person is looking at (the pointer's), at its top centre.
     let display = null;
     try { display = screen.getDisplayNearestPoint?.(screen.getCursorScreenPoint()) ?? null; } catch { display = null; }
@@ -530,7 +562,9 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     return ((await request("/api/v1/computer/targets", null, { method: "GET" }))?.targets ?? [])
       .filter((target) => !own.has(target.pid))
       .map((target) => ({ window_id: Number(target.window_id), pid: Number(target.pid), title: String(target.title || "(untitled)"),
-        app: appKey(target.app), appName: appName(target.app, target.title) }));
+        app: appKey(target.app), appName: appName(target.app, target.title),
+        // The program's full path, for its icon on the bar; the agent is never given it.
+        path: typeof target.path === "string" && target.path ? target.path : null }));
   }
 
   /**
@@ -541,7 +575,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
    */
   async function askApp({ workspaceId, aoSession = null, agent = "The agent", target, signal = null, risk = "" }) {
     const conversation = `${workspaceId}:${aoSession ?? ""}`;
-    if (approvals.allowed(target.app, conversation)) return { allowed: true };
+    if (approvals.allowed(target.app, conversation)) return { allowed: true, decision: "earlier" };
     const joined = pending.find((item) => item.conversation === conversation && item.target.app === appKey(target.app));
     if (joined) return joined.answered;
     const workspaces = (await request("/api/v1/workspaces", null, { method: "GET" }))?.workspaces ?? [];
@@ -600,7 +634,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
       }
       approvals.allow(current.target.app, current.conversation, input.decision);
       logger?.info?.("computer.app_allowed", { app: current.target.app, persist: input.decision });
-      current.finish({ allowed: true });
+      current.finish({ allowed: true, decision: input.decision });
       return { ok: true };
     } catch (error) {
       return { ok: false, error: String(error?.message || error).slice(0, 300) };
@@ -627,9 +661,18 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     }
     const started = await request("/api/v1/computer/start", { workspace_id: workspaceId, window_id: target.window_id, pid: target.pid,
       duration_seconds: 0, always_enabled: true }, { localConfirmation: true });
-    controlled = { window_id: target.window_id, pid: target.pid, title: target.title, app: appKey(target.app) };
+    const startedOn = { window_id: target.window_id, pid: target.pid, title: target.title, app: appKey(target.app) };
+    controlled = startedOn;
     logger?.info?.("computer.started", { pid: target.pid, app: controlled.app });
-    openBar({ title: target.title, agent, model, app: appName(target.app, target.title) });
+    const name = appName(target.app, target.title);
+    openBar({ title: target.title, agent, model, app: name });
+    void iconOf(target.path).then((icon) => {
+      if (!icon || controlled !== startedOn) return;
+      appIcons.set(name, icon);
+      shown = { ...shown, icon };
+      paint();
+      paintHistory();
+    });
     return started?.status ?? await status();
   }
 

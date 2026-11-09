@@ -38,6 +38,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
   chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, sessionModel = null, previewEnabled = () => true,
+  streamAfterMs = undefined, keepAliveMs = undefined,
   registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
@@ -47,6 +48,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     // A fake confirm answers at once; the quick-answer check has its own test.
     minAnswerMs, ...(answerClock ? { answerClock } : {}),
     ...(autoAnswerMs !== undefined ? { autoAnswerMs } : {}), ...(blockedCommand ? { blockedCommand } : {}), ...(now ? { now } : {}),
+    ...(streamAfterMs !== undefined ? { streamAfterMs } : {}), ...(keepAliveMs !== undefined ? { keepAliveMs } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
     ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}), ...(reviewCall ? { reviewCall } : {}), ...(sessionModel ? { sessionModel } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
@@ -92,6 +94,14 @@ function post(url, body, headers = {}) {
       response.on("data", (chunk) => chunks.push(chunk));
       response.on("end", () => {
         const text = Buffer.concat(chunks).toString("utf8");
+        // A call still running after a while is answered as an event stream (callChannel): its
+        // messages in order, the last being the answer, and how many keep-alive comments came.
+        if (/^text\/event-stream/.test(String(response.headers["content-type"] || ""))) {
+          const events = text.split("\n\n").map((block) => block.split("\n").filter((line) => line.startsWith("data: "))
+            .map((line) => line.slice(6)).join("\n")).filter(Boolean).map((data) => JSON.parse(data));
+          resolve({ status: response.statusCode, headers: response.headers, body: events.at(-1) ?? null, events, comments: (text.match(/^: /gm) || []).length });
+          return;
+        }
         resolve({ status: response.statusCode, headers: response.headers, body: text ? JSON.parse(text) : null });
       });
     });
@@ -2708,6 +2718,93 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("a call waiting for the person keeps the agent's client waiting, then says what the person decided", async () => {
+  const tree = tempTree();
+  const windows = [{ window_id: 7, pid: 70, title: "notes.txt - Notepad", app: "notepad.exe", appName: "Notepad" }];
+  let state = "stopped", controlled = null;
+  const cards = [];
+  const starts = [];
+  const computerControl = {
+    status: async () => ({ state, session_id: "lease-1" }),
+    targets: async () => windows,
+    controlled: () => controlled,
+    appName: (app) => windows.find((item) => item.app === app)?.appName ?? app,
+    appAllowed: () => false,
+    // The person's card: answered only when the test says so; a stopped chat's card goes.
+    askApp: (request) => new Promise((resolve) => {
+      const card = { request, answer: resolve, withdrawn: false };
+      cards.push(card);
+      request.signal?.addEventListener("abort", () => { card.withdrawn = true; resolve({ allowed: false, reason: "the chat stopped" }); }, { once: true });
+    }),
+    start: async ({ target }) => { starts.push(target.window_id); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
+  };
+  let reviews = 0;
+  const { tools } = fixture({ root: tree.root, desktop: () => true, computerControl, reviewCall: async () => { reviews += 1; return { action: "allow" }; }, streamAfterMs: 20, keepAliveMs: 15 });
+  const until = async (check) => { for (let tick = 0; tick < 400 && !check(); tick += 1) await new Promise((resolve) => setTimeout(resolve, 5)); assert.ok(check()); };
+  try {
+    const chat = await session(tools, { agent: "claude-code", id: "ao-1" });
+    const select = (progressToken) => post(chat.url, { jsonrpc: "2.0", id: nextId++, method: "tools/call",
+      params: { name: "computer_select_window", arguments: { window_id: 7, pid: 70 }, ...(progressToken ? { _meta: { progressToken } } : {}) } }, chat.auth);
+
+    // Answered while the client waits: the stream says what the call waits for, then the answer.
+    const allowedCall = select("pick-7");
+    await until(() => cards.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    cards[0].answer({ allowed: true, decision: "conversation" });
+    const allowed = await allowedCall;
+    assert.equal(allowed.headers["content-type"], "text/event-stream", "a call still waiting is answered as a stream");
+    const notices = allowed.events.filter((event) => event.method === "notifications/progress");
+    assert.ok(notices.length >= 2, "progress keeps coming while the person reads the card");
+    assert.ok(notices.every((event, index) => event.params.progressToken === "pick-7" && event.params.progress === index + 1));
+    assert.match(notices[0].params.message, /Waiting for the person to allow Claude Code to use Notepad in the chat/);
+    assert.equal(allowed.body.result.isError, false);
+    assert.equal(allowed.body.result.structuredContent.permission, "The user allowed Claude Code to use Notepad for this conversation.");
+    assert.deepEqual(starts, [7], "control starts only once the person answered");
+    assert.match(allowed.body.result.structuredContent.guide, /^Next: get_window_state \{include_text: true\}/m, "and the result says how to go on");
+
+    // Declined, without a progress token: keep-alive comments, and a refusal that cannot be misread.
+    state = "stopped"; controlled = null;
+    const declinedCall = select(null);
+    await until(() => cards.length === 2);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    cards[1].answer({ allowed: false, reason: "the user denied it" });
+    const declined = await declinedCall;
+    assert.ok(declined.comments >= 1, "a client that sent no progress token still gets keep-alives");
+    assert.equal(declined.events.length, 1, "and only the answer as a message");
+    assert.equal(declined.body.result.isError, true);
+    assert.match(declined.body.result.content[0].text, /did not allow Claude Code to use Notepad \(the user denied it\); nothing was done/);
+    assert.equal(declined.body.result.structuredContent.error.code, "APPROVAL_DECLINED");
+    assert.deepEqual(starts, [7]);
+
+    // The guide reads no screen: listed with the computer tools, never reviewed.
+    assert.ok((await listed(chat.url, chat.auth)).includes("computer_guide"));
+    const reviewed = reviews;
+    const guide = await callTool(chat.url, chat.auth, "computer_guide", { topic: "browser", app: "Chrome.exe" });
+    assert.equal(guide.isError, false);
+    assert.match(guide.content[0].text, /preview_read/);
+    assert.match(guide.content[0].text, /## chrome\nThis is a web browser/);
+    assert.equal(reviews, reviewed, "nothing reviews a call that sees nothing");
+    assert.equal((await callTool(chat.url, chat.auth, "computer_guide", { topic: "everything" })).structuredContent.error.code, "INVALID_ARGUMENTS");
+
+    // An agent that hangs up before the person answered: its card is withdrawn, and a late answer
+    // starts nothing the agent would never hear about.
+    const hungUp = new Promise((resolve) => {
+      const target = new URL(chat.url);
+      const request = http.request({ hostname: target.hostname, port: target.port, path: target.pathname, method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json, text/event-stream", ...chat.auth } });
+      request.on("error", () => resolve());
+      request.on("close", resolve);
+      request.end(JSON.stringify({ jsonrpc: "2.0", id: nextId++, method: "tools/call", params: { name: "computer_select_window", arguments: { window_id: 7, pid: 70 } } }));
+      until(() => cards.length === 3).then(() => request.destroy());
+    });
+    await hungUp;
+    await until(() => cards[2].withdrawn);
+    cards[2].answer({ allowed: true, decision: "always" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(starts, [7], "nothing started for the agent that left");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("computer use asks on a card in the chat, Codex's own, and keeps Always allow across restarts", async () => {
   const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), "computer-approvals-"));
@@ -2752,8 +2849,8 @@ test("computer use asks on a card in the chat, Codex's own, and keeps Always all
 
     assert.equal((await control.answer({ id: "another", decision: "always" })).ok, false, "a stale card allows nothing");
     assert.deepEqual(await control.answer({ id: card.id, decision: "conversation" }), { ok: true });
-    assert.deepEqual(await asked, { allowed: true });
-    assert.deepEqual(await again, { allowed: true }, "and its answer");
+    assert.deepEqual(await asked, { allowed: true, decision: "conversation" });
+    assert.deepEqual(await again, { allowed: true, decision: "conversation" }, "and its answer");
     assert.equal(calls.find(([endpoint]) => endpoint === "/api/v1/workspaces/policy")[1].screen_capture_enabled, true, "allowing turns capture on");
     assert.deepEqual(control.requests(), [], "the card goes once answered");
     assert.equal(control.appAllowed("chrome.exe", "ws", "s1"), true);
@@ -2771,10 +2868,10 @@ test("computer use asks on a card in the chat, Codex's own, and keeps Always all
     await settle();
     assert.equal(control.requests()[0].firstUse, false, "the notice shows until an app was allowed once");
     assert.deepEqual(await control.answer({ id: control.requests()[0].id, decision: "always" }), { ok: true });
-    assert.deepEqual(await always, { allowed: true });
+    assert.deepEqual(await always, { allowed: true, decision: "always" });
 
     const restarted = make();
-    assert.deepEqual(await restarted.askApp({ workspaceId: "ws", aoSession: "s9", target: targets[0] }), { allowed: true }, "Always allow survives a restart");
+    assert.deepEqual(await restarted.askApp({ workspaceId: "ws", aoSession: "s9", target: targets[0] }), { allowed: true, decision: "earlier" }, "Always allow survives a restart");
     assert.deepEqual(restarted.allowedApps().map((item) => [item.app, item.name]), [["chrome.exe", "Google Chrome"]]);
     assert.equal(restarted.forgetApp("chrome.exe"), true);
     assert.deepEqual(restarted.allowedApps(), []);

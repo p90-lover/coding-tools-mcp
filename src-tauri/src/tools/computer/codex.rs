@@ -371,7 +371,7 @@ fn refused(failure: &Failure) -> crate::tools::workspace::WorkspaceError {
         );
     }
     error(
-        "CODEX_ACTION_REJECTED",
+        ACTION_REJECTED,
         &format!(
             "The Codex engine refused this call ({}). Control stays on. If it was an input, it may \
              have been submitted: take a fresh computer_snapshot before trying again.",
@@ -382,6 +382,8 @@ fn refused(failure: &Failure) -> crate::tools::workspace::WorkspaceError {
 
 /// The code of a call that never reached a window Codex's engine will not control.
 pub(super) const WINDOW_UNAVAILABLE: &str = "CODEX_WINDOW_UNAVAILABLE";
+/// The code of a call the engine refused while it kept serving (refused).
+pub(super) const ACTION_REJECTED: &str = "CODEX_ACTION_REJECTED";
 
 pub(super) fn request(lease: &Lease, method: &str, params: Value) -> Result<Value> {
     check_same_lease(lease, true)?;

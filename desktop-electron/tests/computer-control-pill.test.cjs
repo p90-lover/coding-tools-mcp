@@ -45,7 +45,7 @@ test("models are named as people know them", () => {
 });
 
 /** A control whose pill is a stand-in window recording what the app did to it. */
-function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3, 4, 5) } = {}) {
+function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3, 4, 5), fileIcon = undefined } = {}) {
   const made = [];
   class FakeWindow {
     constructor(options) {
@@ -97,11 +97,13 @@ function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3
     }
     return {};
   };
-  const control = createComputerControl({ request, BrowserWindow: FakeWindow, screen, ownPids: () => [1], now });
+  const control = createComputerControl({ request, BrowserWindow: FakeWindow, screen, ownPids: () => [1], now, ...(fileIcon ? { fileIcon } : {}) });
   return { control, made, requests, agent };
 }
 
-const calls = (window, name) => window.scripts.filter((code) => code.startsWith(`window.${name}(`)).map((code) => JSON.parse(code.slice(name.length + 8, -1)));
+/** Each call of window.<name>(...) the app made on the pill's page: its arguments. */
+const argumentsOf = (window, name) => window.scripts.filter((code) => code.startsWith(`window.${name}(`)).map((code) => JSON.parse(`[${code.slice(name.length + 8, -1)}]`));
+const calls = (window, name) => argumentsOf(window, name).map(([first]) => first);
 const settle = () => new Promise(setImmediate);
 
 test("the pill sits on the screen the person is using, above full-screen apps, names agent, model and app, and never takes the focus", async () => {
@@ -123,7 +125,8 @@ test("the pill sits on the screen the person is using, above full-screen apps, n
     assert.match(page, /Claude Code/);
     assert.match(page, /gpt-6\.1-sol/);
     assert.doesNotMatch(page, /cpa\/gpt/);
-    assert.match(page, /<span class="app" id="app">Google Chrome<\/span>/, "the app on its own bright chip");
+    assert.match(page, /<span class="app" id="app"><img class="ico" id="appicon" alt="" hidden><span class="name" id="appname">Google Chrome<\/span><\/span>/,
+      "the app on its own bright chip, with room for its icon left of its name");
     assert.match(page, /\.app\{flex:none;[^}]*font-weight:700[^}]*background:#fde68a/, "never cut short, bold, high contrast");
     assert.doesNotMatch(page, /@keyframes|animation|transition/, "nothing animates: an idle pill is never redrawn");
   } finally { control.dispose(); }
@@ -138,7 +141,7 @@ test("the pill names each step while it runs, lets the agent's clicks through, a
     const [window] = made;
     const click = control.activity({ agent: "Codex", model: "cpa/gpt-6.2-luna", tool: "computer_action", args: { step: { action: "click", selector: { name: "File" } } } });
     assert.deepEqual(window.ignoring, [true], "a click under the pill reaches the window it controls (no TARGET_OCCLUDED)");
-    assert.deepEqual(calls(window, "show").at(-1), { agent: "Codex", model: "gpt-6.2-luna", action: "Clicking “File”", app: "Notepad" },
+    assert.deepEqual(calls(window, "show").at(-1), { agent: "Codex", model: "gpt-6.2-luna", action: "Clicking “File”", app: "Notepad", icon: "" },
       "a model switched mid-chat shows");
     click();
     assert.deepEqual(window.ignoring, [true, false], "and Stop is clickable again once the click was sent");
@@ -154,7 +157,7 @@ test("the pill names each step while it runs, lets the agent's clicks through, a
     assert.equal(calls(window, "show").length, 2, "the same line is not sent twice");
 
     t.mock.timers.tick(1_200);
-    assert.deepEqual(calls(window, "show").at(-1), { agent: "Codex", model: "gpt-6.2-luna", action: null, app: "Notepad" }, "between steps it waits for the next");
+    assert.deepEqual(calls(window, "show").at(-1), { agent: "Codex", model: "gpt-6.2-luna", action: null, app: "Notepad", icon: "" }, "between steps it waits for the next");
     const scripts = window.scripts.length;
     t.mock.timers.tick(5_000);
     await settle();
@@ -223,6 +226,37 @@ test("overlapping pointer calls keep clicks passing through until the last one e
   } finally { control.dispose(); }
 });
 
+test("the pill shows the controlled app's own icon left of its name, read once per program", async () => {
+  const asked = [];
+  const icon = "data:image/png;base64,iVBORw0KGgo=";
+  const { control, made } = pill({ fileIcon: async (file) => { asked.push(file); return file.endsWith("chrome.exe") ? icon : "javascript:alert(1)"; } });
+  try {
+    const chrome = { window_id: 7, pid: 70, title: "Inbox - Google Chrome", app: "chrome.exe", path: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" };
+    await control.start({ workspaceId: "ws", agent: "Codex", target: chrome });
+    await settle(); await settle();
+    const [window] = made;
+    assert.deepEqual(asked, [chrome.path], "read from the program itself");
+    assert.equal(calls(window, "show").at(-1).icon, icon, "on the pill, left of the app's name");
+    const step = control.activity({ tool: "computer_snapshot", args: {} });
+    step("done");
+    window.retitle("computer-control-history:open:1");
+    await settle();
+    assert.deepEqual(argumentsOf(window, "showHistory").at(-1)[1], { "Google Chrome": icon }, "and on each of its rows in the history");
+
+    await control.start({ workspaceId: "ws", agent: "Codex", target: { ...chrome } });
+    await settle(); await settle();
+    assert.deepEqual(asked, [chrome.path], "a program's icon is read once");
+
+    await control.start({ workspaceId: "ws", agent: "Codex", target: { window_id: 8, pid: 80, title: "x", app: "evil.exe", path: "C:\\evil.exe" } });
+    await settle(); await settle();
+    assert.equal(calls(made.at(-1), "show").at(-1)?.icon ?? "", "", "anything but a PNG data URL is not shown");
+
+    await control.start({ workspaceId: "ws", agent: "Codex", target: { window_id: 9, pid: 90, title: "y", app: "notepad.exe" } });
+    await settle(); await settle();
+    assert.equal(asked.length, 2, "a window without a known path is shown without an icon");
+  } finally { control.dispose(); }
+});
+
 test("the pill's page shows untrusted names as text, opens its history, and still stops control", () => {
   const page = barPage({ agent: "<b>x</b>", app: "<img src=x onerror=alert(1)>", title: "t", model: "<i>m</i>" });
   assert.ok(!page.includes("<img src=x"));
@@ -231,26 +265,35 @@ test("the pill's page shows untrusted names as text, opens its history, and stil
   const made = [];
   const node = (id) => ({ id, children: [], textContent: "", attributes: {}, className: "",
     toggleAttribute(name, on) { this.attributes[name] = on; }, hasAttribute(name) { return Boolean(this.attributes[name]); },
+    setAttribute(name, value) { this.attributes[name] = value; }, getAttribute(name) { return name === "src" ? this.src ?? null : this.attributes[name] ?? null; },
     replaceChildren() { this.children = []; }, append(...items) { this.children.push(...items); } });
-  const elements = Object.fromEntries(["stop", "toggle", "who", "model", "what", "app", "pill", "panel", "list", "thumb", "thumbimg", "shot", "cap"]
+  const elements = Object.fromEntries(["stop", "toggle", "who", "model", "what", "app", "appname", "appicon", "pill", "panel", "list", "thumb", "thumbimg", "shot", "cap"]
     .map((id) => [id, node(id)]));
   const document = { title: "Computer control is on", body: node("body"), getElementById: (id) => elements[id],
     createElement: (tag) => { const item = node(tag); made.push(item); return item; } };
   const window = {};
-  vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window, String, Boolean });
+  vm.runInNewContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], { document, window, String, Boolean, Object });
   window.show({ agent: "Claude Code", model: "gpt-6.1-sol", action: "Clicking “<script>”", app: "Paint" });
-  assert.deepEqual([elements.who.textContent, elements.model.textContent, elements.what.textContent, elements.app.textContent, elements.pill.attributes["data-busy"]],
+  assert.deepEqual([elements.who.textContent, elements.model.textContent, elements.what.textContent, elements.appname.textContent, elements.pill.attributes["data-busy"]],
     ["Claude Code", " · gpt-6.1-sol", "Clicking “<script>”", "Paint", true], "set as text, never as markup");
+  assert.equal(elements.appicon.hidden, true, "no icon until the app has one");
+  window.show({ agent: "Claude Code", model: "", action: null, app: "Paint", icon: "data:image/png;base64,QUJD" });
+  assert.deepEqual([elements.appicon.src, elements.appicon.hidden], ["data:image/png;base64,QUJD", false], "the app's icon, left of its name");
   window.show({ agent: "Claude Code", model: "", action: null, app: "" });
-  assert.deepEqual([elements.model.textContent, elements.what.textContent, elements.app.textContent, elements.pill.attributes["data-busy"]],
-    ["", "waiting for its next step", "", false]);
+  assert.deepEqual([elements.model.textContent, elements.what.textContent, elements.appname.textContent, elements.app.attributes["data-empty"], elements.pill.attributes["data-busy"]],
+    ["", "waiting for its next step", "", true, false]);
+  assert.equal(elements.appicon.hidden, true);
 
   elements.toggle.onclick();
   assert.equal(document.body.attributes["data-open"], true);
   assert.match(document.title, /^computer-control-history:open:1$/);
-  window.showHistory([{ time: "11:04:05", agent: "Codex", model: "gpt-6.1-sol", action: "<b>Clicking</b>", app: "Paint", outcome: "failed" }]);
-  const [row] = elements.list.children;
-  assert.deepEqual(row.children.map((cell) => cell.textContent), ["11:04:05", "<b>Clicking</b>", "Paint", "✕"], "history rows are text too");
+  window.showHistory([{ time: "11:04:05", agent: "Codex", model: "gpt-6.1-sol", action: "<b>Clicking</b>", app: "Paint", outcome: "failed" },
+    { time: "11:04:06", agent: "Codex", model: "", action: "Typing", app: "__proto__", outcome: "done" }], { Paint: "data:image/png;base64,QUJD" });
+  const [row, odd] = elements.list.children;
+  assert.deepEqual(row.children.map((cell) => cell.textContent), ["11:04:05", "<b>Clicking</b>", "", "✕"], "history rows are text too");
+  assert.deepEqual(row.children[2].children.map((cell) => [cell.id, cell.src ?? cell.textContent]), [["img", "data:image/png;base64,QUJD"], ["span", "Paint"]],
+    "each row's app with its icon on the left");
+  assert.deepEqual(odd.children[2].children.map((cell) => cell.id), ["span"], "a name that is no app of the map gets no icon");
   elements.toggle.onclick();
   assert.match(document.title, /^computer-control-history:closed:2$/, "each change is a new title, so the app hears every one");
   window.showHistory([]);
@@ -352,6 +395,6 @@ test("asking for another window moves control there instead of failing on the on
     assert.equal(made.length, 2);
     assert.equal(control.controlled().app, "notepad.exe");
     const page = decodeURIComponent(made[1].url.slice(made[1].url.indexOf(",") + 1));
-    assert.match(page, /<span class="app" id="app">Notepad<\/span>/);
+    assert.match(page, /<span class="name" id="appname">Notepad<\/span>/);
   } finally { control.dispose(); }
 });
