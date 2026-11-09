@@ -31,6 +31,7 @@ function createHarness(hooks = {}) {
   const requests = [];
   const events = [];
   const warnings = [];
+  const infos = [];
   const opened = [];
   const binary = Buffer.from("fake source-built Go daemon");
   const files = hooks.files ?? new Map();
@@ -258,11 +259,30 @@ function createHarness(hooks = {}) {
     shell: { openExternal: async (url) => { opened.push(url); } },
     openAuth: hooks.openAuth,
     agentTools: hooks.agentTools, fileTools: hooks.fileTools,
-    logger: { warn: (...entry) => warnings.push(entry) },
+    logger: { warn: (...entry) => warnings.push(entry), info: (...entry) => infos.push(entry) },
     readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs,
   });
-  return { controller, children, gateways, reservations, views, requests, events, warnings, parent, opened, daemonReads, files };
+  return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files };
 }
+
+test("AO's report of who holds its database writer, and a slow stage of an agent's start, reach the launcher log", async (context) => {
+  const { controller, children, warnings, infos } = createHarness();
+  context.after(() => controller.stop());
+  assert.equal((await controller.start()).state, "ready");
+  const [daemon] = children;
+  // AO's stderr arrives in chunks that split lines; the quick stage is not reported.
+  const output = [
+    'time=2026-11-09T14:46:17.120+08:00 level=WARN msg="sqlite writer held while writes wait" held=1m3.2s waiting=3 poolWaitCount=9 poolWait=41.5s holder="UpsertUsageEvent<-ReconcileUsage; ListSessions"',
+    'time=2026-11-09T14:47:31.004+08:00 level=INFO msg="spawn: asynchronous chat stage" sessionID=coding-tools-mcp-280 stage=controller_start duration=2m26.4s',
+    'time=2026-11-09T14:47:31.010+08:00 level=INFO msg="spawn: asynchronous chat stage" sessionID=coding-tools-mcp-280 stage=queue_drain duration=12.5ms',
+  ].join("\n") + "\n";
+  daemon.stderr.emit("data", Buffer.from(output.slice(0, 150)));
+  daemon.stderr.emit("data", Buffer.from(output.slice(150)));
+  assert.deepEqual(warnings.filter(([event]) => event === "ao.writer_held"),
+    [["ao.writer_held", { heldMs: 63200, waiting: 3, holder: "UpsertUsageEvent<-ReconcileUsage; ListSessions" }]]);
+  assert.deepEqual(infos.filter(([event]) => event === "ao.start_stage_slow"),
+    [["ao.start_stage_slow", { session: "coding-tools-mcp-280", stage: "controller_start", ms: 146400 }]]);
+});
 
 test("Runtime opens the original AO board and keeps the selected project", async () => {
   const { controller, views, gateways } = createHarness();

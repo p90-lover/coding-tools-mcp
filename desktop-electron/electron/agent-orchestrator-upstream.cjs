@@ -11,7 +11,7 @@ const { MAX_RESPONSE_BYTES } = require("./ipc-schema.cjs");
 const { readCpaCatalog, collectMissionAccounting, accountingMeasurements } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
-const { createDaemonLogFilter } = require("./ao-daemon-log.cjs");
+const { createDaemonLogFilter, daemonLogEvent } = require("./ao-daemon-log.cjs");
 const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
@@ -282,9 +282,17 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * AO's recent meaningful output (no debug lines or quick polls, see ao-daemon-log.cjs), in memory
    * only. AO's output never goes to disk: logs/ao-daemon.log took about 65 MB a day, nearly all of
    * it the chat's conversation polls. When AO exits, the error carries the last of these lines.
+   * Who held AO's database writer, and a slow stage of an agent's start, also go to the launcher log
+   * (daemonLogEvent), where a chat that waited minutes for its agent is looked into.
    */
   let daemonLines = "";
-  const keepDaemonLines = (text) => { daemonLines = (daemonLines + text).slice(-DAEMON_LINES_CHARS); };
+  const keepDaemonLines = (text) => {
+    daemonLines = (daemonLines + text).slice(-DAEMON_LINES_CHARS);
+    for (const line of text.split("\n")) {
+      const found = daemonLogEvent(line);
+      if (found) logger?.[found.level]?.(found.event, found.detail);
+    }
+  };
   /** Removes the log files an older build wrote, off the main thread (each rmSync held it 0.34 s, 2026-11-09). */
   function removeOldDaemonLogs() {
     for (const name of ["ao-daemon.log", "ao-daemon.log.1"]) {
