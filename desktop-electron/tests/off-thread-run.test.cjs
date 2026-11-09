@@ -43,6 +43,26 @@ test("a given environment reaches the program (rtk's rewrite passes its own)", a
   } finally { restore(); }
 });
 
+test("execFileOffThread calls back as execFile does, from a program started off this thread", async () => {
+  // taskkill for sandboxed commands and wevtutil for the disk check go through it (each start held
+  // the main process when it ran here).
+  const { module, calls, restore } = load();
+  const run = (args, options = {}) => new Promise((resolve) => module.execFileOffThread(process.execPath, args, options,
+    (error, stdout, stderr) => resolve({ error, stdout, stderr })));
+  try {
+    const failed = await run(["-e", script], { timeout: 10_000 });
+    assert.equal(failed.error.code, 3, "a non-zero exit is an error carrying its code");
+    assert.equal(failed.stdout, "out");
+    assert.equal(failed.stderr, "err");
+    const ok = await run(["-e", "process.stdout.write('fine')"], { timeout: 10_000 });
+    assert.equal(ok.error, null);
+    assert.equal(ok.stdout, "fine");
+    const slow = await run(["-e", "setInterval(() => {}, 1000)"], { timeout: 300 });
+    assert.equal(slow.error.killed, true, "a timeout ends it and reports as execFile's does");
+    assert.deepEqual(calls, [], "no program started on the calling thread");
+  } finally { restore(); }
+});
+
 test("it still runs when no worker thread can be started", async () => {
   const { module, calls, restore } = load({ Worker: function Unavailable() { throw new Error("no workers here"); } });
   try {

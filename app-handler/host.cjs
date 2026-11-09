@@ -111,11 +111,32 @@ function createCodingToolsAppsHost({
     return false;
   }
 
+  // Identical read-only calls already in flight share one answer. A chat surface asks the same
+  // reads from several places at once (0.8.104, 2026-11-09: five chat_branches and seven run_status
+  // calls in the same second); with the hard disk busy each one held a headless request slot
+  // until the service's queue was full and every poll failed HEADLESS_CAPACITY. A write, or a read
+  // whose arguments cannot be keyed, always runs on its own.
+  const readsInFlight = new Map();
+  function readKey(id, op, args) {
+    try { return `${id}\u0000${op}\u0000${JSON.stringify(args)}`; } catch { return null; }
+  }
+
   async function call(moduleId, operation, args = {}) {
     const input = callInput(moduleId, operation, args);
     const id = requireId(input.moduleId);
     const op = String(input.operation || "");
-    const result = await registry.invoke(id, op, input.args, contextFor(id));
+    const key = isReadOnly(id, op) ? readKey(id, op, input.args) : null;
+    if (key === null) return invokeOnce(id, op, input.args);
+    const known = readsInFlight.get(key);
+    if (known) return known;
+    const shared = invokeOnce(id, op, input.args);
+    readsInFlight.set(key, shared);
+    shared.then(() => readsInFlight.delete(key), () => readsInFlight.delete(key));
+    return shared;
+  }
+
+  async function invokeOnce(id, op, args) {
+    const result = await registry.invoke(id, op, args, contextFor(id));
     return sanitizePublic({
       ok: result?.ok !== false,
       moduleId: id,

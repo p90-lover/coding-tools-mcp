@@ -14,7 +14,7 @@ const {
   validateUpdateSettingsPatch,
 } = require("../electron/state.cjs");
 
-test("launcher state persists onboarding, language, and autostart atomically", () => {
+test("launcher state persists onboarding, language, and autostart atomically", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
   const file = path.join(root, "state.json");
   try {
@@ -48,6 +48,7 @@ test("launcher state persists onboarding, language, and autostart atomically", (
       browserSmokePassed: true,
       browserSmokeVersion: "0.2.0",
     });
+    await store.saved();
     assert.deepEqual(createStateStore(file).read(), {
       version: 1,
       language: "zh-CN",
@@ -143,13 +144,14 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
   }
 });
 
-test("existing MCP auto-connect is opt-in and persists only booleans", () => {
+test("existing MCP auto-connect is opt-in and persists only booleans", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-auto-mcp-state-"));
   const file = path.join(root, "state.json");
   try {
     const store = createStateStore(file);
     assert.equal(store.read().autoConnectExistingMcp, false);
     store.update({ autoConnectExistingMcp: true });
+    await store.saved();
     assert.equal(createStateStore(file).read().autoConnectExistingMcp, true);
     fs.writeFileSync(file, JSON.stringify({ version: 1, autoConnectExistingMcp: "yes" }));
     assert.equal(createStateStore(file).read().autoConnectExistingMcp, false);
@@ -158,16 +160,18 @@ test("existing MCP auto-connect is opt-in and persists only booleans", () => {
   }
 });
 
-test("browser interaction defaults to Automatic and preserves a completed onboarding choice", () => {
+test("browser interaction defaults to Automatic and preserves a completed onboarding choice", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-interaction-state-"));
   const file = path.join(root, "state.json");
   try {
     const store = createStateStore(file);
     assert.equal(store.read().browserInteractionMode, "automatic");
     store.update({ browserInteractionMode: "manual", onboardingComplete: true });
+    await store.saved();
     assert.equal(createStateStore(file).read().browserInteractionMode, "manual");
     assert.equal(createStateStore(file).read().zeroRiskProEnabled, false);
     store.update({ coreSetupComplete: true, zeroRiskProEnabled: true });
+    await store.saved();
     assert.equal(createStateStore(file).read().zeroRiskProEnabled, true);
     fs.writeFileSync(file, JSON.stringify({
       version: 1,
@@ -189,7 +193,7 @@ test("browser interaction defaults to Automatic and preserves a completed onboar
   }
 });
 
-test("saved chats default on for new and older state and keep an explicit opt-out", () => {
+test("saved chats default on for new and older state and keep an explicit opt-out", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-saved-chat-state-"));
   const file = path.join(root, "state.json");
   try {
@@ -199,6 +203,7 @@ test("saved chats default on for new and older state and keep an explicit opt-ou
     const store = createStateStore(file);
     assert.equal(store.read().useSavedChats, true);
     store.update({ useSavedChats: false });
+    await store.saved();
     assert.equal(createStateStore(file).read().useSavedChats, false);
     fs.writeFileSync(file, JSON.stringify({ version: 1, useSavedChats: "no" }));
     assert.equal(createStateStore(file).read().useSavedChats, true);
@@ -207,7 +212,7 @@ test("saved chats default on for new and older state and keep an explicit opt-ou
   }
 });
 
-test("update settings default safe, keep valid choices, and drop invalid stored values", () => {
+test("update settings default safe, keep valid choices, and drop invalid stored values", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-update-settings-"));
   const file = path.join(root, "state.json");
   try {
@@ -219,6 +224,7 @@ test("update settings default safe, keep valid choices, and drop invalid stored 
     assert.equal(Object.hasOwn(createStateStore(file).read(), "updateIdleMinutes"), false);
     const store = createStateStore(file);
     store.update(validateUpdateSettingsPatch({ updateIdleMinutes: 0, updateAutoRollback: false }));
+    await store.saved();
     assert.deepEqual(resolveUpdateSettings(createStateStore(file).read()),
       { ...defaults, updateIdleMinutes: 0, updateAutoRollback: false });
     // A hand-edited or torn value is dropped back to its default, not trusted.
@@ -249,18 +255,67 @@ test("session refresh reminders are deferred by exactly 48 hours", () => {
   assert.throws(() => nextSessionRefreshReminderAt(Number.NaN), /must be finite/);
 });
 
-test("an update that changes nothing is not written again; the first one always is", () => {
+test("an update that changes nothing is not written again; the first one always is", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
   try {
     const file = path.join(root, "launcher-state.json");
     const store = createStateStore(file);
     store.update({ codexRestartRequired: false });
+    await store.saved();
     assert.equal(fs.existsSync(file), true, "the session's first update writes");
     fs.rmSync(file);
     assert.equal(store.update({ codexRestartRequired: false }).codexRestartRequired, false);
+    await store.saved();
     assert.equal(fs.existsSync(file), false, "nothing changed, nothing written");
     store.update({ codexRestartRequired: true });
+    await store.saved();
     assert.equal(createStateStore(file).read().codexRestartRequired, true, "a change is written");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an update is read at once and saved off the main thread; a burst ends with the latest on disk", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
+  try {
+    const file = path.join(root, "launcher-state.json");
+    const store = createStateStore(file);
+    assert.equal(store.update({ sidebarWidth: 300 }).sidebarWidth, 300);
+    // The write waits on a pool thread, so nothing is on disk yet when update() returns: it used to
+    // hold every window for the fsync'd write (11 s with the hard disk busy, 2026-11-09).
+    assert.equal(fs.existsSync(file), false, "update() does not wait for the disk");
+    assert.equal(store.read().sidebarWidth, 300, "the store answers from memory");
+    for (let width = 301; width <= 320; width += 1) store.update({ sidebarWidth: width });
+    await store.saved();
+    assert.equal(createStateStore(file).read().sidebarWidth, 320, "the last update of the burst is saved");
+    assert.equal(JSON.parse(fs.readFileSync(`${file}.bak`, "utf8")).sidebarWidth, 320, "and its copy");
+    assert.equal(fs.readdirSync(root).some((name) => name.includes(".tmp-")), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed save keeps the old file, reports the error, and the next update saves everything", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-launcher-state-"));
+  try {
+    const file = path.join(root, "launcher-state.json");
+    const errors = [];
+    const store = createStateStore(file, { onError: (error) => errors.push(error) });
+    store.update({ language: "ja" });
+    await store.saved();
+    // A directory where the file goes makes the rename fail.
+    fs.rmSync(file);
+    fs.mkdirSync(file);
+    store.update({ autoStart: false });
+    await store.saved();
+    assert.equal(errors.length, 1, "the failure is reported");
+    assert.equal(store.read().autoStart, false, "the store keeps the change in memory");
+    fs.rmSync(file, { recursive: true, force: true });
+    store.update({ autoStart: false });
+    await store.saved();
+    const saved = createStateStore(file).read();
+    assert.equal(saved.language, "ja");
+    assert.equal(saved.autoStart, false, "the same settings are saved again after a failure");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

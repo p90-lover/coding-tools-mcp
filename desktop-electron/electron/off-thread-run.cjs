@@ -4,7 +4,7 @@ const { execFile, spawn } = require("node:child_process");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const net = require("node:net");
-const { PassThrough, Writable } = require("node:stream");
+const { PassThrough, Readable, Writable } = require("node:stream");
 const { Worker } = require("node:worker_threads");
 
 /**
@@ -244,6 +244,11 @@ class OffThreadChild extends EventEmitter {
     this.queue = Promise.resolve();
     this.untold = { stdout: 0, stderr: 0 };
     this.telling = false;
+  }
+
+  /** The three standard streams, as ChildProcess.stdio lists them (null where not piped). */
+  get stdio() {
+    return [this.stdin, this.stdout, this.stderr];
   }
 
   /** Counts output this thread has taken and tells the worker once per turn (OUTPUT_WINDOW_BYTES). */
@@ -827,7 +832,111 @@ function resetFetchWorker() {
   fetchWorkerBroken = false;
 }
 
+/**
+ * execFile(file, args, { timeout, maxBuffer }, callback) through runOffThread: the program starts
+ * from a worker, so Windows' load of it never holds this thread (taskkill for a chat's sandboxed
+ * command; wevtutil for the disk check, 262 ms on main on 2026-11-09). Calls back as execFile does:
+ * (error, stdout, stderr), the error for a start failure, a timeout or a non-zero exit (its `code`).
+ */
+function execFileOffThread(file, args = [], options = {}, callback = () => {}) {
+  const timeoutMs = Number(options.timeout) > 0 ? Number(options.timeout) : 30_000;
+  const maxBytes = Number(options.maxBuffer) > 0 ? Number(options.maxBuffer) : 1024 * 1024;
+  runOffThread({ file, args, cwd: options.cwd, env: options.env, timeoutMs, maxBytes }).then((result) => {
+    if (result.error) callback(new Error(result.error), "", "");
+    else if (result.timedOut) callback(Object.assign(new Error(`${file} timed out`), { killed: true }), "", "");
+    else if (result.code !== 0) callback(Object.assign(new Error(`${file} exited with ${result.code}`), { code: result.code }), result.stdout, result.stderr);
+    else callback(null, result.stdout, result.stderr);
+  });
+}
+
+/**
+ * Streamed GETs. Closing a socket whose connect is still pending runs closesocket() on the thread
+ * that owns the socket, and with the antivirus holding it, the update check's Node fallback held the
+ * main process (every window) for 72.9 s as it gave up on a GitHub connect (Activity, 2026-11-09
+ * 05:56:01Z: handle.close 20.205.243.168:443 < update.cjs). fetchOffThread holds a whole body, and
+ * an update pack is hundreds of MB, so this streams: http(s).get from a worker of its own, with the
+ * shape of https.get(url, { headers }, onResponse). It returns a request with setTimeout(ms, onTimeout),
+ * destroy(error) and an 'error' event; the response is a Readable with statusCode and headers, and
+ * the worker reads the next chunk only once this thread has taken the last. The worker ends with the
+ * request (its socket closes there). Where no worker can start, the request is made here.
+ */
+const GET_WORKER_SOURCE = `
+const { parentPort, workerData } = require("node:worker_threads");
+const transport = require(workerData.protocol === "http:" ? "node:http" : "node:https");
+const errorOf = (error) => ({ message: String((error && error.message) || error), code: error && error.code });
+let response = null;
+const request = transport.get(workerData.url, { headers: workerData.headers }, (res) => {
+  response = res;
+  res.pause();
+  res.on("data", (chunk) => { res.pause(); parentPort.postMessage({ type: "data", chunk }); });
+  res.on("end", () => parentPort.postMessage({ type: "end" }));
+  res.on("error", (error) => parentPort.postMessage({ type: "response-error", error: errorOf(error) }));
+  parentPort.postMessage({ type: "response", statusCode: res.statusCode, headers: res.headers });
+});
+request.on("error", (error) => parentPort.postMessage({ type: "error", error: errorOf(error) }));
+parentPort.on("message", (message) => {
+  if (message.type === "pull") { if (response) response.resume(); }
+  else if (message.type === "timeout") request.setTimeout(message.ms, () => parentPort.postMessage({ type: "timeout" }));
+});
+`;
+
+function getOffThread(url, { headers = {} } = {}, onResponse, { createWorker = (source, options) => new Worker(source, options) } = {}) {
+  const parsed = new URL(url);
+  let worker;
+  try {
+    worker = createWorker(GET_WORKER_SOURCE, { eval: true, workerData: { url: parsed.toString(), protocol: parsed.protocol, headers: { ...headers } } });
+  } catch {
+    return require(parsed.protocol === "http:" ? "node:http" : "node:https").get(parsed, { headers }, onResponse);
+  }
+  const request = new EventEmitter();
+  const rebuilt = (error) => Object.assign(new Error(error.message), error.code ? { code: error.code } : {});
+  let response = null, onTimeout = null, ended = false;
+  // Ends the worker once: its socket closes on its own thread, never this one.
+  const end = () => {
+    if (ended) return false;
+    ended = true;
+    Promise.resolve(worker.terminate?.()).catch(() => {});
+    return true;
+  };
+  const fail = (error) => {
+    if (!end()) return;
+    if (response) response.destroy(error);
+    else request.emit("error", error);
+  };
+  worker.on("message", (message) => {
+    switch (message.type) {
+      case "response":
+        response = new Readable({ read: () => { if (!ended) worker.postMessage({ type: "pull" }); } });
+        response.statusCode = message.statusCode;
+        response.headers = message.headers;
+        // A reader that stops early (a size limit, a write that failed) ends the request.
+        response.once("close", end);
+        onResponse?.(response);
+        break;
+      case "data": response?.push(Buffer.from(message.chunk.buffer, message.chunk.byteOffset, message.chunk.byteLength)); break;
+      case "end": end(); response?.push(null); break;
+      case "response-error": fail(rebuilt(message.error)); break;
+      case "error": fail(rebuilt(message.error)); break;
+      case "timeout": onTimeout?.(); break;
+      default: break;
+    }
+  });
+  worker.on("error", (error) => fail(error));
+  worker.on("exit", () => fail(Object.assign(new Error("The request worker stopped"), { code: "ECONNRESET" })));
+  request.setTimeout = (ms, callback) => {
+    onTimeout = callback;
+    if (!ended) worker.postMessage({ type: "timeout", ms });
+    return request;
+  };
+  request.destroy = (error) => {
+    if (error) fail(error);
+    else end();
+    return request;
+  };
+  return request;
+}
+
 module.exports = {
   runOffThread, warmProgram, spawnOffThread, resetSpawnWorker, watchOffThread, resetWatchWorker, probeTcpOffThread, connectErrorText,
-  fetchOffThread, resetFetchWorker,
+  fetchOffThread, resetFetchWorker, getOffThread, execFileOffThread,
 };

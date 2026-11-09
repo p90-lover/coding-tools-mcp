@@ -1831,11 +1831,23 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 /* On the pointer: carried along above everything, never in the way of a click. */
 .cx-pet.is-riding { z-index: 60; transition: none; }
 .cx-pet.is-riding .cx-pet-body { pointer-events: none; }
-/* Leaping between split panes, or to and from its house under the chat list: over everything. */
+/* Leaping between split panes, or to and from its house under the chat list: over everything. It
+   arcs over the straight line it flies along (ChatPet's leap moves it; petLeap sets --cx-pet-arc and
+   the duration): rising slower as it nears the top, then falling faster onto the spot. */
 .cx-pet.is-leaping .cx-pet-body { pointer-events: none; }
-/* Split view: one Clawd for all panes, its house in a yard under the chat list (empty otherwise). */
+.cx-pet.is-flying { animation-name: cx-pet-arc; animation-fill-mode: both; }
+/* Napping on its box (split view with no house): z's rise over its head. */
+.cx-pet > .cx-pet-nap-z { top: -18px; left: 46px; }
+/* Split view: one Clawd for all panes, its house in a yard under the chat list (empty otherwise). On
+   the porch in front of the house, or walking between there and the door, it stands in front of the
+   walls; inside, behind them. */
 .cx-pet-yard { position: relative; flex: none; }
 .cx-pet-lot { position: relative; width: 160px; height: 160px; margin: 6px auto 10px; }
+.cx-pet.is-porch { z-index: 4; }
+@keyframes cx-pet-arc {
+  0% { transform: translateY(0); animation-timing-function: cubic-bezier(.33, .66, .66, 1); }
+  50% { transform: translateY(calc(-1 * var(--cx-pet-arc, 60px))); animation-timing-function: cubic-bezier(.33, 0, .66, .33); }
+  100% { transform: translateY(0); } }
 @keyframes cx-pet-z { 0% { transform: translateY(6px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px); opacity: 0; } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @keyframes cx-pet-shadow { from { transform: scale(.4); opacity: .3; } to { transform: scale(1); opacity: 1; } }
@@ -1850,7 +1862,7 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 @media (prefers-reduced-motion: reduce) {
   .cx-pet { transition: none; }
   .cx-pet-drop-shadow, .cx-pet-dust { display: none; }
-  .cx-pet-float, .cx-pet-house-z span, .cx-pet-body.is-landing { animation: none !important; }
+  .cx-pet-float, .cx-pet-house-z span, .cx-pet-body.is-landing, .cx-pet.is-flying { animation: none !important; }
   .cx-pet-house-z span { opacity: 1; } }
 /* The side panel's Overview (ChatWorkbench OverviewPane), as Claude Code's side column. */
 .cx-overview { display: flex; flex-direction: column; gap: 0; padding: 4px 14px 14px; overflow-y: auto; font-size: 12.5px; }

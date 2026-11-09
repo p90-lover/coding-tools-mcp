@@ -435,7 +435,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
         } finally { browserOperation = null; }
       },
       app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
-      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {},
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {}, automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
     vm.runInNewContext(source.slice(start, end), context);
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
@@ -511,7 +511,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
         } finally { browserOperation = null; }
       },
       app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
-      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: value => operations.push(value),
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: value => operations.push(value), automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
     vm.runInNewContext(source.slice(start, end), context);
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);

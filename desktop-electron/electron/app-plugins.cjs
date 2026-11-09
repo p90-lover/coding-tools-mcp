@@ -323,7 +323,8 @@ function createAppPlugins({
     const base = toolBase("antigravity-cli");
     const cli = antigravityCli();
     if (!cli) return { ...base, note: "Starts with Agent Orchestrator." };
-    const current = cli.status();
+    // Read off the main thread where the CLI offers it (its synchronous scan held every window).
+    const current = typeof cli.statusAsync === "function" ? await cli.statusAsync() : cli.status();
     const installed = current.installed ? current.version : null;
     const item = { ...base, installed, updating: base.updating || Boolean(current.installing) };
     const release = await latestRelease(TOOL_SOURCES["antigravity-cli"], force);
@@ -374,7 +375,7 @@ function createAppPlugins({
     if (release.error || release.none) throw new Error(release.error || "No release on GitHub yet");
     const target = antigravityTarget(cli, release);
     if (!target) throw new Error("This release has no build to install here");
-    const from = cli.status().version;
+    const from = (typeof cli.statusAsync === "function" ? await cli.statusAsync() : cli.status()).version;
     const status = await cli.update(target);
     if (status?.version !== target.version) throw new Error(`The Antigravity CLI is still ${status?.version ?? from}`);
     logger.info?.("app-plugins.updated", { plugin: "antigravity-cli", from, to: target.version });

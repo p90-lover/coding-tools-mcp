@@ -156,22 +156,39 @@ test("a slow tail read is shared while in flight and stays fresh three times as 
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
   const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
   const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
-  let reads = 0, delay = 400;
+  // A clock the test sets: with real timers a 1 s sleep ran 400 ms late on a loaded machine (0.8.104's
+  // release build, twice), the read had expired, and the test failed for the machine, not the code.
+  let clock = 1_000_000;
+  class FakeDate extends Date { static now() { return clock; } }
+  let reads = 0, took = 400, land = null;
   const { conversationTail } = vm.runInNewContext(`${timelineBounds(source)}${helpers}${identity}({ conversationTail })`, {
-    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, agentTools: null,
-    internalApi: async () => { reads += 1; await new Promise(resolve => setTimeout(resolve, delay)); return { messages: [], activities: [] }; },
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, agentTools: null, Date: FakeDate,
+    // Each read lands when the test says, `took` ms of clock after it began.
+    internalApi: async () => { reads += 1; await new Promise(resolve => { land = () => { clock += took; resolve(); }; }); return { messages: [], activities: [] }; },
   });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
   const first = conversationTail("slow");
-  await new Promise(resolve => setTimeout(resolve, 300));
-  await Promise.all([first, conversationTail("slow")]);
+  await settle();
+  const second = conversationTail("slow");
+  land();
+  await Promise.all([first, second]);
   assert.equal(reads, 1, "a read still in flight is shared");
-  await new Promise(resolve => setTimeout(resolve, 1000));
+  clock += 1000;
   await conversationTail("slow");
   assert.equal(reads, 1, "a 400 ms read still serves a second after it landed (3 x 400 ms)");
-  delay = 5;
-  await new Promise(resolve => setTimeout(resolve, 300));
-  await conversationTail("slow");
+  clock += 300;
+  took = 5;
+  const third = conversationTail("slow");
+  await settle();
+  land();
+  await third;
   assert.equal(reads, 2, "then it is read again");
+  clock += 950;
+  const fourth = conversationTail("slow");
+  await settle();
+  land();
+  await fourth;
+  assert.equal(reads, 3, "a fast read keeps the usual 900 ms, not three times its time");
 });
 
 test("chat hosts that outlived the app are counted by whether their loopback address still answers", async () => {

@@ -103,6 +103,22 @@ export type PetStage<K> = ReturnType<typeof createPetStage<K>>;
 /** The window's one stage: panes are the split grid's pane elements. */
 export const petStage = createPetStage<HTMLElement>();
 
+/** The yard under the window's chat list, where Clawd's house stands in split view. */
+export const PET_YARD = ".ao-workflow > .cx-threads .cx-pet-yard";
+type PetYardScope = { querySelector: (selector: string) => unknown };
+/**
+ * The yard under the chat list of the page `from` (an element in the pet's chat) is on. Each chat
+ * page keeps its own surface mounted while hidden, chat list and yard included, so looking it up in
+ * the whole document found page 1's hidden one, 0 px wide, from every other page: the house then
+ * stood on the pane's chat box over its last messages instead of under the list, above Settings (the
+ * user, 2026-11-09, on page 2).
+ */
+export function findPetYard<T>(from: { closest: (selector: string) => unknown; ownerDocument: unknown } | null): T | null {
+  if (!from) return null;
+  const scope = (from.closest(".cx-chat-page") ?? from.ownerDocument) as PetYardScope | null;
+  return (scope?.querySelector(PET_YARD) as T | null) ?? null;
+}
+
 /** A box on the screen (client px), as getBoundingClientRect gives one. */
 export type PetRect = { left: number; top: number; right: number; bottom: number };
 

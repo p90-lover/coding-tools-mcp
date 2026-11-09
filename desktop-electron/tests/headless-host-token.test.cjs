@@ -73,27 +73,32 @@ test("startup resolves a junction profile before passing private paths to the se
   } finally { await host.shutdown("junction-test"); }
 });
 
-test("the service's program is warmed off the main thread before it is started", async (t) => {
-  // 2026-10-31: spawning it cold held every window 1.85 s while Windows loaded and scanned it.
+test("the service starts from a worker thread, which owns its pipes and passes its exit back", async (t) => {
+  // spawn() holds the calling thread while Windows loads and scans the program: 1.85 s cold
+  // (2026-10-31) and 9.4 s on 0.8.104's first start with the hard disk busy (2026-11-09), even
+  // after the warm-up run that used to precede it.
   const { base, binaryRoot } = startupFixture(t, FAKE_SERVICE);
   const profile = path.join(base, "profile");
   const logger = { info() {}, warn() {}, error() {} };
-  const warmed = [];
-  const { warmProgram } = require("../electron/off-thread-run.cjs");
+  const started = [];
+  const { spawnOffThread } = require("../electron/off-thread-run.cjs");
   const host = new HeadlessHost({ app: { getPath: () => profile, isPackaged: false }, logger, sourceRoot: base, binaryRoot,
-    warm: async (file, args) => {
-      const tokens = path.join(profile, "headless", "aiTemp", "headless-control");
-      warmed.push({ file, args, started: Boolean(host.child), tokens: fs.existsSync(tokens) ? fs.readdirSync(tokens).length : 0 });
-      await warmProgram(file, args);
+    spawnProcess: async (file, args, options) => {
+      started.push({ file, args, stdio: options.stdio });
+      return spawnOffThread(file, args, options);
     } });
   try {
     await host.ensureStarted();
-    assert.equal(warmed.length, 1, "warmed once");
-    assert.equal(path.dirname(warmed[0].file), path.join(binaryRoot, "coding-tools"));
-    assert.deepEqual({ ...warmed[0], file: undefined }, { file: undefined, args: ["--version"], started: false, tokens: 0 },
-      "with an argument it exits on, before the service or its token exists");
-    assert.equal((await host.request("/api/v1/anything")).ok, true, "the service then starts as before");
-  } finally { await host.shutdown("warm-test"); }
+    assert.equal(started.length, 1, "started once, through the worker");
+    assert.equal(path.dirname(started[0].file), path.join(binaryRoot, "coding-tools"));
+    assert.deepEqual(started[0].args, ["serve"]);
+    assert.deepEqual(started[0].stdio, ["pipe", "ignore", "pipe"], "the UI token still goes in on stdin, startup errors come out on stderr");
+    assert.ok(Number.isInteger(host.child.pid), "the worker reports the service's pid");
+    assert.equal((await host.request("/api/v1/anything")).ok, true, "the service answers as before");
+    const exited = new Promise((resolve) => host.child.once("exit", resolve));
+    await host.shutdown("worker-test");
+    await exited;
+  } finally { await host.shutdown("worker-test"); }
 });
 
 test("a failed startup reports bounded sanitized stderr without exposing control credentials", async (t) => {

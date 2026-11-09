@@ -780,7 +780,8 @@ export interface DoctorReport {
 
 export interface OperationState {
   name: string;
-  status: "running" | "completed" | "failed";
+  /** `cancelled`: it gave way (an automatic MCP setup an account switch interrupted) and runs again later. */
+  status: "running" | "completed" | "failed" | "cancelled";
   message: string;
 }
 
@@ -907,6 +908,8 @@ export interface BrowserAccountsStatus {
   maxTabsPerAccount: number;
   settings: BrowserAccountsSettings;
   switching: boolean;
+  /** The account a switch in progress shows (the pickers show it at once), else null. */
+  switchingTo?: string | null;
 }
 
 /**
