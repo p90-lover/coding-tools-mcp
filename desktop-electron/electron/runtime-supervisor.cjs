@@ -868,14 +868,19 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
-    // The write is flushed to disk on the main thread, which held every window 0.4-1.5 s on the hard
-    // disk each time the watchdog re-checked a bridge that needs setup (every 20-40 min, 2026-11-08).
-    // Nothing in it had changed, so the same state this process last wrote is kept. It is forgotten
+    // The write runs on the main thread, which held every window 0.4-1.5 s on the hard disk each time
+    // the watchdog re-checked a bridge that needs setup (every 20-40 min, 2026-11-08). Nothing in it
+    // had changed, so the same state this process last wrote is kept. It is forgotten
     // when the file is cleared or set aside (clearState) and when a read finds other content in it
     // (another launcher's), so those are written again; no extra disk call checks the file here.
     const key = stateKey(state);
     if (key === this.writtenStateKey && this.writtenState) return this.writtenState;
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
+    // Not flushed to disk: the flush held every window 1.1-2.5 s three times in 0.8.104's first
+    // minute (2026-11-09). Only a power cut or crash of Windows loses an unflushed write, and that
+    // ends every process the marker names; whatever it then holds is discarded at the next start
+    // (from before this boot), and a torn one is set aside (readState). It stays synchronous so a
+    // read right after a write, here or by the next launcher, sees it.
+    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
     this.writtenStateKey = key;
     this.writtenState = state;
     return state;

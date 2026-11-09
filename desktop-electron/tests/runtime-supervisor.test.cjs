@@ -2548,9 +2548,12 @@ test("an unreadable marker is set aside only when it was written before this boo
   }
 });
 
-test("the ownership marker is flushed to disk before it replaces the old one", () => {
+test("the ownership marker is written without a flush; only flushed writes pay for one", () => {
+  // The flush held every window up to 2.5 s; a marker a power cut tears is set aside at the next
+  // start instead (the torn and before-boot tests above), as every process it names died with it.
   const source = fs.readFileSync(path.join(__dirname, "..", "electron", "runtime-supervisor.cjs"), "utf8");
-  assert.match(source, /writePrivateFileAtomic\(this\.statePath, [^\n]*\{ durable: true \}\)/);
+  assert.match(source, /writePrivateFileAtomic\(this\.statePath, `\$\{JSON\.stringify\(state, null, 2\)\}\\n`\);/);
+  assert.doesNotMatch(source, /writePrivateFileAtomic\(this\.statePath, [^\n]*durable/);
   const { writePrivateFileAtomic } = require("../electron/atomic-file.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-durable-write-"));
   const synced = [];
