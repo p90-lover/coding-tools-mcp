@@ -297,6 +297,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   checkForUpdates: () => ipcRenderer.invoke("launcher:update-check"),
   setAutomaticUpdates: (enabled) => ipcRenderer.invoke("launcher:update-automatic", enabled),
   updateSettings: (patch) => ipcRenderer.invoke("launcher:update-settings", patch ?? null),
+  rendererAccessibility: (mode) => ipcRenderer.invoke("launcher:renderer-accessibility", mode ?? null),
   installUpdate: () => ipcRenderer.invoke("launcher:update-install"),
   windowState: () => ipcRenderer.invoke("launcher:window-state"),
   windowControl: (action) => ipcRenderer.send("launcher:window-control", action),

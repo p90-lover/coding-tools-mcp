@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { ComputerAllowedApp, JsonObject } from "../api/contracts";
 import { getCodingToolsClient } from "../api/client";
-import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
+import type { LauncherState, RendererAccessibilityMode, RendererAccessibilityStatus, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
 import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
@@ -197,6 +197,19 @@ function updateStatusText(update: UpdateState | null) {
   }
 }
 
+/** Settings → General → Accessibility: what screen reader support does in this run. */
+function accessibilityStatusText(status: RendererAccessibilityStatus | null) {
+  if (!status) return "Lets screen readers read Coding Tools";
+  if (status.restartNeeded) return "Takes effect when Coding Tools restarts";
+  if (status.mode === "off") return "Off, even for a screen reader";
+  if (status.mode === "on") return status.active
+    ? "On for every app that reads the screen. Big chats can be slower"
+    : "On when a screen reader or another app that reads the screen asks. Big chats can be slower";
+  return status.active
+    ? "On while a screen reader runs"
+    : "Turns on when a screen reader starts. Other apps that read the screen can't turn it on and slow big chats";
+}
+
 function Toggle({ checked, label, disabled, onChange }: { checked: boolean; label: string; disabled?: boolean; onChange: (next: boolean) => void }) {
   return <button type="button" role="switch" aria-checked={checked} aria-label={label} disabled={disabled}
     className={checked ? "cxs-toggle is-on" : "cxs-toggle"} onClick={() => onChange(!checked)}>
@@ -237,6 +250,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
   const [section, setSection] = useState<Section>("general");
   const [state, setState] = useState<LauncherState | null>(null);
   const [updates, setUpdates] = useState<UpdateSettings | null>(null);
+  const [access, setAccess] = useState<RendererAccessibilityStatus | null>(null);
   const [update, setUpdate] = useState<UpdateState | null>(null);
   const [error, setError] = useState("");
   const [chat, setChat] = useState<ChatPreferences | null>(null);
@@ -250,6 +264,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
     let live = true;
     void api?.snapshot().then((snapshot) => { if (live) setState(snapshot.state); }, () => undefined);
     void api?.updateSettings?.().then((settings) => { if (live) setUpdates(settings); }, () => undefined);
+    void api?.rendererAccessibility?.().then((status) => { if (live) setAccess(status); }, () => undefined);
     const offState = api?.onStateChanged((next) => setState(next));
     const offUpdate = api?.onUpdateState((next) => setUpdate(next));
     return () => { live = false; offState?.(); offUpdate?.(); };
@@ -336,7 +351,17 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                   onChange={(next) => run(api?.setPreference("keepRunningOnClose", next).then(setState))} />
               </Row>
             </Group>
-          </div> : section === "chat" ? <div className="cxs-sections">
+            <Group title="Accessibility">
+              <Row label="Screen reader support" description={accessibilityStatusText(access)}>
+                <select className="cxs-select" aria-label="Screen reader support" value={access?.mode ?? "auto"} disabled={!access}
+                  onChange={(event) => run(api?.rendererAccessibility?.(event.target.value as RendererAccessibilityMode).then(setAccess))}>
+                  <option value="auto">Automatic</option>
+                  <option value="on">Always on</option>
+                  <option value="off">Off</option>
+                </select>
+              </Row>
+            </Group>
+          </div> : section === "chat" ?<div className="cxs-sections">
             <Group title="Chat list">
               <Row label="Chats shown per project" description="The rest stay under Show more. Chats open in split view always show">
                 <select className="cxs-select" aria-label="Chats shown per project" value={list.visible}

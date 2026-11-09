@@ -144,6 +144,8 @@ function normalizeState(parsed) {
     // An agent's tool request answered in the chat is confirmed again in a dialog unless this is
     // false (the dialog's "Don't ask again"); absent means it asks.
     if (Object.hasOwn(state, "confirmAgentToolRequests") && state.confirmAgentToolRequests !== false) delete state.confirmAgentToolRequests;
+    // Renderer accessibility (renderer-accessibility.cjs): absent means "auto".
+    if (Object.hasOwn(state, "rendererAccessibility") && !["auto", "on", "off"].includes(state.rendererAccessibility)) delete state.rendererAccessibility;
     for (const key of Object.keys(UPDATE_SETTINGS)) {
       if (Object.hasOwn(state, key) && !validUpdateSetting(key, state[key])) delete state[key];
     }

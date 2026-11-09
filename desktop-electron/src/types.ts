@@ -656,6 +656,8 @@ export interface LauncherState {
   confirmAgentToolRequests?: boolean;
   /** Runtime > RTK: agents' commands go through the installed rtk unless false. */
   rtkEnabled?: boolean;
+  /** Settings → General → Accessibility; absent means "auto". */
+  rendererAccessibility?: RendererAccessibilityMode;
   browserInteractionMode: BrowserInteractionMode;
   experimentalBiggerContext: boolean;
   /** Task chats are saved in ChatGPT history (default); false uses Temporary Chat. */
@@ -801,6 +803,19 @@ export type UpdateSettingLimit =
 export interface UpdateSettings {
   values: UpdateSettingValues;
   limits: Record<keyof UpdateSettingValues, UpdateSettingLimit>;
+}
+
+/** Settings → General → Accessibility (electron/renderer-accessibility.cjs). */
+export type RendererAccessibilityMode = "auto" | "on" | "off";
+
+export interface RendererAccessibilityStatus {
+  mode: RendererAccessibilityMode;
+  /** Chromium's accessibility tree is on in this run. */
+  active: boolean;
+  /** Windows' screen reader flag at the last check; null before one or when it could not be read. */
+  screenReader: boolean | null;
+  /** This run started without the switch, so turning it off waits for a restart. */
+  restartNeeded: boolean;
 }
 
 export type UpdateState =
@@ -1314,6 +1329,8 @@ export interface LauncherApi {
   setAutomaticUpdates(enabled: boolean): Promise<LauncherState>;
   /** Settings → Updates: reads them, or changes the given ones (main checks every value). */
   updateSettings(patch?: Partial<UpdateSettingValues> | null): Promise<UpdateSettings>;
+  /** Settings → General → Accessibility: reads it, or saves a mode and applies what this run can. */
+  rendererAccessibility(mode?: RendererAccessibilityMode | null): Promise<RendererAccessibilityStatus | null>;
   installUpdate(): Promise<boolean>;
   windowState(): Promise<{ fullScreen: boolean; maximized: boolean }>;
   windowControl(action: "close" | "minimize" | "zoom"): void;

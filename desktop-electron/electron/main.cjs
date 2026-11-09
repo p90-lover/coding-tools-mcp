@@ -125,6 +125,11 @@ const {
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
 const { createMainStallMonitor, createMainStallProbe } = require("./main-stall-monitor.cjs");
 const { createDiskHealthMonitor } = require("./disk-health.cjs");
+const {
+  MODES: RENDERER_ACCESSIBILITY_MODES,
+  applyLaunchSwitch: applyRendererAccessibilitySwitch,
+  createRendererAccessibility,
+} = require("./renderer-accessibility.cjs");
 const { createMemoryWatch } = require("./memory-watch.cjs");
 const { createRuntimeStartupRetry } = require("./runtime-startup-retry.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
@@ -313,6 +318,10 @@ function dispatchMcpConnectorCommand() {
   void mcpConnectorCommand.request(action, "command").catch(() => undefined);
 }
 let updateController = null;
+// Renderer accessibility (renderer-accessibility.cjs): how this run started, and what turns it on
+// for a screen reader and follows Settings.
+let rendererAccessibilityLaunch = { mode: "auto", blocked: false };
+let rendererAccessibility = null;
 let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
 let rendererLoaded = false;
@@ -1808,6 +1817,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     },
   });
   window.setMenuBarVisibility(false);
+  rendererAccessibility?.watchWindow(window);
   installCpaPanelSession({
     webContents: window.webContents,
     webFrameMain,
@@ -4151,6 +4161,16 @@ function registerIpc({ logger, stateStore }) {
     }
     return { values: resolveUpdateSettings(stateStore.read()), limits: UPDATE_SETTINGS };
   });
+  // Settings → General → Accessibility: no mode reads it; a mode saves it, and this run does what it
+  // can at once (turning it off after a start without the switch waits for a restart).
+  handle("launcher:renderer-accessibility", async (_event, mode) => {
+    if (mode !== undefined && mode !== null) {
+      if (!RENDERER_ACCESSIBILITY_MODES.includes(mode)) throw new Error("Accessibility must be auto, on or off");
+      send("launcher:state-changed", stateStore.update({ rendererAccessibility: mode }));
+      return rendererAccessibility ? rendererAccessibility.apply() : null;
+    }
+    return rendererAccessibility ? rendererAccessibility.status() : null;
+  });
   handle("launcher:update-automatic", async (_event, enabled) => {
     const state = stateStore.update({ automaticUpdates: enabled === true });
     send("launcher:state-changed", state);
@@ -4369,6 +4389,11 @@ async function start() {
   }
   // Keep shader caches off before Chromium starts, including while runtime files are prepared.
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+  // Renderer accessibility stays off unless a screen reader runs or Settings turns it on: any UI
+  // Automation client otherwise turns it on for good, and every chat DOM change then costs main
+  // seconds (renderer-accessibility.cjs). Decided here, before the first await, while Chromium
+  // still reads its switches.
+  rendererAccessibilityLaunch = applyRendererAccessibilitySwitch(app, path.join(app.getPath("userData"), "launcher-state.json"));
   app.on("second-instance", (_event, argv) => {
     const commandAction = mcpConnectorCommandAction(argv);
     if (commandAction) {
@@ -4504,6 +4529,10 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  rendererAccessibility = createRendererAccessibility({
+    app, launch: rendererAccessibilityLaunch, logger, readMode: () => stateStore.read().rendererAccessibility,
+  });
+  rendererAccessibility.start();
   const droppedAgentEnv = droppedAgentSessionEnvironment();
   if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
   // When something other than the user started this app, why: a relaunch guard after a keep-bridge
