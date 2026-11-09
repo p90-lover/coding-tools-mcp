@@ -4957,7 +4957,7 @@ async function start() {
           let proxy;
           try { proxy = { configured: Boolean(antigravityProxyEnvironment().HTTPS_PROXY) }; }
           catch (error) { proxy = { configured: false, error: String(error?.message || error).slice(0, 200) }; }
-          return { ...antigravityCli.status(), proxy, cpa: await antigravityReauth.status() };
+          return { ...(await antigravityCli.statusAsync()), proxy, cpa: await antigravityReauth.status() };
         }
         case "install": return antigravityCli.install();
         case "terminal_open": {

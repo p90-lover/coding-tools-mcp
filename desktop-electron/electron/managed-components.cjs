@@ -600,6 +600,13 @@ function createManagedComponentController({
     return record?.schemaVersion === 1 ? record : null;
   }
 
+  /** readUpdateRecord off the main thread, for the periodic update check: its synchronous read held
+   * every window 362 ms on the busy disk (Activity, 2026-11-09 06:11:36Z, cpa.update.json). */
+  async function readUpdateRecordAsync(id) {
+    const record = await fs.promises.readFile(updateRecordPath(id), "utf8").then(JSON.parse, () => null).catch(() => null);
+    return record?.schemaVersion === 1 ? record : null;
+  }
+
   /** The manifest of a recorded update newer than this build's bundled version, or null. */
   function recordedManifest(id, entry, record) {
     const base = bundledManifests.get(id);
@@ -1736,7 +1743,7 @@ function createManagedComponentController({
     let result;
     try {
       const { tag, version } = await latestRelease(base);
-      const rejected = readUpdateRecord(id)?.rejected || [];
+      const rejected = (await readUpdateRecordAsync(id))?.rejected || [];
       result = {
         id,
         current,
