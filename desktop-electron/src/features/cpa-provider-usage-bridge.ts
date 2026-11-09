@@ -1,6 +1,6 @@
 import type { CpaUsage, CpaUsageRange } from "./cpa-usage";
 
-const RANGES = new Set<CpaUsageRange>(["5h", "24h", "7d", "30d", "all"]);
+const RANGES = new Set<CpaUsageRange>(["5h", "24h", "7d", "30d", "all", "session", "week"]);
 
 // Explicit projection: auth IDs, quota errors and future backend fields never cross the frame boundary.
 function publicQuota(quota: NonNullable<CpaUsage["accounts"]>[number]["quota"]) {
@@ -25,7 +25,8 @@ function publicUsage(usage: CpaUsage | null) {
   return { available: true, range: usage.range, from: usage.from, refreshedAt: usage.refreshedAt,
     totals: usage.totals ? counts(usage.totals) : null,
     accounts: (usage.accounts ?? []).map((a) => ({ ...counts(a), label: a.label, file: a.file, provider: a.provider,
-      disabled: a.disabled, quota: publicQuota(a.quota),
+      disabled: a.disabled, quota: publicQuota(a.quota), usageAvailable: a.usageAvailable,
+      window: a.window ? { from: a.window.from, to: a.window.to } : null,
       models: a.models.map((m) => ({ ...counts(m), model: m.model, provider: m.provider })) })) };
 }
 

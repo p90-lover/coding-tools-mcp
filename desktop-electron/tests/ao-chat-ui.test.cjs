@@ -278,6 +278,41 @@ test("a chat on a mission draws its thoughts and steps expanded, for every model
   assert.doesNotMatch(render(off, "cpa/deepseek-v4.1-flash"), /data-open="true"|dsh-think-body/);
 });
 
+test("a long turn on a mission draws its newest steps under Show earlier steps, in both transcripts", () => {
+  assert.equal(chat.WORK_WINDOW, 40);
+  assert.equal(chat.workWindowStart([1, 1, 1]), 0, "a short list draws whole");
+  assert.equal(chat.workWindowStart(Array(100).fill(1)), 60, "a long one its newest 40");
+  assert.equal(chat.workWindowStart([1, 50]), 1, "an open group past the budget still draws (it windows itself)");
+  assert.equal(chat.workWindowStart([50]), 0);
+  assert.equal(chat.workWindowStart([10, 10, 10, 10, 10]), 1);
+  assert.equal(chat.workGroupRows(Array(90).fill({}), true), 41, "an open group: its head and newest 40");
+  assert.equal(chat.workGroupRows(Array(90).fill({}), false), 1, "a folded one: its head");
+  const command = (n, status = "completed") => ({ id: `c${n}`, kind: "command", status, text: `run-${n}-end` });
+  // 300 steps: nine commands, then a message, thirty times; and one group of 100 commands.
+  const mixed = Array.from({ length: 300 }, (_, i) => (i + 1) % 10 ? command(i + 1) : { id: `m${i + 1}`, kind: "message", status: "completed", text: `Note ${i + 1}.` });
+  const oneGroup = Array.from({ length: 100 }, (_, i) => command(i + 1, i === 99 ? "running" : "completed"));
+  const props = (model, timeline) => ({ runs: [{ id: `long:${model}`, project_id: "task", execution_mode: "single", nodes: [
+    { id: "lead", role: "planner", state: "running", route: { harness_id: "ao:codex", model } }] }],
+  tasks: [{ id: "task", title: "Task", description: "Do the long job" }], selectedTaskId: "task", busy: false, approvals: [],
+  activity: { [`long:${model}:lead`]: { started_at_ms: Date.now(), timeline } },
+  loadDescription: async () => "", send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {} });
+  const drawn = (html) => new Set((html.match(/run-\d+-end/g) ?? []));
+  for (const model of ["cpa/gpt-6.1-sol", "cpa/deepseek-v4.1-flash"]) {
+    const html = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props(model, mixed)));
+    const shown = drawn(html);
+    assert.ok(shown.has("run-299-end"), `${model}: the newest step is drawn`);
+    assert.ok(!shown.has("run-1-end"), `${model}: the oldest is not`);
+    assert.ok(shown.size <= 40, `${model}: ${shown.size} commands drawn`);
+    const hidden = Number(/Show earlier steps · (\d+) not shown/.exec(html)?.[1]);
+    assert.ok(hidden > 250, `${model}: the control counts the steps left out (${hidden})`);
+    // One group of 100: its newest 40 rows, its own control above them.
+    const group = renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, props(model, oneGroup)));
+    assert.equal(drawn(group).size, 40, model);
+    assert.ok(drawn(group).has("run-100-end") && drawn(group).has("run-61-end") && !drawn(group).has("run-60-end"), model);
+    assert.match(group, /Show earlier steps · 60 not shown/, model);
+  }
+});
+
 test("a reply's head says who answered, how it stands, why it failed, a team's cards and the files it changed", () => {
   const head = load("ChatReplyHead.tsx", { "./ao-chat": chat, "./HarnessLogo": { ModelLogo: () => null }, "./ChatChangedFiles": load("ChatChangedFiles.tsx"), "./ChatTurnStats": { useTurnRequests: () => ({ ref: { current: null }, summary: "" }) } });
   const edit = (path, additions, deletions) => ({ id: `${path}${additions}`, kind: "edit", status: "completed", text: "", files: [{ path, additions, deletions }] });

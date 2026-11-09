@@ -16,6 +16,7 @@ import { Icon, type IconName } from "./icons";
 import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
+import { ActionTimesPanel, useTabRenderTiming } from "./features/ActionTimesPanel";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { bindSidebarPeek } from "./sidebar-peek";
 import { ChromeLoginNotice, chromeLoginPending, chromeLoginContinuationPending, chromeLoginWaitingForClose } from "./ChromeLoginNotice";
@@ -456,6 +457,14 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
+  // Activity > Action time: when the tab being drawn was chosen, so its render time runs from the
+  // click to the painted frame (the first tab's, from the app's first render).
+  const tabSwitchStartedAt = useRef(performance.now());
+  const showSurface = (next: Surface) => {
+    tabSwitchStartedAt.current = performance.now();
+    setSurface(next);
+  };
+  useTabRenderTiming(api, surface, tabSwitchStartedAt);
   // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
   // them. The MCP wizard is left out: it seeds its step from how it was opened.
   const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
@@ -547,7 +556,7 @@ function LauncherShell({
 
   useEffect(() => {
     if (!selectedManualTab) return;
-    setSurface("browser");
+    showSurface("browser");
     // Only the compact sidebar covers the browser; the docked one stays as the user left it.
     if (window.matchMedia(COMPACT_SIDEBAR_QUERY).matches) setSidebarOpen(false);
     setBiggerContextRecommendationOpen(false);
@@ -639,7 +648,7 @@ function LauncherShell({
   }, [browser?.authenticated, snapshot.state.sessionRefreshReminderAt]);
 
   const activateBrowser = useCallback(async (show = false) => {
-    setSurface("browser");
+    showSurface("browser");
     await api!.setBrowserSurfaceActive(true);
     if (show) await api!.showBrowser();
   }, []);
@@ -726,7 +735,7 @@ function LauncherShell({
     if (next !== "browser") {
       void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
     }
-    setSurface(next === "api-models" ? "providers" : next);
+    showSurface(next === "api-models" ? "providers" : next);
     if (compactSidebar) setSidebarOpen(false);
     closeSidebarPeek();
   };
@@ -2164,6 +2173,7 @@ function ActivitySurface({
   const logs = useLogs();
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
+      <ActionTimesPanel api={api!} copy={copy} setError={setError} />
       <div className="section-heading activity-heading">
         <span>{copy.recentActivity}</span>
         <SecondaryButton
@@ -2615,12 +2625,18 @@ function RtkSurface({ active, enabled, setError, updateState }: {
     }
   };
   const found = status?.installed ? `rtk ${status.version} · ${status.path}` : autoInstalling ? "Installing…" : status ? "Not installed" : "Checking…";
+  const on = enabled && Boolean(status?.installed);
+  // `rtk hook codex` is in rtk 1.0.1 and later, `rtk hook opencode` in 0.52.0 and later (rtk.cjs
+  // CODEX_HOOK_VERSION, OPENCODE_HOOK_VERSION).
+  const [major = 0, minor = 0, patch = 0] = (status?.version ?? "").split(".").map(Number);
+  const codexHookVersion = major !== 1 ? major > 1 : minor !== 0 ? minor > 0 : patch >= 1;
+  const opencodeHookVersion = major > 0 || minor >= 52;
   return (
     <ContentSurface narrow title="RTK" subtitle="Shortens the output of agents' shell commands, so the model reads less: git, ls, cat, grep, tests and 100+ more. From github.com/rtk-ai/rtk.">
       <SectionHeading label="Agents" />
       <div className="settings-list">
         <SettingRow body={status?.installed
-          ? "Every command a chat agent runs in Coding Tools' terminal goes through rtk first. Claude Code's own Bash tool gets rtk's hook in new sessions after the app restarts. Your agent settings don't change."
+          ? "Every command a chat agent runs in Coding Tools' terminal goes through rtk first. Claude Code's Bash tool, Codex's own shell and OpenCode's bash tool get rtk's hook in new chats after the app restarts. Your agent settings don't change."
           : "The app installs rtk with winget when it starts. Until then, commands run as written."}
           label="Use RTK for agents' commands">
           <Switch checked={enabled} disabled={!status?.installed}
@@ -2636,9 +2652,15 @@ function RtkSurface({ active, enabled, setError, updateState }: {
       </div>
       <SectionHeading label="Covered" />
       <div className="settings-list">
-        <SettingRow body="exec_command from Claude Code, Codex, OpenCode, Antigravity and others is rewritten before review, so you approve the command that runs. Approve for me judges the command rtk wraps." label="Coding Tools terminal tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
-        <SettingRow body="Adds rtk's PreToolUse hook, rtk hook claude, to each Claude Code session's settings, so its Bash tool output is compacted too." label="Claude Code Bash tool"><span className="rtk-chip">{enabled && status?.installed ? "on" : "off"}</span></SettingRow>
-        <SettingRow body="Their own shells aren't hooked yet. Their commands through Coding Tools' terminal are." flushAfter label="Built-in shells of Codex, OpenCode and others"><span className="rtk-chip">terminal only</span></SettingRow>
+        <SettingRow body="exec_command from Claude Code, Codex, OpenCode, Antigravity and others is rewritten before review, so you approve the command that runs. Approve for me judges the command rtk wraps." label="Coding Tools terminal tool"><span className="rtk-chip">{on ? "on" : "off"}</span></SettingRow>
+        <SettingRow body="Adds rtk's PreToolUse hook, rtk hook claude, to each Claude Code session's settings, so its Bash tool output is compacted too. Antigravity chats run on Claude Code and get it as well." label="Claude Code Bash tool"><span className="rtk-chip">{on ? "on" : "off"}</span></SettingRow>
+        <SettingRow body={on && !codexHookVersion ? "Needs rtk 1.0.1 or later for rtk hook codex. Update rtk in App plugins."
+          : "Adds rtk's PreToolUse hook, rtk hook codex, to each Codex chat's own launch, trusted for that chat only, so the commands Codex runs itself are compacted too."}
+          label="Codex shell"><span className="rtk-chip">{on && codexHookVersion ? "on" : "off"}</span></SettingRow>
+        <SettingRow body={on && !opencodeHookVersion ? "Needs rtk 0.52.0 or later for rtk hook opencode. Update rtk in App plugins."
+          : "Adds a plugin that asks rtk hook opencode about each command to each OpenCode chat's own config, so the commands OpenCode runs itself are compacted too. Your OpenCode config and plugins stay as they are."}
+          label="OpenCode bash tool"><span className="rtk-chip">{on && opencodeHookVersion ? "on" : "off"}</span></SettingRow>
+        <SettingRow body="OpenCode 2, Pi, Cline and other agents' own shells aren't hooked yet. Their commands through Coding Tools' terminal are." flushAfter label="Built-in shells of other agents"><span className="rtk-chip">terminal only</span></SettingRow>
       </div>
       <SectionHeading label="Savings" />
       {gain?.available && gain.text ? <pre className="rtk-gain">{gain.text}</pre>

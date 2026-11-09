@@ -7444,6 +7444,59 @@ test("Settings › Instructions start a new agent's first message, within AO's 1
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
 
+test("a follow-up brings its chat's agent back while the card is reserved, not after", async () => {
+  // Seen live 2026-11-09: the reservation and the launch settings took 1-18 s, and only then did a
+  // released agent begin to resume, so the two waits added up on every follow-up.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map();
+  const spawned = [], sent = [], order = [];
+  let checkBegan = null;
+  const checking = new Promise(resolve => { checkBegan = resolve; });
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") {
+      order.push("reserve asked");
+      // The reservation answers once the agent check is under way, or after a while without it.
+      await Promise.race([checking, new Promise(resolve => setTimeout(resolve, 300))]);
+      order.push("reserve answered");
+      latest.nodes[0].state = "reserved";
+      return { ok: true, request_key: "key-1", prompt: "first ask\n\nFollow-up: now run the tests" };
+    }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return "new-session"; },
+      continuable: async id => { order.push(`check ${id}`); checkBegan(); return id === "sess-1"; },
+      send: async (id, text, key) => { sent.push([id, text, key]); return { turnId: "turn-2", state: "running" }; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "tests pass" }),
+    },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now run the tests", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && !sent.length && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.ok(order.indexOf("check sess-1") >= 0 && order.indexOf("check sess-1") < order.indexOf("reserve answered"),
+    `the agent check began before the reservation answered: ${order.join(", ")}`);
+  assert.equal(order.filter(entry => entry === "check sess-1").length, 1, "one check, shared by the launch");
+  assert.equal(spawned.length, 0, "no new session");
+  assert.deepEqual(JSON.parse(JSON.stringify(sent)), [["sess-1", "now run the tests", "key-1"]], "the chat's own agent took the message");
+});
+
 test("activity follows a continued chat's in-memory turn binding before its receipt has a turn ID", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };

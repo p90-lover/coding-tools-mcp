@@ -148,6 +148,8 @@
 .cx-show-more:hover { background: var(--cc-hover); color: var(--cc-text-2); }
 .cx-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 28px; margin: 8px 0 0; padding: 0 2px 0 10px; }
 .cx-group-head h3 { margin: 0; color: var(--cc-muted); font-size: 12px; line-height: 16px; font-weight: 400; }
+/* A heading's buttons sit together at its right (Projects: + then the list settings). */
+.cx-group-actions { display: inline-flex; align-items: center; gap: 2px; }
 /* A section header's ghost icon button (24 px). */
 .cx-list-settings { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: 0;
   border-radius: 6px; background: transparent; color: var(--cc-muted); cursor: pointer; }
@@ -470,7 +472,10 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   background: transparent; color: var(--ao-muted); cursor: pointer; }
 .cx-chip-icon:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-empty p { margin: 0; color: var(--ao-muted); font-size: 13px; }
-.cx-turn { display: flex; flex-direction: column; gap: 10px; }
+.cx-turn { display: flex; flex-direction: column; gap: 10px; contain-intrinsic-size: auto 600px; }
+/* A turn far out of its thread's view (useFarTurns) is not drawn; it keeps the size it last drew at
+   (contain-intrinsic-size: auto), so the thread's height and scroll position stay where they were. */
+.cx-turn[data-far] { content-visibility: auto; }
 .cx-user { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 /* A secret a chat agent hid in the person's message (redact_message): a blurred stand-in on a faint
    chip, never selectable; its tooltip (data-tip) names what was there. */
@@ -1178,6 +1183,8 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-round-fold { display: block; width: 100%; margin: 4px 0 12px; padding: 6px 10px; border: 1px dashed var(--ao-line); border-radius: 8px; background: transparent;
   color: var(--ao-muted); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
 .cx-round-fold:hover { background: var(--cx-hover); color: var(--color-text-primary); }
+/* "Show earlier steps" above a long list of work's newest rows (WORK_WINDOW): a row's height, not a turn's. */
+.cx-round-fold.cx-work-earlier { flex: none; margin: 0 0 2px; padding: 3px 10px; }
 .cx-verdict { padding: 1px 7px; border-radius: 9px; background: var(--cx-hover); font-size: 11px; font-weight: 600; }
 .cx-verdict.is-approved { color: var(--ao-green); }
 .cx-verdict.is-changes_required { color: var(--ao-amber); }

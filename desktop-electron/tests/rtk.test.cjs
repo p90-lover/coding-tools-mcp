@@ -77,7 +77,7 @@ test("a command runs as rtk's rewrite on exit 0 or 3, and as written otherwise",
 test("turned off, nothing is rewritten and Claude Code gets no hook", async () => {
   const { rtk, calls } = world({ enabled: false, rewrites: { "git status": [0, "rtk git status"] } });
   assert.equal(await rtk.rewrite("git status"), null);
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "" }, "an empty hook turns it off in AO");
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" }, "an empty hook turns it off in AO");
   assert.equal(rtk.binDir(), "");
   assert.ok(!calls.some((call) => call[1] === "rewrite"), "rtk is not even asked");
 });
@@ -98,8 +98,23 @@ test("turned off while rtk is rewriting, the command runs as written", async () 
 
 test("on, Claude Code's hook and the agents' PATH point at the installed rtk", () => {
   const { rtk } = world();
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude`, RTK_SUPPRESS_HOOK_WARNING: "1" });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude`, CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
+});
+
+test("Codex's hook names rtk bare, the PATH's first rtk, and only an rtk with `hook codex` gets it", () => {
+  // Codex runs a hook with the turn's shell, PowerShell on Windows, where `"C:\...\rtk.exe" hook codex`
+  // is a syntax error: every hook run exited 1 and nothing was rewritten (codex 0.164.0, 2026-11-09).
+  // Named bare, it is the rtk at the front of the agents' PATH, the same one `rtk git status` then runs.
+  for (const [version, hook] of [["rtk 1.2.0", "rtk hook codex"], ["rtk 1.0.1", "rtk hook codex"], ["rtk 1.0.0", ""], ["rtk 0.50.0", ""]]) {
+    const { rtk } = world({ version });
+    assert.equal(rtk.codexHook(), hook, version);
+    assert.equal(rtk.daemonEnvironment().CODING_TOOLS_RTK_CODEX_HOOK, hook, version);
+    assert.equal(rtk.daemonEnvironment().CODING_TOOLS_RTK_CLAUDE_HOOK, `"${RTK}" hook claude`, `${version}: Claude's hook doesn't depend on it`);
+    assert.equal(rtk.binDir(), path.dirname(RTK), `${version}: rtk's folder still leads the agents' PATH`);
+  }
+  assert.equal(world({ enabled: false }).rtk.codexHook(), "", "off");
+  assert.equal(world({ files: [] }).rtk.codexHook(), "", "missing");
 });
 
 test("rtk never tells an agent or the RTK page \"No hook installed\" while the app hooks each session", async () => {
@@ -174,7 +189,7 @@ test("AO's timed-out first RTK lookup stays asynchronous for its hook and PATH",
     t.mock.timers.tick(15_000);
     await waiting;
     assert.equal(asyncLookups, 1, "the worker lookup is still pending after readiness expires");
-    assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "" });
+    assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" });
     assert.equal(rtk.binDir(), "");
     assert.equal(syncLookups, 0, "the environment does not restart that lookup on the caller");
     assert.equal(asyncLookups, 1, "the readers leave the existing lookup running");
@@ -182,7 +197,7 @@ test("AO's timed-out first RTK lookup stays asynchronous for its hook and PATH",
     release({ code: 0, stdout: "rtk 1.0.1\n" });
     await checking;
   }
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude', RTK_SUPPRESS_HOOK_WARNING: "1" });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude', CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
   assert.equal(syncLookups, 0);
   assert.equal(installs, 0);
@@ -225,7 +240,8 @@ function machine({ installed = false, enabled = true, code = 0, now = () => 0 } 
 test("rtk winget unpacked into its Packages folder is found: no Links shim, its PATH entry not seen yet", async () => {
   const { rtk } = machine({ installed: true });
   assert.equal((await rtk.status()).path, PACKAGED);
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${PACKAGED}" hook claude`, RTK_SUPPRESS_HOOK_WARNING: "1" });
+  // This machine's rtk 0.50.0 predates `rtk hook codex`.
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${PACKAGED}" hook claude`, CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(PACKAGED), "AO's agents get its folder on PATH");
 });
 
@@ -335,4 +351,155 @@ test("AO's start waits for an install in progress, but not past its bound", asyn
 test("rtk's savings report is read as text and JSON", async () => {
   assert.deepEqual(await world().rtk.gain(), { available: true, text: "RTK savings: 1.2K tokens", data: { total_saved: 1234 } });
   assert.deepEqual(await world({ files: [] }).rtk.gain(), { available: false });
+});
+
+// The OpenCode plugin's folder, as main.cjs names it under the launcher's data ("Coding Tools" has a space).
+const pluginRuns = [];
+test.after(() => { for (const run of pluginRuns) require("node:fs").rmSync(run, { recursive: true, force: true }); });
+function pluginFolder() {
+  const fs = require("node:fs");
+  const root = path.resolve(__dirname, "../../aiTemp/rtk-opencode-plugin-tests");
+  fs.mkdirSync(root, { recursive: true });
+  const run = fs.mkdtempSync(path.join(root, "run-"));
+  pluginRuns.push(run);
+  return path.join(run, "Coding Tools", "rtk", "opencode");
+}
+
+/** world() with the OpenCode plugin's folder. */
+function pluginWorld({ version = "rtk 1.2.0", enabled = true, files = [RTK], pluginDir = pluginFolder(), logger = null } = {}) {
+  const rtk = createRtk({ getEnabled: () => enabled, platform: "win32", now: () => 0, exists: (file) => files.includes(file), logger, pluginDir,
+    run: (_file, args) => (args[0] === "--version" ? { status: 0, stdout: `${version}\n` } : { status: 1, stdout: "" }),
+    env: { PATH: "C:\\Windows\\System32", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" } });
+  return { rtk, pluginDir, file: path.join(pluginDir, "rtk.ts") };
+}
+
+test("OpenCode chats get the plugin AO's start wrote, from an rtk with `rtk hook opencode` only", async () => {
+  const fs = require("node:fs");
+  const { rtk, file } = pluginWorld();
+  assert.equal(rtk.opencodePlugin(), "", "nothing to list before the file is written");
+  await rtk.ready(5_000);
+  assert.equal(rtk.daemonEnvironment().CODING_TOOLS_RTK_OPENCODE_PLUGIN, file);
+  const plugin = fs.readFileSync(file, "utf8");
+  assert.match(plugin, /execFile\("rtk", args/, "rtk named bare: the PATH's rtk, which the rewritten command runs too");
+  assert.match(plugin, /\["hook", "opencode", \.\.\.\(agent \? \["--agent", agent\] : \[\]\), command\]/);
+  assert.match(plugin, /async server\(\)/, "OpenCode 1.x's entry point");
+  assert.match(plugin, /async setup\(ctx: any\)/, "OpenCode 2.x's entry point");
+
+  // `rtk hook opencode` landed in 0.52.0; the other hooks keep their own floors.
+  for (const [version, listed] of [["rtk 0.52.0", true], ["rtk 0.51.9", false]]) {
+    const older = pluginWorld({ version });
+    await older.rtk.ready(5_000);
+    assert.equal(older.rtk.opencodePlugin(), listed ? older.file : "", version);
+    assert.ok(fs.existsSync(older.file), `${version}: the file is written either way`);
+  }
+  const off = pluginWorld({ enabled: false });
+  await off.rtk.ready(5_000);
+  assert.deepEqual(off.rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" }, "off");
+  const missing = pluginWorld({ files: [] });
+  await missing.rtk.ready(5_000);
+  assert.equal(missing.rtk.opencodePlugin(), "", "no rtk");
+  const noFolder = createRtk({ platform: "win32", now: () => 0, exists: (file) => file === RTK,
+    run: () => ({ status: 0, stdout: "rtk 1.2.0\n" }), env: { PATH: "", LOCALAPPDATA: "C:\\Users\\me\\AppData\\Local" } });
+  await noFolder.ready(5_000);
+  assert.equal(noFolder.opencodePlugin(), "", "no folder, no plugin");
+});
+
+test("the OpenCode plugin's file is replaced only when it differs, and a failed write leaves OpenCode without it", async () => {
+  const fs = require("node:fs");
+  const first = pluginWorld();
+  fs.mkdirSync(first.pluginDir, { recursive: true });
+  fs.writeFileSync(first.file, "// an older plugin\n");
+  await first.rtk.ready(5_000);
+  const written = fs.readFileSync(first.file, "utf8");
+  assert.notEqual(written, "// an older plugin\n", "an older plugin is replaced");
+
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(first.file, old, old);
+  const again = pluginWorld({ pluginDir: first.pluginDir });
+  await again.rtk.ready(5_000);
+  assert.equal(fs.statSync(again.file).mtimeMs, old.getTime(), "the same plugin is not written again");
+  assert.equal(again.rtk.opencodePlugin(), again.file);
+
+  // A file where its folder should be: the write fails, is logged, and is tried at the next start.
+  const blocked = pluginFolder();
+  fs.mkdirSync(path.dirname(blocked), { recursive: true });
+  fs.writeFileSync(blocked, "not a folder");
+  const warnings = [];
+  const failing = pluginWorld({ pluginDir: blocked, logger: { warn: (event) => warnings.push(event) } });
+  await failing.rtk.ready(5_000);
+  assert.equal(failing.rtk.opencodePlugin(), "");
+  assert.deepEqual(warnings, ["rtk.opencode_plugin_failed"]);
+  fs.rmSync(blocked);
+  await failing.rtk.ready(5_000);
+  assert.equal(failing.rtk.opencodePlugin(), path.join(blocked, "rtk.ts"), "the next start writes it");
+});
+
+test("the OpenCode plugin rewrites only the bash tool's command, with rtk's answer, and fails open", async (t) => {
+  // OpenCode runs the plugin as TypeScript; here it is compiled to CommonJS so execFile can be stubbed.
+  const fs = require("node:fs");
+  const ts = require("typescript");
+  const childProcess = require("node:child_process");
+  const { rtk, file } = pluginWorld();
+  await rtk.ready(5_000);
+  const source = fs.readFileSync(file, "utf8");
+  const compiled = ts.transpileModule(source, { reportDiagnostics: true, compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } });
+  assert.deepEqual(compiled.diagnostics, [], "valid TypeScript (the template literal kept it intact)");
+
+  const asked = [];
+  let answer = (command) => [null, JSON.stringify(command === "git status" ? { command: "rtk git status" } : {})];
+  t.mock.method(childProcess, "execFile", (bin, args, options, callback) => {
+    asked.push([bin, ...args]);
+    assert.equal(options.timeout, 3000);
+    const [error, stdout] = answer(args.at(-1));
+    callback(error, stdout);
+  });
+  const loaded = { exports: {} };
+  new Function("module", "exports", "require", compiled.outputText)(loaded, loaded.exports, require);
+  const plugin = loaded.exports.default;
+  assert.equal(plugin.id, "rtk");
+
+  // OpenCode 1.x: server() returns the hook; output.args is the call's arguments object.
+  const hooks = await plugin.server();
+  const before = hooks["tool.execute.before"];
+  const bash = { command: "git status", description: "status" };
+  await before({ tool: "bash" }, { args: bash });
+  assert.equal(bash.command, "rtk git status");
+  assert.deepEqual(asked.at(-1), ["rtk", "hook", "opencode", "git status"]);
+  const unknown = { command: "echo hi" };
+  await before({ tool: "bash" }, { args: unknown });
+  assert.equal(unknown.command, "echo hi", "{} (no rtk equivalent, or a changed permission verdict) runs it as written");
+  const read = { filePath: "a.txt", command: "git status" };
+  const count = asked.length;
+  await before({ tool: "read" }, { args: read });
+  assert.equal(asked.length, count, "other tools are not asked about");
+  answer = () => [new Error("spawn rtk ENOENT"), ""];
+  const failed = { command: "git status" };
+  await before({ tool: "bash" }, { args: failed });
+  assert.equal(failed.command, "git status", "no rtk on PATH: as written");
+  answer = () => [null, "not json"];
+  await before({ tool: "bash" }, { args: failed });
+  assert.equal(failed.command, "git status", "an unreadable answer: as written");
+
+  // OpenCode 2.x: setup() registers the hook, and the agent's rules are rtk's to read.
+  answer = () => [null, '{"command":"rtk ls -la"}'];
+  let registered = null;
+  await plugin.setup({ tool: { hook: async (name, handler) => { registered = [name, handler]; } } });
+  assert.equal(registered[0], "execute.before");
+  const input = { command: "ls -la" };
+  await registered[1]({ tool: "bash", input, agent: "ao-auto" });
+  assert.equal(input.command, "rtk ls -la");
+  assert.deepEqual(asked.at(-1), ["rtk", "hook", "opencode", "--agent", "ao-auto", "ls -la"]);
+
+  const saved = process.env.RTK_DISABLED;
+  process.env.RTK_DISABLED = "1";
+  try {
+    const disabled = { command: "git status" };
+    const count2 = asked.length;
+    await before({ tool: "bash" }, { args: disabled });
+    assert.equal(disabled.command, "git status", "RTK_DISABLED=1 in OpenCode's environment turns it off");
+    assert.equal(asked.length, count2, "rtk is not even asked");
+  } finally {
+    if (saved === undefined) delete process.env.RTK_DISABLED;
+    else process.env.RTK_DISABLED = saved;
+  }
 });

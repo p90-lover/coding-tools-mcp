@@ -202,10 +202,12 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
     runtimeHost: { currentOperation: () => null, mcpCredentialsConfiguredAsync: async () => true },
     runtimeSupervisor: { readConfigAsync: async () => { coreReads++; return config; }, extraTunnels: { status: () => [] } },
     routeIdleAccountPartition: async partition => routes.push(partition),
-    session: { fromPartition: partition => ({ cookies: { get: async () => cookie(partition) }, fetch: async (url, options) => {
-      probes.push([partition, url]); assert.equal(options.redirect, "error"); assert.equal(options.cache, "no-store");
-      return { ok: true, headers: { get: () => "application/json" }, json: async () => ({ user: { id: partition } }) };
-    } }) },
+    session: { fromPartition: partition => ({ cookies: { get: async () => cookie(partition) } }) },
+    fetchThroughLauncherNetwork: async (url, options, scope) => {
+      assert.equal(scope.useSessionCookies, true);
+      probes.push([scope.partition, url]); assert.equal(options.redirect, "error"); assert.equal(options.cache, "no-store");
+      return { ok: true, headers: { get: () => "application/json" }, json: async () => ({ user: { id: scope.partition } }) };
+    },
     connectAccountMcp: async (id, current) => { mode = "MCP connector creation"; current(); connections.push(id); mode = null; return { connected: true }; },
     setInterval: fn => { callbacks.timer = fn; return { unref() {} }; }, clearInterval() {},
   };
@@ -229,4 +231,37 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
   assert.equal(context.browserHost.partition, "persist:shown");
   await context.automaticAccountMcp.sync();
   assert.equal(connections.length, 2);
+});
+
+test("launcher transport pins owned session reads to the bound proxy and keeps native defaults", async t => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf("async function fetchThroughLauncherNetwork(");
+  const end = source.indexOf("\nfunction getRegisterHost", start);
+  assert(start > 0 && end > start);
+  for (const mode of ["bound", "global", "native"]) await t.test(mode, async () => {
+    const requests = [];
+    const profiles = { bound: { id: "bound", endpoint: { host: "bound.invalid", port: 9001 } }, global: { id: "global", endpoint: { host: "global.invalid", port: 9002 } } };
+    const context = {
+      providerNetworkReady: async () => ({ store: { snapshot: () => ({ routing: { globalEnabled: true, globalProfileId: "global" } }),
+        activeProxy: id => profiles[id], proxySecret: id => ({ username: id, password: "fixture" }) } }),
+      browserAccounts: { accountIdOfPartition: p => p === "persist:selected" ? "selected" : null,
+        proxyForPartition: () => mode === "bound" ? "bound" : null },
+      browserHost: { partition: "persist:shown" }, LAUNCHER_PROFILE: { browserPartition: "persist:default" },
+      session: { fromPartition: partition => ({ partition }) }, electronNet: {},
+      fetchNativeWithProxyAuth: async options => { requests.push(options); return { status: 200 }; },
+    };
+    vm.runInNewContext(source.slice(start, end), context);
+    await context.fetchThroughLauncherNetwork(mode === "native" ? "https://github.com/update" : "https://chatgpt.com/api/auth/session", { method: "GET" },
+      mode === "native" ? undefined : { partition: "persist:selected", useSessionCookies: true });
+    assert.equal(requests.length, 1);
+    const request = requests[0], profile = profiles[mode === "bound" ? "bound" : "global"];
+    assert.equal(request.browserSession.partition, mode === "native" ? "persist:shown" : "persist:selected");
+    assert.equal(request.useSessionCookies, mode !== "native");
+    assert.equal(request.getProxyCredentials({ host: profile.endpoint.host, port: profile.endpoint.port }).username, profile.id);
+    assert.equal(request.getProxyCredentials({ host: "unexpected.invalid", port: profile.endpoint.port }), null);
+    assert.equal(request.getProxyCredentials({ host: profile.endpoint.host, port: 1234 }), null);
+    await assert.rejects(context.fetchThroughLauncherNetwork("https://chatgpt.com/api/auth/session", { method: "GET" },
+      { partition: "persist:unregistered", useSessionCookies: true }), /registered account/i);
+    assert.equal(requests.length, 1);
+  });
 });

@@ -1,0 +1,117 @@
+/* Activity > Action time */
+
+.atp {
+  margin-bottom: 22px;
+}
+
+.atp-hint {
+  margin: 2px 0 10px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.atp-title {
+  margin: 12px 0 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.atp-table {
+  border-top: 1px solid var(--color-border);
+}
+
+.atp-row {
+  display: grid;
+  min-height: 44px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--color-border-light);
+  font-variant-numeric: tabular-nums;
+}
+
+.atp-tabs .atp-row {
+  grid-template-columns: minmax(120px, 1.2fr) minmax(150px, 1.3fr) minmax(70px, 0.5fr) minmax(150px, 1.3fr) minmax(120px, 1fr);
+}
+
+.atp-pages .atp-row {
+  grid-template-columns: minmax(180px, 2fr) minmax(150px, 1.3fr) minmax(150px, 1.3fr) minmax(70px, 0.5fr);
+}
+
+.atp-head {
+  min-height: 28px;
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.atp-row.is-current .atp-name strong {
+  color: var(--color-text-primary, var(--color-text-secondary));
+}
+
+.atp-name,
+.atp-timing {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.atp-name strong,
+.atp-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The numbers under a median wrap rather than hide behind an ellipsis. */
+.atp-timing small {
+  line-height: 1.35;
+}
+
+.atp-name strong {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.atp-name small,
+.atp-timing small {
+  color: var(--color-text-tertiary);
+  font-size: 10px;
+}
+
+.atp-value {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.atp .is-warn {
+  color: var(--color-text-warning);
+}
+
+.atp .is-slow {
+  color: var(--color-text-error);
+}
+
+.atp-empty {
+  margin: 4px 0 8px;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+/* Narrow windows: each table scrolls sideways instead of squeezing its numbers. */
+@media (max-width: 760px) {
+  .atp-table {
+    overflow-x: auto;
+  }
+
+  .atp-tabs .atp-row,
+  .atp-pages .atp-row {
+    min-width: 640px;
+  }
+}

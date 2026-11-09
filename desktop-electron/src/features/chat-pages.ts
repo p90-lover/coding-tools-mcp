@@ -3,53 +3,23 @@ import { createContext, useSyncExternalStore, type ComponentType } from "react";
 export const CHAT_PAGES_STORE = "coding-tools:ao:chat-pages";
 export const CHAT_PAGE_ACTIVE = `${CHAT_PAGES_STORE}:active`;
 export const CHAT_PAGE_LIMIT = 12;
-export type ChatPagePreferences = {
-  enabled: boolean; pageCount: number; keyboard: boolean; wheel: boolean; previous: string; next: string;
-};
+/**
+ * `keyboard`: Ctrl+1 … Ctrl+0 open pages 1 to 10. `wheel`: Alt+scroll (and a scroll over the page
+ * tabs, or a touchpad's sideways swipe) turns pages.
+ */
+export type ChatPagePreferences = { enabled: boolean; pageCount: number; keyboard: boolean; wheel: boolean };
 // Pages are on unless turned off in Settings. Off by default (#903) hid them all: the page tabs,
-// Shift+Q / Shift+R, the wheel and a full page's New chat going to the next page (2026-11-08).
-export const DEFAULT_CHAT_PAGES: ChatPagePreferences = {
-  enabled: true, pageCount: 1, keyboard: true, wheel: true, previous: "Shift+Q", next: "Shift+R",
-};
-// #903's defaults, written into the store by every page change since: they read as today's (Shift+Q / Shift+R).
-const LEGACY_DEFAULT_KEYS = { previous: "Shift+R", next: "Shift+E" };
-const MODIFIERS = ["Ctrl", "Alt", "Shift", "Meta"];
-const NAMED_KEYS = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", "Space"];
+// their keys, the wheel and a full page's New chat going to the next page (2026-11-08).
+export const DEFAULT_CHAT_PAGES: ChatPagePreferences = { enabled: true, pageCount: 1, keyboard: true, wheel: true };
 
-/** A modified letter, number, arrow, navigation or function key. Plain text is never a shortcut. */
-export function normalizePageShortcut(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const parts = value.trim().split("+");
-  if (parts.length < 2 || parts.length > 5) return null;
-  const last = parts.pop()!.trim();
-  const key = /^[a-z0-9]$/i.test(last) || /^F(?:[1-9]|1\d|2[0-4])$/i.test(last) ? last.toUpperCase()
-    : NAMED_KEYS.find((name) => name.toLowerCase() === last.toLowerCase());
-  const modifiers = parts.map((part) => MODIFIERS.find((name) => name.toLowerCase() === part.trim().toLowerCase()));
-  if (!key || modifiers.some((part) => !part) || new Set(modifiers).size !== modifiers.length) return null;
-  return [...MODIFIERS.filter((name) => modifiers.includes(name)), key].join("+");
-}
-
-export function recordPageShortcut(event: Pick<KeyboardEvent, "key" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey" | "isComposing" | "getModifierState">): string | null {
-  if (event.isComposing || event.getModifierState?.("AltGraph")) return null;
-  return normalizePageShortcut([
-    ...(event.ctrlKey ? ["Ctrl"] : []), ...(event.altKey ? ["Alt"] : []),
-    ...(event.shiftKey ? ["Shift"] : []), ...(event.metaKey ? ["Meta"] : []),
-    event.key === " " ? "Space" : event.key,
-  ].join("+"));
-}
-
+/** Saved preferences; the previous/next keys stores still hold (Shift+Q / Shift+R, 2026-11-09) are dropped. */
 export function parseChatPagePreferences(raw: string | null): ChatPagePreferences {
   let value: Partial<ChatPagePreferences> | null = null;
   try { value = JSON.parse(raw || "null"); } catch { /* Use the default layout. */ }
-  let previous = normalizePageShortcut(value?.previous) ?? DEFAULT_CHAT_PAGES.previous;
-  let next = normalizePageShortcut(value?.next) ?? DEFAULT_CHAT_PAGES.next;
-  if (previous === LEGACY_DEFAULT_KEYS.previous && next === LEGACY_DEFAULT_KEYS.next) ({ previous, next } = DEFAULT_CHAT_PAGES);
   return {
     enabled: value?.enabled !== false,
     pageCount: Number.isInteger(value?.pageCount) && value!.pageCount! >= 1 && value!.pageCount! <= CHAT_PAGE_LIMIT ? value!.pageCount! : 1,
     keyboard: value?.keyboard !== false, wheel: value?.wheel !== false,
-    previous: previous === next ? DEFAULT_CHAT_PAGES.previous : previous,
-    next: previous === next ? DEFAULT_CHAT_PAGES.next : next,
   };
 }
 
@@ -82,10 +52,6 @@ export function useChatPagePreferences(): ChatPagePreferences {
 export function saveChatPagePreferences(patch: Partial<ChatPagePreferences>): void {
   const next = { ...readPreferences(), ...patch };
   if (!Number.isInteger(next.pageCount) || next.pageCount < 1 || next.pageCount > CHAT_PAGE_LIMIT) throw new Error(`Use between 1 and ${CHAT_PAGE_LIMIT} chat pages`);
-  if (!normalizePageShortcut(next.previous) || !normalizePageShortcut(next.next)) throw new Error("Press a modified letter, number, arrow or function key");
-  next.previous = normalizePageShortcut(next.previous)!;
-  next.next = normalizePageShortcut(next.next)!;
-  if (next.previous === next.next) throw new Error("Next and previous page need different shortcuts");
   // A failed write leaves the published snapshot alone and is shown by the caller.
   localStorage.setItem(CHAT_PAGES_STORE, JSON.stringify(next));
   snapshot = next;
@@ -104,14 +70,25 @@ export function readPageSelection(page: number): PageSelection | null {
   } catch { return null; }
 }
 
-/** Where typing goes: a page key pressed there is text (Shift+R a capital R), never a page turn. */
+/** Where typing goes, or a dialog or menu: a sideways swipe there stays its own. */
 export const PAGE_KEYS_PAUSED = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="searchbox"], [role="combobox"], [role="listbox"], [role="dialog"], [role="menu"]';
-export function pageShortcutDirection(event: KeyboardEvent, preferences: ChatPagePreferences): -1 | 0 | 1 {
+/** A dialog, menu or list: the page keys and Alt+scroll leave it alone. */
+export const PAGE_TURN_PAUSED = '[role="dialog"], [role="menu"], [role="listbox"]';
+/**
+ * The page Ctrl+1 … Ctrl+9 and Ctrl+0 open (pages 1 to 10), or 0 for any other key. They type
+ * nothing, so they work while you type in a chat (Shift+Q / Shift+R did not, 2026-11-09); not in a
+ * dialog or menu, for a held key, during IME composition, or for a page that is not open.
+ */
+export function pageNumberKey(event: KeyboardEvent, preferences: ChatPagePreferences): number {
   if (!preferences.enabled || !preferences.keyboard || preferences.pageCount < 2 || event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229) return 0;
-  const target = event.target as (Element & { isContentEditable?: boolean }) | null;
-  if (target?.isContentEditable || target?.closest?.(PAGE_KEYS_PAUSED)) return 0;
-  const shortcut = recordPageShortcut(event);
-  return shortcut === preferences.next ? 1 : shortcut === preferences.previous ? -1 : 0;
+  if (!event.ctrlKey || event.altKey || event.shiftKey || event.metaKey) return 0;
+  // The digit row by position (any layout); the number pad only as digits (NumLock off, Numpad1 is End).
+  const digit = /^Digit([0-9])$/.exec(event.code ?? "")?.[1] ?? (/^[0-9]$/.test(event.key) ? event.key : null);
+  if (digit === null) return 0;
+  const page = Number(digit) || 10;
+  if (page > preferences.pageCount) return 0;
+  const target = event.target as Element | null;
+  return target?.closest?.(PAGE_TURN_PAUSED) ? 0 : page;
 }
 export function adjacentChatPage(page: number, direction: number, count: number): number {
   return ((page - 1 + direction) % count + count) % count + 1;
@@ -120,19 +97,21 @@ export function adjacentChatPage(page: number, direction: number, count: number)
 type PageWheel = Pick<WheelEvent, "deltaX" | "deltaY" | "deltaMode" | "shiftKey" | "ctrlKey" | "metaKey" | "altKey">;
 /**
  * How far a wheel event goes through the pages (more than 0 towards the next page; 0: no page turn).
- * Over the page tabs any scroll counts, down or right for the next page. Anywhere else only a
- * sideways one does (a touchpad swipe, a tilted wheel, Shift+wheel), so scrolling messages up and
- * down never turns a page. Ctrl/Meta+wheel zooms and Alt+wheel is the app's own.
+ * Alt+wheel turns pages anywhere: up for the previous page, down for the next. Over the page tabs
+ * any scroll counts, down or right for the next page. Anywhere else only a plain sideways swipe
+ * does (a touchpad, a tilted wheel), so scrolling messages, or sideways with Shift+wheel, never
+ * turns a page. Ctrl/Meta+wheel zooms.
  */
 export function pageWheelDelta(event: PageWheel, overTabs: boolean): number {
-  if (event.ctrlKey || event.metaKey || event.altKey) return 0;
+  if (event.ctrlKey || event.metaKey) return 0;
   const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1;
   let x = event.deltaX * unit;
   let y = event.deltaY * unit;
+  if (event.altKey) return event.shiftKey ? 0 : Math.abs(x) > Math.abs(y) ? x : y;
   // Shift+wheel scrolls sideways: Chromium reports it as deltaX, a plain deltaY elsewhere.
   if (event.shiftKey && !x) [x, y] = [y, 0];
   if (overTabs) return Math.abs(x) > Math.abs(y) ? x : y;
-  return Math.abs(x) > Math.abs(y) * 1.5 ? x : 0;
+  return !event.shiftKey && Math.abs(x) > Math.abs(y) * 1.5 ? x : 0;
 }
 
 /** A sideways scroll this long (px) turns one page: a wheel notch (100 px) at once, a touchpad swipe partway. */
@@ -161,7 +140,8 @@ export function createPageSwipe(distance = PAGE_SWIPE_DISTANCE, quiet = PAGE_SWI
 
 /** What the open page's tabs show and do (ChatPages provides it; null while pages are off). */
 export type ChatPager = {
-  active: number; count: number; canAdd: boolean; keys: { previous: string; next: string } | null;
+  /** `keys`: Ctrl+1 … Ctrl+0 open pages 1 to 10 (the tabs name them). */
+  active: number; count: number; canAdd: boolean; keys: boolean;
   select: (page: number) => void; add: () => void;
 };
 export const ChatPagerContext = createContext<ChatPager | null>(null);
@@ -172,7 +152,7 @@ export const ChatPagerContext = createContext<ChatPager | null>(null);
  * when `canAdd`, or null when there is nowhere for it (the chat then opens on `from` as before).
  */
 export function overflowPage(from: number, count: number, hasRoom: (page: number) => boolean, canAdd: boolean): number | null {
-  // "Next" as Shift+R means it: the pages after this one, wrapping round; a page is added only when all are full.
+  // "Next" as Alt+scroll down means it: the pages after this one, wrapping round; a page is added only when all are full.
   for (let step = 1; step < count; step++) {
     const page = adjacentChatPage(from, step, count);
     if (hasRoom(page)) return page;

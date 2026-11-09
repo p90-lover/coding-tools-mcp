@@ -43,6 +43,7 @@ const { createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
+const { createActionTimes, timeIpcHandler, watchPageTimes } = require("./action-times.cjs");
 const { createRegisterHost, createRegisterCpaSync } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
@@ -195,6 +196,14 @@ let mainWindow = null;
 const caDistrust = require("./ca-distrust.cjs");
 process.env.NODE_OPTIONS = caDistrust.childNodeOptions(path.join(launcherUserData, "runtime-preload"), process.env.NODE_OPTIONS);
 app.on("session-created", (created) => created.setCertificateVerifyProc(caDistrust.verifyCertificate));
+// Activity > Action time (action-times.cjs): tab and page timings, in memory only. Every page the
+// app opens is timed from here, so new views need no wiring of their own.
+const actionTimes = createActionTimes();
+app.on("web-contents-created", (_event, contents) => {
+  // A GPT Browser page is made only once its host has been: keep the host to name the page's account.
+  if (gptBrowser && !gptBrowserHost) void gptBrowser.then((host) => { gptBrowserHost = host; }, () => {});
+  watchPageTimes(contents, { times: actionTimes, describe: describeTimedPartition });
+});
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
@@ -215,6 +224,9 @@ let lifecycleScan = null;
 let savedChatsInUse = () => true;
 let chatgptDesktop = null;
 let gptBrowser = null;
+// The GPT Browser host once made (gptBrowser is its promise), for naming its pages' timings; kept
+// by the web-contents-created hook, so getGptBrowser stays as it was.
+let gptBrowserHost = null;
 let emailHost = null;
 let registerHost = null;
 const chatgptDesktopOwners = new WeakSet();
@@ -483,15 +495,39 @@ function getGptBrowser(logger) {
   return gptBrowser;
 }
 
-// The launcher's own network for a cookie-less native fetch: its browser session (Global Routing's
-// proxy, else the system's) with that proxy's credentials, as the browser control server uses (NFR-2).
-async function fetchThroughLauncherNetwork(url, options) {
+// Names a timed page's part of the app and its account (Activity > Action time), from the
+// partition its session lives in.
+function describeTimedPartition(partition) {
+  if (!partition) return {};
+  const accountId = browserAccounts.accountIdOfPartition(partition);
+  if (accountId) {
+    const entry = browserAccounts.status().accounts.find((item) => item.id === accountId);
+    return { group: "Browser", account: entry?.email || entry?.label || accountId };
+  }
+  const gptAccount = /^persist:gpt-browser-([a-z0-9]{12})$/.exec(partition)?.[1];
+  if (gptAccount) {
+    const entry = gptBrowserHost?.status().accounts.find((item) => item.id === gptAccount);
+    return { group: "GPT Browser", account: entry?.email || entry?.label || gptAccount };
+  }
+  return {};
+}
+
+// Native fetches omit cookies by default. Explicit session reads use their registered account's
+// own cookie jar and bound proxy, answering proxy authentication without rerouting a live page.
+async function fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies = false } = {}) {
+  const sessionRead = useSessionCookies === true;
+  if (sessionRead && !browserAccounts.accountIdOfPartition(partition)) {
+    throw new Error("Session checks require a registered account partition");
+  }
   const network = await providerNetworkReady();
   const routing = network.store.snapshot().routing;
-  const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
+  const boundId = sessionRead ? browserAccounts.proxyForPartition(partition) : null;
+  const profile = (boundId ? network.store.activeProxy(boundId) : null)
+    ?? (routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null);
   const credentials = profile ? network.store.proxySecret(profile.id) : null;
   return fetchNativeWithProxyAuth({
-    electronNet, browserSession: session.fromPartition(browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    electronNet, browserSession: session.fromPartition(sessionRead ? partition : browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    useSessionCookies: sessionRead,
     getProxyCredentials: (authInfo) => (
       profile && authInfo.port === profile.endpoint.port
       && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
@@ -2068,10 +2104,12 @@ function registerIpc({ logger, stateStore }) {
     logger.info("launcher.ipc_already_registered", { reason: "idempotent" });
     return;
   }
+  // Each request from the app window is timed against the tab it was made on (Action time).
+  const isAppWindow = (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents);
   const handle = (channel, handler) => {
     if (registeredIpcChannels.has(channel)) return;
     registeredIpcChannels.add(channel);
-    registerLoggedIpc(ipcMain, logger, channel, handler);
+    registerLoggedIpc(ipcMain, logger, channel, timeIpcHandler(actionTimes, channel, handler, { isAppWindow }));
   };
   const codingTools = createCodingToolsShellBridge({
     assertFocusedMainWindow,
@@ -3530,8 +3568,8 @@ function registerIpc({ logger, stateStore }) {
     readCookies: partition => session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }),
     verifySignIn: async partition => {
       await routeIdleAccountPartition(partition, logger);
-      const ownedSession = session.fromPartition(partition);
-      return readChatGptAuthSession(ownedSession.fetch.bind(ownedSession), "https://chatgpt.com", 10_000);
+      return readChatGptAuthSession((url, options) => fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies: true }),
+        "https://chatgpt.com", 10_000);
     },
     connect: (accountId, current) => connectAccountMcp(accountId, () => {
       if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
@@ -4018,6 +4056,18 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
+  // Activity > Action time. The renderer reports each tab it shows and how long that took.
+  handle("launcher:action-time-tab", (event, input) => {
+    if (!isAppWindow(event.sender)) throw new Error("Tab timings come only from the app window");
+    actionTimes.tabRendered(input);
+    return true;
+  });
+  handle("launcher:action-times", () => actionTimes.snapshot());
+  handle("launcher:action-times-clear", (event) => {
+    assertFocusedMainWindow(event, true);
+    actionTimes.clear();
+    return actionTimes.snapshot();
+  });
   handle("launcher:export-logs", async () => {
     const date = new Date().toISOString().slice(0, 10);
     const copy = nativeCopyFor(stateStore.read().language);
@@ -4452,8 +4502,10 @@ async function start() {
   if (runtimeSourceFallback) logger.warn("runtime.packaged_source_damaged", { message: runtimeSourceFallback, using: "installed copy" });
   // Settings read back from their last good copy (or reset, when that was torn too) after a torn file.
   if (stateStore.recovery) logger.warn("launcher.state_recovered", stateStore.recovery);
-  // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
-  const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
+  // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs). Its
+  // OpenCode plugin is written beside the launcher's own data.
+  const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger,
+    pluginDir: path.join(launcherUserData, "rtk", "opencode") });
   rtkService = rtk;
   // Missing rtk is installed now, without a click (a failed try waits a day); AO's start waits for it.
   try {
@@ -5013,7 +5065,9 @@ async function start() {
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
-        // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
+        // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
+        // session's own settings, on each Codex app-server's command line and in each OpenCode
+        // chat's inline config (empty: off). ready() above wrote the plugin's file.
         try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
         // AO hands this environment to every Claude Code chat agent. Claude Code's own scheduler
         // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
