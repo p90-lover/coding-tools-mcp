@@ -382,7 +382,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -3677,6 +3677,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : "A read through the app's tools, confined to the agent's worktree";
   }
   /**
+   * Why a computer use call may run without the reviewer, or null: the app's own rule
+   * (chat-agent-tools.cjs computerStepAllowed), as Codex's Computer Use asks once per app, not per
+   * step. A step counts only in the window under control, whose app this chat may use.
+   */
+  function inAllowedApp(workspaceId, approval) {
+    const name = String(approval?.tool ?? "");
+    if (typeof computerStepAllowed !== "function" || !name.startsWith(`${APP_TOOL_PREFIX}computer_`) || !approval?.thread_id) return null;
+    try {
+      const reason = computerStepAllowed({ workspaceId, session: String(approval.thread_id), tool: name.slice(APP_TOOL_PREFIX.length) });
+      return typeof reason === "string" && reason ? reason : null;
+    } catch { return null; }
+  }
+  /**
    * Why the app's exec_command call may run without asking: its command line (from the call's
    * arguments, complete JSON only) is a routine project command. The app runs it unasked for a
    * session launched with "Approve for me" too; anything else still asks.
@@ -4427,6 +4440,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
+      // The hard deny list still wins: a blocked command typed into an allowed app is not a routine step.
+      : !blocked && inAllowedApp(workspaceId, approval)
+      ? { action: "allow", actor: "safety_rules", reason_code: "allowed_app_step", reason: inAllowedApp(workspaceId, approval) }
       : attachedFileRead(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
       : !incomplete && routineAppCommand(approval)
@@ -9043,7 +9059,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const schedulesSaved = () => schedules.saved();
   /** Resolves once every wake-up and /loop change so far is on disk (saved off the main thread too). */
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

@@ -23,7 +23,7 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
   const chatHosts = [];
   const nativeStops = [];
   const quits = [];
-  const order = [], recovered = [], goalSaves = [], accountSaves = [], settingsSaves = [];
+  const order = [], recovered = [], goalSaves = [], accountSaves = [], settingsSaves = [], guards = [], relaunches = [];
   const controller = name => ({ dispose() {
     disposed.push(name);
     if (failCleanup && name === "external") throw new Error("Owned process cleanup failed");
@@ -62,14 +62,16 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     quitLogger: null, antigravityAuthBrowser: { closeAll() {} },
     // The forced-exit timer after app.quit() must never fire in a test.
     QUIT_EXIT_GRACE_MS: 0, setTimeout: () => ({ unref() {} }),
-    showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true) },
+    showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true), relaunch: () => relaunches.push(true) },
     dialog: { showMessageBox: async () => ({ response: quitAnyway ? 1 : 0 }) },
     mainWindow: { isDestroyed: () => false },
+    // relaunch-guard.cjs, started through main.cjs's armRelaunchGuard: recorded with what had happened by then.
+    armRelaunchGuard: () => guards.push({ quitsBefore: quits.length, exitCommitted: context.exitCommitted, steps: [...order] }),
   });
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, chatHosts, nativeStops, quits, order, recovered, goalSaves, accountSaves, settingsSaves, browser: context.browserHost, quit, async beforeQuit() {
+  return { disposed, chatHosts, nativeStops, quits, order, recovered, goalSaves, accountSaves, settingsSaves, guards, relaunches, browser: context.browserHost, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -124,6 +126,30 @@ test("a quit ends AO's chat hosts after AO stops, then Nova; a keep-bridge resta
   const restart = fixture();
   assert.equal((await restart.quit({ keepBridge: true })).ok, true);
   assert.deepEqual(restart.chatHosts, ["stop-ao"]);
+});
+
+// Seen 2026-11-02 14:21: an install script's keep-bridge quit ({ relaunch: false }) closed 0.8.50, then the
+// script neither installed 0.8.51 nor started the app; nothing else did, and there was no app for 19 minutes.
+test("a keep-bridge quit that leaves the restart to an installer arms a relaunch guard as it exits", async () => {
+  const handover = fixture();
+  assert.equal((await handover.quit({ keepBridge: true })).ok, true);
+  assert.equal(handover.guards.length, 1, "nothing would start the app again if the installer never runs");
+  const [guard] = handover.guards;
+  assert.equal(guard.quitsBefore, 0, "armed before app.quit()");
+  assert.equal(guard.exitCommitted, false, "armed at the last step a failure could still cancel");
+  assert.ok(guard.steps.includes("stop-register"), "armed only after every stop step has run");
+
+  // Electron restarts a keep-bridge restart itself; a plain quit means the user wants no app.
+  const restart = fixture();
+  assert.equal((await restart.quit({ keepBridge: true, relaunch: true })).ok, true);
+  assert.deepEqual([restart.guards, restart.relaunches.length], [[], 1]);
+  const quit = fixture();
+  assert.equal((await quit.quit()).ok, true);
+  assert.deepEqual(quit.guards, []);
+  // A quit cancelled midway keeps this app running: no guard is left behind to start a second one.
+  const cancelled = fixture({ registerShutdownFails: true });
+  assert.equal((await cancelled.quit({ keepBridge: true })).ok, false);
+  assert.deepEqual(cancelled.guards, []);
 });
 
 test("accepted app quit disposes each integration controller once", async () => {

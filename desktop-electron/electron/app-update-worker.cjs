@@ -17,7 +17,10 @@ const fs = (() => { try { return require("original-fs"); } catch { return requir
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 
-const PARENT_WAIT_MS = 5 * 60_000;
+// A quit the app cancels ends this worker (createAppUpdateController kills it), so an app still running
+// here is one slow to close. The worker used to give up after five minutes, and the app, gone soon
+// after, was started by nobody. It is waited for this long.
+const PARENT_WAIT_MS = 30 * 60_000;
 const RENAME_ATTEMPTS = 12;
 const JOURNAL = "journal.json";
 const MARKER = "applying.json";
@@ -364,12 +367,32 @@ function finishPlaced(job, journal, journalPath) {
   recordResult(job.installRoot, { version: job.version, ok: true, stage: "placed" });
 }
 
+/**
+ * Swaps the job's update in once the app has closed and starts the app. Each step handles its own
+ * failure; one that throws anyway would leave the closed app closed, with nothing to start it, so
+ * it is recorded (the next start logs it in memory) and the app starts again. A swap it cut off is
+ * still journaled, and that start finishes or undoes it (handOffUpdateRecovery).
+ */
 async function applyJob(jobPath) {
   const job = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+  try {
+    await applyStaged(job, jobPath);
+  } catch (error) {
+    try { recordResult(job.installRoot, { version: job.version, ok: false, stage: "worker", message: errorText(error) }); } catch {}
+    try { fs.rmSync(updateFile(job.installRoot, MARKER), { force: true }); } catch {}
+    if (await waitForParent(job.parentPid)) launch(typeof job.executable === "string" ? job.executable : process.execPath);
+  }
+}
+
+async function applyStaged(job, jobPath) {
   appendLog(job, `waiting for the app (PID ${job.parentPid}) to close before updating to v${job.version}`);
   if (!await waitForParent(job.parentPid)) {
-    // The app kept running (its quit was cancelled): change nothing, start nothing.
-    appendLog(job, "the app did not close; the update was not applied");
+    // Still running after PARENT_WAIT_MS: change nothing and start nothing (a second app would only
+    // bring this one forward). The next start logs why the update did not happen.
+    recordResult(job.installRoot, {
+      version: job.version, ok: false, stage: "wait", countFailure: false,
+      message: `the app did not close within ${PARENT_WAIT_MS / 60_000} minutes; the update was not applied`,
+    });
     try { fs.rmSync(job.stageRoot, { recursive: true, force: true }); } catch {}
     return;
   }
@@ -483,11 +506,34 @@ async function main(argv = process.argv.slice(2)) {
   return applyJob(jobPath);
 }
 
+/**
+ * Runs the worker and returns its exit code. One that fails before it knows what to do (an unreadable
+ * job or journal, a fault in a step that handles none) used to exit with the app it was started by
+ * already closing, and nothing started the app again. It runs under that app's executable, in its
+ * install: the failure is recorded there for the next start's log, and once the app has gone it starts.
+ */
+async function run(argv = process.argv.slice(2)) {
+  try {
+    await main(argv);
+    return 0;
+  } catch (error) {
+    try {
+      // Under the last recorded version, whose failure count (the auto-installer's back-off) it keeps.
+      const installRoot = path.dirname(process.execPath);
+      const previous = readJsonFile(updateFile(installRoot, LAST_RESULT));
+      const version = typeof previous?.version === "string" ? previous.version : "unknown";
+      recordResult(installRoot, { version, ok: false, stage: "worker", message: errorText(error), countFailure: false });
+    } catch {}
+    if (await waitForParent(process.ppid)) launch(process.execPath);
+    return 1;
+  }
+}
+
 if (require.main === module) {
-  void main().catch(() => process.exit(1));
+  void run().then((code) => process.exit(code));
 }
 
 module.exports = {
   JOURNAL, LAST_RESULT, MARKER, createJournal, hashFile, readJsonFile, recordResult, renameWithRetry,
-  rollBack, rollForward, swapIn, sweep, verifyPlaced, waitForParent, writeJsonDurable,
+  rollBack, rollForward, run, swapIn, sweep, verifyPlaced, waitForParent, writeJsonDurable,
 };
