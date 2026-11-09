@@ -155,6 +155,27 @@ test("a host that switches in place keeps running: only what owns its page holds
   assert.equal(service.bridgeRefreshPending(id), true, "and the refresh it was waiting for");
 });
 
+test("while a switch runs, every list hears which account it shows", async (t) => {
+  const { registry, service, published, host } = setup(t);
+  const warm = host();
+  const gate = deferred();
+  warm.homeSwitchBlocker = () => null;
+  warm.switchAccount = () => gate.promise;
+  const id = registry.add();
+  const running = service.switchTo(id, { logger: logger() });
+  assert.deepEqual([published.at(-1).switching, published.at(-1).switchingTo], [true, id]);
+  assert.equal(service.status().switchingTo, id);
+  assert.equal(service.status().activeId, FIRST_ACCOUNT_ID, "the account is not active until its page is shown");
+  gate.resolve();
+  await running;
+  assert.deepEqual([published.at(-1).switching, published.at(-1).switchingTo], [false, null]);
+  assert.equal(service.status().activeId, id);
+
+  warm.switchAccount = async () => { throw new Error("page failed"); };
+  await assert.rejects(service.switchTo(FIRST_ACCOUNT_ID, { logger: logger() }), /page failed/);
+  assert.equal(service.status().switchingTo, null, "a failed switch shows the account still in use");
+});
+
 test("a switch is refused while another runs, while the browser starts, or while a turn runs", async (t) => {
   const { registry, service, host } = setup(t);
   const id = registry.add();

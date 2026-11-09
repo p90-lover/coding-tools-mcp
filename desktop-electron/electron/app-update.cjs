@@ -423,6 +423,21 @@ async function readApplyFailure(installRoot, version) {
   return { failures: result.failures, at: Number.isFinite(result.at) ? result.at : 0, message: typeof result.message === "string" ? result.message : null };
 }
 
+/**
+ * How the last update failed, when the worker recorded it within `withinMs`: the app it starts again
+ * (or the next one started) logs why in memory. The worker writes no log of its own for this.
+ */
+async function recentUpdateFailure(installRoot, { now = Date.now(), withinMs = 15 * 60_000 } = {}) {
+  let result;
+  try { result = JSON.parse(await fs.promises.readFile(path.join(installRoot, STAGE_DIRECTORY, LAST_RESULT), "utf8")); } catch { return null; }
+  if (result?.ok !== false || !Number.isFinite(result.at) || result.at > now + 60_000 || now - result.at > withinMs) return null;
+  const text = (value, max) => (typeof value === "string" ? value.slice(0, max) : null);
+  return {
+    version: text(result.version, 40), stage: text(result.stage, 20), message: text(result.message, 2000),
+    failures: Number.isInteger(result.failures) ? result.failures : null, at: result.at,
+  };
+}
+
 function createAppUpdateController({
   currentVersion, electronVersion, platform = process.platform, arch = process.arch,
   packaged, executablePath, logsDirectory, publish, logger, closeForUpdate, closeBlocker, dependencies = {},
@@ -748,6 +763,7 @@ module.exports = {
   handOffUpdateRecovery,
   hashFile,
   readJournal,
+  recentUpdateFailure,
   isFrameworkFile,
   manifestAssetName,
   packAssetName,

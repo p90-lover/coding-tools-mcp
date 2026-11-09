@@ -33,11 +33,14 @@ const ALLOWED = {
   "chatgpt-desktop-sync.cjs": 1, "chatgpt-desktop.cjs": 25, "codex-chat-lifecycle-sync.cjs": 9,
   "codex-thread-accounts.cjs": 2, "codex-thread-stats.cjs": 1, "computer-control.cjs": 4, "cpa-antigravity-reauth.cjs": 4,
   "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 45, "durable-state.cjs": 5, "external-services.cjs": 27,
-  "extra-tunnels.cjs": 5, "gpt-browser.cjs": 1, "gui-update.cjs": 12, "headless-host.cjs": 13, "in-use-files.cjs": 4,
+  "extra-tunnels.cjs": 5, "gpt-browser.cjs": 1, "gui-update.cjs": 12, "headless-host.cjs": 11, "in-use-files.cjs": 4,
   "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1, "main.cjs": 24,
   "managed-components.cjs": 62, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
-  "proxybridge-nova.cjs": 5, "register-host.cjs": 9, "rtk.cjs": 4, "runtime-command.cjs": 6, "runtime-install.cjs": 24,
+  "proxybridge-nova.cjs": 5, "register-host.cjs": 9,
+  // Three run once at quit, as the app exits (spawnRelaunchGuard); the rest only in the guard, its own process under Bun.
+  "relaunch-guard.cjs": 6,
+  "rtk.cjs": 4, "runtime-command.cjs": 6, "runtime-install.cjs": 24,
   "runtime-supervisor.cjs": 20, "runtime.cjs": 39, "smoke-exit.cjs": 1, "subagents.cjs": 4, "update-worker.cjs": 26,
   "update.cjs": 20, "upstream-tools.cjs": 3, "window-state.cjs": 1,
 };

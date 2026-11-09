@@ -3,9 +3,8 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
 const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.cjs");
-const { warmProgram, fetchOffThread } = require("./off-thread-run.cjs");
+const { spawnOffThread, fetchOffThread } = require("./off-thread-run.cjs");
 
 const CONTROL_SCHEMA = 1;
 const CONTROL_PROTOCOL_VERSION = 1;
@@ -53,6 +52,11 @@ const MAX_STARTUP_STDERR_BYTES = 4096;
 
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+/** Whether a file exists, asked without holding this thread (the startup poll asks every 100 ms). */
+function present(pathname) {
+  return fs.promises.access(pathname).then(() => true, () => false);
 }
 
 function regularFile(pathname, label) {
@@ -171,8 +175,8 @@ async function requestJson({ endpoint, token, localUiToken = null, pathname, met
 }
 
 class HeadlessHost {
-  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null, warm = warmProgram, fetchImpl = fetchOffThread }) {
-    this.warm = warm;
+  constructor({ app, logger, sourceRoot, binaryRoot = null, aoWorktreesRoot = null, spawnProcess = spawnOffThread, fetchImpl = fetchOffThread }) {
+    this.spawnProcess = spawnProcess;
     this.fetchImpl = fetchImpl;
     this.app = app;
     this.logger = logger;
@@ -240,12 +244,10 @@ class HeadlessHost {
     if (selection.ignoredOverride) {
       this.logger?.warn?.("headless.binary_override_ignored", { reason: "packaged app without CODING_TOOLS_DEV_HOME" });
     }
-    // spawn() holds every window until Windows has loaded the program and the antivirus has
-    // scanned it: 1.85 s for this start (launcher.main_blocked, 2026-10-31). The service's pipes
-    // and exit must live here, so the program is first run from a worker with an argument it
-    // refuses at once, and the start below finds it loaded and scanned.
-    await this.warm(executable, ["--version"]);
-    if (this.stopping) throw new Error("Local execution service is stopping");
+    // spawn() holds the thread that calls it until Windows has loaded the program and the
+    // antivirus has scanned it: 1.85 s cold (2026-10-31), and 9.4 s on 0.8.104's first start even
+    // after a warm-up run, with the hard disk busy (2026-11-09). The service starts from a worker
+    // that owns its pipes and passes its output and exit back, so no window waits on it.
     const requestedAppDataDir = path.join(this.app.getPath("userData"), "headless");
     fs.mkdirSync(requestedAppDataDir, { recursive: true, mode: 0o700 });
     const appDataDir = fs.realpathSync.native(requestedAppDataDir);
@@ -270,7 +272,7 @@ class HeadlessHost {
       startupStderr = Buffer.alloc(0);
       return new Error(message + (detail ? ": " + detail : ""));
     };
-    const child = spawn(executable, ["serve"], {
+    const child = await this.spawnProcess(executable, ["serve"], {
       cwd: path.dirname(executable),
       env: {
         // The commands headless starts for exec_command (Git Bash among them) inherit this: on
@@ -325,7 +327,9 @@ class HeadlessHost {
         removeTokenFile(tokenPath, this.logger);
         throw startupError(`Local execution service exited during startup (${child.exitCode})`);
       }
-      if (fs.existsSync(descriptorPath) && fs.existsSync(tokenPath)) {
+      // Asked off this thread: on the busy hard disk one existsSync of the descriptor held every
+      // window 0.7 s (0.8.104's first start, 2026-11-09).
+      if (await present(descriptorPath) && await present(tokenPath)) {
         try {
           const descriptor = this.readDescriptor(descriptorPath, appDataDir, child.pid);
           const token = this.readToken(descriptor, tokenPath, appDataDir);

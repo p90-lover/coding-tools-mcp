@@ -31,6 +31,7 @@ import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOr
 import { ChatPages } from "./features/ChatPages";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
+import { ComputerUseSurface } from "./features/ComputerUseSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
@@ -554,6 +555,17 @@ function LauncherShell({
     }
   }, [snapshot.state.browserInteractionMode]);
 
+  // The error toast sits at the page's top-left, just past the sidebar, but it is drawn outside
+  // this shell: publish the sidebar's docked width (open, rail or none) where the toast can read it.
+  const sidebarDockWidth = sidebarOpen ? sidebarWidth : compactSidebar ? 0 : SIDEBAR_RAIL_WIDTH;
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--sidebar-dock-width", `${sidebarDockWidth}px`);
+    return () => {
+      root.style.removeProperty("--sidebar-dock-width");
+    };
+  }, [sidebarDockWidth]);
+
   useEffect(() => {
     if (!selectedManualTab) return;
     showSurface("browser");
@@ -866,6 +878,7 @@ function LauncherShell({
                 <SidebarItem active={surface === "agent-orchestrator"} icon="chat" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
                 <SidebarItem active={surface === "agent-orchestrator-teams"} icon="team" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
                 <SidebarItem active={surface === "subagents"} icon="git" label="Subagents" onClick={() => navigateSurface("subagents")} />
+                <SidebarItem active={surface === "computer-use"} icon="cursor" label="Computer use" onClick={() => navigateSurface("computer-use")} />
                 <SidebarItem active={surface === "native-codex"} icon="terminal" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
               </SidebarGroup>
               <SidebarGroup label={copy.workspace}>
@@ -1106,6 +1119,16 @@ function LauncherShell({
             ))}
             {keepAlive("subagents", () => (
               <SubagentsSurface active={surface === "subagents"} setError={setError} />
+            ))}
+            {keepAlive("computer-use", () => (
+              <ComputerUseSurface
+                active={surface === "computer-use"}
+                toolsOn={snapshot.state.chatAgentTools !== false}
+                desktopOn={snapshot.state.chatAgentDesktopTools === true}
+                reviewSteps={snapshot.state.computerReviewSteps === true}
+                setPreference={(key, value) => void api!.setPreference(key, value).then(updateState).catch((cause) => setError(messageOf(cause)))}
+                setError={setError}
+              />
             ))}
             {keepAlive("plugins", () => (
               <PluginsSurface active={surface === "plugins"} copy={copy} setError={setError} snapshot={snapshot} updateState={updateState} />
@@ -3721,13 +3744,31 @@ function readableError(message: string): string {
   return `${words[0].toUpperCase()}${words.slice(1)} didn't finish within ${Math.round(Number(ms) / 1000)} s${rest}`;
 }
 
+/** An error toast fades out after this long; pointing at it holds it until the pointer leaves. */
+const ERROR_TOAST_MS = 5_000;
+
 function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string; onDismiss: () => void }) {
+  const [held, setHeld] = useState(false);
+  // The parent passes a new arrow on every render, and launcher state re-renders it often: read it
+  // from a ref so those renders don't restart the countdown. A new message does restart it.
+  const dismiss = useRef(onDismiss);
+  useEffect(() => {
+    dismiss.current = onDismiss;
+  }, [onDismiss]);
+  useEffect(() => {
+    if (held) return;
+    const timer = window.setTimeout(() => dismiss.current(), ERROR_TOAST_MS);
+    return () => window.clearTimeout(timer);
+  }, [held, message]);
   return (
     <motion.div
       animate={{ opacity: 1, y: 0 }}
       className="error-toast"
-      exit={{ opacity: 0, y: 8 }}
-      initial={{ opacity: 0, y: 8 }}
+      exit={{ opacity: 0, y: -8 }}
+      initial={{ opacity: 0, y: -8 }}
+      onPointerEnter={() => setHeld(true)}
+      onPointerLeave={() => setHeld(false)}
+      role="alert"
       transition={PANEL_TRANSITION}
     >
       <StateDot state="error" />

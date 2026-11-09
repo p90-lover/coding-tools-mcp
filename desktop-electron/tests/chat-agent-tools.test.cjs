@@ -38,7 +38,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
   minAnswerMs = 0, answerClock = undefined, sandbox = null, subagents = null, statePath = null, autoAnswerMs = undefined, blockedCommand = undefined, now = undefined,
   wakeups = null, goals = null, rewriteCommand = undefined, catalog = CATALOG, chatHistory = null, appProcesses = null, captureApp = null,
   chatTitles = null, redaction = null, computerControl = null, previews = null, chatMoves = null, reviewCall = null, sessionModel = null, previewEnabled = () => true,
-  streamAfterMs = undefined, keepAliveMs = undefined,
+  streamAfterMs = undefined, keepAliveMs = undefined, reviewComputerSteps = null,
   registry = [{ id: "ws1", path: path.join(os.tmpdir(), "task") }, { id: "ws2", path: path.join(os.tmpdir(), "other") }] } = {}) {
   const calls = [];
   const asked = [];
@@ -51,6 +51,7 @@ function fixture({ enabled = () => true, desktop = () => false, terminal = () =>
     ...(streamAfterMs !== undefined ? { streamAfterMs } : {}), ...(keepAliveMs !== undefined ? { keepAliveMs } : {}),
     ...(rewriteCommand ? { rewriteCommand } : {}), ...(chatTitles ? { chatTitles } : {}), ...(redaction ? { redaction } : {}),
     ...(computerControl ? { computerControl } : {}), ...(chatMoves ? { chatMoves } : {}), ...(reviewCall ? { reviewCall } : {}), ...(sessionModel ? { sessionModel } : {}),
+    ...(reviewComputerSteps ? { reviewComputerSteps } : {}),
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async (id, workspaceId) => {
       asked.push(id);
@@ -2699,8 +2700,8 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
     assert.deepEqual([step.agent, step.model, step.tool, step.outcome], ["Claude Code", "cpa/gpt-6.1-sol", "computer_action", "done"]);
     assert.deepEqual(modelLookups, [["ws1", "ao-1"]], "the model is looked up once, then kept for a while");
     assert.equal(calls[step.began]?.body?.tool, "computer_action", "the pill names the step before it reaches headless");
-    assert.equal(step.waiting, true, "from the moment it arrives, while it waits for its review");
-    assert.equal(calls[step.proceeded]?.body?.tool, "computer_action", "and drops the wait once the review passed, before headless runs it");
+    assert.equal(step.waiting, false, "in an app the person allowed, a step waits for no review (main #87374f7a7)");
+    assert.equal(calls[step.proceeded]?.body?.tool, "computer_action", "and may act before headless runs it");
     assert.ok(step.ended > step.began, "and stops naming it only once headless answered");
     assert.equal(asks.length, 1, "the allowed app is not asked again");
 
@@ -2712,6 +2713,7 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
     assert.match(refused.content[0].text, /did not allow Codex to use Notepad \(the user denied it\)/);
     assert.equal(calls.length, before, "nothing reached the screen");
     assert.deepEqual([activities.at(-1).agent, activities.at(-1).outcome], ["Codex", "failed"], "the refused call shows on the pill as failed");
+    assert.equal(activities.at(-1).waiting, true, "a chat not allowed the app waits for its review, and the pill says so from the moment it arrives");
 
     const gone = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 99, pid: 1 });
     assert.match(gone.content[0].text, /not open any more/);
@@ -2805,6 +2807,66 @@ test("a call waiting for the person keeps the agent's client waiting, then says 
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("as in Codex, the yes for an app covers its steps: no review per step there, unless Review each step is on", async () => {
+  const tree = tempTree();
+  const windows = [{ window_id: 7, pid: 70, title: "notes.txt - Notepad", app: "notepad.exe", appName: "Notepad" }];
+  let controlled = null;
+  const allowed = new Set();
+  const computerControl = {
+    status: async () => ({ state: controlled ? "active" : "stopped", session_id: "lease-1" }),
+    targets: async () => windows,
+    controlled: () => controlled,
+    appName: (app) => windows.find((item) => item.app === app)?.appName ?? app,
+    appAllowed: (app, workspaceId, session) => allowed.has(`${workspaceId}:${session}:${app}`),
+    askApp: async (request) => { allowed.add(`${request.workspaceId}:${request.aoSession}:${request.target.app}`); return { allowed: true }; },
+    start: async ({ target }) => { controlled = target; return { state: "active", session_id: "lease-1" }; },
+    activity: () => () => undefined,
+  };
+  const reviewed = [];
+  let review = false;
+  const catalog = { ...CATALOG, tools: [...CATALOG.tools,
+    ...["computer_list_windows", "computer_select_window", "computer_find_control", "computer_wait", "computer_sequence"].map(tool)] };
+  const { tools, calls, confirmations } = fixture({ root: tree.root, desktop: () => true, computerControl, catalog, reviewComputerSteps: () => review,
+    blockedCommand: (text) => /format c:/i.test(text),
+    reviewCall: async (input) => { reviewed.push(input.tool); return { action: "ask", reason: "unsure" }; }, confirm: async () => true });
+  try {
+    const chat = await session(tools, { agent: "codex", id: "ao-1" });
+    const init = await post(chat.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, chat.auth);
+    assert.match(init.body.result.instructions, /in an app the user allowed they run without a review per step/);
+    assert.equal(tools.computerStepAllowed({ workspaceId: "ws1", session: "ao-1", tool: "computer_action" }), null, "nothing is under control yet");
+    assert.equal((await callTool(chat.url, chat.auth, "computer_list_windows", {})).isError, false);
+    assert.equal((await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 7, pid: 70 })).isError, false);
+    assert.deepEqual(reviewed, [], "listing the windows and asking for one: the app's card is the person's answer");
+    for (const name of ["computer_snapshot", "computer_action", "computer_sequence", "computer_find_control", "computer_wait"]) {
+      assert.equal((await callTool(chat.url, chat.auth, name, { session_id: "lease-1" })).isError, false, name);
+      assert.equal(calls.at(-1).body.tool, name, `${name} ran`);
+    }
+    assert.deepEqual(reviewed, [], "no step in the allowed app was reviewed");
+    assert.equal(confirmations.length, 0, "and nothing waited for the person");
+    assert.equal(tools.computerStepAllowed({ workspaceId: "ws1", session: "ao-1", tool: "computer_action" }),
+      "A step in Notepad, which you allowed this chat to use");
+
+    // Typing what the safety rules block is the reviewer's, even in the allowed app.
+    await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease-1", step: { action: "type", text: "format c: /q" } });
+    assert.deepEqual(reviewed, ["computer_action"]);
+
+    // A capture of the whole screen is still the reviewer's.
+    await callTool(chat.url, chat.auth, "capture_screenshot", {});
+    assert.deepEqual(reviewed, ["computer_action", "capture_screenshot"]);
+
+    // A chat that was not allowed Notepad: its step is reviewed, and then the app is asked for it.
+    const other = await session(tools, { agent: "codex", id: "ao-2" });
+    await callTool(other.url, other.auth, "computer_action", { session_id: "lease-1" });
+    assert.deepEqual(reviewed.slice(2), ["computer_action"]);
+
+    // Review each step: every step goes to the reviewer again, even in the allowed app.
+    review = true;
+    await callTool(chat.url, chat.auth, "computer_action", { session_id: "lease-1" });
+    assert.deepEqual(reviewed.slice(3), ["computer_action"]);
+    assert.equal(tools.computerStepAllowed({ workspaceId: "ws1", session: "ao-1", tool: "computer_select_window" }), null);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("computer use asks on a card in the chat, Codex's own, and keeps Always allow across restarts", async () => {
   const { createComputerControl, barPage } = require("../electron/computer-control.cjs");
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), "computer-approvals-"));
@@ -2889,6 +2951,54 @@ test("computer use asks on a card in the chat, Codex's own, and keeps Always all
     assert.deepEqual(control.requests(), [], "a stopped chat's card goes");
   } finally { control.dispose(); fs.rmSync(folder, { recursive: true, force: true }); }
   assert.ok(!barPage({ title: "</span><script>" }).includes("</span><script>"));
+});
+
+test("an app allowed before turns on screen capture in a new project; the Computer use tab's overview and Always allow", async () => {
+  const { createComputerControl } = require("../electron/computer-control.cjs");
+  const calls = [];
+  // ws-a has capture on; ws-b (a project the app was never allowed in) has it off.
+  const projects = { "ws-a": true, "ws-b": false };
+  const request = async (endpoint, body) => {
+    calls.push([endpoint, body]);
+    if (endpoint === "/api/v1/computer/status") return { status: { state: "stopped" } };
+    if (endpoint === "/api/v1/computer/targets") return { targets: [{ window_id: 7, pid: 70, title: "Inbox", app: "chrome.exe" }, { window_id: 9, pid: 90, title: "a.txt", app: "notepad.exe" }] };
+    if (endpoint === "/api/v1/workspaces") {
+      return { workspaces: Object.entries(projects).map(([id, on]) => ({ id, name: id, screen_capture_enabled: on, permission_mode: "p", approval_mode: "a", tool_profile: "t" })) };
+    }
+    if (endpoint === "/api/v1/workspaces/policy") { projects[body.workspace_id] = body.screen_capture_enabled === true; return {}; }
+    return {};
+  };
+  const published = [];
+  const control = createComputerControl({ request, BrowserWindow: class {}, ownPids: () => [1], onRequests: (list) => published.push(list),
+    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+  try {
+    const [chrome, notepad] = await control.targets();
+    assert.deepEqual(await control.allowApp("chrome.exe"), [{ app: "chrome.exe", name: "Google Chrome", at: control.allowedApps()[0].at }],
+      "always allowed from the tab, before any chat asks");
+    await assert.rejects(control.allowApp("..\\evil"), /open windows/, "only an executable's name");
+
+    const before = calls.filter(([endpoint]) => endpoint === "/api/v1/workspaces/policy").length;
+    assert.deepEqual(await control.askApp({ workspaceId: "ws-a", aoSession: "s1", target: chrome }), { allowed: true, decision: "earlier" });
+    assert.equal(calls.filter(([endpoint]) => endpoint === "/api/v1/workspaces/policy").length, before, "capture already on: the policy is left alone");
+    assert.deepEqual(await control.askApp({ workspaceId: "ws-b", aoSession: "s2", target: chrome }), { allowed: true, decision: "earlier" }, "no card for an app always allowed");
+    const policy = calls.filter(([endpoint]) => endpoint === "/api/v1/workspaces/policy").at(-1)[1];
+    assert.deepEqual([policy.workspace_id, policy.screen_capture_enabled, policy.permission_mode, policy.tool_profile], ["ws-b", true, "p", "t"],
+      "headless refuses computer use where capture is off, so it comes on with the app, the rest of the policy kept");
+    assert.equal(projects["ws-b"], true);
+    assert.deepEqual(await control.askApp({ workspaceId: "ws-gone", aoSession: "s3", target: chrome }), { allowed: false, reason: "the chat's project is not registered" });
+
+    // A request waiting for an app is answered when the tab always allows it.
+    const waiting = control.askApp({ workspaceId: "ws-a", aoSession: "s4", agent: "Codex", target: notepad });
+    for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate);
+    const overview = await control.overview();
+    assert.deepEqual([overview.state, overview.controlled, overview.history], ["stopped", null, []]);
+    assert.deepEqual(overview.requests.map((item) => [item.agent, item.app]), [["Codex", "Notepad"]]);
+    assert.deepEqual(overview.apps.map((item) => item.app), ["chrome.exe"]);
+    await control.allowApp("notepad.exe");
+    assert.deepEqual(await waiting, { allowed: true, decision: "always" });
+    assert.deepEqual(control.requests(), []);
+    assert.deepEqual(control.allowedApps().map((item) => item.app), ["chrome.exe", "notepad.exe"]);
+  } finally { control.dispose(); }
 });
 
 // Seen live on 0.8.39 (2026-10-31): a data: page never navigates in-page, so the picker's Start and

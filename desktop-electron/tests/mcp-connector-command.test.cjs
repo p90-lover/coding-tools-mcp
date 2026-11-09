@@ -435,7 +435,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
         } finally { browserOperation = null; }
       },
       app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
-      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {},
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {}, automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
     vm.runInNewContext(source.slice(start, end), context);
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
@@ -511,7 +511,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
         } finally { browserOperation = null; }
       },
       app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
-      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: value => operations.push(value),
+      recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: value => operations.push(value), automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
     vm.runInNewContext(source.slice(start, end), context);
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
@@ -945,6 +945,20 @@ test("the setup's own ChatGPT page messages reach the account card; anything els
   for (const text of ["ChatGPT did not open its connector form. PRIVATE_PAGE_TEXT", "PRIVATE_PAGE_TEXT ChatGPT did not open its connector form."]) {
     assert.equal(mcpConnectorCommandFailure(new Error(text)).message, "Connector creation failed. Check Configuration in Coding Tools.");
   }
+});
+
+test("a setup page that moved or a Platform sign-in that stopped is named; nothing else rides along", () => {
+  const { PLATFORM_SIGN_IN_UNFINISHED } = require("../electron/mcp-connector-setup.cjs");
+  const moved = "The browser navigation changed during MCP context inspection.";
+  assert.deepEqual(mcpConnectorCommandFailure(Object.assign(new Error(moved), { navigatedTo: "platform.openai.com/login" })),
+    { code: "workspace_context_changed", message: `${moved} It moved to platform.openai.com/login.` });
+  assert.deepEqual(mcpConnectorCommandFailure(Object.assign(new Error(PLATFORM_SIGN_IN_UNFINISHED), { navigatedTo: "auth.openai.com/log-in" })),
+    { code: "platform_sign_in_required", message: `${PLATFORM_SIGN_IN_UNFINISHED} It stopped at auth.openai.com/log-in.` });
+  // Only a place in navigationPlace's shape is added, and only to those two messages.
+  assert.equal(mcpConnectorCommandFailure(Object.assign(new Error(moved), { navigatedTo: "x.com/a?token=SECRET" })).message, moved);
+  assert.equal(mcpConnectorCommandFailure(Object.assign(new Error(moved), { navigatedTo: null })).message, moved);
+  assert.equal(mcpConnectorCommandFailure(Object.assign(new Error("MCP connector setup is busy"), { navigatedTo: "platform.openai.com/login" })).message,
+    "Finish the active browser or setup operation before creating the connector.");
 });
 
 test("missing ChatGPT form fields do not request a harness configuration change", async t => {

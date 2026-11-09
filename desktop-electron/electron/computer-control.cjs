@@ -556,6 +556,20 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     return end;
   }
 
+  /** The project headless knows as `workspaceId`, or null. */
+  async function workspaceOf(workspaceId) {
+    const workspaces = (await request("/api/v1/workspaces", null, { method: "GET" }))?.workspaces ?? [];
+    return workspaces.find((item) => item.id === workspaceId) ?? null;
+  }
+  const captureOffIn = (workspace) => workspace.screen_capture_enabled !== true && workspace.screenCaptureEnabled !== true;
+  /** Turns the project's screen capture on, keeping the rest of its policy: every computer use call needs it. */
+  async function enableCapture(workspace) {
+    await request("/api/v1/workspaces/policy", {
+      workspace_id: workspace.id, permission_mode: workspace.permission_mode, approval_mode: workspace.approval_mode,
+      tool_profile: workspace.tool_profile, screen_capture_enabled: true, confirm: true,
+    });
+  }
+
   /** The windows a chat may ask for, with the program each belongs to; never this app's own. */
   async function targets() {
     const own = new Set(ownPids());
@@ -575,14 +589,29 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
    */
   async function askApp({ workspaceId, aoSession = null, agent = "The agent", target, signal = null, risk = "" }) {
     const conversation = `${workspaceId}:${aoSession ?? ""}`;
-    if (approvals.allowed(target.app, conversation)) return { allowed: true, decision: "earlier" };
+    if (approvals.allowed(target.app, conversation)) {
+      // Allowed before: Always allow (in another project, or from the Computer use tab) or earlier
+      // in this conversation. Headless refuses every computer use call in a project whose screen
+      // capture is off, so capture comes on with the app here, as it does on the card; an app
+      // always allowed from another project failed every step with CONTROL_POLICY_DISABLED.
+      try {
+        const workspace = await workspaceOf(workspaceId);
+        if (!workspace) return { allowed: false, reason: "the chat's project is not registered" };
+        if (captureOffIn(workspace)) {
+          await enableCapture(workspace);
+          logger?.info?.("computer.capture_enabled", { app: appKey(target.app), reason: "app already allowed" });
+        }
+      } catch (error) {
+        return { allowed: false, reason: `screen capture could not be turned on for the project (${String(error?.message || error).slice(0, 200)})` };
+      }
+      return { allowed: true, decision: "earlier" };
+    }
     const joined = pending.find((item) => item.conversation === conversation && item.target.app === appKey(target.app));
     if (joined) return joined.answered;
-    const workspaces = (await request("/api/v1/workspaces", null, { method: "GET" }))?.workspaces ?? [];
-    const workspace = workspaces.find((item) => item.id === workspaceId);
+    const workspace = await workspaceOf(workspaceId);
     if (!workspace) return { allowed: false, reason: "the chat's project is not registered" };
     const project = workspace.name || workspace.path || workspace.id;
-    const captureOff = workspace.screen_capture_enabled !== true && workspace.screenCaptureEnabled !== true;
+    const captureOff = captureOffIn(workspace);
     let finish;
     const answered = new Promise((resolve) => { finish = resolve; });
     const item = {
@@ -625,13 +654,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     if (current.starting) return { ok: false, error: "Already allowing it" };
     current.starting = true;
     try {
-      if (current.captureOff) {
-        const { workspace } = current;
-        await request("/api/v1/workspaces/policy", {
-          workspace_id: workspace.id, permission_mode: workspace.permission_mode, approval_mode: workspace.approval_mode,
-          tool_profile: workspace.tool_profile, screen_capture_enabled: true, confirm: true,
-        });
-      }
+      if (current.captureOff) await enableCapture(current.workspace);
       approvals.allow(current.target.app, current.conversation, input.decision);
       logger?.info?.("computer.app_allowed", { app: current.target.app, persist: input.decision });
       current.finish({ allowed: true, decision: input.decision });
@@ -681,9 +704,44 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     if (bar) void stop("app quit");
   }
 
+  /**
+   * What the Computer use tab shows: whether control is on and of which window (with the agent, its
+   * model and the step it is on, as the pill shows them), the steps taken, the apps always allowed
+   * and the requests waiting. Headless's own state is `state` ("unknown" when it cannot be read).
+   */
+  async function overview() {
+    let state = "unknown";
+    try { state = String((await status())?.state ?? "stopped"); } catch { state = "unknown"; }
+    const on = Boolean(controlled && bar && !bar.isDestroyed());
+    return {
+      state,
+      controlled: on ? Object.freeze({ app: controlled.app, appName: appName(controlled.app, controlled.title), title: String(controlled.title || ""),
+        agent: shown.agent, model: shown.model, action: shown.action }) : null,
+      history: history.map((entry) => ({ ...entry })),
+      apps: approvals.list(),
+      requests: requests(),
+    };
+  }
+
+  /**
+   * Always allow `app` (an executable's file name) from the Computer use tab, before any chat asks,
+   * so its windows never wait on a card; a request already waiting for it is answered as allowed.
+   * Resolves the always-allowed list.
+   */
+  async function allowApp(app) {
+    const key = appKey(app);
+    if (!key || !/^[^\\/:*?"<>|]+$/.test(key)) throw new Error("Choose an app from the open windows");
+    approvals.allow(key, "", "always");
+    logger?.info?.("computer.app_allowed", { app: key, persist: "always", from: "computer-use tab" });
+    for (const item of pending.filter((entry) => entry.target.app === key)) {
+      try { await answer({ id: item.public.id, decision: "always" }); } catch { /* its card stays */ }
+    }
+    return approvals.list();
+  }
+
   return Object.freeze({
     status, targets, askApp, answer, start, requests, stop, dispose, activity, history: () => history.map((entry) => ({ ...entry })),
-    controlled: () => controlled, appName,
+    controlled: () => controlled, appName, overview, allowApp,
     allowedApps: () => approvals.list(), forgetApp: (app) => approvals.remove(app),
     appAllowed: (app, workspaceId, aoSession) => approvals.allowed(app, `${workspaceId}:${aoSession ?? ""}`),
   });

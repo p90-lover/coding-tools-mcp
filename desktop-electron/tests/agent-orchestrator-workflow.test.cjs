@@ -9774,6 +9774,30 @@ test("Approve for me: reading a file the person attached needs no review; readin
   assert.equal(without.attachedFileRead({ tool: "Read", toolInput: JSON.stringify({ file_path: path.join(attachments, "a.png") }) }), null, "no folder given, no exception");
 });
 
+test("Approve for me: a computer use step in an app the chat may use needs no review; the app's rule decides, by the chat's session", () => {
+  const asked = [];
+  const computerStepAllowed = (input) => { asked.push(input); return input.tool === "computer_action" && input.session === "ao-1" ? "A step in Notepad" : null; };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe", computerStepAllowed });
+  const step = (tool, thread = "ao-1") => workflow.inAllowedApp("ws1", { kind: "tool", tool, thread_id: thread, toolInput: "{}" });
+  assert.equal(step("mcp__coding-tools__computer_action"), "A step in Notepad");
+  assert.deepEqual(asked.at(-1), { workspaceId: "ws1", session: "ao-1", tool: "computer_action" }, "asked with the app tool's own name and the chat's session");
+  assert.equal(step("mcp__coding-tools__computer_action", "ao-2"), null, "another chat is reviewed");
+  assert.equal(step("mcp__coding-tools__computer_snapshot"), null, "what the rule refuses is reviewed");
+  const before = asked.length;
+  assert.equal(step("mcp__coding-tools__capture_screenshot"), null, "only computer use calls");
+  assert.equal(step("mcp__other__computer_action"), null, "only the app's own server");
+  assert.equal(workflow.inAllowedApp("ws1", { tool: "mcp__coding-tools__computer_action" }), null, "a request with no chat session");
+  assert.equal(asked.length, before, "none of those reach the rule");
+  const failing = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe",
+    computerStepAllowed: () => { throw new Error("tools not ready"); } });
+  assert.equal(failing.inAllowedApp("ws1", { tool: "mcp__coding-tools__computer_action", thread_id: "ao-1" }), null, "a rule that fails reviews");
+  const without = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
+  assert.equal(without.inAllowedApp("ws1", { tool: "mcp__coding-tools__computer_action", thread_id: "ao-1" }), null);
+  // Screening asks the rule only for a request the hard deny list lets through.
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  assert.match(source, /: !blocked && inAllowedApp\(workspaceId, approval\)\r?\n\s+\? \{ action: "allow", actor: "safety_rules", reason_code: "allowed_app_step"/);
+});
+
 test("Approve for me: the chat's preview tools and routine commands through the app's terminal pass; anything else asks", () => {
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
   for (const tool of ["preview_open", "preview_read", "preview_screenshot", "preview_click", "preview_console"]) {
@@ -10856,7 +10880,7 @@ function workflowInternals(options) {
   fixture.filename = filename;
   fixture.paths = module.paths;
   const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
-    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, observeExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
   fixture._compile(source, filename);
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
@@ -10961,6 +10985,63 @@ test("restoration uncertainty: a replacement waits for shutdown acknowledgement"
     assert.deepEqual(calls, ["exit existing", "spawn"]);
     assert.equal(workflow.continuations.has("new"), false);
   } finally { finishExit(); workflow.dispose(); }
+});
+
+test("cold agent starts run two at a time; the next begins once an agent is up, ends, or its hold runs out", async () => {
+  // Seen live 2026-11-09: an AO restart ended five chats' turns, "Retry automatically" relaunched all
+  // five in the same second, none of their agents took its message, and the watchdog ended all five.
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const spawned = [], holds = [];
+  const up = new Set();
+  const workflow = workflowInternals({
+    requestHeadless: async (endpoint) => endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "task" } : { ok: true, run: {} },
+    setTimer: (work, ms) => { const hold = { work, ms }; holds.push(hold); return hold; }, clearTimer: hold => { if (hold) hold.cleared = true; },
+    aoHarness: {
+      spawn: async () => { spawned.push(`agent-${spawned.length + 1}`); return spawned.at(-1); },
+      observe: async id => up.has(id) ? { status: "working", turnId: "t", turnState: "running", timeline: [], approvals: [] }
+        : { status: "idle", turnId: "t", turnState: "queued", provisioning: true, timeline: [], approvals: [] },
+    },
+  });
+  const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); };
+  const node = id => ({ id: "one", role: "planner", route, state: "running", receipt: { thread_id: id, request_key: "k" } });
+  try {
+    const launches = ["a", "b", "c", "d"].map(run => workflow.dispatchExternal("ws", run, { id: "one", role: "planner", route }, 1, true, true));
+    await settle();
+    assert.deepEqual(spawned, ["agent-1", "agent-2"], "two cold starts at once; the rest wait their turn");
+    // An agent still starting keeps its slot.
+    await workflow.observeExternal("ws", "a", node("agent-1"));
+    await settle();
+    assert.equal(spawned.length, 2);
+    // Its agent is up: the next waiting launch starts.
+    up.add("agent-1");
+    await workflow.observeExternal("ws", "a", node("agent-1"));
+    await settle();
+    assert.deepEqual(spawned, ["agent-1", "agent-2", "agent-3"]);
+    // A start that never reports gives its slot back once its hold runs out.
+    const hold = holds.find(entry => entry.ms === 3 * 60_000 && !entry.cleared && !entry.fired);
+    assert.ok(hold, "every cold start holds its slot for at most three minutes");
+    hold.fired = true;
+    hold.work();
+    await settle();
+    assert.deepEqual(spawned, ["agent-1", "agent-2", "agent-3", "agent-4"]);
+    await Promise.all(launches);
+  } finally { workflow.dispose(); }
+});
+
+test("a cold start that fails gives its slot to the next launch at once", async () => {
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  let calls = 0;
+  const started = [];
+  const workflow = workflowInternals({
+    requestHeadless: async (endpoint) => endpoint.endsWith("/reserve") ? { ok: true, request_key: "k", prompt: "task" } : { ok: true, run: {} },
+    aoHarness: { spawn: async () => { calls++; if (calls <= 2) throw new Error("AO refused the start"); started.push(calls); return `agent-${calls}`; } },
+  });
+  try {
+    const results = await Promise.allSettled(["a", "b", "c"].map(run => workflow.dispatchExternal("ws", run, { id: "one", role: "planner", route }, 1, true, true)));
+    assert.equal(calls, 3, "the third launch was not left waiting behind two failed starts");
+    assert.deepEqual(started, [3]);
+    assert.deepEqual(results.map(result => result.status), ["rejected", "rejected", "fulfilled"], "each failed start still reports its own error");
+  } finally { workflow.dispose(); }
 });
 
 test("concurrent host-release upgrades recheck the in-flight stop after its first settlement", async () => {

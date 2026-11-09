@@ -1,4 +1,4 @@
-const { readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { createStateFileWriter, readStateFile } = require("./durable-state.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
 const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -126,6 +126,9 @@ function normalizeState(parsed) {
     if (Object.hasOwn(state, "chatAgentTools") && typeof state.chatAgentTools !== "boolean") delete state.chatAgentTools;
     // Their screen capture and computer control only when this is true; absent means off.
     if (Object.hasOwn(state, "chatAgentDesktopTools") && state.chatAgentDesktopTools !== true) delete state.chatAgentDesktopTools;
+    // Computer use > "Review each step": the reviewer checks every step even in an app the chat
+    // may use, only when this is true; absent means off (the yes for the app covers its steps).
+    if (Object.hasOwn(state, "computerReviewSteps") && state.computerReviewSteps !== true) delete state.computerReviewSteps;
     // Their commands through the app's terminal: false is off; absent is on when Codex's sandbox runs
     // them, otherwise off; true is on (unsandboxed, each command asked, when there is no sandbox).
     if (Object.hasOwn(state, "chatAgentTerminalTools") && typeof state.chatAgentTerminalTools !== "boolean") delete state.chatAgentTerminalTools;
@@ -183,10 +186,6 @@ function normalizeState(parsed) {
   }
 }
 
-function writeState(filePath, state) {
-  writeStateFile(filePath, `${JSON.stringify(state, null, 2)}\n`);
-}
-
 function validateSidebarState(value) {
   if (!value || typeof value !== "object" || typeof value.open !== "boolean") {
     throw new Error("Sidebar state is invalid");
@@ -197,14 +196,19 @@ function validateSidebarState(value) {
   return { sidebarOpen: value.open, sidebarWidth: Math.round(value.width) };
 }
 
-function createStateStore(filePath) {
+/**
+ * The settings, kept in memory and saved off the main thread. Saving on it held every window: an
+ * 11 s rename and 1-2 s fsyncs of launcher-state.json at 0.8.104's startup (2026-11-09) with the
+ * hard disk busy. `read()` sees an update at once; `saved()` resolves once every update so far is on
+ * disk, which a quit waits for. A burst of updates is one write plus at most one more with the
+ * latest settings, and a patch that changes nothing is not written again. The session's first
+ * update always writes, so settings recovered from a torn file reach the disk. A failed write keeps
+ * the old file, calls `onError`, and the next update saves everything again.
+ */
+function createStateStore(filePath, { onError = null } = {}) {
   const loaded = readState(filePath);
   let state = loaded.state;
-  // What this store last wrote. A patch that changes nothing is not written again: each write is an
-  // fsync'd atomic write plus its .bak on the main thread, up to 2.4 s on the busy hard disk, and
-  // callers often set what is already set (codexRestartRequired: false on each catalog failure).
-  // The session's first update always writes, so settings recovered from a torn file reach the disk.
-  let written = null;
+  const writer = createStateFileWriter(filePath, { onError });
   return {
     /** How the settings were recovered from a torn file at startup, for the log; null if they were not. */
     recovery: loaded.recovery,
@@ -213,13 +217,12 @@ function createStateStore(filePath) {
     },
     update(patch) {
       const next = { ...state, ...patch, version: 1 };
-      const text = JSON.stringify(next);
-      if (text !== written) {
-        writeState(filePath, next);
-        written = text;
-      }
+      writer.save(`${JSON.stringify(next, null, 2)}\n`);
       state = next;
       return structuredClone(next);
+    },
+    saved() {
+      return writer.saved();
     },
   };
 }

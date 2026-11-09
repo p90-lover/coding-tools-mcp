@@ -3,7 +3,6 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
@@ -521,8 +520,15 @@ class RuntimeSupervisor {
     // Called with { pid, adopted } each time the main MCP tunnel becomes ready (started, adopted, or
     // found running under a new process): main.cjs checks the ChatGPT connector again then.
     onTunnelReady,
+    // Starts the bridge daemon (spawnChild); a worker by default, so Windows creating the process
+    // does not hold this thread.
+    spawnProcess = spawnOffThread,
   }) {
     this.onTunnelReady = onTunnelReady;
+    this.spawnProcess = spawnProcess;
+    // A child start still in flight, by name: a stop waits for it, so a child started in that gap is
+    // never missed (it is not this.daemon until the start resolves).
+    this.childStarts = { daemon: null, tunnel: null };
     this.watchConfigFile = watchConfigFile;
     this.configWatcher = null;
     this.configTrusted = false;
@@ -868,14 +874,19 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
-    // The write is flushed to disk on the main thread, which held every window 0.4-1.5 s on the hard
-    // disk each time the watchdog re-checked a bridge that needs setup (every 20-40 min, 2026-11-08).
-    // Nothing in it had changed, so the same state this process last wrote is kept. It is forgotten
+    // The write runs on the main thread, which held every window 0.4-1.5 s on the hard disk each time
+    // the watchdog re-checked a bridge that needs setup (every 20-40 min, 2026-11-08). Nothing in it
+    // had changed, so the same state this process last wrote is kept. It is forgotten
     // when the file is cleared or set aside (clearState) and when a read finds other content in it
     // (another launcher's), so those are written again; no extra disk call checks the file here.
     const key = stateKey(state);
     if (key === this.writtenStateKey && this.writtenState) return this.writtenState;
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
+    // Not flushed to disk: the flush held every window 1.1-2.5 s three times in 0.8.104's first
+    // minute (2026-11-09). Only a power cut or crash of Windows loses an unflushed write, and that
+    // ends every process the marker names; whatever it then holds is discarded at the next start
+    // (from before this boot), and a torn one is set aside (readState). It stays synchronous so a
+    // read right after a write, here or by the next launcher, sees it.
+    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
     this.writtenStateKey = key;
     this.writtenState = state;
     return state;
@@ -931,7 +942,7 @@ class RuntimeSupervisor {
     if (!preservesLiveOwnership) this.writeState("external", detail);
   }
 
-  spawnChild(name, invocation) {
+  async spawnChild(name, invocation) {
     const suppliedRuntimeEnvironment = this.getRuntimeEnvironment() || {};
     if (typeof suppliedRuntimeEnvironment !== "object" || Array.isArray(suppliedRuntimeEnvironment)) {
       throw new Error("Runtime environment provider returned an invalid value");
@@ -946,7 +957,10 @@ class RuntimeSupervisor {
     // discarded rather than kept in a file: runtime/daemon.log was appended for every line and the
     // launcher re-copied each one into launcher.jsonl.
     if (persistent) this.removeOldDaemonLogs();
-    const child = spawn(invocation.executable, invocation.args, {
+    // Started from a worker: spawning bun.exe here held every window 1.1 s at 0.8.104's start
+    // (2026-11-09), and up to 48 s while the antivirus scanned it (0.8.40). The worker hands back a
+    // child with the same pid, streams, kill() and events; a persistent one does not keep it busy.
+    const starting = this.spawnProcess(invocation.executable, invocation.args, {
       cwd: invocation.cwd,
       detached: persistent ? true : DETACH_OWNED_CHILD,
       env: {
@@ -957,6 +971,13 @@ class RuntimeSupervisor {
       stdio: persistent ? "ignore" : ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
+    this.childStarts[name] = Promise.resolve(starting);
+    let child;
+    try {
+      child = await starting;
+    } finally {
+      this.childStarts[name] = null;
+    }
     this[name] = child;
     this.lastChildFailure[name] = null;
     this.lastChildOutput[name] = null;
@@ -1080,6 +1101,8 @@ class RuntimeSupervisor {
       await Promise.allSettled([...this.recoveryTasks]);
       this.stopTunnelMonitor();
     }
+    // A daemon still being started is left running too, and the marker names it for the next launcher.
+    await this.childStarted("daemon");
     const daemon = this.daemon;
     if (daemon) this.expectedExits.add(daemon);
     daemon?.release?.();
@@ -1811,7 +1834,7 @@ class RuntimeSupervisor {
     }
     let child;
     try {
-      child = this.spawnChild("daemon", this.runtimeCommand(["serve"]));
+      child = await this.spawnChild("daemon", this.runtimeCommand(["serve"]));
       this.daemonRuntimeRoot = this.installedRuntimeRoot ?? null;
       await this.waitForProxy(config);
       if (this.daemon !== child) throw new Error("Responses proxy exited immediately after becoming healthy");
@@ -2597,7 +2620,13 @@ class RuntimeSupervisor {
     return result;
   }
 
+  /** Waits for a start of `name` still in flight (spawnChild), so a stop sees the child it started. */
+  async childStarted(name) {
+    try { await this.childStarts[name]; } catch { /* a failed start leaves no child to stop */ }
+  }
+
   async stopChild(name, timeoutMs = 10_000) {
+    await this.childStarted(name);
     const child = this[name];
     if (!child || child.exitCode !== null || child.signalCode !== null) {
       this[name] = null;

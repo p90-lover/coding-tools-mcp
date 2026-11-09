@@ -318,13 +318,36 @@ function DshGroup({ items, live, turnLive, mission = false }: { items: ChatLiveI
 }
 
 /**
+ * A card's thoughts that the model has moved on from, settled (exported for its tests). Thinking is
+ * one thought at a time, so one is over once the model adds anything after it; a message the person
+ * steered in is not the model moving on. Their completion often never arrives, and in a mission
+ * that runs for hours each kept its shimmer until the whole turn ended: 146 such rows across four
+ * running missions, stepped 30 times a second by the shimmer ticker, kept the window's main thread
+ * busy (0.8.104, 2026-11-09). Tool calls are left as they are: several can run at once.
+ */
+export function settleFollowedThoughts(items: ChatLiveItem[]): ChatLiveItem[] {
+  let followed = false;
+  let settled: ChatLiveItem[] | null = null;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (followed && item.kind === "reasoning" && item.status === "running") {
+      settled ??= items.slice();
+      settled[index] = { ...item, status: "completed" as const };
+    }
+    if (item.kind !== "steer") followed = true;
+  }
+  return settled ?? items;
+}
+
+/**
  * A card's work as DeepSeek Desktop's Standard view lays it out: groups between the replies, each
  * folded under its heading (open on a mission). Only the last group of a running card is live; a
  * reply or a steered message after a group closes it.
  */
 function DshFlow({ items, live, finished, hideReply, mission = false }: { items: ChatLiveItem[]; live: boolean; finished: boolean; hideReply?: string; mission?: boolean }) {
   // The reply is the turn's messages joined: each one in it shows once, in the reply (withoutReplied).
-  const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), hideReply);
+  // Thoughts are settled before that, so one the reply follows has ended too.
+  const tidy = withoutReplied(settleFollowedThoughts(tidyTimeline(steerReceipts(items, finished))), hideReply);
   const segments = dshSegments(tidy);
   // A group starts open on a mission (DshGroup); the person's own toggles stay inside it.
   const shown = useWorkWindow(segments.map((segment) => segment.kind === "item" ? segment.item.id : segment.key),

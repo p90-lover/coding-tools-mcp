@@ -132,6 +132,8 @@ function userTabsOnPartition(host, partition) {
 
 // Accounts the Browser tab keeps loaded, the shown one included (GPT Browser keeps 4 as well).
 const MAX_WARM_HOMES = 4;
+// How long an operation waits for the page an account switch opened before it goes on anyway.
+const HOME_OPEN_WAIT_MS = 30_000;
 // What a parked account's page keeps of the Browser tab's state.
 const HOME_STATE_FIELDS = ["status", "message", "url", "title", "authenticated", "loading", "canGoBack", "canGoForward"];
 
@@ -736,7 +738,10 @@ class BrowserHost {
     this.interactionModeOverride = null;
     this.selectedTabId = "home";
     this.manualOperation = null;
+    this.manualOperationYields = false;
     this.manualOperationSettled = null;
+    // The page an account switch is opening: { view, done } (presentHome).
+    this.homeOpening = null;
     this.loginOperation = null;
     this.sessionRefreshOperation = null;
     this.cloudflareChallengeRecovery = null;
@@ -915,7 +920,9 @@ class BrowserHost {
    * in their own tabs on their own accounts, so only what owns the shown account's page blocks it.
    */
   homeSwitchBlocker() {
-    if (this.manualOperation) return `${this.manualOperation} is running`;
+    // A background operation (automatic MCP setup, in hidden windows of its own) gives way: it stops
+    // at its next step once the shown account changes. It refused every switch while it ran.
+    if (this.manualOperation && !this.manualOperationYields) return `${this.manualOperation} is running`;
     if (this.loginOperation || this.authView) return "sign-in is in progress";
     if ([...this.turnTabs.values()].some((tab) => tab.interactionMode === "manual" && tab.status === "running")) {
       return "a Zero Risk turn is waiting to be sent";
@@ -2941,6 +2948,39 @@ class BrowserHost {
     if (inspectSession) await this.probeAuthentication();
   }
 
+  /**
+   * After an account switch: shows the Browser tab if it was showing, and starts ChatGPT on the
+   * account's page without waiting for it. The switch used to wait for the whole page and its
+   * sign-in check, up to a minute through the account's proxy on a busy machine, with the account
+   * picker locked on "Switching…" (2026-11-09). The page shows its own loading and errors; an
+   * operation that needs it waits for it in withManualOperation, as it waited for the switch.
+   */
+  presentHome({ show = false, inspectSession = true } = {}) {
+    if (show) {
+      if (inspectSession) requireAutomaticBrowserInspection(this, "ChatGPT session inspection");
+      if (this.selectedTabId === "home") this.homeTabClosed = false;
+      this.show();
+    }
+    const opening = { view: this.view, done: null };
+    opening.done = this.openHomePage(inspectSession).catch((error) => {
+      this.logger.warn("browser.home_open_failed", { message: error instanceof Error ? error.message.slice(0, 200) : String(error) });
+    }).finally(() => {
+      if (this.homeOpening === opening) this.homeOpening = null;
+    });
+    this.homeOpening = opening;
+    return opening.done;
+  }
+
+  /** Settles once the shown account's page is open (presentHome), or after `timeoutMs`. */
+  async homeOpened(timeoutMs = HOME_OPEN_WAIT_MS) {
+    const opening = this.homeOpening;
+    // A page parked by a later switch goes on loading on its own: only the one shown is waited for.
+    if (!opening || opening.view !== this.view) return;
+    let timer;
+    await Promise.race([opening.done, new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); })]);
+    clearTimeout(timer);
+  }
+
   hide() {
     this.visible = false;
     this.syncViewVisibility();
@@ -4346,6 +4386,8 @@ class BrowserHost {
 
   async withManualOperation(name, action, { preserveSurface = false } = {}) {
     await this.ready();
+    // The page an account switch just opened (sign-in, the connector check and setup all read it).
+    await this.homeOpened?.();
     if (this.activeTraceId) {
       throw new Error(`ChatGPT browser is running Codex turn ${this.activeTraceId}`);
     }
@@ -4354,6 +4396,8 @@ class BrowserHost {
     }
     if (!preserveSurface) this.activateHomeSurface();
     this.manualOperation = name;
+    // One that leaves the shown page alone runs in the background and yields to an account switch.
+    this.manualOperationYields = preserveSurface === true;
     let settle;
     this.manualOperationSettled = new Promise((resolve) => { settle = resolve; });
     const contents = this.view?.webContents;
@@ -4367,6 +4411,7 @@ class BrowserHost {
     } finally {
       if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);
       this.manualOperation = null;
+      this.manualOperationYields = false;
       this.manualOperationSettled = null;
       settle();
     }
