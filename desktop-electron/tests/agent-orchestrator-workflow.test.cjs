@@ -9774,6 +9774,30 @@ test("Approve for me: reading a file the person attached needs no review; readin
   assert.equal(without.attachedFileRead({ tool: "Read", toolInput: JSON.stringify({ file_path: path.join(attachments, "a.png") }) }), null, "no folder given, no exception");
 });
 
+test("Approve for me: a computer use step in an app the chat may use needs no review; the app's rule decides, by the chat's session", () => {
+  const asked = [];
+  const computerStepAllowed = (input) => { asked.push(input); return input.tool === "computer_action" && input.session === "ao-1" ? "A step in Notepad" : null; };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe", computerStepAllowed });
+  const step = (tool, thread = "ao-1") => workflow.inAllowedApp("ws1", { kind: "tool", tool, thread_id: thread, toolInput: "{}" });
+  assert.equal(step("mcp__coding-tools__computer_action"), "A step in Notepad");
+  assert.deepEqual(asked.at(-1), { workspaceId: "ws1", session: "ao-1", tool: "computer_action" }, "asked with the app tool's own name and the chat's session");
+  assert.equal(step("mcp__coding-tools__computer_action", "ao-2"), null, "another chat is reviewed");
+  assert.equal(step("mcp__coding-tools__computer_snapshot"), null, "what the rule refuses is reviewed");
+  const before = asked.length;
+  assert.equal(step("mcp__coding-tools__capture_screenshot"), null, "only computer use calls");
+  assert.equal(step("mcp__other__computer_action"), null, "only the app's own server");
+  assert.equal(workflow.inAllowedApp("ws1", { tool: "mcp__coding-tools__computer_action" }), null, "a request with no chat session");
+  assert.equal(asked.length, before, "none of those reach the rule");
+  const failing = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe",
+    computerStepAllowed: () => { throw new Error("tools not ready"); } });
+  assert.equal(failing.inAllowedApp("ws1", { tool: "mcp__coding-tools__computer_action", thread_id: "ao-1" }), null, "a rule that fails reviews");
+  const without = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
+  assert.equal(without.inAllowedApp("ws1", { tool: "mcp__coding-tools__computer_action", thread_id: "ao-1" }), null);
+  // Screening asks the rule only for a request the hard deny list lets through.
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
+  assert.match(source, /: !blocked && inAllowedApp\(workspaceId, approval\)\r?\n\s+\? \{ action: "allow", actor: "safety_rules", reason_code: "allowed_app_step"/);
+});
+
 test("Approve for me: the chat's preview tools and routine commands through the app's terminal pass; anything else asks", () => {
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), findCodexExecutable: () => "C:/codex.exe" });
   for (const tool of ["preview_open", "preview_read", "preview_screenshot", "preview_click", "preview_console"]) {

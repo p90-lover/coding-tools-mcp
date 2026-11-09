@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "chatgpt-browser-management" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-browser-management" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "computer-use" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 /** Plugins > MCPs (chat-mcp-servers.cjs): one of the person's own MCP servers for chat agents. */
 export interface McpServerEntry {
@@ -642,6 +642,8 @@ export interface LauncherState {
   codexRoute?: boolean;
   /** Those agents may also capture the screen and control the computer; absent means off. */
   chatAgentDesktopTools?: boolean;
+  /** Computer use > "Review each step": every computer use step goes to the reviewer, even in an allowed app; absent means off. */
+  computerReviewSteps?: boolean;
   /** Those agents may also run commands through the app's terminal; absent means off. */
   chatAgentTerminalTools?: boolean;
   /** Those agents get their own preview browser for pages served on this machine; absent means on. */
@@ -1191,7 +1193,7 @@ export interface LauncherApi {
     targetMode: BrowserInteractionMode;
   }>;
   setPreference(
-    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests" | "rtkEnabled" | "chatAgentRedactSecrets",
+    key: "keepRunningOnClose" | "showBrowserDuringTurns" | "autoConnectExistingMcp" | "chatAgentTools" | "chatAgentDesktopTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "confirmAgentToolRequests" | "rtkEnabled" | "chatAgentRedactSecrets" | "computerReviewSteps",
     value: boolean,
   ): Promise<LauncherState>;
   /** What chat agents hide in the user's messages, one kind per line; empty restores the defaults. */

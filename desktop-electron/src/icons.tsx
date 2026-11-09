@@ -11,6 +11,7 @@ export type IconName =
   | "chevron"
   | "chevronDown"
   | "close"
+  | "cursor"
   | "external"
   | "expand"
   | "forward"
@@ -63,6 +64,7 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
       {name === "chevron" ? <path {...common} d="m9 6 6 6-6 6" /> : null}
       {name === "chevronDown" ? <path {...common} d="m6 9 6 6 6-6" /> : null}
       {name === "close" ? <path {...common} d="m6 6 12 12M18 6 6 18" /> : null}
+      {name === "cursor" ? <><path {...common} d="M5 3.5 19 10l-6.2 1.9L10.5 18 5 3.5Z" /><path {...common} d="m13.2 12.4 5.3 5.3" /></> : null}
       {name === "external" ? <><path {...common} d="M14 5h5v5M19 5l-8 8" /><path {...common} d="M18 13v5a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" /></> : null}
       {name === "expand" ? <><path {...common} d="M8 3H3v5M3 3l6 6M16 3h5v5M21 3l-6 6M8 21H3v-5M3 21l6-6M16 21h5v-5M21 21l-6-6" /></> : null}
       {name === "forward" ? <path {...common} d="m9.5 6 6 6-6 6" /> : null}
