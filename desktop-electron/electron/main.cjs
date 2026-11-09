@@ -326,6 +326,8 @@ let agentOrchestratorResourceRoot = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
+/** The saved settings (launcher-state.json), made at startup; a quit waits for its last save. */
+let launcherStateStore = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
 let chatAgentTools = null;
 // A chat's computer control (computer-control.cjs), made with the tool server: its request cards.
@@ -4188,12 +4190,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal, /schedule, wake-up, /loop or browser-account change still being saved (off the main
-    // thread) lands before the app goes; a disk that hangs holds the quit 5 s at most, and each file
-    // keeps the change before.
+    // A goal, /schedule, wake-up, /loop, browser-account or settings change still being saved (off
+    // the main thread) lands before the app goes; a disk that hangs holds the quit 5 s at most, and
+    // each file keeps the change before.
     await Promise.race([
       Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(),
-        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved()]),
+        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved(), launcherStateStore?.saved()]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
     const runtimeOperation = runtimeHost?.currentOperation();
@@ -4381,7 +4383,15 @@ async function start() {
     });
   }
 
-  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"), {
+    onError: (error) => {
+      // The logger is made further down; a save that fails before then is retried by the next one.
+      try {
+        logger.warn("launcher.state_write_failed", { message: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
+      } catch { /* no logger yet */ }
+    },
+  });
+  launcherStateStore = stateStore;
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
     stateStore.update({
       language: stateStore.read().language || "en",
@@ -5017,7 +5027,7 @@ async function start() {
           let proxy;
           try { proxy = { configured: Boolean(antigravityProxyEnvironment().HTTPS_PROXY) }; }
           catch (error) { proxy = { configured: false, error: String(error?.message || error).slice(0, 200) }; }
-          return { ...antigravityCli.status(), proxy, cpa: await antigravityReauth.status() };
+          return { ...(await antigravityCli.statusAsync()), proxy, cpa: await antigravityReauth.status() };
         }
         case "install": return antigravityCli.install();
         case "terminal_open": {
