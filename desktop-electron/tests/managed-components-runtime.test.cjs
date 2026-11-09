@@ -443,7 +443,9 @@ test("a services snapshot after an install touches no file synchronously", async
     });
     store.setGlobalRouting({ enabled: false, profileId: null });
     await store.saved();
-    assert.equal(await controller.refreshDiskState(), true);
+    // Not "returns true": the file watcher's own read can see the change first, and then this read
+    // rightly finds nothing new (2 of 7 local runs failed so, 2026-11-09). The snapshot below is the check.
+    await controller.refreshDiskState();
     for (const name of syncNames) {
       fs[name] = (...args) => {
         calls.push(`${name} ${args[0]}`);

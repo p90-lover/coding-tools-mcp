@@ -1,4 +1,5 @@
 "use strict";
+const { fetchOffThread } = require("./off-thread-run.cjs");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -599,7 +600,7 @@ function createExternalServicesController({
   safeStorage = null,
   logger = null,
   env = process.env,
-  fetchImpl = globalThis.fetch,
+  fetchImpl = fetchOffThread,
   spawnProcess = spawn,
   terminateProcessTree = terminateOwnedProcessTree,
   getProviderSnapshot = null,

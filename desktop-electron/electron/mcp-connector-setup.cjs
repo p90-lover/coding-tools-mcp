@@ -318,11 +318,26 @@ function requireAutomaticConnectorSetup(runtimeHost, browserHost) {
   }
 }
 
-function currentConnectorSettings(runtimeHost) {
+/**
+ * Whether the automatic tunnel's runtime key is saved, read off the main thread once for a whole
+ * connector operation; undefined when the host can only check it synchronously.
+ */
+async function connectorCredentials(runtimeHost) {
+  if (typeof runtimeHost.mcpCredentialsConfiguredAsync !== "function") return undefined;
+  return runtimeHost.mcpCredentialsConfiguredAsync(runtimeHost.runtimeConfigSnapshot().config, "automatic");
+}
+
+/**
+ * The main tunnel's connector name and tunnel ID. `credentials` is connectorCredentials()'s answer
+ * for an operation that checks again and again (every 50 ms while ChatGPT confirms a workspace):
+ * the key file was then looked up on the main thread each time, and on the busy hard disk one
+ * lookup held every window for up to 17.9 s (seen live 2026-11-09). Its config is cached.
+ */
+function currentConnectorSettings(runtimeHost, { credentials } = {}) {
   const snapshot = runtimeHost.runtimeConfigSnapshot();
   const config = snapshot.config;
   if (!snapshot.configured || snapshot.owner !== "launcher" || config?.mode !== "full"
-    || config.browserInteractionMode === "manual" || !runtimeHost.mcpCredentialsConfigured("automatic")) {
+    || config.browserInteractionMode === "manual" || !(credentials ?? runtimeHost.mcpCredentialsConfigured("automatic"))) {
     throw new Error("Connect the saved automatic MCP harness before creating its ChatGPT connector.");
   }
   const tunnel = config.automaticTunnel || (!config.manualTunnel ? config.tunnel : null);
@@ -732,9 +747,11 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
   requireAutomaticConnectorSetup(runtimeHost, browserHost);
   if (operationHeld && browserHost.currentOperation?.() !== "MCP connector creation") throw new Error("MCP connector setup is busy");
   const extra = target?.tunnelId !== undefined;
+  // Read once here; checkHost runs on every step of the setup.
+  const credentials = extra ? undefined : await connectorCredentials(runtimeHost);
   const settings = extra
     ? extraConnectorSettings(runtimeHost, target.tunnelId)
-    : currentConnectorSettings(runtimeHost);
+    : currentConnectorSettings(runtimeHost, { credentials });
   const partition = target?.partition ?? browserHost.partition;
   const sharedProof = shared && freshConnectorResults.get(shared.creationResult);
   if (shared) {
@@ -754,7 +771,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     if (browserHost.partition !== activePartition) throw new Error("The browser account changed during MCP setup.");
     assertCurrent?.();
     if (shared) sharedProof.assertCurrent?.();
-    const current = extra ? extraConnectorSettings(runtimeHost, settings.tunnelId) : currentConnectorSettings(runtimeHost);
+    const current = extra ? extraConnectorSettings(runtimeHost, settings.tunnelId) : currentConnectorSettings(runtimeHost, { credentials });
     if (current.name !== settings.name || current.tunnelId !== settings.tunnelId) throw new Error("The MCP configuration changed during setup.");
   };
   const run = async () => {
@@ -1035,4 +1052,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

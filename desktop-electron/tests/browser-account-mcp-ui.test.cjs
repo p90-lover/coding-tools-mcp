@@ -53,7 +53,7 @@ function fixture(createConnector = async () => ({ created: true, connected: true
   const page = () => render(exports.ChatGptBrowserManagement, props, "management");
   const cardNode = id => nodes(page()).find(node => node.type?.name === "AccountCard" && node.props.account.id === id);
   const card = id => { const node = cardNode(id); assert(node); return render(node.type, node.props, id); };
-  return { accounts, calls, api, props, status, page, cardNode, card, render, flush: () => new Promise(resolve => setImmediate(resolve)) };
+  return { accounts, calls, api, props, status, page, cardNode, card, render, exports, flush: () => new Promise(resolve => setImmediate(resolve)) };
 }
 
 function nodes(value) {
@@ -324,4 +324,17 @@ test("bulk setup includes fresh existing-connector checks and skips unverified a
   await ui.flush();
   assert.deepEqual(ui.calls.connector, ["main", "second"]);
   assert.match(text(ui.page()), /1 skipped/);
+});
+
+test("a failed automatic plan check waits five minutes, like a successful one, before it runs again", () => {
+  const { planCheckDue } = fixture().exports;
+  const now = 1_000_000_000, key = "main:main@example.test";
+  const unchecked = { id: "main", plan: null };
+  assert.equal(planCheckDue(unchecked, key, now, new Map()), true, "never checked: check now");
+  assert.equal(planCheckDue({ id: "main", plan: { planCheckedAt: now - 60_000 } }, key, now, new Map()), false);
+  assert.equal(planCheckDue({ id: "main", plan: { planCheckedAt: now - 300_000 } }, key, now, new Map()), true);
+  const failures = new Map([[key, now - 60_000]]);
+  assert.equal(planCheckDue(unchecked, key, now, failures), false, "failed a minute ago: not on this visit");
+  assert.equal(planCheckDue(unchecked, "second:second@example.test", now, failures), true, "another account is unaffected");
+  assert.equal(planCheckDue(unchecked, key, now + 240_000, failures), true, "five minutes after the failure: check again");
 });

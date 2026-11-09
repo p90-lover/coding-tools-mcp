@@ -285,10 +285,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   let daemonLines = "";
   const keepDaemonLines = (text) => { daemonLines = (daemonLines + text).slice(-DAEMON_LINES_CHARS); };
-  /** Removes the log files an older build wrote. */
+  /** Removes the log files an older build wrote, off the main thread (each rmSync held it 0.34 s, 2026-11-09). */
   function removeOldDaemonLogs() {
     for (const name of ["ao-daemon.log", "ao-daemon.log.1"]) {
-      try { fs.rmSync(path.join(dataRoot, "logs", name), { force: true }); } catch {}
+      // Any failure, thrown or rejected, leaves the file for the next start: it never fails a start.
+      Promise.resolve().then(() => fs.promises.rm(path.join(dataRoot, "logs", name), { force: true })).catch(() => {});
     }
   }
   let missionSelection = null;
@@ -1194,23 +1195,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // Each session's last good context reading (steadyContext), bounded like launchWindows. Kept on
   // disk too: after an app restart (an update) the first steer's zero snapshot had nothing to fall
   // back on, and the meter showed an empty context for a long chat.
-  // Loaded on the meter's first read.
+  // Loaded on the meter's first read, off the main thread (read synchronously, it held every window
+  // for 0.9 s on the busy hard disk); the meters asking at the same time share the one read.
   let contextReadings = null;
+  let readingsLoad = null;
   let readingsSaved = "";
   let readingsTimer = null;
   let readingsWrite = Promise.resolve();
   const readingsFile = () => path.join(dataRoot, "coding-tools-context-readings.json");
   const readings = () => {
-    if (contextReadings) return contextReadings;
-    let saved = [];
-    try {
-      const parsed = JSON.parse(fs.readFileSync(readingsFile(), "utf8"));
-      if (Array.isArray(parsed)) saved = parsed.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string"
-        && entry[1] && typeof entry[1] === "object" && entry[1].usage && typeof entry[1].usage === "object").slice(-64);
-    } catch { /* no readings yet */ }
-    contextReadings = new Map(saved);
-    readingsSaved = JSON.stringify(saved);
-    return contextReadings;
+    if (contextReadings) return Promise.resolve(contextReadings);
+    readingsLoad ??= fs.promises.readFile(readingsFile(), "utf8").then((text) => {
+      const parsed = JSON.parse(text);
+      return Array.isArray(parsed) ? parsed.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string"
+        && entry[1] && typeof entry[1] === "object" && entry[1].usage && typeof entry[1].usage === "object").slice(-64) : [];
+    }).catch(() => [] /* no readings yet */).then((saved) => {
+      contextReadings = new Map(saved);
+      readingsSaved = JSON.stringify(saved);
+      return contextReadings;
+    });
+    return readingsLoad;
   };
   const persistReadings = () => {
     readingsWrite = readingsWrite.then(async () => {
@@ -2053,7 +2057,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     await closingGateway?.close();
     if (child && child.exitCode === null && child.signalCode === null) {
       const stoppingChild = child;
-      try { await fetch(`http://127.0.0.1:${daemonPort}/shutdown`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(2000) }); } catch {}
+      try { await fetchOffThread(`http://127.0.0.1:${daemonPort}/shutdown`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(2000) }); } catch {}
       await new Promise((resolve) => {
         const timer = setTimeout(() => { stoppingChild.kill(); resolve(); }, 5000);
         stoppingChild.once("exit", () => { clearTimeout(timer); resolve(); });
@@ -2274,7 +2278,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
           }
           try {
-            const response = await fetch(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", signal: AbortSignal.timeout(1000) });
+            const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(1000) });
             checkStartup();
             const ready = await response.json();
             checkStartup();
@@ -2494,7 +2498,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (!conversation || typeof conversation !== "object") return;
         const reported = conversation.usage && typeof conversation.usage === "object" ? conversation.usage : null;
         const compactedAt = typeof conversation.compactedAt === "string" ? conversation.compactedAt : null;
-        const usage = steadyContext(readings(), id, reported, compactedAt);
+        const usage = steadyContext(await readings(), id, reported, compactedAt);
         saveReadings();
         const limits = conversation.rateLimits && typeof conversation.rateLimits === "object" ? conversation.rateLimits : null;
         sessions[id] = {

@@ -1,4 +1,5 @@
 "use strict";
+const { fetchOffThread } = require("./off-thread-run.cjs");
 
 // The 5-hour and weekly usage limits of the Codex accounts CPA serves Codex models from, for the
 // chat's context meter (shown as Claude Code shows plan usage limits). CPA Helper, the bundled CPA
@@ -77,7 +78,7 @@ function rank(account) {
   return account.checkedAt ? 0 : 1;
 }
 
-function createCpaQuota({ getConnection, fetchImpl = fetch, now = Date.now, logger = console } = {}) {
+function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.now, logger = console } = {}) {
   let cached = null; // { at, value }
   let pending = null;
   const refreshedAt = new Map(); // auth_index -> ms

@@ -12218,3 +12218,52 @@ test("chat recovery is a privileged app operation routed through the workflow", 
   } } });
   assert.deepEqual(result, { ok: true, recovery: "observed" }); assert.deepEqual(calls, [{ operation: "chat_recover", input: args }]);
 });
+
+test("a send that races a board change reads the board again and starts its run, instead of losing the message", async () => {
+  // Seen live 2026-11-09: chat_send failed twice in an hour with "AO board revision or initial state
+  // changed": something else moved the board between the send's read and its run's creation.
+  for (const races of [1, 3, 4]) {
+    const world = chatWorld();
+    let refused = 0;
+    const request = async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team" && refused < races) {
+        refused++;
+        throw new Error("AO board revision or initial state changed");
+      }
+      return world.requestHeadless(endpoint, body, options);
+    };
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request, findCodexExecutable: () => "C:\c.exe",
+      setTimer: (fn) => { fn(); return 0; },
+      resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+    try {
+      if (races < 4) {
+        const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the email dots" });
+        assert.equal(sent.taskId, "task-1", `${races} refusal(s)`);
+        assert.equal(world.updates.filter((change) => change.operation === "create_from_team").length, 1, "one run is made");
+      } else {
+        // A board that keeps moving still ends in an error after four tries, not a loop.
+        await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the email dots" }), /board revision/);
+        assert.equal(world.updates.filter((change) => change.operation === "create_from_team").length, 0);
+      }
+      assert.equal(refused, races);
+    } finally { workflow.dispose(); }
+  }
+});
+
+test("a run creation refused for another reason is not retried", async () => {
+  const world = chatWorld();
+  let attempts = 0;
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team") {
+      attempts++;
+      throw new Error("AO run identity already exists");
+    }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: request, findCodexExecutable: () => "C:\c.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); } });
+  try {
+    await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the email dots" }), /identity already exists/);
+    assert.equal(attempts, 1);
+  } finally { workflow.dispose(); }
+});
