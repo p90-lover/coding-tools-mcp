@@ -138,7 +138,9 @@ function mount(props, { effects = false, objectUrls } = {}) {
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
             : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
               SentImage: "SentImage", ToolImages: "ToolImages", ImageLightbox: "ImageLightbox", SecretText: "SecretText",
-              SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart, WaitingAnswer: "WaitingAnswer" } : {},
+              SteerReader: react.createContext("Claude"), SteerReceiptMark: "SteerReceiptMark", TurnRestart: turnRestart, WaitingAnswer: "WaitingAnswer",
+              // A long list of work draws its newest rows (ao-chat's window), as the real hook does before a click.
+              EarlierSteps: "EarlierSteps", useWorkWindow: (keys, rows) => ({ start: chat.workWindowStart(rows ?? keys.map(() => 1)), showEarlier() {} }) } : {},
   { window: timers, document: { querySelector: () => null, addEventListener() {}, removeEventListener() {} }, navigator: {}, URL: objectUrls });
   props.queue?.attach?.(module.syncChatQueues);
   return {
@@ -1588,13 +1590,19 @@ test("while a goal is pursued its earlier rounds show their work expanded too; o
 test("a row's own choice outlives the row: its turn keeps it by card, so a thought folded on the running card stays folded in the answer's fold", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   const tree = ts.createSourceFile("AgentOrchestratorChat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let hook;
-  const visit = (item) => { if (ts.isFunctionDeclaration(item) && item.name?.text === "useWorkOpen") hook = item.getText(tree); ts.forEachChild(item, visit); };
+  let hook, key;
+  const visit = (item) => {
+    if (ts.isFunctionDeclaration(item) && item.name?.text === "useWorkOpen") hook = item.getText(tree);
+    // The key a row's choice is kept under, shared with the work list's window (LiveTimeline).
+    if (ts.isVariableStatement(item) && item.declarationList.declarations.some((declaration) => declaration.name.getText(tree) === "workChoiceKey")) key = item.getText(tree);
+    ts.forEachChild(item, visit);
+  };
   visit(tree);
   assert.ok(hook, "the chat's one hook for a disclosure in a turn's work");
   // Each call is a row mounting afresh with its own state, as the "Worked for" fold mounts new rows.
   const exports = {};
-  vm.runInNewContext(ts.transpileModule(`exports.useWorkOpen = ${hook}`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
+  vm.runInNewContext(ts.transpileModule(`${key}
+exports.useWorkOpen = ${hook}`, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText,
     { exports, useState: (initial) => { let value = typeof initial === "function" ? initial() : initial; return [value, (next) => { value = next; }]; } });
   const row = (...args) => exports.useWorkOpen(...args);
   const turn = { open: true, chosen: new Map(), card: "r1:planner" };

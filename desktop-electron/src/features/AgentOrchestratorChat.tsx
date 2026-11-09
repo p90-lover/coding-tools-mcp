@@ -25,7 +25,7 @@ import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMemb
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer, EarlierSteps, useWorkWindow } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
 import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
@@ -33,7 +33,7 @@ import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
-  activitySummary, groupTimeline, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
+  activitySummary, groupTimeline, workGroupRows, workSegmentSteps, type ChatLiveSegment, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
@@ -325,10 +325,11 @@ type MissionWork = { open: boolean; chosen: Map<string, boolean>; card?: string 
 
 /** One disclosure in a turn's work: the person's choice wins, else open on a mission, else `fallback`. */
 function useWorkOpen(mission: MissionWork | undefined, id: string, fallback = false): [boolean, (open: boolean) => void] {
-  const key = `${mission?.card ?? ""}\n${id}`;
+  const key = workChoiceKey(mission, id);
   const [chosen, setChosen] = useState<boolean | null>(() => mission?.chosen.get(key) ?? null);
   return [chosen ?? (fallback || Boolean(mission?.open)), (open) => { mission?.chosen.set(key, open); setChosen(open); }];
 }
+const workChoiceKey = (mission: MissionWork | undefined, id: string) => `${mission?.card ?? ""}\n${id}`;
 
 /** A card's own part of its turn's mission state, so its rows' choices never meet another card's. */
 function useCardMission(mission: MissionWork | undefined, card: string): MissionWork | undefined {
@@ -603,6 +604,7 @@ function ActivityGroup({ id, items, live, expanded = false, mission }: { id: str
   const title = active ? dshLiveTitle(items).label : hasCalls ? summary.text : "Thought";
   // The group's own time: what its steps took, summed (a running group shows its live line instead).
   const took = active ? "" : stepDuration(items.reduce((sum, item) => sum + (item.durationMs ?? 0), 0));
+  const shown = useWorkWindow(items.map((item) => item.id));
   return <div className={`cx-group${live ? " is-live" : ""}`}>
     <button type="button" className="cx-activity-head" aria-expanded={open} onClick={() => setOpen(!open)} title={activitySummary(items)}>
       <Icon name="chevron" width="11" height="11" className={open ? "is-open" : undefined} />
@@ -610,7 +612,10 @@ function ActivityGroup({ id, items, live, expanded = false, mission }: { id: str
       <span className={`cx-group-verb${active ? " cx-shimmer" : ""}`}>{title}</span>
       {took ? <span className="cx-step-time">{took}</span> : null}
     </button>
-    {open ? <ol className="cx-live">{items.map((item) => <LiveRow key={item.id} item={item} mission={mission} />)}</ol> : null}
+    {open ? <ol className="cx-live">
+      {shown.start ? <li className="cx-live-earlier"><EarlierSteps hidden={shown.start} onShow={shown.showEarlier} /></li> : null}
+      {items.slice(shown.start).map((item) => <LiveRow key={item.id} item={item} mission={mission} />)}
+    </ol> : null}
   </div>;
 }
 
@@ -623,12 +628,18 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
     // separated by a tool retain their original boundaries even while that tool is folded.
     .filter((item) => !collapsed || item.kind === "message" || item.kind === "steer" || item.answered)
     .map((item) => !live && item.status === "running" ? { ...item, status: "completed" as const } : item);
+  const segments = compact ? groupTimeline(tidy) : tidy.map((item): ChatLiveSegment => ({ kind: "item", item }));
+  // A group draws its rows while open: as the person left it, else as ActivityGroup opens it.
+  const groupOpen = (key: string) => mission?.chosen.get(workChoiceKey(mission, `group:${key}`)) ?? (expanded || Boolean(mission?.open));
+  const shown = useWorkWindow(segments.map((segment) => segment.kind === "item" ? segment.item.id : segment.key),
+    segments.map((segment) => segment.kind === "item" ? 1 : workGroupRows(segment.items, groupOpen(segment.key))));
   if (!tidy.length) return null;
-  if (!compact) return <ol className="cx-live">{tidy.map((item) => <LiveRow key={item.id} item={item} mission={mission} />)}</ol>;
-  const segments = groupTimeline(tidy);
-  return <ol className="cx-live is-compact">
-    {segments.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} mission={mission} />
-      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup id={segment.key} items={segment.items} live={live && index === segments.length - 1}
+  const earlier = shown.start ? <li className="cx-live-earlier"><EarlierSteps hidden={workSegmentSteps(segments.slice(0, shown.start))} onShow={shown.showEarlier} /></li> : null;
+  const drawn = segments.slice(shown.start);
+  return <ol className={`cx-live${compact ? " is-compact" : ""}`}>
+    {earlier}
+    {drawn.map((segment, index) => segment.kind === "item" ? <LiveRow key={segment.item.id} item={segment.item} mission={mission} />
+      : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup id={segment.key} items={segment.items} live={live && index === drawn.length - 1}
         expanded={expanded} mission={mission} /></li>)}
   </ol>;
 }
@@ -1118,6 +1129,35 @@ function ScheduleBar({ schedule, onDelete }: { schedule: ChatSchedule; onDelete:
   </div>;
 }
 
+/**
+ * Marks the thread's turns that are more than a view's height outside it `data-far`, where CSS
+ * skips drawing them (content-visibility): every frame styled, painted and layerized each turn of
+ * every split pane. A hidden page marks every turn, so showing it again draws only the turns in view
+ * first: the ten-pane harness's first frame back came after 80-90 ms instead of 270-310 (2026-11-09).
+ * Turns in or near view stay uncontained: content-visibility clips whatever pokes out of its box,
+ * such as a receipt's or a hidden secret's tooltip.
+ */
+function useFarTurns(scroller: { current: HTMLElement | null }, column: { current: HTMLElement | null }) {
+  const watch = useRef<{ box: HTMLElement; far: IntersectionObserver; turns: Set<Element> } | null>(null);
+  useEffect(() => () => { watch.current?.far.disconnect(); watch.current = null; }, []);
+  // After each render: watch the turns it drew, and let go of the ones it took away.
+  useEffect(() => {
+    const box = scroller.current, content = column.current;
+    if (!box || !content || typeof IntersectionObserver === "undefined") return;
+    if (watch.current?.box !== box) {
+      watch.current?.far.disconnect();
+      watch.current = { box, turns: new Set(), far: new IntersectionObserver((entries) => {
+        for (const entry of entries) entry.target.toggleAttribute("data-far", !entry.isIntersecting);
+      }, { root: box, rootMargin: "100% 0px" }) };
+    }
+    const current = watch.current;
+    for (const turn of current.turns) if (!turn.isConnected) { current.far.unobserve(turn); current.turns.delete(turn); }
+    for (const turn of content.querySelectorAll("article.cx-turn")) {
+      if (!current.turns.has(turn)) { current.turns.add(turn); current.far.observe(turn); }
+    }
+  });
+}
+
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
@@ -1498,6 +1538,7 @@ export function AgentOrchestratorChat({
     observer.observe(box);
     return () => observer.disconnect();
   }, [selectedTaskId]);
+  useFarTurns(scroller, column);
   // Compact activity (the header's toggle): tool calls and thinking fold into one line per run.
   const [compactActivity, setCompactActivity] = useState(() => { try { return localStorage.getItem(COMPACT_ACTIVITY_KEY) !== "off"; } catch { return true; } });
   const toggleCompact = () => setCompactActivity((current) => {
