@@ -2,6 +2,7 @@
 
 const { chatGptMcpContextScript, observeMcpSetupContext, extensionHelpersSource, createConfiguredConnector,
   requireAutomaticConnectorSetup, UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED } = require("./mcp-connector-setup.cjs");
+const { loadPastCloudflareCheck, matchBrowserUserAgent, SETUP_CHECK_WAIT_MS } = require("./chatgpt-cloudflare-check.cjs");
 
 const ADMIN_REQUIRED = WORKSPACE_OWNER_REQUIRED;
 const PUBLISH_REQUIRED = "The workspace owner created the MCP connector, but ChatGPT did not make it available to this member. Publish the connector in that workspace's app settings, then retry.";
@@ -92,9 +93,17 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
   const popup = new BrowserWindow({ show: false, width: 1100, height: 800,
     webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true,
       backgroundThrottling: false, offscreen: true } });
-  let observer, loading = false, changed = false, version = 0, timedOut = false, expectedPath = null;
-  const timer = setTimeout(() => { timedOut = true; if (!popup.isDestroyed()) popup.destroy(); }, action ? 90_000 : 35_000);
-  timer.unref?.();
+  let observer, loading = false, changed = false, version = 0, timedOut = false, expectedPath = null, timer;
+  // A hidden window can take half a minute just to start on the busy hard disk (31 s on
+  // 2026-11-09, when a plain Refresh had 35 s in all). A Cloudflare check restarts the clock with
+  // its own wait added.
+  const budget = action ? 90_000 : 60_000;
+  const arm = ms => {
+    clearTimeout(timer);
+    timer = setTimeout(() => { timedOut = true; if (!popup.isDestroyed()) popup.destroy(); }, ms);
+    timer.unref?.();
+  };
+  arm(budget);
   const navigation = (_event, value, inPlace, mainFrame) => {
     if (mainFrame === false) return;
     version++;
@@ -111,6 +120,7 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
   };
   try {
     popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    matchBrowserUserAgent(popup);
     // CDP Network.enable waits for a renderer; an untouched hidden window has none yet.
     await popup.loadURL("about:blank");
     check();
@@ -126,7 +136,8 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
     observer = await observeMcpSetupContext(popup.webContents, null);
     const load = async url => {
       check(); loading = true; expectedPath = new URL(url).pathname;
-      try { await popup.loadURL(url); } finally { loading = false; }
+      // The check's own reload happens inside the load, where a navigation is expected.
+      try { await loadPastCloudflareCheck(popup, url, { onCheck: () => arm(SETUP_CHECK_WAIT_MS + budget) }); } finally { loading = false; }
       check();
     };
     const selected = async (id, navigationAfter = null) => {

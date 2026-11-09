@@ -922,6 +922,30 @@ test("preflight receipts classify only exact safe failures and never log private
   }
 });
 
+test("the setup's own ChatGPT page messages reach the account card; anything else stays generic", () => {
+  // 2026-11-09: every Connect read "Connector creation failed" while the setup had said exactly
+  // which page step did not happen.
+  const { SETUP_CHECK_MESSAGE } = require("../electron/chatgpt-cloudflare-check.cjs");
+  const electron = path.join(__dirname, "../electron");
+  const helperMessages = new Set();
+  for (const file of ["mcp-connector-setup.cjs", "chatgpt-workspace.cjs", "extensions/fast-access/content.js"]) {
+    for (const [, message] of fs.readFileSync(path.join(electron, file), "utf8").matchAll(/new Error\(['"](ChatGPT did not [^'"]+)['"]/g)) {
+      helperMessages.add(message);
+    }
+  }
+  assert(helperMessages.has("ChatGPT did not confirm the selected workspace."));
+  for (const message of helperMessages) {
+    const failure = mcpConnectorCommandFailure(new Error(message));
+    assert.notEqual(failure.message, "Connector creation failed. Check Configuration in Coding Tools.", `${message} names its step`);
+  }
+  assert.deepEqual(mcpConnectorCommandFailure(new Error("ChatGPT did not open its connector form.")),
+    { code: "creation_failed", message: "ChatGPT did not open its connector form." });
+  assert.deepEqual(mcpConnectorCommandFailure(new Error(SETUP_CHECK_MESSAGE)), { code: "verification_required", message: SETUP_CHECK_MESSAGE });
+  for (const text of ["ChatGPT did not open its connector form. PRIVATE_PAGE_TEXT", "PRIVATE_PAGE_TEXT ChatGPT did not open its connector form."]) {
+    assert.equal(mcpConnectorCommandFailure(new Error(text)).message, "Connector creation failed. Check Configuration in Coding Tools.");
+  }
+});
+
 test("missing ChatGPT form fields do not request a harness configuration change", async t => {
   const parent = path.resolve(__dirname, "../../aiTemp");
   fs.mkdirSync(parent, { recursive: true });

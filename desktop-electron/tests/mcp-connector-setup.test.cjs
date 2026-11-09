@@ -189,6 +189,28 @@ test("MCP observation uses normal list requests and bounded public Platform meta
   assert(commands.every(call => ["Network.enable", "Network.getResponseBody"].includes(call.method)), "observation must not issue API requests or app actions");
 });
 
+test("the plugins page's current list request (GET ps/plugins/list) names the selected workspace", async t => {
+  // Live on 2026-11-09 the page no longer sent POST list_accessible; this request carries the
+  // selected workspace now, and without it no Connect could confirm a workspace.
+  const businessId = "602b5d8d-e211-49b1-9762-206108d52954", otherId = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
+  const { debuggerClient, observed } = fakeMcpNetwork();
+  const observer = await observeMcpSetupContext({ debugger: debuggerClient }, null);
+  t.after(() => observer.dispose());
+  for (const [method, url] of [["POST", "https://chatgpt.com/backend-api/ps/plugins/list"],
+    ["GET", "https://chatgpt.com/backend-api/ps/plugins/installed"], ["GET", "https://evil.example/backend-api/ps/plugins/list"]]) {
+    observed(method, url, { "chatgpt-account-id": otherId }, {});
+    assert.equal(observer.snapshot().activeAccountId, null, `${method} ${url} is no workspace proof`);
+  }
+  observed("GET", "https://chatgpt.com/backend-api/ps/plugins/list?limit=50", { "ChatGPT-Account-ID": businessId }, {});
+  const selected = observer.snapshot();
+  assert.equal(selected.activeAccountId, businessId);
+  observed("GET", "https://chatgpt.com/backend-api/ps/plugins/list", { "chatgpt-account-id": businessId }, {});
+  assert.equal(observer.snapshot().selectionVersion, selected.selectionVersion, "the same workspace listed again is no switch");
+  observed("POST", "https://chatgpt.com/backend-api/aip/connectors/mcp/list_accessible", { "chatgpt-account-id": otherId }, {});
+  assert.equal(observer.snapshot().activeAccountId, otherId, "the older request still counts");
+  assert(observer.snapshot().selectionVersion > selected.selectionVersion, "another workspace invalidates the captured context");
+});
+
 test("a new Platform login cannot combine its identity with the previous user's org proof", async t => {
   const network = fakeMcpNetwork(), tunnelId = `tunnel_${"a".repeat(32)}`, org = "org-fixture";
   const observer = await observeMcpSetupContext({ debugger: network.debuggerClient }, tunnelId);
