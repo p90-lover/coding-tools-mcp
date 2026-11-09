@@ -955,6 +955,41 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const sessionStops = new Map(); // Only in-flight stop promises; reused sessions wait for settlement.
   const freshLaunches = new Map(); // AO session -> when this app session spawned it cold (dispatchExternal)
   const stalledLaunches = new Set(); // fresh launches the watchdog ended (stopStalledLaunch)
+  // Cold agent starts run at most COLD_START_SLOTS at a time across the app. Seen live 2026-11-09:
+  // AO restarted under five chats' turns, "Retry automatically" relaunched all five in the same
+  // second, AO took ~2.7 min just to record each start, none of the agents took its message, and the
+  // launch watchdog ended all five together after 4 min 25 s; their next retry started in 1-8 s each.
+  // A slot is held from the spawn until the agent is up (observeExternal), its start fails or is
+  // ended, or COLD_START_HOLD_MS passes, so a start that never reports cannot hold up the rest.
+  const COLD_START_SLOTS = 2;
+  const COLD_START_HOLD_MS = 3 * 60_000;
+  const coldStarts = new Map(); // holder -> its hold timer
+  const coldStartOf = new Map(); // AO session -> the holder its start took
+  const coldStartQueue = []; // wake-ups of launches waiting for a slot, oldest first
+  function releaseColdStart(holder) {
+    if (!coldStarts.has(holder)) return;
+    const timer = coldStarts.get(holder);
+    coldStarts.delete(holder);
+    if (timer) clearTimer(timer);
+    coldStartQueue.shift()?.();
+  }
+  function releaseColdStartOf(session) {
+    const holder = coldStartOf.get(session);
+    if (holder === undefined) return;
+    coldStartOf.delete(session);
+    releaseColdStart(holder);
+  }
+  async function takeColdStart(waiting) {
+    while (coldStarts.size >= COLD_START_SLOTS) {
+      waiting(coldStarts.size);
+      await new Promise(resolve => coldStartQueue.push(resolve));
+    }
+    const holder = Symbol("cold start");
+    const timer = setTimer(() => releaseColdStart(holder), COLD_START_HOLD_MS);
+    timer?.unref?.();
+    coldStarts.set(holder, timer);
+    return holder;
+  }
   const nodeKey = (workspaceId, runId, nodeId) => JSON.stringify([workspaceId, runId, nodeId]);
   // nodeKey -> { at, pending }: the run loop's latest view of an AO card's parked tool requests.
   const pendingFrames = new Map();
@@ -1648,14 +1683,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           session = live;
           launchedVia = sent?.turnId ? "continued" : "warm";
         } else {
-          stage(continued ? "starting a new agent (the chat's agent was gone or refused the message)" : "starting a new agent");
-          session = await harnessService().spawn({ ...launch, prompt });
+          const starting = continued ? "starting a new agent (the chat's agent was gone or refused the message)" : "starting a new agent";
+          stage(starting);
+          const holder = await takeColdStart(count => stage(`waiting for ${count} other agent${count === 1 ? "" : "s"} to finish starting`));
+          stage(starting);
+          try { session = await harnessService().spawn({ ...launch, prompt }); }
+          catch (error) { releaseColdStart(holder); throw error; }
           // A brand-new agent holding nothing but this message: the one kind of start the launch
-          // watchdog may end (stopStalledLaunch).
+          // watchdog may end (stopStalledLaunch). Its clock starts with the spawn, not the wait above.
           if (session) {
             freshLaunches.set(session, now());
             if (freshLaunches.size > 200) freshLaunches.delete(freshLaunches.keys().next().value);
-          }
+            coldStartOf.set(session, holder);
+            if (coldStartOf.size > 200) releaseColdStartOf(coldStartOf.keys().next().value);
+          } else releaseColdStart(holder);
         }
         if (first?.turnId || (session && !sent?.turnId)) givenInstructions(session, standing.hash);
         // The next chat on this route finds a session waiting too, started once this turn is under
@@ -1825,6 +1866,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       logger?.warn?.("ao.launch_stall_stop_failed", { message: publicText(error?.message || error, 200) });
       return false;
     }
+    releaseColdStartOf(session);
     logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node) });
     return true;
   }
@@ -1862,6 +1904,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // the chat's work, never a fresh launch the watchdog may end.
     if (observed?.provisioning !== true) freshLaunches.delete(session);
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
+    // Its start is over (the agent is up, or the start ended): the next cold start may begin.
+    if (observed?.provisioning !== true || terminal) releaseColdStartOf(session);
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
@@ -8717,6 +8761,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   function dispose() {
     archiveSweep.disposed = true;
+    for (const timer of coldStarts.values()) if (timer) clearTimer(timer);
+    coldStarts.clear();
+    coldStartOf.clear();
     if (archiveSweep.timer) clearTimeout(archiveSweep.timer);
     for (const entry of sessionCompactions.values()) if (entry.timer) clearTimer(entry.timer);
     sessionCompactions.clear();
