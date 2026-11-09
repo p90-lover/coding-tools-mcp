@@ -10,7 +10,7 @@
 // One loop per chat ("<workspace>:<task>"); a new one replaces it.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const MIN_LOOP_MINUTES = 1;
 const MAX_LOOP_MINUTES = 1440;
@@ -65,14 +65,24 @@ function createLoopStore({ file = null, now = Date.now } = {}) {
     } catch { /* No loops saved yet. */ }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  // Saved off the main thread, as wake-ups, schedules and goals are: a loop's every round updates it,
+  // and a synchronous write held every window while the busy hard disk took it. Flushed before it
+  // replaces the old file; a burst of changes is one save plus at most one more with the latest.
+  let saving = null;
+  let saveAgain = false;
   const persist = () => {
     if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(loops, null, 2));
-    fs.renameSync(temporary, file);
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(file, JSON.stringify(loops, null, 2), { durable: true, protectDirectory: false })
+      .catch(() => { /* the old file stays; the next change saves every loop again */ })
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
   };
   return {
+    /** Resolves once every change so far is on disk (tests, and a quit). */
+    async saved() { while (saving) await saving; },
     get: (workspaceId, taskId) => loops[key(workspaceId, taskId)] ?? null,
     /** Every loop of one project, by chat. */
     forWorkspace(workspaceId) {

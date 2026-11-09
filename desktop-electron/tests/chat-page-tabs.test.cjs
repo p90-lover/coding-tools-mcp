@@ -14,20 +14,23 @@ const compile = (file) => ts.transpileModule(read(file), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
 
-function loadPages() {
+// `options`: `effects` collects the host's effects to run by hand, `store` seeds localStorage,
+// `window` and `Element` stand in for the browser's.
+function loadPages(options = {}) {
   const contexts = new Map();
   const react = {
     createContext: (value) => { const context = { value }; context.Provider = { context }; return context; },
     useContext: (context) => contexts.has(context) ? contexts.get(context) : context.value,
     useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
     useRef: (current) => ({ current }), useMemo: (build) => build(), useCallback: (callback) => callback,
-    useEffect() {}, useLayoutEffect() {}, useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
+    useEffect: (effect) => { options.effects?.push(effect); }, useLayoutEffect() {}, useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
   };
   const jsx = (type, props, key) => ({ type, props, key });
-  const values = new Map();
+  const values = new Map(options.store ?? []);
   const globals = {
     localStorage: { getItem: (name) => values.get(name) ?? null, setItem: (name, value) => values.set(name, value) },
-    window: { addEventListener() {}, removeEventListener() {} },
+    window: options.window ?? { addEventListener() {}, removeEventListener() {} },
+    ...(options.Element ? { Element: options.Element } : {}),
   };
   const pages = {};
   vm.runInNewContext(compile("src/features/chat-pages.ts"), { exports: pages, require: (name) => name === "react" ? react : require(name), ...globals });
@@ -47,12 +50,12 @@ function loadPages() {
   const Tabs = provider.props.value.Tabs;
   assert.equal(typeof Tabs, "function", "the registry hands each page its tabs");
   const render = (pager, page) => { contexts.set(pages.ChatPagerContext, pager); return Tabs({ page }); };
-  return { pages, host, tree, render, Surface };
+  return { pages, host, tree, render, Surface, values };
 }
 const children = (element) => [element.props.children].flat(Infinity).filter(Boolean);
 const pagerOf = (extra = {}) => {
   const calls = [];
-  return { calls, pager: { active: 1, count: 3, canAdd: true, keys: { previous: "Shift+Q", next: "Shift+R" },
+  return { calls, pager: { active: 1, count: 3, canAdd: true, keys: true,
     select: (page) => calls.push(["select", page]), add: () => calls.push(["add"]), ...extra } };
 };
 
@@ -69,8 +72,9 @@ test("the open page's tabs are its number among the others and +, with the keys 
   assert.deepEqual(tabs.map((tab) => tab.props["aria-selected"]), [true, false, false]);
   assert.deepEqual(tabs.map((tab) => tab.props.tabIndex), [0, -1, -1]);
   assert.deepEqual(tabs.map((tab) => tab.props["aria-controls"]), ["chat-page-1", "chat-page-2", "chat-page-3"]);
-  assert.equal(tabs[1].props.title, "Page 2 (Shift+Q / Shift+R)");
-  assert.equal(list.props["aria-keyshortcuts"], "Shift+Q Shift+R");
+  assert.deepEqual(tabs.map((tab) => tab.props.title), ["Page 1 (Ctrl+1)", "Page 2 (Ctrl+2)", "Page 3 (Ctrl+3)"]);
+  assert.deepEqual(tabs.map((tab) => tab.props["aria-keyshortcuts"]), ["Control+1", "Control+2", "Control+3"]);
+  assert.equal(list.props["aria-keyshortcuts"], undefined, "no Shift+Q / Shift+R any more");
   assert.equal(add.props["aria-label"], "New page");
   tabs[2].props.onClick();
   add.props.onClick();
@@ -93,8 +97,13 @@ test("only the open page draws tabs; none with pages off; no + once twelve pages
   assert.equal(render(null, 1), null, "pages turned off in Settings");
   const full = render(pagerOf({ count: 12, canAdd: false }).pager, 1);
   assert.equal(children(full).length, 1, "twelve pages: no +");
-  const quiet = children(children(render(pagerOf({ keys: null }).pager, 1))[0]);
+  const twelve = children(children(full)[0]);
+  assert.deepEqual([twelve[9].props.title, twelve[10].props.title, twelve[11].props.title], ["Page 10 (Ctrl+0)", "Page 11", "Page 12"],
+    "Ctrl+0 is page 10; pages 11 and 12 have no key");
+  assert.equal(twelve[10].props["aria-keyshortcuts"], undefined);
+  const quiet = children(children(render(pagerOf({ keys: false }).pager, 1))[0]);
   assert.equal(quiet[0].props.title, "Page 1");
+  assert.equal(quiet[0].props["aria-keyshortcuts"], undefined);
 });
 
 test("each visited page draws its own surface, and only visited pages mount", () => {
@@ -126,11 +135,64 @@ test("the tabs sit in each page's title-bar strip, which stays a drag region aro
   assert.doesNotMatch(host, /className="cx-pages-bar"/);
 });
 
+test("Alt+scroll turns pages and holds the chat still only while Alt is down; Ctrl+number opens a page", () => {
+  // Listeners by type, each with whether it may block scrolling (passive: false).
+  const bus = () => {
+    const listeners = new Map();
+    return {
+      listeners,
+      addEventListener(type, listener, options) {
+        listeners.set(type, [...(listeners.get(type) ?? []), { listener, passive: typeof options === "object" ? options.passive : undefined }]);
+      },
+      removeEventListener(type, listener) { listeners.set(type, (listeners.get(type) ?? []).filter((item) => item.listener !== listener)); },
+      fire(type, event) { for (const { listener } of [...(listeners.get(type) ?? [])]) listener(event); },
+      blocking(type) { return (listeners.get(type) ?? []).filter((item) => item.passive === false).length; },
+    };
+  };
+  class Element { closest() { return null; } }
+  const win = bus();
+  const effects = [];
+  const { tree, values } = loadPages({ effects, window: win, Element, store: [["coding-tools:ao:chat-pages", '{"pageCount":3}']] });
+  const element = { ...bus(), querySelector: () => null };
+  tree.props.ref.current = element;
+  for (const effect of effects) effect();
+  const active = () => values.get("coding-tools:ao:chat-pages:active") ?? "1";
+  let stopped = 0, prevented = 0;
+  const wheel = (deltaY, extra = {}) => element.fire("wheel", { deltaX: 0, deltaY, deltaMode: 0, shiftKey: false, ctrlKey: false,
+    metaKey: false, altKey: false, target: new Element(), preventDefault: () => stopped++, ...extra });
+  const key = (type, extra) => win.fire(type, { key: "", code: "", ctrlKey: false, altKey: false, shiftKey: false, metaKey: false,
+    repeat: false, isComposing: false, keyCode: 0, defaultPrevented: false, target: new Element(),
+    preventDefault: () => prevented++, stopImmediatePropagation() {}, ...extra });
+
+  assert.equal(element.blocking("wheel"), 0, "no blocking wheel listener until Alt is held");
+  wheel(100, { altKey: true, timeStamp: 1000 });
+  assert.equal(active(), "2", "Alt+scroll down: the next page");
+  key("keydown", { key: "Alt", altKey: true });
+  assert.equal(element.blocking("wheel"), 1, "Alt held: the chat under the pointer is kept still");
+  wheel(-100, { altKey: true, timeStamp: 2000 });
+  assert.equal(active(), "1", "Alt+scroll up: the previous page");
+  assert.equal(stopped, 1, "and the chat did not scroll with it");
+  key("keyup", { key: "Alt" });
+  assert.equal(element.blocking("wheel"), 0, "Alt let go: scrolling is passive again");
+  wheel(100, { timeStamp: 3000 });
+  assert.deepEqual([active(), stopped], ["1", 1], "a plain scroll scrolls the chat and turns nothing");
+  key("keydown", { key: "Alt", altKey: true });
+  win.fire("blur", {});
+  assert.equal(element.blocking("wheel"), 0, "leaving the window lets go of Alt too");
+
+  key("keydown", { key: "3", code: "Digit3", ctrlKey: true });
+  assert.deepEqual([active(), prevented], ["3", 1], "Ctrl+3: page 3");
+  key("keydown", { key: "R", code: "KeyR", shiftKey: true });
+  key("keydown", { key: "5", code: "Digit5", ctrlKey: true });
+  assert.deepEqual([active(), prevented], ["3", 1], "Shift+R does nothing now, nor Ctrl+5 with three pages");
+});
+
 test("scrolling never waits for the page listener, and page keys check typing before anything costly", () => {
   const host = read("src/features/ChatPages.tsx");
   assert.match(host, /element\.addEventListener\("wheel", wheel, \{ passive: true \}\)/);
+  assert.match(host, /if \(held\) element\.addEventListener\("wheel", still, \{ passive: false \}\);/, "a blocking listener only while Alt is held");
   const key = /const key = \(event: KeyboardEvent\) => \{([\s\S]*?)\n {4}\};/.exec(host)[1];
-  assert.ok(key.indexOf("pageShortcutDirection") < key.indexOf("dialogOpen()"), "the DOM query runs only for a page key");
+  assert.ok(key.indexOf("pageNumberKey") < key.indexOf("dialogOpen()"), "the DOM query runs only for a page key");
   // A page's chats are one element while their inputs are: turning a page redraws two pages, not all.
   assert.match(host, /function PageSurface[\s\S]*?return useMemo\(\(\) => <AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} \/>, \[page, language, setError\]\);/);
 });

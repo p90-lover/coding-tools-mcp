@@ -510,15 +510,22 @@ function describeTimedPartition(partition) {
   return {};
 }
 
-// The launcher's own network for a cookie-less native fetch: its browser session (Global Routing's
-// proxy, else the system's) with that proxy's credentials, as the browser control server uses (NFR-2).
-async function fetchThroughLauncherNetwork(url, options) {
+// Native fetches omit cookies by default. Explicit session reads use their registered account's
+// own cookie jar and bound proxy, answering proxy authentication without rerouting a live page.
+async function fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies = false } = {}) {
+  const sessionRead = useSessionCookies === true;
+  if (sessionRead && !browserAccounts.accountIdOfPartition(partition)) {
+    throw new Error("Session checks require a registered account partition");
+  }
   const network = await providerNetworkReady();
   const routing = network.store.snapshot().routing;
-  const profile = routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null;
+  const boundId = sessionRead ? browserAccounts.proxyForPartition(partition) : null;
+  const profile = (boundId ? network.store.activeProxy(boundId) : null)
+    ?? (routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null);
   const credentials = profile ? network.store.proxySecret(profile.id) : null;
   return fetchNativeWithProxyAuth({
-    electronNet, browserSession: session.fromPartition(browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    electronNet, browserSession: session.fromPartition(sessionRead ? partition : browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    useSessionCookies: sessionRead,
     getProxyCredentials: (authInfo) => (
       profile && authInfo.port === profile.endpoint.port
       && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
@@ -3559,8 +3566,8 @@ function registerIpc({ logger, stateStore }) {
     readCookies: partition => session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }),
     verifySignIn: async partition => {
       await routeIdleAccountPartition(partition, logger);
-      const ownedSession = session.fromPartition(partition);
-      return readChatGptAuthSession(ownedSession.fetch.bind(ownedSession), "https://chatgpt.com", 10_000);
+      return readChatGptAuthSession((url, options) => fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies: true }),
+        "https://chatgpt.com", 10_000);
     },
     connect: (accountId, current) => connectAccountMcp(accountId, () => {
       if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
@@ -4173,10 +4180,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal, /schedule or browser-account change still being saved (off the main thread) lands before
-    // the app goes; a disk that hangs holds the quit 5 s at most, and each file keeps the change before.
+    // A goal, /schedule, wake-up, /loop or browser-account change still being saved (off the main
+    // thread) lands before the app goes; a disk that hangs holds the quit 5 s at most, and each file
+    // keeps the change before.
     await Promise.race([
-      Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(), browserAccounts.saved()]),
+      Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(),
+        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved()]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
     const runtimeOperation = runtimeHost?.currentOperation();
@@ -4483,8 +4492,10 @@ async function start() {
   if (runtimeSourceFallback) logger.warn("runtime.packaged_source_damaged", { message: runtimeSourceFallback, using: "installed copy" });
   // Settings read back from their last good copy (or reset, when that was torn too) after a torn file.
   if (stateStore.recovery) logger.warn("launcher.state_recovered", stateStore.recovery);
-  // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
-  const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
+  // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs). Its
+  // OpenCode plugin is written beside the launcher's own data.
+  const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger,
+    pluginDir: path.join(launcherUserData, "rtk", "opencode") });
   rtkService = rtk;
   // Missing rtk is installed now, without a click (a failed try waits a day); AO's start waits for it.
   try {
@@ -5044,8 +5055,9 @@ async function start() {
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
-        // RTK's Claude Code and Codex hooks, which AO puts in each Claude session's own settings and
-        // on each Codex app-server's command line (empty: off).
+        // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
+        // session's own settings, on each Codex app-server's command line and in each OpenCode
+        // chat's inline config (empty: off). ready() above wrote the plugin's file.
         try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
         // AO hands this environment to every Claude Code chat agent. Claude Code's own scheduler
         // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal

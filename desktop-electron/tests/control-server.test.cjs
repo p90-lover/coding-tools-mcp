@@ -903,3 +903,67 @@ test("a native fetch aborted before its response arrives fails instead of hangin
   assert.equal(settled, "Update request timed out");
   assert.equal(requests[0].aborted, true, "the request itself is cancelled");
 });
+
+test("owned session reads authenticate the proxy and include only their selected cookie jar", async () => {
+  const { EventEmitter } = require("node:events");
+  const { Readable } = require("node:stream");
+  const { fetchNativeWithProxyAuth } = require("../electron/control-server.cjs");
+  const owned = { account: "selected" }, sent = [];
+  let challenged = 0;
+  const electronNet = { request: options => {
+    sent.push(options);
+    const request = Object.assign(new EventEmitter(), { abort() {}, end() {
+      queueMicrotask(() => request.emit("login", { isProxy: true, host: "proxy.invalid", port: 8080 }, (username, password) => {
+        assert.equal(username, "saved-user"); assert.equal(password, "saved-password");
+        request.emit("response", Object.assign(Readable.from([Buffer.from('{"user":{"id":"selected"}}')]), {
+          statusCode: 200, headers: { "content-type": "application/json" },
+        }));
+      }));
+    } });
+    return request;
+  } };
+  const response = await fetchNativeWithProxyAuth({ electronNet, browserSession: owned,
+    url: "https://chatgpt.com/api/auth/session", useSessionCookies: true,
+    options: { method: "GET", headers: { accept: "application/json", cookie: "untrusted=discard", "proxy-authorization": "discard" } },
+    getProxyCredentials: info => { challenged++; assert.equal(info.isProxy, true); return { username: "saved-user", password: "saved-password" }; },
+  });
+  assert.equal((await response.json()).user.id, "selected");
+  assert.equal(challenged, 1);
+  assert.equal(sent[0].session, owned);
+  assert.equal(sent[0].credentials, "include");
+  assert.equal(sent[0].useSessionCookies, true);
+  assert.equal(sent[0].redirect, "manual");
+  assert.equal(sent[0].headers.cookie, undefined);
+  assert.equal(sent[0].headers["proxy-authorization"], undefined);
+});
+
+test("cookie-bearing transport rejects destinations and methods outside the session read", async () => {
+  const { fetchNativeWithProxyAuth } = require("../electron/control-server.cjs");
+  let requests = 0;
+  for (const [url, method] of [
+    ["http://chatgpt.com/api/auth/session", "GET"], ["https://example.com/api/auth/session", "GET"],
+    ["https://chatgpt.com/backend-api/me", "GET"], ["https://chatgpt.com/api/auth/session?x=1", "GET"],
+    ["https://user@chatgpt.com/api/auth/session", "GET"], ["https://chatgpt.com/api/auth/session#x", "GET"],
+    ["https://chatgpt.com/api/auth/session", "POST"],
+  ]) await assert.rejects(fetchNativeWithProxyAuth({ electronNet: { request() { requests++; throw new Error("Network must not run"); } },
+    browserSession: {}, url, options: { method, headers: {} }, useSessionCookies: true, getProxyCredentials: () => null,
+  }), /session.*GET|GET.*session/i);
+  assert.equal(requests, 0);
+});
+
+test("ordinary native fetches remain cookie-less even when fetch options ask for credentials", async () => {
+  const { EventEmitter } = require("node:events");
+  const { Readable } = require("node:stream");
+  const { fetchNativeWithProxyAuth } = require("../electron/control-server.cjs");
+  let sent;
+  const response = await fetchNativeWithProxyAuth({ electronNet: { request(options) {
+    sent = options;
+    const request = Object.assign(new EventEmitter(), { abort() {}, end() { queueMicrotask(() => request.emit("response",
+      Object.assign(Readable.from([Buffer.from("ok")]), { statusCode: 200, headers: {} }))); } });
+    return request;
+  } }, browserSession: {}, url: "https://github.com/update", options: { method: "GET", credentials: "include", headers: { cookie: "discard" } }, getProxyCredentials: () => null });
+  assert.equal(await response.text(), "ok");
+  assert.equal(sent.credentials, "omit");
+  assert.equal(sent.useSessionCookies, false);
+  assert.equal(sent.headers.cookie, undefined);
+});

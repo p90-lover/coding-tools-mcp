@@ -12,10 +12,10 @@
  */
 import { useContext, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, ToolImages, WaitingAnswer } from "./ChatToolParts";
+import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, ToolImages, WaitingAnswer, EarlierSteps, useWorkWindow } from "./ChatToolParts";
 import {
   dshActivity, dshCommandText, dshDuration, dshExitLabel, dshGroupActivity, dshItemDetail, dshLiveTitle, dshProcessTitle, dshQuietNote, dshRetryNote, dshSegments, dshThinkSummary, dshToolTitle,
-  steerReader, steerReceipts, tidyTimeline, withoutReplied, cpaRefusalNote, waitsForPerson, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
+  steerReader, steerReceipts, tidyTimeline, withoutReplied, workGroupRows, workSegmentSteps, cpaRefusalNote, waitsForPerson, type ChatLiveItem, type ChatStep, type ChatTurn, type CpaRefusal,
   type DshActivity, type SteerReceipt,
 } from "./ao-chat";
 
@@ -299,6 +299,7 @@ function DshGroup({ items, live, turnLive, mission = false }: { items: ChatLiveI
   if (open && !wasOpen.current && !start.current) start.current = live ? "bottom" : "top";
   wasOpen.current = open;
   const now = useHeldTitle(live ? dshLiveTitle(items) : { activity: dshGroupActivity(items), label: dshProcessTitle(items) }, live);
+  const shown = useWorkWindow(items.map((item) => item.id));
   return <div className="dsh-group" data-open={open || undefined}>
     <button type="button" className="dsh-group-title" aria-expanded={open} data-process-activity={now.activity} onClick={toggle}>
       <span className="dsh-group-leading" aria-hidden="true">
@@ -308,7 +309,10 @@ function DshGroup({ items, live, turnLive, mission = false }: { items: ChatLiveI
       <span className={`dsh-group-label${live ? " dsh-shimmer" : ""}`}>{now.label}</span>
     </button>
     {open ? <div ref={body} className={`dsh-group-body${edges.up ? " fade-top" : ""}${edges.down ? " fade-bottom" : ""}`} onScroll={measure}>
-      <div ref={content} className="dsh-flow">{items.map((item) => <DshItem key={item.id} item={item} live={turnLive} mission={mission} />)}</div>
+      <div ref={content} className="dsh-flow">
+        <EarlierSteps hidden={shown.start} onShow={shown.showEarlier} />
+        {items.slice(shown.start).map((item) => <DshItem key={item.id} item={item} live={turnLive} mission={mission} />)}
+      </div>
     </div> : null}
   </div>;
 }
@@ -322,9 +326,16 @@ function DshFlow({ items, live, finished, hideReply, mission = false }: { items:
   // The reply is the turn's messages joined: each one in it shows once, in the reply (withoutReplied).
   const tidy = withoutReplied(tidyTimeline(steerReceipts(items, finished)), hideReply);
   const segments = dshSegments(tidy);
-  return <div className="dsh-flow">{segments.map((segment, index) => segment.kind === "item"
-    ? <DshItem key={segment.item.id} item={segment.item} live={live} mission={mission} />
-    : <DshGroup key={segment.key} items={segment.items} live={live && index === segments.length - 1} turnLive={live} mission={mission} />)}</div>;
+  // A group starts open on a mission (DshGroup); the person's own toggles stay inside it.
+  const shown = useWorkWindow(segments.map((segment) => segment.kind === "item" ? segment.item.id : segment.key),
+    segments.map((segment) => segment.kind === "item" ? 1 : workGroupRows(segment.items, mission)));
+  const drawn = segments.slice(shown.start);
+  return <div className="dsh-flow">
+    <EarlierSteps hidden={workSegmentSteps(segments.slice(0, shown.start))} onShow={shown.showEarlier} />
+    {drawn.map((segment, index) => segment.kind === "item"
+      ? <DshItem key={segment.item.id} item={segment.item} live={live} mission={mission} />
+      : <DshGroup key={segment.key} items={segment.items} live={live && index === drawn.length - 1} turnLive={live} mission={mission} />)}
+  </div>;
 }
 
 function DshStepWork({ step, useWork, answer, mission = false }: { step: ChatStep; useWork: UseStepWork; answer?: string; mission?: boolean }) {

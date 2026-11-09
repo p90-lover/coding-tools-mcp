@@ -11,17 +11,77 @@
 //   hook command from CODING_TOOLS_RTK_CLAUDE_HOOK (daemonEnvironment below).
 // - Codex's own shell gets RTK's PreToolUse hook on its app-server command line, trusted for that
 //   process only: AO reads it from CODING_TOOLS_RTK_CODEX_HOOK.
+// - OpenCode's own bash tool gets a plugin that asks rtk about each command (OPENCODE_PLUGIN), which
+//   AO lists in that chat's inline OpenCode config only: AO reads its path from
+//   CODING_TOOLS_RTK_OPENCODE_PLUGIN.
 // Off in Settings, or with no rtk found, commands run exactly as written.
 
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync, spawn } = require("node:child_process");
 const { runOffThread } = require("./off-thread-run.cjs");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 /** `rtk rewrite` landed in 0.23.0. */
 const MIN_VERSION = [0, 23, 0];
 /** The oldest rtk seen with `rtk hook codex`; an older one would fail every hook run. */
 const CODEX_HOOK_VERSION = [1, 0, 1];
+/** `rtk hook opencode`, which OPENCODE_PLUGIN asks, landed in 0.52.0 (2026-10-13). */
+const OPENCODE_HOOK_VERSION = [0, 52, 0];
+/**
+ * The OpenCode plugin for AO's OpenCode chats, written to the app's own folder (OpenCode imports a
+ * plugin from a file, which app.asar is not) and listed in each chat's OPENCODE_CONFIG_CONTENT by
+ * AO: the person's OpenCode config never changes, and OpenCode keeps loading their own plugins
+ * beside it. rtk decides each rewrite with `rtk hook opencode`, the protocol of rtk's own plugin
+ * (hooks/opencode/rtk.ts): it answers {} where the rewrite would change what OpenCode's permission
+ * rules decide. Without rtk on OpenCode's PATH (binDir puts it there; the rewritten command needs
+ * it too) the hook fails and the command runs as written. Checked live with OpenCode 1.19.5 and
+ * rtk 1.2.0 (AO's TestLiveRTKPluginRewritesOpenCodeShellCommands). OpenCode 1.x calls server(),
+ * OpenCode 2.x setup().
+ */
+const OPENCODE_PLUGIN = `// RTK for this OpenCode chat's own shell, written by Coding Tools and listed only in the chat's
+// OPENCODE_CONFIG_CONTENT (your OpenCode config is unchanged). rtk decides each rewrite:
+// "rtk hook opencode [--agent <name>] <command>" answers {"command": "..."}, or {} where the rewrite
+// would change what OpenCode's permission rules decide, the protocol of rtk's own plugin
+// (hooks/opencode/rtk.ts). An rtk that is missing, fails or times out leaves the command as written.
+import { execFile } from "node:child_process"
+
+function rewrite(command: unknown, agent?: string): Promise<string | null> {
+  if (typeof command !== "string" || !command.trim() || process.env.RTK_DISABLED === "1") return Promise.resolve(null)
+  const args = ["hook", "opencode", ...(agent ? ["--agent", agent] : []), command]
+  return new Promise((resolve) => {
+    execFile("rtk", args, { encoding: "utf8", timeout: 3000, windowsHide: true }, (error, stdout) => {
+      if (error) return resolve(null)
+      try {
+        const answer = JSON.parse(String(stdout ?? "").trim() || "{}")
+        const next = typeof answer?.command === "string" ? answer.command.trim() : ""
+        resolve(next && next !== command ? next : null)
+      } catch {
+        resolve(null)
+      }
+    })
+  })
+}
+
+async function handle(tool: unknown, args: any, agent?: string) {
+  const name = String(tool ?? "").toLowerCase()
+  if ((name !== "bash" && name !== "shell") || !args || typeof args !== "object") return
+  const next = await rewrite(args.command, agent)
+  if (next) args.command = next
+}
+
+// OpenCode 1.x calls server(), 2.x setup().
+export default {
+  id: "rtk",
+  async setup(ctx: any) {
+    await ctx?.tool?.hook?.("execute.before", (event: any) =>
+      handle(event?.tool, event?.input, typeof event?.agent === "string" ? event.agent : undefined))
+  },
+  async server() {
+    return { "tool.execute.before": (input: any, output: any) => handle(input?.tool, output?.args) }
+  },
+}
+`;
 const FIND_TTL_MS = 60_000;
 const AUTO_INSTALL_RETRY_MS = 24 * 60 * 60 * 1000;
 const REWRITE_TIMEOUT_MS = 3_000;
@@ -46,9 +106,13 @@ const atLeast = (version, minimum) => {
 /** rtk's path as a command word for cmd.exe and Git Bash alike (always quoted: one form to unwrap). */
 const quoted = (file) => `"${file}"`;
 
+/**
+ * `pluginDir` is the app's own folder for OPENCODE_PLUGIN (on the app's data drive, never the system
+ * one); without it OpenCode chats get no plugin.
+ */
 function createRtk({ getEnabled = () => true, logger = null, env = process.env, platform = process.platform,
   run = spawnSync, spawnProcess = spawn, now = Date.now, exists = (file) => { try { return fs.statSync(file).isFile(); } catch { return false; } },
-  listDir = (dir) => fs.readdirSync(dir) } = {}) {
+  listDir = (dir) => fs.readdirSync(dir), pluginDir = null } = {}) {
   let found = null;
   let checkedAt = -Infinity;
   /** The winget install in progress (the person's click or the automatic one), shared by both. */
@@ -212,6 +276,38 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     const tool = active();
     return tool && atLeast(tool.version.split(".").map(Number), CODEX_HOOK_VERSION) ? "rtk hook codex" : "";
   };
+  /**
+   * OPENCODE_PLUGIN's file, written to `pluginDir` once per run (again only when it is missing or
+   * differs). Resolves with its path, or "" without a folder or when the write failed (the next
+   * AO start tries again).
+   */
+  let pluginFile = "";
+  let pluginWrite = null;
+  function writeOpencodePlugin() {
+    if (!pluginDir) return Promise.resolve("");
+    pluginWrite ??= (async () => {
+      const file = path.join(pluginDir, "rtk.ts");
+      try {
+        const current = await fs.promises.readFile(file, "utf8").catch(() => null);
+        if (current !== OPENCODE_PLUGIN) await writePrivateFileAtomicAsync(file, OPENCODE_PLUGIN);
+        pluginFile = file;
+        return file;
+      } catch (error) {
+        logger?.warn?.("rtk.opencode_plugin_failed", { message: String(error?.message ?? error) });
+        pluginWrite = null;
+        return "";
+      }
+    })();
+    return pluginWrite;
+  }
+  /**
+   * The OpenCode plugin's path for AO, or "" when rtk is off, missing or too old for
+   * `rtk hook opencode`, or the file isn't written (ready writes it before AO starts).
+   */
+  const opencodePlugin = () => {
+    const tool = active();
+    return tool && pluginFile && atLeast(tool.version.split(".").map(Number), OPENCODE_HOOK_VERSION) ? pluginFile : "";
+  };
   /** The folder holding rtk, for the agents' PATH (a rewritten command calls `rtk`). */
   const binDir = () => {
     const tool = active();
@@ -219,10 +315,11 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
   };
   /** What a command an agent runs gets while rtk is on: no "No hook installed" line (QUIET). */
   const commandEnvironment = () => (active() ? { ...QUIET } : {});
-  /** What AO's daemon passes to every chat agent. An empty hook turns it off. */
+  /** What AO's daemon passes to every chat agent. An empty hook or plugin turns it off. */
   const daemonEnvironment = () => {
     const hook = claudeHook();
-    return { CODING_TOOLS_RTK_CLAUDE_HOOK: hook, CODING_TOOLS_RTK_CODEX_HOOK: codexHook(), ...(hook ? QUIET : {}) };
+    return { CODING_TOOLS_RTK_CLAUDE_HOOK: hook, CODING_TOOLS_RTK_CODEX_HOOK: codexHook(),
+      CODING_TOOLS_RTK_OPENCODE_PLUGIN: opencodePlugin(), ...(hook ? QUIET : {}) };
   };
 
   /** RTK's own savings report (`rtk gain`), as text and, when rtk can give it, JSON (resolves). */
@@ -334,20 +431,21 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
 
   /**
    * Waits for an install in progress, at most `timeoutMs`, so a process started now (AO's daemon,
-   * which hands its PATH and Claude's hook to every agent) is started with rtk.
+   * which hands its PATH and Claude's hook to every agent) is started with rtk. The OpenCode
+   * plugin's file is written meanwhile, for daemonEnvironment.
    */
   function ready(timeoutMs) {
-    const pending = checking ?? installing;
-    if (!pending) return Promise.resolve();
+    // The startup check resolves with the install it started, if any.
+    const pending = [checking ?? installing, pluginDir ? writeOpencodePlugin() : null].filter(Boolean);
+    if (!pending.length) return Promise.resolve();
     return new Promise((resolve) => {
       const timer = setTimeout(resolve, timeoutMs);
       timer.unref?.();
-      // The startup check resolves with the install it started, if any.
-      pending.then(() => {}, () => {}).then(() => { clearTimeout(timer); resolve(); });
+      Promise.all(pending.map((work) => work.then(() => {}, () => {}))).then(() => { clearTimeout(timer); resolve(); });
     });
   }
 
-  return { locate, active, rewrite, unwrap, claudeHook, codexHook, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
+  return { locate, active, rewrite, unwrap, claudeHook, codexHook, opencodePlugin, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
 }
 
 module.exports = { createRtk };

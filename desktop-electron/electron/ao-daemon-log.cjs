@@ -39,6 +39,41 @@ function keepsDaemonLogLine(line) {
   return !(duration < SLOW_REQUEST_MS);
 }
 
+/** slog's text form as fields: `key=value` pairs, a value with spaces quoted with `\"` escapes. */
+function slogFields(line) {
+  const fields = {};
+  for (const [, key, raw] of String(line).trimEnd().matchAll(/(?:^|\s)([\w.]+)=("(?:[^"\\]|\\.)*"|\S*)/g)) {
+    fields[key] = raw.startsWith('"') ? raw.slice(1, -1).replace(/\\(.)/g, "$1") : raw;
+  }
+  return fields;
+}
+
+// A start stage this long is reported. A healthy start's stages take milliseconds, except the
+// agent handshake (controller_start), which takes a few seconds.
+const SLOW_STAGE_MS = 5000;
+
+/**
+ * The launcher log event (memory only) an AO line makes, or null. A chat that read "waiting for
+ * the agent to take the message" for four minutes (2026-11-09) could not be explained afterwards:
+ * AO had said which store method held its one database writer, and how long each stage of the
+ * agent's start took, but those lines stayed in the in-memory tail nothing reads. Two kinds go to
+ * the launcher log, where a slow chat start is looked into: AO's writer report (at most one a
+ * minute) and a start stage that took SLOW_STAGE_MS or more.
+ */
+function daemonLogEvent(line) {
+  const writer = line.includes('msg="sqlite writer held while writes wait"');
+  if (!writer && !line.includes('msg="spawn: asynchronous chat stage"')) return null;
+  const fields = slogFields(line);
+  if (writer) {
+    return { level: "warn", event: "ao.writer_held", detail: { heldMs: Math.round(goDurationMs(fields.held)) || null,
+      waiting: Number(fields.waiting) || 0, holder: String(fields.holder ?? "").slice(0, 400) } };
+  }
+  const ms = goDurationMs(fields.duration);
+  if (!(ms >= SLOW_STAGE_MS)) return null;
+  return { level: "info", event: "ao.start_stage_slow",
+    detail: { session: String(fields.sessionID ?? "").slice(0, 128), stage: String(fields.stage ?? "").slice(0, 40), ms: Math.round(ms) } };
+}
+
 /**
  * Splits one output stream into lines and passes the kept ones to `write`. Chunks do not end on
  * line boundaries, so each stream needs its own filter.
@@ -67,4 +102,4 @@ function createDaemonLogFilter(write) {
   };
 }
 
-module.exports = { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs };
+module.exports = { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs, daemonLogEvent, SLOW_STAGE_MS };

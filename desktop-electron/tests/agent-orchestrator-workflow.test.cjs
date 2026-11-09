@@ -6108,26 +6108,31 @@ test("a self-paced round that fails to start stays due and is retried, and is re
     const store = createLoopStore({ file, now: () => 1_000_000 });
     store.set("ws-1", "task-1", { prompt: "watch CI", minutes: null });
     store.update("ws-1", "task-1", { due: true, round: 1, nextAt: null });
+    await store.saved();
     const restarted = wakeChat({ hold: true, loopsFile: file });
     const quiet = restarted.world.updates.length;
     await restarted.advance(30_000);
     assert.equal(restarted.world.updates.length, quiet + 1);
+    await restarted.workflow.wakeupsSaved(); // as a quit waits for it
     restarted.workflow.dispose();
   } finally { fs.rmSync(file, { force: true }); }
 });
 
 const { createLoopStore, loopAction, loopMessage, cleanLoop, LOOP_LIFETIME_MS } = require("../electron/chat-loops.cjs");
 
-test("loops are kept per chat in a file, end after seven days, and say how to go on when self-paced", () => {
+test("loops are kept per chat in a file, end after seven days, and say how to go on when self-paced", async () => {
   const file = path.join(require("node:os").tmpdir(), `ct-loops-${crypto.randomUUID()}.json`);
   try {
     const store = createLoopStore({ file, now: () => 60_000 });
     const first = store.set("ws-1", "task-1", { prompt: " deploy ", minutes: 10 });
     assert.equal(first.prompt, "deploy");
     assert.equal(first.expiresAt, 60_000 + LOOP_LIFETIME_MS);
+    assert.equal(fs.existsSync(file), false, "the save never holds the calling (main) thread");
+    await store.saved();
     assert.equal(createLoopStore({ file }).get("ws-1", "task-1").id, first.id, "it survives a restart");
     assert.equal(store.clear("ws-1", "task-1", "another-id"), false, "only the loop named is cleared");
     assert.equal(store.clear("ws-1", "task-1", first.id), true);
+    await store.saved();
     assert.equal(createLoopStore({ file }).get("ws-1", "task-1"), null);
   } finally { fs.rmSync(file, { force: true }); }
   assert.throws(() => cleanLoop({ prompt: "x", minutes: 1441 }), /interval must be/);
@@ -6269,22 +6274,26 @@ test("schedules are kept per chat in a file, move with their chat, and a due one
 
 const { createWakeupStore, wakeupAction, wakePrompt, cleanWakeup } = require("../electron/chat-wakeups.cjs");
 
-test("wake-ups are kept per chat in a file, and a due one sends, waits or drops", () => {
+test("wake-ups are kept per chat in a file, and a due one sends, waits or drops", async () => {
   const file = path.join(require("node:os").tmpdir(), `ct-wakeups-${crypto.randomUUID()}.json`);
   try {
     const store = createWakeupStore({ file, now: () => 60_000 });
     const first = store.set("ws-1", "task-1", { minutes: 2, reason: " CI ", session: "s", runId: "r1" });
     assert.equal(first.reason, "CI");
     assert.equal(first.dueAt, 180_000);
+    assert.equal(fs.existsSync(file), false, "the save never holds the calling (main) thread");
+    await store.saved();
     const again = createWakeupStore({ file });
     assert.equal(again.get("ws-1", "task-1").id, first.id, "it survives a restart");
     assert.deepEqual(again.all().map((item) => [item.workspaceId, item.taskId]), [["ws-1", "task-1"]]);
     assert.equal(again.edit("ws-1", "task-1", "another-id", { reason: "x" }), null, "only the wake-up named is edited");
     assert.throws(() => again.edit("ws-1", "task-1", first.id, { minutes: 0 }), /1 to 720/);
     assert.equal(again.edit("ws-1", "task-1", first.id, { reason: " deploy " }).dueAt, 180_000, "a note edit keeps its time");
+    await again.saved();
     assert.equal(createWakeupStore({ file }).get("ws-1", "task-1").reason, "deploy", "the edit is saved");
     assert.equal(again.clear("ws-1", "task-1", "another-id"), false, "only the wake-up named is cleared");
     assert.equal(again.clear("ws-1", "task-1", first.id), true);
+    await again.saved();
     assert.equal(createWakeupStore({ file }).get("ws-1", "task-1"), null);
   } finally { fs.rmSync(file, { force: true }); }
   assert.throws(() => cleanWakeup({ minutes: 721, reason: "x" }), /1 to 720/);

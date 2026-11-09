@@ -53,14 +53,20 @@ function writeJson(response, status, body) {
   response.end(encoded);
 }
 
-function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, getProxyCredentials }) {
+function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, getProxyCredentials, useSessionCookies = false }) {
   return new Promise((resolve, reject) => {
+    const sessionRead = useSessionCookies === true;
+    if (sessionRead) {
+      let valid = false;
+      try { valid = new URL(url).href === "https://chatgpt.com/api/auth/session" && (options.method ?? "GET") === "GET"; } catch {}
+      if (!valid) throw new Error("Cookie-bearing reads require GET to the ChatGPT session endpoint");
+    }
     const headers = new Headers(options.headers);
     headers.delete("cookie");
     headers.delete("proxy-authorization");
     const request = electronNet.request({
       url, method: options.method, headers: Object.fromEntries(headers),
-      session: browserSession, credentials: "omit", useSessionCookies: false,
+      session: browserSession, credentials: sessionRead ? "include" : "omit", useSessionCookies: sessionRead,
       redirect: "manual",
     });
     // Electron's abort() emits "abort" and "close", never "error": an abort before the response

@@ -307,7 +307,10 @@ function since(startedAt: number, now: number) {
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
 }
 
-export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, subagents = [], renderWork }: {
+/** A changed file a reply asked the Changes tab to show: the agent that edited it, the file (none: the whole diff), one id per click. */
+export type ChangesTarget = { sessionId: string; path?: string; requestId: number };
+
+export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, subagents = [], renderWork, changesTarget }: {
   sessions: ChatAgentSession[];
   /** The chat's workspace: reaches an agent's worktree even when the app holds no lease for it. */
   workspaceId?: string;
@@ -318,13 +321,20 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
   /** The subagents the chat's agents started (useChatSubagents), for the Subagents tab and the Overview. */
   subagents?: ChatSubagent[];
   renderWork?: RenderWork;
+  /** A reply's changed file, opened from its summary (ChatChangedFiles): shown in the Changes tab. */
+  changesTarget?: ChangesTarget;
 }) {
-  const [sessionId, setSessionId] = useState(sessions[0]?.id ?? "");
+  const [sessionId, setSessionId] = useState(changesTarget?.sessionId ?? sessions[0]?.id ?? "");
   // The subagent whose work the Subagents tab shows; none shows the list.
   const [subagentId, setSubagentId] = useState<string | null>(null);
   useEffect(() => {
     if (!sessions.some((session) => session.id === sessionId)) setSessionId(sessions[0]?.id ?? "");
   }, [sessions, sessionId]);
+  // Each click on a changed file shows the agent that edited it. Only a new click moves the
+  // picker: the person choosing another agent afterwards is not pulled back by a later poll.
+  useEffect(() => {
+    if (changesTarget && sessions.some((session) => session.id === changesTarget.sessionId)) setSessionId(changesTarget.sessionId);
+  }, [changesTarget?.requestId]); // eslint-disable-line react-hooks/exhaustive-deps
   const [tabs, setTabs] = useState<PanelTab[]>(() => [newTab(tab)]);
   const [active, setActive] = useState(() => tabs[0].id);
   const tabsNow = useRef(tabs);
@@ -369,6 +379,9 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
     }
   };
   const addTab = () => { const added = newTab("new"); setTabs((list) => [...list, added]); setActive(added.id); onTab("new"); };
+  // The Changes tab remounts on each click (its key), so the diff is read again (the reply may have
+  // just written the file) and the clicked file is picked once it has loaded.
+  const changesFor = changesTarget?.sessionId === sessionId ? changesTarget : undefined;
 
   // The panel's width is dragged from its left edge, as the cards panel's is, and kept per viewer.
   const [width, setWidth] = useState<number | null>(() => {
@@ -420,7 +433,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
         subagents={subagents} onSubagent={(id) => { setSubagentId(id); show("subagents"); }} />
       : current?.kind === "preview" ? <PreviewPane key={sessionId} sessionId={sessionId} />
         : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
-          : current?.kind === "changes" ? <ChangesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
+          : current?.kind === "changes" ? <ChangesPane key={`${sessionId}:${changesFor?.requestId ?? ""}`} sessionId={sessionId} workspaceId={workspaceId} target={changesFor} />
             : current?.kind === "files" ? <FilesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
               : <NewTabPage sessionId={sessionId} onTool={show} />}
   </aside>;
@@ -967,8 +980,30 @@ function parseDiff(text: string): DiffFile[] {
   return files;
 }
 
+/**
+ * Which of the Changes tab's files a reply's changed file is, or undefined when none is.
+ * `path` is how the agent's edit named the file: often absolute and Windows-style
+ * (G:\Projects\app\src\App.tsx). `paths` are the worktree's diff and untracked paths, relative
+ * with forward slashes (src/App.tsx).
+ */
+export function changeTargetPath(path: string, paths: string[]): string | undefined {
+  const normal = (value: string) => value.replace(/\\/g, "/").replace(/^\.\//, "");
+  const listed = paths.filter(Boolean);
+  // Case decides first, as git reports it; ignoring it is the fallback, since Windows does.
+  for (const fold of [(value: string) => value, (value: string) => value.toLowerCase()]) {
+    const wanted = fold(normal(path));
+    const exact = listed.find((entry) => fold(normal(entry)) === wanted);
+    if (exact !== undefined) return exact;
+    // Otherwise the worktree's own folder is in front: the entry must end the path on a "/".
+    // The longest such entry is the file itself; a shorter one is another file higher up.
+    const ends = listed.filter((entry) => wanted.endsWith(`/${fold(normal(entry))}`));
+    if (ends.length) return ends.reduce((best, entry) => (normal(entry).length > normal(best).length ? entry : best));
+  }
+  return undefined;
+}
+
 /** The Changes tab: the agent worktree's diff, one file at a time, with every changed file listed. */
-function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceId?: string }) {
+function ChangesPane({ sessionId, workspaceId, target }: { sessionId: string; workspaceId?: string; target?: ChangesTarget }) {
   const [data, setData] = useState<{ branch: string; entries: { path: string; index_status: string; worktree_status: string }[]; diff: string; truncated: boolean } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -1002,6 +1037,18 @@ function ChangesPane({ sessionId, workspaceId }: { sessionId: string; workspaceI
   const listed = [...files.map((file) => ({ path: file.path, added: file.added, removed: file.removed, isNew: false })),
     ...untracked.map((entry) => ({ path: entry.path, added: 0, removed: 0, isNew: true }))]
     .filter((item) => !filter || item.path.toLowerCase().includes(filter.toLowerCase()));
+  // The clicked file is picked once, when the diff first loads; a later Refresh keeps the person's choice.
+  // A file the diff doesn't list (committed since, or outside the worktree) leaves the first file shown.
+  const targetApplied = useRef(false);
+  useEffect(() => {
+    const owner = scope.current;
+    if (!target?.path || !data || !owner || targetApplied.current) return;
+    targetApplied.current = true;
+    const path = changeTargetPath(target.path, [...files.map((file) => file.path), ...untracked.map((entry) => entry.path)]);
+    if (path === undefined) return;
+    // owner.selected lets a new file's text be read (the effect below), as a click on it does.
+    owner.selected = path; setFilter(""); setSelected(path);
+  }, [data]); // eslint-disable-line react-hooks/exhaustive-deps
   const current = files.find((file) => file.path === selected) ?? (selected ? null : files[0] ?? null);
   const totals = files.reduce((sum, file) => ({ added: sum.added + file.added, removed: sum.removed + file.removed }), { added: 0, removed: 0 });
   useLayoutEffect(() => {

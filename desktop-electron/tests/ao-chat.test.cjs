@@ -3039,7 +3039,7 @@ test("a message stamp saved in UTC shows in this computer's own time zone", () =
 function filePane(name) {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatWorkbench.tsx"), "utf8");
   const file = ts.createSourceFile("ChatWorkbench.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const code = file.statements.filter(node => ts.isFunctionDeclaration(node) && [name, "parseDiff"].includes(node.name?.text))
+  const code = file.statements.filter(node => ts.isFunctionDeclaration(node) && [name, "parseDiff", "changeTargetPath"].includes(node.name?.text))
     .map(node => node.getText(file)).join("\n") + `\nexports.Pane = ${name};`;
   const states = [], refs = [], effects = [], memos = [], queued = [], requests = [], afterUnmount = [];
   let stateIndex, refIndex, effectIndex, memoIndex, dirty, mounted = true;
@@ -3131,6 +3131,38 @@ test("Refresh rereads a selected untracked file even when the diff stays empty",
   const reads = ui.requests.filter(item => item.operation === "chat_file"); assert.equal(reads.length, 2);
   reads[1].resolve({ content: "v2" }); await new Promise(setImmediate);
   assert.ok(ui.nodes(ui.render()).some(node => node.props.className === "cx-diff-text" && node.props.children.includes("v2"))); ui.unmount();
+});
+
+test("a reply's changed file is the one the Changes tab shows, once its diff loads, until the person picks another", async () => {
+  const diff = ["a.txt", "b.txt"].map(file => `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-old\n+new ${file}`).join("\n");
+  const changes = { entries: [{ path: "new.txt", worktree_status: "?" }], diff };
+  const ui = filePane("ChangesPane");
+  ui.render({ target: { sessionId: "agent", path: "G:\\worktree\\b.txt", requestId: 1 } });
+  assert.equal(ui.displayed(), undefined, "nothing is picked before the diff is read");
+  ui.requests[0].resolve(changes); await new Promise(setImmediate);
+  assert.equal(ui.displayed(), "b.txt", "the edit's absolute path finds its diff file, not the first one");
+  ui.select("a.txt"); ui.refresh().props.onClick(); ui.render();
+  ui.requests.filter(item => item.operation === "chat_changes").at(-1).resolve(changes); await new Promise(setImmediate);
+  assert.equal(ui.displayed(), "a.txt", "a Refresh keeps the person's own choice");
+  ui.unmount();
+
+  // A new file has no diff: it is read whole, as clicking it in the list does.
+  const fresh = filePane("ChangesPane");
+  fresh.render({ target: { sessionId: "agent", path: "G:\\worktree\\new.txt", requestId: 2 } });
+  fresh.requests[0].resolve(changes); await new Promise(setImmediate); fresh.render();
+  const read = fresh.requests.find(item => item.operation === "chat_file");
+  assert.equal(read?.input.path, "new.txt");
+  read.resolve({ content: "brand new" }); await new Promise(setImmediate);
+  assert.equal(fresh.displayed(), "new.txt");
+  fresh.unmount();
+
+  // A file the worktree no longer lists (committed since) leaves the tab on its first file.
+  const gone = filePane("ChangesPane");
+  gone.render({ target: { sessionId: "agent", path: "G:\\worktree\\gone.txt", requestId: 3 } });
+  gone.requests[0].resolve(changes); await new Promise(setImmediate);
+  assert.equal(gone.displayed(), "a.txt");
+  assert.equal(gone.requests.some(item => item.operation === "chat_file"), false, "no read is sent for a path the worktree doesn't have");
+  gone.unmount();
 });
 
 test("only the latest Changes refresh can replace data, report errors or finish loading", async t => {

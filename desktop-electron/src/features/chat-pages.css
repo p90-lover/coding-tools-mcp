@@ -28,8 +28,3 @@
 .cx-page-tabs button[aria-selected="true"] { background: var(--cx-page-on); color: var(--cx-page-strong); }
 .cx-page-tabs button:focus-visible { outline: 2px solid var(--color-border-focus, #d97757); outline-offset: -2px; }
 .cx-page-tabs .cx-page-add { width: 24px; padding: 0; }
-.cxs-shortcut { width: 148px; min-width: 0; padding: 6px 10px; border: 1px solid var(--cxs-border); border-radius: 8px;
-  background: var(--cxs-panel); color: inherit; font: inherit; font-size: 13px; text-align: center; cursor: pointer; }
-.cxs-shortcut:focus-visible { outline: 2px solid var(--color-border-focus); outline-offset: 2px; }
-.cxs-shortcut:disabled { cursor: default; opacity: .45; }
-@media (max-width: 480px) { .cxs-shortcut { width: 112px; } }

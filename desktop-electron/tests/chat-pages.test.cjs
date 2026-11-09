@@ -21,8 +21,9 @@ function load(entries = []) {
   }, require: (name) => require(require.resolve(name, { paths: [root] })) });
   return { api: exports, values, localStorage };
 }
-const key = (value = "E", extra = {}) => ({
-  key: value, shiftKey: true, ctrlKey: false, altKey: false, metaKey: false, repeat: false,
+// Ctrl+<digit> on the digit row, as Chromium reports it.
+const key = (digit = "2", extra = {}) => ({
+  key: digit, code: `Digit${digit}`, shiftKey: false, ctrlKey: true, altKey: false, metaKey: false, repeat: false,
   isComposing: false, defaultPrevented: false, keyCode: 0, target: null, getModifierState: () => false, ...extra,
 });
 const configured = (api) => ({ ...plain(api.DEFAULT_CHAT_PAGES), enabled: true, pageCount: 3 });
@@ -39,54 +40,44 @@ test("chat pages default on, an explicit off stays off, and corrupt or out-of-ra
     assert.equal(api.parseChatPagePreferences(raw).pageCount, 1);
   }
   const parsed = api.parseChatPagePreferences('{"enabled":true,"pageCount":4,"keyboard":false,"wheel":false,"next":"ctrl+shift+n","previous":"shift+r","unknown":"discard"}');
-  assert.deepEqual(plain(parsed), { enabled: true, pageCount: 4, keyboard: false, wheel: false, next: "Ctrl+Shift+N", previous: "Shift+R" });
-  assert.deepEqual(plain(api.parseChatPagePreferences('{"next":"Shift+R","previous":"Shift+R"}')), plain(api.DEFAULT_CHAT_PAGES));
+  assert.deepEqual(plain(parsed), { enabled: true, pageCount: 4, keyboard: false, wheel: false }, "old previous/next keys are dropped");
 });
 
-test("Shift+Q is the previous page and Shift+R the next; #903's saved defaults read as these", () => {
-  const { api } = load();
-  assert.equal(api.DEFAULT_CHAT_PAGES.previous, "Shift+Q");
-  assert.equal(api.DEFAULT_CHAT_PAGES.next, "Shift+R");
-  // Every page change saved the whole preferences, so a store from 0.8.6x holds the old pair.
-  const old = api.parseChatPagePreferences('{"enabled":true,"pageCount":3,"keyboard":true,"wheel":true,"previous":"Shift+R","next":"Shift+E"}');
-  assert.deepEqual([old.previous, old.next, old.pageCount], ["Shift+Q", "Shift+R", 3]);
-  const own = api.parseChatPagePreferences('{"previous":"Shift+R","next":"Ctrl+E"}');
-  assert.deepEqual([own.previous, own.next], ["Shift+R", "Ctrl+E"], "keys the user chose stay");
-});
-
-test("shortcut recording normalizes modifiers and rejects plain typing, duplicate modifiers and AltGr", () => {
-  const { api } = load();
-  assert.equal(api.normalizePageShortcut("shift+ctrl+e"), "Ctrl+Shift+E");
-  assert.equal(api.normalizePageShortcut("Alt+ArrowRight"), "Alt+ArrowRight");
-  assert.equal(api.normalizePageShortcut("Ctrl+PageDown"), "Ctrl+PageDown");
-  assert.equal(api.normalizePageShortcut("Meta+F12"), "Meta+F12");
-  for (const value of ["E", "Shift", "Shift+Shift+R", "Ctrl+", "Ctrl+F25", "Win+E", null]) assert.equal(api.normalizePageShortcut(value), null);
-  assert.equal(api.recordPageShortcut(key("e")), "Shift+E");
-  assert.equal(api.recordPageShortcut(key(" ", { shiftKey: false, ctrlKey: true })), "Ctrl+Space");
-  assert.equal(api.recordPageShortcut(key("E", { isComposing: true })), null);
-  assert.equal(api.recordPageShortcut(key("e", { ctrlKey: true, altKey: true, getModifierState: () => true })), null);
-});
-
-test("next and previous defaults and rebound keys obey the enable switches", () => {
-  const { api } = load();
-  const preferences = configured(api);
-  assert.equal(api.pageShortcutDirection(key("R"), preferences), 1);
-  assert.equal(api.pageShortcutDirection(key("q"), preferences), -1);
-  assert.equal(api.pageShortcutDirection(key("E"), preferences), 0, "#903's next key no longer turns pages");
-  for (const disabled of [{ enabled: false }, { keyboard: false }, { pageCount: 1 }]) {
-    assert.equal(api.pageShortcutDirection(key("R"), { ...preferences, ...disabled }), 0);
+test("Shift+Q / Shift+R are gone: no letter turns a page, and saved keys drop out on the next save", () => {
+  const { api, values } = load([["coding-tools:ao:chat-pages", '{"enabled":true,"pageCount":3,"keyboard":true,"wheel":true,"previous":"Shift+Q","next":"Shift+R"}']]);
+  assert.equal(api.recordPageShortcut, undefined);
+  assert.equal(api.pageShortcutDirection, undefined);
+  assert.deepEqual(Object.keys(api.DEFAULT_CHAT_PAGES).sort(), ["enabled", "keyboard", "pageCount", "wheel"]);
+  for (const letter of ["Q", "R", "q", "r"]) {
+    assert.equal(api.pageNumberKey(key(letter, { code: `Key${letter.toUpperCase()}`, ctrlKey: false, shiftKey: true }), configured(api)), 0);
+    assert.equal(api.pageNumberKey(key(letter, { code: `Key${letter.toUpperCase()}` }), configured(api)), 0, `Ctrl+${letter}`);
   }
-  const rebound = { ...preferences, next: "Ctrl+Shift+N" };
-  assert.equal(api.pageShortcutDirection(key("R"), rebound), 0);
-  assert.equal(api.pageShortcutDirection(key("N", { ctrlKey: true }), rebound), 1);
+  api.saveChatPagePreferences({ wheel: false });
+  assert.deepEqual(JSON.parse(values.get(api.CHAT_PAGES_STORE)), { enabled: true, pageCount: 3, keyboard: true, wheel: false });
 });
 
-test("page keys never consume editing, dialogs, composition, repeats or an already handled event", () => {
+test("Ctrl+1 … Ctrl+9 open pages 1 to 9 and Ctrl+0 page 10, on any layout, and only pages that are open", () => {
+  const { api } = load();
+  const twelve = { ...configured(api), pageCount: 12 };
+  for (let page = 1; page <= 10; page++) assert.equal(api.pageNumberKey(key(String(page % 10)), twelve), page);
+  assert.equal(api.pageNumberKey(key("&", { code: "Digit1" }), twelve), 1, "AZERTY: the digit row counts by position");
+  assert.equal(api.pageNumberKey(key("3", { code: "Numpad3" }), twelve), 3, "the number pad with NumLock on");
+  assert.equal(api.pageNumberKey(key("End", { code: "Numpad1" }), twelve), 0, "NumLock off: Ctrl+End stays Ctrl+End");
+  const three = configured(api);
+  assert.equal(api.pageNumberKey(key("3"), three), 3);
+  assert.equal(api.pageNumberKey(key("4"), three), 0, "page 4 is not open: the key is left alone");
+  assert.equal(api.pageNumberKey(key("0"), three), 0);
+  for (const disabled of [{ enabled: false }, { keyboard: false }, { pageCount: 1 }]) {
+    assert.equal(api.pageNumberKey(key("1"), { ...three, ...disabled }), 0, JSON.stringify(disabled));
+  }
+});
+
+test("page number keys need Ctrl alone and skip composition, repeats, AltGr and an already handled event", () => {
   const { api } = load();
   const preferences = configured(api);
   for (const extra of [{ repeat: true }, { isComposing: true }, { keyCode: 229 }, { defaultPrevented: true },
-    { shiftKey: false }, { ctrlKey: true }, { target: { closest: () => ({}) } }]) {
-    assert.equal(api.pageShortcutDirection(key("R", extra), preferences), 0);
+    { ctrlKey: false }, { shiftKey: true }, { altKey: true }, { metaKey: true }, { ctrlKey: false, metaKey: true }]) {
+    assert.equal(api.pageNumberKey(key("2", extra), preferences), 0, JSON.stringify(extra));
   }
 });
 
@@ -110,42 +101,36 @@ function element(tag, attributes = {}, parent = null, extra = {}) {
   return node;
 }
 
-test("Shift+Q / Shift+R never turn a page while focus is where typing goes", () => {
+test("Ctrl+number works while you type in a chat, never in a dialog, menu or list", () => {
   const { api } = load();
   const preferences = configured(api);
-  const composer = element("textarea", { class: "cx-composer" });
   const rich = element("div", { contenteditable: "" });
-  const typing = [
-    element("input", { type: "text" }), composer, element("select"), rich, element("span", {}, rich),
-    element("div", { role: "textbox" }), element("div", { role: "searchbox" }), element("div", { role: "combobox" }),
-    element("div", { role: "listbox" }), element("button", {}, element("div", { role: "dialog" })), element("div", { role: "menu" }),
-    element("div", {}, null, { isContentEditable: true }),
-  ];
-  for (const target of typing) {
-    assert.equal(api.pageShortcutDirection(key("R", { target }), preferences), 0, `${target.tag} ${JSON.stringify(target.attributes)}`);
-    assert.equal(api.pageShortcutDirection(key("Q", { target }), preferences), 0);
-  }
-  // Elsewhere they turn pages: the page body, a chat's button, a page tab, a switched-off editor.
-  for (const target of [element("body"), element("button", { role: "tab" }), element("div", { contenteditable: "false" }), null]) {
-    assert.equal(api.pageShortcutDirection(key("R", { target }), preferences), 1);
-    assert.equal(api.pageShortcutDirection(key("Q", { target }), preferences), -1);
+  const anywhere = [element("textarea", { class: "cx-composer" }), element("input", { type: "text" }), rich, element("span", {}, rich),
+    element("div", { role: "textbox" }), element("body"), element("button", { role: "tab" }), null];
+  for (const target of anywhere) assert.equal(api.pageNumberKey(key("2", { target }), preferences), 2, target ? target.tag : "no target");
+  for (const target of [element("button", {}, element("div", { role: "dialog" })), element("div", { role: "menu" }), element("div", { role: "listbox" })]) {
+    assert.equal(api.pageNumberKey(key("2", { target }), preferences), 0, JSON.stringify(target.attributes));
   }
 });
 
-test("only a sideways scroll turns pages over the chats; over the page tabs any scroll does", () => {
+test("Alt+scroll turns pages anywhere; over the chats only a plain sideways swipe does; over the tabs any scroll", () => {
   const { api } = load();
   const wheel = (extra) => ({ deltaX: 0, deltaY: 0, deltaMode: 0, shiftKey: false, ctrlKey: false, metaKey: false, altKey: false, ...extra });
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, altKey: true }), false), 100, "Alt+scroll down: the next page");
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: -100, altKey: true }), false), -100, "Alt+scroll up: the previous page");
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: -3, deltaMode: 1, altKey: true }), false), -48, "lines count as 16 px");
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, altKey: true, shiftKey: true }), false), 0, "Alt+Shift is no page turn");
   assert.equal(api.pageWheelDelta(wheel({ deltaY: 100 }), false), 0, "scrolling messages never turns a page");
   assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, deltaX: 20 }), false), 0, "a mostly up/down scroll is no swipe");
   assert.equal(api.pageWheelDelta(wheel({ deltaX: 100 }), false), 100, "a tilted wheel or touchpad swipe");
   assert.equal(api.pageWheelDelta(wheel({ deltaX: -30, deltaY: 4 }), false), -30);
-  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, shiftKey: true }), false), 100, "Shift+wheel reported as deltaY");
-  assert.equal(api.pageWheelDelta(wheel({ deltaX: -100, shiftKey: true }), false), -100, "Shift+wheel reported as deltaX");
+  assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, shiftKey: true }), false), 0, "Shift+wheel scrolls sideways and turns nothing (Alt does)");
+  assert.equal(api.pageWheelDelta(wheel({ deltaX: -100, shiftKey: true }), false), 0);
   assert.equal(api.pageWheelDelta(wheel({ deltaY: -3, deltaMode: 1 }), true), -48, "over the tabs, lines count as 16 px");
   assert.equal(api.pageWheelDelta(wheel({ deltaY: 100 }), true), 100, "over the tabs, down is the next page");
-  for (const modifier of ["ctrlKey", "metaKey", "altKey"]) {
-    assert.equal(api.pageWheelDelta(wheel({ deltaX: 100, [modifier]: true }), false), 0, `${modifier}+wheel is not a page turn`);
-    assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, [modifier]: true }), true), 0);
+  for (const modifier of ["ctrlKey", "metaKey"]) {
+    assert.equal(api.pageWheelDelta(wheel({ deltaX: 100, [modifier]: true }), false), 0, `${modifier}+wheel zooms`);
+    assert.equal(api.pageWheelDelta(wheel({ deltaY: 100, [modifier]: true, altKey: true }), true), 0);
   }
 });
 
@@ -175,13 +160,12 @@ test("page navigation wraps in both directions without making a new page", () =>
   assert.equal(api.adjacentChatPage(1, -1, 1), 1);
 });
 
-test("settings persist independently and failed or conflicting writes do not replace them", () => {
+test("settings persist independently and failed or out-of-range writes do not replace them", () => {
   const { api, values, localStorage } = load();
-  api.saveChatPagePreferences({ enabled: true, pageCount: 4, next: "Ctrl+Shift+N" });
+  api.saveChatPagePreferences({ enabled: true, pageCount: 4 });
   api.saveChatPagePreferences({ keyboard: false });
   const saved = values.get(api.CHAT_PAGES_STORE);
-  assert.deepEqual(JSON.parse(saved), { ...plain(api.DEFAULT_CHAT_PAGES), enabled: true, pageCount: 4, next: "Ctrl+Shift+N", keyboard: false });
-  assert.throws(() => api.saveChatPagePreferences({ previous: "Ctrl+Shift+N" }), /different shortcuts/);
+  assert.deepEqual(JSON.parse(saved), { ...plain(api.DEFAULT_CHAT_PAGES), enabled: true, pageCount: 4, keyboard: false });
   assert.throws(() => api.saveChatPagePreferences({ pageCount: 13 }), /between 1 and 12/);
   assert.equal(values.get(api.CHAT_PAGES_STORE), saved);
   localStorage.setItem = () => { throw new Error("storage full"); };
@@ -232,7 +216,7 @@ test("a full page's chat goes to the next page with room, wrapping round, and a 
   const roomOn = (...pages) => (page) => pages.includes(page);
   assert.equal(api.overflowPage(2, 4, roomOn(1, 3, 4), true), 3, "the next page first");
   assert.equal(api.overflowPage(2, 4, roomOn(1, 4), true), 4, "then the one after");
-  assert.equal(api.overflowPage(4, 4, roomOn(1, 2), true), 1, "from the last page it wraps, as Shift+R does");
+  assert.equal(api.overflowPage(4, 4, roomOn(1, 2), true), 1, "from the last page it wraps, as Alt+scroll down does");
   assert.equal(api.overflowPage(3, 4, roomOn(1), true), 1, "an earlier page with room before a new page");
   assert.equal(api.overflowPage(1, 4, roomOn(), true), 5, "every page full: a new one");
   assert.equal(api.overflowPage(1, 12, roomOn(), false), null, "twelve full pages: nowhere");

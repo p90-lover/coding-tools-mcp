@@ -9,7 +9,7 @@
 // asked for it: a newer message in the chat (the user's own, or a goal's next round) supersedes it.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const MIN_WAKE_MINUTES = 1;
 const MAX_WAKE_MINUTES = 720;
@@ -66,14 +66,25 @@ function createWakeupStore({ file = null, now = Date.now } = {}) {
     } catch { /* No wake-ups saved yet. */ }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  // Saved off the main thread, as schedules and goals are: the synchronous write held every window
+  // for 786 ms (seen live 2026-11-09) when a due wake-up was cleared as it fired. Flushed before it
+  // replaces the old file, so a power cut leaves the old wake-ups or the new ones; a burst of changes
+  // is one save plus at most one more with the latest.
+  let saving = null;
+  let saveAgain = false;
   const persist = () => {
     if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(wakeups, null, 2));
-    fs.renameSync(temporary, file);
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(file, JSON.stringify(wakeups, null, 2), { durable: true, protectDirectory: false })
+      .catch(() => { /* the old file stays; the next change saves every wake-up again */ })
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
   };
   return {
+    /** Resolves once every change so far is on disk (tests, and a quit). */
+    async saved() { while (saving) await saving; },
     get: (workspaceId, taskId) => wakeups[key(workspaceId, taskId)] ?? null,
     /** Every wake-up of one project, by chat. */
     forWorkspace(workspaceId) {

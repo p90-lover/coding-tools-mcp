@@ -758,8 +758,8 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
 
 /**
  * The panel page script that puts each account's usage on its Auth Files card (#/auth-files): the
- * requests, tokens and estimated cost of the last 5 hours (a Codex account's 5-hour window) and of
- * the last 7 days (its weekly window), under the card's size and date line. The numbers come from
+ * requests, tokens and estimated cost since each account's short-hour and weekly limit reset,
+ * under the card's size and date line. No confirmed active reset means no total. The numbers come from
  * the app through the CPA usage bridge (cpa-provider-usage-bridge.ts, which answers this frame and
  * sends no key or account id), matched to a card by its auth file name. They refresh every 2
  * minutes while the page is open and shown, and the last answer is kept (localStorage) so a reload
@@ -771,8 +771,8 @@ function authFilesUsageScript(marker) {
     if (sessionStorage.getItem('coding-tools-cpa-session') !== marker) return 'unseeded';
     if (window.__codingToolsCardUsage) return 'running';
     window.__codingToolsCardUsage = true;
-    const SAVED = 'coding-tools-card-usage';
-    const RANGES = [['5h', 'Last 5 h'], ['7d', 'Last 7 days']];
+    const SAVED = 'coding-tools-card-usage-v2';
+    const RANGES = [['5h', 'Last 5 h'], ['7d', 'Last 7 days'], ['session', '5-hour'], ['week', 'Weekly']];
     const REFRESH_MS = 2 * 60e3;
     const MONO = 'ui-monospace,SF Mono,Cascadia Mono,JetBrains Mono,Menlo,Consolas,monospace';
     const read = (key) => { try { return JSON.parse(localStorage.getItem(key)); } catch { return null; } };
@@ -807,9 +807,10 @@ function authFilesUsageScript(marker) {
         RANGES.forEach(([range], index) => {
           const usage = answers[index];
           if (usage?.available && Array.isArray(usage.accounts)) next[range] = usage.accounts.filter((a) => a && a.file)
-            .map((a) => ({ file: a.file, requests: a.requests, failed: a.failed, inputTokens: a.inputTokens, outputTokens: a.outputTokens,
+            .map((a) => ({ file: a.file, provider: a.provider, requests: a.requests, failed: a.failed, inputTokens: a.inputTokens, outputTokens: a.outputTokens,
               cachedTokens: a.cachedTokens, reasoningTokens: a.reasoningTokens, totalTokens: a.totalTokens,
-              cost: a.cost, costSource: a.costSource, costPartial: a.costPartial }));
+              cost: a.cost, costSource: a.costSource, costPartial: a.costPartial,
+              window: a.window ? { from: a.window.from, to: a.window.to } : null, usageAvailable: a.usageAvailable === true }));
           else if (byRange[range]) next[range] = byRange[range];
         });
         if (Object.keys(next).length) {
@@ -833,23 +834,30 @@ function authFilesUsageScript(marker) {
     // CPA Helper's own prices are exact; the app's list-price table is an estimate (≈); "+" when some models had no price.
     function money(row) {
       if (!row.requests && !row.totalTokens) return '$0';
-      if (row.cost === null || row.cost === undefined) return 'cost unknown';
+      if (row.cost === null || row.cost === undefined) return 'Null';
       const amount = row.cost >= 100 ? row.cost.toFixed(0) : row.cost >= 1 ? row.cost.toFixed(2) : row.cost.toFixed(3);
       return (row.costSource === 'cpa-helper' ? '' : '≈') + '$' + amount + (row.costPartial ? '+' : '');
     }
-    function line(label, row) {
+    const active = (row) => Number.isFinite(row?.window?.from) && Number.isFinite(row?.window?.to)
+      && row.window.from <= Date.now() && row.window.to > Date.now();
+    function line(range, label, row) {
       const div = document.createElement('div');
-      div.style.cssText = 'display:flex;gap:6px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      div.style.cssText = 'display:grid;grid-template-columns:72px minmax(0,1fr);gap:6px;align-items:baseline;overflow-wrap:anywhere';
+      const current = range === 'session' || range === 'week';
       const name = document.createElement('span');
-      name.style.cssText = 'color:var(--text-tertiary);min-width:76px';
-      name.textContent = label;
+      name.style.cssText = 'color:var(--text-tertiary);min-width:0;white-space:nowrap';
+      name.textContent = range === 'session' && row?.window ? ((row.window.to - row.window.from) / 36e5) + '-hour' : label;
       const value = document.createElement('span');
       value.style.cssText = 'color:var(--text-secondary,inherit)';
       const requests = row ? row.requests || 0 : 0;
-      const failed = row?.failed ? ' (' + row.failed + ' failed)' : '';
-      value.textContent = requests ? requests + (requests === 1 ? ' request' : ' requests') + failed + ' · ' + compact(row.totalTokens) + ' tokens · ' + money(row) : 'No requests';
-      if (row) div.title = label + ': in ' + compact(row.inputTokens) + ' · out ' + compact(row.outputTokens) + ' · cached ' + compact(row.cachedTokens)
-        + ' · reasoning ' + compact(row.reasoningTokens) + (row.failed ? ' · ' + row.failed + ' failed' : '');
+      value.textContent = current && !active(row) ? 'Pending reset' : current && !row.usageAvailable ? 'Unavailable'
+        : requests ? requests + (requests === 1 ? ' request' : ' requests') + ' · ' + compact(row.totalTokens) + ' tokens · ' + money(row) : '0 requests';
+      div.title = current && !active(row) ? 'Totals start at a confirmed limit reset; previous-cycle usage is excluded.'
+        : current && !row.usageAvailable ? 'Usage history could not be read.'
+        : (current ? 'Since last limit reset: ' + new Date(row.window.from).toLocaleString() + ' · resets ' + new Date(row.window.to).toLocaleString() + ' · ' : 'Rolling history · ')
+          + 'Input ' + compact(row?.inputTokens) + ' · output ' + compact(row?.outputTokens) + ' · cached ' + compact(row?.cachedTokens)
+          + ' · reasoning ' + compact(row?.reasoningTokens) + (row?.failed ? ' · ' + row.failed + ' failed requests' : '')
+          + ' · API-price estimate, not subscription charges';
       div.append(name, value);
       return div;
     }
@@ -858,7 +866,10 @@ function authFilesUsageScript(marker) {
       for (const nameNode of document.querySelectorAll('[class*="AuthFileCard-module__fileName"]')) {
         const card = nameNode.closest('article') || nameNode.parentElement;
         const file = nameNode.textContent.trim().replace(/[.]json$/i, '');
-        const key = file + '|' + loadedAt;
+        const codex = /^codex-/.test(file) || ['session', 'week'].some((range) => byRange[range]?.some((row) => row.file === file && row.provider === 'codex'));
+        const ranges = codex ? RANGES.slice(2) : RANGES.slice(0, 2);
+        const rows = ranges.map(([range]) => byRange[range]?.find((row) => row.file === file));
+        const key = file + '|' + loadedAt + '|' + rows.map(active).join('|');
         let box = card.querySelector(':scope > [data-coding-tools-usage]');
         if (box?.dataset.codingToolsUsage === key) continue;
         if (!box) {
@@ -868,8 +879,7 @@ function authFilesUsageScript(marker) {
           anchor.after(box);
         }
         box.dataset.codingToolsUsage = key;
-        box.replaceChildren(...RANGES.filter(([range]) => byRange[range])
-          .map(([range, label]) => line(label, byRange[range].find((row) => row.file === file))));
+        box.replaceChildren(...ranges.map(([range, label], index) => line(range, label, rows[index])));
       }
     }
 

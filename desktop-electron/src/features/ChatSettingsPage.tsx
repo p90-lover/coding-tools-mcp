@@ -3,7 +3,7 @@ import type { ComputerAllowedApp, JsonObject } from "../api/contracts";
 import { getCodingToolsClient } from "../api/client";
 import type { LauncherState, UpdateSettings, UpdateSettingValues, UpdateState } from "../types";
 import { ChatGlyph } from "./ChatMenu";
-import { CHAT_PAGE_LIMIT, recordPageShortcut, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
+import { CHAT_PAGE_LIMIT, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
 import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
 import { SHORTCUTS } from "./ChatThreadList";
@@ -228,19 +228,6 @@ function MinutesSelect({ value, choices, label, onChange }: { value: number; cho
   </select>;
 }
 
-function PageShortcut({ label, value, disabled, onChange }: { label: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
-  return <input className="cxs-shortcut" aria-label={label} value={value} readOnly disabled={disabled}
-    title="Focus here and press a modified letter, number, arrow or function key. Escape cancels."
-    onKeyDown={(event) => {
-      if (event.key === "Tab") return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.key === "Escape") { event.currentTarget.blur(); return; }
-      const shortcut = recordPageShortcut(event.nativeEvent);
-      if (shortcut) onChange(shortcut);
-    }} />;
-}
-
 /**
  * `onArchiveChanged` tells the chat list the archive days changed, so its Archived section and
  * popover read them again.
@@ -385,21 +372,13 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <button type="button" className="cxs-button" disabled={!pages.enabled || pages.pageCount >= CHAT_PAGE_LIMIT}
                   onClick={() => setPagePreference({ pageCount: pages.pageCount + 1 })}>Add page</button>
               </Row>
-              <Row label="Scroll to switch pages" description="Scroll over the page numbers, or sideways anywhere in Chat (a touchpad swipe or Shift+scroll). Scrolling messages stays unchanged">
+              <Row label="Scroll to switch pages" description="Hold Alt and scroll anywhere in Chat: up for the previous page, down for the next. Scrolling over the page numbers or swiping sideways on a touchpad also works. Plain scrolling stays with the messages">
                 <Toggle label="Scroll to switch pages" checked={pages.wheel} disabled={!pages.enabled}
                   onChange={(wheel) => setPagePreference({ wheel })} />
               </Row>
-              <Row label="Page keyboard shortcuts" description="Switch pages without clicking. Shortcuts pause while typing or using a dialog">
-                <Toggle label="Page keyboard shortcuts" checked={pages.keyboard} disabled={!pages.enabled}
+              <Row label="Page number keys" description="Ctrl+1 to Ctrl+9 open pages 1 to 9 and Ctrl+0 opens page 10, even while you type in a chat. They pause in dialogs and menus">
+                <Toggle label="Page number keys" checked={pages.keyboard} disabled={!pages.enabled}
                   onChange={(keyboard) => setPagePreference({ keyboard })} />
-              </Row>
-              <Row label="Previous page shortcut" description="Focus the shortcut, then press the key combination you want">
-                <PageShortcut label="Previous page shortcut" value={pages.previous} disabled={!pages.enabled || !pages.keyboard}
-                  onChange={(previous) => setPagePreference(previous === pages.next ? { previous, next: pages.previous } : { previous })} />
-              </Row>
-              <Row label="Next page shortcut" description="Pressing the previous page's shortcut here swaps the two">
-                <PageShortcut label="Next page shortcut" value={pages.next} disabled={!pages.enabled || !pages.keyboard}
-                  onChange={(next) => setPagePreference(next === pages.previous ? { next, previous: pages.next } : { next })} />
               </Row>
             </Group>
             <Group title="Context">
