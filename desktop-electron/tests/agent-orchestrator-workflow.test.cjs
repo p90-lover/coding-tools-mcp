@@ -1522,7 +1522,9 @@ function chatWorld({ runs = [], tasks = [] } = {}) {
       if (body.tool === "workflow_list") {
         const listed = state.tasks.map(({ description, ...rest }) => rest);
         return { operation: { state: "completed", result: { ok: true, revision: state.revision, workspace_id: "ws-1", steps: [],
-          ...(args.task_id ? { task: state.tasks.find((task) => task.id === args.task_id) ?? null } : { tasks: listed }) } } };
+          // A copy, as the service's JSON answer is: a test changing the chat later must not change
+          // what an earlier read saw.
+          ...(args.task_id ? { task: structuredClone(state.tasks.find((task) => task.id === args.task_id) ?? null) } : { tasks: listed }) } } };
       }
       assert.equal(args.expected_revision, state.revision);
       if (args.change.operation === "create") state.tasks.push({ id: `task-${state.tasks.length + 1}`, title: args.change.title, description: args.change.description, state: "backlog", clauses: [] });
@@ -1600,6 +1602,49 @@ test("a follow-up waits for the chat's run, then extends the same task and start
   assert.equal(done.edits[0].title, "Fix auth");
   assert.match(done.edits[0].description, /^first ask\n\nFollow-up \([0-9-]+ [0-9:]+ UTC\):\nalso add tests$/);
   assert.equal(done.updates[0].task_id, "task-1");
+});
+
+test("a person's follow-up goes ahead of saturated background polls, and the start it leaves running does not", async () => {
+  // Seen live 2026-11-09: ten split chats polling on a saturated disk held a follow-up's reads in the
+  // ordinary queue until the service gave up ("HEADLESS_CAPACITY: request admission is full").
+  const world = startableChatWorld();
+  world.tasks.push({ id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] });
+  world.runs.push({ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] });
+  const calls = [];
+  let releasePoll, releaseStart, answered = false;
+  const startHeld = new Promise(resolve => { releaseStart = resolve; });
+  const workflow = createAgentOrchestratorWorkflow({
+    runReadFreshMs: 5_000, findCodexExecutable: () => "C:/Codex/codex.exe",
+    requestHeadless: async (endpoint, body, options) => {
+      calls.push({ endpoint, person: options?.admissionControl === true, afterSend: answered });
+      // The first background read stays queued behind the other polls until the end.
+      if (endpoint === "/api/v1/ao/read" && options?.admissionControl !== true && !releasePoll) {
+        await new Promise(resolve => { releasePoll = resolve; });
+      }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    resolveHarness: async () => { await startHeld; return { expected_sha256: "a".repeat(64), executable: path.resolve("codex.exe") }; },
+  });
+  try {
+    const poll = workflow.call("runs", { workspaceId: "ws-1" });
+    await until(() => releasePoll);
+    const sending = workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "also add tests", deferStart: true });
+    // It reads afresh rather than join the poll's read still waiting in the queue.
+    const sent = await Promise.race([sending, new Promise(resolve => setTimeout(() => resolve("waited"), 1_000))]);
+    answered = true;
+    assert.notEqual(sent, "waited", "the send waited behind the background poll");
+    assert.equal(sent.status, "starting");
+    const during = calls.slice(1);
+    assert.ok(during.length >= 3 && during.every(call => call.person), JSON.stringify(during));
+    // The run's start goes on in the background: once the send has answered it queues like any poll.
+    releaseStart();
+    await until(() => calls.some(call => call.afterSend && call.endpoint === "/api/v1/ao/grant"));
+    const after = calls.filter(call => call.afterSend);
+    assert.ok(after.some(call => call.endpoint === "/api/v1/ao/grant") && after.every(call => !call.person), JSON.stringify(after));
+    releasePoll();
+    await poll;
+    assert.equal(calls[0].person, false, "a background poll is never promoted");
+  } finally { releasePoll?.(); releaseStart(); workflow.dispose(); }
 });
 
 test("a follow-up whose run was not made leaves the chat; one whose run was made after all stays", async () => {
