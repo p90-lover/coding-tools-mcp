@@ -6894,6 +6894,72 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
   } finally { mission.nodes[0].state = "finished"; }
 });
 
+test("turning \"Let the model judge\" on beside a waiting push: the chat says the reviewer is on it, then that it allowed it, never \"waiting for approval\" with Continue", async () => {
+  // Seen live 2026-11-09: a `git -C <relative> …; git -C <relative> push` waited on the person for 8
+  // minutes (the judge was off). Turned on from its card, the judge allowed it 8 s later, but the chat
+  // read "waiting for approval · waiting for you for 8m 22s" with Continue (restart the agent).
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
+  const command = "git -C aiTemp/strip remote get-url origin; git -C aiTemp/strip push origin feat/cpa-reset-usage";
+  const request = { approval_id: "push", source: "ao", kind: "command", tool: "Bash", command, decisions, since: new Date(1_000_000).toISOString() };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
+  let clock = 1_000_000, aoLists = true, answer = null;
+  const resolved = [], prompts = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
+    now: () => clock,
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      prompts.push(JSON.parse(init.body).messages[0].content);
+      await new Promise(resolve => { answer = resolve; });
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"outcome":"allow","rationale":"pushes the feature branch the user asked for"}' } }] }) };
+    },
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+      // An AO card has no native hub: its requests are read from its AO session.
+      : endpoint.endsWith("/harness/status") ? { ok: true, status: { connected: false } } : { ok: true, run: mission },
+    aoHarness: {
+      // AO goes on listing the request until `aoLists` is cleared: it drops an answered one a moment later.
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", needsInput: aoLists, approvals: aoLists ? [request] : [] }),
+      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  const settle = async (ms) => { for (let tries = 0; tries < ms / 10; tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  const activityNow = async () => {
+    await workflow.call("activity", { workspaceId: "ws", runId: "run" });
+    await settle(40);
+    return (await workflow.call("activity", { workspaceId: "ws", runId: "run" })).nodes.one.activity;
+  };
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await settle(300);
+    assert.equal(prompts.length, 0, "with the judge off, a push the app can't verify goes to the person unread");
+    assert.match(await activityNow(), /^waiting for approval: git -C aiTemp\/strip/);
+    // Eight minutes later the person turns the judge on from the request's card.
+    clock += 8 * 60_000;
+    await workflow.call("chat_model_judges", { enabled: true });
+    for (let tries = 0; tries < 300 && !prompts.length; tries++) await settle(10);
+    assert.match(prompts[0], /could not verify this publication locally/, "the judge reads it");
+    assert.match(await activityNow(), /^the reviewer is checking: git -C aiTemp\/strip/, "judged with its whole budget, not overdue at once");
+    const status = await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" });
+    assert.equal(status.status.pending_approvals[0].awaiting_review, true, "no card to answer while it is judged");
+    answer();
+    for (let tries = 0; tries < 300 && !resolved.length; tries++) await settle(10);
+    assert.deepEqual(resolved, [["push", "yes"]]);
+    // AO still lists it for a moment: the chat says it was allowed, and has nothing to restart.
+    clock += 5_000;
+    assert.match(await activityNow(), /^the reviewer allowed: git -C aiTemp\/strip/);
+    // Still listed a minute after the answer, it never reached the agent: the person's (Continue).
+    clock += 60_000;
+    assert.match(await activityNow(), /^waiting for approval: git -C aiTemp\/strip/);
+    aoLists = false;
+  } finally { mission.nodes[0].state = "finished"; answer?.(); }
+});
+
 test("a request the safety rules block is denied naming the rule; one that only mentions a dangerous word is reviewed", async () => {
   // The user, 2026-11-08: "the auto review keeps always blocking harmless command for no reason". The
   // agent heard only "Blocked by the command approver's safety rules", and a Grep for "shutdown" was one.

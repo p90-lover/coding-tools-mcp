@@ -2715,6 +2715,20 @@ test("a turn waiting on the person's answer is never called stuck, so it offers 
   assert.equal(chat.waitsForPerson(undefined), false);
 });
 
+test("a request the reviewer is judging, or has just answered while AO still lists it, is not \"waiting for approval\"", () => {
+  // Seen live 2026-11-09: "waiting for approval · waiting for you for 8m 22s" with Continue, a second
+  // after "Let the model judge" allowed the request, while AO had not yet dropped it.
+  const working = [run("r1", "t", [node("w", "planner", "running", { receipt: { started_at_ms: 1_000 } })])];
+  const shown = (activity) => chat.chatTurns(working, "go", { activity: { "r1:w": { activity, turn_started: true,
+    timeline: [{ id: "a", kind: "approval", status: "pending", text: "git push" }] } }, now: 60_000 })[0].steps
+    .find((step) => step.working)?.working.activity;
+  assert.equal(shown("the reviewer allowed: git push origin feat"), "the reviewer allowed: git push origin feat");
+  assert.equal(shown("the reviewer denied: git push origin main"), "the reviewer denied: git push origin main");
+  assert.equal(shown("the reviewer is checking: git push origin feat"), "the reviewer is checking: git push origin feat");
+  assert.equal(shown("running git status"), "waiting for approval", "a request nobody has answered holds the card");
+  assert.equal(chat.waitsForPerson("the reviewer allowed: git push"), false, "so no Continue is offered for it");
+});
+
 test("an open chat follows its live run once the selected one has settled", () => {
   const working = run("old", "t", [node("a", "planner", "running")]);
   const stopped = run("new", "t", [node("a", "planner", "cancelled")], { cancelled: true, paused: true });

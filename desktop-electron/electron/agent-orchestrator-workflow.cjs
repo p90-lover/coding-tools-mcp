@@ -2365,7 +2365,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // for approval" for the two minutes a slow review took, with no request shown to answer (seen
     // live: a PowerShell check, allowed by the reviewer after 114 s), so it looked stuck on them.
     if (permission && card?.mission && card?.node && !approvalNeedsPerson(card.mission, card.node, permission)) {
-      return `the reviewer is checking: ${publicText(permission.command || permission.path || permission.tool || "a request", 90)}`;
+      const what = publicText(permission.command || permission.path || permission.tool || "a request", 90);
+      // Answered and sent: AO drops the request in a moment, and the agent goes on.
+      const answered = approverAdvice.get(permission.approval_id);
+      if (answered?.resolved) return `the reviewer ${answered.action === "allow" ? "allowed" : "denied"}: ${what}`;
+      return `the reviewer is checking: ${what}`;
     }
     if (permission) return `waiting for approval: ${publicText(permission.command || permission.path || permission.tool || "a request", 90)}`;
     const question = requests.find(request => request.kind === "question");
@@ -4162,6 +4166,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // for them as a question with no timer (the user's call, 2026-10-20): answering it for them,
     // after 20 s or at once, ran or refused commands nobody had judged.
     const advice = approverAdvice.get(approval.approval_id);
+    // Answered and sent, while AO still lists it for a moment: not the person's. Old enough to be
+    // overdue, it read "waiting for approval · waiting for you for 8m 22s" with Continue (restart
+    // the agent) offered, a second after "Let the model judge" allowed it (seen live 2026-11-09).
+    // One AO still lists well after the answer never reached the agent (its link to AO went, seen
+    // 2026-11-02): that one is the person's again, and Continue is how it goes on.
+    if (advice?.resolved) return !(now() - (advice.resolvedAt ?? -Infinity) < ANSWER_DELIVERY_MS);
     // Not reviewed yet: the reviewer answers it within its budget, or passes it to the person then.
     // A review that never came (no run loop to start it, a review pass that hung) hid the request as
     // "being reviewed" with nothing to answer it: a DeepSeek chat sat 85 minutes on one PowerShell
@@ -4170,6 +4180,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Longer than every review try with its retry wait, plus the decide pass: an unreviewed request past it is stuck. */
   const REVIEW_DEADLINE_MS = REVIEW_TRIES * (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15_000;
+  /** How long AO may go on listing a request after the reviewer's answer was sent (seconds, live). */
+  const ANSWER_DELIVERY_MS = 60_000;
   /** A review pass still running after this has hung; the next one starts beside it. */
   const SCREEN_PASS_STALE_MS = REVIEW_DEADLINE_MS;
   const reviewStarted = new Map(); // approval_id -> when its first review try began
@@ -4388,7 +4400,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const sent = await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false);
       check();
       if (sent) {
-        approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+        approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
         return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
@@ -4405,7 +4417,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       check();
       if (sent) {
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
-        approverAdvice.set(approval.approval_id, { ...advice, resolved: true });
+        approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
         return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
       keepAdvice({ action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
@@ -4720,7 +4732,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const saving = chatPreferences.set({ modelJudges: enabled });
       // Turned on beside a request already waiting for the person: the reviewer's "ask" is dropped,
       // so the next screening pass judges it. An answer that could not be sent stays the person's.
-      if (enabled) for (const [id, advice] of approverAdvice) if (advice.action === "ask" && !advice.unsent) approverAdvice.delete(id);
+      // Its review starts now, with the whole budget: counted from its first review, a request that
+      // had waited 8 minutes was overdue at once, so it stayed "waiting for approval" while judged.
+      if (enabled) {
+        for (const [id, advice] of approverAdvice) {
+          if (advice.action !== "ask" || advice.unsent) continue;
+          approverAdvice.delete(id);
+          reviewStarted.set(id, now());
+        }
+      }
       await saving;
     }
     return { ok: true, modelJudges: chatPreferences.get().modelJudges };
