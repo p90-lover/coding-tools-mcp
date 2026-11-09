@@ -15,12 +15,27 @@
 //   offsets, as headless keeps exec_command's) for the agent's read_output and the chat's Terminal
 //   pane; its process tree is killed with it (taskkill /T).
 
-const { spawn, execFile } = require("node:child_process");
+const { execFile } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
+const { spawnOffThread, runOffThread } = require("./off-thread-run.cjs");
+
+/**
+ * taskkill, started from a worker as the command itself is (spawnOffThread): a start on this thread
+ * waits for Windows to load the program, and on the busy disk that holds every window. Calls back as
+ * execFile does: an error for a start failure, a timeout or a non-zero exit, else null.
+ */
+function execFileOffThread(file, args, _options, callback) {
+  runOffThread({ file, args, timeoutMs: 30_000, maxBytes: 64 * 1024 }).then((result) => {
+    if (result.error) callback(new Error(result.error));
+    else if (result.timedOut) callback(new Error(`${file} timed out`));
+    else if (result.code !== 0) callback(Object.assign(new Error(`${file} exited with ${result.code}`), { code: result.code }));
+    else callback(null);
+  });
+}
 
 const STREAM_LIMIT = 4 * 1024 * 1024;
 const MAX_KEPT = 64;
@@ -170,7 +185,10 @@ function createSandboxRunner({
   // Where command scripts go: a folder on the app data drive. No default: the system temp folder is
   // on C:, which holds no app storage (AGENTS.md).
   locate = findCodexSandbox, roots = cacheRoots, scriptDir,
-  env = process.env, spawnProcess = spawn, execFileProcess = execFile, logger = console, now = Date.now, platform = process.platform,
+  // Both start programs from a worker thread: spawning codex.exe here held every window 1.4 s
+  // (Activity, 2026-11-09 05:24:30Z, a chat's sandboxed command). spawnProcess may return the child
+  // or a promise of it.
+  env = process.env, spawnProcess = spawnOffThread, execFileProcess = execFileOffThread, logger = console, now = Date.now, platform = process.platform,
   // Folders put first on a command's PATH, e.g. the one AO keeps `ao` in for its own sessions.
   extraPath = () => [],
   // Plain variables every command gets (rtk.cjs commandEnvironment); never a private name or PATH.
@@ -267,7 +285,9 @@ function createSandboxRunner({
         "-c", `sandbox_workspace_write.writable_roots=[${writableRoots.map(tomlPath).join(",")}]`,
         "--", "cmd.exe", "/d", "/c", script,
       ];
-      child = spawnProcess(found.codex, args, { cwd: home, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      // Awaited: the off-thread start resolves once the worker has the pid (a start failure arrives
+      // as the child's error event, as with spawn), and holds its events until the listeners below.
+      child = await spawnProcess(found.codex, args, { cwd: home, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     } catch (error) {
       // No child owns the script yet; preserve the original cancellation or setup failure.
       await fs.promises.rm(script, { force: true }).catch(() => undefined);
