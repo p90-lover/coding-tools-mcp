@@ -241,7 +241,8 @@ test("Refresh menu reports every open and close path to the Register native gate
   assert.equal(nodes(titlebar, "icon-button")[0].props.releaseFocus, true);
   assert.match(appSource, /onMouseDown=\{releaseFocus \? \(event\) => event\.preventDefault\(\) : undefined\}/);
   // A manual browser tab closes only the compact sidebar, never the docked one.
-  assert.match(appSource, /setSurface\("browser"\);\s*\/\/[^\n]*\n\s*if \(window\.matchMedia\(COMPACT_SIDEBAR_QUERY\)\.matches\) setSidebarOpen\(false\);/);
+  // (showSurface: the tab switch, timed for Activity > Action time.)
+  assert.match(appSource, /showSurface\("browser"\);\s*\/\/[^\n]*\n\s*if \(window\.matchMedia\(COMPACT_SIDEBAR_QUERY\)\.matches\) setSidebarOpen\(false\);/);
   assert.match(appSource, /onRefreshMenuOpenChange=\{setRefreshMenuOpen\}/);
   const expression = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)[1];
   const gate = new Function("surface", "sidebarCovers", "biggerContextRecommendationOpen", "sessionReminderDue", "refreshMenuOpen", "return " + expression);

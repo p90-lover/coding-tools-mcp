@@ -199,7 +199,11 @@ app.on("session-created", (created) => created.setCertificateVerifyProc(caDistru
 // Activity > Action time (action-times.cjs): tab and page timings, in memory only. Every page the
 // app opens is timed from here, so new views need no wiring of their own.
 const actionTimes = createActionTimes();
-app.on("web-contents-created", (_event, contents) => watchPageTimes(contents, { times: actionTimes, describe: describeTimedPartition }));
+app.on("web-contents-created", (_event, contents) => {
+  // A GPT Browser page is made only once its host has been: keep the host to name the page's account.
+  if (gptBrowser && !gptBrowserHost) void gptBrowser.then((host) => { gptBrowserHost = host; }, () => {});
+  watchPageTimes(contents, { times: actionTimes, describe: describeTimedPartition });
+});
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
@@ -220,7 +224,8 @@ let lifecycleScan = null;
 let savedChatsInUse = () => true;
 let chatgptDesktop = null;
 let gptBrowser = null;
-// The GPT Browser host once made (gptBrowser is its promise), for naming its pages' timings.
+// The GPT Browser host once made (gptBrowser is its promise), for naming its pages' timings; kept
+// by the web-contents-created hook, so getGptBrowser stays as it was.
 let gptBrowserHost = null;
 let emailHost = null;
 let registerHost = null;
@@ -480,10 +485,7 @@ function getGptBrowser(logger) {
     // mailto click failed as an unhandled rejection and the mail app never opened.
     openExternal: (url) => (/^mailto:/i.test(String(url)) ? shell.openExternal(String(url)) : openWebUrl(url)),
     onChange: (status) => send("launcher:gpt-browser-changed", status),
-  })).then((host) => {
-    gptBrowserHost = host;
-    return host;
-  }, (error) => {
+  })).catch((error) => {
     // A host that could not be made is made again on the next call, as before.
     gptBrowser = null;
     throw error;
