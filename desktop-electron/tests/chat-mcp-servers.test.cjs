@@ -11,15 +11,20 @@ const HTTP_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 function store() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-mcp-servers-"));
   const filePath = path.join(dir, "chat-mcp-servers.json");
-  return { filePath, servers: createChatMcpServers({ filePath }), done: () => fs.rmSync(dir, { recursive: true, force: true }) };
+  const servers = createChatMcpServers({ filePath });
+  return { filePath, servers, done: async () => {
+    await servers.saved().catch(() => {});
+    fs.rmSync(dir, { recursive: true, force: true });
+  } };
 }
 
-test("a saved server is kept on disk and comes back after a restart", (t) => {
+test("a saved server is kept on disk and comes back after a restart", async (t) => {
   const { filePath, servers, done } = store();
   t.after(done);
   const [saved] = servers.save({ name: "notes", type: "stdio", command: " notes-mcp ", args: ["--root", "C:\\notes"], env: { NOTES_TOKEN: "secret" } });
   assert.match(saved.id, /^[a-f0-9]{16}$/);
   assert.deepEqual({ ...saved, id: "x" }, { id: "x", name: "notes", type: "stdio", enabled: true, command: "notes-mcp", args: ["--root", "C:\\notes"], env: { NOTES_TOKEN: "secret" } });
+  await servers.saved();
   const again = createChatMcpServers({ filePath });
   assert.deepEqual(again.list(), servers.list());
   servers.save({ ...saved, name: "notebook" });
@@ -105,4 +110,28 @@ test("a GitHub CLI that is missing or signed out says what to do, never what it 
   assert.equal(await run(null, "gho_0123456789abcdefghijABCDEFGHIJ\n"), "gho_0123456789abcdefghijABCDEFGHIJ");
   await assert.rejects(run(Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" }), ""), /isn't installed/);
   await assert.rejects(run(new Error("exit 1"), "partial gho_secret"), (error) => /gh auth login/.test(error.message) && !error.message.includes("gho_secret"));
+});
+
+test("saving never touches the disk on the calling thread and reports a failed write", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-mcp-servers-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // The store's folder is a plain file, so the first write fails.
+  const folder = path.join(dir, "data");
+  fs.writeFileSync(folder, "");
+  const filePath = path.join(folder, "chat-mcp-servers.json");
+  const servers = createChatMcpServers({ filePath });
+  servers.list();
+  const sync = Object.keys(fs).filter((name) => name.endsWith("Sync") && typeof fs[name] === "function");
+  const originals = Object.fromEntries(sync.map((name) => [name, fs[name]]));
+  for (const name of sync) fs[name] = () => assert.fail(`${name} on the calling thread`);
+  let first;
+  try { first = servers.save({ name: "notes", command: "notes-mcp" }); } finally { Object.assign(fs, originals); }
+  assert.deepEqual(first.map((server) => server.name), ["notes"], "the list changes at once");
+  await assert.rejects(servers.saved());
+  fs.rmSync(folder);
+  fs.mkdirSync(folder);
+  servers.save({ name: "docs", command: "docs-mcp" });
+  await servers.saved();
+  assert.deepEqual(createChatMcpServers({ filePath }).list().map((server) => server.name), ["notes", "docs"],
+    "the next change writes every server, including the one whose write failed");
 });

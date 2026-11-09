@@ -49,7 +49,7 @@ const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
 const { boundedQuitStep } = require("./quit-steps.cjs");
 const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
-const { createConfiguredConnector, currentConnectorSettings, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
+const { createConfiguredConnector, currentConnectorSettings, connectorCredentials, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
@@ -322,6 +322,11 @@ function userMcpServers(logger = null) {
   chatMcpServers ??= require("./chat-mcp-servers.cjs").createChatMcpServers({
     filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger });
   return chatMcpServers;
+}
+// The page hears "saved" only once the file is on disk; the write itself runs off the main thread.
+async function savedMcpServers(list) {
+  await userMcpServers().saved();
+  return list;
 }
 // The person's unified-agent-tools (vendor/unified-agent-tools), for every chat that runs a GPT model.
 let gptFileTools = null;
@@ -763,7 +768,10 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
   if (!credentials) return false;
   const config = knownConfig !== undefined ? knownConfig : runtimeSupervisor?.readConfig();
   if (config?.mode !== "full") return false;
-  if (health.version !== config.releaseVersion || health.pid !== runtimeSupervisor.readState()?.daemonPid) return true;
+  if (health.version !== config.releaseVersion) return true;
+  // Read off the main thread: this check repeats every 15 s while the browser is in use.
+  const ownership = await (runtimeSupervisor.readStateAsync ? runtimeSupervisor.readStateAsync() : runtimeSupervisor.readState());
+  if (health.pid !== ownership?.daemonPid) return true;
   // A ChatGPT page without its composer is still loading; the blank page the browser parks on
   // between turns has nothing to keep (counted as a draft, it held the check off for good).
   const hasDraft = await contents.executeJavaScript(`(() => {
@@ -3380,6 +3388,8 @@ function registerIpc({ logger, stateStore }) {
     const tunnel = extraTunnels?.status().find(entry => entry.accountId === accountId);
     const id = tunnel?.id;
     let primarySettings = null, tunnelId = tunnel?.tunnelId;
+    // The saved runtime key, read once off the main thread (see currentConnectorSettings).
+    let credentials;
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       assertAutomaticCurrent?.();
@@ -3399,7 +3409,7 @@ function registerIpc({ logger, stateStore }) {
         throw new Error("The account's MCP tunnel changed or is not ready.");
       }
       if (!tunnel) {
-        const current = currentConnectorSettings(runtimeHost);
+        const current = currentConnectorSettings(runtimeHost, { credentials });
         if (current.name !== primarySettings.name || current.tunnelId !== tunnelId) {
           throw new Error("The MCP configuration changed during setup.");
         }
@@ -3409,7 +3419,8 @@ function registerIpc({ logger, stateStore }) {
     try {
       // The main tunnel is a candidate; the helper must still prove its fresh account/workspace ownership.
       if (!tunnel) {
-        primarySettings = currentConnectorSettings(runtimeHost);
+        credentials = await connectorCredentials(runtimeHost);
+        primarySettings = currentConnectorSettings(runtimeHost, { credentials });
         tunnelId = primarySettings.tunnelId;
       }
       assertCurrent();
@@ -3964,15 +3975,15 @@ function registerIpc({ logger, stateStore }) {
     // "Use my GitHub CLI sign-in": the token is read here and never passes through the page.
     const input = options?.githubCliToken === true
       ? await require("./chat-mcp-servers.cjs").withGithubCliToken(server) : server;
-    return userMcpServers(logger).save(input);
+    return savedMcpServers(userMcpServers(logger).save(input));
   });
   handle("mcp-servers:remove", (event, id) => {
     assertFocusedMainWindow(event, true);
-    return userMcpServers(logger).remove(String(id));
+    return savedMcpServers(userMcpServers(logger).remove(String(id)));
   });
   handle("mcp-servers:set-enabled", (event, id, enabled) => {
     if (enabled === true) assertFocusedMainWindow(event, true);
-    return userMcpServers(logger).setEnabled(String(id), enabled === true);
+    return savedMcpServers(userMcpServers(logger).setEnabled(String(id), enabled === true));
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"

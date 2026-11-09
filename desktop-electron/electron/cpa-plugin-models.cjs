@@ -1,4 +1,5 @@
 "use strict";
+const { fetchOffThread } = require("./off-thread-run.cjs");
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -62,7 +63,7 @@ async function syncClineMarker(stateRoot) {
 const REFRESH_FIRST_MS = 60_000;
 const REFRESH_EVERY_MS = 6 * 60 * 60_000;
 
-async function refreshClineModels({ baseUrl, managementKey, fetchImpl = fetch }) {
+async function refreshClineModels({ baseUrl, managementKey, fetchImpl = fetchOffThread }) {
   const response = await fetchImpl(`${baseUrl}/v0/management/cline-pass-switcher/api/fetch-official-models`, {
     method: "POST", headers: { Authorization: `Bearer ${managementKey}`, "Content-Type": "application/json" }, body: "{}",
     signal: AbortSignal.timeout(120_000),

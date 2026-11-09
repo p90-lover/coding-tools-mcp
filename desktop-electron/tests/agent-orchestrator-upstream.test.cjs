@@ -2438,12 +2438,13 @@ function contextPersistenceHarness({ files = new Map(), beforeWrite = async () =
   const timers = new Set(), writes = [];
   let active = 0, maxActive = 0, reads = 0, directories = 0, reported = 100000;
   const io = {
-    readFileSync(filename) {
-      assert.equal(filename, file); reads++;
-      if (!files.has(filename)) throw new Error("fixture has no saved context");
-      return files.get(filename);
-    },
+    readFileSync() { assert.fail("the saved readings are read off the main thread"); },
     promises: {
+      async readFile(filename) {
+        assert.equal(filename, file); reads++;
+        if (!files.has(filename)) throw new Error("fixture has no saved context");
+        return files.get(filename);
+      },
       async mkdir(directory) { assert.equal(directory, path.dirname(file)); directories++; },
       async chmod() {},
       async writeFile(filename, content) {

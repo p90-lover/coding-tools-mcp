@@ -1893,3 +1893,24 @@ test("the chat header has a Preview button that opens the chat's browser with no
     assert.ok(!preview(), "while a hidden page is open the browser chip takes its place");
   } finally { openPage = null; }
 });
+
+test("a failed work read waits instead of being retried on every poll while AO is slow", async t => {
+  // Seen live 2026-11-09: seven cards' turn_timeline reads timed out together every 30 s while AO
+  // was already slow; each chat poll rendered the turn anew and asked again.
+  const route = { harness_id: "ao:codex", model: "gpt-6.1-sol" };
+  const reads = [];
+  const { props } = base({ selectedTaskId: "t", runs: [run("slow-ao", "t", [node("p", "planner", "finished", {
+    route, receipt: { thread_id: "slow-ao-thread", started_at_ms: 7000, finished_at_ms: 9000, answer: "Done." },
+  })], { execution_mode: "single" })], loadWork: async (runId) => {
+    reads.push(runId);
+    throw new Error("The operation was aborted due to timeout");
+  } });
+  const page = mount(props, { effects: true });
+  t.after(() => page.unmount());
+  for (let poll = 0; poll < 5; poll++) {
+    page.render();
+    await new Promise(setImmediate);
+  }
+  assert.equal(reads.length, 1, "five polls after a failed read ask AO once");
+  assert.match(text(page.render()), /Done/, "the answer still shows without its activity");
+});

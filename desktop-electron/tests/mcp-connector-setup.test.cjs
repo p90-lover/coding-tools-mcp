@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
-const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 
 function fakeMcpNetwork() {
   const debuggerClient = new EventEmitter(), bodies = new Map(), bodyWaits = new Map(), commands = [];
@@ -489,6 +489,28 @@ test("connector setup reads current names and tunnel keys on every action withou
   assert.doesNotMatch(JSON.stringify(renewed), /private-key-file|DO_NOT_EXPORT/);
 });
 
+test("an operation's repeated checks read the saved key once, off the main thread, never per check", async () => {
+  // Live 2026-11-09: assertCurrent ran every 50 ms while ChatGPT confirmed a workspace, each run an
+  // existsSync of the key file on the main thread; on the busy hard disk one held every window 17.9 s.
+  const host = runtime();
+  let syncChecks = 0;
+  const asked = [];
+  host.mcpCredentialsConfigured = () => { syncChecks += 1; throw new Error("checked on the main thread"); };
+  host.mcpCredentialsConfiguredAsync = async (config, mode) => { asked.push([config.automaticTunnel.tunnelId, mode]); return true; };
+  const credentials = await connectorCredentials(host);
+  assert.equal(credentials, true);
+  assert.deepEqual(asked, [[host.config.automaticTunnel.tunnelId, "automatic"]]);
+  for (let check = 0; check < 240; check += 1) assert.equal(currentConnectorSettings(host, { credentials }).name, "Team Harness A");
+  assert.equal(syncChecks, 0, "no check looked the key up again");
+  // A missing key still refuses, and a renamed connector is still seen (the config is read each time).
+  assert.throws(() => currentConnectorSettings(host, { credentials: false }), /automatic MCP harness/);
+  host.config.automaticAppName = "Renamed";
+  assert.equal(currentConnectorSettings(host, { credentials }).name, "Renamed");
+  // A host that can only check synchronously keeps doing so.
+  assert.equal(await connectorCredentials(runtime()), undefined);
+  assert.equal(currentConnectorSettings(runtime()).name, "Team Harness A");
+});
+
 test("automatic setup cannot borrow a manual profile or an external runtime", () => {
   const host = runtime();
   host.config.browserInteractionMode = "manual";
@@ -779,6 +801,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
         binding: { userId: "user-fixture", workspaceId: "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", tunnelId: tunnels[0].tunnelId } };
     }, app: {}, BrowserWindow: {}, browserHost: { partition: "persist:main", ready: async () => {}, currentOperation: () => null }, runtimeHost: { currentOperation: () => null, runtimeConfigSnapshot: () => ({ configured: false }) }, publishBrowserAccounts() { assert(records.length > 0, "account persistence resolves before its update is published"); }, publishOperation() {},
     currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
+    connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
     mcpConnectorCommandFailure: error => ({ code: "fixture_failure", message: error.message }),
   };
   vm.runInNewContext(snippet, context);
