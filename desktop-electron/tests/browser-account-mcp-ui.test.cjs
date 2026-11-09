@@ -146,6 +146,21 @@ test("bulk MCP setup is sequential, continues after failure, and requires connec
   assert(button(ui.card("third"), "Connect MCP"));
 });
 
+test("bulk MCP setup stops at a browser that is still busy instead of failing every account", async () => {
+  // 2026-11-09: a busy browser refused all 22 accounts in 8 s, each marked failed the same way.
+  const ui = fixture(async id => {
+    if (id === "main") return { created: true, connected: true };
+    throw new Error("Error invoking remote method 'launcher:mcp-create-connector': Error: Finish the active browser or setup operation before creating the connector.");
+  });
+  button(ui.page(), "Connect all accounts").props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.connector, ["main", "second"], "nothing is tried after the busy refusal");
+  assert(text(ui.page()).includes("1 of 3 accounts connected · stopped: the browser is busy with another operation."));
+  assert(text(ui.card("second")).includes("Finish the active browser or setup operation before creating the connector."));
+  assert(!text(ui.card("second")).includes("Error invoking remote method"), "the IPC wrapper is not shown");
+  assert(!text(ui.card("third")).includes("Finish the active browser"), "an account not tried keeps its state");
+});
+
 test("account setup preserves bulk removal, the tabs drawer, and opening the Browser tab", async () => {
   const ui = fixture();
   ui.cardNode("second").props.onSelect(true);

@@ -550,10 +550,18 @@ function requireAutomaticBrowserInspection(host, operation) {
 }
 
 /** Waits while the connector check holds the browser, at most `timeoutMs`; the caller re-checks. */
-async function waitForConnectorVerification(host, timeoutMs = CONNECTOR_VERIFICATION_TURN_WAIT_MS) {
+function waitForConnectorVerification(host, timeoutMs = CONNECTOR_VERIFICATION_TURN_WAIT_MS) {
+  return waitForManualOperation(host, timeoutMs, () => host.manualOperation === CONNECTOR_VERIFICATION_OPERATION);
+}
+
+/**
+ * Waits while an operation holds the browser (`holds`: any by default), at most `timeoutMs`, without
+ * polling: each operation settles a promise when it ends. The caller re-checks; a Codex turn
+ * (activeTraceId) is not an operation here and is never waited for.
+ */
+async function waitForManualOperation(host, timeoutMs, holds = () => Boolean(host.manualOperation)) {
   const deadline = Date.now() + timeoutMs;
-  while (host.manualOperation === CONNECTOR_VERIFICATION_OPERATION && host.manualOperationSettled
-    && Date.now() < deadline) {
+  while (holds() && host.manualOperationSettled && Date.now() < deadline) {
     let timer;
     await Promise.race([
       host.manualOperationSettled,
@@ -4599,4 +4607,5 @@ module.exports = {
   navigationOriginForLog,
   TEMPORARY_CHAT_URL,
   waitForConnectorVerification,
+  waitForManualOperation,
 };

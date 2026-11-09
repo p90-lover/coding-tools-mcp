@@ -10,22 +10,25 @@ function createBrowserAccountMcpSync(deps) {
   const now = deps.now ?? Date.now;
   let inFlight = null;
   let generation = 0;
+  // Connects the user asked for that are waiting or running (hold()): none of this runs meanwhile.
+  let holds = 0;
+  const admitted = (options) => holds === 0 && deps.canRun(options);
 
   async function scan() {
     const revision = generation;
     await deps.prepare?.();
-    if (!deps.canRun() || revision !== generation) return;
+    if (!admitted() || revision !== generation) return;
     const accounts = deps.accounts();
     for (const id of attempts.keys()) {
       if (!accounts.some(account => account.id === id)) attempts.delete(id);
     }
     for (const account of accounts) {
-      if (!deps.canRun()) return;
+      if (!admitted()) return;
       try {
         const target = deps.target(account.id);
         if (!target) continue;
         let connecting = false;
-        const current = () => revision === generation && deps.canRun({ connecting })
+        const current = () => revision === generation && admitted({ connecting })
           && deps.accounts().some(entry => entry.id === account.id && entry.partition === account.partition)
           && deps.target(account.id) === target;
         const cookies = await deps.readCookies(account.partition);
@@ -83,7 +86,7 @@ function createBrowserAccountMcpSync(deps) {
   return {
     sync() {
       if (inFlight) return inFlight;
-      if (!deps.canRun()) return Promise.resolve();
+      if (!admitted()) return Promise.resolve();
       inFlight = scan().catch(error => deps.logger?.warn?.("browser_accounts.automatic_mcp_pending", {
         message: error instanceof Error ? error.message : String(error),
       })).finally(() => { inFlight = null; });
@@ -91,6 +94,20 @@ function createBrowserAccountMcpSync(deps) {
     },
     // An explicit runtime/tunnel restart starts a new round, even with unchanged login cookies.
     invalidate() { generation++; attempts.clear(); },
+    /**
+     * A Connect the user asked for comes first. Until the returned release runs, no round starts, and
+     * one already connecting fails its admission check at its next step, so it gives way (deferred,
+     * not failed). Release once; later calls do nothing.
+     */
+    hold() {
+      holds++;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        holds--;
+      };
+    },
   };
 }
 

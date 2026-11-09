@@ -18,6 +18,12 @@ const DECODO_PREFIX = "decodo:";
 const TOTAL_TAB_CEILING = 15;
 const CONCURRENT_TURNS = 5;
 const KEEP_FINISHED_TABS_MINUTES = [5, 10, 20, 30, 60];
+// mcp-connector-command.cjs's "busy" refusal: another operation still holds the browser.
+const BROWSER_BUSY = "Finish the active browser or setup operation";
+
+// Electron wraps a main-process error as "Error invoking remote method '<channel>': Error: …".
+const ipcErrorText = (cause: unknown) => (cause && typeof cause === "object" && "message" in cause ? String(cause.message) : String(cause))
+  .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 
 const accountName = (account: BrowserAccount) => account.email ?? account.label;
 // A loading/idle page is not a signed-out account. Keep each partition's own sign-in evidence.
@@ -255,7 +261,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
     try {
       await run("connect-mcp", async () => {
         setConnectionSummary(null);
-        let connected = 0, skipped = 0, latest = accounts;
+        let connected = 0, skipped = 0, latest = accounts, stopped = false;
         const accessOf = (account: BrowserAccount, status: BrowserAccountsStatus | null) => {
           const signedIn = (entry: BrowserAccount) => accountSignedIn(entry, status?.activeId ?? "", browser?.authenticated) === true;
           return mcpAccountAccess({ ...account, signedIn: signedIn(account) },
@@ -298,11 +304,15 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             setConnections(previous => ({ ...previous, [account.id]: { state: "connected", detail, checkedAt: Date.now(), email: account.email,
               userId: result.binding?.userId, workspaceId: result.binding?.workspaceId } }));
           } catch (cause) {
-            const detail = cause instanceof Error ? cause.message : String(cause);
+            const detail = ipcErrorText(cause);
             setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
+            // Main already waited for the browser; still busy (a Codex turn, a sign-in) refuses every
+            // account the same way, so the rest are left as they were instead of each failing.
+            if (detail.startsWith(BROWSER_BUSY)) { stopped = true; break; }
           }
         }
-        setConnectionSummary(`${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected${skipped ? ` · ${skipped} skipped` : ""}.`);
+        setConnectionSummary(`${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected${skipped ? ` · ${skipped} skipped` : ""}`
+          + (stopped ? " · stopped: the browser is busy with another operation. Connect again when it finishes." : "."));
         await api.browserAccounts().then(setAccounts).catch(() => {});
         await api.mcpTunnels().then(setTunnels).catch(() => {});
       });
