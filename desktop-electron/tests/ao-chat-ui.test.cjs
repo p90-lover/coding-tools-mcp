@@ -361,6 +361,38 @@ test("a finished turn's rows stop shimmering even when their stored status still
   assert.match(row(stale[0], false), /dsh-title">Think</, "and the thought is still there to open");
 });
 
+test("a running card's thoughts that the model moved on from stop shimmering; the current one and tools keep theirs", () => {
+  // 146 such Think rows across four running missions were stepped 30 times a second by the shimmer
+  // ticker and kept the window's main thread busy (0.8.104, 2026-11-09).
+  const items = [
+    { id: "r1", kind: "reasoning", status: "running", text: "First thought." },
+    { id: "t1", kind: "tool", status: "running", text: "mcp__coding-tools__read_file", input: JSON.stringify({ path: "a.md" }) },
+    { id: "r2", kind: "reasoning", status: "running", text: "Second thought." },
+    { id: "s1", kind: "steer", status: "completed", text: "also check b.md" },
+  ];
+  const settled = dsh.settleFollowedThoughts(items);
+  assert.deepEqual(settled.map((item) => item.status), ["completed", "running", "running", "completed"],
+    "a followed thought settles; a tool and the newest thought (a steer is not the model moving on) keep running");
+  assert.equal(items[0].status, "running", "the stored items are not changed");
+  const quiet = [{ id: "r", kind: "reasoning", status: "running", text: "Only thought." }];
+  assert.equal(dsh.settleFollowedThoughts(quiet), quiet, "nothing to settle gives back the same list");
+
+  // Drawn on a mission (groups open): only the newest thought shimmers among the rows.
+  const many = [];
+  for (let index = 0; index < 6; index += 1) {
+    many.push({ id: `r${index}`, kind: "reasoning", status: "running", text: `Thought ${index}.` });
+    many.push({ id: `c${index}`, kind: "command", status: "completed", text: "npm test", description: "Run the tests" });
+  }
+  many.push({ id: "r-now", kind: "reasoning", status: "running", text: "Thinking now." });
+  const step = { key: "s", nodeId: "n", role: "planner", name: "Agent", detail: "", state: "running", startedAtMs: Date.now() - 60_000, hasWork: true,
+    working: { detail: "", stalled: false, timeline: many } };
+  const turn = { key: "live", runId: "run", steps: [step], status: "running", solo: true, startedAtMs: Date.now() - 60_000 };
+  const html = renderToStaticMarkup(React.createElement(dsh.DshTurnWork, { turn, live: true, expanded: true, mission: true, useWork: () => many }));
+  const shimmeringRows = (html.match(/dsh-row-text dsh-shimmer/g) || []).length;
+  assert.equal(shimmeringRows, 1, "one Think row shimmers, not seven");
+  assert.equal((html.match(/dsh-title">Think</g) || []).length, 7, "every thought is still there to open");
+});
+
 test("a retried single DeepSeek card shows its earlier attempt above the attempt now", () => {
   const timeline = [{ id: "c1", kind: "command", status: "running", text: "npm test", description: "Run the tests" }];
   const step = { key: "s", nodeId: "n", role: "planner", name: "MiMo V2.6 Pro", detail: "", state: "running", startedAtMs: Date.now() - 5_000,
