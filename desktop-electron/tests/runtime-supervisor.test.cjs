@@ -104,6 +104,7 @@ function manualTunnelRestartFixture() {
   const gate = new Promise(resolve => { release = resolve; }), entered = new Promise(resolve => { enter = resolve; });
   const supervisor = { ...f.owner, stopping: false, startPromise: null, stopPromise: null, recoveryTasks: new Set(),
     persistentBridge: true, expectedExits: new Set(), restartTimers: { daemon: null, tunnel: null }, tunnelMonitorGeneration: 0,
+    childStarts: { daemon: null, tunnel: null },
     tunnel: null, daemon: null, launcherProfile: "development", extraTunnels: { detach() { events.push("extra-detached"); } },
     logger: { info() {}, warn() {}, error() {} }, readConfig: () => f.config, readState: () => null,
     clearState() { events.push("stopped-written"); }, writeState(status) { events.push(status + "-written"); return { daemonPid: this.daemon?.pid, tunnelPid: this.tunnel?.pid }; },
@@ -118,7 +119,7 @@ function manualTunnelRestartFixture() {
       return f.method.apply(this, args);
     },
   };
-  for (const name of ["restartTunnelOnly", "startTunnel", "runTunnelConnectCommand", "runTunnelStopCommand", "stopTunnelGracefully", "stopForSetup", "performStopForSetup", "adoptConfiguredTunnelForStop", "detach"])
+  for (const name of ["restartTunnelOnly", "startTunnel", "runTunnelConnectCommand", "runTunnelStopCommand", "stopTunnelGracefully", "stopForSetup", "performStopForSetup", "adoptConfiguredTunnelForStop", "detach", "childStarted"])
     supervisor[name] = RuntimeSupervisor.prototype[name];
   return { supervisor, events, entered, release, f };
 }
@@ -2548,9 +2549,12 @@ test("an unreadable marker is set aside only when it was written before this boo
   }
 });
 
-test("the ownership marker is flushed to disk before it replaces the old one", () => {
+test("the ownership marker is written without a flush; only flushed writes pay for one", () => {
+  // The flush held every window up to 2.5 s; a marker a power cut tears is set aside at the next
+  // start instead (the torn and before-boot tests above), as every process it names died with it.
   const source = fs.readFileSync(path.join(__dirname, "..", "electron", "runtime-supervisor.cjs"), "utf8");
-  assert.match(source, /writePrivateFileAtomic\(this\.statePath, [^\n]*\{ durable: true \}\)/);
+  assert.match(source, /writePrivateFileAtomic\(this\.statePath, `\$\{JSON\.stringify\(state, null, 2\)\}\\n`\);/);
+  assert.doesNotMatch(source, /writePrivateFileAtomic\(this\.statePath, [^\n]*durable/);
   const { writePrivateFileAtomic } = require("../electron/atomic-file.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-durable-write-"));
   const synced = [];
@@ -2876,4 +2880,43 @@ test("the watchdog waits longer each time another process still owns the bridge 
   }
   assert.deepEqual(minutes, [10, 20, 40, 60, 60]);
   assert.equal(watchdogExternalBackoff(0), 10 * 60_000, "a ready bridge resets it");
+});
+
+test("the bridge daemon starts from a worker, and a stop issued while it starts still stops it", async () => {
+  const { EventEmitter } = require("node:events");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-daemon-start-"));
+  const calls = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const child = Object.assign(new EventEmitter(), { pid: 424242, exitCode: null, signalCode: null, stdout: null, stderr: null });
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root,
+    coreHome: root,
+    browserDescriptorPath: path.join(root, "runtime", "launcher-browser.json"),
+    persistentBridge: true,
+    spawnProcess: (file, args, options) => { calls.push({ file, args, options }); return gate.then(() => child); },
+  });
+  try {
+    const starting = supervisor.spawnChild("daemon", { executable: "bun.exe", args: ["serve"], cwd: root });
+    assert.equal(calls.length, 1, "the start goes to the injected (worker) spawn");
+    assert.deepEqual(calls[0].args, ["serve"]);
+    assert.equal(calls[0].options.detached, true, "a persistent bridge outlives the launcher");
+    assert.equal(calls[0].options.stdio, "ignore");
+    assert.equal(supervisor.daemon, null, "not the daemon until its start resolves");
+    // The child exits before the stop looks at it; a stop that did not wait would see no daemon,
+    // return, and leave this.daemon set once the start resolved.
+    const stopped = supervisor.stopChild("daemon").then(() => supervisor.daemon);
+    child.exitCode = 0;
+    release();
+    assert.equal(await starting, child);
+    assert.equal(await stopped, null, "the stop waited for the start and saw its child");
+    const marker = JSON.parse(fs.readFileSync(path.join(root, "runtime", "launcher-supervisor.json"), "utf8"));
+    assert.equal(marker.status, "starting");
+    assert.equal(marker.daemonPid, 424242, "the marker names the started daemon");
+    await supervisor.childStarted("daemon"); // nothing in flight: resolves at once
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

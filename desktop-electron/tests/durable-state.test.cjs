@@ -70,11 +70,12 @@ test("a state file with no usable copy reads as unreadable, and a first start as
   assert.equal(fs.existsSync(`${file}.bak`), false);
 });
 
-test("torn settings come back from their copy instead of a first start", () => {
+test("torn settings come back from their copy instead of a first start", async () => {
   const root = tempRoot();
   const file = path.join(root, "launcher-state.json");
   const store = createStateStore(file);
   store.update({ onboardingComplete: true, language: "ja", automaticUpdates: false });
+  await store.saved();
   assert.equal(store.recovery, null);
 
   tear(file);
@@ -92,6 +93,7 @@ test("torn settings come back from their copy instead of a first start", () => {
   assert.equal(reset.read().onboardingComplete, false);
   assert.ok(fs.existsSync(reset.recovery.setAside));
   reset.update({ language: "en" });
+  await reset.saved();
   assert.ok(fs.existsSync(reset.recovery.setAside), "a later save leaves the torn file where it was set aside");
 });
 

@@ -223,6 +223,9 @@ test("only what owns the shown page blocks showing another account; Codex turns 
   assert.match(blocker({ manualOperation: "session inspection" }), /session inspection is running/);
   assert.match(blocker({ loginOperation: Promise.resolve() }), /sign-in/);
   assert.match(blocker({ authView: {} }), /sign-in/);
+  // Automatic MCP setup runs in hidden windows of its own and stops once the shown account changes.
+  assert.equal(blocker({ manualOperation: "MCP connector creation", manualOperationYields: true }), null);
+  assert.match(blocker({ manualOperation: "MCP connector creation", manualOperationYields: false }), /MCP connector creation is running/);
 });
 
 // A BrowserHost with fake pages: enough for switchAccount, without Electron.

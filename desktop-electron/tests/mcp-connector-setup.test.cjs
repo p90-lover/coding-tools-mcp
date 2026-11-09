@@ -823,7 +823,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     runtimeSupervisor: { extraTunnels: { status: () => tunnels,
       reconnect: async id => { calls.push(`reconnect:${id}`); tunnels[0].state = "ready"; },
       setConnector: async (id, href, binding) => { await Promise.resolve(); assert.equal(binding.tunnelId, tunnels[0].tunnelId); if (removeDuringSave) accounts.delete("other"); calls.push(`connector:${id}`); } } },
-    recordBrowserWorkspaceContext() {},
+    recordBrowserWorkspaceContext() {}, automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     createWorkspaceConnector: async options => {
       calls.push(JSON.parse(JSON.stringify(options))); options.assertCurrent();
       if (failure) throw new Error(failure);
@@ -859,4 +859,26 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   accounts.add("other"); removeDuringSetup = false; removeDuringSave = true;
   await assert.rejects(handler({}, "other"), /Unknown account/);
   assert.equal(records.filter(record => record.bound).length, 1, "a stale persistence completion cannot mark a removed account connected");
+
+  // An automatic setup that gave way (an account switch, the app left) failed nothing: no connector
+  // error is recorded and no failure reaches the screen. The same error while still admitted did fail.
+  const connectAccountMcp = vm.runInNewContext("connectAccountMcp", context);
+  const operations = [];
+  context.publishOperation = value => operations.push(value);
+  accounts.add("other"); removeDuringSave = false; records.length = 0;
+  let admitted = true;
+  const admission = () => { if (!admitted) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account."); };
+  context.createWorkspaceConnector = async options => {
+    options.assertCurrent();
+    admitted = false;
+    options.assertCurrent();
+  };
+  await assert.rejects(connectAccountMcp("other", admission), error => /waiting for the focused, idle app/.test(error.message) && error.gaveWay === true);
+  assert.deepEqual(records, [], "a setup that gave way leaves the account's connector state as it was");
+  assert.equal(operations.at(-1).status, "cancelled");
+  admitted = true;
+  context.createWorkspaceConnector = async options => { options.assertCurrent(); throw new Error("ChatGPT refused this connector"); };
+  await assert.rejects(connectAccountMcp("other", admission), /refused/);
+  assert.deepEqual(records, [{ id: "other", error: "ChatGPT refused this connector" }]);
+  assert.equal(operations.at(-1).status, "failed");
 });

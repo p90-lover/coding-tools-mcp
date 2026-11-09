@@ -19,6 +19,12 @@ const {
   validateReleaseAssetUrl,
 } = require("../electron/update.cjs");
 
+// The app makes its Node fallback request from a worker (getOffThread, tested in
+// off-thread-get.test.cjs); these tests replace https.get on this thread, so the fallback calls it
+// here. Looked up at each call, so each test's mock applies.
+const IN_PROCESS_GET = (url, options, onResponse) => https.get(url, options, onResponse);
+require("../electron/update.cjs").useNodeUpdateTransportForTests(IN_PROCESS_GET);
+
 test("Linux auto-update fails closed without the stable installer wrapper", () => {
   const previousAppImage = process.env.CODEX_WEB_GPT_APPIMAGE;
   const previousWrapper = process.env.CODEX_WEB_GPT_LAUNCHER_EXECUTABLE;
@@ -497,6 +503,27 @@ test("a successful Node fallback still supplies the update without a retry", asy
   update.useNativeUpdateTransport(async () => { throw new Error("net::ERR_NAME_NOT_RESOLVED"); });
   assert.equal(await update.downloadText("https://example.test/metadata.json"), "fallback response");
   assert.equal(https.get.mock.callCount(), 1);
+});
+
+test("the app's own Node fallback runs in a worker, never with this thread's https", async (testContext) => {
+  const update = require("../electron/update.cjs");
+  const net = require("node:net");
+  testContext.after(() => {
+    update.useNativeUpdateTransport(null);
+    update.useNodeUpdateTransportForTests(IN_PROCESS_GET);
+    update.setUpdateSleepForTests((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  });
+  update.setUpdateSleepForTests(async () => {});
+  testContext.mock.method(https, "get", () => { throw new Error("https.get ran on the calling thread"); });
+  const closed = net.createServer();
+  await new Promise((resolve) => closed.listen(0, "127.0.0.1", resolve));
+  const port = closed.address().port;
+  await new Promise((resolve) => closed.close(resolve));
+  update.useNodeUpdateTransportForTests(null); // the app's default
+  update.useNativeUpdateTransport(async () => { throw new Error("net::ERR_NAME_NOT_RESOLVED"); });
+  await assert.rejects(update.downloadText(`https://127.0.0.1:${port}/metadata.json`), (error) =>
+    error instanceof AggregateError && /ECONNREFUSED/.test(String(error.message)));
+  assert.equal(https.get.mock.callCount(), 0);
 });
 
 test("a fallback redirect does not hide a retryable native failure on the next host", async (testContext) => {

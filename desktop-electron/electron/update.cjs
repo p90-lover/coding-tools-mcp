@@ -1,11 +1,11 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
-const https = require("node:https");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn, spawnSync } = require("node:child_process");
 const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
+const { getOffThread } = require("./off-thread-run.cjs");
 
 const REPOSITORY = "p90-lover/coding-tools-mcp";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases?per_page=20`;
@@ -201,9 +201,15 @@ async function requestOnce(url, redirects) {
   }
 }
 
+// Node's https, from a worker thread (getOffThread): giving up on a connect still pending closes its
+// socket, and on this thread that held every window 72.9 s while the antivirus held the close
+// (Activity, 2026-11-09 05:56:01Z). Tests put https.get back with useNodeUpdateTransportForTests.
+let nodeGet = getOffThread;
+function useNodeUpdateTransportForTests(get) { nodeGet = typeof get === "function" ? get : getOffThread; }
+
 function nodeRequest(parsed, headers, redirects) {
   return new Promise((resolve, reject) => {
-    const req = https.get(parsed, { headers }, (response) => {
+    const req = nodeGet(parsed, { headers }, (response) => {
       if ([301, 302, 303, 307, 308].includes(response.statusCode) && response.headers.location) {
         response.resume();
         const next = new URL(response.headers.location, parsed).toString();
@@ -547,6 +553,7 @@ function createUpdateController({
 
 module.exports = {
   useNativeUpdateTransport,
+  useNodeUpdateTransportForTests,
   setUpdateSleepForTests: (fn) => { sleep = fn; },
   setUpdateIdleMsForTests: (ms) => { REQUEST_IDLE_MS = ms; },
   DEFAULT_UPDATE_CHECK_INTERVAL_MS,

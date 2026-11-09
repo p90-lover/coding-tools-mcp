@@ -16,7 +16,7 @@ function fixture() {
   const state = { allowed: true, time: 1, target: "configured-tunnel", operation: null };
   const accounts = [{ id: "one", partition: "persist:one" }, { id: "two", partition: "persist:two" }];
   const cookies = new Map(accounts.map(account => [account.partition, cookie(account.id)]));
-  const verified = [], connected = [], warnings = [], infos = [];
+  const verified = [], connected = [], warnings = [];
   const deps = {
     accounts: () => accounts,
     canRun: ({ connecting = false } = {}) => state.allowed && (!state.operation || connecting && state.operation === "MCP connector creation"),
@@ -25,10 +25,10 @@ function fixture() {
     readCookies: async partition => cookies.get(partition) ?? [],
     verifySignIn: async partition => { verified.push(partition); return { sessionAuthenticated: true, sessionCheckError: null }; },
     connect: async (id, current) => { assert(current()); connected.push(id); return { connected: true }; },
-    logger: { warn: (event, fields) => warnings.push({ event, ...fields }), info: (event, fields) => infos.push({ event, ...fields }) },
+    logger: { warn: (event, fields) => warnings.push({ event, ...fields }) },
   };
   const sync = createBrowserAccountMcpSync(deps);
-  return { state, accounts, cookies, verified, connected, warnings, infos, deps, sync };
+  return { state, accounts, cookies, verified, connected, warnings, deps, sync };
 }
 
 test("cookie candidates require fresh session proof; security failures never open setup", async () => {
@@ -71,6 +71,26 @@ test("one failure continues to other accounts and does not retry its own recorde
   f.accounts[0].connector.errorAt = ++f.state.time; // a later tool/explicit check reported a new failure
   await f.sync.sync();
   assert.deepEqual(f.connected, ["one", "two", "one"]);
+});
+
+test("a setup that gave way to an account switch runs again, though the switch is already over", async () => {
+  const f = fixture();
+  let interrupt = true;
+  f.deps.connect = async id => {
+    f.connected.push(id);
+    if (id === "one" && interrupt) {
+      interrupt = false;
+      throw Object.assign(new Error("The browser account changed during MCP setup."), { gaveWay: true });
+    }
+    return { connected: true };
+  };
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two"]);
+  assert.deepEqual(f.warnings.map(entry => entry.event), ["browser_accounts.automatic_mcp_deferred"]);
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two", "one"], "the account it gave way on is tried again");
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two", "one"], "and once connected, left alone");
 });
 
 test("new login cookies, changed target and a real sign-out permit a fresh attempt", async () => {
@@ -143,28 +163,6 @@ test("the coordinator permits its own held operation and resumes when focus retu
   assert.deepEqual(f.connected, ["one", "one"]);
 });
 
-test("a run that lost its turn is logged as paused, not failed, and runs again when focus returns", async () => {
-  // Live 2026-11-09: each paused run was logged and shown as "Connector creation failed".
-  const f = fixture();
-  f.accounts.splice(1);
-  f.deps.connect = async (id, current) => {
-    f.connected.push(id);
-    if (f.connected.length === 1) {
-      f.state.allowed = false;
-      try { current(); } catch {}
-      throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."),
-        { automaticDeferred: true, reason: "window_unfocused" });
-    }
-    return { connected: true };
-  };
-  await f.sync.sync();
-  assert.deepEqual(f.warnings, []);
-  assert.deepEqual(f.infos, [{ event: "browser_accounts.automatic_mcp_deferred", reason: "window_unfocused" }]);
-  f.state.allowed = true;
-  await f.sync.sync();
-  assert.deepEqual(f.connected, ["one", "one"]);
-});
-
 test("disabled/busy setup performs no probing, and asynchronous preparation rechecks admission", async () => {
   const f = fixture();
   let prepared = 0;
@@ -193,12 +191,38 @@ test("automatic admission preserves the selected surface while manual defaults a
   await host.withManualOperation("MCP connector creation", async () => {
     assert.equal(selected, "user-chat", "background admission must not activate/focus home");
     assert.equal(host.manualOperation, "MCP connector creation");
+    assert.equal(host.manualOperationYields, true, "a background setup gives way to an account switch");
     await assert.rejects(host.withManualOperation("another operation", async () => {}), /already busy/);
   }, { preserveSurface: true });
   assert.equal(selected, "user-chat");
   assert.equal(host.manualOperation, null);
-  await host.withManualOperation("session inspection", async () => assert.equal(selected, "home"));
+  assert.equal(host.manualOperationYields, false);
+  await host.withManualOperation("session inspection", async () => {
+    assert.equal(selected, "home");
+    assert.equal(host.manualOperationYields, false, "one on the shown page still holds switches");
+  });
   assert.deepEqual(throttles, [false, true, false, true]);
+
+  // An operation starts once the page an account switch opened is open.
+  const order = [];
+  let opened;
+  host.homeOpened = () => new Promise((resolve) => { opened = () => { order.push("opened"); resolve(); }; });
+  const running = host.withManualOperation("ChatGPT login", async () => order.push("login"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, []);
+  opened();
+  await running;
+  assert.deepEqual(order, ["opened", "login"]);
+});
+
+test("an automatic setup that gave way is told apart from one that failed", () => {
+  const { automaticSetupGaveWay } = require("../electron/browser-account-mcp.cjs");
+  const admitted = () => {};
+  const refused = () => { throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account."); };
+  assert.equal(automaticSetupGaveWay(undefined, () => true), false, "a setup someone asked for reports every failure");
+  assert.equal(automaticSetupGaveWay(admitted, () => false), false, "still admitted, same account: it failed");
+  assert.equal(automaticSetupGaveWay(admitted, () => true), true, "the shown account changed under it");
+  assert.equal(automaticSetupGaveWay(refused, () => false), true, "it lost admission (focus, a switch, a turn)");
 });
 
 test("production wiring uses owned native sessions and actual focus; it leaves active Browser unchanged", async () => {

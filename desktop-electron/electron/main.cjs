@@ -39,7 +39,7 @@ const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require(".
 const { restoreGptBrowserAccounts } = require("./gpt-browser-restore.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
-const { createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
+const { automaticSetupGaveWay, createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
@@ -258,8 +258,10 @@ const browserAccountService = createBrowserAccountService({
   lifecycleSyncFor: (accountId, logger) => lifecycleSyncFor(accountId, logger),
   afterSwitch: async (next, { wasVisible, stateStore }) => {
     const automatic = stateStore.read().browserInteractionMode === "automatic";
-    // The account switched to opens ChatGPT whether or not the Browser tab is showing.
-    if (wasVisible) await next.reveal(automatic);
+    // The account switched to opens ChatGPT whether or not the Browser tab is showing. The switch
+    // settles once its page is on screen; ChatGPT loads and checks its sign-in after (presentHome).
+    if (next.presentHome) void next.presentHome({ show: wasVisible, inspectSession: automatic });
+    else if (wasVisible) await next.reveal(automatic);
     else await next.openHomePage?.(automatic);
     send("launcher:browser-state", next.snapshot());
   },
@@ -324,6 +326,8 @@ let agentOrchestratorResourceRoot = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
+/** The saved settings (launcher-state.json), made at startup; a quit waits for its last save. */
+let launcherStateStore = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
 let chatAgentTools = null;
 // A chat's computer control (computer-control.cjs), made with the tool server: its request cards.
@@ -3515,15 +3519,13 @@ function registerIpc({ logger, stateStore }) {
       publishOperation({ name: "mcp-connector-create", status: "completed", message: "This account's MCP connector is connected" });
       return result;
     } catch (error) {
-      if (assertAutomaticCurrent && error?.automaticDeferred === true) {
-        // An automatic setup that lost its turn (the app left focus, a Browser turn or switch
-        // began) failed nothing and runs again later. Recorded as "Connector creation failed" it
-        // replaced each card's real error and raised the app's error banner every minute
-        // (2026-11-09: a hidden setup window took 22 s to open, so few runs kept focus that long).
-        publishOperation({ name: "mcp-connector-create", status: "completed", message: "Automatic MCP setup paused until Coding Tools is focused and idle" });
-        throw error;
-      }
       const failure = mcpConnectorCommandFailure(error);
+      // An automatic setup that gave way (an account switch, the app left) did not fail: the account
+      // keeps its connector state and the sync tries again later, with no error on screen.
+      if (automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
+        publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
+        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
+      }
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
@@ -3539,27 +3541,23 @@ function registerIpc({ logger, stateStore }) {
   });
 
   let accountMcpConfig = null;
-  // What keeps automatic MCP setup from running now, or null. Its words name a paused run in the log.
-  const automaticMcpBlocker = ({ connecting = false } = {}) => {
-    const state = stateStore.read();
-    if (IS_DEV_PROFILE || quitting || shutdownInProgress) return "shutdown";
-    if (state.autoConnectExistingMcp !== true || state.coreSetupComplete !== true
-      || state.browserInteractionMode !== "automatic") return "settings";
-    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized()) return "window_hidden";
-    if (!mainWindow.isFocused() || !mainWindow.webContents.isFocused()) return "window_unfocused";
-    if (!browserHost || browserHost.activeTraceId) return "browser_turn";
-    if (browserAccountsStatus().switching) return "account_switch";
-    const operation = browserHost.currentOperation();
-    if (operation && !(connecting && operation === "MCP connector creation")) return "browser_operation";
-    if (!runtimeHost || runtimeHost.currentOperation()) return "runtime_operation";
-    return null;
-  };
   automaticAccountMcp = createBrowserAccountMcpSync({
     logger,
     accounts: () => browserAccounts.status().accounts.map(account => ({
       ...account, partition: browserAccounts.partitionOf(account.id),
     })),
-    canRun: options => automaticMcpBlocker(options) === null,
+    canRun: ({ connecting = false } = {}) => {
+      const state = stateStore.read();
+      const operation = browserHost?.currentOperation();
+      return !IS_DEV_PROFILE && !quitting && !shutdownInProgress
+        && state.autoConnectExistingMcp === true && state.coreSetupComplete === true
+        && state.browserInteractionMode === "automatic"
+        && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()
+        && mainWindow.isFocused() && mainWindow.webContents.isFocused()
+        && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
+        && (!operation || (connecting && operation === "MCP connector creation"))
+        && runtimeHost && !runtimeHost.currentOperation();
+    },
     prepare: async () => {
       // Timers must not synchronously read configuration/credential files on the main thread.
       const config = await runtimeSupervisor.readConfigAsync();
@@ -3582,11 +3580,7 @@ function registerIpc({ logger, stateStore }) {
         "https://chatgpt.com", 10_000);
     },
     connect: (accountId, current) => connectAccountMcp(accountId, () => {
-      if (!current()) {
-        throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."), {
-          automaticDeferred: true, reason: automaticMcpBlocker({ connecting: true }) ?? "account_changed",
-        });
-      }
+      if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
     }),
   });
   const syncAccountMcp = () => void automaticAccountMcp.sync().catch(error => logger.warn("browser_accounts.automatic_mcp_pending", {
@@ -4196,12 +4190,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal, /schedule, wake-up, /loop or browser-account change still being saved (off the main
-    // thread) lands before the app goes; a disk that hangs holds the quit 5 s at most, and each file
-    // keeps the change before.
+    // A goal, /schedule, wake-up, /loop, browser-account or settings change still being saved (off
+    // the main thread) lands before the app goes; a disk that hangs holds the quit 5 s at most, and
+    // each file keeps the change before.
     await Promise.race([
       Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(),
-        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved()]),
+        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved(), launcherStateStore?.saved()]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
     const runtimeOperation = runtimeHost?.currentOperation();
@@ -4389,7 +4383,15 @@ async function start() {
     });
   }
 
-  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
+  const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"), {
+    onError: (error) => {
+      // The logger is made further down; a save that fails before then is retried by the next one.
+      try {
+        logger.warn("launcher.state_write_failed", { message: (error instanceof Error ? error.message : String(error)).slice(0, 500) });
+      } catch { /* no logger yet */ }
+    },
+  });
+  launcherStateStore = stateStore;
   if (IS_DEV_PROFILE && !stateStore.read().onboardingComplete) {
     stateStore.update({
       language: stateStore.read().language || "en",
@@ -5025,7 +5027,7 @@ async function start() {
           let proxy;
           try { proxy = { configured: Boolean(antigravityProxyEnvironment().HTTPS_PROXY) }; }
           catch (error) { proxy = { configured: false, error: String(error?.message || error).slice(0, 200) }; }
-          return { ...antigravityCli.status(), proxy, cpa: await antigravityReauth.status() };
+          return { ...(await antigravityCli.statusAsync()), proxy, cpa: await antigravityReauth.status() };
         }
         case "install": return antigravityCli.install();
         case "terminal_open": {

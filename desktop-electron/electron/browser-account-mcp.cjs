@@ -51,20 +51,20 @@ function createBrowserAccountMcpSync(deps) {
           continue;
         }
         attempts.set(account.id, { key, errorAt, retryAt: Infinity });
+        let gaveWay = false;
         try {
           connecting = true;
           const result = await deps.connect(account.id, current);
           if (result?.connected !== true) throw new Error("ChatGPT did not confirm the exact connector state.");
         } catch (error) {
-          if (error?.automaticDeferred === true) {
-            deps.logger?.info?.("browser_accounts.automatic_mcp_deferred", { reason: String(error.reason ?? "unknown").slice(0, 40) });
-          } else {
-            deps.logger?.warn?.("browser_accounts.automatic_mcp_failed", {
-              message: error instanceof Error ? error.message : String(error),
-            });
-          }
+          // It stopped for an account switch (automaticSetupGaveWay): no failure, and it runs again.
+          // An account switch is over in a moment, so by now this setup may be admitted again.
+          gaveWay = error?.gaveWay === true;
+          deps.logger?.warn?.(gaveWay ? "browser_accounts.automatic_mcp_deferred" : "browser_accounts.automatic_mcp_failed", {
+            message: error instanceof Error ? error.message : String(error),
+          });
         } finally { connecting = false; }
-        if (!current()) {
+        if (gaveWay || !current()) {
           // Losing admission defers work until focus/setup is available again.
           attempts.delete(account.id);
           continue;
@@ -94,4 +94,20 @@ function createBrowserAccountMcpSync(deps) {
   };
 }
 
-module.exports = { createBrowserAccountMcpSync };
+/**
+ * Whether an automatic connector setup stopped because it gave way, not because it failed: the shown
+ * account changed under it (a switch, which no longer waits for it) or its admission no longer holds
+ * (the app lost focus, a turn started). A manual setup, with no admission check, always failed.
+ */
+function automaticSetupGaveWay(assertAdmitted, accountChanged) {
+  if (typeof assertAdmitted !== "function") return false;
+  if (accountChanged()) return true;
+  try {
+    assertAdmitted();
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+module.exports = { automaticSetupGaveWay, createBrowserAccountMcpSync };

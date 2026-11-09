@@ -45,6 +45,7 @@ test("install refuses a download whose checksum or host does not match the pin",
   await assert.rejects(cli.install(), /pinned checksum/);
   assert.equal(hops, 2);
   assert.equal(cli.status().installed, false);
+  assert.deepEqual(await cli.statusAsync(), cli.status());
   assert.equal(await cli.binDir(), null, "a failed install gives AO no shim folder");
   const evil = createAntigravityCli({
     toolsRoot: path.join(root, "tools2"), manifestPath, platform: "win32", arch: "x64", confirm: async () => true, getWorkspaces: async () => [],
@@ -86,10 +87,14 @@ test("a verified archive installs a shim for Agent Orchestrator and retires olde
     saved[name] = fs[name];
     fs[name] = (...args) => { syncReads.push(name); return saved[name](...args); };
   }
-  let found;
-  try { found = await cli.binDir(); } finally { Object.assign(fs, saved); }
+  let found, asyncStatus;
+  // The app's screens read the status the same way (its synchronous scan held main 614 ms).
+  try { found = await cli.binDir(); asyncStatus = await cli.statusAsync(); } finally { Object.assign(fs, saved); }
   assert.equal(found, path.join(toolsRoot, "bin"));
   assert.deepEqual(syncReads, []);
+  assert.deepEqual(asyncStatus, cli.status(), "statusAsync answers as status() does");
+  assert.equal(asyncStatus.installed, true);
+  assert.equal(asyncStatus.version, "2.0.0");
   assert.match(fs.readFileSync(path.join(toolsRoot, "bin", "agy.cmd"), "utf8"), /SSH_CLIENT/, "AO lookup must refresh an older installed shim");
   const shim = fs.readFileSync(path.join(toolsRoot, "bin", "agy.cmd"), "utf8");
   assert.match(shim, /2\.0\.0.*antigravity\.exe/s);

@@ -29,6 +29,7 @@ function createBrowserAccountService(deps) {
   const now = deps.now ?? Date.now;
   const signIns = new Map(); // account id -> true | false, from its partition's cookies
   let switching = null; // the switch in progress
+  let switchingTo = null; // the account it shows, which the pickers show at once
   let signInRefresh = null;
   let signInAgain = false; // a change arrived during a read: read once more after it
   let bridgeRefreshFor = null; // the account a switch left the bridge to pick up on its sign-in
@@ -39,6 +40,7 @@ function createBrowserAccountService(deps) {
       ...current,
       accounts: current.accounts.map((entry) => ({ ...entry, signedIn: signIns.get(entry.id) ?? null })),
       switching: switching !== null,
+      switchingTo: switching !== null ? switchingTo : null,
     };
   }
 
@@ -145,11 +147,13 @@ function createBrowserAccountService(deps) {
       await deps.afterSwitch?.(next, { wasVisible, stateStore });
     })();
     switching = run;
+    switchingTo = accountId;
     publish();
     try {
       await run;
     } finally {
       switching = null;
+      switchingTo = null;
       publish();
       // The account left keeps its sign-in in its partition; the list shows it for every account.
       void refreshSignIns(logger);
