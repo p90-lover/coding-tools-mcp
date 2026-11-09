@@ -166,10 +166,11 @@ test("a persistent bridge's output is discarded, never kept in a log file", asyn
   fs.writeFileSync(path.join(runtime, "daemon.log"), "old line\n");
   fs.writeFileSync(path.join(runtime, "daemon.log.1"), "older line\n");
   const { supervisor } = supervisorFor(root);
-  const child = supervisor.spawnChild("daemon", {
+  // Started from a worker (spawnOffThread), so the start is awaited.
+  const child = await supervisor.spawnChild("daemon", {
     executable: process.execPath, args: ["-e", "console.log('listening'); console.error('a warning')"], cwd: root,
   });
-  await new Promise((resolve) => child.once("exit", resolve));
+  if (child.exitCode === null && child.signalCode === null) await new Promise((resolve) => child.once("exit", resolve));
   assert.equal(child.stdout, null);
   assert.equal(child.stderr, null);
   assert.deepEqual(fs.readdirSync(runtime).filter((name) => name.includes("log")), []);

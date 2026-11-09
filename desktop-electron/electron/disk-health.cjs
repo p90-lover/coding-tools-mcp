@@ -12,7 +12,8 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { execFile } = require("node:child_process");
+// wevtutil starts from a worker: its start on main held every window 262 ms (2026-11-09).
+const { execFileOffThread } = require("./off-thread-run.cjs");
 
 const FIRST_CHECK_MS = 3 * 60_000;
 const CHECK_MS = 30 * 60_000;
@@ -46,7 +47,7 @@ function parseEvents(xml) {
   return events;
 }
 
-function readWindowsDiskEvents({ lookbackMs, run = execFile }) {
+function readWindowsDiskEvents({ lookbackMs, run = execFileOffThread }) {
   return new Promise((resolve, reject) => {
     run("wevtutil", ["qe", "System", `/q:${eventQuery(lookbackMs)}`, "/c:500", "/rd:true", "/f:xml"],
       { windowsHide: true, timeout: 20_000, maxBuffer: 8 * 1024 * 1024 },

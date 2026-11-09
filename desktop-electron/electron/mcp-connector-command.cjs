@@ -4,6 +4,7 @@ const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { SETUP_CHECK_MESSAGE } = require("./chatgpt-cloudflare-check.cjs");
+const { PLATFORM_SIGN_IN_UNFINISHED } = require("./mcp-connector-setup.cjs");
 
 const PREFLIGHT_FAILURES = new Map([
   ["manual_browser_inspection_disabled", "MCP connector setup is disabled in Zero Risk mode."],
@@ -32,6 +33,7 @@ const PREFLIGHT_FAILURES = new Map([
   ["creation_failed", "The account's MCP tunnel is not ready. Reconnect it before creating the connector."],
   ["creation_failed", "The account's MCP tunnel changed or is not ready."],
   ["verification_required", SETUP_CHECK_MESSAGE],
+  ["platform_sign_in_required", PLATFORM_SIGN_IN_UNFINISHED],
 ].map(([code, message]) => [message, { code, message }]));
 
 // The setup's own words for the ChatGPT page step that did not happen. Each names what to look at,
@@ -66,7 +68,13 @@ function mcpConnectorCommandFailure(error, action = "create") {
   if (action === "add-tunnel") return { code: "tunnel_add_failed", message: "MCP tunnel connection failed. The private input was retained for retry." };
   const text = String(error?.message || error || "");
   const known = PREFLIGHT_FAILURES.get(text);
-  if (known) return { ...known };
+  if (known) {
+    // A setup window that moved names where it went (navigationPlace: host and path only).
+    const place = ["workspace_context_changed", "platform_sign_in_required"].includes(known.code)
+      && typeof error?.navigatedTo === "string" && /^[A-Za-z0-9./_-]{1,340}$/.test(error.navigatedTo) ? error.navigatedTo : null;
+    if (!place) return { ...known };
+    return { ...known, message: `${known.message} ${known.code === "platform_sign_in_required" ? "It stopped at" : "It moved to"} ${place}.` };
+  }
   if (CHATGPT_PAGE_FAILURES.has(text)) return { code: "creation_failed", message: text };
   const [code, message] = /denied access/i.test(text)
     ? ["mcp_access_denied", "The MCP server denied access. Check its authentication and workspace access."]

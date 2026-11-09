@@ -119,3 +119,44 @@ test("desktop shell wires codingTools.apps without constructing five-stack at bo
   assert.doesNotMatch(original, /openOriginalControlCenter/);
   assert.doesNotMatch(host, /createServer/);
 });
+
+test("identical read-only calls in flight share one answer; writes, other reads and later reads run on their own", async () => {
+  // 0.8.104 (2026-11-09): with the hard disk busy, five chat_branches and seven run_status polls in
+  // the same second each held a headless request slot until every poll failed HEADLESS_CAPACITY.
+  const invoked = [];
+  const gates = [];
+  const registry = {
+    has: () => true,
+    get: () => ({ handler: { isReadOnly: (operation) => operation.startsWith("read_") } }),
+    invoke: (id, operation, args) => {
+      invoked.push([operation, JSON.stringify(args)]);
+      return new Promise((resolve, reject) => gates.push({ resolve: () => resolve({ operation, args }), reject }));
+    },
+  };
+  const host = createCodingToolsAppsHost({ registry });
+  const reads = [1, 2, 3].map(() => host.call("agent-orchestrator", "read_status", { runId: "r1" }));
+  const other = host.call("agent-orchestrator", "read_status", { runId: "r2" });
+  const writes = [1, 2].map(() => host.call("agent-orchestrator", "set_flag", { on: true }));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(invoked, [
+    ["read_status", '{"runId":"r1"}'],
+    ["read_status", '{"runId":"r2"}'],
+    ["set_flag", '{"on":true}'],
+    ["set_flag", '{"on":true}'],
+  ], "three identical reads made one call; the other read and both writes made their own");
+  for (const gate of gates) gate.resolve();
+  const answers = await Promise.all(reads);
+  assert.ok(answers.every((answer) => answer.result.args.runId === "r1" && answer.ok), "each caller got the shared answer");
+  assert.equal((await other).result.args.runId, "r2");
+  await Promise.all(writes);
+  const later = host.call("agent-orchestrator", "read_status", { runId: "r1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(invoked.length, 5, "a read asked after the shared one settled runs again");
+  gates.at(-1).reject(new Error("AO timed out"));
+  await assert.rejects(later, /AO timed out/);
+  const retried = host.call("agent-orchestrator", "read_status", { runId: "r1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(invoked.length, 6, "a failed read is not kept: the next one asks again");
+  gates.at(-1).resolve();
+  await retried;
+});

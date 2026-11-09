@@ -554,6 +554,17 @@ function LauncherShell({
     }
   }, [snapshot.state.browserInteractionMode]);
 
+  // The error toast sits at the page's top-left, just past the sidebar, but it is drawn outside
+  // this shell: publish the sidebar's docked width (open, rail or none) where the toast can read it.
+  const sidebarDockWidth = sidebarOpen ? sidebarWidth : compactSidebar ? 0 : SIDEBAR_RAIL_WIDTH;
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty("--sidebar-dock-width", `${sidebarDockWidth}px`);
+    return () => {
+      root.style.removeProperty("--sidebar-dock-width");
+    };
+  }, [sidebarDockWidth]);
+
   useEffect(() => {
     if (!selectedManualTab) return;
     showSurface("browser");
@@ -3721,13 +3732,31 @@ function readableError(message: string): string {
   return `${words[0].toUpperCase()}${words.slice(1)} didn't finish within ${Math.round(Number(ms) / 1000)} s${rest}`;
 }
 
+/** An error toast fades out after this long; pointing at it holds it until the pointer leaves. */
+const ERROR_TOAST_MS = 5_000;
+
 function ErrorToast({ copy, message, onDismiss }: { copy: Copy; message: string; onDismiss: () => void }) {
+  const [held, setHeld] = useState(false);
+  // The parent passes a new arrow on every render, and launcher state re-renders it often: read it
+  // from a ref so those renders don't restart the countdown. A new message does restart it.
+  const dismiss = useRef(onDismiss);
+  useEffect(() => {
+    dismiss.current = onDismiss;
+  }, [onDismiss]);
+  useEffect(() => {
+    if (held) return;
+    const timer = window.setTimeout(() => dismiss.current(), ERROR_TOAST_MS);
+    return () => window.clearTimeout(timer);
+  }, [held, message]);
   return (
     <motion.div
       animate={{ opacity: 1, y: 0 }}
       className="error-toast"
-      exit={{ opacity: 0, y: 8 }}
-      initial={{ opacity: 0, y: 8 }}
+      exit={{ opacity: 0, y: -8 }}
+      initial={{ opacity: 0, y: -8 }}
+      onPointerEnter={() => setHeld(true)}
+      onPointerLeave={() => setHeld(false)}
+      role="alert"
       transition={PANEL_TRANSITION}
     >
       <StateDot state="error" />

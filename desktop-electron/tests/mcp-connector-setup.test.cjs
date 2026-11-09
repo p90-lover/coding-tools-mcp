@@ -4,7 +4,8 @@ const vm = require("node:vm");
 const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
-const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 
 function fakeMcpNetwork() {
   const debuggerClient = new EventEmitter(), bodies = new Map(), bodyWaits = new Map(), commands = [];
@@ -244,6 +245,15 @@ test("a new Platform login cannot combine its identity with the previous user's 
   assert.throws(() => platformMcpOwnerContext(snapshot.platform, tunnelId, { userId: "user-target" }), /ownership.*unknown/i);
 });
 
+test("a setup window that moved is named by host and path only", () => {
+  assert.equal(navigationPlace("https://platform.openai.com/login?next=%2Fsettings&token=SECRET#frag"), "platform.openai.com/login");
+  assert.equal(navigationPlace("https://chatgpt.com/auth/<b>x"), "chatgpt.com/auth/3Cb3Ex");
+  assert.equal(navigationPlace("https://cdn.platform.openai.com/" + "a".repeat(200)).length, "cdn.platform.openai.com".length + 80);
+  assert.equal(navigationPlace("about:blank"), "about");
+  assert.equal(navigationPlace("javascript:alert(1)"), null);
+  assert.equal(navigationPlace("not a url"), null);
+});
+
 test("the production connector action verifies fresh owner and workspace proof before each mutation", async t => {
   const personalId = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", businessId = "602b5d8d-e211-49b1-9762-206108d52954";
   const tunnelId = `tunnel_${"a".repeat(32)}`, initialUser = "user-fixture", org = "org-fixture";
@@ -269,6 +279,11 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "subject switch after preparing cannot submit", change: "user", error: /context|authentication.*changed/i },
     { name: "partition switch after preparing cannot submit", change: "partition", error: /account|partition|context/i },
     { name: "unexpected document navigation after preparing cannot submit", change: "navigation", error: /navigation|context/i },
+    // Live 2026-11-09: Platform's page went from tunnels to /login once it had loaded, and every Connect stopped there.
+    { name: "Platform signing itself in while its tunnels load is part of the Platform step", change: "platform-sign-in" },
+    { name: "a Platform page that leaves OpenAI's sign-in for another site stops and names it", change: "platform-elsewhere",
+      error: error => /navigation changed/.test(error.message) && error.navigatedTo === "accounts.example.com/o/oauth2/auth"
+        && mcpConnectorCommandFailure(error).message.endsWith(" It moved to accounts.example.com/o/oauth2/auth.") },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
     { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, identityMissing: true, error: /existing connector.*tunnel.*unverified/i },
@@ -404,10 +419,26 @@ test("the production connector action verifies fresh owner and workspace proof b
             platformVisits++;
             assert(!scenario.shared || publishing, "a member never borrows Platform authentication from its publisher");
             assert(network.debuggerClient.isAttached(), "observation must precede Platform navigation");
-            network.observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, { user: { id: userId, orgs: { data: [{ id: org, role: "owner" }] } } });
-            network.observed("GET", "https://api.openai.com/v1/dashboard/organization/permissions", { "openai-organization": org }, { data: ["api.organization.tunnel.read", "api.organization.tunnel.use"] });
-            network.observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, { tunnels: [{ id: tunnelId,
-              creator: scenario.unknownOwner ? { id: userId } : scenario.nonOwner ? "user-other" : userId, workspace_ids: [businessId], organization_ids: [] }] });
+            const observePlatform = () => {
+              network.observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, { user: { id: userId, orgs: { data: [{ id: org, role: "owner" }] } } });
+              network.observed("GET", "https://api.openai.com/v1/dashboard/organization/permissions", { "openai-organization": org }, { data: ["api.organization.tunnel.read", "api.organization.tunnel.use"] });
+              network.observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, { tunnels: [{ id: tunnelId,
+                creator: scenario.unknownOwner ? { id: userId } : scenario.nonOwner ? "user-other" : userId, workspace_ids: [businessId], organization_ids: [] }] });
+            };
+            if (scenario.change === "platform-sign-in" || scenario.change === "platform-elsewhere") {
+              // The page has loaded; its own router then goes through sign-in. No query reaches a message.
+              setImmediate(() => {
+                contents.emit("did-start-navigation", {}, "https://platform.openai.com/login?next=%2Fsettings%2Forganization%2Ftunnels", true, true);
+                if (scenario.change === "platform-elsewhere") {
+                  contents.emit("did-start-navigation", {}, "https://accounts.example.com/o/oauth2/auth?client_id=platform&state=SECRET", false, true);
+                  return;
+                }
+                contents.emit("did-start-navigation", {}, "https://auth.openai.com/authorize?client_id=platform&state=SECRET", false, true);
+                contents.emit("did-start-navigation", {}, "https://platform.openai.com/auth/callback?code=SECRET", false, true);
+                contents.emit("did-start-navigation", {}, "https://platform.openai.com/settings/organization/tunnels", false, true);
+                observePlatform();
+              });
+            } else observePlatform();
           } else if (next.startsWith("https://chatgpt.com/plugins")) select(accountId);
         } };
     }
@@ -792,7 +823,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     runtimeSupervisor: { extraTunnels: { status: () => tunnels,
       reconnect: async id => { calls.push(`reconnect:${id}`); tunnels[0].state = "ready"; },
       setConnector: async (id, href, binding) => { await Promise.resolve(); assert.equal(binding.tunnelId, tunnels[0].tunnelId); if (removeDuringSave) accounts.delete("other"); calls.push(`connector:${id}`); } } },
-    recordBrowserWorkspaceContext() {},
+    recordBrowserWorkspaceContext() {}, automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     createWorkspaceConnector: async options => {
       calls.push(JSON.parse(JSON.stringify(options))); options.assertCurrent();
       if (failure) throw new Error(failure);
@@ -828,4 +859,26 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   accounts.add("other"); removeDuringSetup = false; removeDuringSave = true;
   await assert.rejects(handler({}, "other"), /Unknown account/);
   assert.equal(records.filter(record => record.bound).length, 1, "a stale persistence completion cannot mark a removed account connected");
+
+  // An automatic setup that gave way (an account switch, the app left) failed nothing: no connector
+  // error is recorded and no failure reaches the screen. The same error while still admitted did fail.
+  const connectAccountMcp = vm.runInNewContext("connectAccountMcp", context);
+  const operations = [];
+  context.publishOperation = value => operations.push(value);
+  accounts.add("other"); removeDuringSave = false; records.length = 0;
+  let admitted = true;
+  const admission = () => { if (!admitted) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account."); };
+  context.createWorkspaceConnector = async options => {
+    options.assertCurrent();
+    admitted = false;
+    options.assertCurrent();
+  };
+  await assert.rejects(connectAccountMcp("other", admission), error => /waiting for the focused, idle app/.test(error.message) && error.gaveWay === true);
+  assert.deepEqual(records, [], "a setup that gave way leaves the account's connector state as it was");
+  assert.equal(operations.at(-1).status, "cancelled");
+  admitted = true;
+  context.createWorkspaceConnector = async options => { options.assertCurrent(); throw new Error("ChatGPT refused this connector"); };
+  await assert.rejects(connectAccountMcp("other", admission), /refused/);
+  assert.deepEqual(records, [{ id: "other", error: "ChatGPT refused this connector" }]);
+  assert.equal(operations.at(-1).status, "failed");
 });

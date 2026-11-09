@@ -35,8 +35,10 @@ export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
       setStatus(await action());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      // A refused switch publishes nothing: the picker goes back to the account still shown.
+      void api.browserAccounts().then(setStatus).catch(() => {});
     }
-  }, [setError]);
+  }, [api, setError]);
 
   if (!status) return null;
   const locked = busy || status.switching;
@@ -47,8 +49,13 @@ export function BrowserAccountSwitcher({ api, copy, busy, setError }: {
         aria-label={copy.browserAccount}
         className="browser-account-select"
         disabled={locked}
-        onChange={event => void run(() => api.switchBrowserAccount(event.target.value))}
-        value={status.activeId}
+        onChange={event => {
+          const id = event.target.value;
+          // The pick shows at once; it snapped back to the account left until the switch ended.
+          setStatus(current => current ? { ...current, switching: true, switchingTo: id } : current);
+          void run(() => api.switchBrowserAccount(id));
+        }}
+        value={status.switchingTo ?? status.activeId}
       >
         {status.accounts.map(account => (
           <option key={account.id} value={account.id}>{accountName(account)}</option>

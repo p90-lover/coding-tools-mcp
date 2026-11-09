@@ -2,7 +2,7 @@
 require("./support/temp-dirs.cjs");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
-const { spawn } = require("node:child_process");
+const { spawnOffThread } = require("../electron/off-thread-run.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 const { PassThrough } = require("node:stream");
@@ -175,12 +175,14 @@ test("an explicit deadline stops a real owned Windows process tree and keeps its
     // EPERM/EBUSY while a killed process or an antivirus scan still holds the folder: retried.
     fs.rmSync(scriptDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
+  // The app's own path end to end: the parent is started from the spawn worker and the deadline's
+  // taskkill from the run worker (the runner's defaults), never on this thread.
   const runner = createSandboxRunner({
     scriptDir, locate: () => ({ codex: "fixture-only" }), roots: () => [], logger: { info() {} },
-    spawnProcess: () => {
+    spawnProcess: async () => {
       const script = "const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});process.stdout.write('descendant:'+child.pid+'\\n');setInterval(()=>{},1000);";
       // Started outside scriptDir: a process's working folder cannot be deleted while it lives.
-      child = spawn(process.execPath, ["-e", script], { cwd: parent, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      child = await spawnOffThread(process.execPath, ["-e", script], { cwd: parent, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
       return child;
     },
   });

@@ -2700,13 +2700,18 @@ code {
   height: 100%;
 }
 
+/* Top-left of the page, a small gap past the sidebar (--sidebar-dock-width, set by the shell),
+   gliding with the sidebar's own open/close curve. */
 .error-toast {
   position: fixed;
   z-index: 500;
-  right: 18px;
-  bottom: 18px;
+  top: calc(var(--height-titlebar) + 12px);
+  left: calc(var(--sidebar-dock-width, 0px) + 12px);
   display: grid;
-  width: min(430px, calc(100vw - 36px));
+  width: min(430px, calc(100vw - var(--sidebar-dock-width, 0px) - 24px));
+  transition:
+    left 260ms cubic-bezier(0.32, 0.72, 0, 1),
+    width 260ms cubic-bezier(0.32, 0.72, 0, 1);
   grid-template-columns: 8px minmax(0, 1fr) auto;
   align-items: start;
   gap: 10px;
