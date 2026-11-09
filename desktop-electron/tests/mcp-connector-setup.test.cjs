@@ -279,9 +279,11 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "subject switch after preparing cannot submit", change: "user", error: /context|authentication.*changed/i },
     { name: "partition switch after preparing cannot submit", change: "partition", error: /account|partition|context/i },
     { name: "unexpected document navigation after preparing cannot submit", change: "navigation", error: /navigation|context/i },
-    { name: "a Platform page that moves itself while its tunnels load names where it went", change: "platform-login",
-      error: error => /navigation changed/.test(error.message) && error.navigatedTo === "platform.openai.com/login"
-        && mcpConnectorCommandFailure(error).message.endsWith(" It moved to platform.openai.com/login.") },
+    // Live 2026-11-09: Platform's page went from tunnels to /login once it had loaded, and every Connect stopped there.
+    { name: "Platform signing itself in while its tunnels load is part of the Platform step", change: "platform-sign-in" },
+    { name: "a Platform page that leaves OpenAI's sign-in for another site stops and names it", change: "platform-elsewhere",
+      error: error => /navigation changed/.test(error.message) && error.navigatedTo === "accounts.example.com/o/oauth2/auth"
+        && mcpConnectorCommandFailure(error).message.endsWith(" It moved to accounts.example.com/o/oauth2/auth.") },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
     { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, identityMissing: true, error: /existing connector.*tunnel.*unverified/i },
@@ -417,15 +419,26 @@ test("the production connector action verifies fresh owner and workspace proof b
             platformVisits++;
             assert(!scenario.shared || publishing, "a member never borrows Platform authentication from its publisher");
             assert(network.debuggerClient.isAttached(), "observation must precede Platform navigation");
-            if (scenario.change === "platform-login") {
-              // The page loads, then its own router moves to sign-in; the query never reaches the message.
-              setImmediate(() => contents.emit("did-start-navigation", {}, "https://platform.openai.com/login?next=%2Fsettings%2Forganization%2Ftunnels&token=SECRET", true, true));
-              return;
-            }
-            network.observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, { user: { id: userId, orgs: { data: [{ id: org, role: "owner" }] } } });
-            network.observed("GET", "https://api.openai.com/v1/dashboard/organization/permissions", { "openai-organization": org }, { data: ["api.organization.tunnel.read", "api.organization.tunnel.use"] });
-            network.observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, { tunnels: [{ id: tunnelId,
-              creator: scenario.unknownOwner ? { id: userId } : scenario.nonOwner ? "user-other" : userId, workspace_ids: [businessId], organization_ids: [] }] });
+            const observePlatform = () => {
+              network.observed("POST", "https://api.openai.com/v1/dashboard/onboarding/login", {}, { user: { id: userId, orgs: { data: [{ id: org, role: "owner" }] } } });
+              network.observed("GET", "https://api.openai.com/v1/dashboard/organization/permissions", { "openai-organization": org }, { data: ["api.organization.tunnel.read", "api.organization.tunnel.use"] });
+              network.observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, { tunnels: [{ id: tunnelId,
+                creator: scenario.unknownOwner ? { id: userId } : scenario.nonOwner ? "user-other" : userId, workspace_ids: [businessId], organization_ids: [] }] });
+            };
+            if (scenario.change === "platform-sign-in" || scenario.change === "platform-elsewhere") {
+              // The page has loaded; its own router then goes through sign-in. No query reaches a message.
+              setImmediate(() => {
+                contents.emit("did-start-navigation", {}, "https://platform.openai.com/login?next=%2Fsettings%2Forganization%2Ftunnels", true, true);
+                if (scenario.change === "platform-elsewhere") {
+                  contents.emit("did-start-navigation", {}, "https://accounts.example.com/o/oauth2/auth?client_id=platform&state=SECRET", false, true);
+                  return;
+                }
+                contents.emit("did-start-navigation", {}, "https://auth.openai.com/authorize?client_id=platform&state=SECRET", false, true);
+                contents.emit("did-start-navigation", {}, "https://platform.openai.com/auth/callback?code=SECRET", false, true);
+                contents.emit("did-start-navigation", {}, "https://platform.openai.com/settings/organization/tunnels", false, true);
+                observePlatform();
+              });
+            } else observePlatform();
           } else if (next.startsWith("https://chatgpt.com/plugins")) select(accountId);
         } };
     }

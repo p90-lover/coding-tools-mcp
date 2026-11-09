@@ -9,6 +9,9 @@ const { loadPastCloudflareCheck, matchBrowserUserAgent, SETUP_CHECK_WAIT_MS } = 
 const freshConnectorResults = new WeakMap();
 const UNVERIFIED_CONNECTOR = "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.";
 const WORKSPACE_OWNER_REQUIRED = "Only a verified owner of this ChatGPT workspace can create its MCP connector. Add or sign in to the workspace owner account, refresh its workspace details, then retry.";
+// Hosts Platform's own sign-in passes through while the setup reads tunnel ownership.
+const PLATFORM_SIGN_IN_HOSTS = ["platform.openai.com", "auth.openai.com", "auth0.openai.com"];
+const PLATFORM_SIGN_IN_UNFINISHED = "OpenAI Platform asked this account to sign in again, and the sign-in did not finish by itself. Sign in to OpenAI Platform with this ChatGPT account, then retry.";
 
 function requireMcpWorkspaceOwner(context) {
   if (!["workspace", "personal"].includes(context?.workspaceStructure) || context.workspaceRole !== "account-owner") {
@@ -816,7 +819,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
     let navigatedTo = null;
     const changedTo = value => { navigationChanged = true; navigatedTo ??= navigationPlace(value); };
-    let expectedPath = null, platformPhase = false, recheckExistingFailure = null, timer;
+    let expectedPath = null, platformPhase = false, platformSignIn = null, recheckExistingFailure = null, timer;
     // A Cloudflare check restarts the clock with its own wait added (loadPastCloudflareCheck).
     const budget = target ? 120_000 : 75_000;
     const arm = ms => {
@@ -834,6 +837,15 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       if (navigating) return;
       let url;
       try { url = new URL(value); } catch { changedTo(value); return; }
+      // Platform's page signs in by itself once it has loaded: on 2026-11-09 it went from the
+      // tunnels page to /login, and the setup stopped there on every Connect. That round trip
+      // through OpenAI's sign-in belongs to the Platform step; the user it signs in is still
+      // checked against the ChatGPT user (platformMcpOwnerContext) before anything is created.
+      if (platformPhase && url.protocol === "https:" && !url.username && !url.password && !url.port
+        && PLATFORM_SIGN_IN_HOSTS.includes(url.hostname)) {
+        if (url.hostname !== "platform.openai.com" || url.pathname.startsWith("/login")) platformSignIn = navigationPlace(value);
+        return;
+      }
       if (!inPlace || (!submitting && url.pathname !== expectedPath)) changedTo(value);
     };
     try {
@@ -846,8 +858,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         try {
           const url = new URL(value);
           if (url.protocol === "https:" && !url.username && !url.password && !url.port
-            && (url.hostname === "chatgpt.com" || (platformPhase
-              && ["platform.openai.com", "auth.openai.com", "auth0.openai.com"].includes(url.hostname)))) return;
+            && (url.hostname === "chatgpt.com" || (platformPhase && PLATFORM_SIGN_IN_HOSTS.includes(url.hostname)))) return;
         } catch {}
         changedTo(value);
         event.preventDefault();
@@ -1021,6 +1032,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         name: settings.name, href, at: Date.now() });
       return connected;
     } catch (error) {
+      if (timedOut && platformPhase && platformSignIn) {
+        // Platform's sign-in stopped on a page that wants a person (a password or account choice).
+        throw Object.assign(new Error(PLATFORM_SIGN_IN_UNFINISHED), { navigatedTo: platformSignIn });
+      }
       if (timedOut) throw new Error("ChatGPT connector setup took too long. Retry from Configuration.");
       if (existingOnly && !mutationStarted && error?.message === UNVERIFIED_CONNECTOR) {
         // A rejected helper skips its normal post-read check. Context changes must stop setup,
@@ -1083,4 +1098,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
