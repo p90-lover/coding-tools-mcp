@@ -31,6 +31,7 @@ import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOr
 import { ChatPages } from "./features/ChatPages";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
+import { ComputerUseSurface } from "./features/ComputerUseSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
@@ -877,6 +878,7 @@ function LauncherShell({
                 <SidebarItem active={surface === "agent-orchestrator"} icon="chat" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
                 <SidebarItem active={surface === "agent-orchestrator-teams"} icon="team" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
                 <SidebarItem active={surface === "subagents"} icon="git" label="Subagents" onClick={() => navigateSurface("subagents")} />
+                <SidebarItem active={surface === "computer-use"} icon="cursor" label="Computer use" onClick={() => navigateSurface("computer-use")} />
                 <SidebarItem active={surface === "native-codex"} icon="terminal" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
               </SidebarGroup>
               <SidebarGroup label={copy.workspace}>
@@ -1117,6 +1119,16 @@ function LauncherShell({
             ))}
             {keepAlive("subagents", () => (
               <SubagentsSurface active={surface === "subagents"} setError={setError} />
+            ))}
+            {keepAlive("computer-use", () => (
+              <ComputerUseSurface
+                active={surface === "computer-use"}
+                toolsOn={snapshot.state.chatAgentTools !== false}
+                desktopOn={snapshot.state.chatAgentDesktopTools === true}
+                reviewSteps={snapshot.state.computerReviewSteps === true}
+                setPreference={(key, value) => void api!.setPreference(key, value).then(updateState).catch((cause) => setError(messageOf(cause)))}
+                setError={setError}
+              />
             ))}
             {keepAlive("plugins", () => (
               <PluginsSurface active={surface === "plugins"} copy={copy} setError={setError} snapshot={snapshot} updateState={updateState} />
