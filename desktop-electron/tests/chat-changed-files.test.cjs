@@ -108,3 +108,18 @@ test("the reply renders only the compact changed-file control beside runtime, in
     if (selected.length) assert.match(html, /cx-reply-time[^>]*>1m<\/span><span class="cx-changed-files"/);
   }
 });
+
+test("a reply's file names the Changes tab's file however the agent's edit wrote its path", () => {
+  const { changeTargetPath } = load("ChatWorkbench.tsx");
+  const listed = ["src/index.ts", "tests/index.ts", "README.md"];
+  assert.equal(changeTargetPath("src/index.ts", listed), "src/index.ts", "a relative path that is listed");
+  assert.equal(changeTargetPath("G:\\project\\src\\index.ts", listed), "src/index.ts", "an absolute Windows path inside the worktree");
+  assert.equal(changeTargetPath("G:/project/tests/index.ts", listed), "tests/index.ts", "the same file with forward slashes");
+  assert.equal(changeTargetPath("G:\\project\\src\\gone.ts", listed), undefined, "a file the diff no longer lists");
+  assert.equal(changeTargetPath("G:\\project\\notes\\README.md.bak", listed), undefined, "a longer name is not a match");
+  assert.equal(changeTargetPath("G:\\project\\xindex.ts", ["index.ts"]), undefined, "a suffix must start a path segment");
+  assert.equal(changeTargetPath("G:\\proj\\a\\index.ts", ["index.ts", "a/index.ts"]), "a/index.ts", "the longest listed suffix is the file itself");
+  assert.equal(changeTargetPath("G:\\proj\\Src\\Index.ts", ["src/index.ts", "Src/Index.ts"]), "Src/Index.ts", "case decides when it can");
+  assert.equal(changeTargetPath("G:\\Proj\\SRC\\index.ts", listed), "src/index.ts", "Windows ignores case, so a differently cased edit still finds its file");
+  assert.equal(changeTargetPath("./README.md", listed), "README.md", "a leading ./ is the same file");
+});

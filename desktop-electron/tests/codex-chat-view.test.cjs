@@ -115,7 +115,9 @@ function mount(props, { effects = false, objectUrls } = {}) {
       removeItem: (key) => workbenchStorage?.delete(key),
     } };
   const changedFiles = transpile("ChatChangedFiles.tsx", name => name === "react" ? { ...react, useId: () => "changed-files", useLayoutEffect() {} }
-    : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, { window: timers, clearTimeout() {} });
+    : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, { window: { ...timers, addEventListener() {}, removeEventListener() {} }, clearTimeout() {},
+      // An open file list listens for outside clicks, Escape and scrolls while it is shown.
+      document: { addEventListener() {}, removeEventListener() {} } });
   // The reply's head renders inline too, so a turn's who, status and files can be read.
   const replyHead = transpile("ChatReplyHead.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
     : name === "./ao-chat" ? chat : name === "./ChatChangedFiles" ? changedFiles : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
@@ -1766,6 +1768,40 @@ test("a joined finished receipt keeps research and bug findings between compact 
   assert.deepEqual(opened.map(row => /kind-(\w+)/.exec(row.props.className)?.[1]), ["message", "group", "tool", "message", "group", "edit"], "opened, each tool group opens between what was said");
   walk(page.render()).find(row => row.props?.className === "cx-activity-head").props.onClick();
   assert.ok(walk(page.render()).some(row => /cx-tool/.test(row.props?.className ?? "")), "the recorded tool remains inspectable");
+});
+
+test("a reply's changed file opens the side panel's Changes tab on it, in the agent's worktree", async t => {
+  workbenchStorage = new Map();
+  t.after(() => { workbenchStorage = null; });
+  const written = "G:\\Projects\\app\\src\\callback.ts";
+  const timeline = [{ id: "edit", kind: "edit", status: "completed", text: "Edit callback.ts", files: [{ path: written, additions: 2, deletions: 1 }] }];
+  const chatWith = (route) => base({ selectedTaskId: "t", projectId: "p", runs: [run("edit-run", "t", [node("p", "planner", "finished", {
+    route, receipt: { thread_id: "edit-thread", started_at_ms: 1000, finished_at_ms: 4000, answer: "Fixed." },
+  })], { execution_mode: "single" })], loadWork: async () => timeline }).props;
+  const page = mount(chatWith({ harness_id: "ao:codex", model: "gpt-6.1-sol" }), { effects: true });
+  t.after(() => page.unmount());
+  page.render();
+  await new Promise(setImmediate);
+  const panel = (tree) => walk(tree).find((element) => element.type === "Workbench");
+  const openList = () => { walk(page.render()).find((element) => element.props?.className === "cx-changed-files-trigger").props.onClick(); return page.render(); };
+  walk(openList()).find((element) => element.type === "button" && element.props?.className === "cx-changed-file").props.onClick();
+  const shown = panel(page.render());
+  assert.equal(shown?.props.tab, "changes", "the click opens the Changes tab");
+  assert.deepEqual({ ...shown.props.changesTarget }, { taskId: "t", sessionId: "edit-thread", path: written, requestId: 1 }, "on the file, as the edit named it, in the agent that wrote it");
+  walk(openList()).find((element) => element.type === "button" && /View all changes/.test(text(element))).props.onClick();
+  const all = panel(page.render()).props.changesTarget;
+  assert.equal(all.path, undefined, "View all changes shows the whole diff");
+  assert.equal(all.requestId, 2, "each click is its own request, so the same file can be opened again");
+
+  // A ChatGPT web turn has no AO worktree to diff: its files stay plain text, as before.
+  const web = mount(chatWith({ harness_id: "codex-native", model: "chatgpt-web/gpt-6" }), { effects: true });
+  t.after(() => web.unmount());
+  web.render();
+  await new Promise(setImmediate);
+  walk(web.render()).find((element) => element.props?.className === "cx-changed-files-trigger")?.props.onClick();
+  const plain = walk(web.render());
+  assert.equal(plain.some((element) => element.type === "button" && element.props?.className === "cx-changed-file"), false);
+  assert.equal(plain.some((element) => /View all changes/.test(text(element))), false);
 });
 
 test("Focus mode keeps its joined answer without repeating the same commentary above it", async t => {
