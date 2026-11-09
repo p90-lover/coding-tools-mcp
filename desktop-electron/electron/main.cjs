@@ -5042,7 +5042,8 @@ async function start() {
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
-        // RTK's Claude Code hook, which AO puts in each Claude session's own settings (empty: off).
+        // RTK's Claude Code and Codex hooks, which AO puts in each Claude session's own settings and
+        // on each Codex app-server's command line (empty: off).
         try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
         // AO hands this environment to every Claude Code chat agent. Claude Code's own scheduler
         // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
