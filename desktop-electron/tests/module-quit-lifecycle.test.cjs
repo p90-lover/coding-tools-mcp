@@ -23,7 +23,7 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
   const chatHosts = [];
   const nativeStops = [];
   const quits = [];
-  const order = [], recovered = [], goalSaves = [], accountSaves = [];
+  const order = [], recovered = [], goalSaves = [], accountSaves = [], settingsSaves = [];
   const controller = name => ({ dispose() {
     disposed.push(name);
     if (failCleanup && name === "external") throw new Error("Owned process cleanup failed");
@@ -35,6 +35,8 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     missionWorkflowRuntime: { goalsSaved: async () => { goalSaves.push(true); } },
     // So are Browser account changes (browser-accounts.cjs).
     browserAccounts: { saved: async () => { accountSaves.push(true); } },
+    // And the settings (launcher-state.json, state.cjs).
+    launcherStateStore: { saved: async () => { settingsSaves.push(true); } },
     runtimeHost: { currentOperation: () => active, restoreBridgeRoute: async () => {
       order.push("restore-route");
       if (restoreFails) throw new Error("Route restore failed");
@@ -67,7 +69,7 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, chatHosts, nativeStops, quits, order, recovered, goalSaves, accountSaves, browser: context.browserHost, quit, async beforeQuit() {
+  return { disposed, chatHosts, nativeStops, quits, order, recovered, goalSaves, accountSaves, settingsSaves, browser: context.browserHost, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -133,6 +135,7 @@ test("accepted app quit disposes each integration controller once", async () => 
   assert.deepEqual(f.order, ["restore-route", "stop-runtime", "stop-register", "stop-chatgpt-desktop"]);
   assert.deepEqual(f.goalSaves, [true], "the last goal change is on disk before the app goes");
   assert.deepEqual(f.accountSaves, [true], "so is the last Browser account change");
+  assert.deepEqual(f.settingsSaves, [true], "and the last settings change");
 });
 
 test("route restoration failure cancels quit unless the user chooses Quit anyway", async () => {
