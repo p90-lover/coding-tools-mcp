@@ -95,6 +95,22 @@ test("the 5-hour range is served, with each account's auth file name for matchin
   f.dispose();
 });
 
+test("reset-aligned ranges project only window bounds and availability, never extra backend state", async () => {
+  const ranges = [];
+  const f = fixture(async (range) => { ranges.push(range); return { available: true, range,
+    accounts: [{ requests: 2, file: "codex-a-team", models: [], quota: null, usageAvailable: true,
+      window: { from: 1000, to: 2000, auth: "private-auth", apiKey: "secret-window-key" }, raw: "private-backend-state" }] }; });
+  for (const range of ["session", "week"]) await f.send({ data: { type: "cpm:usage:read", id: range, range } });
+  assert.deepEqual(ranges, ["session", "week"]);
+  const account = f.replies[0].m.usage.accounts[0];
+  assert.equal(account.window.from, 1000);
+  assert.equal(account.window.to, 2000);
+  assert.equal(account.usageAvailable, true);
+  assert.deepEqual(Object.keys(account.window).sort(), ["from", "to"]);
+  assert.doesNotMatch(JSON.stringify(f.replies), /private|secret|apiKey|raw/);
+  f.dispose();
+});
+
 test("the host serves usage to the CPA frame and no longer mounts its own strip", () => {
   // CPA Provider Manager v0.2.2+ reads cpm:usage:read and shows accounts and quota itself.
   const ui = fs.readFileSync(path.join(__dirname, "../src/features/OriginalUiSurface.tsx"), "utf8");
