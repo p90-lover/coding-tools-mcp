@@ -193,17 +193,55 @@ function createAntigravityCli({
     return versionDirs().filter(version => version !== keep);
   }
 
-  function status() {
-    const current = installed();
+  /** The status from what is on disk: the newest complete install, every version folder, the shim. */
+  function statusOf(current, versions, shimExists) {
     let asset = null;
     try { asset = platformAsset(manifest, platform, arch); } catch {}
+    const keep = current?.version ?? manifest.version;
     return {
       ok: true, id: manifest.id, name: manifest.name, command: manifest.command,
       version: current?.version ?? manifest.version, pinned: manifest.version, supported: Boolean(asset), installing: Boolean(installing),
       installed: Boolean(current), installedAt: current?.installedAt ?? null,
-      previous: previousVersions(), shim: current && fs.existsSync(shimPath) ? shimPath : null,
+      previous: versions.filter(version => version !== keep), shim: current && shimExists ? shimPath : null,
       binDir: current ? binDir : null, download: asset ? { fileName: asset.fileName, size: asset.size, url: asset.url } : null,
     };
+  }
+
+  function status() {
+    const current = installed();
+    return statusOf(current, versionDirs(), Boolean(current) && fs.existsSync(shimPath));
+  }
+
+  async function versionDirsAsync() {
+    try {
+      return (await fs.promises.readdir(root, { withFileTypes: true }))
+        .filter(entry => entry.isDirectory() && VERSION.test(entry.name)).map(entry => entry.name);
+    } catch { return []; }
+  }
+
+  async function installedAsync(versions) {
+    for (const version of [...versions].sort((left, right) => compareVersion(right, left))) {
+      try {
+        const marker = JSON.parse(await fs.promises.readFile(markerPath(path.join(root, version)), "utf8"));
+        const executable = path.join(root, version, marker.executable);
+        if (marker.version === version && (await fs.promises.stat(executable)).isFile()) {
+          return { version: marker.version, executable, installedAt: marker.installedAt };
+        }
+      } catch { /* an incomplete install: try the next */ }
+    }
+    return null;
+  }
+
+  /**
+   * status() for the app's own screens (the Antigravity page, App plugins): the same answer, read
+   * off the main thread. The synchronous scan held every window 614 ms on the busy disk (Activity,
+   * 2026-11-09 06:14:33Z: readdirSync antigravity-cli < status).
+   */
+  async function statusAsync() {
+    const versions = await versionDirsAsync();
+    const current = await installedAsync(versions);
+    const shimExists = Boolean(current) && await fs.promises.access(shimPath).then(() => true, () => false);
+    return statusOf(current, versions, shimExists);
   }
 
   async function download(asset, target) {
@@ -334,27 +372,14 @@ function createAntigravityCli({
    * the same scan done synchronously held main 0.6-0.8 s per call on a cold disk after launch.
    */
   async function binDirAsync() {
-    let names = [];
-    try {
-      names = (await fs.promises.readdir(root, { withFileTypes: true }))
-        .filter(entry => entry.isDirectory() && VERSION.test(entry.name)).map(entry => entry.name)
-        .sort((left, right) => compareVersion(right, left));
-    } catch {}
-    let target = null;
-    for (const version of names) {
-      try {
-        const marker = JSON.parse(await fs.promises.readFile(markerPath(path.join(root, version)), "utf8"));
-        const candidate = path.join(root, version, marker.executable);
-        if (marker.version === version && (await fs.promises.stat(candidate)).isFile()) { target = candidate; break; }
-      } catch {}
-    }
+    const target = (await installedAsync(await versionDirsAsync()))?.executable;
     if (!target) return null;
     const shim = await fs.promises.readFile(shimPath, "utf8").catch(() => null);
     if (shim !== shimBody(target, platform)) writeShim(target);
     return binDir;
   }
 
-  return Object.freeze({ status, install, update, executable, binDir: binDirAsync, manifest });
+  return Object.freeze({ status, statusAsync, install, update, executable, binDir: binDirAsync, manifest });
 }
 
 module.exports = { createAntigravityCli, loadManifest, releaseManifest, compareVersion, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment };

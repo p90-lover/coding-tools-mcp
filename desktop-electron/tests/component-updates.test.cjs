@@ -186,7 +186,7 @@ test("a new launcher runs only a confirmed update; an unchecked one waits as pen
   third.controller.dispose();
 });
 
-test("a rejected update never comes back, and the last confirmed one survives the rollback", async () => {
+test("a rejected update never comes back, and the last confirmed one survives the rollback", async (t) => {
   const github = fakeGitHub();
   const first = fixture(github);
   await first.controller.installComponent("cpa");
@@ -198,7 +198,15 @@ test("a rejected update never comes back, and the last confirmed one survives th
   await first.controller.installComponentUpdate("cpa");
   assert.deepEqual(first.controller.activateComponentUpdate("cpa"), { from: "1.2.0", to: "1.3.0" });
   assert.equal(first.controller.rejectComponentUpdate("cpa", "1.3.0").version, "1.2.0");
+  // The periodic check reads the record off the main thread (a synchronous read held every window
+  // 362 ms on 2026-11-09), and still finds the rejection.
+  const readFileSync = fs.readFileSync;
+  t.mock.method(fs, "readFileSync", (file, ...rest) => {
+    if (String(file).endsWith(".update.json")) throw new Error("the update check read its record synchronously");
+    return readFileSync.call(fs, file, ...rest);
+  });
   const check = await first.controller.checkComponentUpdate("cpa");
+  t.mock.restoreAll();
   assert.equal(check.available, false);
   assert.match(check.reason, /failed its health check/);
   first.controller.dispose();

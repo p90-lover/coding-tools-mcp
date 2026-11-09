@@ -73,6 +73,26 @@ test("one failure continues to other accounts and does not retry its own recorde
   assert.deepEqual(f.connected, ["one", "two", "one"]);
 });
 
+test("a setup that gave way to an account switch runs again, though the switch is already over", async () => {
+  const f = fixture();
+  let interrupt = true;
+  f.deps.connect = async id => {
+    f.connected.push(id);
+    if (id === "one" && interrupt) {
+      interrupt = false;
+      throw Object.assign(new Error("The browser account changed during MCP setup."), { gaveWay: true });
+    }
+    return { connected: true };
+  };
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two"]);
+  assert.deepEqual(f.warnings.map(entry => entry.event), ["browser_accounts.automatic_mcp_deferred"]);
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two", "one"], "the account it gave way on is tried again");
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two", "one"], "and once connected, left alone");
+});
+
 test("new login cookies, changed target and a real sign-out permit a fresh attempt", async () => {
   const f = fixture();
   await f.sync.sync();
@@ -171,12 +191,38 @@ test("automatic admission preserves the selected surface while manual defaults a
   await host.withManualOperation("MCP connector creation", async () => {
     assert.equal(selected, "user-chat", "background admission must not activate/focus home");
     assert.equal(host.manualOperation, "MCP connector creation");
+    assert.equal(host.manualOperationYields, true, "a background setup gives way to an account switch");
     await assert.rejects(host.withManualOperation("another operation", async () => {}), /already busy/);
   }, { preserveSurface: true });
   assert.equal(selected, "user-chat");
   assert.equal(host.manualOperation, null);
-  await host.withManualOperation("session inspection", async () => assert.equal(selected, "home"));
+  assert.equal(host.manualOperationYields, false);
+  await host.withManualOperation("session inspection", async () => {
+    assert.equal(selected, "home");
+    assert.equal(host.manualOperationYields, false, "one on the shown page still holds switches");
+  });
   assert.deepEqual(throttles, [false, true, false, true]);
+
+  // An operation starts once the page an account switch opened is open.
+  const order = [];
+  let opened;
+  host.homeOpened = () => new Promise((resolve) => { opened = () => { order.push("opened"); resolve(); }; });
+  const running = host.withManualOperation("ChatGPT login", async () => order.push("login"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(order, []);
+  opened();
+  await running;
+  assert.deepEqual(order, ["opened", "login"]);
+});
+
+test("an automatic setup that gave way is told apart from one that failed", () => {
+  const { automaticSetupGaveWay } = require("../electron/browser-account-mcp.cjs");
+  const admitted = () => {};
+  const refused = () => { throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account."); };
+  assert.equal(automaticSetupGaveWay(undefined, () => true), false, "a setup someone asked for reports every failure");
+  assert.equal(automaticSetupGaveWay(admitted, () => false), false, "still admitted, same account: it failed");
+  assert.equal(automaticSetupGaveWay(admitted, () => true), true, "the shown account changed under it");
+  assert.equal(automaticSetupGaveWay(refused, () => false), true, "it lost admission (focus, a switch, a turn)");
 });
 
 test("production wiring uses owned native sessions and actual focus; it leaves active Browser unchanged", async () => {

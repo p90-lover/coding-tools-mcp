@@ -15,12 +15,14 @@
 //   offsets, as headless keeps exec_command's) for the agent's read_output and the chat's Terminal
 //   pane; its process tree is killed with it (taskkill /T).
 
-const { spawn, execFile } = require("node:child_process");
+const { execFile } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
+// taskkill starts from a worker too, as the command itself does (spawnOffThread).
+const { spawnOffThread, execFileOffThread } = require("./off-thread-run.cjs");
 
 const STREAM_LIMIT = 4 * 1024 * 1024;
 const MAX_KEPT = 64;
@@ -170,7 +172,10 @@ function createSandboxRunner({
   // Where command scripts go: a folder on the app data drive. No default: the system temp folder is
   // on C:, which holds no app storage (AGENTS.md).
   locate = findCodexSandbox, roots = cacheRoots, scriptDir,
-  env = process.env, spawnProcess = spawn, execFileProcess = execFile, logger = console, now = Date.now, platform = process.platform,
+  // Both start programs from a worker thread: spawning codex.exe here held every window 1.4 s
+  // (Activity, 2026-11-09 05:24:30Z, a chat's sandboxed command). spawnProcess may return the child
+  // or a promise of it.
+  env = process.env, spawnProcess = spawnOffThread, execFileProcess = execFileOffThread, logger = console, now = Date.now, platform = process.platform,
   // Folders put first on a command's PATH, e.g. the one AO keeps `ao` in for its own sessions.
   extraPath = () => [],
   // Plain variables every command gets (rtk.cjs commandEnvironment); never a private name or PATH.
@@ -267,7 +272,9 @@ function createSandboxRunner({
         "-c", `sandbox_workspace_write.writable_roots=[${writableRoots.map(tomlPath).join(",")}]`,
         "--", "cmd.exe", "/d", "/c", script,
       ];
-      child = spawnProcess(found.codex, args, { cwd: home, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      // Awaited: the off-thread start resolves once the worker has the pid (a start failure arrives
+      // as the child's error event, as with spawn), and holds its events until the listeners below.
+      child = await spawnProcess(found.codex, args, { cwd: home, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     } catch (error) {
       // No child owns the script yet; preserve the original cancellation or setup failure.
       await fs.promises.rm(script, { force: true }).catch(() => undefined);
