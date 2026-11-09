@@ -43,6 +43,7 @@ const { createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
+const { createActionTimes, timeIpcHandler, watchPageTimes } = require("./action-times.cjs");
 const { createRegisterHost, createRegisterCpaSync } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
@@ -195,6 +196,10 @@ let mainWindow = null;
 const caDistrust = require("./ca-distrust.cjs");
 process.env.NODE_OPTIONS = caDistrust.childNodeOptions(path.join(launcherUserData, "runtime-preload"), process.env.NODE_OPTIONS);
 app.on("session-created", (created) => created.setCertificateVerifyProc(caDistrust.verifyCertificate));
+// Activity > Action time (action-times.cjs): tab and page timings, in memory only. Every page the
+// app opens is timed from here, so new views need no wiring of their own.
+const actionTimes = createActionTimes();
+app.on("web-contents-created", (_event, contents) => watchPageTimes(contents, { times: actionTimes, describe: describeTimedPartition }));
 let mainWindowReadyToShow = false;
 let mainWindowShowRequested = false;
 let browserHost = null;
@@ -215,6 +220,8 @@ let lifecycleScan = null;
 let savedChatsInUse = () => true;
 let chatgptDesktop = null;
 let gptBrowser = null;
+// The GPT Browser host once made (gptBrowser is its promise), for naming its pages' timings.
+let gptBrowserHost = null;
 let emailHost = null;
 let registerHost = null;
 const chatgptDesktopOwners = new WeakSet();
@@ -473,12 +480,32 @@ function getGptBrowser(logger) {
     // mailto click failed as an unhandled rejection and the mail app never opened.
     openExternal: (url) => (/^mailto:/i.test(String(url)) ? shell.openExternal(String(url)) : openWebUrl(url)),
     onChange: (status) => send("launcher:gpt-browser-changed", status),
-  })).catch((error) => {
+  })).then((host) => {
+    gptBrowserHost = host;
+    return host;
+  }, (error) => {
     // A host that could not be made is made again on the next call, as before.
     gptBrowser = null;
     throw error;
   });
   return gptBrowser;
+}
+
+// Names a timed page's part of the app and its account (Activity > Action time), from the
+// partition its session lives in.
+function describeTimedPartition(partition) {
+  if (!partition) return {};
+  const accountId = browserAccounts.accountIdOfPartition(partition);
+  if (accountId) {
+    const entry = browserAccounts.status().accounts.find((item) => item.id === accountId);
+    return { group: "Browser", account: entry?.email || entry?.label || accountId };
+  }
+  const gptAccount = /^persist:gpt-browser-([a-z0-9]{12})$/.exec(partition)?.[1];
+  if (gptAccount) {
+    const entry = gptBrowserHost?.status().accounts.find((item) => item.id === gptAccount);
+    return { group: "GPT Browser", account: entry?.email || entry?.label || gptAccount };
+  }
+  return {};
 }
 
 // The launcher's own network for a cookie-less native fetch: its browser session (Global Routing's
@@ -2066,10 +2093,12 @@ function registerIpc({ logger, stateStore }) {
     logger.info("launcher.ipc_already_registered", { reason: "idempotent" });
     return;
   }
+  // Each request from the app window is timed against the tab it was made on (Action time).
+  const isAppWindow = (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents);
   const handle = (channel, handler) => {
     if (registeredIpcChannels.has(channel)) return;
     registeredIpcChannels.add(channel);
-    registerLoggedIpc(ipcMain, logger, channel, handler);
+    registerLoggedIpc(ipcMain, logger, channel, timeIpcHandler(actionTimes, channel, handler, { isAppWindow }));
   };
   const codingTools = createCodingToolsShellBridge({
     assertFocusedMainWindow,
@@ -4016,6 +4045,18 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("launcher:sidebar-state", (_event, value) => stateStore.update(validateSidebarState(value)));
   handle("launcher:logs", (_event, limit) => logger.recent(limit));
+  // Activity > Action time. The renderer reports each tab it shows and how long that took.
+  handle("launcher:action-time-tab", (event, input) => {
+    if (!isAppWindow(event.sender)) throw new Error("Tab timings come only from the app window");
+    actionTimes.tabRendered(input);
+    return true;
+  });
+  handle("launcher:action-times", () => actionTimes.snapshot());
+  handle("launcher:action-times-clear", (event) => {
+    assertFocusedMainWindow(event, true);
+    actionTimes.clear();
+    return actionTimes.snapshot();
+  });
   handle("launcher:export-logs", async () => {
     const date = new Date().toISOString().slice(0, 10);
     const copy = nativeCopyFor(stateStore.read().language);

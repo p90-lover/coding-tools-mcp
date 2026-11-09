@@ -16,6 +16,7 @@ import { Icon, type IconName } from "./icons";
 import { appendLog, logKey, replaceLogs, useLogs } from "./log-store";
 import { ProviderCenterSurface } from "./features/ProviderHubSaasSurface";
 import { NativeViewsCoveredContext, SurfaceHiddenContext } from "./features/page-visibility";
+import { ActionTimesPanel, useTabRenderTiming } from "./features/ActionTimesPanel";
 import { PartErrorBoundary } from "./PartErrorBoundary";
 import { bindSidebarPeek } from "./sidebar-peek";
 import { ChromeLoginNotice, chromeLoginPending, chromeLoginContinuationPending, chromeLoginWaitingForClose } from "./ChromeLoginNotice";
@@ -456,6 +457,14 @@ function LauncherShell({
   const [surface, setSurface] = useState<Surface>(
     firstRunZeroRiskSetup ? "mcp" : interactionSetupComplete ? "browser" : "setup",
   );
+  // Activity > Action time: when the tab being drawn was chosen, so its render time runs from the
+  // click to the painted frame (the first tab's, from the app's first render).
+  const tabSwitchStartedAt = useRef(performance.now());
+  const showSurface = (next: Surface) => {
+    tabSwitchStartedAt.current = performance.now();
+    setSurface(next);
+  };
+  useTabRenderTiming(api, surface, tabSwitchStartedAt);
   // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
   // them. The MCP wizard is left out: it seeds its step from how it was opened.
   const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
@@ -547,7 +556,7 @@ function LauncherShell({
 
   useEffect(() => {
     if (!selectedManualTab) return;
-    setSurface("browser");
+    showSurface("browser");
     // Only the compact sidebar covers the browser; the docked one stays as the user left it.
     if (window.matchMedia(COMPACT_SIDEBAR_QUERY).matches) setSidebarOpen(false);
     setBiggerContextRecommendationOpen(false);
@@ -639,7 +648,7 @@ function LauncherShell({
   }, [browser?.authenticated, snapshot.state.sessionRefreshReminderAt]);
 
   const activateBrowser = useCallback(async (show = false) => {
-    setSurface("browser");
+    showSurface("browser");
     await api!.setBrowserSurfaceActive(true);
     if (show) await api!.showBrowser();
   }, []);
@@ -726,7 +735,7 @@ function LauncherShell({
     if (next !== "browser") {
       void api!.setBrowserSurfaceActive(false).catch((cause) => setError(messageOf(cause)));
     }
-    setSurface(next === "api-models" ? "providers" : next);
+    showSurface(next === "api-models" ? "providers" : next);
     if (compactSidebar) setSidebarOpen(false);
     closeSidebarPeek();
   };
@@ -2164,6 +2173,7 @@ function ActivitySurface({
   const logs = useLogs();
   return (
     <ContentSurface subtitle={copy.activitySubtitle} title={copy.activityTitle}>
+      <ActionTimesPanel api={api!} copy={copy} setError={setError} />
       <div className="section-heading activity-heading">
         <span>{copy.recentActivity}</span>
         <SecondaryButton
