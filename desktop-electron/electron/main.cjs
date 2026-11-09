@@ -39,7 +39,7 @@ const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require(".
 const { restoreGptBrowserAccounts } = require("./gpt-browser-restore.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
-const { createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
+const { automaticSetupGaveWay, createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
@@ -258,8 +258,10 @@ const browserAccountService = createBrowserAccountService({
   lifecycleSyncFor: (accountId, logger) => lifecycleSyncFor(accountId, logger),
   afterSwitch: async (next, { wasVisible, stateStore }) => {
     const automatic = stateStore.read().browserInteractionMode === "automatic";
-    // The account switched to opens ChatGPT whether or not the Browser tab is showing.
-    if (wasVisible) await next.reveal(automatic);
+    // The account switched to opens ChatGPT whether or not the Browser tab is showing. The switch
+    // settles once its page is on screen; ChatGPT loads and checks its sign-in after (presentHome).
+    if (next.presentHome) void next.presentHome({ show: wasVisible, inspectSession: automatic });
+    else if (wasVisible) await next.reveal(automatic);
     else await next.openHomePage?.(automatic);
     send("launcher:browser-state", next.snapshot());
   },
@@ -3516,6 +3518,12 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // An automatic setup that gave way (an account switch, the app left) did not fail: the account
+      // keeps its connector state and the sync tries again later, with no error on screen.
+      if (automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
+        publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
+        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
+      }
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
