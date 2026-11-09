@@ -1,5 +1,6 @@
 "use strict";
 
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -399,10 +400,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
   const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
   const runReads = new Map(); // JSON read key -> { at, pending, read }
+  // A person's own message (chat_send, chat_steer, and their queued message going out) is admitted
+  // ahead of the background polls (headless-host.cjs `admissionControl`). Ten split chats polling on
+  // a saturated disk kept a follow-up's reads in the ordinary queue behind their polls until it gave
+  // up: "HEADLESS_CAPACITY: request admission is full" as a toast (2026-11-09). Every call the send
+  // makes, however deep, carries the mark through this async context. The token dies with the send,
+  // so a timer or loop started under it goes back to the ordinary queue once the send has answered.
+  const personTurn = new AsyncLocalStorage();
+  const forPerson = () => personTurn.getStore()?.live === true;
+  async function asPerson(work) {
+    const token = { live: true };
+    try { return await personTurn.run(token, work); } finally { token.live = false; }
+  }
   function sharedWorkflowRead(key, load) {
     if (!(runReadFreshMs > 0)) return load();
     const known = runReads.get(key);
-    if (known && (known.pending || Date.now() - known.at < runReadFreshMs)) return known.read;
+    // A person's send reads afresh rather than wait on a background read still queued behind the
+    // polls (as Stop does, readForStop); a settled read that is still fresh serves it too.
+    if (known && (known.pending ? !forPerson() : Date.now() - known.at < runReadFreshMs)) return known.read;
     const entry = { at: 0, pending: true, read: load() };
     runReads.set(key, entry);
     entry.read.then(() => {
@@ -414,6 +429,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
   // Every argument passes through (a confirmed action's third is its localConfirmation).
   const requestHeadless = (endpoint, ...rest) => {
+    if (forPerson()) rest = [rest[0], { ...rest[1], admissionControl: true }, ...rest.slice(2)];
     if (HEADLESS_READS.has(endpoint)
       || endpoint === "/api/v1/ao/harness/compact" && rest[0]?.status === true
       || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return sendHeadless(endpoint, ...rest);
@@ -6117,7 +6133,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const still = goalGuard(id, task, stalled);
     try {
-      const result = await chatSend(input);
+      const result = await asPerson(() => chatSend(input));
       if (still() && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalledNote });
       else if (still() && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
       // Sent while the goal waited out a pause (a failed round or check): this turn is its next round.
@@ -8873,7 +8889,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     switch (operation) {
       case "chat_send": return personChatSend(args);
       case "chat_recover": return chatRecover(args);
-      case "chat_steer": return chatSteer(args);
+      case "chat_steer": return asPerson(() => chatSteer(args));
       case "chat_prewarm": return chatPrewarm(args);
       case "turn_timeline": return turnTimeline(args);
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };

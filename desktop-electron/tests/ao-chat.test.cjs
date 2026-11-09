@@ -1803,6 +1803,42 @@ test("overlapping deliver callbacks change only their own optimistic message", a
   });
 });
 
+// 2026-11-09: ten split chats polling a saturated disk turned a follow-up away before it was sent
+// ("HEADLESS_CAPACITY: request admission is full"), shown as a "Something went wrong" toast.
+test("a message the local service had no room for waits in its chat's queue; a new chat's comes back to the composer", async () => {
+  const FULL = "IPC_TRANSPORT_FAILED: apps.call failed: HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)";
+  assert.equal(chat.sendRefusedForNow(new Error(FULL)), "full");
+  assert.equal(chat.sendRefusedForNow(new Error("Headless launcher queue is full; wait for pending work to finish")), "full");
+  assert.equal(chat.sendRefusedForNow(new Error("This chat is still running; wait for it to finish or stop it first")), "busy");
+  assert.equal(chat.sendRefusedForNow("Messages are sent only from the focused app window"), "unfocused");
+  assert.equal(chat.sendRefusedForNow(new Error("IPC_TRANSPORT_FAILED: apps.call failed: Headless request timed out")), "",
+    "a request that timed out once sent may have gone through: it is never sent again by itself");
+  for (const taskId of ["task-1", ""]) {
+    const attachments = [], annotations = [], queued = [], state = { outgoing: null, draft: "also add tests" };
+    const composing = { current: { taskId, cacheKey: `scope-${taskId}`, draft: "also add tests", snapshot: { text: "also add tests" }, attachments, annotations } };
+    const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
+      selectedTaskId: taskId, draft: state.draft, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
+      setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: async () => { throw new Error(FULL); },
+      sendRefusedForNow: chat.sendRefusedForNow, enqueue: async (task, item, front) => { queued.push([task, item.message, front]); },
+      // The composer's own copy follows what is typed, as the component's effect keeps it.
+      setDraft: next => { state.draft = next; composing.current = { ...composing.current, draft: next }; },
+      setOutgoing: next => { state.outgoing = typeof next === "function" ? next(state.outgoing) : next; },
+      setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {}, setAnnotations() {},
+    });
+    const sent = await deliver("also add tests");
+    assert.equal(state.outgoing, null, taskId);
+    if (taskId) {
+      assert.equal(sent, true);
+      assert.deepEqual(queued, [["task-1", "also add tests", true]], "it waits at the front of the chat's queue");
+      assert.equal(state.draft, "", "it left the composer for the queue");
+    } else {
+      assert.equal(sent, false);
+      assert.deepEqual(queued, [], "a new chat has no queue");
+      assert.equal(state.draft, "also add tests", "it comes back to be sent again");
+    }
+  }
+});
+
 test("retiring an earlier optimistic message preserves its replacement", () => {
   const outgoing = { taskId: "", cacheKey: "old", message: "A", sent: true }, replacement = { taskId: "", cacheKey: "new", message: "B", sent: false };
   let current = replacement;

@@ -40,10 +40,14 @@ function abortedRequest() {
   return Object.assign(new Error("Headless request cancelled"), { name: "AbortError", code: "ABORT_ERR" });
 }
 
+// A control path always goes ahead of background work, and so does any call the app's own code marks
+// `admissionControl`: Stop's reads, and every call of a message the person sent (a send reads, writes
+// the chat and makes its run through /tools/call too). The renderer cannot set it: options come only
+// from main-process callers.
 function requestScope(pathname, body, options) {
   const id = value => typeof value === "string" && /^[\w-]{1,128}$/.test(value) ? value : "";
   const owner = JSON.stringify([id(body?.workspace_id), id(body?.run_id)]);
-  const control = CONTROL_PATHS.has(pathname) || (pathname === "/api/v1/ao/read" && options.admissionControl === true);
+  const control = CONTROL_PATHS.has(pathname) || options.admissionControl === true;
   return { owner, category: control ? "control" : READ_PATHS.has(pathname) ? "read" : "other" };
 }
 
