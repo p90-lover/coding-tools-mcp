@@ -895,14 +895,23 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     leapNow.current = { ...from, ms: 0, arc };
     setLeap(leapNow.current);
     setPose({ ...REST, arms: "both", walking: true, look: to.x < from.x ? -1 : 1 });
-    // Two frames later, so the leap starts from where it stood.
-    afterTwoFrames(() => setLeap((current) => current && { ...to, ms, arc }));
-    leapTimer.current = window.setTimeout(() => {
+    const land = () => {
+      window.clearTimeout(leapTimer.current);
       leapNow.current = null;
       setLeap(null);
       setPose(REST);
       done();
-    }, ms + 34);
+    };
+    // Two frames later, so the leap starts from where it stood, and it lands a whole leap after it
+    // takes off: timed from the start, a busy window's late frames ate into the flight (two frames
+    // took 290 ms in a loaded run, and a 420 ms leap flew in 170 ms, a zip again). The first timer
+    // only keeps it from staying in the air if those frames never come.
+    leapTimer.current = window.setTimeout(land, ms + 1000);
+    afterTwoFrames(() => {
+      setLeap((current) => current && { ...to, ms, arc });
+      window.clearTimeout(leapTimer.current);
+      leapTimer.current = window.setTimeout(land, ms + 34);
+    });
   };
   /**
    * Over to another pane's box (split view): it leaps onto that box's top edge, and the pet there
