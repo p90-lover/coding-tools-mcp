@@ -2616,15 +2616,17 @@ function RtkSurface({ active, enabled, setError, updateState }: {
   };
   const found = status?.installed ? `rtk ${status.version} · ${status.path}` : autoInstalling ? "Installing…" : status ? "Not installed" : "Checking…";
   const on = enabled && Boolean(status?.installed);
-  // `rtk hook codex` is in rtk 1.0.1 and later (rtk.cjs CODEX_HOOK_VERSION).
+  // `rtk hook codex` is in rtk 1.0.1 and later, `rtk hook opencode` in 0.52.0 and later (rtk.cjs
+  // CODEX_HOOK_VERSION, OPENCODE_HOOK_VERSION).
   const [major = 0, minor = 0, patch = 0] = (status?.version ?? "").split(".").map(Number);
   const codexHookVersion = major !== 1 ? major > 1 : minor !== 0 ? minor > 0 : patch >= 1;
+  const opencodeHookVersion = major > 0 || minor >= 52;
   return (
     <ContentSurface narrow title="RTK" subtitle="Shortens the output of agents' shell commands, so the model reads less: git, ls, cat, grep, tests and 100+ more. From github.com/rtk-ai/rtk.">
       <SectionHeading label="Agents" />
       <div className="settings-list">
         <SettingRow body={status?.installed
-          ? "Every command a chat agent runs in Coding Tools' terminal goes through rtk first. Claude Code's Bash tool and Codex's own shell get rtk's hook in new chats after the app restarts. Your agent settings don't change."
+          ? "Every command a chat agent runs in Coding Tools' terminal goes through rtk first. Claude Code's Bash tool, Codex's own shell and OpenCode's bash tool get rtk's hook in new chats after the app restarts. Your agent settings don't change."
           : "The app installs rtk with winget when it starts. Until then, commands run as written."}
           label="Use RTK for agents' commands">
           <Switch checked={enabled} disabled={!status?.installed}
@@ -2645,7 +2647,10 @@ function RtkSurface({ active, enabled, setError, updateState }: {
         <SettingRow body={on && !codexHookVersion ? "Needs rtk 1.0.1 or later for rtk hook codex. Update rtk in App plugins."
           : "Adds rtk's PreToolUse hook, rtk hook codex, to each Codex chat's own launch, trusted for that chat only, so the commands Codex runs itself are compacted too."}
           label="Codex shell"><span className="rtk-chip">{on && codexHookVersion ? "on" : "off"}</span></SettingRow>
-        <SettingRow body="Their own shells aren't hooked yet. Their commands through Coding Tools' terminal are." flushAfter label="Built-in shells of OpenCode and others"><span className="rtk-chip">terminal only</span></SettingRow>
+        <SettingRow body={on && !opencodeHookVersion ? "Needs rtk 0.52.0 or later for rtk hook opencode. Update rtk in App plugins."
+          : "Adds a plugin that asks rtk hook opencode about each command to each OpenCode chat's own config, so the commands OpenCode runs itself are compacted too. Your OpenCode config and plugins stay as they are."}
+          label="OpenCode bash tool"><span className="rtk-chip">{on && opencodeHookVersion ? "on" : "off"}</span></SettingRow>
+        <SettingRow body="OpenCode 2, Pi, Cline and other agents' own shells aren't hooked yet. Their commands through Coding Tools' terminal are." flushAfter label="Built-in shells of other agents"><span className="rtk-chip">terminal only</span></SettingRow>
       </div>
       <SectionHeading label="Savings" />
       {gain?.available && gain.text ? <pre className="rtk-gain">{gain.text}</pre>
