@@ -21,21 +21,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { TextDecoder } = require("node:util");
-const { spawnOffThread, runOffThread } = require("./off-thread-run.cjs");
-
-/**
- * taskkill, started from a worker as the command itself is (spawnOffThread): a start on this thread
- * waits for Windows to load the program, and on the busy disk that holds every window. Calls back as
- * execFile does: an error for a start failure, a timeout or a non-zero exit, else null.
- */
-function execFileOffThread(file, args, _options, callback) {
-  runOffThread({ file, args, timeoutMs: 30_000, maxBytes: 64 * 1024 }).then((result) => {
-    if (result.error) callback(new Error(result.error));
-    else if (result.timedOut) callback(new Error(`${file} timed out`));
-    else if (result.code !== 0) callback(Object.assign(new Error(`${file} exited with ${result.code}`), { code: result.code }));
-    else callback(null);
-  });
-}
+// taskkill starts from a worker too, as the command itself does (spawnOffThread).
+const { spawnOffThread, execFileOffThread } = require("./off-thread-run.cjs");
 
 const STREAM_LIMIT = 4 * 1024 * 1024;
 const MAX_KEPT = 64;

@@ -828,6 +828,23 @@ function resetFetchWorker() {
 }
 
 /**
+ * execFile(file, args, { timeout, maxBuffer }, callback) through runOffThread: the program starts
+ * from a worker, so Windows' load of it never holds this thread (taskkill for a chat's sandboxed
+ * command; wevtutil for the disk check, 262 ms on main on 2026-11-09). Calls back as execFile does:
+ * (error, stdout, stderr), the error for a start failure, a timeout or a non-zero exit (its `code`).
+ */
+function execFileOffThread(file, args = [], options = {}, callback = () => {}) {
+  const timeoutMs = Number(options.timeout) > 0 ? Number(options.timeout) : 30_000;
+  const maxBytes = Number(options.maxBuffer) > 0 ? Number(options.maxBuffer) : 1024 * 1024;
+  runOffThread({ file, args, cwd: options.cwd, env: options.env, timeoutMs, maxBytes }).then((result) => {
+    if (result.error) callback(new Error(result.error), "", "");
+    else if (result.timedOut) callback(Object.assign(new Error(`${file} timed out`), { killed: true }), "", "");
+    else if (result.code !== 0) callback(Object.assign(new Error(`${file} exited with ${result.code}`), { code: result.code }), result.stdout, result.stderr);
+    else callback(null, result.stdout, result.stderr);
+  });
+}
+
+/**
  * Streamed GETs. Closing a socket whose connect is still pending runs closesocket() on the thread
  * that owns the socket, and with the antivirus holding it, the update check's Node fallback held the
  * main process (every window) for 72.9 s as it gave up on a GitHub connect (Activity, 2026-11-09
@@ -916,5 +933,5 @@ function getOffThread(url, { headers = {} } = {}, onResponse, { createWorker = (
 
 module.exports = {
   runOffThread, warmProgram, spawnOffThread, resetSpawnWorker, watchOffThread, resetWatchWorker, probeTcpOffThread, connectErrorText,
-  fetchOffThread, resetFetchWorker, getOffThread,
+  fetchOffThread, resetFetchWorker, getOffThread, execFileOffThread,
 };
