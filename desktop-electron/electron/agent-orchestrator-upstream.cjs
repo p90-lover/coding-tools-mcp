@@ -1080,6 +1080,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // Sessions whose failed background start was resumed once: id -> { resumed: Promise<boolean>,
   // after: the observe() read count when AO answered the resume }.
   const provisionRetried = new Map();
+  // A session the app ended on purpose (kill, or a Stop while its agent was starting) is never
+  // resumed: cancelling a background start leaves AO's reason "context canceled", which reads as
+  // transient, and the resume would have brought back an agent whose card had moved on.
+  const endedOnPurpose = (id) => {
+    provisionRetried.set(id, { after: Infinity, resumed: Promise.resolve(false) });
+    if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.keys().next().value);
+  };
   let observeReads = 0;
   // One session read in flight serves every observe() of that session that asks meanwhile. The run
   // loop, the chat's activity poll and the approvals poll each observed the same session, several
@@ -1535,6 +1542,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(sessionStamps.length ? { sessionActivityAt: Math.max(...sessionStamps) } : {}),
         sessionTools,
         ...(toolStarts.length ? { toolSince: Math.min(...toolStarts) } : {}),
+        // AO is still starting this chat's agent in the background (spawn's async), so nothing has
+        // taken its opening message yet: the run loop can tell a start that hung (stopStalledLaunch).
+        ...(session?.session?.provisionState === "provisioning" ? { provisioning: true } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         // No agent process behind this session (released while idle, or it exited): nothing runs,
         // so a stop has nothing to wait for and a steer nothing to reach.
@@ -1841,6 +1851,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     /** Ends a session and its agent (a pre-warmed one nobody used). */
     async kill(id) {
       agentTools?.cancelSessionCalls?.(id);
+      endedOnPurpose(id);
       await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
       agentTools?.forgetSession?.(id);
       return { ok: true };
@@ -1980,6 +1991,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         if (!/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) throw error;
         const record = await internalApi("GET", `/api/v1/sessions/${sessionId(id)}`);
         if (record?.session?.provisionState === "provisioning") {
+          endedOnPurpose(id);
           await internalApi("POST", `/api/v1/sessions/${sessionId(id)}/kill`, {});
           agentTools?.forgetSession?.(id);
           return;
