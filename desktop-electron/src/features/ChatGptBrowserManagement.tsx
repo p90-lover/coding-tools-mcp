@@ -52,51 +52,61 @@ function ago(at: number | null | undefined) {
   return new Date(at).toLocaleDateString();
 }
 
-function planText(plan: BrowserAccount["plan"], signedIn?: boolean | null) {
-  const capabilities = typeof plan?.solAvailable === "boolean" && plan.checkedAt
-    ? `Model access up to ${plan.proAvailable ? "6 Pro" : plan.solAvailable ? "6 High" : "6 Instant"}` : null;
-  if (!plan?.planCheckedAt) return { label: "Not verified", detail: ["Refresh to check the actual subscription", capabilities].filter(Boolean).join(" · ") };
-  const labels: Record<string, string> = { free: "Free", go: "Go", plus: "Plus", pro: "Pro", team: "Business (Team)",
-    business: "Business", enterprise: "Enterprise", edu: "Edu", education: "Edu" };
-  const label = labels[plan.planType ?? ""] ?? "Unknown plan";
-  return { label: signedIn === false ? `Last known ${label}` : label,
-    detail: [plan.workspaceStructure === "personal" ? "Personal workspace" : plan.workspaceName || "Workspace",
-      `${signedIn === false ? "Last checked" : "Checked"} ${ago(plan.planCheckedAt)}`, capabilities].filter(Boolean).join(" · ") };
+const PLAN_LABELS: Record<string, string> = { free: "Free", go: "Go", plus: "Plus", pro: "Pro", team: "Business",
+  business: "Business", enterprise: "Enterprise", edu: "Edu", education: "Edu" };
+const ROLE_LABELS: Record<string, string> = { "account-owner": "Owner", "account-admin": "Admin", "standard-user": "Member" };
+
+/** The card's plan pill and its one workspace line: the workspace, the role in it, and when it was checked. */
+function planText(plan: BrowserAccount["plan"]) {
+  const models = typeof plan?.solAvailable === "boolean" && plan.checkedAt
+    ? `Model access up to ${plan.proAvailable ? "6 Pro" : plan.solAvailable ? "6 High" : "6 Instant"}` : undefined;
+  if (!plan?.planCheckedAt) return { label: null, workspace: "Not checked yet", models };
+  const role = Object.hasOwn(ROLE_LABELS, plan.workspaceRole ?? "") ? ROLE_LABELS[plan.workspaceRole!] : null;
+  return {
+    label: Object.hasOwn(PLAN_LABELS, plan.planType ?? "") ? PLAN_LABELS[plan.planType!] : null,
+    workspace: [plan.workspaceStructure === "personal" ? "Personal" : plan.workspaceName || "Workspace", role,
+      `checked ${ago(plan.planCheckedAt)}`].filter(Boolean).join(" · "),
+    models,
+  };
 }
 
 const TUNNEL_TONE: Record<McpTunnel["state"], string> = { ready: "ok", starting: "idle", stopped: "warn", failed: "error" };
 const TUNNEL_LABEL: Record<McpTunnel["state"], string> = { ready: "Ready", starting: "Starting", stopped: "Stopped", failed: "Failed" };
 
+/**
+ * What MCP setup may do for an account. Workspace details count for 5 minutes; older ones are not
+ * a dead end any more: `refresh` says Connect reads them again first (2026-11-09: every card said
+ * "Refresh required" with Connect greyed out, and each Refresh failed on its own).
+ */
 export function mcpAccountAccess(account: BrowserAccount, accounts: BrowserAccount[], now = Date.now()) {
   const fresh = (plan: BrowserAccount["plan"]) => Boolean(plan?.planCheckedAt && plan.userId && plan.workspaceId
     && now >= plan.planCheckedAt && now - plan.planCheckedAt < 300_000);
   const plan = account.plan;
-  const knownRole = plan?.workspaceRole === "account-owner" ? "Owner" : plan?.workspaceRole === "account-admin" ? "Admin"
-    : plan?.workspaceRole === "standard-user" ? "Member" : null;
-  const verified = account.signedIn === true && fresh(plan) && Boolean(knownRole)
+  const knownRole = Object.hasOwn(ROLE_LABELS, plan?.workspaceRole ?? "");
+  const verified = account.signedIn === true && fresh(plan) && knownRole
     && ["workspace", "personal"].includes(plan?.workspaceStructure ?? "");
-  const role = knownRole ? verified ? knownRole : `Last known ${knownRole}` : "Not verified";
   if (!verified) {
-    return { allowed: false, role, label: "Refresh required", detail: "Refresh this account's workspace details to verify its role and MCP access." };
+    return { allowed: false, refresh: account.signedIn === true, label: "Refresh required",
+      detail: account.signedIn === true ? "Reads this account's workspace details again, then connects." : "Sign in to this account first." };
   }
-  if (plan?.workspaceRole === "account-owner") return { allowed: true, role, label: "Can create and connect", detail: "The verified workspace owner can create, publish, or connect this MCP connector." };
+  if (plan?.workspaceRole === "account-owner") return { allowed: true, refresh: false, label: "Can create and connect", detail: "Creates or connects this account's MCP connector." };
   if (plan?.workspaceStructure === "workspace") {
     const ownerAvailable = accounts.some(owner => owner.id !== account.id && owner.signedIn === true
       && fresh(owner.plan) && owner.plan?.workspaceId === plan.workspaceId && owner.plan?.workspaceStructure === "workspace"
       && owner.plan?.workspaceRole === "account-owner" && owner.plan?.userId !== plan.userId);
-    return { allowed: true, role, label: "Use existing only", detail: ownerAvailable
-      ? "Check an existing connector first. A signed-in owner of this workspace can create and publish it if needed."
-      : "Check an existing connector in this workspace. A verified owner is required to create or publish one." };
+    return { allowed: true, refresh: false, label: "Use existing only", detail: ownerAvailable
+      ? "Checks the existing connector. A signed-in owner of this workspace can create and publish it if needed."
+      : "Checks the existing connector. Only a verified owner can create or publish one." };
   }
-  return { allowed: false, role, label: "Owner required", detail: "Only the workspace owner can create MCP. Add or sign in to that owner account and refresh its workspace details." };
+  return { allowed: false, refresh: false, label: "Owner required", detail: "Only the workspace owner can create the MCP connector. Sign in to the owner's account here." };
 }
 
 function connectorText(connector: BrowserAccount["connector"]) {
-  if (!connector) return { tone: "idle", label: "Not checked", detail: "Connect MCP to set up and check this account" };
+  if (!connector) return { tone: "idle", label: "Not set up", detail: "" };
   if (connector.error && (connector.errorAt ?? 0) >= (connector.okAt ?? 0)) {
     return { tone: "error", label: "Failed", detail: `${connector.error} · ${ago(connector.errorAt)}` };
   }
-  return { tone: "idle", label: "Previously connected", detail: `Last confirmed ${ago(connector.okAt)}` };
+  return { tone: "ok", label: "Connected", detail: `confirmed ${ago(connector.okAt)}` };
 }
 
 type ConnectionResult = { state: "connecting" | "connected" | "failed"; detail: string; checkedAt: number; email: string | null;
@@ -112,6 +122,8 @@ export interface BridgeSetup {
   mcpReady: boolean;
   bridgeReady: boolean;
   inspectionDisabled?: boolean;
+  /** A Codex lists its models without the bridge, so it has no WebGPT models until it restarts. */
+  codexRestartRequired?: boolean;
 }
 
 /**
@@ -228,20 +240,46 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
     try {
       await run("connect-mcp", async () => {
         setConnectionSummary(null);
-        let connected = 0, skipped = 0;
-        for (const account of targets) {
-          const signedIn = accountSignedIn(account, accounts?.activeId ?? "", browser?.authenticated) === true;
-          const access = mcpAccountAccess({ ...account, signedIn }, (accounts?.accounts ?? []).map(entry => ({ ...entry,
-            signedIn: accountSignedIn(entry, accounts?.activeId ?? "", browser?.authenticated) === true })));
-          if (!signedIn || !access.allowed) { skipped += 1; continue; }
+        let connected = 0, skipped = 0, latest = accounts;
+        const accessOf = (account: BrowserAccount, status: BrowserAccountsStatus | null) => {
+          const signedIn = (entry: BrowserAccount) => accountSignedIn(entry, status?.activeId ?? "", browser?.authenticated) === true;
+          return mcpAccountAccess({ ...account, signedIn: signedIn(account) },
+            (status?.accounts ?? []).map(entry => ({ ...entry, signedIn: signedIn(entry) })));
+        };
+        for (const target of targets) {
+          let account = target;
+          let access = accessOf(account, latest);
+          // Stale workspace details are read again here, so Connect is never stuck behind a Refresh.
+          if (!access.allowed && access.refresh && !setup.inspectionDisabled) {
+            setConnections(previous => ({ ...previous, [account.id]: { state: "connecting", detail: "Reading workspace details", checkedAt: Date.now(), email: account.email } }));
+            try {
+              latest = await api.inspectBrowserAccount(account.id);
+              setAccounts(latest);
+              account = latest.accounts.find(entry => entry.id === target.id) ?? account;
+              access = accessOf(account, latest);
+            } catch (cause) {
+              const detail = cause instanceof Error ? cause.message : String(cause);
+              setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
+              continue;
+            }
+          }
+          if (!access.allowed) {
+            skipped += 1;
+            // Still unverified after reading again: ChatGPT gave no role this setup can use.
+            const detail = !access.refresh ? access.detail : setup.inspectionDisabled
+              ? "Workspace details are not read in Zero Risk mode." : "ChatGPT did not report this account's workspace role.";
+            if (access.refresh || access.label === "Owner required") {
+              setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
+            }
+            continue;
+          }
           setConnections(previous => ({ ...previous, [account.id]: { state: "connecting", detail: "Setting up and checking this account's connector", checkedAt: Date.now(), email: account.email } }));
           try {
             const result = await api.createMcpConnector(account.id);
             if (result.connected !== true) throw new Error("ChatGPT did not confirm this account's connector connection.");
             connected += 1;
-            const administrator = accounts?.accounts.find(entry => entry.id === result.setupAccountId);
-            const detail = administrator ? `ChatGPT confirmed this account's connection · Set up by ${accountName(administrator)} (Owner)`
-              : "ChatGPT confirmed this account's connection";
+            const administrator = latest?.accounts.find(entry => entry.id === result.setupAccountId);
+            const detail = administrator ? `set up by ${accountName(administrator)} (Owner)` : "confirmed just now";
             setConnections(previous => ({ ...previous, [account.id]: { state: "connected", detail, checkedAt: Date.now(), email: account.email,
               userId: result.binding?.userId, workspaceId: result.binding?.workspaceId } }));
           } catch (cause) {
@@ -249,7 +287,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
           }
         }
-        setConnectionSummary(`Last connection check: ${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected.${skipped ? ` ${skipped} skipped: sign-in and fresh workspace details are required.` : ""}${connected < targets.length - skipped ? " Check the accounts that need attention below." : ""}`);
+        setConnectionSummary(`${connected} of ${targets.length} account${targets.length === 1 ? "" : "s"} connected${skipped ? ` · ${skipped} skipped` : ""}.`);
         await api.browserAccounts().then(setAccounts).catch(() => {});
         await api.mcpTunnels().then(setTunnels).catch(() => {});
       });
@@ -284,7 +322,10 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   const ticked = accounts.accounts.filter(account => selected.has(account.id)).map(account => account.id);
   const signedInOf = (account: BrowserAccount) => accountSignedIn(account, activeId, browser?.authenticated) === true;
   const mcpAccounts = accounts.accounts.map(account => ({ ...account, signedIn: signedInOf(account) }));
-  const canConnectMcp = mcpAccounts.some(account => account.signedIn && mcpAccountAccess(account, mcpAccounts).allowed);
+  const canConnectMcp = mcpAccounts.some(account => {
+    const access = mcpAccountAccess(account, mcpAccounts);
+    return account.signedIn && (access.allowed || (access.refresh && !setup.inspectionDisabled));
+  });
   const toggle = (id: string, on: boolean) => setSelected(previous => {
     const next = new Set(previous);
     if (on) next.add(id); else next.delete(id);
@@ -294,10 +335,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   return (
     <section className="cbm">
       <header className="cbm-header">
-        <div>
-          <h1>ChatGPT browser management</h1>
-          <p className="cbm-muted">Every ChatGPT account the Browser tab holds, what it is doing, and how it runs Codex.</p>
-        </div>
+        <h1>ChatGPT browser management</h1>
         {/* A disabled button shows no tooltip of its own: the wrapper carries why it is off. */}
         <span title={full ? `The GPT Browser holds ${accounts.maxAccounts} accounts at most. Remove one below to add another.` : undefined}>
           <button
@@ -319,20 +357,27 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
       <div className="cbm-stats" role="list" aria-label="Overview">
         <Stat label="Accounts" value={accounts.accounts.length} detail={`${accounts.accounts.filter(signedInOf).length} signed in`} />
         <Stat label="Tabs open" value={pages.length} detail={`of ${TOTAL_TAB_CEILING} · ${running} running`} />
-        <Stat label="Codex sessions" value={threads.length} detail={`${threads.filter(t => t.running).length} running · ${CONCURRENT_TURNS} turns at once`} />
+        <Stat label="Codex sessions" value={threads.length} detail={`${threads.filter(t => t.running).length} running`}
+          title={`Codex runs ${CONCURRENT_TURNS} turns at once`} />
         <Stat
-          label="MCP check"
+          label="MCP"
           value={setup.mcpReady ? "Verified" : "Not verified"}
           tone={setup.mcpReady ? "ok" : "warn"}
-          detail={`${1 + tunnels.length} tunnel${tunnels.length ? "s" : ""} · ${setup.bridgeReady ? "Codex bridge set up" : "Codex bridge not set up"}`}
+          detail={`${1 + tunnels.length} tunnel${tunnels.length ? "s" : ""}`}
         />
-        <Stat label="Proxies" value={`${bound}/${accounts.accounts.length}`} detail={`accounts bound · ${decodoCount} from Decodo`} />
+        <Stat label="Proxies" value={`${bound}/${accounts.accounts.length}`} detail={`${decodoCount} from Decodo`} />
       </div>
 
+      {setup.codexRestartRequired ? (
+        <p className="cbm-notice" role="status">
+          Codex has no WebGPT models yet: it started before the Codex bridge. Quit Codex fully, background process too, then reopen it.
+        </p>
+      ) : null}
+
       <div className="cbm-decodo-head">
-        <p className="cbm-muted" role="status">{connectionSummary ?? "Set up the configured Coding Tools MCP connector and check its connection in each account."}</p>
+        <p className="cbm-muted" role="status">{connectionSummary ?? ""}</p>
         <button className="cbm-button" disabled={switching || removing || chatRunning || !canConnectMcp}
-          title={canConnectMcp ? "Connect eligible accounts using a verified workspace owner" : "Sign in and refresh workspace details. Only verified workspace owners can create MCP."}
+          title={canConnectMcp ? "Connects every signed-in account, reading stale workspace details first" : "Sign in to an account first"}
           onClick={() => void connectAccounts(accounts.accounts)} type="button">
           {isRunning("connect-mcp") ? "Connecting accounts…" : "Connect all accounts"}
         </button>
@@ -374,7 +419,6 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
             selected={selected.has(account.id)}
             onSelect={accounts.accounts.length > 1 ? (on: boolean) => toggle(account.id, on) : undefined}
             maxTabs={accounts.maxTabsPerAccount}
-            mainTunnelReady={setup.mcpReady}
             proxies={proxies}
             holders={mcpAccounts}
             run={run}
@@ -432,7 +476,7 @@ function BulkRemoveBar({ total, ticked, locked, onSelectNotSignedIn, onClear, on
   };
   return (
     <div className="cbm-bulk" role="toolbar" aria-label="Remove several accounts">
-      <span className="cbm-muted">{count ? `${count} selected` : "Tick accounts to remove several at once"}</span>
+      <span className="cbm-muted">{count ? `${count} selected` : ""}</span>
       <button className="cbm-link" disabled={locked} onClick={onSelectNotSignedIn} type="button">Select not signed in</button>
       {count ? <button className="cbm-link" disabled={locked} onClick={onClear} type="button">Clear</button> : null}
       <button
@@ -448,9 +492,9 @@ function BulkRemoveBar({ total, ticked, locked, onSelectNotSignedIn, onClear, on
   );
 }
 
-function Stat({ label, value, detail, tone }: { label: string; value: string | number; detail: string; tone?: "ok" | "warn" }) {
+function Stat({ label, value, detail, tone, title }: { label: string; value: string | number; detail: string; tone?: "ok" | "warn"; title?: string }) {
   return (
-    <div className="cbm-stat" role="listitem">
+    <div className="cbm-stat" role="listitem" title={title}>
       <span className="cbm-stat-label">{label}</span>
       <strong className={tone ? `is-${tone}` : undefined}>{value}</strong>
       <span className="cbm-muted">{detail}</span>
@@ -459,7 +503,7 @@ function Stat({ label, value, detail, tone }: { label: string; value: string | n
 }
 
 function AccountCard({
-  account, api, authenticated, isRunning, chatRunning, canRemove, inUse, removing, switching, mainTunnelReady, maxTabs, proxies, holders, run,
+  account, api, authenticated, isRunning, chatRunning, canRemove, inUse, removing, switching, maxTabs, proxies, holders, run,
   sessions, tabs, threads, tunnel, selected = false, onSelect, onOpenBrowser, connection, connect, inspectionDisabled = false,
 }: {
   /** Every bound Codex session: a tab's own one gives its tokens, model and effort. */
@@ -481,8 +525,6 @@ function AccountCard({
   removing: boolean;
   /** An account switch runs (one at a time): the switch buttons wait for it. */
   switching: boolean;
-  /** The main MCP tunnel is set up (it serves the accounts without a tunnel of their own). */
-  mainTunnelReady: boolean;
   maxTabs: number;
   proxies: ProxyProfileRecord[];
   holders: BrowserAccount[];
@@ -507,23 +549,23 @@ function AccountCard({
   // Every account keeps its own sign-in: the one in use from its live page, the others from their
   // own saved session (null until read).
   const signedIn = inUse && authenticated ? true : account.signedIn;
-  const plan = planText(account.plan, signedIn);
+  const plan = planText(account.plan);
   const mcpAccess = mcpAccountAccess({ ...account, signedIn: signedIn === true }, holders);
+  const canConnect = mcpAccess.allowed || (mcpAccess.refresh && !inspectionDisabled);
   const observedAt = Math.max(account.connector?.okAt ?? 0, account.connector?.errorAt ?? 0);
   const connectionCheck = signedIn !== false && connection && connectionMatchesAccount(connection, account)
     && (connection.state === "connecting" || connection.checkedAt >= observedAt) ? connection : undefined;
-  // Losing creation authority does not disconnect a previously confirmed connector.
+  // Losing creation authority does not disconnect a previously confirmed connector. Stale workspace
+  // details are no state of the connector: Connect reads them again itself.
   const connector = signedIn === false
-    ? { tone: "warn", label: "Not connected", detail: "Sign in to this account in the Browser tab first" }
-    : !mcpAccess.allowed && connectionCheck?.state !== "connected" && !account.connector?.okAt
-      ? { tone: "warn", label: mcpAccess.label, detail: mcpAccess.detail }
-      : connectionCheck
+    ? { tone: "warn", label: "Not connected", detail: "" }
+    : connectionCheck
       ? { tone: connectionCheck.state === "connected" ? "ok" : connectionCheck.state === "failed" ? "error" : "idle",
-        label: connectionCheck.state === "connected" ? "Connected" : connectionCheck.state === "failed" ? "Needs attention" : "Connecting…", detail: connectionCheck.detail }
-      : connectorText(account.connector);
-  const signIn = signedIn === null
-    ? { tone: "idle", label: "Checking…" }
-    : signedIn ? { tone: inUse ? "ok" : "idle", label: "Signed in" } : { tone: "warn", label: "Not signed in" };
+        label: connectionCheck.state === "connected" ? "Connected" : connectionCheck.state === "failed" ? "Failed" : "Connecting…", detail: connectionCheck.detail }
+      : !mcpAccess.allowed && !mcpAccess.refresh && !account.connector?.okAt
+        ? { tone: "warn", label: mcpAccess.label, detail: "" }
+        : connectorText(account.connector);
+  const signIn = signedIn === null ? "Checking sign-in…" : signedIn ? "Signed in" : "Not signed in";
   const fill = Math.min(100, Math.round((tabs.length / account.maxTabs) * 100));
 
   // Use and Sign in end in the Browser tab: the account's page (or its sign-in) opens there.
@@ -562,38 +604,39 @@ function AccountCard({
             type="checkbox"
           />
         ) : null}
-        <i className={`cbm-dot${signedIn === null ? "" : signedIn ? " is-on" : " is-warn"}`} aria-hidden />
+        <i className={`cbm-dot${signedIn === null ? "" : signedIn ? " is-on" : " is-warn"}`} aria-label={signIn} role="img" title={signIn} />
         <div className="cbm-card-title">
           <strong title={account.label}>{accountName(account)}</strong>
           {account.email ? <span className="cbm-muted">{account.label}</span> : null}
         </div>
         {inUse ? <span className="cbm-pill is-accent">In use</span> : null}
-        <span className="cbm-pill">{plan.label}</span>
+        {plan.label ? <span className="cbm-pill" title={plan.models}>{plan.label}</span> : null}
       </header>
 
       <dl className="cbm-facts">
+        {signedIn !== true ? (
+          <div>
+            <dt>Sign-in</dt>
+            <dd>
+              <span className={`cbm-tone is-${signedIn === null ? "idle" : "warn"}`}>{signIn}</span>
+              {signedIn === false ? (
+                <button
+                  className="cbm-link"
+                  disabled={isRunning(`signin:${account.id}`) || (!inUse && (switching || removing)) || (inUse && chatRunning)}
+                  onClick={() => void signInNow()}
+                  title={inUse ? "Opens ChatGPT's sign-in in the Browser tab" : "Switches the Browser tab to this account and opens ChatGPT's sign-in"}
+                  type="button"
+                >
+                  {isRunning(`signin:${account.id}`) ? "Opening…" : "Sign in"}
+                </button>
+              ) : null}
+            </dd>
+          </div>
+        ) : null}
         <div>
-          <dt>Sign-in</dt>
+          <dt>Workspace</dt>
           <dd>
-            <span className={`cbm-tone is-${signIn.tone}`}>{signIn.label}</span>
-            {!inUse && account.email ? <span className="cbm-muted"> · last seen as {account.email}</span> : null}
-            {signedIn === false ? (
-              <button
-                className="cbm-link"
-                disabled={isRunning(`signin:${account.id}`) || (!inUse && (switching || removing)) || (inUse && chatRunning)}
-                onClick={() => void signInNow()}
-                title={inUse ? "Opens ChatGPT's sign-in in the Browser tab" : "Switches the Browser tab to this account and opens ChatGPT's sign-in"}
-                type="button"
-              >
-                {isRunning(`signin:${account.id}`) ? "Opening…" : "Sign in"}
-              </button>
-            ) : null}
-          </dd>
-        </div>
-        <div>
-          <dt>Plan</dt>
-          <dd>
-            <span className="cbm-muted">{plan.detail}</span>
+            <span className="cbm-muted" title={plan.models}>{plan.workspace}</span>
             {signedIn ? (
               <button className="cbm-link" disabled={isRunning(`plan:${account.id}`) || isRunning("connect-mcp") || inspectionDisabled} onClick={() => void run(`plan:${account.id}`, () => api.inspectBrowserAccount(account.id))} type="button">
                 {isRunning(`plan:${account.id}`) ? "Checking…" : "Refresh"}
@@ -602,46 +645,26 @@ function AccountCard({
           </dd>
         </div>
         <div>
-          <dt>Role</dt>
-          <dd><span className="cbm-muted">{mcpAccess.role}</span></dd>
-        </div>
-        <div>
-          <dt>MCP access</dt>
-          <dd className="cbm-connector" title={mcpAccess.detail}>
-            <span className="cbm-muted">{mcpAccess.label}</span>
-            <span className="cbm-muted">{mcpAccess.detail}</span>
-          </dd>
-        </div>
-        <div>
           <dt>MCP</dt>
-          <dd>
-            {tunnel ? (
-              <>
-                <span className={`cbm-tone is-${TUNNEL_TONE[tunnel.state]}`}>{TUNNEL_LABEL[tunnel.state]}</span>
-                <span className={`cbm-muted${tunnel.state === "failed" ? " is-error" : ""}`} title={tunnel.detail}>
-                  {" "}· {tunnel.label}{tunnel.detail ? ` · ${tunnel.detail}` : ""}
-                </span>
-                {tunnel.state === "failed" || tunnel.state === "stopped" ? (
-                  <button className="cbm-link" disabled={isRunning(`tunnel:${tunnel.id}`)} onClick={() => void run(`tunnel:${tunnel.id}`, () => api.reconnectMcpTunnel(tunnel.id))} type="button">
-                    {isRunning(`tunnel:${tunnel.id}`) ? "Reconnecting…" : "Reconnect"}
-                  </button>
-                ) : null}
-              </>
-            ) : (
-              <>
-                <span className={`cbm-tone is-${mainTunnelReady ? "idle" : "warn"}`}>Main tunnel</span>
-                <span className="cbm-muted"> · {mainTunnelReady ? "shared configuration" : "not verified"}</span>
-              </>
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>Connector</dt>
           <dd className="cbm-connector" role="status">
             <span className={`cbm-tone is-${connector.tone}`}>{connector.label}</span>
-            <span className={`cbm-muted${connector.tone === "error" ? " is-error" : ""}`} title={connector.detail}>{connector.detail}</span>
+            {connector.detail ? <span className={`cbm-muted${connector.tone === "error" ? " is-error" : ""}`} title={connector.detail}>{connector.detail}</span> : null}
           </dd>
         </div>
+        {tunnel ? (
+          <div>
+            <dt>Tunnel</dt>
+            <dd>
+              <span className={`cbm-tone is-${TUNNEL_TONE[tunnel.state]}`}>{TUNNEL_LABEL[tunnel.state]}</span>
+              {tunnel.state === "failed" && tunnel.detail ? <span className="cbm-muted is-error" title={tunnel.detail}> · {tunnel.detail}</span> : null}
+              {tunnel.state === "failed" || tunnel.state === "stopped" ? (
+                <button className="cbm-link" disabled={isRunning(`tunnel:${tunnel.id}`)} onClick={() => void run(`tunnel:${tunnel.id}`, () => api.reconnectMcpTunnel(tunnel.id))} type="button">
+                  {isRunning(`tunnel:${tunnel.id}`) ? "Reconnecting…" : "Reconnect"}
+                </button>
+              ) : null}
+            </dd>
+          </div>
+        ) : null}
         <div>
           <dt>Proxy</dt>
           <dd className="cbm-proxy">
@@ -662,18 +685,19 @@ function AccountCard({
                 );
               })}
             </select>
-            <div className="cbm-proxy-meta">
-              <span className={`cbm-muted${proxyMissing || proxy?.lastError ? " is-error" : ""}`}>
-                {proxyMissing ? "Bound proxy is gone; using Global Routing"
-                  : proxy ? (proxy.lastError ?? (proxy.latencyMs !== undefined ? `${proxy.latencyMs} ms` : "Not checked"))
-                    : "No proxy of its own"}
-              </span>
-              {proxy ? (
-                <button className="cbm-link" disabled={isRunning(`check:${proxy.id}`)} onClick={() => void run(`check:${proxy.id}`, () => api.testProxyProfile(proxy.id))} type="button">
-                  {isRunning(`check:${proxy.id}`) ? "Checking…" : "Check"}
-                </button>
-              ) : null}
-            </div>
+            {proxy || proxyMissing ? (
+              <div className="cbm-proxy-meta">
+                <span className={`cbm-muted${proxyMissing || proxy?.lastError ? " is-error" : ""}`}>
+                  {proxyMissing ? "Bound proxy is gone; using Global Routing"
+                    : proxy!.lastError ?? (proxy!.latencyMs !== undefined ? `${proxy!.latencyMs} ms` : "Not checked")}
+                </span>
+                {proxy ? (
+                  <button className="cbm-link" disabled={isRunning(`check:${proxy.id}`)} onClick={() => void run(`check:${proxy.id}`, () => api.testProxyProfile(proxy.id))} type="button">
+                    {isRunning(`check:${proxy.id}`) ? "Checking…" : "Check"}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
           </dd>
         </div>
         <div>
@@ -687,17 +711,16 @@ function AccountCard({
               type="button"
             >
               <span className="cbm-meter" aria-hidden><span style={{ width: `${fill}%` }} /></span>
-              <span className="cbm-muted">{tabs.length} of {account.maxTabs}{runningTabs ? ` · ${runningTabs} running` : ""}</span>
+              <span className="cbm-muted">
+                {tabs.length} of {account.maxTabs}{runningTabs ? ` · ${runningTabs} running` : ""}
+                {sessions ? ` · ${sessions} Codex session${sessions === 1 ? "" : "s"}` : ""}
+              </span>
               <svg aria-hidden className="cbm-chevron" height="12" viewBox="0 0 12 12" width="12">
                 <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" />
               </svg>
             </button>
           </dd>
           <AccountTabs id={`cbm-tabs-${account.id}`} open={tabsOpen} tabs={tabs} threads={threads} />
-        </div>
-        <div>
-          <dt>Sessions</dt>
-          <dd className="cbm-muted">{sessions ? `${sessions} Codex session${sessions === 1 ? "" : "s"}` : "None yet"}</dd>
         </div>
       </dl>
 
@@ -732,7 +755,7 @@ function AccountCard({
       </div>
 
       <footer className="cbm-card-actions">
-        <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true || !mcpAccess.allowed || isRunning(`remove:${account.id}`)}
+        <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true || !canConnect || isRunning(`remove:${account.id}`)}
           onClick={() => void connect()} title={signedIn === true ? mcpAccess.detail : "Sign in to this account first"} type="button">
           {connectionCheck?.state === "connecting" ? "Connecting…" : connectionCheck?.state === "connected" ? "Check connection" : "Connect MCP"}
         </button>

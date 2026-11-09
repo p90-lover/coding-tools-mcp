@@ -1006,7 +1006,8 @@ function LauncherShell({
                 onOpenBrowser={() => navigateSurface("browser")}
                 setError={setError}
                 setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true,
-                  inspectionDisabled: snapshot.state.browserInteractionMode === "manual" }}
+                  inspectionDisabled: snapshot.state.browserInteractionMode === "manual",
+                  codexRestartRequired: !devProfile && snapshot.state.codexRestartRequired === true }}
               />
             ))}
             {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
