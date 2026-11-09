@@ -55,6 +55,43 @@ export interface ComputerAllowedApp {
   readonly at: number;
 }
 
+/** One step a chat agent took (computer-control.cjs history), newest first. */
+export interface ComputerStep {
+  readonly time: string;
+  readonly agent: string;
+  readonly model: string;
+  readonly action: string;
+  readonly app: string;
+  readonly outcome: "running" | "done" | "failed";
+}
+
+/** Computer use (the sidebar tab): electron/computer-control.cjs overview(). */
+export interface ComputerOverview {
+  /** False until the app's tools are up. */
+  readonly ready: boolean;
+  /** Headless's control state ("active", "stopped"…), "unknown" when it cannot be read. */
+  readonly state: string;
+  /** The window under control, with the agent, its model and the step it is on; null when control is off. */
+  readonly controlled: {
+    readonly app: string;
+    readonly appName: string;
+    readonly title: string;
+    readonly agent: string;
+    readonly model: string;
+    readonly action: string | null;
+  } | null;
+  readonly history: readonly ComputerStep[];
+  readonly apps: readonly ComputerAllowedApp[];
+  readonly requests: readonly ComputerRequest[];
+}
+
+/** An open window a chat could ask for, with its program ("chrome.exe", "Google Chrome"). */
+export interface ComputerWindow {
+  readonly app: string;
+  readonly appName: string;
+  readonly title: string;
+}
+
 export interface PageRequest {
   readonly cursor?: number;
   readonly limit?: number;
@@ -136,6 +173,11 @@ export interface CodingToolsApi {
     allowedApps(): Promise<{ apps: ComputerAllowedApp[] }>;
     forgetApp(input: { app: string }): Promise<{ ok: boolean; apps?: ComputerAllowedApp[]; error?: string }>;
     onRequests(listener: (requests: ComputerRequest[]) => void): () => void;
+    /** Computer use (the sidebar tab). */
+    overview(): Promise<ComputerOverview>;
+    stop(): Promise<{ ok: boolean; error?: string }>;
+    windows(): Promise<{ windows: ComputerWindow[] }>;
+    allowApp(input: { app: string }): Promise<{ ok: boolean; apps?: ComputerAllowedApp[]; error?: string }>;
   };
   readonly tasks: {
     list(input: PageRequest & { readonly workspaceId: string }): Promise<TaskPage>;

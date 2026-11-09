@@ -760,6 +760,32 @@ const CONTRACTS = Object.freeze({
     }),
     response: genericObject,
   }),
+  // Computer use (the sidebar tab).
+  "computer.overview": Object.freeze({
+    channel: "coding-tools:computer:overview",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "computer.stop": Object.freeze({
+    channel: "coding-tools:computer:stop",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "computer.windows": Object.freeze({
+    channel: "coding-tools:computer:windows",
+    request: emptyObject,
+    response: genericObject,
+  }),
+  "computer.allowApp": Object.freeze({
+    channel: "coding-tools:computer:allow-app",
+    request: Object.freeze({
+      type: "object",
+      required: Object.freeze(["app"]),
+      properties: Object.freeze({ app: Object.freeze({ type: "string", minLength: 1, maxLength: 260 }) }),
+      additionalProperties: false,
+    }),
+    response: genericObject,
+  }),
   "tasks.list": Object.freeze({
     channel: "coding-tools:tasks:list",
     request: taskListRequest,

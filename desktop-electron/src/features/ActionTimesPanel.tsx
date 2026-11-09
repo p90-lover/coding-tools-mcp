@@ -42,6 +42,7 @@ function tabLabel(tab: string, copy: Copy): string {
     "agent-orchestrator-teams": "Orchestrator Team",
     "agent-orchestrator-original": "Agent Orchestrator",
     subagents: "Subagents",
+    "computer-use": "Computer use",
     "native-codex": copy.nativeCodex,
     browser: copy.browser,
     "gpt-browser": "GPT Browser",

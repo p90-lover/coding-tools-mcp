@@ -122,7 +122,8 @@ for (const phase of ["afterCookies", "afterRoute", "duringInspection"]) {
 
 for (const channel of ["launcher:browser-account-remove", "launcher:browser-accounts-remove",
   "launcher:browser-account-switch", "launcher:mcp-create-connector", "coding-tools:computer:answer",
-  "coding-tools:computer:forget-app", "coding-tools:workspaces:policy-update", "coding-tools:workspaces:copy-secret"]) {
+  "coding-tools:computer:forget-app", "coding-tools:computer:allow-app", "coding-tools:computer:stop",
+  "coding-tools:workspaces:policy-update", "coding-tools:workspaces:copy-secret"]) {
   test(`${channel} does not inherit metadata inspection's background access`, async () => {
     const f = fixture();
     vm.runInNewContext(registration(channel), f.context);

@@ -78,8 +78,9 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
-  pendingAppliedUpdate, sweepUpdateLeftovers, waitForUpdateApply,
+  pendingAppliedUpdate, recentUpdateFailure, sweepUpdateLeftovers, waitForUpdateApply,
 } = require("./app-update.cjs");
+const { consumeRelaunchNote, spawnRelaunchGuard } = require("./relaunch-guard.cjs");
 const { createUpdateHealthGate } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { createAppPlugins } = require("./app-plugins.cjs");
@@ -272,6 +273,8 @@ let shutdownInProgress = false;
 let exitCommitted = false;
 /** The launcher's logger, for the quit path (which runs outside start's scope). */
 let quitLogger = null;
+/** The bridge runtime this launch prepared (outside the install folder): the relaunch guard runs on its Bun. */
+let launcherRuntimeRoot = null;
 // Runtime > RTK (rtk.cjs), made once the logger exists; IPC reads it from here.
 let rtkService = null;
 /** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
@@ -2319,6 +2322,33 @@ function registerIpc({ logger, stateStore }) {
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return { ok: computerControlService.forgetApp(input.app), apps: computerControlService.allowedApps() };
   });
+  // Computer use (the sidebar tab): whether control is on and of which window, the steps taken, the
+  // always-allowed apps and the requests waiting. Read while the tab is on screen.
+  handle("coding-tools:computer:overview", async (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!computerControlService) return { ready: false, state: "unknown", controlled: null, history: [], apps: [], requests: [] };
+    return { ready: true, ...(await computerControlService.overview()) };
+  });
+  // Stop on the tab, as on the control pill.
+  handle("coding-tools:computer:stop", async (event) => {
+    assertFocusedMainWindow(event, true);
+    if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
+    await computerControlService.stop("Stop pressed in Computer use");
+    return { ok: true };
+  });
+  // The open windows, each with its program: an app can be always allowed before a chat asks for it.
+  handle("coding-tools:computer:windows", async (event) => {
+    assertFocusedMainWindow(event, false);
+    if (!computerControlService) return { windows: [] };
+    const windows = await computerControlService.targets();
+    return { windows: windows.slice(0, 200).map((item) => ({ app: item.app, appName: item.appName, title: item.title })) };
+  });
+  // Allowing an app is the person's click in the focused window, as on a chat's card.
+  handle("coding-tools:computer:allow-app", async (event, input) => {
+    assertFocusedMainWindow(event, true);
+    if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
+    return { ok: true, apps: await computerControlService.allowApp(input.app) };
+  });
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
   let nativeApprovalPromptInFlight = false;
@@ -4036,12 +4066,13 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
       || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
-      || key === "confirmAgentToolRequests" || key === "rtkEnabled" || key === "chatAgentRedactSecrets";
+      || key === "confirmAgentToolRequests" || key === "rtkEnabled" || key === "chatAgentRedactSecrets" || key === "computerReviewSteps";
     if (!ordinary) throw new Error("Unknown preference");
     // Consent: auto-connecting MCP, letting chat agents see and drive the screen or run commands,
-    // and dropping the dialog that confirms their tool requests, are the user's.
+    // and dropping the dialog that confirms their tool requests or the review of each computer use
+    // step, are the user's.
     if (key === "autoConnectExistingMcp" || ((key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools") && value === true)
-      || (key === "confirmAgentToolRequests" && value === false)) {
+      || ((key === "confirmAgentToolRequests" || key === "computerReviewSteps") && value === false)) {
       assertFocusedMainWindow(_event, true);
     }
     const state = stateStore.update({ [key]: value === true });
@@ -4165,6 +4196,30 @@ function browserCloseBlocker() {
   return operation ? `Wait for ${operation} to finish before quitting Coding Tools` : null;
 }
 
+/**
+ * A keep-bridge quit without a relaunch hands the restart to whoever asked for it (an installer or an
+ * install script). When that never came, the app stayed closed: 19 minutes on 2026-11-02. The guard
+ * (relaunch-guard.cjs) starts it again if neither an app nor an installer has turned up a few minutes
+ * after this one exits. It runs on a bridge runtime's Bun, outside the install folder. Never throws.
+ */
+function armRelaunchGuard() {
+  if (!app.isPackaged || IS_DEV_PROFILE || process.platform !== "win32") return;
+  let failure = "No bridge runtime outside the install folder";
+  for (const root of [launcherRuntimeRoot, runtimeSupervisor?.daemonRuntimeRoot]) {
+    if (typeof root !== "string" || !root) continue;
+    try {
+      const guard = spawnRelaunchGuard({
+        runtime: runtimeBundlePaths(root).executable, executable: process.execPath, descriptorPath: BROWSER_DESCRIPTOR_PATH,
+      });
+      quitLogger?.info("launcher.relaunch_guard_armed", { pid: guard.pid });
+      return;
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+  }
+  quitLogger?.warn("launcher.relaunch_guard_failed", { message: failure });
+}
+
 async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
@@ -4264,6 +4319,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     await step("browser-control", () => browserControl?.close(), 5_000);
     // Last: everything above may still reach the network through Nova's gateway.
     if (!keepBridge) await step("proxybridge-nova", () => stopProxyBridgeNova(), 5_000);
+    // Armed here, past every step that can still cancel the quit: a cancelled one keeps this app running.
+    if (keepBridge && !relaunch) armRelaunchGuard();
     exitCommitted = true;
     if (relaunch) app.relaunch();
     app.quit();
@@ -4366,6 +4423,7 @@ async function start() {
     onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); },
   });
   installedRuntimeRoot = launchRuntimeRoot;
+  launcherRuntimeRoot = launchRuntimeRoot;
   runtimeRootResolved = true;
   runtimeRootCheck.at = Date.now();
 
@@ -4435,6 +4493,17 @@ async function start() {
   quitLogger = logger;
   const droppedAgentEnv = droppedAgentSessionEnvironment();
   if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
+  // When something other than the user started this app, why: a relaunch guard after a keep-bridge
+  // quit nobody finished (relaunch-guard.cjs leaves a note), or an update worker that could not apply
+  // its update (app-update-worker.cjs records it). Logged in memory only; neither writes a log file.
+  void consumeRelaunchNote(path.dirname(BROWSER_DESCRIPTOR_PATH)).then((note) => {
+    if (note) logger.warn("launcher.relaunched_by_guard", note);
+  });
+  if (app.isPackaged) {
+    void recentUpdateFailure(path.dirname(process.execPath)).then((failure) => {
+      if (failure) logger.warn("launcher.app_update_failed_last_run", failure);
+    });
+  }
   // An update that just placed this version is kept only once it proves it works: its window loaded,
   // its backend answered and AO, when started, is ready (update-health-gate.cjs). Until then the old
   // copies the worker held stay; a version still not healthy after Settings' health window goes back
@@ -4875,6 +4944,8 @@ async function start() {
         previews: chatPreviews,
         sandbox: chatSandbox,
         computerControl,
+        // Computer use > "Review each step": off, the person's yes for an app covers its steps.
+        reviewComputerSteps: () => stateStore.read().computerReviewSteps === true,
         // Every call that sees or drives the screen goes to the chat's reviewer first (Codex's auto-review).
         reviewCall: (input) => missionWorkflowRuntime?.reviewToolCall?.(input) ?? { action: "ask", reason: "" },
         // The model a chat runs on, named on the computer-control pill.
@@ -5131,6 +5202,8 @@ async function start() {
       logger,
       // A pre-warmed session is reused only by a launch that attaches the same app tools.
       agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
+      // "Approve for me" runs a computer use step in an app the chat may use without the reviewer.
+      computerStepAllowed: (input) => chatAgentTools?.computerStepAllowed?.(input) ?? null,
       nativePreviewTools: chatAgentTools,
       // Runtime > Subagents: its settings, saved subagents and running ones.
       subagents: subagentsService,
