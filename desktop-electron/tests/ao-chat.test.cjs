@@ -385,6 +385,30 @@ test("chats group runs by task, newest first, titled 'New task' when the task is
   assert.deepEqual(list[0].runIds, ["r1", "r3"]);
 });
 
+test("a chat with no run in the project read's newest 100 stays listed from its lifecycle's newest run", () => {
+  // 2026-11-09: the project read holds its newest 100 runs, shared by all chats; busy goal chats
+  // filled it, and "clash of clan macro" listed 4 of its 49 chats. The workflow puts a chat's newest
+  // run on its lifecycle entry when none of its runs is in the read (withChatIndex).
+  const runs = [run("r9", "goal", [node("p", "planner", "finished")]), run("r10", "goal", [node("p", "planner", "running")])];
+  const lifecycle = [
+    { task_id: "goal", visibility: "active" },
+    { task_id: "old", title: "Old chat", visibility: "active", latest_run: { id: "r2", nodes: [{ role: "planner", state: "finished" }], run_count: 7, at: 2_000 } },
+    { task_id: "newer", title: "Newer chat", visibility: "active", latest_run: { id: "r5", nodes: [{ role: "planner", state: "failed" }], run_count: 1, at: 5_000 } },
+    { task_id: "gone", title: "Archived chat", visibility: "archived", latest_run: { id: "r1", nodes: [{ role: "planner", state: "finished" }], at: 9_000 } },
+    { task_id: "draft", title: "New task", visibility: "active" },
+  ];
+  const list = plain(chat.chatList(runs, [], lifecycle));
+  assert.deepEqual(list.map((entry) => [entry.taskId, entry.title, entry.latestRunId, entry.status, entry.runCount]), [
+    ["goal", "New task", "r10", "running", undefined],
+    ["newer", "Newer chat", "r5", "attention", 1],
+    ["old", "Old chat", "r2", "done", 7],
+  ], "after the chats in the read, newest work first; a draft with no runs stays off, an archived one stays archived");
+  assert.deepEqual(plain(chat.chatArchived(runs, [], lifecycle)).map((entry) => entry.taskId), ["gone"]);
+  // Once its runs are in the read again (a new message, or the chat's own read), those are what it shows.
+  const back = plain(chat.chatList([...runs, run("r11", "old", [node("p", "planner", "running")])], [], lifecycle));
+  assert.deepEqual(back.map((entry) => [entry.taskId, entry.latestRunId, entry.status]).slice(0, 2), [["old", "r11", "running"], ["goal", "r10", "running"]]);
+});
+
 test("a run being stopped reads as stopped at once; its working cards end, its finished ones keep their work", () => {
   const receipt = { thread_id: "s1", answer: "partial" };
   const live = run("r", "t", [node("p", "planner", "finished", { receipt }), node("w", "worker", "running", { receipt }),
