@@ -4094,10 +4094,10 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal or browser-account change still being saved (off the main thread) lands before the app
-    // goes; a disk that hangs holds the quit 5 s at most, and each file keeps the change before.
+    // A goal, /schedule or browser-account change still being saved (off the main thread) lands before
+    // the app goes; a disk that hangs holds the quit 5 s at most, and each file keeps the change before.
     await Promise.race([
-      Promise.all([missionWorkflowRuntime?.goalsSaved(), browserAccounts.saved()]),
+      Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(), browserAccounts.saved()]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
     const runtimeOperation = runtimeHost?.currentOperation();
@@ -5039,6 +5039,12 @@ async function start() {
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
       // The chat's own preferences ("Retry automatically").
       chatPreferencesFile: path.join(app.getPath("userData"), "integrations", "chat-preferences.json"),
+      // Settings › Instructions: the global AGENTS.md and each project's own, put in front of every
+      // agent's first message (agent-instructions.cjs ships with the app, not the backend bundle).
+      agentInstructions: require("./agent-instructions.cjs").createAgentInstructions({
+        globalFile: path.join(app.getPath("userData"), "instructions", "AGENTS.md"),
+        workspaces: listHeadlessWorkspaces,
+      }),
       // Points per model from finished Team rounds (model-scores.cjs).
       modelScoresFile: path.join(app.getPath("userData"), "integrations", "model-scores.json"),
       knownModelsFile: path.join(app.getPath("userData"), "integrations", "cpa-known-models.json"),

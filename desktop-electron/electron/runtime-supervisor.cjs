@@ -142,6 +142,12 @@ function tunnelRuntimeStopped(health) {
     || (health?.state === "stopped" && health?.processRunning === false);
 }
 
+/** An ownership state without its write time: two writes of the same state compare equal. */
+function stateKey(state) {
+  const { updatedAt: _updatedAt, ...content } = state;
+  return JSON.stringify(content);
+}
+
 function runtimeOwnershipPredatesCurrentBoot(state) {
   return Boolean(
     state
@@ -743,7 +749,11 @@ class RuntimeSupervisor {
   }
 
   readState() {
-    if (!fs.existsSync(this.statePath)) return null;
+    if (!fs.existsSync(this.statePath)) {
+      this.writtenStateKey = null;
+      this.writtenState = null;
+      return null;
+    }
     // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
     // processes it named died with the machine. Failing on it stopped every watchdog restart until
     // something rewrote the file; it is set aside as if it were missing, its bytes kept in Trash first.
@@ -774,6 +784,10 @@ class RuntimeSupervisor {
         || typeof state.updatedAt !== "string"
         || Number.isNaN(Date.parse(state.updatedAt))) {
         throw new Error("state shape is invalid");
+      }
+      if (this.writtenStateKey && stateKey(state) !== this.writtenStateKey) {
+        this.writtenStateKey = null;
+        this.writtenState = null;
       }
       return state;
     } catch (error) {
@@ -829,7 +843,16 @@ class RuntimeSupervisor {
 
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
+    // The write is flushed to disk on the main thread, which held every window 0.4-1.5 s on the hard
+    // disk each time the watchdog re-checked a bridge that needs setup (every 20-40 min, 2026-11-08).
+    // Nothing in it had changed, so the same state this process last wrote is kept. It is forgotten
+    // when the file is cleared or set aside (clearState) and when a read finds other content in it
+    // (another launcher's), so those are written again; no extra disk call checks the file here.
+    const key = stateKey(state);
+    if (key === this.writtenStateKey && this.writtenState) return this.writtenState;
     writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`, { durable: true });
+    this.writtenStateKey = key;
+    this.writtenState = state;
     return state;
   }
 
@@ -854,6 +877,8 @@ class RuntimeSupervisor {
 
   clearState() {
     fs.rmSync(this.statePath, { force: true });
+    this.writtenStateKey = null;
+    this.writtenState = null;
   }
 
   prepareExternalMigration() {

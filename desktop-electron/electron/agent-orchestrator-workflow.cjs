@@ -365,7 +365,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetch, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -896,6 +896,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const planner = team?.nodes?.find(node => node.role === "planner");
     if (!planner?.route) return { ok: true, warmed: false, reason: "The team has no orchestrator to pre-warm" };
     return chatPrewarmRoute(id, planner.route, false);
+  }
+  // The person's global and workspace AGENTS.md (agent-instructions.cjs): in front of a new agent's
+  // first message, and of a running agent's next one once they changed (AO session -> the version
+  // it was given). A follow-up is sent as a steer-sized message (64 KiB), not a 16 KiB spawn prompt.
+  const FOLLOW_UP_BYTES = 60 * 1024;
+  const instructionsGiven = new Map();
+  function givenInstructions(session, hash) {
+    if (!session) return;
+    instructionsGiven.delete(session);
+    instructionsGiven.set(session, hash);
+    if (instructionsGiven.size > 500) instructionsGiven.delete(instructionsGiven.keys().next().value);
+  }
+  /** Never fails a launch: unreadable files are left out (and logged), as no files are. */
+  async function launchInstructions(workspaceId, maxBytes) {
+    if (!agentInstructions || maxBytes <= 0) return { text: "", hash: "" };
+    return agentInstructions.forLaunch(workspaceId, { maxBytes }).catch((error) => {
+      logger?.warn?.("ao.instructions_unread", { message: publicText(error?.message || error, 200) });
+      return { text: "", hash: "" };
+    });
+  }
+  function agentInstructionsCall({ workspaceId = null, scope, text } = {}) {
+    if (!agentInstructions) throw new Error("Agent instructions are unavailable");
+    const id = workspaceId ? clean(workspaceId, 128) : null;
+    const files = scope === undefined ? agentInstructions.read(id) : agentInstructions.save({ scope, workspaceId: id, text });
+    return Promise.all([files, agentInstructions.projects?.().catch(() => []) ?? []])
+      .then(([read, projects]) => ({ ok: true, ...read, projects }));
   }
   // AO session -> the turn its latest follow-up started, so the previous turn is not read as its answer.
   const expectedTurns = new Map();
@@ -1488,6 +1514,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // window before it, and whether it continued the chat's session, took a warm one or spawned.
       let launchedVia = "spawn";
       let launchStarted = null;
+      // A follow-up's launch in two parts: bringing its agent back (or confirming it is up) and the
+      // send itself. Continued launches took 10-17 s against ~0.3 s usually (2026-11-08), and the
+      // total alone did not say which part waited.
+      let checkMs = null, sendMs = null;
       // No warm start begins in this project while the launch runs (it would queue in front of
       // it in AO), and a route the picker asked to warm before the send is no longer wanted.
       launching.set(workspaceId, (launching.get(workspaceId) ?? 0) + 1);
@@ -1508,11 +1538,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // It is stopped (its session, worktree and conversation stay), so it cannot come back beside
         // the new agent, which starts with the chat so far (the handoff below).
         let unconfirmed = null;
+        const checkStarted = now();
         const usable = Boolean(continued) && await continuableSession(continued.session).catch((error) => {
           if (error?.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
           unconfirmed = error;
           return false;
         });
+        if (continued) checkMs = now() - checkStarted;
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
           // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
@@ -1523,8 +1555,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
-          sent = await harnessService().send(continued.session, continued.text, reserved.request_key)
+          // The person's AGENTS.md files go in front again only when they changed since this agent
+          // was given them (or since the app started, when that is not known).
+          const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
+          const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
+          const sendStarted = now();
+          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key)
             .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
+          sendMs = now() - sendStarted;
+          if (sent?.turnId) givenInstructions(continued.session, standing.hash);
         }
         // A follow-up that should have continued the chat's session starts a fresh one: logged with
         // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
@@ -1538,10 +1577,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
         handoffs.delete(runId);
-        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt);
+        // A new agent's first message starts with the person's AGENTS.md files, in the room the
+        // request leaves; the chat's handoff gets what is left after them.
+        const standing = sent?.turnId ? { text: "", hash: "" } : await launchInstructions(workspaceId, PROMPT_BYTES - utf8Bytes(reserved.prompt));
+        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt) - utf8Bytes(standing.text);
         if (!sent?.turnId && handoff) stage("summarising the chat for a new agent");
-        const prompt = !sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt;
+        const prompt = standing.text + (!sent?.turnId && handoff
+          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt);
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
@@ -1573,6 +1615,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage(continued ? "starting a new agent (the chat's agent was gone or refused the message)" : "starting a new agent");
           session = await harnessService().spawn({ ...launch, prompt });
         }
+        if (first?.turnId || (session && !sent?.turnId)) givenInstructions(session, standing.hash);
         // The next chat on this route finds a session waiting too, started once this turn is under
         // way rather than beside its first model call.
         if (warmed && !idleStopped) {
@@ -1590,7 +1633,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       const done = now();
       logger?.info?.("ao.launch_timing", { agent: externalAgent(node), via: launchedVia, ok: !failure,
-        prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted });
+        prepareMs: (launchStarted ?? done) - dispatchStarted, launchMs: launchStarted === null ? 0 : done - launchStarted, totalMs: done - dispatchStarted,
+        ...(checkMs === null ? {} : { checkMs }), ...(sendMs === null ? {} : { sendMs }) });
       // A card stopped while its launch was in flight has no session to stop yet; once the launch
       // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
       const stopIfAbandoned = async () => {
@@ -5546,8 +5590,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const CHAT_MESSAGE_BYTES = BOARD_TEXT_BYTES - 256;
   const tooLong = (text) => `This message is ${utf8Bytes(text).toLocaleString("en-US")} bytes; a chat message can be at most ${CHAT_MESSAGE_BYTES.toLocaleString("en-US")}. Shorten it or send it in parts.`;
   const boardText = text => text.replace(/\r\n?/g, "\n").replace(/[\x7F-\x9F]/g, "");
+  // One message steered in twice: the chat's send was refused ("still running", a goal's next round
+  // had just started), the message went to the chat's queue, and the queue and a direct steer both
+  // put it into the same turn 0.6 s apart (2026-11-08: "unpause it" twice in the agent's turn and
+  // twice in the chat). A steer of the same text into the same chat waits for one already on its way
+  // and takes its answer, and one that turn already took within STEER_REPEAT_MS is not sent again.
+  const STEER_REPEAT_MS = 30_000;
+  const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
+  function chatSteer(input = {}) {
+    if (input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input);
+    const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
+    const earlier = steersInFlight.get(key);
+    if (earlier) {
+      return earlier.catch(() => null).then((answer) => answer?.steered === true ? { ...answer, duplicate: true } : steerTracked(key, input));
+    }
+    return steerTracked(key, input);
+  }
+  // The steer itself, as its caller's answer: no wait is added in front of it (the chat's note reads
+  // the message count while the caller carries on).
+  function steerTracked(key, input) {
+    const mine = chatSteerOnce(input);
+    steersInFlight.set(key, mine);
+    const forget = () => { if (steersInFlight.get(key) === mine) steersInFlight.delete(key); };
+    mine.then(forget, forget);
+    return mine;
+  }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteer({ workspaceId, taskId, message, restart = false, goal } = {}) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -5561,6 +5630,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
       && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
+    // This turn already took the same message moments ago: it is not handed over (or noted) again,
+    // unless the agent has asked a question since that what was typed answers (below).
+    const repeat = !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
+      .some(steer => steer.taskId === task && steer.message === text && now() - steer.at < STEER_REPEAT_MS);
+    const skipRepeat = () => {
+      logger?.info?.("ao.steer_repeat_skipped", { workspaceId: id, taskId: task });
+      return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id };
+    };
+    if (repeat && !externalAgent(card)) return skipRepeat();
     // Native Codex (WebGPT and the shared CPA pool) steers its running turn through Codex's own
     // turn/steer, as the Codex app does: the message joins the turn at the agent's next step. Its
     // chats queued every message until the turn ended ("Running. New messages send when it finishes").
@@ -5586,6 +5664,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
+    const question = !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
+    const reply = question ? typedAnswer(question, text) : null;
+    if (repeat && !reply) return skipRepeat();
     // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
     // (seen 2026-10-21: a steer into a turn waiting on an approval held the session's dispatch lock,
     // and every later steer, approval answer and stop hung for 180 s). The message waits instead.
@@ -5618,8 +5699,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Claude Code, where a reply typed under its question answers it. The user (2026-11-08): "fix the
     // steer message always in queued instead auto sending to agent"; a steer typed under a question
     // waited 30 s here, then sat in the queue until the question went (answered for them, or never).
-    const question = !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
-    const reply = question ? typedAnswer(question, text) : null;
     if (reply) {
       await harnessService().resolveInput(card.receipt.thread_id, question.approval_id, reply.action, reply.content);
       rememberAnswer(question.approval_id, questionText(question), reply.action === "accept" ? questionAnswerText(question, reply.content) : "Skipped");
@@ -5733,7 +5812,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const stalledNote = stalled?.note;
     if (stalled) {
       invalidateGoal(stalled);
-      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", stuckRounds: 0 });
+      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0 });
     }
     const still = goalGuard(id, task, stalled);
     try {
@@ -6085,7 +6164,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const selection = goal.team?.id ? { teamId: goal.team.id } : followUpSelection(previous, goal.route);
     const message = goalMessage(goal.objective, round, goal.feedback);
     // The reason it goes on stays readable (feedback) while the round runs; the note is for states.
-    goals.update(id, task, { round, note: "", lastMessage: message });
+    goals.update(id, task, { round, note: "", lastMessage: message, roundStartedAt: now() });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
       const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true }, (accepting = false) => {
@@ -6189,6 +6268,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // How many failed rounds (or failed checks) in a row a goal carries on through before it stalls,
   // and the pauses between: a round that failed waits 30 s, then 60 s; a check waits 2 minutes.
   const GOAL_FAILED_ROUNDS = 3;
+  // A round judged not met that ended this soon after it started is "quick"; the pause before the
+  // next round after N quick ones in a row is GOAL_QUICK_PAUSES_MS[N] (none for the first), and
+  // GOAL_QUICK_STALL in a row stall the goal. A longer round resets the count.
+  const GOAL_QUICK_ROUND_MS = 2 * 60_000;
+  const GOAL_QUICK_PAUSES_MS = [0, 0, 30_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
+  const GOAL_QUICK_STALL = 8;
   const GOAL_RETRY_DELAY_MS = 30_000;
   const GOAL_CHECK_RETRY_MS = 2 * 60_000;
   const goalTimers = new Map();
@@ -6494,6 +6579,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         goals.update(workspaceId, task, { status: "limited", note: `Stopped after ${goal.round} rounds; resume allows ${goal.rounds} more` });
         return;
       }
+      // Rounds that end at once without meeting the goal (the agent only says it is blocked, without
+      // update_goal) wait longer each time, then stall the goal: a goal chat ran a round every ~20 s
+      // for hours, 150+ rounds of "the account is on hold", until CPA refused its requests (2026-11-08).
+      const quickRounds = Number.isFinite(goal.roundStartedAt) && now() - goal.roundStartedAt < GOAL_QUICK_ROUND_MS ? (goal.quickRounds ?? 0) + 1 : 0;
+      goals.update(workspaceId, task, { quickRounds });
+      if (quickRounds >= GOAL_QUICK_STALL) {
+        goals.update(workspaceId, task, { status: "stalled", quickRounds: 0,
+          note: `${quickRounds} rounds in a row ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal; check what the agent says it needs, then /goal resume` });
+        logger?.warn?.("ao.goal_quick_rounds_stalled", { task: task.slice(0, 8), round: goal.round, quickRounds });
+        return;
+      }
+      const pause = GOAL_QUICK_PAUSES_MS[Math.min(quickRounds, GOAL_QUICK_PAUSES_MS.length - 1)];
+      if (pause > 0) {
+        goals.update(workspaceId, task, { note: `Round ${goal.round} ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal (${quickRounds} in a row); the next round starts in ${pause < 60_000 ? `${pause / 1000} s` : `${pause / 60_000} min`}` });
+        logger?.info?.("ao.goal_round_paced", { task: task.slice(0, 8), round: goal.round, quickRounds, pauseMs: pause });
+        goalLater(workspaceId, task, pause, runId);
+        return;
+      }
       await continueGoal(workspaceId, task, goals.get(workspaceId, task), mission);
     } finally {
       goalChecks.delete(guard);
@@ -6596,7 +6699,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Resuming carries on now: a pause still waiting is dropped.
     dropGoalRetry(id, task);
     invalidateGoal(goal);
-    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", stuckRounds: 0 });
+    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0 });
     const still = goalGuard(id, task, goal);
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
@@ -8513,6 +8616,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_schedule": return chatSchedule(args);
       case "chat_auto_retry": return chatAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
+      case "agent_instructions": return agentInstructionsCall(args);
       case "chat_question_timeout": return chatQuestionTimeout(args);
       case "chat_auto_compact": return chatAutoCompact(args);
       case "compact_chat": return compactSession(args);
@@ -8628,7 +8732,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   restoreQueues();
   /** Resolves once every goal change so far is on disk (saves run off the main thread). */
   const goalsSaved = () => goals.saved();
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  /** Resolves once every /schedule change so far is on disk (saved off the main thread too). */
+  const schedulesSaved = () => schedules.saved();
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved,startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
