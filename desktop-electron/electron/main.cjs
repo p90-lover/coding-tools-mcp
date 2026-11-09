@@ -78,8 +78,9 @@ const { runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
-  pendingAppliedUpdate, sweepUpdateLeftovers, waitForUpdateApply,
+  pendingAppliedUpdate, recentUpdateFailure, sweepUpdateLeftovers, waitForUpdateApply,
 } = require("./app-update.cjs");
+const { consumeRelaunchNote, spawnRelaunchGuard } = require("./relaunch-guard.cjs");
 const { createUpdateHealthGate } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { createAppPlugins } = require("./app-plugins.cjs");
@@ -272,6 +273,8 @@ let shutdownInProgress = false;
 let exitCommitted = false;
 /** The launcher's logger, for the quit path (which runs outside start's scope). */
 let quitLogger = null;
+/** The bridge runtime this launch prepared (outside the install folder): the relaunch guard runs on its Bun. */
+let launcherRuntimeRoot = null;
 // Runtime > RTK (rtk.cjs), made once the logger exists; IPC reads it from here.
 let rtkService = null;
 /** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
@@ -4193,6 +4196,30 @@ function browserCloseBlocker() {
   return operation ? `Wait for ${operation} to finish before quitting Coding Tools` : null;
 }
 
+/**
+ * A keep-bridge quit without a relaunch hands the restart to whoever asked for it (an installer or an
+ * install script). When that never came, the app stayed closed: 19 minutes on 2026-11-02. The guard
+ * (relaunch-guard.cjs) starts it again if neither an app nor an installer has turned up a few minutes
+ * after this one exits. It runs on a bridge runtime's Bun, outside the install folder. Never throws.
+ */
+function armRelaunchGuard() {
+  if (!app.isPackaged || IS_DEV_PROFILE || process.platform !== "win32") return;
+  let failure = "No bridge runtime outside the install folder";
+  for (const root of [launcherRuntimeRoot, runtimeSupervisor?.daemonRuntimeRoot]) {
+    if (typeof root !== "string" || !root) continue;
+    try {
+      const guard = spawnRelaunchGuard({
+        runtime: runtimeBundlePaths(root).executable, executable: process.execPath, descriptorPath: BROWSER_DESCRIPTOR_PATH,
+      });
+      quitLogger?.info("launcher.relaunch_guard_armed", { pid: guard.pid });
+      return;
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    }
+  }
+  quitLogger?.warn("launcher.relaunch_guard_failed", { message: failure });
+}
+
 async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
@@ -4292,6 +4319,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     await step("browser-control", () => browserControl?.close(), 5_000);
     // Last: everything above may still reach the network through Nova's gateway.
     if (!keepBridge) await step("proxybridge-nova", () => stopProxyBridgeNova(), 5_000);
+    // Armed here, past every step that can still cancel the quit: a cancelled one keeps this app running.
+    if (keepBridge && !relaunch) armRelaunchGuard();
     exitCommitted = true;
     if (relaunch) app.relaunch();
     app.quit();
@@ -4394,6 +4423,7 @@ async function start() {
     onFallback: (error) => { runtimeSourceFallback = error instanceof Error ? error.message : String(error); },
   });
   installedRuntimeRoot = launchRuntimeRoot;
+  launcherRuntimeRoot = launchRuntimeRoot;
   runtimeRootResolved = true;
   runtimeRootCheck.at = Date.now();
 
@@ -4463,6 +4493,17 @@ async function start() {
   quitLogger = logger;
   const droppedAgentEnv = droppedAgentSessionEnvironment();
   if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
+  // When something other than the user started this app, why: a relaunch guard after a keep-bridge
+  // quit nobody finished (relaunch-guard.cjs leaves a note), or an update worker that could not apply
+  // its update (app-update-worker.cjs records it). Logged in memory only; neither writes a log file.
+  void consumeRelaunchNote(path.dirname(BROWSER_DESCRIPTOR_PATH)).then((note) => {
+    if (note) logger.warn("launcher.relaunched_by_guard", note);
+  });
+  if (app.isPackaged) {
+    void recentUpdateFailure(path.dirname(process.execPath)).then((failure) => {
+      if (failure) logger.warn("launcher.app_update_failed_last_run", failure);
+    });
+  }
   // An update that just placed this version is kept only once it proves it works: its window loaded,
   // its backend answered and AO, when started, is ready (update-health-gate.cjs). Until then the old
   // copies the worker held stay; a version still not healthy after Settings' health window goes back

@@ -838,19 +838,24 @@ function memoryUpdate(faults = {}) {
     readFile: async file => io.readFileSync(file), writeFile: async (...args) => io.writeFileSync(...args),
     rm: async (...args) => io.rmSync(...args), access: async file => { if (!io.existsSync(file)) throw missing(file); },
   };
-  class Clock extends Date { static now() { return 1000; } }
-  const fakeProcess = { pid: 42, platform: "win32", arch: "x64", env: {}, execPath: path.join(installRoot, "Coding Tools.exe"),
-    kill() { throw Object.assign(new Error("fixture parent exited"), { code: "ESRCH" }); } };
+  // `parentAliveMs`: the app stays up that long; each sleep then moves the clock on by what it waited.
+  let clock = 1000;
+  class Clock extends Date { static now() { return clock; } }
+  const fakeProcess = { pid: 42, ppid: 1, platform: "win32", arch: "x64", env: {}, execPath: path.join(installRoot, "Coding Tools.exe"),
+    kill() {
+      if (faults.parentAliveMs && clock - 1000 < faults.parentAliveMs) return true;
+      throw Object.assign(new Error("fixture parent exited"), { code: "ESRCH" });
+    } };
   const dependencies = { "original-fs": io, "node:fs": io, "node:path": path, "node:crypto": require("node:crypto"), "node:zlib": require("node:zlib"),
     "node:child_process": { spawn: (file, args) => { launches.push({ file, args }); return { on() {}, once() {}, unref() {} }; }, spawnSync: () => ({ status: 1, stdout: "" }) },
     "./update.cjs": {},
   };
   const context = module => ({ module, __dirname: path.dirname(workerPath), Buffer, Date: Clock, process: fakeProcess,
     require: name => { assert.ok(Object.hasOwn(dependencies, name), `unexpected fixture dependency ${name}`); return dependencies[name]; },
-    setTimeout: fn => { queueMicrotask(fn); return { unref() {} }; }, clearTimeout() {},
+    setTimeout: (fn, ms) => { if (faults.parentAliveMs) clock += ms ?? 0; queueMicrotask(fn); return { unref() {} }; }, clearTimeout() {},
   });
   const workerModule = { exports: {} };
-  const worker = vm.runInNewContext(workerSource + "\n({applyJob,recoverJournal})", context(workerModule));
+  const worker = vm.runInNewContext(workerSource + "\n({applyJob,recoverJournal,run:typeof run==='function'?run:undefined})", context(workerModule));
   dependencies["./app-update-worker.cjs"] = workerModule.exports;
   const controllerModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(controllerPath, "utf8"), context(controllerModule));
@@ -862,7 +867,7 @@ function memoryUpdate(faults = {}) {
   const job = { version: "0.8.0", parentPid: 1, installRoot, stageRoot, filesRoot, executable: fakeProcess.execPath,
     changed: Object.keys(staged), obsolete: ["resources/old.js"], logPath: path.join(root, "worker.log"),
     installedManifest: { version: "0.8.0", files: Object.entries(staged).map(([rel, content]) => ({ path: rel, size: content.length, sha256: sha(content) })) } };
-  files.set(jobPath, JSON.stringify(job));
+  files.set(jobPath, JSON.stringify(faults.corruptJob ? { ...job, changed: undefined } : job));
   return { worker, helper: workerModule.exports, controller: controllerModule.exports, files, io, faults, launches, logs, job, jobPath, journalPath, stageRoot, installRoot, appPath,
     journal: () => JSON.parse(files.get(journalPath)), result: () => JSON.parse(files.get(path.join(installRoot, "_update", "last-result.json"))),
     read: rel => files.get(path.join(installRoot, ...rel.split("/"))),
@@ -884,6 +889,44 @@ test("rollback retention successful apply keeps repair files until health commit
   assert.equal(f.read("resources/app.asar.old-1000"), undefined);
   assert.equal(f.read("resources/app.asar"), "v2");
   assert.equal(f.result().stage, "started");
+});
+
+// A quit the app cancels ends the worker (createAppUpdateController kills it), so an app still running is
+// one slow to close. The worker gave up after five minutes, and the app, gone soon after, stayed closed.
+test("an app that takes over five minutes to close still gets its update and is started again", async () => {
+  const f = memoryUpdate({ parentAliveMs: 6 * 60_000 });
+  await f.worker.applyJob(f.jobPath);
+  assert.equal(f.read("resources/app.asar"), "v2");
+  assert.equal(f.journal().state, "placed");
+  assert.equal(f.launches.length, 1, "the closed app must start again");
+});
+
+test("an app that never closes is left running: nothing is applied or started, and why is recorded for its log", async () => {
+  const f = memoryUpdate({ parentAliveMs: 31 * 60_000 });
+  await f.worker.applyJob(f.jobPath);
+  assert.equal(f.read("resources/app.asar"), "v1");
+  assert.equal(f.launches.length, 0, "a second app would only bring the running one forward");
+  assert.equal(f.io.existsSync(f.stageRoot), false);
+  assert.deepEqual([f.result().ok, f.result().stage, f.result().failures], [false, "wait", 0], "not the version's fault: no back-off");
+  assert.match(f.result().message, /did not close/);
+});
+
+test("a worker step that throws unexpectedly records why and starts the closed app again", async () => {
+  const f = memoryUpdate({ corruptJob: true });
+  await f.worker.applyJob(f.jobPath);
+  assert.equal(f.read("resources/app.asar"), "v1", "nothing was swapped");
+  assert.deepEqual(f.launches.map((launch) => launch.file), [f.job.executable]);
+  assert.deepEqual([f.result().ok, f.result().stage], [false, "worker"]);
+  assert.equal(f.files.has(path.join(f.installRoot, "_update", "applying.json")), false);
+});
+
+test("a worker that cannot read its job or journal still starts the app it closed once that app has gone", async () => {
+  const f = memoryUpdate();
+  assert.equal(typeof f.worker.run, "function");
+  assert.equal(await f.worker.run(["--recover", path.join(f.installRoot, "_update", "missing.json"), "1"]), 1);
+  assert.deepEqual(f.launches.map((launch) => launch.file), [path.join(f.installRoot, "Coding Tools.exe")]);
+  assert.deepEqual([f.result().ok, f.result().stage], [false, "worker"]);
+  assert.match(f.result().message, /missing/);
 });
 
 for (const failure of ["swap", "verify"]) {
