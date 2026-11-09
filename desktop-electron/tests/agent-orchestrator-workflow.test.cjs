@@ -8284,12 +8284,12 @@ test("a new chat's first message runs in the session pre-warmed for its model, a
     if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
     return world.requestHeadless(endpoint, body, options);
   };
-  // The replacement warm session waits until the claimed one's turn is under way (90 s).
+  // The replacement warm session waits until the claimed one's turn is under way (12 s).
   const rewarms = [];
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: request, findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
-    setTimer: (callback, delay) => { if (delay === 90_000) { rewarms.push(callback); return { unref() {} }; } return setTimeout(callback, delay); },
+    setTimer: (callback, delay) => { if (delay === 12_000) { rewarms.push(callback); return { unref() {} }; } return setTimeout(callback, delay); },
     clearTimer: timer => clearTimeout(timer),
     aoHarness: {
       spawn: async input => { spawned.push(input); return `warm-${spawned.length}`; },
@@ -8354,7 +8354,7 @@ test("a warm agent that does not take the first message within seconds is ended 
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: request, findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
-    setTimer: (callback, delay) => delay === 90_000 ? { unref() {} } : setTimeout(callback, delay),
+    setTimer: (callback, delay) => delay === 12_000 ? { unref() {} } : setTimeout(callback, delay),
     clearTimer: timer => clearTimeout(timer),
     aoHarness: {
       spawn: async input => { spawned.push(input); return `agent-${spawned.length}`; },
@@ -8375,6 +8375,113 @@ test("a warm agent that does not take the first message within seconds is ended 
     assert.equal(spawned.length, 2);
     assert.equal(spawned[1].prompt, "fix the login", "a fresh agent starts with the message");
   } finally { workflow.dispose(); }
+});
+
+/**
+ * A chat launched cold (no warm agent for its route) whose agent AO is still starting: observe says
+ * `provisioning` with the opening prompt queued, until `started` is set.
+ */
+function coldLaunchWorld({ autoRetry, started = () => false, observeAs = null }) {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const world = chatWorld();
+  const created = new Map();
+  const spawned = [], killed = [], failures = [], logged = [];
+  let clock = 1_000_000;
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "fix the login" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") {
+      latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id, request_key: "key-1" };
+      return { ok: true, run: latest };
+    }
+    if (endpoint === "/api/v1/ao/external/terminal") {
+      if (body.failure) failures.push(body.failure);
+      latest.nodes[0].state = body.completed ? "finished" : "held";
+      latest.nodes[0].receipt = { ...latest.nodes[0].receipt, error: body.failure };
+      return { ok: true, run: latest };
+    }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath, now: () => clock,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    logger: { info: (event, detail) => logged.push([event, detail]), warn: (event, detail) => logged.push([event, detail]) },
+    aoHarness: {
+      spawn: async input => { spawned.push(input); return `agent-${spawned.length}`; },
+      continuable: async () => false,
+      // AO's own reason once a background start is cancelled reads as transient; the card's says why.
+      observe: async (id) => observeAs ? observeAs(id, clock) : killed.includes(id)
+        ? { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" }
+        : started() ? { status: "idle", turnId: "turn-1", turnState: "completed", answer: "fixed" }
+          : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, lastActivityAt: clock, timeline: [], approvals: [] },
+      warmSessions: async () => [],
+      kill: async id => { killed.push(id); return { ok: true }; },
+    },
+  });
+  return { workflow, route, spawned, killed, failures, logged, advance: ms => { clock += ms; }, autoRetry };
+}
+
+test("a cold launch whose agent never takes its message is ended after four minutes, and its step says why", async () => {
+  // Seen live 2026-11-09: two cold starts held their chats "launching" for AO's whole 10-minute
+  // start budget (claude.exe up, the prompt never delivered) before the automatic retry relaunched them.
+  const world = coldLaunchWorld({ autoRetry: true });
+  const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  try {
+    await world.workflow.call("chat_auto_retry", { enabled: true });
+    await world.workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: world.route });
+    await wait(() => world.spawned.length > 0);
+    assert.equal(world.spawned[0].prompt, "fix the login", "launched cold, with the message");
+    // Still within a healthy cold start (they take 15-75 s): nothing is ended.
+    world.advance(3 * 60_000);
+    await wait(() => false, 30);
+    assert.deepEqual(world.killed, []);
+    world.advance(61_000);
+    await wait(() => world.killed.length > 0);
+    assert.deepEqual(world.killed, ["agent-1"], "the start that hung is ended");
+    await wait(() => world.failures.length > 0);
+    assert.match(world.failures[0], /did not start within 4 minutes/, "the card says why, not AO's \"context canceled\"");
+    assert.ok(world.logged.some(([event, detail]) => event === "ao.launch_stalled" && detail.waitedSeconds >= 240));
+  } finally { world.workflow.dispose(); }
+});
+
+test("with \"Retry automatically\" off, a slow cold launch is left to AO's own start budget", async () => {
+  const world = coldLaunchWorld({ autoRetry: false });
+  const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  try {
+    await world.workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: world.route });
+    await wait(() => world.spawned.length > 0);
+    world.advance(9 * 60_000);
+    await wait(() => false, 50);
+    assert.deepEqual(world.killed, [], "nothing would retry the step, so the start is not cut short");
+  } finally { world.workflow.dispose(); }
+});
+
+test("a launched agent that came up is never ended as a stalled launch when it starts again later", async () => {
+  // Once up, the session holds the chat's work: a later start (its idle agent brought back, which
+  // AO may show as provisioning again) is a resume, not a fresh launch.
+  let phase = "up";
+  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => phase === "up"
+    ? { status: "working", turnId: "turn-1", turnState: "running", lastActivityAt: at, timeline: [], approvals: [] }
+    : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, lastActivityAt: at, timeline: [], approvals: [] } });
+  const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  try {
+    await world.workflow.call("chat_auto_retry", { enabled: true });
+    await world.workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: world.route });
+    await wait(() => world.spawned.length > 0);
+    await wait(() => false, 40); // observed while its agent is up
+    phase = "starting again";
+    world.advance(6 * 60_000);
+    await wait(() => false, 60);
+    assert.deepEqual(world.killed, [], "a resumed agent is not a hung launch");
+  } finally { world.workflow.dispose(); }
 });
 
 test("a pre-warmed session is used only by a launch that attaches the same app tools", async () => {
