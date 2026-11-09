@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, type PageOpen } from "./chat-pages";
@@ -516,6 +516,11 @@ export function chatLoops(result: { loops?: unknown }): Record<string, ChatLoop>
   const loops = result.loops;
   return loops && typeof loops === "object" && !Array.isArray(loops) ? loops as Record<string, ChatLoop> : {};
 }
+/** The chats' schedules (/schedule) a runs read carries, by chat. */
+export function chatSchedules(result: { schedules?: unknown }): Record<string, ChatSchedule> {
+  const schedules = result.schedules;
+  return schedules && typeof schedules === "object" && !Array.isArray(schedules) ? schedules as Record<string, ChatSchedule> : {};
+}
 /** How full a chat's context (its task text, capped at 8,192 characters) is. */
 export const CHAT_CONTEXT_LIMIT = 8192;
 export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
@@ -848,6 +853,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     setGoals(chatGoals(current));
     setWakeups(chatWakeups(current));
     setLoops(chatLoops(current));
+    setSchedules(chatSchedules(current));
     // The app's queued messages of this project's chats (chat-queue.cjs).
     if (current.queues && typeof current.queues === "object") syncChatQueues(id, current.queues as Record<string, QueuedChatMessage[]>);
     const setups = aoSavedTeams(current);
@@ -1033,6 +1039,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       setGoals(chatGoals(current));
       setWakeups(chatWakeups(current));
       setLoops(chatLoops(current));
+      setSchedules(chatSchedules(current));
       const setups = aoSavedTeams(current);
       setSavedTeams(setups); setComposerTeamId(selected => aoComposerTeam(selected, setups, current.team as AoTeam | null));
       setTeam(current.team as AoTeam | null ?? setups[0] ?? null);
@@ -1163,6 +1170,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [wakeups, setWakeups] = useState<Record<string, ChatWakeup>>({});
   // The chats' loops (/loop), per chat.
   const [loops, setLoops] = useState<Record<string, ChatLoop>>({});
+  // The chats' schedules (/schedule), per chat.
+  const [schedules, setSchedules] = useState<Record<string, ChatSchedule>>({});
   // A model picked while the open chat's goal runs is used from its next round on (the running
   // round keeps the model it started with; the composer says so). A round that fails on the old
   // model is not retried on it: the next round starts on the pick.
@@ -1245,6 +1254,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           setWakeups((previous) => JSON.stringify(previous) === JSON.stringify(wakeups) ? previous : wakeups);
           const loops = chatLoops(current);
           setLoops((previous) => JSON.stringify(previous) === JSON.stringify(loops) ? previous : loops);
+          const schedules = chatSchedules(current);
+          setSchedules((previous) => JSON.stringify(previous) === JSON.stringify(schedules) ? previous : schedules);
           setTeam((previous) => JSON.stringify(previous) === JSON.stringify(team) ? previous : team);
           setSavedTeams((previous) => JSON.stringify(previous) === JSON.stringify(saved) ? previous : saved);
           setTaskLifecycle((previous) => JSON.stringify(previous) === JSON.stringify(lifecycle) ? previous : lifecycle);
@@ -2660,6 +2671,18 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     stopLoop: async () => {
       if (!chatTaskId) return;
       await moduleCall("chat_loop", { workspaceId, taskId: chatTaskId, action: "stop" });
+      await loadMissions(workspaceId);
+    },
+    schedule: chatTaskId ? schedules[chatTaskId] ?? null : null,
+    setSchedule: async ({ dueAt, message, spec }) => {
+      if (!chatTaskId) throw new Error("Open a chat first");
+      await moduleCall("chat_schedule", { workspaceId, taskId: chatTaskId, action: "set", dueAt, message, spec });
+      await loadMissions(workspaceId);
+    },
+    clearSchedule: async () => {
+      const schedule = chatTaskId ? schedules[chatTaskId] : undefined;
+      if (!chatTaskId || !schedule) return;
+      await moduleCall("chat_schedule", { workspaceId, taskId: chatTaskId, action: "clear", id: schedule.id });
       await loadMissions(workspaceId);
     },
     goalEdit: async (objective) => {

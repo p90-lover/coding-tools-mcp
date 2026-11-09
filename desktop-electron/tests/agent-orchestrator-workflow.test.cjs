@@ -5512,7 +5512,7 @@ test("a team round's evaluator reads every card's answer, named by its card, wit
 /** A chat whose Single agent (AO session "sess-1") just finished run r1, with a clock and timers the test drives. */
 /** `hold`: a turn the chat sends never finishes starting, so it never settles as failed (a self-paced /loop would end). */
 /** `gate`: `read` (a promise) holds the runs reads until it settles; `fail` board calls throw that many times. */
-function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
+function wakeChat({ goal = false, hold = false, loopsFile = null, schedulesFile = null } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Ship", description: "watch CI", state: "in_progress", clauses: [] }], runs: [
     { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
@@ -5526,7 +5526,7 @@ function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
     if (endpoint === "/api/v1/tools/call" && gate.fail > 0) { gate.fail -= 1; throw new Error("board unavailable"); }
     return world.requestHeadless(endpoint, ...rest);
   };
-  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", loopsFile,
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", loopsFile, schedulesFile,
     resolveHarness: hold ? () => new Promise(() => {}) : async () => { throw new Error("stop before the background loop"); }, now: () => clock.at,
     setTimer: (fn, ms) => { next += 1; timers.set(next, { fn, at: clock.at + ms }); return next; }, clearTimer: (id) => timers.delete(id) });
   /** Moves the clock and runs every timer due by then (and those they arm). */
@@ -5540,7 +5540,7 @@ function wakeChat({ goal = false, hold = false, loopsFile = null } = {}) {
       await new Promise((resolve) => setImmediate(resolve));
     }
   };
-  return { world, workflow, route, advance, timers, gate };
+  return { world, workflow, route, advance, timers, gate, clock };
 }
 const wakeupOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).wakeups["task-1"];
 
@@ -6140,6 +6140,125 @@ test("loops are kept per chat in a file, end after seven days, and say how to go
   assert.equal(loopAction(loop, { active: true, working: false }, 1000), "drop", "seven days are up");
   assert.equal(loopMessage(loop), "check");
   assert.match(loopMessage({ ...loop, minutes: null }, "CI"), /^check\n\n\(Your note from the last round: CI\)\n\nThis is a self-paced \/loop/);
+});
+
+// ---- /schedule ----
+
+const scheduleOf = async (workflow) => (await workflow.call("runs", { workspaceId: "ws-1" })).schedules["task-1"];
+const HOUR = 3_600_000;
+
+test("/schedule continues the chat at its time, waits out a working turn the person started, and is then gone", async (t) => {
+  const { world, workflow, route, advance, clock } = wakeChat();
+  t.after(() => workflow.dispose());
+  const before = world.updates.length;
+  const set = await workflow.call("chat_schedule", { workspaceId: "ws-1", taskId: "task-1", action: "set", dueAt: clock.at + 5 * HOUR, message: "", spec: "5h" });
+  assert.equal(set.schedule.message, "Continue", "no words: the chat is told to continue");
+  assert.equal(set.schedule.custom, false);
+  assert.equal(set.schedule.spec, "5h");
+  assert.equal(world.updates.length, before, "nothing is sent when it is set");
+  await advance(5 * HOUR - 60_000);
+  assert.equal(world.updates.length, before, "nothing before its time");
+  // A turn the person started meanwhile does not cancel the schedule: it holds the send until that turn settles.
+  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "running", route }] });
+  await advance(60_000);
+  assert.equal(world.updates.length, before, "held while the chat works");
+  assert.equal((await scheduleOf(workflow)).due, true);
+  world.runs.at(-1).nodes[0].state = "finished";
+  await workflow.chatScheduleAfterRun("ws-1");
+  assert.equal(world.updates.length, before + 1, "sent once the turn settled");
+  assert.deepEqual(world.updates.at(-1).single_route, route, "on the chat's own Single model");
+  assert.match(world.edits.at(-1).description, /\nContinue\. \(Scheduled 5h ago: check what has changed/);
+  assert.equal(await scheduleOf(workflow), undefined, "a sent schedule is gone");
+  await advance(24 * HOUR);
+  assert.equal(world.updates.length, before + 1, "and it sends once");
+});
+
+test("a schedule sends the person's own words; /clearschedule deletes only the schedule it names; bad times are refused", async (t) => {
+  const { world, workflow, advance, clock } = wakeChat();
+  t.after(() => workflow.dispose());
+  const before = world.updates.length;
+  const call = (args) => workflow.call("chat_schedule", { workspaceId: "ws-1", taskId: "task-1", ...args });
+  const first = await call({ action: "set", dueAt: clock.at + HOUR, message: "run the tests again", spec: "1h" });
+  assert.equal(first.schedule.custom, true);
+  // A new schedule replaces the chat's old one, and the old one's timer sends nothing.
+  const second = await call({ action: "set", dueAt: clock.at + 2 * HOUR, message: "check the overnight build", spec: "2h" });
+  await advance(HOUR);
+  assert.equal(world.updates.length, before, "the replaced schedule sends nothing");
+  await advance(HOUR);
+  assert.equal(world.updates.length, before + 1);
+  assert.ok(world.edits.at(-1).description.includes("check the overnight build"), "the person's own words are sent");
+
+  const third = await call({ action: "set", dueAt: clock.at + HOUR, message: "", spec: "1h" });
+  assert.equal((await call({ action: "clear", id: "another-id" })).cleared, false, "only the schedule named is deleted");
+  assert.equal((await scheduleOf(workflow)).id, third.schedule.id);
+  assert.equal((await call({ action: "clear", id: third.schedule.id })).cleared, true);
+  assert.equal((await call({ action: "clear" })).cleared, false, "nothing left to delete");
+  await advance(2 * HOUR);
+  assert.equal(world.updates.length, before + 1, "a deleted schedule sends nothing");
+
+  await assert.rejects(call({ action: "set", dueAt: clock.at + 30_000 }), /at least 1 minute/);
+  await assert.rejects(call({ action: "set", dueAt: clock.at + 31 * 24 * HOUR }), /at most 30 days/);
+  await assert.rejects(call({ action: "set", dueAt: "soon" }), /Say when/);
+  await assert.rejects(workflow.call("chat_schedule", { workspaceId: "ws-1", taskId: "task-9", action: "set", dueAt: clock.at + HOUR }), /Send this chat a message first/);
+  await assert.rejects(call({ action: "edit" }), /Choose set or clear/);
+  assert.equal(second.schedule.spec, "2h");
+});
+
+test("a schedule saved before a restart is sent shortly after the app is back", async () => {
+  const file = path.join(require("node:os").tmpdir(), `ct-schedules-${crypto.randomUUID()}.json`);
+  try {
+    const store = createScheduleStore({ file, now: () => 900_000 });
+    store.set("ws-1", "task-1", { dueAt: 900_000 + 60_000, message: "", spec: "1m" });
+    // The app was closed past its time: it is overdue when the app starts again.
+    const restarted = wakeChat({ schedulesFile: file });
+    const quiet = restarted.world.updates.length;
+    await restarted.advance(29_000);
+    assert.equal(restarted.world.updates.length, quiet, "it waits for the app to settle");
+    await restarted.advance(1_000);
+    assert.equal(restarted.world.updates.length, quiet + 1, "then it is sent");
+    assert.equal(createScheduleStore({ file }).get("ws-1", "task-1"), null, "and deleted from the file");
+    restarted.workflow.dispose();
+  } finally { fs.rmSync(file, { force: true }); }
+});
+
+const { createScheduleStore, scheduleAction, scheduleMessage, scheduleSpan, cleanSchedule, DEFAULT_SCHEDULE_MESSAGE } = require("../electron/chat-schedules.cjs");
+
+test("schedules are kept per chat in a file, move with their chat, and a due one sends, waits or drops", () => {
+  const file = path.join(require("node:os").tmpdir(), `ct-schedules-${crypto.randomUUID()}.json`);
+  try {
+    const store = createScheduleStore({ file, now: () => 60_000 });
+    const first = store.set("ws-1", "task-1", { dueAt: 60_000 + HOUR, message: " run the tests ", spec: "1h" });
+    assert.equal(first.message, "run the tests");
+    assert.equal(first.scheduledAt, 60_000);
+    assert.equal(createScheduleStore({ file }).get("ws-1", "task-1").id, first.id, "it survives a restart");
+    assert.deepEqual(Object.keys(store.forWorkspace("ws-1")), ["task-1"]);
+    assert.equal(store.move("ws-1", "ws-2", "task-1"), true, "a chat moved to another project keeps its schedule");
+    assert.equal(store.get("ws-1", "task-1"), null);
+    assert.equal(store.get("ws-2", "task-1").workspaceId, "ws-2");
+    assert.equal(store.clear("ws-2", "task-1", "another-id"), false, "only the schedule named is cleared");
+    assert.equal(store.clear("ws-2", "task-1", first.id), true);
+    assert.equal(createScheduleStore({ file }).get("ws-2", "task-1"), null);
+  } finally { fs.rmSync(file, { force: true }); }
+  assert.throws(() => cleanSchedule({ dueAt: 60_000 + 30_000 }, 60_000), /at least 1 minute/);
+  assert.throws(() => cleanSchedule({ dueAt: 60_000 + 31 * 24 * HOUR }, 60_000), /at most 30 days/);
+  assert.throws(() => cleanSchedule({ dueAt: 1.5 }, 60_000), /Say when/);
+  assert.throws(() => cleanSchedule({ dueAt: 60_000 + HOUR, message: "x".repeat(4001) }, 60_000), /at most 4,000 characters/);
+  assert.deepEqual(cleanSchedule({ dueAt: 60_000 + HOUR, message: " \u0007 " }, 60_000), { dueAt: 60_000 + HOUR, message: DEFAULT_SCHEDULE_MESSAGE, custom: false });
+  assert.equal(scheduleAction({}, { active: true, working: false }), "send");
+  assert.equal(scheduleAction({}, { active: true, working: true }), "wait");
+  assert.equal(scheduleAction({}, { active: false, working: false }), "drop", "archived or deleted");
+  // The person's words go as they typed them, however late; without words, the chat hears how long ago it was set.
+  const own = { message: "run the tests again", custom: true, scheduledAt: 0, dueAt: 5 * HOUR };
+  assert.equal(scheduleMessage(own, 7 * HOUR), "run the tests again");
+  const plain = { ...own, message: DEFAULT_SCHEDULE_MESSAGE, custom: false };
+  assert.equal(scheduleMessage(plain, 5 * HOUR), "Continue. (Scheduled 5h ago: check what has changed since then before you carry on.)");
+  assert.match(scheduleMessage(plain, 2.5 * HOUR), /Scheduled 2h 30m ago/);
+  assert.match(scheduleMessage(plain, 27 * HOUR), /Scheduled 1d 3h ago/, "sent late, after the app was closed: the whole wait counts");
+  assert.equal(scheduleMessage({ ...plain, scheduledAt: undefined }, 5 * HOUR), "Continue", "no time to go by: just continue");
+  assert.equal(scheduleSpan(45 * 60_000), "45m");
+  assert.equal(scheduleSpan(24 * HOUR), "1d");
+  assert.equal(scheduleSpan(HOUR + 30_000), "1h 1m", "rounded to the minute");
 });
 
 const { createWakeupStore, wakeupAction, wakePrompt, cleanWakeup } = require("../electron/chat-wakeups.cjs");

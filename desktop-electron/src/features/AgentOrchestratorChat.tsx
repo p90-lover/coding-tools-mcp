@@ -36,6 +36,7 @@ import {
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
+  chatScheduleParse, scheduleCountdown, scheduleLabel, scheduleWhen, type ChatSchedule,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -1082,6 +1083,25 @@ function LoopBar({ loop, onStop }: { loop: ChatLoop; onStop: () => void }) {
   </div>;
 }
 
+/**
+ * The chat's schedule (/schedule): when it continues by itself, what it sends, then Delete. The
+ * label ticks alone; the time it fires and why a send failed are in the tooltip.
+ */
+function ScheduleBar({ schedule, onDelete }: { schedule: ChatSchedule; onDelete: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  return <div className="cx-goal cx-wakeup is-active" role="status">
+    <span className="cx-wakeup-glyph" aria-hidden="true">◷</span>
+    <span className="cx-goal-state" title={`Continues ${scheduleWhen(schedule.dueAt, now)}${schedule.spec ? ` (/schedule ${schedule.spec})` : ""}`}>{scheduleLabel(schedule, now)}</span>
+    <span className="cx-goal-objective" title={schedule.message}>{schedule.message}</span>
+    {schedule.note ? <span className="cx-goal-note" title={schedule.note}>{schedule.note}</span> : null}
+    <button type="button" className="cx-goal-icon" title="Delete schedule (/clearschedule)" aria-label="Delete schedule" onClick={onDelete}><GoalGlyph name="trash" /></button>
+  </div>;
+}
+
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
@@ -2107,6 +2127,36 @@ export function AgentOrchestratorChat({
             : `Looping every ${loopInterval(parsed.minutes)}: it ${first}, then every ${loopInterval(parsed.minutes)} for up to 7 days. /loop stop ends it.`);
           break;
         }
+        case "schedule": {
+          const schedule = commands?.schedule;
+          if (!arg) {
+            setCard(schedule ? { title: "Schedule", rows: [["Continues", scheduleWhen(schedule.dueAt)], ["Sends", schedule.message],
+              ...(schedule.spec ? [["Set with", `/schedule ${schedule.spec}`] as [string, string]] : []),
+              ...(schedule.note ? [["Note", schedule.note] as [string, string]] : [])] }
+              : { title: "Schedule", text: "This chat has no schedule.\nUsage: /schedule <when> [message] | clear\n"
+                + "Examples: /schedule 5h (continue in 5 hours)\n/schedule 1h30m run the tests again\n"
+                + "/schedule 9:30 or /schedule 9pm (the next 9:30 or 9 pm)\n/schedule tomorrow 9am check the overnight build\n"
+                + "/clearschedule deletes it." });
+            break;
+          }
+          if (["clear", "cancel", "delete", "off", "stop"].includes(arg.toLowerCase())) { await runCommand("clearschedule", "", typed); break; }
+          if (!selectedTaskId || !commands?.setSchedule) { say("Schedule", "Open a chat first: a schedule continues the chat it was set in."); break; }
+          const parsed = chatScheduleParse(arg);
+          if ("error" in parsed) { say("Schedule", parsed.error); setDraft(`/schedule ${arg}`); break; }
+          if (schedule && !window.confirm(`Replace this chat's schedule?\n\nIt continues ${scheduleWhen(schedule.dueAt)} now; the new one ${scheduleWhen(parsed.dueAt)}.`)) {
+            setDraft(`/schedule ${arg}`); break;
+          }
+          await commands.setSchedule(parsed);
+          say("Schedule", `This chat continues by itself ${scheduleWhen(parsed.dueAt)} (in ${scheduleCountdown(parsed.dueAt - Date.now())}), sending "${parsed.message || "Continue"}". `
+            + "If a turn is running then, it waits for that turn to end. /clearschedule or the chat details delete it.");
+          break;
+        }
+        case "clearschedule": {
+          if (!commands?.schedule) { say("Schedule", "This chat has no schedule."); break; }
+          await commands.clearSchedule?.();
+          say("Schedule", "Schedule deleted. The chat won't continue by itself.");
+          break;
+        }
         case "plan":
           commands?.setPlanMode(!commands.planMode);
           say("Plan mode", commands?.planMode ? "Plan mode is off." : "Plan mode is on. Messages ask for a plan, not changes. Send /plan to turn it off.");
@@ -2655,6 +2705,29 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                 <Icon name={row.kind === "app" ? "globe" : "logs"} width="14" height="14" />
                 <span>{row.label}</span><small>{row.running ? "Running" : "Offline"}</small></button>)
                 : <p className="cx-details-empty">Apps and terminals the agents start show here.</p>}
+              {/* /schedule: when the chat continues by itself. A click shows it; right-click deletes it. */}
+              <p className="cx-details-label">Schedule</p>
+              {commands?.schedule ? (() => {
+                const schedule = commands.schedule;
+                const menuFor = (x: number, y: number) => setMenu({ x, y, label: "Schedule", items: [
+                  { label: "Show schedule", icon: "schedule", run: () => void runCommand("schedule", "", false) },
+                  { kind: "separator" },
+                  { label: "Delete schedule", icon: "delete", danger: true, run: () => void runCommand("clearschedule", "", false) },
+                ] });
+                return <button type="button" className="cx-details-row cx-schedule-row" aria-haspopup="menu"
+                  title={`Sends "${schedule.message}" ${scheduleWhen(schedule.dueAt)}${schedule.note ? `\n${schedule.note}` : ""}\nRight-click to delete`}
+                  onClick={() => void runCommand("schedule", "", false)}
+                  onContextMenu={(event) => { event.preventDefault(); menuFor(event.clientX, event.clientY); }}
+                  onKeyDown={(event) => {
+                    // The keyboard's context menu (Shift+F10, the menu key) opens the same menu.
+                    if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+                      event.preventDefault();
+                      const box = event.currentTarget.getBoundingClientRect();
+                      menuFor(box.left + 12, box.bottom);
+                    }
+                  }}>
+                  <ChatGlyph name="schedule" size={15} /><span>{scheduleLabel(schedule)}</span><small>{scheduleWhen(schedule.dueAt)}</small></button>;
+              })() : <p className="cx-details-empty">Type /schedule 5h to have this chat continue by itself later.</p>}
               <p className="cx-details-label">Setup</p>
               {lead ? <>
                 <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
@@ -2808,8 +2881,9 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
                   .then(() => setWakeupEditing(null), (cause) => say("Edit wake-up", cause instanceof Error ? cause.message : String(cause)))}>Save</button></footer>
           </section>;
         })() : null}
-        {commands?.goal || commands?.planMode || commands?.wakeup || commands?.loop ? <div className="cx-composer-modes">
+        {commands?.goal || commands?.planMode || commands?.wakeup || commands?.loop || commands?.schedule ? <div className="cx-composer-modes">
           {commands?.loop ? <LoopBar loop={commands.loop} onStop={() => void runCommand("loop", "stop", false)} /> : null}
+          {commands?.schedule ? <ScheduleBar schedule={commands.schedule} onDelete={() => void runCommand("clearschedule", "", false)} /> : null}
           {commands?.wakeup ? <WakeupBar wakeup={commands.wakeup}
             onEdit={commands.editWakeup ? () => { setCard(null); setWakeupEditing({ reason: commands.wakeup!.reason,
               minutes: String(Math.min(720, Math.max(1, Math.ceil((commands.wakeup!.dueAt - Date.now()) / 60_000)))) }); } : undefined}

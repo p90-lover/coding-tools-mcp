@@ -536,6 +536,8 @@ test("every operation the renderer calls is one the AO module accepts (the chat'
   assert.equal(handler.isReadOnly("chat_diff"), true);
   assert.equal(handler.isReadOnly("chat_goal"), false);
   assert.equal(handler.isReadOnly("chat_loop"), false);
+  assert.ok(called.has("chat_schedule"), "/schedule and /clearschedule reach the module");
+  assert.equal(handler.isReadOnly("chat_schedule"), false);
   // Queuing is the person's typing: it needs the focused window, as a send does.
   assert.equal(handler.isReadOnly("chat_queue"), false);
   assert.equal(handler.isReadOnly("compact_chat"), false);

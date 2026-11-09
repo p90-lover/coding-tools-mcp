@@ -1646,6 +1646,8 @@ export type ChatSlashCommand = { name: string; hint: string; args?: string; need
 export const CHAT_SLASH_COMMANDS: ChatSlashCommand[] = [
   { name: "goal", hint: "Set a goal to keep pursuing", args: "<objective> | pause | resume | edit | clear" },
   { name: "loop", hint: "Run a prompt or command on a recurring interval", args: "[interval] <prompt or /review, /init> | stop", needsChat: true },
+  { name: "schedule", hint: "Continue this chat by itself later (5h, 90m, 9:30, tomorrow 9am)", args: "<when> [message] | clear", needsChat: true },
+  { name: "clearschedule", hint: "Delete this chat's schedule", needsChat: true },
   { name: "plan", hint: "Turn plan mode on or off" },
   { name: "compact", hint: "Compact this chat's context", needsChat: true },
   { name: "autocompact", hint: "Turn auto-compact on or off, or set how full the chat gets first", args: "[on | off | <percent>]" },
@@ -1761,6 +1763,86 @@ export function loopLabel(loop: Pick<ChatLoop, "minutes" | "round" | "nextAt" | 
     : `next in ${seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.ceil(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`}`;
   return `Every ${loopInterval(loop.minutes)} · ${next}`;
 }
+/**
+ * A chat's schedule (/schedule), as the bridge keeps it (chat-schedules.cjs): at `dueAt` the chat is
+ * sent `message` ("Continue" when the person gave none). `spec` is the time as they typed it, `due`
+ * means it waits for the chat's running turn, and `note` says why its last send failed.
+ */
+export type ChatSchedule = {
+  id: string; message: string; custom?: boolean; spec?: string; scheduledAt: number; dueAt: number; due?: boolean; note?: string;
+};
+export const SCHEDULE_MIN_MS = 60_000;
+export const SCHEDULE_MAX_MS = 30 * 86_400_000;
+const SCHEDULE_UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
+const SCHEDULE_UNIT = "(?:s|secs?|seconds?|m|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?)";
+// "5h", "1h30m", "1h 30m", "1.5 hours", "in 90 minutes", "2 days and 3 hours": one or more amounts with a unit.
+const SCHEDULE_DURATION = new RegExp(`^(?:in\\s+)?((?:\\d+(?:\\.\\d+)?\\s*${SCHEDULE_UNIT}(?![a-z])(?:\\s*,?\\s*(?:and\\s+)?)?)+)`, "i");
+// "9:30", "21:00", "9pm", "9:30 pm", "at 9am", "tomorrow 9am", "tonight 11:30": a clock time, today or tomorrow.
+const SCHEDULE_CLOCK = /^(?:(today|tonight|tomorrow|tmrw?)\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?(?![\w:])/i;
+
+/**
+ * /schedule's argument: when, then what to send (optional). "5h" is five hours from now; "1h30m",
+ * "90m", "1.5h", "2 days", "in 45 minutes" and "1w" work too. A clock time ("9:30", "21:00", "9pm",
+ * "tomorrow 9am") is its next time: today, or tomorrow once it has passed. What follows is the
+ * message ("/schedule 5h run the tests again"); with none the chat is told to continue.
+ */
+export function chatScheduleParse(arg: string, at = Date.now()): { dueAt: number; message: string; spec: string } | { error: string } {
+  const text = arg.trim();
+  const usage = "Say when: /schedule 5h, /schedule 1h30m, /schedule 9:30 or /schedule tomorrow 9am, then what to send if not \"Continue\"";
+  if (!text) return { error: usage };
+  const tail = (spec: string) => text.slice(spec.length).replace(/^\s*(?:[:,\-–—]|then\b)?\s*/i, "").trim();
+  const duration = SCHEDULE_DURATION.exec(text);
+  if (duration) {
+    let ms = 0;
+    for (const [, amount, unit] of duration[1].matchAll(/(\d+(?:\.\d+)?)\s*([a-z]+)/gi)) ms += Number(amount) * SCHEDULE_UNIT_MS[unit[0].toLowerCase()];
+    if (ms < SCHEDULE_MIN_MS) return { error: "A schedule must be at least 1 minute from now" };
+    if (ms > SCHEDULE_MAX_MS) return { error: "A schedule can be at most 30 days from now" };
+    return { dueAt: Math.round(at + ms), message: tail(duration[0]), spec: duration[0].trim() };
+  }
+  const clock = SCHEDULE_CLOCK.exec(text);
+  if (clock && (clock[3] !== undefined || clock[4] !== undefined)) {
+    const day = (clock[1] ?? "").toLowerCase(), meridiem = (clock[4] ?? "").toLowerCase().replace(/\./g, "");
+    let hour = Number(clock[2]);
+    const minute = Number(clock[3] ?? 0);
+    if (minute > 59 || (meridiem ? hour < 1 || hour > 12 : hour > 23)) return { error: `${clock[0].trim()} is not a time of day` };
+    if (meridiem) hour = hour % 12 + (meridiem === "pm" ? 12 : 0);
+    else if (day === "tonight" && hour < 12) hour += 12;
+    const due = new Date(at);
+    due.setHours(hour, minute, 0, 0);
+    if (day.startsWith("tom") || day.startsWith("tmr")) due.setDate(due.getDate() + 1);
+    else if (due.getTime() <= at) {
+      if (day) return { error: `${clock[0].trim()} has already passed` };
+      due.setDate(due.getDate() + 1);
+    }
+    if (due.getTime() - at < SCHEDULE_MIN_MS) return { error: "A schedule must be at least 1 minute from now" };
+    return { dueAt: due.getTime(), message: tail(clock[0]), spec: clock[0].trim() };
+  }
+  if (/^\d+(?:\.\d+)?(?:\s|$)/.test(text)) return { error: `Add a unit or a time: ${text.split(/\s/)[0]}h for hours, ${text.split(/\s/)[0]}m for minutes, or ${text.split(/\s/)[0]}:00 or ${text.split(/\s/)[0]}pm for a time of day` };
+  return { error: usage };
+}
+/** 42_000 -> "42s"; 185_000 -> "4m"; 17_940_000 -> "4h 59m"; 97_200_000 -> "1d 3h". */
+export function scheduleCountdown(ms: number): string {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)}m`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
+  return `${Math.floor(seconds / 86_400)}d ${Math.floor(seconds % 86_400 / 3600)}h`;
+}
+/** When a schedule fires, in local time: "today 19:32", "tomorrow 09:00", "Tue 12 Nov 09:00". */
+export function scheduleWhen(dueAt: number, at = Date.now()): string {
+  const due = new Date(dueAt), today = new Date(at);
+  const clock = `${String(due.getHours()).padStart(2, "0")}:${String(due.getMinutes()).padStart(2, "0")}`;
+  const dayOf = (date: Date) => new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const days = Math.round((dayOf(due) - dayOf(today)) / 86_400_000);
+  if (days === 0) return `today ${clock}`;
+  if (days === 1) return `tomorrow ${clock}`;
+  return `${due.toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" }).replace(",", "")} ${clock}`;
+}
+/** The schedule bar's words: "Continues in 4h 59m", or, once due while the chat works, "Continues after this turn". */
+export function scheduleLabel(schedule: Pick<ChatSchedule, "dueAt" | "due">, at = Date.now()): string {
+  if (schedule.due || schedule.dueAt <= at) return "Continues after this turn";
+  return `Continues in ${scheduleCountdown(schedule.dueAt - at)}`;
+}
 /** Codex's goal summary words for each state. */
 export const GOAL_SUMMARY: Record<ChatGoal["status"], string> = {
   active: "Pursuing goal", paused: "Paused goal", achieved: "Goal achieved", stalled: "Goal stalled", limited: "Goal limited",
@@ -1823,6 +1905,10 @@ export type ChatCommands = {
   loop?: ChatLoop | null;
   startLoop?: (loop: { prompt: string; minutes: number | null }) => Promise<void>;
   stopLoop?: () => Promise<void>;
+  /** The chat's schedule (/schedule): a message it is sent by itself at a time the person chose. */
+  schedule?: ChatSchedule | null;
+  setSchedule?: (schedule: { dueAt: number; message: string; spec: string }) => Promise<void>;
+  clearSchedule?: () => Promise<void>;
   /** Edit goal: saves a new objective for the rounds still to come. */
   goalEdit: (objective: string) => Promise<void>;
   /** Compacts the live agent session and waits for provider completion, as local Codex does. */
