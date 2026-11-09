@@ -65,6 +65,7 @@ function world(stage = "response", { alwaysBroken = false, verdict = "allow" } =
       resolveApproval: async (_session, id, decision) => {
         deliveries.push([id, decision]);
         if (stage === "delivery" && broken) await pending();
+        if (stage === "refused" && broken) throw new Error("AO did not take the answer");
         resolved.push([id, decision]); return { ok: true };
       },
       interrupt: async () => { interrupted = true; return { ok: true }; },
@@ -201,8 +202,26 @@ test("a direct review rejects a late decision after its cloned owner snapshot ch
   } finally { await state.close(); }
 });
 
-for (const mode of ["normal", "judge", "enable judge after timeout"]) {
-  test(`unknown answer delivery times out visibly and is not replayed (${mode})`, async () => {
+test("unknown answer delivery times out visibly and is not replayed (normal)", async () => {
+  const state = world("delivery");
+  try {
+    await state.observe(); await waitFor(() => state.entered > 0);
+    await state.expire(); state.healthy();
+    for (let i = 0; i < 4; i++) { await state.observe(); await tick(); }
+    state.advance(60_001);
+    for (let i = 0; i < 4; i++) { await state.observe(); await tick(); }
+    assert.equal(state.deliveries.length, 1, "without the judge, an outcome-unknown delivery is never resent automatically");
+    const shown = await state.status();
+    assert.equal(shown.awaiting_review, undefined);
+    assert.equal(shown.recommendation.action, "ask");
+    assert.match(shown.recommendation.reason, /sent|deliver|outcome|unknown/i);
+  } finally { await state.close(); }
+});
+
+// The user's report (2026-11-09): with "Let the model judge" on, a request whose answer delivery was
+// cut off stayed on its card ("delivery outcome is unknown") with Allow/Deny, and never closed.
+for (const mode of ["judge", "enable judge after timeout"]) {
+  test(`with the judge on, an unknown delivery AO still lists is sent again as decided and the card closes (${mode})`, async () => {
     const state = world("delivery");
     try {
       if (mode === "judge") await state.workflow.call("chat_model_judges", { enabled: true });
@@ -210,14 +229,54 @@ for (const mode of ["normal", "judge", "enable judge after timeout"]) {
       await state.expire(); state.healthy();
       if (mode === "enable judge after timeout") await state.workflow.call("chat_model_judges", { enabled: true });
       for (let i = 0; i < 4; i++) { await state.observe(); await tick(); }
-      assert.equal(state.deliveries.length, 1, "an outcome-unknown delivery must never be resent automatically");
-      const shown = await state.status();
-      assert.equal(shown.awaiting_review, undefined);
-      assert.equal(shown.recommendation.action, "ask");
-      assert.match(shown.recommendation.reason, /sent|deliver|outcome|unknown/i);
+      assert.equal(state.deliveries.length, 1, "an answer that may still land is not resent inside the delivery window");
+      assert.equal((await state.status()).awaiting_review, true, "the judge's request is not left on the card for the person");
+      state.advance(60_001);
+      await state.observe(); await waitFor(() => state.resolved.length > 0);
+      assert.deepEqual(state.deliveries, [["review-one", "yes"], ["review-one", "yes"]], "the same decision, sent again");
+      assert.equal(state.models.length, 1, "a resend never reviews the request again");
+      assert.equal(await state.status(), undefined, "the card closes");
     } finally { await state.close(); }
   });
 }
+
+test("with the judge on, an answer that never lands is sent three times, then the person decides", async () => {
+  const state = world("delivery", { alwaysBroken: true });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true });
+    await state.observe(); await waitFor(() => state.entered > 0);
+    await state.expire();
+    for (let send = 2; send <= 3; send++) {
+      state.advance(60_001);
+      await state.observe(); await waitFor(() => state.deliveries.length === send);
+      await state.expire();
+    }
+    state.advance(60_001);
+    for (let i = 0; i < 4; i++) { await state.observe(); await tick(); }
+    assert.equal(state.deliveries.length, 3, "resends are bounded");
+    assert.ok(state.deliveries.every(([id, decision]) => id === "review-one" && decision === "yes"));
+    assert.equal(state.models.length, 1);
+    const shown = await state.status();
+    assert.equal(shown.awaiting_review, undefined);
+    assert.equal(shown.recommendation.action, "ask");
+    assert.match(shown.recommendation.reason, /3 times/);
+  } finally { await state.close(); }
+});
+
+test("with the judge on, a refused send is retried shortly with the same decision", async () => {
+  const state = world("refused");
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true });
+    await state.observe(); await waitFor(() => state.deliveries.length > 0);
+    for (let i = 0; i < 5; i++) await tick();
+    assert.equal((await state.status()).awaiting_review, true);
+    state.healthy();
+    for (let i = 0; i < 20 && !state.resolved.length; i++) { await state.observe(); await tick(); }
+    assert.deepEqual(state.deliveries, [["review-one", "yes"], ["review-one", "yes"]]);
+    assert.deepEqual(state.resolved, [["review-one", "yes"]]);
+    assert.equal(state.models.length, 1);
+  } finally { await state.close(); }
+});
 
 for (const change of ["stop", "owner", "dispose"]) {
   test(`a late reviewer cannot answer after ${change}`, async () => {

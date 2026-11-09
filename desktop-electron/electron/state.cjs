@@ -126,6 +126,9 @@ function normalizeState(parsed) {
     if (Object.hasOwn(state, "chatAgentTools") && typeof state.chatAgentTools !== "boolean") delete state.chatAgentTools;
     // Their screen capture and computer control only when this is true; absent means off.
     if (Object.hasOwn(state, "chatAgentDesktopTools") && state.chatAgentDesktopTools !== true) delete state.chatAgentDesktopTools;
+    // Computer use > "Review each step": the reviewer checks every step even in an app the chat
+    // may use, only when this is true; absent means off (the yes for the app covers its steps).
+    if (Object.hasOwn(state, "computerReviewSteps") && state.computerReviewSteps !== true) delete state.computerReviewSteps;
     // Their commands through the app's terminal: false is off; absent is on when Codex's sandbox runs
     // them, otherwise off; true is on (unsandboxed, each command asked, when there is no sandbox).
     if (Object.hasOwn(state, "chatAgentTerminalTools") && typeof state.chatAgentTerminalTools !== "boolean") delete state.chatAgentTerminalTools;

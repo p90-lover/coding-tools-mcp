@@ -381,7 +381,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -3661,6 +3661,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : "A read through the app's tools, confined to the agent's worktree";
   }
   /**
+   * Why a computer use call may run without the reviewer, or null: the app's own rule
+   * (chat-agent-tools.cjs computerStepAllowed), as Codex's Computer Use asks once per app, not per
+   * step. A step counts only in the window under control, whose app this chat may use.
+   */
+  function inAllowedApp(workspaceId, approval) {
+    const name = String(approval?.tool ?? "");
+    if (typeof computerStepAllowed !== "function" || !name.startsWith(`${APP_TOOL_PREFIX}computer_`) || !approval?.thread_id) return null;
+    try {
+      const reason = computerStepAllowed({ workspaceId, session: String(approval.thread_id), tool: name.slice(APP_TOOL_PREFIX.length) });
+      return typeof reason === "string" && reason ? reason : null;
+    } catch { return null; }
+  }
+  /**
    * Why the app's exec_command call may run without asking: its command line (from the call's
    * arguments, complete JSON only) is a routine project command. The app runs it unasked for a
    * session launched with "Approve for me" too; anything else still asks.
@@ -4222,6 +4235,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // for them as a question with no timer (the user's call, 2026-10-20): answering it for them,
     // after 20 s or at once, ran or refused commands nobody had judged.
     const advice = approverAdvice.get(approval.approval_id);
+    // "Let the model judge": an answer that may not have reached AO is sent again (resendDue), so
+    // the card shows it being reviewed, not Allow/Deny for the person, until its sends run out.
+    if (resendPending(advice)) return false;
     // Answered and sent, while AO still lists it for a moment: not the person's. Old enough to be
     // overdue, it read "waiting for approval · waiting for you for 8m 22s" with Continue (restart
     // the agent) offered, a second after "Let the model judge" allowed it (seen live 2026-11-09).
@@ -4238,6 +4254,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const REVIEW_DEADLINE_MS = REVIEW_TRIES * (REVIEW_BUDGET_MS + REVIEW_RETRY_MS) + REVIEW_BUDGET_MS + 15_000;
   /** How long AO may go on listing a request after the reviewer's answer was sent (seconds, live). */
   const ANSWER_DELIVERY_MS = 60_000;
+  /**
+   * "Let the model judge" leaves nothing to the person, and that includes a decided answer that
+   * may not have reached AO. Its send was cut off (the review budget ran out mid-send) or refused,
+   * and the request sat on its card as "delivery outcome is unknown" with the judge on (seen live
+   * 2026-11-09, a DeepSeek chat's netstat). AO still listing it is the reconciliation: an answer
+   * that landed takes it off within ANSWER_DELIVERY_MS, so one still listed after that never
+   * arrived. The same decision is sent again, never a new review, and AO refuses a decision for a
+   * request no longer pending, so a resend cannot answer it twice. A send that was refused outright
+   * is retried after REVIEW_RETRY_MS. After DELIVERY_TRIES sends the request is the person's.
+   */
+  const DELIVERY_TRIES = 3;
+  const resendPending = (advice) => Boolean(advice?.decided) && !advice.resolved && chatPreferences.get().modelJudges
+    && (advice.sends ?? 1) < DELIVERY_TRIES;
+  const resendDue = (advice) => resendPending(advice)
+    && now() - (advice.unsentAt ?? -Infinity) >= (advice.uncertain ? ANSWER_DELIVERY_MS : REVIEW_RETRY_MS);
+  /** The advice kept for an answer that did not (surely) reach AO: the decision itself, for its resend. */
+  function unsentAnswer(decided, sends, uncertain, reason) {
+    const again = chatPreferences.get().modelJudges && sends < DELIVERY_TRIES;
+    return { action: "ask", unresolved: true, unsent: decided.action, sends, uncertain, unsentAt: now(),
+      decided: { action: decided.action, reason: decided.reason, actor: decided.actor, reason_code: decided.reason_code, unavailable: decided.unavailable },
+      reason: again ? `${uncertain ? "The reviewer's answer may not have reached the agent" : "The reviewer's answer couldn't be sent"};`
+        + ` it is sent again while the request still waits (Let the model judge is on). It said ${decided.action}: ${decided.reason}`
+        : sends > 1 ? `Sent ${sends} times without reaching the agent. ${reason}` : reason };
+  }
   /** A review pass still running after this has hung; the next one starts beside it. */
   const SCREEN_PASS_STALE_MS = REVIEW_DEADLINE_MS;
   const reviewStarted = new Map(); // approval_id -> when its first review try began
@@ -4265,9 +4305,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * person before "Let the model judge" was on. Turning the judge on from that request's own card
    * did nothing: its "ask" was kept, so no pass looked at it again and the turn waited for an hour
    * (seen live 2026-11-04, a `git -C … push`). A request already judged, or whose answer could
-   * not be sent, is not judged again.
+   * not be sent, is not judged again; that answer is sent again instead when it is due (resendDue).
    */
-  const rescreen = (advice) => !advice || (advice.action === "ask" && !advice.judged && !advice.resolved && !advice.unsent && chatPreferences.get().modelJudges);
+  const rescreen = (advice) => !advice || resendDue(advice)
+    || (advice.action === "ask" && !advice.judged && !advice.resolved && !advice.unsent && chatPreferences.get().modelJudges);
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
     const jobs = [];
@@ -4321,7 +4362,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             }
           };
           return screenOne(workspaceId, runId, mission, job, {
-            ...review, verifyCurrent, sending: advice => { mark.sending = advice; },
+            ...review, verifyCurrent, sending: (advice, sends) => { mark.sending = advice; mark.sends = sends; },
           });
         }, current);
         if (said) note = said;
@@ -4329,9 +4370,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!current()) return;
         const why = publicText(error?.message || error, 160);
         if (mark.sending) {
-          approverAdvice.set(id, { action: "ask", unresolved: true, unsent: mark.sending.action,
-            reason: "The reviewer's answer delivery outcome is unknown. Check this request before answering; it was not automatically replayed." });
-          note = "The reviewer's answer delivery is uncertain; check the pending request";
+          const kept = unsentAnswer(mark.sending, mark.sends ?? 1, true,
+            "The reviewer's answer delivery outcome is unknown. Check this request before answering; it was not automatically replayed.");
+          approverAdvice.set(id, kept);
+          note = resendPending(kept) ? "The reviewer's answer may not have reached the agent; it is sent again if the request still waits"
+            : "The reviewer's answer delivery is uncertain; check the pending request";
         } else {
           const tries = (reviewFailures.get(id)?.tries ?? 0) + 1;
           reviewFailures.set(id, { tries, at: now() });
@@ -4367,12 +4410,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const judges = chatPreferences.get().modelJudges;
     // What this request's screening concluded; judged ones are not screened again (rescreen).
     const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
+    // An answer that may not have reached AO goes again as it was decided (resendDue), unreviewed.
+    // One not due (the judge turned off since) is left alone: a new review could send a different
+    // answer to a request that may already have one.
+    const prior = approverAdvice.get(approval.approval_id);
+    const resend = resendDue(prior) ? prior : null;
+    if (prior?.unsent && !resend) return null;
+    const sends = resend ? (resend.sends ?? 1) + 1 : 1;
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
-    let advice = exhausted
+    let advice = resend ? { ...resend.decided }
+      : exhausted
       ? judges ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
+      // The hard deny list still wins: a blocked command typed into an allowed app is not a routine step.
+      : !blocked && inAllowedApp(workspaceId, approval)
+      ? { action: "allow", actor: "safety_rules", reason_code: "allowed_app_step", reason: inAllowedApp(workspaceId, approval) }
       : attachedFileRead(approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "attached_file_read", reason: attachedFileRead(approval) }
       : !incomplete && routineAppCommand(approval)
@@ -4439,7 +4493,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       advice = { action: "ask", unresolved: true, reason: "Choose one of this request's own answers" };
     }
     check();
-    keepAdvice(advice);
+    // A resend keeps its bookkeeping while it goes out, so its card stays "being reviewed" meanwhile.
+    keepAdvice(resend ? { ...advice, decided: resend.decided, sends, uncertain: resend.uncertain, unsentAt: resend.unsentAt } : advice);
     if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
     // Each answer stands alone: one the person gave first (or any failure to send it) never
     // touches the other requests; this one just goes to the person.
@@ -4452,31 +4507,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return null;
       }
       check();
-      sending(advice);
+      sending(advice, sends);
       const sent = await harnessService().resolveApproval(approval.thread_id, approval.approval_id, decision, why).then(() => true, () => false);
       check();
       if (sent) {
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
-        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
+        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action, ...(sends > 1 ? { sends } : {}) });
         return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
-      keepAdvice({ action: "ask", unresolved: true, unsent: advice.action, reason: `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+      keepAdvice(unsentAnswer(advice, sends, false, `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}`));
       return null;
     }
     if (approver.settings?.auto_decide === true && advice.action !== "ask") {
       check();
-      sending(advice);
+      sending(advice, sends);
       const sent = await requestHeadless("/api/v1/ao/harness/approval", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: approval.approval_id,
         allow: advice.action === "allow", confirm: false, approver_reason: advice.reason || advice.action, approver_request: request,
       }).then(result => result?.ok === true && result.result?.ok === true, () => false);
       check();
       if (sent) {
-        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action });
+        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action, ...(sends > 1 ? { sends } : {}) });
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
         return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
-      keepAdvice({ action: "ask", unresolved: true, unsent: advice.action, reason: `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}` });
+      keepAdvice(unsentAnswer(advice, sends, false, `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}`));
       return null;
     }
     return `Command approver suggests ${advice.action === "ask" ? "checking it yourself" : advice.action === "allow" ? "allowing" : "denying"}: ${advice.reason}`;
@@ -4787,7 +4842,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // In effect at once; the save to disk is awaited after.
       const saving = chatPreferences.set({ modelJudges: enabled });
       // Turned on beside a request already waiting for the person: the reviewer's "ask" is dropped,
-      // so the next screening pass judges it. An answer that could not be sent stays the person's.
+      // so the next screening pass judges it. An answer that could not be sent is kept: it is sent
+      // again as decided (resendDue), never judged a second time.
       // Its review starts now, with the whole budget: counted from its first review, a request that
       // had waited 8 minutes was overdue at once, so it stayed "waiting for approval" while judged.
       if (enabled) {
@@ -8987,7 +9043,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const schedulesSaved = () => schedules.saved();
   /** Resolves once every wake-up and /loop change so far is on disk (saved off the main thread too). */
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

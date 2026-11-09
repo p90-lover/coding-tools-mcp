@@ -361,6 +361,10 @@ const UNREVIEWED_DESKTOP = new Set(["computer_status", "computer_stop", "compute
 const CONTROL_TOOLS = new Set([
   "computer_select_window", "computer_find_control", "computer_wait", "computer_action", "computer_sequence",
 ]);
+// As in Codex's Computer Use, the person's yes is per app, not per step: once a chat may use the
+// app whose window is under control, these run there without the reviewer (computerStepAllowed),
+// unless Computer use > "Review each step" is on.
+const IN_APP_STEPS = new Set(["computer_snapshot", "computer_find_control", "computer_wait", "computer_action", "computer_sequence"]);
 // The agents' names as the person knows them, for "Allow <agent> to use <app>?".
 const AGENT_NAMES = Object.freeze({ "claude-code": "Claude Code", codex: "Codex", "codex-native": "Codex", agy: "Antigravity",
   opencode: "opencode", cline: "Cline", gemini: "Gemini" });
@@ -1128,7 +1132,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false, watches = false,
-  renames = false, moves = false, redacts = false, ownFileTools = false, unifiedFiles = false } = {}) {
+  renames = false, moves = false, redacts = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either; nor is a GPT session that
   // has unified-agent-tools for them, which is told to use those for every file operation.
@@ -1183,11 +1187,20 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
         + "page works as intended. Use them for every GUI or frontend check. "
       : "")
     + (groups.includes("desktop")
-      ? "capture_process, capture_screenshot, list_windows and computer_* see and drive the desktop: each call is reviewed before it "
-        + "runs, and one the reviewer cannot judge waits for the user. To use an app, call computer_list_windows, then "
-        + "computer_select_window with the window_id and pid of its window: the user is asked to allow that app for this chat "
-        + "(the call waits for their answer), and control starts on that window; use the session_id it returns with the other "
-        + "computer_* tools. Control acts only on that window. "
+      ? (computerSteps
+        ? "capture_process, capture_screenshot, capture_window and list_windows see the desktop: each call is reviewed before it "
+          + "runs, and one the reviewer cannot judge waits for the user. Computer use (computer_*) drives apps: call "
+          + "computer_list_windows, then computer_select_window with the window_id and pid of the window you need. The user is "
+          + "asked once to allow that app for this chat (the call waits for their answer; an app they always allow is not "
+          + "asked), and control starts on that window. Use the session_id it returns with computer_snapshot, "
+          + "computer_find_control, computer_wait, computer_action and computer_sequence: in an app the user allowed they run "
+          + "without a review per step, so look (computer_snapshot) before you act and check the result after. Control acts "
+          + "only on that window; to use another app, select its window the same way. "
+        : "capture_process, capture_screenshot, list_windows and computer_* see and drive the desktop: each call is reviewed before it "
+          + "runs, and one the reviewer cannot judge waits for the user. To use an app, call computer_list_windows, then "
+          + "computer_select_window with the window_id and pid of its window: the user is asked to allow that app for this chat "
+          + "(the call waits for their answer), and control starts on that window; use the session_id it returns with the other "
+          + "computer_* tools. Control acts only on that window. ")
       : "")
     + (groups.includes("subagents")
       ? "Subagents: for a self-contained piece of work (exploring part of the codebase, an independent change, a review) you can "
@@ -1314,6 +1327,9 @@ function createChatAgentTools({
   // Computer control (computer-control.cjs): the agent asks for a window and the person allows its
   // app on a card in the chat (askApp), then control starts on it (start). Without it control can't start.
   computerControl = null,
+  // Computer use > "Review each step": true sends every computer_* step to the reviewer, even in an
+  // app the chat may use (off: the person's yes for the app covers its steps).
+  reviewComputerSteps = () => false,
   // Codex's auto-review of one call that sees or drives the screen (the workflow's reviewToolCall):
   // ({ workspaceId, session, tool, args }) => { action: "allow" | "deny" | "ask", reason }.
   reviewCall = null,
@@ -1786,6 +1802,32 @@ function createChatAgentTools({
   const plainResult = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }], structuredContent: value, isError: false });
 
   /**
+   * Why a computer_* call may run without the reviewer, or null when it is reviewed. With "Review
+   * each step" off: listing the windows it could ask for, asking for one (the person answers its
+   * app's card, or allowed that app before), and each step in the window under control once this
+   * chat may use its app. A step in an app it may not use, and every other screen call
+   * (capture_screenshot, capture_window, list_windows…), is still reviewed.
+   */
+  function computerStepAllowed({ workspaceId, session, tool, args = null } = {}) {
+    if (!computerControl || setting(reviewComputerSteps) || !setting(desktopEnabled)) return null;
+    const name = String(tool ?? "");
+    if (name === "computer_list_windows") return "Lists the windows it could ask to use, with their titles; it sees and touches nothing in them";
+    if (name === "computer_select_window") return "Asks you to allow the window's app on the chat's card, unless you already allowed it";
+    if (!IN_APP_STEPS.has(name)) return null;
+    // A step whose input the safety rules block (a blocked command typed into a terminal app) is
+    // still the reviewer's; so is any step when they cannot be read.
+    if (args) {
+      let blocked = true;
+      try { blocked = Boolean(blockedCommand(JSON.stringify(args))); } catch { blocked = true; }
+      if (blocked) return null;
+    }
+    let controlled = null;
+    try { controlled = computerControl.controlled?.() ?? null; } catch { controlled = null; }
+    if (!controlled?.app || !computerControl.appAllowed(controlled.app, workspaceId, session)) return null;
+    return `A step in ${computerControl.appName(controlled.app, controlled.title)}, which you allowed this chat to use`;
+  }
+
+  /**
    * Computer use as in Codex: the agent lists the windows and asks for one (computer_select_window);
    * the person allows its app for this chat, for this conversation or always (askApp), and control
    * starts on that window. Every other control call acts on that window, whose app this chat must
@@ -2255,9 +2297,11 @@ function createChatAgentTools({
       if (typeof compact === "string" && compact && compact !== args.cmd) args = { ...args, cmd: compact };
     }
     // Every call that sees or drives the screen is reviewed first, whatever the chat's approval
-    // mode (reviewDesktop); as in Codex's Computer Use, control is then of an app the person allowed
-    // this chat to use (computerUse).
-    if (group === "desktop" && !UNREVIEWED_DESKTOP.has(name)) {
+    // mode (reviewDesktop), except a computer use step the person's yes for its app covers
+    // (computerStepAllowed); as in Codex's Computer Use, control is then of an app the person
+    // allowed this chat to use (computerUse).
+    if (group === "desktop" && !UNREVIEWED_DESKTOP.has(name)
+      && !computerStepAllowed({ workspaceId: entry.workspaceId, session: entry.aoSession, tool: name, args })) {
       const verdict = await reviewDesktop(entry, name, args, signal);
       if (verdict !== true) return verdict;
     }
@@ -2507,7 +2551,7 @@ function createChatAgentTools({
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
               wakeups: canWake(entry), watches: canWatch(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
-              unifiedFiles: entry.unifiedFiles === true }),
+              unifiedFiles: entry.unifiedFiles === true, computerSteps: Boolean(computerControl) && !setting(reviewComputerSteps) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -2800,6 +2844,11 @@ function createChatAgentTools({
   }
 
   return Object.freeze({
+    /**
+     * For "Approve for me"'s screening (the workflow's screenOne): why a computer_* call of the chat
+     * whose AO session is `session` needs no review, or null. `tool` is the app tool's own name.
+     */
+    computerStepAllowed,
     /**
      * Tools for one AO chat session about to be spawned, or null when the setting is off, the
      * agent's driver cannot take an HTTP server, or the workspace id is unusable. `servers` go into
