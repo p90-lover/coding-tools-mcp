@@ -1083,7 +1083,7 @@ export function ChatThreadList(props: ThreadListProps) {
         {hover.chat.schedule?.state === "scheduled" ? <span>◷ {scheduledStartLabel(hover.chat.schedule.due_at_ms, now)}</span> : null}
         <span>📁 {workspace?.name}</span>
         {workspace?.path ? <span className="cx-hover-path">{workspace.path}</span> : null}
-        <span>{hover.chat.runIds.length} {hover.chat.runIds.length === 1 ? "run" : "runs"}</span>
+        <span>{hover.chat.runCount ?? hover.chat.runIds.length} {(hover.chat.runCount ?? hover.chat.runIds.length) === 1 ? "run" : "runs"}</span>
       </FloatingLayer> : null}
       {projectCard && !menu ? (() => {
         const { item } = projectCard;

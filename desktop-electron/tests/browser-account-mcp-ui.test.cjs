@@ -6,15 +6,18 @@ const test = require("node:test");
 const vm = require("node:vm");
 const ts = require("typescript");
 
-function fixture(createConnector = async () => ({ created: true, connected: true }), { threads = [] } = {}) {
+const freshOwnerPlan = id => ({ userId: `user-${id}`, workspaceId: `workspace-${id}`, workspaceRole: "account-owner",
+  workspaceStructure: "workspace", planCheckedAt: Date.now() });
+
+// `inspect(account)`: what the account's workspace inspection does (Refresh, or Connect on stale details).
+function fixture(createConnector = async () => ({ created: true, connected: true }), { threads = [], inspect = () => {} } = {}) {
   const accounts = ["main", "second", "third"].map(id => ({ id, label: id, email: `${id}@example.test`,
-    proxyProfileId: null, maxTabs: 3, acceptsNewSessions: true,
-    plan: { userId: `user-${id}`, workspaceId: `workspace-${id}`, workspaceRole: "account-owner", workspaceStructure: "workspace", planCheckedAt: Date.now() },
-    connector: null, signedIn: true }));
+    proxyProfileId: null, maxTabs: 3, acceptsNewSessions: true, plan: freshOwnerPlan(id), connector: null, signedIn: true }));
   const status = { accounts, activeId: "main", switching: false, maxAccounts: 10, maxTabsPerAccount: 15,
     settings: { newSessions: "active", keepFinishedTabsMinutes: 5 } };
-  const calls = { connector: [], switches: [], removed: [], browserOpened: 0, errors: [] };
+  const calls = { connector: [], inspected: [], switches: [], removed: [], browserOpened: 0, errors: [] };
   const api = { browserAccounts: async () => status, mcpTunnels: async () => [],
+    inspectBrowserAccount: async id => { calls.inspected.push(id); await inspect(accounts.find(account => account.id === id)); return status; },
     createMcpConnector: async id => { calls.connector.push(id); return createConnector(id); },
     switchBrowserAccount: async id => { calls.switches.push(id); },
     removeBrowserAccounts: async ids => { calls.removed.push(ids); return { ...status, removed: ids, failed: [] }; } };
@@ -79,8 +82,7 @@ test("team role access separates existing connector validation from owner creati
     const card = ui.card("second");
     const connect = button(card, "Connect MCP");
     assert.equal(connect.props.disabled, false, "a fresh member may ask the backend to verify an existing workspace connector");
-    assert.match(text(card), new RegExp(`Role${label}`));
-    assert.match(text(card), /MCP accessUse existing only/);
+    assert.match(text(card), new RegExp(`WorkspaceWorkspace · ${label} · checked`), "the role sits in the workspace line");
     assert.match(connect.props.title, /existing.*owner/i);
     connect.props.onClick();
     await ui.flush();
@@ -166,10 +168,14 @@ test("account setup preserves bulk removal, the tabs drawer, and opening the Bro
 test("management keeps partition sign-in evidence when the shown page has no authentication result", () => {
   const ui = fixture();
   ui.props.browser.authenticated = false;
-  assert(text(ui.card("main")).includes("Signed in"));
+  const dot = card => nodes(card).find(node => node.type === "i" && node.props.role === "img");
+  assert.equal(dot(ui.card("main")).props["aria-label"], "Signed in");
+  assert.doesNotMatch(text(ui.card("main")), /Sign-in/, "a signed-in account needs no sign-in row");
   assert.equal(button(ui.card("main"), "Connect MCP").props.disabled, false);
   ui.accounts[0].signedIn = null;
-  assert(text(ui.card("main")).includes("Checking…"), "unknown is not signed out");
+  assert(text(ui.card("main")).includes("Checking sign-in…"), "unknown is not signed out");
+  ui.accounts[0].signedIn = false;
+  assert.match(text(ui.card("main")), /Sign-inNot signed inSign in/);
 });
 
 test("an active owner's idle or loading page preserves signed-in account proof when connecting MCP", async () => {
@@ -225,36 +231,59 @@ test("MCP setup waits only for that account's in-flight removal", async () => {
 });
 
 for (const role of ["owner", "constructor", "toString", "__proto__", undefined]) {
-  test(`MCP setup is blocked without a verified workspace role: ${role}`, async () => {
-    const ui = fixture();
+  test(`MCP setup never runs without a verified workspace role: ${role}`, async () => {
+    // The details are read again first; a role ChatGPT still does not give stays refused.
+    const ui = fixture(undefined, { inspect: account => { account.plan = { ...freshOwnerPlan(account.id), workspaceRole: role }; } });
     for (const account of ui.accounts) account.plan.workspaceRole = role;
     const connect = button(ui.card("second"), "Connect MCP");
-    assert.equal(connect.props.disabled, true);
-    assert.match(connect.props.title, /owner|verify/i);
-    assert.match(text(ui.card("second")), /RoleNot verified/);
-    assert.match(text(ui.card("second")), /Refresh required/);
-    assert.equal(button(ui.page(), "Connect all accounts").props.disabled, true);
-    // The handler also refuses a queued click whose permissions have since changed.
+    assert.equal(connect.props.disabled, false, "Connect reads the details again instead of waiting for a Refresh");
+    assert.match(connect.props.title, /workspace details again/i);
+    assert.doesNotMatch(text(ui.card("second")), /Refresh required/, "stale details are no connector state");
     connect.props.onClick();
     await ui.flush();
-    assert.deepEqual(ui.calls.connector, []);
+    assert.deepEqual(ui.calls.inspected, ["second"]);
+    assert.deepEqual(ui.calls.connector, [], "an unverified role never reaches connector setup");
+    assert.match(text(ui.card("second")), /FailedChatGPT did not report this account's workspace role\./);
   });
 }
 
-test("unknown and stale workspace metadata cannot enable MCP creation", async () => {
-  const ui = fixture();
+test("stale or unknown workspace details are read again before connecting", async () => {
+  const ui = fixture(undefined, { inspect: account => { if (account.id !== "third") account.plan = freshOwnerPlan(account.id); } });
   ui.accounts[0].plan = null;
   ui.accounts[1].plan.planCheckedAt = Date.now() - 300001;
   ui.accounts[2].plan.workspaceStructure = undefined;
-  assert.equal(button(ui.page(), "Connect all accounts").props.disabled, true);
-  for (const account of ui.accounts) assert.equal(button(ui.card(account.id), "Connect MCP").props.disabled, true);
+  assert.equal(button(ui.page(), "Connect all accounts").props.disabled, false);
+  for (const account of ui.accounts) assert.equal(button(ui.card(account.id), "Connect MCP").props.disabled, false);
   button(ui.page(), "Connect all accounts").props.onClick();
   await ui.flush();
-  assert.deepEqual(ui.calls.connector, []);
-  assert.match(text(ui.page()), /3 skipped/);
+  assert.deepEqual(ui.calls.inspected, ["main", "second", "third"]);
+  assert.deepEqual(ui.calls.connector, ["main", "second"], "only accounts the fresh read verified are connected");
+  assert.match(text(ui.page()), /2 of 3 accounts connected · 1 skipped/);
 });
 
-test("a known role is last-known after sign-out, stale inspection, or a future timestamp", () => {
+test("a failed read of workspace details shows its reason and connects nothing", async () => {
+  const ui = fixture(undefined, { inspect: () => { throw new Error("ChatGPT is showing a Cloudflare security check for this account."); } });
+  ui.accounts[1].plan.planCheckedAt = Date.now() - 300001;
+  button(ui.card("second"), "Connect MCP").props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.connector, []);
+  // (The test's Error is from another realm, so the card prints it with its "Error: " name.)
+  assert.match(text(ui.card("second")), /MCPFailed(Error: )?ChatGPT is showing a Cloudflare security check/);
+});
+
+test("Zero Risk mode reads no workspace details, so stale ones keep Connect off", async () => {
+  const ui = fixture();
+  ui.props.setup = { ...ui.props.setup, inspectionDisabled: true };
+  ui.accounts[1].plan.planCheckedAt = Date.now() - 300001;
+  assert.equal(button(ui.card("second"), "Connect MCP").props.disabled, true);
+  assert.equal(button(ui.card("main"), "Connect MCP").props.disabled, false);
+  button(ui.page(), "Connect all accounts").props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.inspected, []);
+  assert.deepEqual(ui.calls.connector, ["main", "third"]);
+});
+
+test("a known role stays in the workspace line after sign-out, stale inspection, or a future timestamp", () => {
   for (const state of ["signed-out", "stale", "future", "identity-missing"]) {
     const ui = fixture();
     const account = ui.accounts[1];
@@ -263,9 +292,8 @@ test("a known role is last-known after sign-out, stale inspection, or a future t
     if (state === "future") account.plan.planCheckedAt = Date.now() + 60000;
     if (state === "identity-missing") account.plan.userId = null;
     const card = ui.card(account.id);
-    assert.match(text(card), /RoleLast known Owner/);
-    assert.match(text(card), /MCP accessRefresh required/);
-    assert.equal(button(card, "Connect MCP").props.disabled, true);
+    assert.match(text(card), /WorkspaceWorkspace · Owner · checked/);
+    assert.equal(button(card, "Connect MCP").props.disabled, state === "signed-out");
   }
 });
 
@@ -293,7 +321,7 @@ test("losing creation authority does not relabel an already confirmed connection
   const card = ui.card("second");
   assert.match(text(card), /Connected/);
   assert.equal(button(card, "Check connection").props.disabled, false, "a member can validate the existing connector without creation authority");
-  assert.match(text(card), /MCP accessUse existing only/);
+  assert.match(button(card, "Check connection").props.title, /existing connector/);
 });
 
 test("a saved successful connection survives reopening the page without creation authority", () => {
@@ -301,7 +329,7 @@ test("a saved successful connection survives reopening the page without creation
   ui.accounts[1].connector = { okAt: Date.now() - 1000 };
   ui.accounts[1].plan.workspaceRole = "standard-user";
   const card = ui.card("second");
-  assert.match(text(card), /Previously connected/);
+  assert.match(text(card), /MCPConnectedconfirmed just now/);
   assert.doesNotMatch(text(card), /Owner required/);
   assert.equal(button(card, "Connect MCP").props.disabled, false, "the backend must freshly verify identity before reusing the connector");
   assert.deepEqual(ui.calls.connector, [], "the saved status requires no creation attempt");
@@ -322,6 +350,7 @@ test("bulk setup includes fresh existing-connector checks and skips unverified a
   ui.accounts[2].plan = null;
   button(ui.page(), "Connect all accounts").props.onClick();
   await ui.flush();
+  assert.deepEqual(ui.calls.inspected, ["third"], "only the unverified account is read again");
   assert.deepEqual(ui.calls.connector, ["main", "second"]);
   assert.match(text(ui.page()), /1 skipped/);
 });

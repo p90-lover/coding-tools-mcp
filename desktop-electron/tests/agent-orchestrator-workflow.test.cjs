@@ -7491,6 +7491,57 @@ test("the same words typed again answer a question the agent asked since, rather
   assert.deepEqual(steered, ["never ask"], "the agent was steered once");
 });
 
+test("a project's chats past its read's newest 100 runs keep their newest run on the list, each read once", async () => {
+  // 2026-11-09: the project read holds the newest 100 runs, shared by all chats, and the list is made
+  // from them. A busy goal chat filled it: "clash of clan macro" listed 4 of its 49 chats.
+  const runOf = (id, task, state, extra = {}) => ({ id, project_id: task, workspace_id: "ws-1", cancelled: false, revision: 1,
+    nodes: [{ id: "p", role: "planner", state, route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { started_at_ms: extra.at ?? 1, finished_at_ms: extra.at ?? 1 } }] });
+  let all = [runOf("o1", "old", "finished"), runOf("o2", "old", "finished"), runOf("o3", "old", "finished", { at: 3_000 }),
+    runOf("f1", "failing", "failed", { at: 5_000 }), runOf("g0", "gone", "finished"),
+    ...Array.from({ length: 100 }, (_, index) => runOf(`goal-${index}`, "goal", "finished", { at: 10_000 + index }))];
+  const lifecycle = [{ task_id: "goal", visibility: "active" }, { task_id: "old", visibility: "active" }, { task_id: "failing", visibility: "active" },
+    { task_id: "draft", title: "New task", visibility: "active" }, { task_id: "gone", visibility: "archived" }];
+  const reads = [];
+  let clock = 1_000_000;
+  const requestHeadless = async (endpoint, body) => {
+    if (endpoint !== "/api/v1/ao/read") return { ok: true };
+    if (body.task_id) { reads.push(body.task_id); return { ok: true, runs: all.filter((run) => run.project_id === body.task_id).slice(-200), task_lifecycle: lifecycle }; }
+    return { ok: true, runs: all.slice(-100), task_lifecycle: lifecycle };
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless, now: () => clock });
+  const latest = async () => Object.fromEntries((await workflow.call("runs", { workspaceId: "ws-1" })).task_lifecycle
+    .map((entry) => [entry.task_id, entry.latest_run ? [entry.latest_run.id, entry.latest_run.run_count, entry.latest_run.nodes[0].state] : null]));
+  const settle = async () => { for (let tick = 0; tick < 50; tick += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+  // The first read lists what it holds; the others are read in the background, one at a time.
+  assert.deepEqual(await latest(), { goal: null, old: null, failing: null, draft: null, gone: null });
+  await settle();
+  assert.deepEqual(reads.sort(), ["draft", "failing", "old"], "active chats only; an archived one is not looked up");
+  assert.deepEqual(await latest(), { goal: null, old: ["o3", 3, "finished"], failing: ["f1", 1, "failed"], draft: null, gone: null },
+    "each with its newest run; a draft with no runs stays off the list");
+  await settle();
+  assert.equal(reads.length, 3, "a settled chat is not read again");
+
+  // Back in the window with a new message, then pushed out again by a busy goal: listed all along.
+  all = [...all, runOf("o4", "old", "running", { at: 20_000 })];
+  assert.equal((await latest()).old, null, "in the read, the chat's runs speak for it");
+  all = [...all, ...Array.from({ length: 100 }, (_, index) => runOf(`goal-b${index}`, "goal", "finished", { at: 30_000 + index }))];
+  assert.deepEqual((await latest()).old, ["o4", undefined, "running"], "the moment it leaves the window, as it last showed");
+  await settle();
+  assert.deepEqual((await latest()).old, ["o4", 4, "running"], "then read once for its run count");
+
+  // A run still working is read again after 30 s; one waiting on the person after 5 minutes.
+  all = all.map((run) => run.id === "o4" ? runOf("o4", "old", "finished", { at: 21_000 }) : run);
+  const before = reads.length;
+  clock += 31_000;
+  await latest(); await settle();
+  assert.deepEqual(reads.slice(before), ["old"], "the working one settles on the list");
+  assert.deepEqual((await latest()).old, ["o4", 4, "finished"]);
+  clock += 5 * 60_000;
+  await latest(); await settle();
+  assert.ok(reads.slice(before).includes("failing"), "the failed one is checked again, less often");
+});
+
 test("a /goal sent mid-turn steers its condition in and becomes the goal of the run it steered", async () => {
   const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
