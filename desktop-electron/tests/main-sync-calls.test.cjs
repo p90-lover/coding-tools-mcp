@@ -28,6 +28,8 @@ const ALLOWED = {
   "browser-debugging.cjs": 1,
   "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 10, "chat-archive.cjs": 4, "chat-edits.cjs": 4,
   "chat-goals.cjs": 2, "chat-loops.cjs": 4, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 4,
+  // /schedule reads its saved schedules once, when the workflow is created at startup; it saves off the main thread.
+  "chat-schedules.cjs": 1,
   "chatgpt-desktop-sync.cjs": 1, "chatgpt-desktop.cjs": 25, "codex-chat-lifecycle-sync.cjs": 9,
   "codex-thread-accounts.cjs": 2, "codex-thread-stats.cjs": 1, "computer-control.cjs": 4, "cpa-antigravity-reauth.cjs": 4,
   "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 45, "durable-state.cjs": 5, "external-services.cjs": 27,

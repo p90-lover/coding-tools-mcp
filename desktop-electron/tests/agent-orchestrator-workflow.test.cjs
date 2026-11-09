@@ -6210,6 +6210,8 @@ test("a schedule saved before a restart is sent shortly after the app is back", 
   try {
     const store = createScheduleStore({ file, now: () => 900_000 });
     store.set("ws-1", "task-1", { dueAt: 900_000 + 60_000, message: "", spec: "1m" });
+    // Saved off the main thread: on disk once the save resolves.
+    await store.saved();
     // The app was closed past its time: it is overdue when the app starts again.
     const restarted = wakeChat({ schedulesFile: file });
     const quiet = restarted.world.updates.length;
@@ -6217,6 +6219,7 @@ test("a schedule saved before a restart is sent shortly after the app is back", 
     assert.equal(restarted.world.updates.length, quiet, "it waits for the app to settle");
     await restarted.advance(1_000);
     assert.equal(restarted.world.updates.length, quiet + 1, "then it is sent");
+    await restarted.workflow.schedulesSaved();
     assert.equal(createScheduleStore({ file }).get("ws-1", "task-1"), null, "and deleted from the file");
     restarted.workflow.dispose();
   } finally { fs.rmSync(file, { force: true }); }
@@ -6224,13 +6227,15 @@ test("a schedule saved before a restart is sent shortly after the app is back", 
 
 const { createScheduleStore, scheduleAction, scheduleMessage, scheduleSpan, cleanSchedule, DEFAULT_SCHEDULE_MESSAGE } = require("../electron/chat-schedules.cjs");
 
-test("schedules are kept per chat in a file, move with their chat, and a due one sends, waits or drops", () => {
+test("schedules are kept per chat in a file, move with their chat, and a due one sends, waits or drops", async () => {
   const file = path.join(require("node:os").tmpdir(), `ct-schedules-${crypto.randomUUID()}.json`);
+  const store = createScheduleStore({ file, now: () => 60_000 });
   try {
-    const store = createScheduleStore({ file, now: () => 60_000 });
     const first = store.set("ws-1", "task-1", { dueAt: 60_000 + HOUR, message: " run the tests ", spec: "1h" });
     assert.equal(first.message, "run the tests");
     assert.equal(first.scheduledAt, 60_000);
+    // Saved off the main thread (a synchronous write held every window on a busy disk): on disk once it resolves.
+    await store.saved();
     assert.equal(createScheduleStore({ file }).get("ws-1", "task-1").id, first.id, "it survives a restart");
     assert.deepEqual(Object.keys(store.forWorkspace("ws-1")), ["task-1"]);
     assert.equal(store.move("ws-1", "ws-2", "task-1"), true, "a chat moved to another project keeps its schedule");
@@ -6238,8 +6243,9 @@ test("schedules are kept per chat in a file, move with their chat, and a due one
     assert.equal(store.get("ws-2", "task-1").workspaceId, "ws-2");
     assert.equal(store.clear("ws-2", "task-1", "another-id"), false, "only the schedule named is cleared");
     assert.equal(store.clear("ws-2", "task-1", first.id), true);
+    await store.saved();
     assert.equal(createScheduleStore({ file }).get("ws-2", "task-1"), null);
-  } finally { fs.rmSync(file, { force: true }); }
+  } finally { await store.saved(); fs.rmSync(file, { force: true }); }
   assert.throws(() => cleanSchedule({ dueAt: 60_000 + 30_000 }, 60_000), /at least 1 minute/);
   assert.throws(() => cleanSchedule({ dueAt: 60_000 + 31 * 24 * HOUR }, 60_000), /at most 30 days/);
   assert.throws(() => cleanSchedule({ dueAt: 1.5 }, 60_000), /Say when/);

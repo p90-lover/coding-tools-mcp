@@ -11,7 +11,7 @@
 // One schedule per chat ("<workspace>:<task>"); a new one replaces it.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const MIN_SCHEDULE_MS = 60_000;
 const MAX_SCHEDULE_MS = 30 * 24 * 60 * 60_000;
@@ -76,14 +76,25 @@ function createScheduleStore({ file = null, now = Date.now } = {}) {
     } catch { /* No schedules saved yet. */ }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  // Saved off the main thread, as the goals are (chat-goals.cjs): a synchronous write here held every
+  // window for as long as the busy hard disk took, on each /schedule, send and delete. Flushed before
+  // it replaces the old file, so a power cut leaves the old schedules or the new ones; a burst of
+  // changes is one save plus at most one more with the latest.
+  let saving = null;
+  let saveAgain = false;
   const persist = () => {
     if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(schedules, null, 2));
-    fs.renameSync(temporary, file);
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(file, JSON.stringify(schedules, null, 2), { durable: true, protectDirectory: false })
+      .catch(() => { /* the old file stays; the next change saves every schedule again */ })
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
   };
   return {
+    /** Resolves once every change so far is on disk (tests, and a caller about to exit). */
+    async saved() { while (saving) await saving; },
     get: (workspaceId, taskId) => schedules[key(workspaceId, taskId)] ?? null,
     /** Every schedule of one project, by chat. */
     forWorkspace(workspaceId) {
