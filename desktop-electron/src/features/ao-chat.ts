@@ -625,6 +625,12 @@ export type TaskLifecycleView = {
   task_id: string; title?: string; workspace_id?: string; revision?: number; visibility?: "active" | "archived" | "deleted";
   reconfigure?: { id: string; previous_run_id: string; replacement_run_id?: string | null; phase: string; handoff?: string }[];
   schedule?: { id: string; run_id: string; due_at_ms: number; state: string; revision: number } | null;
+  /**
+   * A chat's newest run when none of its runs is in the project read's newest 100 (the workflow's
+   * withChatIndex): its id, what its status is made from, how many runs it has, and when it last
+   * worked (ms). Without it such a chat dropped off the list.
+   */
+  latest_run?: { id: string; cancelled?: boolean; paused?: boolean; nodes?: { id?: string; role: string; state: string }[]; run_count?: number; at?: number };
 };
 export type ChatRun = {
   replaces_run_id?: string;
@@ -649,6 +655,8 @@ export type ChatSummary = {
   taskId: string;
   title: string;
   runIds: string[];
+  /** How many runs the chat has, when `runIds` holds only its newest (a chat past the project read's newest 100). */
+  runCount?: number;
   latestRunId: string;
   status: ChatStatus;
   /** When the chat's task last changed (Unix ms), for the list's relative age. */
@@ -814,12 +822,23 @@ function chatSummaries(runs: ChatRun[], tasks: ChatTask[], lifecycle: TaskLifecy
   const lifeByTask = new Map(lifecycle.map(item => [item.task_id, item]));
   const titles = new Map(tasks.map((task) => [task.id, task.title]));
   const byId = new Map(tasks.map((task) => [task.id, task]));
-  const byTask = new Map<string, { runs: ChatRun[]; lastIndex: number }>();
+  const byTask = new Map<string, { runs: ChatRun[]; lastIndex: number; count?: number }>();
   runs.forEach((run, index) => {
     const entry = byTask.get(run.project_id) ?? { runs: [], lastIndex: index };
     entry.runs.push(run);
     entry.lastIndex = index;
     byTask.set(run.project_id, entry);
+  });
+  // A chat none of whose runs is in the read (the project read holds its newest 100, shared by all of
+  // its chats) comes with its newest run on its lifecycle entry. All its runs are older than every
+  // run here, so it lists after the chats that have one, its own newest work first.
+  const past = lifecycle.filter((item) => item.latest_run?.id && !byTask.has(item.task_id))
+    .sort((a, b) => (b.latest_run!.at ?? 0) - (a.latest_run!.at ?? 0));
+  past.forEach((item, index) => {
+    const latest = item.latest_run!;
+    const stub: ChatRun = { id: latest.id, project_id: item.task_id, cancelled: latest.cancelled === true, paused: latest.paused === true,
+      nodes: (latest.nodes ?? []).map((node, at) => ({ id: node.id ?? `${latest.id}:${at}`, role: node.role, state: node.state }) as ChatNode) };
+    byTask.set(item.task_id, { runs: [stub], lastIndex: -1 - index, count: latest.run_count });
   });
   return [...byTask.entries()]
     .sort((a, b) => b[1].lastIndex - a[1].lastIndex)
@@ -830,6 +849,7 @@ function chatSummaries(runs: ChatRun[], tasks: ChatTask[], lifecycle: TaskLifecy
         taskId,
         title: titles.get(taskId) || lifeByTask.get(taskId)?.title || CHAT_DEFAULT_TITLE,
         runIds: entry.runs.map((run) => run.id),
+        ...(entry.count ? { runCount: entry.count } : {}),
         latestRunId: latest.id,
         visibility,
         schedule: lifeByTask.get(taskId)?.schedule,

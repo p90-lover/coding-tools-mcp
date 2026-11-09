@@ -1829,6 +1829,92 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     });
   }
 
+  // ---- Chats past the project read's newest 100 runs ----
+  // The chat list is made from the project read's runs, and that read holds the project's newest
+  // 100 only, shared by all of its chats: busy goal chats pushed every other chat off the list, no
+  // archive involved (seen live 2026-11-09: "clash of clan macro" listed 4 of its 49 chats, this
+  // repo 9 of 41; opening one from elsewhere took it as deleted). A chat outside that window cannot
+  // change without a new run, and a new run is always in the window, so each one's newest run is
+  // read once (the chat's own read, one at a time, never holding the list's read) and kept. The list
+  // gets it as its lifecycle entry's `latest_run`. Only active chats are looked up, and a task with
+  // no runs (a draft that never started) stays off the list.
+  // A newest run still working may settle without a new run: it is read again after this long. One
+  // waiting on the person (failed or held) changes only when they act on it, so it is read less often.
+  const CHAT_INDEX_RECHECK_MS = 30_000;
+  const CHAT_INDEX_WAITING_RECHECK_MS = 5 * 60_000;
+  const CHAT_INDEX_RETRY_MS = 60_000;
+  const CHAT_SETTLED_STATES = new Set(["finished", "cancelled", "archived"]);
+  /** workspace → task → { run, count, readAt } (count null: seen only in the window), or null: no runs. */
+  const chatIndex = new Map();
+  const chatIndexQueue = new Map();
+  const chatIndexFailed = new Map();
+  let chatIndexReading = false;
+
+  /** What the list needs of a chat's newest run: its id and enough to say its status (chatRunStatus). */
+  function chatRunStub(run) {
+    const nodes = Array.isArray(run.nodes) ? run.nodes : [];
+    const times = nodes.flatMap((node) => [node.receipt?.finished_at_ms, node.receipt?.started_at_ms]).filter(Number.isFinite);
+    return { id: run.id, cancelled: run.cancelled === true, paused: run.paused === true,
+      nodes: nodes.map((node) => ({ id: node.id, role: node.role, state: node.state })), ...(times.length ? { at: Math.max(...times) } : {}) };
+  }
+  /** How long a kept newest run stays good, as the list says its status (ao-chat.ts chatRunStatus). */
+  function chatIndexFresh(stub) {
+    if (stub.cancelled) return Infinity;
+    const open = stub.nodes.filter((node) => !(node.role === "retry" && node.state === "pending") && !CHAT_SETTLED_STATES.has(node.state));
+    if (!stub.paused && !open.length) return Infinity;
+    return stub.paused || open.some((node) => !["failed", "held"].includes(node.state)) ? CHAT_INDEX_RECHECK_MS : CHAT_INDEX_WAITING_RECHECK_MS;
+  }
+
+  function readChatIndex() {
+    if (chatIndexReading) return;
+    const next = chatIndexQueue.entries().next();
+    if (next.done) return;
+    const [key, { workspaceId, taskId }] = next.value;
+    chatIndexQueue.delete(key);
+    chatIndexReading = true;
+    void runs({ workspaceId, taskId }).then((read) => {
+      const mine = chatEdits.visible(workspaceId, read.runs).filter((run) => run.project_id === taskId);
+      const index = chatIndex.get(workspaceId) ?? new Map();
+      chatIndex.set(workspaceId, index);
+      index.set(taskId, mine.length ? { run: chatRunStub(mine[mine.length - 1]), count: mine.length, readAt: now() } : null);
+      chatIndexFailed.delete(key);
+    }, (error) => {
+      chatIndexFailed.set(key, now());
+      logger?.warn?.("ao.chat_index_read_failed", { message: publicText(error?.message || error, 200) });
+    }).finally(() => {
+      chatIndexReading = false;
+      readChatIndex();
+    });
+  }
+
+  /** The project read's lifecycle, each active chat outside its runs carrying its newest run (`latest_run`). */
+  function withChatIndex(workspaceId, shown, lifecycle) {
+    if (!Array.isArray(lifecycle)) return lifecycle;
+    const index = chatIndex.get(workspaceId) ?? new Map();
+    chatIndex.set(workspaceId, index);
+    // A chat in the window is kept as it shows there, so it stays listed the moment it leaves it.
+    const windowed = new Map();
+    for (const run of shown) windowed.set(run.project_id, run);
+    for (const [taskId, run] of windowed) {
+      const known = index.get(taskId);
+      index.set(taskId, { run: chatRunStub(run), count: known?.run?.id === run.id ? known.count : null, readAt: now() });
+    }
+    const at = now();
+    const listed = lifecycle.map((entry) => {
+      const taskId = typeof entry?.task_id === "string" ? entry.task_id : "";
+      if (!taskId || windowed.has(taskId) || entry.visibility !== "active") return entry;
+      const known = index.get(taskId);
+      const key = `${workspaceId}\n${taskId}`;
+      // Read: never read yet, its run count unknown (it left the window), or a run still open (it
+      // may have settled since; it would be in the window had it started again).
+      const stale = known === undefined || (known && (known.count === null || at - known.readAt > chatIndexFresh(known.run)));
+      if (stale && !(at - (chatIndexFailed.get(key) ?? -Infinity) < CHAT_INDEX_RETRY_MS)) chatIndexQueue.set(key, { workspaceId, taskId });
+      return known ? { ...entry, latest_run: { ...known.run, ...(known.count === null ? {} : { run_count: known.count }) } } : entry;
+    });
+    readChatIndex();
+    return listed;
+  }
+
   async function updateRun({ workspaceId, change } = {}) {
     const id = clean(workspaceId, 128);
     if (!change || typeof change !== "object" || Array.isArray(change)
@@ -8603,7 +8689,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // queued message whose chat's settle was missed goes on.
         if (!args.runId && !args.taskId) sweepWorkspace(clean(args.workspaceId, 128), saved);
         // The runs of deleted chat messages stay in AO's history but are not shown in their chat.
-        return { ...saved, runs: chatEdits.visible(clean(args.workspaceId, 128), saved.runs), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
+        const shown = chatEdits.visible(clean(args.workspaceId, 128), saved.runs);
+        // The project's chats past its newest 100 runs stay on the list (withChatIndex).
+        const lifecycle = !args.runId && !args.taskId ? withChatIndex(clean(args.workspaceId, 128), shown, saved.task_lifecycle) : saved.task_lifecycle;
+        return { ...saved, runs: shown, ...(lifecycle === undefined ? {} : { task_lifecycle: lifecycle }), goals: goals.forWorkspace(clean(args.workspaceId, 128)),
           wakeups: wakeups.forWorkspace(clean(args.workspaceId, 128)), loops: loops.forWorkspace(clean(args.workspaceId, 128)),
           schedules: schedules.forWorkspace(clean(args.workspaceId, 128)),
           queues: chatQueue.forWorkspace(clean(args.workspaceId, 128)) };
