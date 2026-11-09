@@ -4485,8 +4485,10 @@ async function start() {
   if (runtimeSourceFallback) logger.warn("runtime.packaged_source_damaged", { message: runtimeSourceFallback, using: "installed copy" });
   // Settings read back from their last good copy (or reset, when that was torn too) after a torn file.
   if (stateStore.recovery) logger.warn("launcher.state_recovered", stateStore.recovery);
-  // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs).
-  const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger });
+  // Runtime > RTK: the person's installed rtk compacts the commands chat agents run (rtk.cjs). Its
+  // OpenCode plugin is written beside the launcher's own data.
+  const rtk = require("./rtk.cjs").createRtk({ getEnabled: () => stateStore.read().rtkEnabled !== false, logger,
+    pluginDir: path.join(launcherUserData, "rtk", "opencode") });
   rtkService = rtk;
   // Missing rtk is installed now, without a click (a failed try waits a day); AO's start waits for it.
   try {
@@ -5046,8 +5048,9 @@ async function start() {
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
-        // RTK's Claude Code and Codex hooks, which AO puts in each Claude session's own settings and
-        // on each Codex app-server's command line (empty: off).
+        // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
+        // session's own settings, on each Codex app-server's command line and in each OpenCode
+        // chat's inline config (empty: off). ready() above wrote the plugin's file.
         try { env = { ...env, ...rtk.daemonEnvironment() }; } catch { /* runs without RTK */ }
         // AO hands this environment to every Claude Code chat agent. Claude Code's own scheduler
         // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
