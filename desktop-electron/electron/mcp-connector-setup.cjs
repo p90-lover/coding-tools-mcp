@@ -427,8 +427,17 @@ function accountConnectorBinding(saved, partition, { workspaceId, tunnelId, name
     && (value.name === undefined || value.name === name));
 }
 
+// The pinned extension's content script ships with the app and does not change while it runs, so it
+// is read once, off the main thread as this module loads. Read on every setup step, it held every
+// window 668 ms during an MCP connector setup on the busy hard disk (0.8.104, 2026-11-09). A call
+// before that read lands reads it here, once.
+const EXTENSION_CONTENT_SCRIPT = path.join(__dirname, "extensions", "fast-access", "content.js");
+let extensionContentScript = null;
+fs.promises.readFile(EXTENSION_CONTENT_SCRIPT, "utf8")
+  .then((text) => { extensionContentScript ??= text; }, () => { /* read on first use, which reports a missing file */ });
+
 function extensionHelpersSource({ testLegacy = false } = {}) {
-  const source = fs.readFileSync(path.join(__dirname, "extensions", "fast-access", "content.js"), "utf8");
+  const source = extensionContentScript ??= fs.readFileSync(EXTENSION_CONTENT_SCRIPT, "utf8");
   const boundary = source.indexOf("  // Test seam.");
   if (boundary < 0) throw new Error("The pinned MCP extension helper boundary is missing.");
   // Reuse the extension's detection/form logic without registering its Chrome worker or Sync flow.
