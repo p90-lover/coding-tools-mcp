@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+const { loadPastCloudflareCheck, matchBrowserUserAgent, SETUP_CHECK_WAIT_MS } = require("./chatgpt-cloudflare-check.cjs");
 // An original result object is usable once during a held workspace operation, never after JSON persistence.
 const freshConnectorResults = new WeakMap();
 const UNVERIFIED_CONNECTOR = "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.";
@@ -176,8 +177,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
         }
         return;
       }
-      if (url.origin === "https://chatgpt.com" && request.method === "POST"
-        && url.pathname === "/backend-api/aip/connectors/mcp/list_accessible") kind = "chatgpt";
+      // The plugins page's own list request names the workspace it shows. ChatGPT replaced the
+      // POST list_accessible with GET ps/plugins/list (seen live 2026-11-09); with only the old
+      // one known, no workspace was ever confirmed and every Connect failed.
+      if (url.origin === "https://chatgpt.com" && ((request.method === "POST"
+        && url.pathname === "/backend-api/aip/connectors/mcp/list_accessible")
+        || (request.method === "GET" && url.pathname === "/backend-api/ps/plugins/list"))) kind = "chatgpt";
       if (url.origin === "https://api.openai.com") {
         if (request.method === "POST" && url.pathname === "/v1/dashboard/onboarding/login") kind = "login";
         else if (request.method === "GET" && url.pathname === "/v1/dashboard/organization/permissions") kind = "permissions";
@@ -778,12 +783,18 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       },
     });
     let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
-    let expectedPath = null, platformPhase = false, recheckExistingFailure = null;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      if (!popup.isDestroyed()) popup.destroy();
-    }, target ? 120_000 : 75_000);
-    timer.unref?.();
+    let expectedPath = null, platformPhase = false, recheckExistingFailure = null, timer;
+    // A Cloudflare check restarts the clock with its own wait added (loadPastCloudflareCheck).
+    const budget = target ? 120_000 : 75_000;
+    const arm = ms => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        timedOut = true;
+        if (!popup.isDestroyed()) popup.destroy();
+      }, ms);
+      timer.unref?.();
+    };
+    arm(budget);
     const navigation = (_event, value, inPlace, mainFrame) => {
       if (mainFrame === false) return;
       navigationVersion++;
@@ -794,6 +805,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     };
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      matchBrowserUserAgent(popup);
       // Initialize the hidden renderer before awaiting CDP Network.enable.
       await popup.loadURL("about:blank");
       checkHost();
@@ -813,7 +825,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       observer = await observeMcpSetupContext(popup.webContents, settings.tunnelId);
       const navigate = async value => {
         checkHost(); expectedPath = new URL(value).pathname; navigating = true;
-        try { await popup.loadURL(value); } finally { navigating = false; }
+        try { await loadPastCloudflareCheck(popup, value, { onCheck: () => arm(SETUP_CHECK_WAIT_MS + budget) }); } finally { navigating = false; }
         checkHost();
       };
       const evidence = async ready => {
@@ -1014,6 +1026,7 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
     timer.unref?.();
     try {
       popup.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+      matchBrowserUserAgent(popup);
       const guardNavigation = (event, value) => {
         try {
           const url = new URL(value);

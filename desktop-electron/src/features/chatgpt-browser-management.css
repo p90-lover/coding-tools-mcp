@@ -40,7 +40,20 @@
 
 /* The page starts at the window's top edge: Add account kept clear of the window's own buttons
    (minimise, maximise, close), which covered it. 0 where there are none (a browser). */
-.cbm-header { padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw)); }
+.cbm-header {
+  align-items: center;
+  padding-right: calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
+}
+
+/* One line that needs the person: Codex started before the bridge and has no WebGPT models. */
+.cbm-notice {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-warning);
+  font-size: var(--text-sm);
+}
 
 .cbm-decodo-actions {
   display: flex;

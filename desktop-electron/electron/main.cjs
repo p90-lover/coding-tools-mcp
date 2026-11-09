@@ -31,6 +31,7 @@ const { createSignInRetryWait } = require("./sign-in-retry-wait.cjs");
 const { prepareBrowserDebugging } = require("./browser-debugging.cjs");
 const { CodexChatLifecycleSync, createLifecycleScan } = require("./codex-chat-lifecycle-sync.cjs");
 const { codexThreadStats } = require("./codex-thread-stats.cjs");
+const { watchCodexModelCache } = require("./codex-model-cache.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
@@ -270,6 +271,7 @@ let cdpPort = 0;
 let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
+let codexModelCacheWatch = null;
 // The automatic MCP check for the running bridge: { pid, failures, retryAt }, retryAt null once it
 // passed or ran out of retries. A failed check retries after each delay below, then waits for a new
 // round (a tunnel restart, a sign-in, an account switch, the setting); one try per bridge left MCP
@@ -956,6 +958,29 @@ function applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged =
     send("launcher:state-changed", state);
   }
   startCatalogVerificationMonitor({ logger, stateStore });
+  startCodexModelCacheWatch({ logger, stateStore });
+}
+
+/**
+ * Keeps "Restart Codex" shown while a Codex lists models without the bridge (codex-model-cache.cjs).
+ * The catalog check above ends at the first Codex that asks the bridge, and the app's own Codex
+ * servers ask at once, so a Codex app started before the route stayed without WebGPT models
+ * while the app said all was well (2026-11-09).
+ */
+function startCodexModelCacheWatch({ logger, stateStore }) {
+  if (codexModelCacheWatch || IS_DEV_PROFILE || !process.env.CODEX_HOME) return;
+  codexModelCacheWatch = watchCodexModelCache({
+    codexHome: process.env.CODEX_HOME,
+    routed: () => { const state = stateStore.read(); return state.codexRoute === true && state.coreSetupComplete === true; },
+    bridgeServedAt: async () => {
+      const health = await runtimeSupervisor.proxyHealthPayload(await runtimeSupervisor.readConfigAsync());
+      return Date.parse(health?.last_successful_model_catalog_request_at);
+    },
+    restartRequired: () => stateStore.read().codexRestartRequired === true,
+    setRestartRequired: (value) => send("launcher:state-changed", stateStore.update({ codexRestartRequired: value })),
+    logger,
+  });
+  app.once("will-quit", () => codexModelCacheWatch?.stop());
 }
 
 async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reason = "auth" }) {
@@ -1113,7 +1138,7 @@ function startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh 
     if (runtime.status === "ready" || runtime.status === "degraded") {
       if (!runtime.bridgeConnected) {
         applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: runtime.bridgeRouteChanged === true });
-      }
+      } else startCodexModelCacheWatch({ logger, stateStore });
       return;
     }
     if (runtime.status === "not-configured") {
