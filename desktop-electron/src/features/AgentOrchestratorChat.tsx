@@ -14,7 +14,7 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { goalMissionStart, openedThought, stepDuration, stepFamily, stepFamilyCounts, stepFamilyNoun, transcriptCompletion, transcriptParts, transcriptSummary, transcriptTone, type StepFamily } from "./chat-transcript";
 import { onMissionWork, readMissionWork } from "./chat-view-settings";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
-import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type ChangesTarget, type WorkbenchTab } from "./ChatWorkbench";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
@@ -1424,6 +1424,10 @@ export function AgentOrchestratorChat({
   };
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
+  // A reply's changed file, clicked in its summary: the side panel's Changes tab shows it, in the
+  // worktree of the agent that edited it. Kept per chat; each click has its own id.
+  const [changesTarget, setChangesTarget] = useState<ChangesTarget & { taskId: string } | null>(null);
+  const changesClicks = useRef(0);
   const previewSessions = useMemo(() => chatAgentSessions(chatRuns, projectId && selectedTaskId
     ? { workspaceId: projectId, taskId: selectedTaskId } : undefined), [chatRuns, projectId, selectedTaskId]);
   const previewSessionIds = useMemo(() => previewSessions.map(session => session.id), [previewSessions]);
@@ -2563,6 +2567,20 @@ export function AgentOrchestratorChat({
     const headError = failing && turn !== failedTurn ? { step: failing.name, message: failing.error! } : undefined;
     const items = cards.flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []);
     const changes = turnChanges(items);
+    // A changed file opens the Changes tab on it, in the worktree of the card whose edit wrote it
+    // (the answering card for "View all changes"). Only an AO agent's session has a worktree diff
+    // (chatAgentSessions); without one the files stay plain text, as before.
+    const sessionOf = (step?: ChatStep) => {
+      const id = answerRun?.nodes.find((node) => node.id === step?.nodeId)?.receipt?.thread_id;
+      return id && agentSessionIds.includes(id) ? id : undefined;
+    };
+    const changesSession = sessionOf(lead) ?? cards.map(sessionOf).find(Boolean);
+    const openChanges = changes.length && changesSession ? (path?: string) => {
+      const editor = path ? [...cards].reverse().find((step) => (CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])
+        .some((item) => item.kind === "edit" && item.files?.some((file) => file.path === path))) : undefined;
+      setChangesTarget({ taskId: selectedTaskId, sessionId: sessionOf(editor) ?? changesSession, path, requestId: ++changesClicks.current });
+      setWorkbench("changes");
+    } : undefined;
     // An agent's own tasks belong in every style, including the default transcript. Other styles
     // may also summarize work as steps; the transcript never invents a task list from tool calls.
     const plan = replyPlan(items, live, failing?.error);
@@ -2640,14 +2658,14 @@ export function AgentOrchestratorChat({
                   turn keeps only its files: its running line (TurnRunning) says who and how long. */}
               <ReplyHead team={teamAnswer} name={teamAnswer ? "Team" : lead?.name ?? "Agent"} model={leadModel} tone={replyTone(turn, live)}
                 startedAtMs={turn.startedAtMs} endedAtMs={turn.endedAtMs ?? turns.slice(turnIndex + 1).find((later) => later.startedAtMs)?.startedAtMs}
-                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes}
+                verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes} onOpenChanges={openChanges}
                 requestModels={turn.runId && !live ? turn.cpaModels : undefined} actions={quietLine ? answerActions : undefined} />
               </section> : null}
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
-    replyStyle, roundFolds, openRounds, drawStart, missionWork, goalStart]);
+    replyStyle, roundFolds, openRounds, drawStart, missionWork, goalStart, agentSessionIds, selectedTaskId]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>
@@ -3114,7 +3132,7 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
       {workbench && selectedTaskId ? <ChatWorkbench key={workbenchKey} sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
-        subagents={subagents} renderWork={renderSubagentWork} /> : null}
+        subagents={subagents} renderWork={renderSubagentWork} changesTarget={changesTarget?.taskId === selectedTaskId ? changesTarget : undefined} /> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   </TurnRestart.Provider></CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);
