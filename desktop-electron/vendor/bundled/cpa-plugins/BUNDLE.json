@@ -112,7 +112,7 @@
   "cline": {
     "id": "cline-pass-switcher",
     "provider": "cline",
-    "version": "0.1.0-codingtools.10",
+    "version": "0.1.0-codingtools.11",
     "source": {
       "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
       "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
@@ -133,7 +133,8 @@
       "A model Cline lists but no longer serves (its 502 \"model not found\") is a non-retryable 404: Claude Code retried the 502 for about four minutes before the chat failed",
       "GET /api/usage-limits returns each enabled key's ClinePass usage windows (5-hour, weekly, monthly: percent used and reset time) from Cline's /users/me/plan/usage-limits, cached for a minute, for CPA's quota page; keys never leave the switcher",
       "A streamed reply that has not started within 60 s is asked for once more, and two that never start are a retryable 504: one that never started took the switcher's whole 120 s attempt budget, and the chat sat quiet for two minutes after a tool call",
-      "A spent ClinePass window (Cline's \"Error 429: You have reached your weekly Clinepass limit\", passed on as 502) is a 429, so CPA puts the model on its quota cooldown and answers retries itself: as a 502, each of Claude Code's ten retries went to Cline four times (CPA's request-retry), the whole context each time"
+      "A spent ClinePass window (Cline's \"Error 429: You have reached your weekly Clinepass limit\", passed on as 502) is a 429, so CPA puts the model on its quota cooldown and answers retries itself: as a 502, each of Claude Code's ten retries went to Cline four times (CPA's request-retry), the whole context each time",
+      "A managed runtime that exits on its own (stopped with the app's processes, crashed) is started again with the same configuration by the next request, at most every 30 s; CPA never resends an unchanged configuration, so every Cline model failed with connection refused (Upstream HTTP 500) until CPA restarted"
     ],
     "build": {
       "go": "1.27.3",
@@ -142,9 +143,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.10.dll",
-        "sha256": "92c6860ee817bfec5eb6b378219406e17d4c8b188e2b0194846d4c8ea0ef7a8a",
-        "size": 7893504
+        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.11.dll",
+        "sha256": "092b1683ef4307481041cf2ea3fdd7b2df8e50dca26d176e7462cef7f007839a",
+        "size": 7897088
       }
     }
   },

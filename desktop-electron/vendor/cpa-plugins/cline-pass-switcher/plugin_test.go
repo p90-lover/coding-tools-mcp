@@ -504,17 +504,51 @@ func TestFullNativeProviderConsoleAndLifecycle(t *testing.T) {
 			t.Fatal("native stream emitted no chunks")
 		}
 	}
+	// A runtime that dies on its own comes back on the next request, but not more often than
+	// restartEvery: seen 2026-10-17, a killed child left every Cline model failing until CPA restarted.
+	runtimeMu.Lock()
+	first := active
+	runtimeMu.Unlock()
+	if first == nil {
+		t.Fatal("managed child missing")
+	}
+	if e := first.cmd.Process.Kill(); e != nil {
+		t.Fatal(e)
+	}
+	<-first.done
+	if _, _, _, e := readLocal("GET", "/v1/models", nil); e == nil || !strings.Contains(e.Error(), "started again in") {
+		t.Fatalf("a runtime that just started was respawned at once: %v", e)
+	}
+	runtimeMu.Lock()
+	lastStart = time.Now().Add(-restartEvery)
+	runtimeMu.Unlock()
+	if status, _, b, e := readLocal("GET", "/v1/models", nil); e != nil || status != 200 || !bytes.Contains(b, []byte("cline-pass/fixture")) {
+		t.Fatalf("dead runtime was not started again: %d %q %v", status, b, e)
+	}
 	runtimeMu.Lock()
 	s := active
 	runtimeMu.Unlock()
-	if s == nil {
-		t.Fatal("managed child missing")
+	if s == nil || s == first || s.cmd.Process.Pid == first.cmd.Process.Pid {
+		t.Fatal("no new managed child after the old one died")
 	}
 	quiesce()
 	select {
 	case <-s.done:
 	default:
 		t.Fatal("managed child remained after shutdown")
+	}
+	// After CPA quiesces the plugin nothing starts it again.
+	runtimeMu.Lock()
+	lastStart = time.Time{}
+	runtimeMu.Unlock()
+	if _, _, _, e := readLocal("GET", "/v1/models", nil); e == nil || !strings.Contains(e.Error(), "not available") {
+		t.Fatalf("runtime restarted after quiesce: %v", e)
+	}
+	runtimeMu.Lock()
+	restarted := active
+	runtimeMu.Unlock()
+	if restarted != nil {
+		t.Fatal("a managed child is running after quiesce")
 	}
 }
 
