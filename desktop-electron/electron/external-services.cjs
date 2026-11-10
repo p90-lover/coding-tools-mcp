@@ -331,6 +331,21 @@ function archiveRefusal(message) {
 // Retired services never run again: their state under integrations/state/ is frozen.
 const isRetiredState = (relative) => relative.startsWith("integrations/state/");
 
+// Where a service runs from is written again at every start, and the managed CPA's program sits in
+// the running version's folder (...\versions\0.8.108-win32-x64\runtime\bun.exe), so every app
+// update changed the live settings file. The archive keeps the retired services' state and the
+// secrets with their key, not launch paths, yet each update took a new snapshot and wrote its
+// manifest, which lists every retired file (6.5 MB), on the main thread before any window worked:
+// 7.9 s at 0.8.108's first start (2026-11-10). A change in these fields alone is not a new snapshot.
+const LAUNCH_FIELDS = Object.freeze(["executable", "arguments", "home", "stateDir"]);
+function withoutLaunchFields(buffer) {
+  const value = JSON.parse(buffer.toString("utf8"));
+  for (const service of Object.values(value?.services ?? {})) {
+    if (service && typeof service === "object") for (const field of LAUNCH_FIELDS) delete service[field];
+  }
+  return JSON.stringify(value);
+}
+
 // The retired-state entries (sources and stats) of the latest snapshot, or null when there is
 // no snapshot yet or it predates recorded stats.
 function archivedRetiredState(archiveRoot) {
@@ -372,7 +387,13 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
   const stats = {};
   const statOf = (info) => ({ size: info.size, mtimeMs: Math.trunc(info.mtimeMs) });
   const sameStat = (a, b) => Boolean(a && b) && a.size === b.size && a.mtimeMs === b.mtimeMs;
-  const sameBytes = (a, b) => { try { return fs.readFileSync(a).equals(fs.readFileSync(b)); } catch { return false; } };
+  // Same bytes, or the same once `view` has read each (a file that isn't what `view` expects is not the same).
+  const sameBytes = (a, b, view = null) => {
+    try {
+      const [left, right] = [fs.readFileSync(a), fs.readFileSync(b)];
+      return view ? view(left) === view(right) : left.equals(right);
+    } catch { return false; }
+  };
   function include(source, relative) {
     if (!fs.existsSync(source)) return;
     const info = fs.lstatSync(source);
@@ -444,7 +465,8 @@ function archiveRetiredServicesState({ filePath, keyPath, archiveDataRoot = null
     // for it. When only mtimes moved, nothing is written: refreshing the stats in place rewrote the
     // whole manifest (~10 MB: every retired file is listed) at each start to save the next start a
     // read of two small files.
-    const sameLiveContent = (relative) => sameBytes(sources[relative], path.join(destination, relative));
+    const sameLiveContent = (relative) => sameBytes(sources[relative], path.join(destination, relative),
+      relative === "external-services.json" ? withoutLaunchFields : null);
     if (sameSources && previous.stats && keys.every((relative) => isRetiredState(relative)
       ? sameStat(previous.stats[relative], stats[relative]) : sameLiveContent(relative))) {
       return destination;

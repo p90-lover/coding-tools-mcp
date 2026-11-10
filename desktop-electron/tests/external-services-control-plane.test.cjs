@@ -716,6 +716,57 @@ test("archived retired state is not walked again on later launches", () => {
   assert.deepEqual(walked.filter((dir) => dir.includes(path.join("state", "codex-router"))), [], "frozen retired state must not be walked");
 });
 
+test("an app update's new launch paths alone do not snapshot the archive again", async () => {
+  // 0.8.108's first start (2026-11-10): the CPA program's versioned folder changed, and the new
+  // snapshot's 6.5 MB manifest held every window for 7.9 s.
+  const directory = temporaryDirectory();
+  const dataRoot = path.join(directory, "integrations");
+  const statePath = path.join(dataRoot, "state", "codex-router", "lib.py");
+  const filePath = path.join(directory, "external-services.json");
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, "x");
+  const settings = (version, secrets = {}) => JSON.stringify({
+    version: 1,
+    services: {
+      cpa: {
+        endpoint: "http://127.0.0.1:8317/",
+        enabled: true,
+        executable: `C:\\Users\\me\\.coding-tools\\versions\\${version}-win32-x64\\runtime\\bun.exe`,
+        arguments: [`H:\\Apps\\Coding Tools ${version}\\electron\\cpa-managed.cjs`, "run"],
+        home: `G:\\components\\cpa\\${version}`,
+        stateDir: `G:\\state\\cpa\\${version}`,
+      },
+    },
+    secrets,
+  }, null, 2);
+  const options = { filePath, keyPath: path.join(directory, "external-services.key"), archiveDataRoot: dataRoot };
+  async function launch(text) {
+    fs.writeFileSync(filePath, text);
+    const controller = createExternalServicesController(options);
+    await controller.saved?.(); // its own rewrite lands before the next launch writes the file
+    controller.dispose();
+  }
+  await launch(settings("0.8.107"));
+  const archive = path.join(directory, "archives", "retired-services");
+  const snapshots = () => (fs.existsSync(path.join(archive, "snapshots")) ? fs.readdirSync(path.join(archive, "snapshots")).length : 0);
+  const before = snapshots();
+  const manifest = path.join(archive, "manifest.json");
+  const old = new Date(Date.now() - 60_000);
+  fs.utimesSync(manifest, old, old);
+  const manifestWritten = fs.statSync(manifest).mtimeMs;
+
+  await launch(settings("0.8.108"));
+  await launch(settings("0.8.109"));
+  assert.equal(snapshots(), before, "no new snapshot when only where the services run from moved");
+  assert.equal(fs.statSync(manifest).mtimeMs, manifestWritten, "nor a rewrite of the manifest");
+
+  // Anything else in the file is still a change with its own snapshot.
+  await launch(settings("0.8.109", { change: 1 }));
+  assert.equal(snapshots(), before + 1);
+  const latest = JSON.parse(fs.readFileSync(path.join(archive, "latest.json"), "utf8")).relative;
+  assert.match(fs.readFileSync(path.join(archive, latest, "external-services.json"), "utf8"), /"change": 1/);
+});
+
 test("rewriting the live service file with the same content does not snapshot retired state again", () => {
   const directory = temporaryDirectory();
   const dataRoot = path.join(directory, "integrations");
