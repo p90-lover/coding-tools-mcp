@@ -317,10 +317,16 @@ function surfaceCallback(name, bindings) {
       && node.expression.expression.getText(file) === "useEffect"
       && node.expression.arguments[0]?.getText(file).includes("if (chatTaskId !== null || !board"));
     callback = statement.expression.arguments[0];
+  } else if (name === "register") {
+    const statement = surface.body.statements.find((node) => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)
+      && node.expression.expression.getText(file) === "useLayoutEffect"
+      && node.expression.arguments[0]?.getText(file).includes("return pageRegistry.register(pageNumber"));
+    callback = statement.expression.arguments[0];
   } else {
     const statement = surface.body.statements.find((node) => ts.isVariableStatement(node)
       && node.declarationList.declarations.some((item) => item.name.getText(file) === name));
-    callback = statement.declarationList.declarations.find((item) => item.name.getText(file) === name).initializer.arguments[0];
+    const initializer = statement.declarationList.declarations.find((item) => item.name.getText(file) === name).initializer;
+    callback = ts.isArrowFunction(initializer) ? initializer : initializer.arguments[0];
   }
   const exports = {};
   vm.runInNewContext(ts.transpileModule(`exports.run = ${callback.getText(file)}`, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
@@ -353,6 +359,90 @@ test("late page restoration with another owner stays local and never reveals a d
   bindings.pageRegistry.has = () => true;
   surfaceCallback("selection", bindings)();
   assert.deepEqual(bindings.selected, [""]);
+});
+
+function splitBindings(registry, pageNumber = 2, splitPanes = []) {
+  const exports = {};
+  const splitSource = fs.readFileSync(path.join(root, "src/features/chat-split.ts"), "utf8");
+  vm.runInNewContext(ts.transpileModule(splitSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports });
+  const state = { panes: splitPanes, errors: [], focus: "main", main: null };
+  return { ...exports, state, splitPanes, pageRegistry: registry, pageNumber, workspaceId: "ws", chatTaskId: "local-chat", splitMaxCols: 3,
+    crypto: { randomUUID: () => "new-pane" }, paneShowing: (workspaceId, taskId) => splitPanes.find((pane) => pane.workspaceId === workspaceId && pane.taskId === taskId)?.id,
+    setView: () => {}, setSheet: () => {}, setFocusedPane: (id) => { state.focus = id; },
+    setSplitPanes: (update) => { state.panes = typeof update === "function" ? update(state.panes) : update; },
+    showInMain: (workspaceId, taskId) => { state.main = { workspaceId, taskId }; },
+    setError: (error) => state.errors.push(error), moveSplitPane: () => {}, moveMainChat: () => {} };
+}
+
+test("an explicit split moves the existing owner to the current page without navigating or duplicating it", () => {
+  for (const target of [undefined, { kind: "column" }, { kind: "cell", col: 0, row: 1 }, { kind: "left" }]) {
+    const { api } = load();
+    const navigated = [], released = [];
+    const registry = api.createChatPageRegistry((page) => navigated.push(page));
+    registry.register(1, [{ workspaceId: "ws", taskId: "other-chat", paneId: "main" }], () => {}, { release: (id) => released.push(id) });
+    const bindings = splitBindings(registry);
+    surfaceCallback("openInSplit", bindings)("ws", "other-chat", target);
+    assert.deepEqual(navigated, [], "explicit splits never reveal another page");
+    assert.deepEqual(released, ["main"], "the old view releases its chat once");
+    assert.equal(registry.has(2, "ws", "other-chat"), false, "old ownership is removed before another render");
+    assert.equal(bindings.state.main?.taskId ?? bindings.state.panes.find((pane) => pane.taskId === "other-chat")?.taskId, "other-chat");
+  }
+});
+
+test("a page releases only the requested chat and project, while normal selection still reveals its owner", () => {
+  const { api } = load();
+  const seen = [];
+  const registry = api.createChatPageRegistry((page) => seen.push(["page", page]));
+  registry.register(1, [
+    { workspaceId: "ws", taskId: "shared-id", paneId: "main" },
+    { workspaceId: "other", taskId: "shared-id", paneId: "side" },
+  ], (pane) => seen.push(["focus", pane]), { release: (pane) => seen.push(["release", pane]) });
+  assert.equal(registry.releaseChat(2, "ws", "shared-id"), true);
+  assert.equal(registry.has(2, "ws", "shared-id"), false);
+  assert.equal(registry.has(2, "other", "shared-id"), true);
+  assert.equal(registry.reveal(2, "other", "shared-id"), true);
+  assert.deepEqual(seen, [["release", "main"], ["page", 1], ["focus", "side"]]);
+  assert.equal(registry.releaseChat(1, "other", "shared-id"), true, "same-page moves do not release their own view");
+  assert.equal(registry.releaseChat(2, "ws", ""), true, "new drafts have no owner");
+  assert.equal(registry.has(2, "other", "shared-id"), true);
+});
+
+test("a split keeps the source untouched when it cannot release ownership", () => {
+  const { api } = load();
+  const registry = api.createChatPageRegistry(() => { throw new Error("Must not navigate"); });
+  registry.register(1, [{ workspaceId: "ws", taskId: "other-chat", paneId: "main" }], () => {});
+  const bindings = splitBindings(registry);
+  surfaceCallback("openInSplit", bindings)("ws", "other-chat");
+  assert.equal(registry.has(2, "ws", "other-chat"), true);
+  assert.equal(bindings.state.panes.length, 0);
+  assert.equal(bindings.state.errors.length, 1);
+});
+
+test("a source page clears a lone main chat, otherwise closes or promotes only the released pane", () => {
+  for (const [paneId, panes] of [["main", []], ["main", [{ id: "side", workspaceId: "ws", taskId: "side-chat", col: 1, row: 0 }]],
+    ["side", [{ id: "side", workspaceId: "ws", taskId: "side-chat", col: 1, row: 0 }]]]) {
+    const { api } = load();
+    const registry = api.createChatPageRegistry(() => { throw new Error("Must not navigate"); });
+    const released = [];
+    const bindings = { ...splitBindings(registry, 1, panes), pane: undefined, setSettingsOpen: () => {}, setPageOpenAsked: () => {},
+      startNewChat: () => released.push("new"), closeSplitPane: (id) => released.push(id) };
+    surfaceCallback("register", bindings)();
+    registry.releaseChat(2, "ws", paneId === "main" ? "local-chat" : "side-chat");
+    assert.deepEqual(released, [paneId === "main" && !panes.length ? "new" : paneId]);
+  }
+});
+
+test("same-page and blank splits still allocate locally without losing existing panes", () => {
+  const { api } = load();
+  const registry = api.createChatPageRegistry(() => { throw new Error("Must not navigate"); });
+  const side = { id: "side", workspaceId: "ws", taskId: "side-chat", col: 1, row: 0 };
+  const bindings = splitBindings(registry, 3, [side]);
+  surfaceCallback("openInSplit", bindings)("ws", "side-chat");
+  assert.equal(bindings.state.focus, "side");
+  surfaceCallback("openInSplit", bindings)("ws", "", { kind: "column" });
+  assert.equal(bindings.state.panes.length, 2);
+  assert.equal(bindings.state.panes[0].taskId, "side-chat");
+  assert.equal(bindings.state.panes[1].taskId, "");
 });
 
 test("hidden pages do not start an archived-chat retention scan", async () => {

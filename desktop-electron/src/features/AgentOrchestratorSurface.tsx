@@ -2021,6 +2021,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         ? newChatPlace(splitPanes, maxColumns, { workspaceId, taskId: chatTaskId ?? "" }, id) !== null
         : splitHasRoom(splitPanes, maxColumns, chatTaskId ?? ""),
       wake: () => setPageOpenAsked((count) => count + 1),
+      release: (id) => { if (id === "main" && !splitPanes.length) startNewChat(); else closeSplitPane(id); },
     });
   }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, splitPanes]);
   useEffect(() => {
@@ -2042,7 +2043,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
    * (a new column while one fits, then a free bottom row, else in place of the last chat).
    */
   const openInSplit = (id: string, taskId: string, at?: SplitDropTarget | PanePos | null) => {
-    if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
+    if (pageRegistry && !pageRegistry.releaseChat(pageNumber, id, taskId)) {
+      setError("This chat could not be moved into split view.");
+      return;
+    }
     const open = paneShowing(id, taskId);
     setView("chat"); setSheet("");
     // An open chat dragged from the sidebar to another place moves there and its old pane closes;
