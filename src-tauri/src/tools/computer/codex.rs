@@ -21,10 +21,27 @@ struct Runtime {
     helper: PathBuf,
     cli: PathBuf,
 }
+/// An engine call that failed: the bridge's code, and whether the worker ended with it. Only a
+/// fatal failure (the engine closed or timed out, physical Escape, a changed window) stops
+/// control; any other is that call's error alone, and the worker keeps serving.
+#[derive(Clone, Debug, PartialEq)]
+struct Failure {
+    code: String,
+    fatal: bool,
+}
+impl Failure {
+    fn fatal(code: &str) -> Self {
+        Self {
+            code: code.into(),
+            fatal: true,
+        }
+    }
+}
+type Outcome = std::result::Result<Value, Failure>;
 struct Request {
     method: String,
     params: Value,
-    response: mpsc::SyncSender<std::result::Result<Value, String>>,
+    response: mpsc::SyncSender<Outcome>,
 }
 struct Worker {
     binding: String,
@@ -141,34 +158,65 @@ fn discover(generation: u64) -> Result<Runtime> {
     Err(unavailable("Install a compatible Codex desktop runtime, or set CODING_TOOLS_CODEX_RESOURCES to its app/resources directory. No alternative input engine was used."))
 }
 
+/// The bridge's reply to one call as an outcome. A reply without `fatal` (an older bridge) counts
+/// as fatal, and a code is kept only in its documented shape: the bridge never sends native text.
+fn reply_outcome(response: &Value) -> Outcome {
+    if response["ok"] == true {
+        return Ok(response["result"].clone());
+    }
+    let code = response["code"]
+        .as_str()
+        .filter(|code| {
+            (3..=64).contains(&code.len())
+                && code
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        })
+        .unwrap_or("CODEX_ENGINE_FAILED");
+    Err(Failure {
+        code: code.into(),
+        fatal: response["fatal"].as_bool() != Some(false),
+    })
+}
+
 async fn exchange(
     stdin: &mut tokio::process::ChildStdin,
     stdout: &mut BufReader<tokio::process::ChildStdout>,
     method: &str,
     params: Value,
-) -> std::result::Result<Value, String> {
+) -> Outcome {
     let mut request = serde_json::to_vec(&json!({"method":method,"params":params}))
-        .map_err(|_| "CODEX_REQUEST_INVALID")?;
+        .map_err(|_| Failure::fatal("CODEX_REQUEST_INVALID"))?;
     if request.len() > 32767 {
-        return Err("CODEX_REQUEST_TOO_LARGE".into());
+        // Refused before it reached the engine: the worker is untouched.
+        return Err(Failure {
+            code: "CODEX_REQUEST_TOO_LARGE".into(),
+            fatal: false,
+        });
     }
     request.push(b'\n');
     let read = async {
         stdin
             .write_all(&request)
             .await
-            .map_err(|_| "CODEX_ENGINE_CLOSED")?;
-        stdin.flush().await.map_err(|_| "CODEX_ENGINE_CLOSED")?;
+            .map_err(|_| Failure::fatal("CODEX_ENGINE_CLOSED"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|_| Failure::fatal("CODEX_ENGINE_CLOSED"))?;
         let mut line = Vec::new();
         loop {
-            let bytes = stdout.fill_buf().await.map_err(|_| "CODEX_ENGINE_CLOSED")?;
+            let bytes = stdout
+                .fill_buf()
+                .await
+                .map_err(|_| Failure::fatal("CODEX_ENGINE_CLOSED"))?;
             if bytes.is_empty() {
-                return Err("CODEX_ENGINE_CLOSED".to_string());
+                return Err(Failure::fatal("CODEX_ENGINE_CLOSED"));
             }
             let end = bytes.iter().position(|b| *b == b'\n');
             let count = end.map_or(bytes.len(), |n| n + 1);
             if line.len() + count > MAX_RESPONSE {
-                return Err("CODEX_RESPONSE_TOO_LARGE".into());
+                return Err(Failure::fatal("CODEX_RESPONSE_TOO_LARGE"));
             }
             line.extend_from_slice(&bytes[..count]);
             stdout.consume(count);
@@ -177,21 +225,12 @@ async fn exchange(
             }
         }
         let response: Value =
-            serde_json::from_slice(&line).map_err(|_| "INVALID_CODEX_RESPONSE")?;
-        if response["ok"] == true {
-            Ok(response["result"].clone())
-        } else {
-            let code = response["code"].as_str().unwrap_or("CODEX_ENGINE_FAILED");
-            Err(if code == "CODEX_ENGINE_INTERRUPTED" {
-                code.into()
-            } else {
-                "CODEX_ENGINE_FAILED".into()
-            })
-        }
+            serde_json::from_slice(&line).map_err(|_| Failure::fatal("INVALID_CODEX_RESPONSE"))?;
+        reply_outcome(&response)
     };
     tokio::time::timeout(Duration::from_secs(12), read)
         .await
-        .map_err(|_| "CODEX_ENGINE_TIMEOUT".to_string())?
+        .map_err(|_| Failure::fatal("CODEX_ENGINE_TIMEOUT"))?
 }
 
 fn start(lease: &Lease, generation: u64) -> Result<mpsc::SyncSender<Request>> {
@@ -269,7 +308,7 @@ fn start(lease: &Lease, generation: u64) -> Result<mpsc::SyncSender<Request>> {
                 let _ = tree.terminate();
             }
             let _ = ready.send(initialized.clone());
-            initialized?;
+            initialized.map_err(|failure| failure.code)?;
             loop {
                 if generation != GENERATION.load(Ordering::SeqCst) {
                     break;
@@ -295,7 +334,8 @@ fn start(lease: &Lease, generation: u64) -> Result<mpsc::SyncSender<Request>> {
                     &request.method,
                     request.params,
                 ));
-                let failed = result.is_err();
+                // A refused call is answered and the worker serves the next one.
+                let failed = matches!(&result, Err(failure) if failure.fatal);
                 let _ = request.response.send(result);
                 if failed {
                     break;
@@ -306,7 +346,7 @@ fn start(lease: &Lease, generation: u64) -> Result<mpsc::SyncSender<Request>> {
             Ok(())
         };
         if let Err(code) = run() {
-            let _ = ready.send(Err(code));
+            let _ = ready.send(Err(Failure::fatal(&code)));
         }
     });
     match startup.recv_timeout(Duration::from_secs(15)) {
@@ -319,6 +359,31 @@ fn start(lease: &Lease, generation: u64) -> Result<mpsc::SyncSender<Request>> {
         }
     }
 }
+
+/// The error for a call the engine refused while its worker kept serving: control stays on.
+fn refused(failure: &Failure) -> crate::tools::workspace::WorkspaceError {
+    if failure.code == "CODEX_WINDOW_HIDDEN" {
+        return error(
+            WINDOW_UNAVAILABLE,
+            "Codex's computer-use engine cannot reach this window: Codex leaves its own windows \
+             (ChatGPT and Codex) out of what it controls. No input was sent. Control stays on, and \
+             computer_snapshot still shows this window; to click or type, select another app's window.",
+        );
+    }
+    error(
+        ACTION_REJECTED,
+        &format!(
+            "The Codex engine refused this call ({}). Control stays on. If it was an input, it may \
+             have been submitted: take a fresh computer_snapshot before trying again.",
+            failure.code
+        ),
+    )
+}
+
+/// The code of a call that never reached a window Codex's engine will not control.
+pub(super) const WINDOW_UNAVAILABLE: &str = "CODEX_WINDOW_UNAVAILABLE";
+/// The code of a call the engine refused while it kept serving (refused).
+pub(super) const ACTION_REJECTED: &str = "CODEX_ACTION_REJECTED";
 
 pub(super) fn request(lease: &Lease, method: &str, params: Value) -> Result<Value> {
     check_same_lease(lease, true)?;
@@ -369,8 +434,9 @@ pub(super) fn request(lease: &Lease, method: &str, params: Value) -> Result<Valu
                 check_same_lease(lease, true)?;
                 return Ok(value);
             }
-            Ok(Err(code)) => {
-                super::emergency_stop(if code == "CODEX_ENGINE_INTERRUPTED" {
+            Ok(Err(failure)) if !failure.fatal => return Err(refused(&failure)),
+            Ok(Err(failure)) => {
+                super::emergency_stop(if failure.code == "CODEX_ENGINE_INTERRUPTED" {
                     "Codex engine stopped by physical Escape"
                 } else {
                     "Codex engine failed; automatic replay disabled"
@@ -482,6 +548,39 @@ mod tests {
         std::fs::create_dir_all(&scratch).unwrap();
         let root = tempfile::tempdir_in(scratch).unwrap();
         assert!(runtime_at(root.path()).is_none());
+    }
+    #[test]
+    fn only_a_fatal_reply_ends_the_worker_and_codes_keep_their_shape() {
+        assert_eq!(
+            reply_outcome(&json!({"ok":true,"result":{"a":1}})),
+            Ok(json!({"a":1}))
+        );
+        let refused =
+            reply_outcome(&json!({"ok":false,"code":"CODEX_WINDOW_HIDDEN","fatal":false}));
+        assert_eq!(
+            refused,
+            Err(Failure {
+                code: "CODEX_WINDOW_HIDDEN".into(),
+                fatal: false
+            })
+        );
+        // An older bridge sends no `fatal`: it ended its worker, so control stops as before.
+        assert!(
+            reply_outcome(&json!({"ok":false,"code":"CODEX_ENGINE_FAILED"}))
+                .is_err_and(|f| f.fatal)
+        );
+        // Anything but an upper-case code is never passed on to the agent.
+        let odd = reply_outcome(&json!({"ok":false,"code":"secret text: C:\\x","fatal":false}));
+        assert_eq!(odd.unwrap_err().code, "CODEX_ENGINE_FAILED");
+        assert_eq!(refused_code("CODEX_WINDOW_HIDDEN"), WINDOW_UNAVAILABLE);
+        assert_eq!(refused_code("INVALID_ELEMENT"), "CODEX_ACTION_REJECTED");
+    }
+    fn refused_code(code: &str) -> &'static str {
+        refused(&Failure {
+            code: code.into(),
+            fatal: false,
+        })
+        .code()
     }
     #[test]
     fn worker_code_does_not_use_an_ambient_codex_pipe_or_write_frames() {

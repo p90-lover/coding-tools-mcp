@@ -105,11 +105,20 @@ const STOP_TITLE = "stop-computer-control";
 // The pill's history button opens and closes its list the same way (page-title-updated).
 const HISTORY_TITLE = "computer-control-history:";
 
-// The pill's size, in DIPs: one row, wide enough for agent and model, the step, the app and the
-// buttons. With its history open the window grows down by HISTORY_HEIGHT, and only then.
-const PILL_WIDTH = 620;
+// The pill's size, in DIPs: one row, wide enough for the preview, agent and model, the step, the
+// app and the buttons. With its panel open the window grows down by HISTORY_HEIGHT, and by
+// PREVIEW_HEIGHT more once there is a frame to show, and only then.
+const PILL_WIDTH = 680;
 const PILL_HEIGHT = 40;
 const HISTORY_HEIGHT = 268;
+const PREVIEW_HEIGHT = 320;
+// The preview the bar shows: a JPEG data URL headless made from the agent's own frame, and no bigger.
+const PREVIEW_URL = /^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/;
+const PREVIEW_MAX_CHARS = 4_000_000;
+// A program's icon on the bar: a PNG data URL from app.getFileIcon (32 px), at most this long; this many kept.
+const ICON_URL = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+const MAX_ICON_CHARS = 200_000;
+const MAX_ICONS = 64;
 // Steps the history keeps, newest first.
 const HISTORY_LIMIT = 50;
 // After a step the pill keeps naming it this long, so a run of quick steps reads as one line, not a flicker.
@@ -162,10 +171,14 @@ function describeAction(tool, args = {}) {
     case "computer_snapshot": return "Looking at the window";
     case "computer_find_control": return `Looking for ${quoted(args?.selector?.name || args?.selector?.automation_id) || "a control"}`;
     case "computer_wait": return `Waiting for ${quoted(args?.selector?.name || args?.selector?.automation_id) || "a control"}`;
-    case "computer_select_window": return args?.activate ? "Bringing the window forward" : null;
+    case "computer_list_windows": return "Looking at the open windows";
+    case "computer_select_window": return args?.activate ? "Bringing the window forward" : "Choosing a window";
     default: return null;
   }
 }
+
+/** A step's line while its call waits for the reviewer or the person: "Clicking “Save” · waiting for approval". */
+const waitingLabel = (action) => `${action} · waiting for approval`;
 
 /** Calls that send pointer input: the pill lets clicks through while one runs (see activity). */
 const POINTER_TOOLS = new Set(["computer_action", "computer_sequence"]);
@@ -177,9 +190,10 @@ function modelLabel(model) {
 }
 
 /**
- * The pill shown while control is on: the agent and its model, the step it is on, the app it
- * controls (a bright chip, never cut short), its history (▾) and Stop. Static: no animation or
- * transition, so it draws only when its text changes (window.show, window.showHistory).
+ * The pill shown while control is on: a small preview of what the agent saw last, the agent and
+ * its model, the step it is on, the app it controls (a bright chip, never cut short), its panel (▾:
+ * the preview, large, over the history) and Stop. Static: no animation or transition, so it draws
+ * only when its text or its frame changes (window.show, window.showHistory, window.showFrame).
  */
 function barPage({ title = "", agent = "A chat", app = "", model = "" } = {}) {
   const where = app || title;
@@ -194,52 +208,84 @@ background:#18181b;border:1px solid #52525b;-webkit-app-region:drag}
 .model{color:#fdba74;font-weight:600}
 .what{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e4e4e7}
 .pill:not([data-busy]) .what{color:#a1a1aa}
-.app{flex:none;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:700;font-size:13px;
-color:#111827;background:#fde68a;border-radius:999px;padding:3px 10px}
-.app:empty{display:none}
+.app{flex:none;display:flex;align-items:center;gap:5px;max-width:190px;overflow:hidden;white-space:nowrap;font-weight:700;font-size:13px;
+color:#111827;background:#fde68a;border-radius:999px;padding:3px 10px 3px 8px}
+.app[data-empty]{display:none}
+.app .name{overflow:hidden;text-overflow:ellipsis}
+.ico{flex:none;width:16px;height:16px;object-fit:contain}.ico[hidden]{display:none}
 button{-webkit-app-region:no-drag;flex:none;font:inherit;font-weight:600;border:0;border-radius:999px;padding:5px 12px;cursor:pointer}
 #toggle{background:#3f3f46;color:#f4f4f5;padding:5px 9px}#toggle:hover{background:#52525b}
 #stop{background:#dc2626;color:#fff}#stop:hover{background:#b91c1c}
-.panel{display:none;box-sizing:border-box;margin-top:6px;height:${HISTORY_HEIGHT - 6}px;overflow-y:auto;border-radius:14px;
-background:#18181b;border:1px solid #52525b;padding:4px 0}
-body[data-open] .panel{display:block}
+.thumb{width:54px;height:30px;padding:0;border-radius:6px;overflow:hidden;background:#09090b;border:1px solid #3f3f46}
+.thumb[hidden]{display:none}.thumb:hover{border-color:#a1a1aa}
+.thumb img{display:block;width:100%;height:100%;object-fit:cover}
+.panel{display:none;flex-direction:column;box-sizing:border-box;margin-top:6px;height:calc(100vh - ${PILL_HEIGHT + 6}px);overflow:hidden;
+border-radius:14px;background:#18181b;border:1px solid #52525b}
+body[data-open] .panel{display:flex}
+.shot{display:none;flex:none;height:${PREVIEW_HEIGHT}px;flex-direction:column;border-bottom:1px solid #27272a}
+body[data-frame] .shot{display:flex}
+.shot img{flex:1;min-height:0;width:100%;object-fit:contain;background:#09090b}
+.cap{flex:none;padding:4px 12px;color:#a1a1aa;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.list{flex:1;min-height:0;overflow-y:auto;padding:4px 0}
 .row{display:grid;grid-template-columns:62px 1fr auto 18px;gap:8px;align-items:center;padding:5px 12px;border-bottom:1px solid #27272a}
 .row:last-child{border-bottom:0}.time{color:#a1a1aa;font-variant-numeric:tabular-nums;font-size:12px}
 .act{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.act small{color:#a1a1aa}
-.row .app{font-size:11.5px;padding:1px 8px;max-width:150px}
+.row .app{font-size:11.5px;padding:1px 8px 1px 6px;max-width:150px;gap:4px}
+.row .ico{width:13px;height:13px}
 .mark{text-align:center;font-weight:700}.done{color:#4ade80}.failed{color:#f87171}.running{color:#fdba74}
 .empty{color:#a1a1aa;padding:10px 12px}</style></head>
 <body><div class="pill" id="pill"><span class="dot"></span>
+<button id="thumb" class="thumb" title="What it saw: open the preview" hidden><img id="thumbimg" alt=""></button>
 <span class="who"><b id="who">${escapeHtml(agent)}</b><span class="model" id="model">${model ? ` · ${escapeHtml(model)}` : ""}</span></span>
-<span class="what" id="what">${escapeHtml(IDLE_TEXT)}</span><span class="app" id="app">${escapeHtml(where)}</span>
+<span class="what" id="what">${escapeHtml(IDLE_TEXT)}</span><span class="app" id="app"${where ? "" : " data-empty"}><img class="ico" id="appicon" alt="" hidden><span class="name" id="appname">${escapeHtml(where)}</span></span>
 <button id="toggle" title="Show what it did">▾</button><button id="stop" title="Stop computer control">Stop</button></div>
-<div class="panel" id="panel"><div class="empty">Nothing done yet.</div></div>
+<div class="panel" id="panel"><div class="shot"><img id="shot" alt="What the agent saw"><div class="cap" id="cap"></div></div>
+<div class="list" id="list"><div class="empty">Nothing done yet.</div></div></div>
 <script>const $ = (id) => document.getElementById(id);
 let flips = 0;
 $("stop").onclick = () => { document.title = ${JSON.stringify(STOP_TITLE)}; };
-$("toggle").onclick = () => {
+$("toggle").onclick = $("thumb").onclick = () => {
   const open = !document.body.hasAttribute("data-open");
   document.body.toggleAttribute("data-open", open);
   $("toggle").textContent = open ? "▴" : "▾";
   document.title = ${JSON.stringify(HISTORY_TITLE)} + (open ? "open:" : "closed:") + (++flips);
 };
+// The image the agent saw last, as a small copy: on the pill, and large in the open panel.
+window.showFrame = (frame) => {
+  $("thumbimg").src = String(frame.src);
+  $("shot").src = String(frame.src);
+  $("cap").textContent = "What it saw at " + String(frame.time)
+    + (frame.viewOnly ? " · view only: the Codex engine cannot click or type in this window" : "");
+  $("thumb").hidden = false;
+  document.body.toggleAttribute("data-frame", true);
+};
 window.show = (state) => {
   $("who").textContent = String(state.agent || "A chat");
   $("model").textContent = state.model ? " · " + String(state.model) : "";
   $("what").textContent = String(state.action || ${JSON.stringify(IDLE_TEXT)});
-  $("app").textContent = String(state.app || "");
+  $("appname").textContent = String(state.app || "");
+  $("app").toggleAttribute("data-empty", !state.app);
+  // The app's own icon, left of its name, once the app has read it from the program.
+  const icon = String(state.icon || "");
+  if (icon && $("appicon").getAttribute("src") !== icon) $("appicon").src = icon;
+  $("appicon").hidden = !icon;
   $("pill").toggleAttribute("data-busy", Boolean(state.action));
 };
 const cell = (tag, className, text) => { const node = document.createElement(tag); node.className = className; node.textContent = text; return node; };
-window.showHistory = (entries) => {
-  const panel = $("panel");
+window.showHistory = (entries, icons = {}) => {
+  const panel = $("list");
   panel.replaceChildren();
   if (!entries.length) { panel.append(cell("div", "empty", "Nothing done yet.")); return; }
   for (const entry of entries) {
     const row = cell("div", "row", "");
     const act = cell("span", "act", String(entry.action));
     act.append(cell("small", "", "  " + String(entry.agent) + (entry.model ? " · " + String(entry.model) : "")));
-    row.append(cell("span", "time", String(entry.time)), act, cell("span", "app", String(entry.app || "")),
+    const app = cell("span", "app", "");
+    const icon = entry.app && Object.hasOwn(icons, entry.app) ? String(icons[entry.app]) : "";
+    if (icon) { const img = document.createElement("img"); img.className = "ico"; img.alt = ""; img.src = icon; app.append(img); }
+    app.append(cell("span", "name", String(entry.app || "")));
+    if (!entry.app) app.setAttribute("data-empty", "");
+    row.append(cell("span", "time", String(entry.time)), act, app,
       cell("span", "mark " + String(entry.outcome), entry.outcome === "done" ? "✓" : entry.outcome === "failed" ? "✕" : "…"));
     row.title = String(entry.action);
     panel.append(row);
@@ -248,13 +294,13 @@ window.showHistory = (entries) => {
 }
 
 function createComputerControl({ request, BrowserWindow, screen, logger = null, ownPids = () => [process.pid], onRequests = () => undefined,
-  approvalsFile = null, now = Date.now }) {
+  approvalsFile = null, now = Date.now, fileIcon = null }) {
   const approvals = createAppApprovals({ file: approvalsFile, now });
   let bar = null;
   let heartbeat = null;
   // What the pill shows, the text last sent to it, the calls running (pointer ones apart), and the
   // timer that clears the last step's name.
-  let shown = { agent: "A chat", model: "", action: null, app: "" };
+  let shown = { agent: "A chat", model: "", action: null, app: "", icon: "" };
   let painted = null;
   let running = 0;
   let pointing = 0;
@@ -263,7 +309,25 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   // app runs; sent to the pill only while its history is open.
   const history = [];
   let historyOpen = false;
+  // The agent frame the pill shows (its snapshot id), whether it has one, and a fetch under way.
+  let frameShown = null;
+  let frameTried = null;
+  let hasFrame = false;
+  let frameLoading = false;
   const clock = (at) => new Date(at).toTimeString().slice(0, 8);
+  // Each program's icon, read once (fileIcon: Electron's app.getFileIcon) and kept as a PNG data URL,
+  // or null when it has none; by app name too, for the history's rows.
+  const icons = new Map();
+  const appIcons = new Map();
+  function iconOf(file) {
+    if (typeof fileIcon !== "function" || typeof file !== "string" || !file) return Promise.resolve(null);
+    if (!icons.has(file)) {
+      if (icons.size >= MAX_ICONS) icons.delete(icons.keys().next().value);
+      icons.set(file, Promise.resolve().then(() => fileIcon(file))
+        .then((url) => (typeof url === "string" && url.length <= MAX_ICON_CHARS && ICON_URL.test(url) ? url : null), () => null));
+    }
+    return icons.get(file);
+  }
   // The window control was last started on, by this app ({ window_id, pid, title, app }).
   let controlled = null;
   // The requests waiting for the person: { public, finish, workspace, captureOff, target, conversation }.
@@ -286,18 +350,53 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   /** The history list, sent only while it is open: a closed pill gets nothing more to draw. */
   function paintHistory() {
     if (!historyOpen || !bar || bar.isDestroyed()) return;
-    void bar.webContents.executeJavaScript(`window.showHistory(${JSON.stringify(history)})`).catch(() => undefined);
+    const used = {};
+    for (const entry of history) if (appIcons.has(entry.app)) used[entry.app] = appIcons.get(entry.app);
+    void bar.webContents.executeJavaScript(`window.showHistory(${JSON.stringify(history)}, ${JSON.stringify(used)})`).catch(() => undefined);
   }
 
-  /** The person opened or closed the history: the window grows down to hold it, or back to the pill alone. */
+  /** The window's height: the pill, and with its panel open the history and, once there is one, the preview. */
+  function fit(own) {
+    try {
+      const bounds = own.getBounds();
+      own.setBounds({ ...bounds, height: PILL_HEIGHT + (historyOpen ? HISTORY_HEIGHT + (hasFrame ? PREVIEW_HEIGHT : 0) : 0) });
+    } catch { /* stays its size */ }
+  }
+
+  /** The person opened or closed the panel: the window grows down to hold it, or back to the pill alone. */
   function toggleHistory(own, open) {
     if (bar !== own || own.isDestroyed()) return;
     historyOpen = open;
-    try {
-      const bounds = own.getBounds();
-      own.setBounds({ ...bounds, height: PILL_HEIGHT + (open ? HISTORY_HEIGHT : 0) });
-    } catch { /* stays its size */ }
+    fit(own);
     paintHistory();
+  }
+
+  /**
+   * Fetches the agent's newest frame for the preview (headless scales down the image the agent
+   * was given; nothing is captured for it) and shows it. Asked only when the heartbeat reports a
+   * snapshot the pill does not show yet, one fetch at a time, and once per snapshot: a frame that
+   * could not be fetched is not asked for again each second.
+   */
+  async function loadFrame(own, snapshot) {
+    if (frameLoading) return;
+    frameLoading = true;
+    frameTried = snapshot;
+    try {
+      const after = frameShown ? `?after=${encodeURIComponent(frameShown)}` : "";
+      const frame = (await request(`/api/v1/computer/frame${after}`, null, { method: "GET", localConfirmation: true }))?.frame;
+      if (bar !== own || own.isDestroyed() || !frame || typeof frame !== "object") return;
+      const src = typeof frame.data_url === "string" ? frame.data_url : "";
+      if (src.length > PREVIEW_MAX_CHARS || !PREVIEW_URL.test(src)) return;
+      frameShown = String(frame.snapshot_id ?? "");
+      const first = !hasFrame;
+      hasFrame = true;
+      const at = Number(frame.captured_at_unix_ms);
+      const shownFrame = { src, time: clock(Number.isFinite(at) && at > 0 ? at : now()), viewOnly: frame.input_available === false };
+      void own.webContents.executeJavaScript(`window.showFrame(${JSON.stringify(shownFrame)})`).catch(() => { frameShown = null; });
+      if (first && historyOpen) fit(own);
+    } catch { /* the next beat asks again */ } finally {
+      frameLoading = false;
+    }
   }
 
   function closeBar() {
@@ -309,6 +408,9 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     pointing = 0;
     painted = null;
     historyOpen = false;
+    frameShown = null;
+    frameTried = null;
+    hasFrame = false;
     for (const entry of history) if (entry.outcome === "running") entry.outcome = "failed";
     const open = bar;
     bar = null;
@@ -332,7 +434,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
 
   function openBar({ title, agent = "A chat", app = "", model = "" }) {
     closeBar();
-    shown = { agent, model: modelLabel(model), action: null, app: app || title };
+    shown = { agent, model: modelLabel(model), action: null, app: app || title, icon: "" };
     // On the screen the person is looking at (the pointer's), at its top centre.
     let display = null;
     try { display = screen.getDisplayNearestPoint?.(screen.getCursorScreenPoint()) ?? null; } catch { display = null; }
@@ -380,43 +482,59 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
         const current = (await request("/api/v1/computer/status?heartbeat=true", null, { method: "GET", localConfirmation: true }))?.status;
         if (bar !== own || own.isDestroyed()) return;
         if (!current || current.state === "stopped") { closeBar(); controlled = null; return; }
+        // A new frame the agent was given (a snapshot, or the one after each action) goes on the preview.
+        const snapshot = typeof current.last_snapshot_id === "string" ? current.last_snapshot_id : null;
+        if (snapshot && snapshot !== frameShown && snapshot !== frameTried) void loadFrame(own, snapshot);
       } catch { /* a missed beat only pauses input; the next one restores it */ }
     }, HEARTBEAT_MS);
     heartbeat.unref?.();
   }
 
   /**
-   * A chat's computer_* call is about to run: the pill names it (describeAction) until it ends,
-   * then a moment longer. Returns the function to call when it ends. While a call that sends
-   * pointer input runs, the pill lets clicks through: headless refuses a click on a point another
-   * window covers (TARGET_OCCLUDED), and the pill is always on top. This uses no mouse hook, which
-   * would slow every mouse move on the computer whenever this app is busy.
+   * A chat's computer_* call arrived: the pill names it (describeAction) until it ends, then a
+   * moment longer. With `waiting` it waits for its review first, and the pill says so until
+   * proceed() is called on the returned function, which is called itself when the call ends. While
+   * a call that sends pointer input runs, the pill lets clicks through: headless refuses a click on
+   * a point another window covers (TARGET_OCCLUDED), and the pill is always on top. This uses no
+   * mouse hook, which would slow every mouse move on the computer whenever this app is busy.
    */
-  function activity({ agent = null, model = null, tool, args } = {}) {
+  function activity({ agent = null, model = null, tool, args, waiting = false } = {}) {
     const action = describeAction(tool, args);
     const own = bar;
-    if (!action || !own || own.isDestroyed()) return () => undefined;
+    const none = () => undefined;
+    none.proceed = () => undefined;
+    if (!action || !own || own.isDestroyed()) return none;
     const pointer = POINTER_TOOLS.has(tool);
+    // Clicks pass through only once the call may act: while it waits for approval, Stop stays clickable.
+    let passing = false;
+    const passThrough = () => {
+      if (!pointer || passing) return;
+      passing = true;
+      if (pointing++ === 0) own.setIgnoreMouseEvents?.(true);
+    };
     running += 1;
-    if (pointer && pointing++ === 0) own.setIgnoreMouseEvents?.(true);
+    if (!waiting) passThrough();
     if (idleTimer) clearTimeout(idleTimer);
     idleTimer = null;
-    shown = { ...shown, agent: agent || shown.agent, model: model ? modelLabel(model) : shown.model, action };
+    const label = waiting ? waitingLabel(action) : action;
+    shown = { ...shown, agent: agent || shown.agent, model: model ? modelLabel(model) : shown.model, action: label };
     paint();
-    const step = { time: clock(now()), agent: shown.agent, model: shown.model, action, app: shown.app, outcome: "running" };
+    const step = { time: clock(now()), agent: shown.agent, model: shown.model, action: label, app: shown.app, outcome: "running" };
     history.unshift(step);
     history.length = Math.min(history.length, HISTORY_LIMIT);
     paintHistory();
     let ended = false;
-    /** `outcome`: "done", or "failed" when the call came back as an error. */
-    return (outcome = "done") => {
+    /** `outcome`: "done", or "failed" when the call came back as an error (a refusal included). */
+    const end = (outcome = "done") => {
       if (ended) return;
       ended = true;
       step.outcome = outcome === "failed" ? "failed" : "done";
+      step.action = action;
       if (bar !== own || own.isDestroyed()) return;
+      if (shown.action === label && label !== action) { shown = { ...shown, action }; paint(); }
       paintHistory();
       running = Math.max(0, running - 1);
-      if (pointer && --pointing <= 0) { pointing = 0; own.setIgnoreMouseEvents?.(false); }
+      if (passing && --pointing <= 0) { pointing = 0; own.setIgnoreMouseEvents?.(false); }
       if (running) return;
       idleTimer = setTimeout(() => {
         idleTimer = null;
@@ -426,6 +544,16 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
       }, IDLE_LINGER_MS);
       idleTimer.unref?.();
     };
+    /** The call passed its review and runs now: the pill drops "waiting for approval". */
+    end.proceed = () => {
+      if (ended || bar !== own || own.isDestroyed()) return;
+      passThrough();
+      if (step.action === action) return;
+      step.action = action;
+      if (shown.action === label) { shown = { ...shown, action }; paint(); }
+      paintHistory();
+    };
+    return end;
   }
 
   /** The project headless knows as `workspaceId`, or null. */
@@ -448,7 +576,9 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     return ((await request("/api/v1/computer/targets", null, { method: "GET" }))?.targets ?? [])
       .filter((target) => !own.has(target.pid))
       .map((target) => ({ window_id: Number(target.window_id), pid: Number(target.pid), title: String(target.title || "(untitled)"),
-        app: appKey(target.app), appName: appName(target.app, target.title) }));
+        app: appKey(target.app), appName: appName(target.app, target.title),
+        // The program's full path, for its icon on the bar; the agent is never given it.
+        path: typeof target.path === "string" && target.path ? target.path : null }));
   }
 
   /**
@@ -474,7 +604,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
       } catch (error) {
         return { allowed: false, reason: `screen capture could not be turned on for the project (${String(error?.message || error).slice(0, 200)})` };
       }
-      return { allowed: true };
+      return { allowed: true, decision: "earlier" };
     }
     const joined = pending.find((item) => item.conversation === conversation && item.target.app === appKey(target.app));
     if (joined) return joined.answered;
@@ -527,7 +657,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
       if (current.captureOff) await enableCapture(current.workspace);
       approvals.allow(current.target.app, current.conversation, input.decision);
       logger?.info?.("computer.app_allowed", { app: current.target.app, persist: input.decision });
-      current.finish({ allowed: true });
+      current.finish({ allowed: true, decision: input.decision });
       return { ok: true };
     } catch (error) {
       return { ok: false, error: String(error?.message || error).slice(0, 300) };
@@ -542,11 +672,30 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
    * already on another window moves to this one.
    */
   async function start({ workspaceId, target, agent = "A chat", model = "" }) {
+    // Headless keeps one control at a time and refuses a second start (CONTROL_ALREADY_ARMED), so
+    // every switch to another window failed until 2026-11-09. The old control ends first.
+    let current = null;
+    try { current = await status(); } catch { current = null; }
+    if (controlled || (current?.state && current.state !== "stopped")) {
+      closeBar();
+      controlled = null;
+      await request("/api/v1/computer/stop", {});
+      logger?.info?.("computer.moved", { app: appKey(target.app) });
+    }
     const started = await request("/api/v1/computer/start", { workspace_id: workspaceId, window_id: target.window_id, pid: target.pid,
       duration_seconds: 0, always_enabled: true }, { localConfirmation: true });
-    controlled = { window_id: target.window_id, pid: target.pid, title: target.title, app: appKey(target.app) };
+    const startedOn = { window_id: target.window_id, pid: target.pid, title: target.title, app: appKey(target.app) };
+    controlled = startedOn;
     logger?.info?.("computer.started", { pid: target.pid, app: controlled.app });
-    openBar({ title: target.title, agent, model, app: appName(target.app, target.title) });
+    const name = appName(target.app, target.title);
+    openBar({ title: target.title, agent, model, app: name });
+    void iconOf(target.path).then((icon) => {
+      if (!icon || controlled !== startedOn) return;
+      appIcons.set(name, icon);
+      shown = { ...shown, icon };
+      paint();
+      paintHistory();
+    });
     return started?.status ?? await status();
   }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createBridge, loadEngine, validateCall, sameExecutable, METHODS } from '../src-tauri/src/tools/computer/codex-bridge.mjs';
+import { createBridge, loadEngine, validateCall, sameExecutable, failureReply, METHODS } from '../src-tauri/src/tools/computer/codex-bridge.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,6 +21,36 @@ function fixture(overrides = {}) {
   };
   return { calls, bridge: createBridge({ client, windowId: window.id, executable }) };
 }
+
+test('a refused call keeps the worker; a closed engine, Escape or a changed window ends it', async () => {
+  const coded = code => Object.assign(new Error(code), { code });
+  // A stale element index, as the real engine refused it on 2026-11-09, must not end control.
+  assert.deepEqual(failureReply(new Error('element index 99999 is out of range')), { ok: false, code: 'CODEX_ELEMENT_INVALID', fatal: false });
+  // An uncoded failure keeps its kind, never its text: a failing screenshot is told from the rest.
+  assert.deepEqual(failureReply(new Error('Failed to capture screenshot of "Inbox - secret.txt"')), { ok: false, code: 'CODEX_CAPTURE_FAILED', fatal: false });
+  assert.equal(failureReply(new Error('request timed out after 15000ms')).code, 'CODEX_ENGINE_TIMEOUT');
+  // The engine's own screenshot call, as a peer session reproduced it on 2026-11-09: a bare Error("timeout").
+  assert.deepEqual(failureReply(new Error('timeout')), { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: false });
+  // The SDK's own timer and helper exit (helper_transport.js): the helper is gone, so control ends.
+  assert.deepEqual(failureReply(new Error('computer-use request timed out: get_window_state')), { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: true });
+  assert.deepEqual(failureReply(new Error('computer-use helper exited with exit code 1: C:\\secret')), { ok: false, code: 'CODEX_ENGINE_CLOSED', fatal: true });
+  assert.equal(failureReply(new Error('Access is denied. (os error 5)')).code, 'CODEX_ACCESS_DENIED');
+  assert.equal(failureReply(new Error('UI Automation tree unavailable')).code, 'CODEX_ACCESSIBILITY_FAILED');
+  assert.equal(failureReply(new Error('something else entirely')).code, 'CODEX_ENGINE_FAILED');
+  assert.deepEqual(failureReply(coded('INVALID_CODEX_PARAMS')), { ok: false, code: 'INVALID_CODEX_PARAMS', fatal: false });
+  // The engine lists no ChatGPT or Codex window: seen live as "window id 525084 was not found. Current windows: []".
+  assert.deepEqual(failureReply(new Error('window id 525084 was not found. Current windows: []')), { ok: false, code: 'CODEX_WINDOW_HIDDEN', fatal: false });
+  assert.deepEqual(failureReply(new Error('Computer use was stopped by the user')), { ok: false, code: 'CODEX_ENGINE_INTERRUPTED', fatal: true });
+  assert.deepEqual(failureReply(coded('CONTROL_SCOPE_MISMATCH')), { ok: false, code: 'CONTROL_SCOPE_MISMATCH', fatal: true });
+  assert.deepEqual(failureReply(coded('CODEX_ENGINE_CLOSED')), { ok: false, code: 'CODEX_ENGINE_CLOSED', fatal: true });
+  assert.equal(failureReply(coded('INVALID_ELEMENT'), true).fatal, true, 'anything after the engine closed is fatal');
+  // Native text never becomes a code.
+  assert.equal(failureReply(coded('C:\\secret path')).code, 'CODEX_ENGINE_FAILED');
+  const { bridge } = fixture({ async click() { throw new Error('element index 4 is stale'); } });
+  await assert.rejects(bridge.call('click', { element_index: 4 }), /stale/);
+  assert.equal(bridge.closed, false, 'the bridge itself stays open after a refused call');
+  assert.ok((await bridge.call('get_window_state', { include_screenshot: true })).screenshots.length);
+});
 
 test('the documented window2 methods reach the actual client with the approved native Window', async () => {
   const f = fixture();

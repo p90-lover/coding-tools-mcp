@@ -4997,6 +4997,11 @@ async function start() {
         approvalsFile: path.join(app.getPath("userData"), "integrations", "computer-app-approvals.json"),
         // The app's own windows are never offered as a target.
         ownPids: () => app.getAppMetrics().map((metric) => metric.pid),
+        // The controlled program's icon, left of its name on the bar (32 px, shown at 16).
+        fileIcon: async (file) => {
+          const image = await app.getFileIcon(file, { size: "normal" });
+          return image.isEmpty() ? null : image.toDataURL();
+        },
         onRequests: (requests) => {
           send("launcher:computer-requests", requests);
           // Asked in the chat, never by bringing a window up: a window that is not in front only
@@ -5110,6 +5115,8 @@ async function start() {
         },
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
+        // The person's notes for computer_guide: <app>.md (chrome.md, notepad.md) or <topic>.md, read on each call.
+        computerGuidesDir: path.join(app.getPath("userData"), "computer-guides"),
         previewEnabled: () => stateStore.read().chatAgentPreviewTools !== false,
         requestHeadless: (endpoint, body, options) => {
           if (!headlessHost) throw new Error("Local Coding Tools runtime is unavailable");

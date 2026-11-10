@@ -6997,7 +6997,9 @@ async fn computer_targets(State(state): State<ServiceState>, headers: HeaderMap)
                 .into_iter()
                 .map(|target| {
                     let app = tools::computer::local_target_app(target.pid);
-                    json!({"window_id": target.window_id, "pid": target.pid, "title": target.title, "app": app})
+                    // Its full path, for the program's icon on the control bar.
+                    let path = tools::computer::local_target_path(target.pid);
+                    json!({"window_id": target.window_id, "pid": target.pid, "title": target.title, "app": app, "path": path})
                 })
                 .collect::<Vec<_>>()
         })
@@ -7093,6 +7095,43 @@ async fn computer_status(
         fields.remove("agent_frame");
     }
     Json(json!({"ok": true, "status": status})).into_response()
+}
+
+#[derive(Deserialize, Default)]
+struct ComputerFrameQuery {
+    /// The snapshot the bar already shows; the frame comes back only when a newer one exists.
+    #[serde(default)]
+    after: Option<String>,
+}
+
+/// The control bar's preview: the image the agent was given last, scaled down, when it is newer
+/// than `after`. Only the app's own UI may read it (the local UI token), and nothing is captured
+/// for it: the bar shows what the agent saw, refreshed by the agent's own snapshots and actions.
+async fn computer_frame(
+    State(state): State<ServiceState>,
+    headers: HeaderMap,
+    Query(query): Query<ComputerFrameQuery>,
+) -> Response {
+    if let Err(response) = auth(&headers, &state) {
+        return *response;
+    }
+    if !local_ui_authorized(&headers, &state) {
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "COMPUTER_LOCAL_CONFIRMATION_REQUIRED",
+            "Only the app's own control bar shows the agent's frame",
+        );
+    }
+    let after = query.after.filter(|id| id.len() <= 64);
+    let preview = tokio::task::spawn_blocking(move || {
+        tools::computer::local_frame_preview(after.as_deref())
+    })
+    .await;
+    match preview {
+        Ok(Ok(frame)) => Json(json!({"ok": true, "frame": frame})).into_response(),
+        Ok(Err(error)) => json_error(StatusCode::BAD_REQUEST, "COMPUTER_FRAME_FAILED", error.message()),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "COMPUTER_FRAME_FAILED", text_error(error)),
+    }
 }
 
 async fn computer_stop(State(state): State<ServiceState>, headers: HeaderMap) -> Response {
@@ -7310,6 +7349,7 @@ fn router(state: ServiceState) -> Router {
         .route("/api/v1/computer/targets", get(computer_targets))
         .route("/api/v1/computer/start", post(computer_start))
         .route("/api/v1/computer/status", get(computer_status))
+        .route("/api/v1/computer/frame", get(computer_frame))
         .route("/api/v1/computer/stop", post(computer_stop))
         .route("/api/v1/operations/{request_id}", get(operation_read))
         .route("/api/v1/events/emit", post(events_emit))
