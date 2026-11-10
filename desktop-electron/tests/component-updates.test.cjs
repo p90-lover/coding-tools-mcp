@@ -237,6 +237,32 @@ test("an update whose download doesn't match the published checksum is not stage
   controller.dispose();
 });
 
+test("an update is downloaded, hashed and moved into place with no synchronous disk call in its staging folder", async (t) => {
+  // One CPA update held every window 0.3-1.4 s per synchronous step and 2.5 s hashing the zip
+  // (2026-11-10 00:53Z). Every path inside an install's staging folder (cpa-<time>-<uuid>) fails here
+  // when touched synchronously.
+  const { controller } = fixture();
+  await controller.installComponent("cpa");
+  const staging = /[\\/]cpa-\d{4}-\d{2}-\d{2}T[^\\/]+(?:[\\/]|$)/;
+  const touched = [];
+  for (const name of ["openSync", "statSync", "existsSync", "renameSync", "copyFileSync", "mkdirSync", "writeFileSync"]) {
+    const original = fs[name];
+    t.mock.method(fs, name, (...args) => {
+      if (staging.test(String(args[0]))) {
+        touched.push(`${name} ${path.basename(String(args[0]))}`);
+        throw new Error(`${name} on the main thread: ${args[0]}`);
+      }
+      return original.apply(fs, args);
+    });
+  }
+  const staged = await controller.installComponentUpdate("cpa");
+  t.mock.restoreAll();
+  assert.deepEqual(touched, []);
+  assert.equal(staged.staged, true);
+  assert.equal(controller.pendingComponentUpdate("cpa").version, "1.2.0");
+  controller.dispose();
+});
+
 test("a failed GitHub check reports its error instead of throwing", async () => {
   const { controller } = fixture({ fetchImpl: async () => new Response("rate limited", { status: 403 }) });
   const check = await controller.checkComponentUpdate("cpa");

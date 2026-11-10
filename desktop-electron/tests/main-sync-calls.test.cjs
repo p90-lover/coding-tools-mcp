@@ -35,7 +35,7 @@ const ALLOWED = {
   "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 45, "durable-state.cjs": 5, "external-services.cjs": 27,
   "extra-tunnels.cjs": 5, "gpt-browser.cjs": 1, "gui-update.cjs": 12, "headless-host.cjs": 11, "in-use-files.cjs": 4,
   "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1, "main.cjs": 24,
-  "managed-components.cjs": 62, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
+  "managed-components.cjs": 48, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9,
   // The saved accessibility mode is read once in start()'s first tick, before any window exists:
