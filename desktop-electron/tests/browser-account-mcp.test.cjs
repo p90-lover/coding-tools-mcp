@@ -93,6 +93,69 @@ test("a setup that gave way to an account switch runs again, though the switch i
   assert.deepEqual(f.connected, ["one", "two", "one"], "and once connected, left alone");
 });
 
+test("a Connect the user asked for holds the sync: none starts, and one connecting gives way", async () => {
+  const f = fixture();
+  const release = f.sync.hold();
+  await f.sync.sync();
+  assert.deepEqual(f.verified, [], "a held sync reads nothing and opens no setup");
+  release();
+  release(); // A second release must not let a later hold through.
+
+  const started = pending(), gate = pending();
+  f.deps.connect = async (id, current) => {
+    f.connected.push(id);
+    if (id === "one") { started.resolve(); await gate.promise; }
+    // main.cjs's connect checks admission at each step and reports a lost one as gaveWay.
+    if (!current()) throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."), { gaveWay: true });
+    return { connected: true };
+  };
+  const running = f.sync.sync();
+  await started.promise;
+  const manual = f.sync.hold();
+  const second = f.sync.hold();
+  gate.resolve();
+  await running;
+  assert.deepEqual(f.connected, ["one"], "it gave way on its account and started no other");
+  assert.deepEqual(f.warnings.map(entry => entry.event), ["browser_accounts.automatic_mcp_deferred"]);
+  manual();
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one"], "still held by the other Connect");
+  second();
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "one", "two"], "once released, the account it gave way on is tried again");
+});
+
+test("main's account Connect holds the automatic sync, waits for the browser, and always lets go", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf('  handle("launcher:mcp-create-connector",');
+  const close = /\r?\n {2}\}\);\r?\n/g;
+  close.lastIndex = start;
+  const match = close.exec(source);
+  const end = match ? match.index + match[0].length : -1;
+  assert(start > 0 && end > start);
+  const order = [];
+  let handler;
+  const context = {
+    MANUAL_MCP_CONNECT_WAIT_MS: 60_000,
+    browserHost: { manualOperation: "MCP connector creation" },
+    assertFocusedMainWindow: () => order.push("focus"),
+    mcpConnectorCommand: { request: async () => order.push("settings") },
+    automaticAccountMcp: { hold: () => { order.push("hold"); return () => order.push("release"); } },
+    waitForManualOperation: async (host, timeoutMs) => { order.push(`wait ${timeoutMs}`); assert.equal(host, context.browserHost); },
+    connectAccountMcp: async id => { order.push(`connect ${id}`); if (id === "bad") throw new Error("busy"); return { connected: true }; },
+    handle: (channel, fn) => { assert.equal(channel, "launcher:mcp-create-connector"); handler = fn; },
+  };
+  vm.runInNewContext(source.slice(start, end), context);
+  assert.deepEqual(await handler({}, "one"), { connected: true });
+  assert.deepEqual(order, ["focus", "hold", "wait 60000", "connect one", "release"]);
+  order.length = 0;
+  await assert.rejects(handler({}, "bad"), /busy/);
+  assert.deepEqual(order, ["focus", "hold", "wait 60000", "connect bad", "release"], "a failed Connect releases the hold too");
+  order.length = 0;
+  await handler({}, undefined);
+  assert.deepEqual(order, ["focus", "settings"], "the Settings connector is unchanged");
+});
+
 test("new login cookies, changed target and a real sign-out permit a fresh attempt", async () => {
   const f = fixture();
   await f.sync.sync();

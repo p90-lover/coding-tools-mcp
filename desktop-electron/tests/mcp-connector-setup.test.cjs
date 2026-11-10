@@ -814,6 +814,8 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   const tunnels = [{ id: "extra", accountId: "other", tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", state: "stopped" }];
   const context = {
     Error, handle: (_name, action) => { handler = action; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+    // The handler's hold on the automatic sync and its wait for the browser (browser-account-mcp.test.cjs).
+    automaticAccountMcp: null, waitForManualOperation: async () => {}, MANUAL_MCP_CONNECT_WAIT_MS: 60_000,
     quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
     mcpConnectorCommand: { request: (...args) => { calls.push(args); return "legacy"; } },
     browserAccounts: { has: id => accounts.has(id), partitionOf(id) { if (!accounts.has(id)) throw new Error("Unknown account"); return `persist:${id}`; },

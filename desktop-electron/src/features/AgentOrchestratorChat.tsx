@@ -38,6 +38,7 @@ import {
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
   chatScheduleParse, scheduleCountdown, scheduleLabel, scheduleWhen, type ChatSchedule,
+  sendRefusedForNow,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -1852,10 +1853,11 @@ export function AgentOrchestratorChat({
             : { title: title.trim() || undefined, message: first, ...(goal ? { goal } : {}) });
         } catch (error) {
           // Not sent: it goes back where it was typed, unless something new was typed meanwhile, or
-          // it is only refused for now (it then waits in the queue; see the catch below).
+          // a follow-up is only refused for now (it then waits in the queue; see the catch below). A
+          // new chat has no queue, so it always comes back.
           if (shown) {
             setOutgoing((pending) => pending === outgoingMessage ? null : pending);
-            if (here() && !composing.current.draft && !/still running|focused app window/i.test(String((error as Error)?.message ?? error))) {
+            if (here() && !composing.current.draft && !(selectedTaskId && sendRefusedForNow(error))) {
               setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
             }
           }
@@ -1881,13 +1883,13 @@ export function AgentOrchestratorChat({
       // Refused only for the moment, not for what it says: the chat started working again under it
       // (seen live: "Retrying automatically in 5s" restarted the run as the message went, and "This
       // chat is still running" sent it back to the composer), or the window was not in front (sends
-      // run only from the focused window). It waits at the front of the queue instead, steered in or
-      // sent as soon as it can be, or once the window is back in front.
-      const why = String((error as Error)?.message ?? error);
-      const busyNow = /still running/i.test(why), unfocused = /focused app window/i.test(why);
+      // run only from the focused window), or the local service had no room and never sent it (ten
+      // split chats polling a saturated disk, 2026-11-09: a "request admission is full" toast). It
+      // waits at the front of the queue instead, steered in or sent as soon as it can be, or once
+      // the window is back in front (sendRefusedForNow).
       // The app queues it at the front and sends it when the chat is free (a queue refused while the
       // window is not in front leaves it to come back below).
-      if (selectedTaskId && (busyNow || unfocused) && await enqueue(selectedTaskId, { what: "Message", message, ...(goal ? { goal } : {}) }, true).then(() => true, () => false)) {
+      if (selectedTaskId && sendRefusedForNow(error) && await enqueue(selectedTaskId, { what: "Message", message, ...(goal ? { goal } : {}) }, true).then(() => true, () => false)) {
         // It shows in the queued-message bar above the composer (#466), which has no notice cards.
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         return true;

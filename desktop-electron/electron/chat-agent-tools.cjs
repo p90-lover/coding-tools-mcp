@@ -647,16 +647,21 @@ function inside(base, target) {
   return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-/** The real location of a path that may not exist yet: its deepest existing ancestor, resolved. */
-function realLocation(target) {
+/**
+ * The real location of a path that may not exist yet: its deepest existing ancestor, resolved. Read
+ * off the main thread: fs.promises.realpath resolves as fs.realpathSync.native does, and the
+ * synchronous form held every window 404 ms on the busy hard disk scoping one agent tool call's
+ * path (0.8.104, 2026-11-09).
+ */
+async function realLocation(target) {
   const rest = [];
   let cursor = target;
   for (;;) {
     try {
-      return path.join(fs.realpathSync.native(cursor), ...[...rest].reverse());
+      return path.join(await fs.promises.realpath(cursor), ...[...rest].reverse());
     } catch (error) {
       let dangling = false;
-      try { fs.lstatSync(cursor); dangling = true; } catch { /* the entry does not exist */ }
+      try { await fs.promises.lstat(cursor); dangling = true; } catch { /* the entry does not exist */ }
       // A link whose target is missing could point anywhere once it appears.
       if (dangling) throw new ScopeError("a link inside it points to a missing target");
       if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR") throw new ScopeError("it cannot be resolved");
@@ -706,7 +711,7 @@ const protectedName = (part) => part !== "." && part !== ".." && PROTECTED_NAMES
  * resolves it against the same root). A `write` target may not be git's own data or another
  * protected folder, compared by its canonical name.
  */
-function scopePath(root, raw, label, { write = false } = {}) {
+async function scopePath(root, raw, label, { write = false } = {}) {
   if (typeof raw !== "string" || !raw || raw.includes("\0")) throw new ScopeError(`${label} must be a non-empty path`);
   const outside = (why = "it is outside this chat's worktree") => new ScopeError(`${label} "${raw.slice(0, 200)}" is refused: ${why}`);
   if (raw.startsWith("@")) throw outside("linked projects (@alias) are outside this chat's worktree");
@@ -722,7 +727,7 @@ function scopePath(root, raw, label, { write = false } = {}) {
     }
   }
   let real;
-  try { real = realLocation(candidate); } catch (error) { throw outside(error instanceof ScopeError ? error.message : undefined); }
+  try { real = await realLocation(candidate); } catch (error) { throw outside(error instanceof ScopeError ? error.message : undefined); }
   if (!inside(root.real, real)) throw outside("it leads outside this chat's worktree through a link");
   if (write) {
     const realRelative = path.relative(root.real, real);
@@ -1079,19 +1084,22 @@ function withoutConsent(args) {
 }
 
 /** The call's arguments with every path scoped to the worktree; throws ScopeError on any escape. */
-function scopeArguments(name, args, root) {
+async function scopeArguments(name, args, root) {
   const scoped = { ...args };
-  if (Object.hasOwn(scoped, "project_root")) scoped.project_root = scopePath(root, scoped.project_root, "project_root");
+  // One path at a time, in the same order as before, so the first refusal is the one reported.
+  if (Object.hasOwn(scoped, "project_root")) scoped.project_root = await scopePath(root, scoped.project_root, "project_root");
   for (const key of PATH_ARGUMENTS[name] ?? []) {
-    if (scoped[key] !== undefined && scoped[key] !== null) scoped[key] = scopePath(root, scoped[key], key);
+    if (scoped[key] !== undefined && scoped[key] !== null) scoped[key] = await scopePath(root, scoped[key], key);
   }
   for (const key of PATH_LIST_ARGUMENTS[name] ?? []) {
     if (scoped[key] === undefined || scoped[key] === null) continue;
     if (!Array.isArray(scoped[key])) throw new ScopeError(`${key} must be a list of paths`);
-    scoped[key] = scoped[key].map((value) => scopePath(root, value, key));
+    const paths = [];
+    for (const value of scoped[key]) paths.push(await scopePath(root, value, key));
+    scoped[key] = paths;
   }
   if (PATCH_TOOLS.has(name) && typeof scoped.patch === "string") {
-    for (const target of patchTargets(scoped.patch)) scopePath(root, target, "patch target", { write: true });
+    for (const target of patchTargets(scoped.patch)) await scopePath(root, target, "patch target", { write: true });
   }
   // Commands start in the worktree unless they name a directory inside it.
   if (name === "exec_command" && scoped.workdir === undefined && scoped.cwd === undefined) scoped.workdir = ".";
@@ -2305,7 +2313,7 @@ function createChatAgentTools({
     let root;
     try {
       root = await rootOf(entry);
-      if (group !== "desktop") args = scopeArguments(name, args, root);
+      if (group !== "desktop") args = await scopeArguments(name, args, root);
     } catch (error) {
       if (error instanceof ScopeError) return failedCall(error.message);
       throw error;
@@ -3240,7 +3248,7 @@ function createChatAgentTools({
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const root = await rootOf(entry);
-      const listed = await invokeAsUser(entry, "list_dir", { path: scopePath(root, folder || ".", "path") });
+      const listed = await invokeAsUser(entry, "list_dir", { path: await scopePath(root, folder || ".", "path") });
       return { ok: true, path: folder || ".", entries: Array.isArray(listed?.entries) ? listed.entries.slice(0, 1000) : [], truncated: listed?.truncated === true };
     },
     /** One file of the session's worktree for the Files tab, as text. */
@@ -3248,7 +3256,7 @@ function createChatAgentTools({
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const root = await rootOf(entry);
-      const read = await invokeAsUser(entry, "read_file", { path: scopePath(root, target, "path"), max_bytes: 512 * 1024 });
+      const read = await invokeAsUser(entry, "read_file", { path: await scopePath(root, target, "path"), max_bytes: 512 * 1024 });
       return { ok: true, path: target, content: typeof read?.content === "string" ? read.content : "", encoding: read?.encoding ?? null,
         truncated: read?.truncated === true };
     },

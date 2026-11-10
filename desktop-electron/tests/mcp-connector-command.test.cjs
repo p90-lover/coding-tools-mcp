@@ -404,6 +404,8 @@ test("account setup keeps its captured account and tunnel across awaited workspa
     const tunnel = { id: "extra-2", accountId: "account-2", tunnelId: "tunnel_original", state: scenario.retarget ? "stopped" : "ready" };
     const context = {
       Error, handle: (_channel, callback) => { handler = callback; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+      // The handler's hold on the automatic sync and its wait for the browser (browser-account-mcp.test.cjs).
+      automaticAccountMcp: null, waitForManualOperation: async () => {}, MANUAL_MCP_CONNECT_WAIT_MS: 60_000,
       quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
       browserAccounts: { has: id => id === "account-2", partitionOf: () => partition,
         recordConnector: (_id, value) => { if (value.bound) calls.bound++; return true; } },
@@ -476,6 +478,8 @@ test("account setup verifies the configured main tunnel without an extra assignm
       ready: async () => { if (scenario.readyRetarget) config.automaticTunnel = { tunnelId: otherId }; } };
     const context = {
       Error, handle: (_channel, callback) => { handler = callback; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+      // The handler's hold on the automatic sync and its wait for the browser (browser-account-mcp.test.cjs).
+      automaticAccountMcp: null, waitForManualOperation: async () => {}, MANUAL_MCP_CONNECT_WAIT_MS: 60_000,
       quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
       browserAccounts: { has: id => id === "account-2", partitionOf: () => "persist:account-2",
         recordConnector: async (_id, value) => {

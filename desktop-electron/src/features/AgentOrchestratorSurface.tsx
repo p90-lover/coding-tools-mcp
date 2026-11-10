@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, type PageOpen } from "./chat-pages";
@@ -84,12 +84,6 @@ function ToolButton({ icon, label, onClick, disabled, primary, pressed }: { icon
   return <button type="button" className={`ao-tool${primary ? " is-primary" : ""}`} aria-label={label} title={label} aria-pressed={pressed} disabled={disabled} onClick={onClick}><Glyph name={icon} /></button>;
 }
 
-/**
- * A chat message refused only for the moment: the chat started working again under it (its
- * automatic retry), or the app window was not in front. The chat keeps it at the front of its queue
- * and sends it as soon as it can, so it is no "Something went wrong".
- */
-const QUIET_SEND_REFUSAL = /still running|focused app window/i;
 const OVERVIEW_RATIO_KEY = "coding-tools:ao:overview-ratio:v1";
 const OVERVIEW_DIVIDER = 8;
 
@@ -1857,9 +1851,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       } catch (cause) {
         if (current() && !input.taskId) setPendingChat(null);
         reject(cause);
-        // Refused only for now (the chat started working again under the message, or the window was
-        // not in front): the chat queues the message and says so; no "Something went wrong" toast.
-        if (input.taskId && QUIET_SEND_REFUSAL.test(cause instanceof Error ? cause.message : String(cause))) return;
+        // Refused only for now (the chat started working again under the message, the window was not
+        // in front, or the local service had no room): the chat queues the message and says so; no
+        // "Something went wrong" toast (sendRefusedForNow).
+        if (input.taskId && sendRefusedForNow(cause)) return;
         throw cause;
       }
     });
@@ -1878,8 +1873,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         : result.waiting === true ? "wait" as const : false;
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      // The chat waits for focus and steers it in then (see QUIET_SEND_REFUSAL).
-      if (!QUIET_SEND_REFUSAL.test(message)) setError(message);
+      // The chat queues it and steers it in or sends it once it can (sendRefusedForNow).
+      if (!sendRefusedForNow(cause)) setError(message);
       throw cause;
     }
   };
@@ -2890,14 +2885,14 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   [pane, threadWorkspaces, workspaceId, threadChats, threadArchived, listSelected, listSelectedWorkspace, listNow, archivedAll, chatPins, chatUnread,
     projectPins, chatBusy, threadOpenIds, listPending, listLoading, loadProjectChats, listCalls, listActions]);
 
-  // The page tabs sit in the drag strip (ChatPages hands them over), costing the chats no height.
+  // The page tabs (ChatPages hands them over): a glass dock at the foot of the window's chat column.
   const PageTabs = pane ? undefined : pageRegistry?.Tabs;
   return (
     <section className={pane ? "ao-workflow cx-pane-surface" : "ao-workflow"} aria-label={copy.title} lang={language}>
       {threadList}
       <div className="ao-main">
       {/* A pane sits inside the window's own chat area: only that one holds the window's drag strip. */}
-      {pane ? null : <div className="ao-dragstrip" aria-hidden={PageTabs ? undefined : true}>{PageTabs ? <PageTabs page={pageNumber} /> : null}</div>}
+      {pane ? null : <div className="ao-dragstrip" aria-hidden="true" />}
       {view !== "chat" ? <header className="ao-workspace-head">
         <div className="ao-workspace-title">
           <strong>{workspaces.find(workspace => workspace.id === workspaceId)?.name || copy.title}</strong>
@@ -3158,6 +3153,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         </OverviewSplit>
         </ChatSplit>
       </div>
+      {/* The page tabs float at the foot of the chat column, centred under its chats. */}
+      {PageTabs ? <PageTabs page={pageNumber} /> : null}
       </div>
       {(() => {
         const project = projectEdit && workspaces.find((item) => item.id === projectEdit.id);

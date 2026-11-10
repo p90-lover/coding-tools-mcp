@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Language } from "../types";
 import { AgentOrchestratorSurface } from "./AgentOrchestratorSurface";
 import {
@@ -9,20 +9,52 @@ import { ChatGlyph } from "./ChatMenu";
 import { NativeViewsCoveredContext, SurfaceHiddenContext, useSurfaceHidden } from "./page-visibility";
 import "./chat-pages.css";
 
+// Where the liquid blob last sat ({ x, w } in the tab list), kept across pages: each page's surface
+// draws its own dock, so the blob of the page just opened starts from the one just left.
+let blobAt: { x: number; w: number } | null = null;
+
+const reducedMotion = () => {
+  try { return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true; } catch { return false; }
+};
+
 /**
- * The page tabs: numbers in the open page's title-bar strip (its surface's drag strip), so pages take
- * no height from the chats, and + for a new page. Only the open page draws them.
+ * The page tabs: a glass dock floating at the foot of the open page's chat column, centred, with the
+ * page numbers and + for a new page. Only the open page draws it. Behind the open page's number sits
+ * a liquid blob that stretches towards the page turned to and springs into place there.
  */
 function ChatPageTabs({ page }: { page: number }) {
   const pager = useContext(ChatPagerContext);
   const strip = useRef<HTMLElement>(null);
+  const blob = useRef<HTMLSpanElement>(null);
+  const open = pager?.active === page;
   useEffect(() => {
     strip.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   }, [pager?.active, pager?.count]);
-  if (!pager || pager.active !== page) return null;
+  // Measured only when the page or the page count changes: one read of the open tab's box.
+  useLayoutEffect(() => {
+    const node = blob.current;
+    const tab = strip.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    if (!open || !node || !tab) return;
+    const next = { x: tab.offsetLeft, w: tab.offsetWidth };
+    node.style.transform = `translateX(${next.x}px)`;
+    node.style.width = `${next.w}px`;
+    const from = blobAt;
+    blobAt = next;
+    if (!from || (from.x === next.x && from.w === next.w) || reducedMotion() || typeof node.animate !== "function") return;
+    // Liquid: halfway it reaches across most of the way, thinner, then settles with a small overshoot.
+    const left = Math.min(from.x, next.x), reach = Math.abs(next.x - from.x);
+    const forward = next.x > from.x;
+    node.animate([
+      { transform: `translateX(${from.x}px)`, width: `${from.w}px` },
+      { offset: 0.45, transform: `translateX(${left + (forward ? reach * 0.2 : 0)}px) scaleY(0.78)`, width: `${reach * 0.8 + Math.max(from.w, next.w)}px` },
+      { transform: `translateX(${next.x}px)`, width: `${next.w}px` },
+    ], { duration: 520, easing: "cubic-bezier(0.22, 1.25, 0.36, 1)" });
+  }, [open, pager?.active, pager?.count]);
+  if (!pager || !open) return null;
   // Pages 1 to 10 have a key, Ctrl+1 … Ctrl+0, named in their tooltips while the keys are on.
   const digit = (item: number) => pager.keys && item <= 10 ? String(item % 10) : null;
   return <nav className="cx-page-tabs" aria-label="Chat pages" ref={strip}>
+    <span className="cx-page-sheen" aria-hidden="true" />
     <div role="tablist" aria-label="Chat pages"
       onKeyDown={(event) => {
         const next = event.key === "Home" ? 1 : event.key === "End" ? pager.count
@@ -32,6 +64,7 @@ function ChatPageTabs({ page }: { page: number }) {
         event.preventDefault();
         pager.select(next);
       }}>
+      <span className="cx-page-blob" aria-hidden="true" ref={blob} />
       {Array.from({ length: pager.count }, (_, index) => index + 1).map((item) => <button key={item} type="button" role="tab"
         id={`chat-page-tab-${item}`} data-page={item} aria-selected={item === page} aria-controls={`chat-page-${item}`}
         tabIndex={item === page ? 0 : -1} title={`Page ${item}${digit(item) ? ` (Ctrl+${digit(item)})` : ""}`}
