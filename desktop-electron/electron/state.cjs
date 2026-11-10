@@ -144,6 +144,9 @@ function normalizeState(parsed) {
     // An agent's tool request answered in the chat is confirmed again in a dialog unless this is
     // false (the dialog's "Don't ask again"); absent means it asks.
     if (Object.hasOwn(state, "confirmAgentToolRequests") && state.confirmAgentToolRequests !== false) delete state.confirmAgentToolRequests;
+    // The sidebar's "More tools" section stays open only when this is true; absent means it opens
+    // while one of its pages is showing.
+    if (Object.hasOwn(state, "sidebarMoreToolsPinned") && state.sidebarMoreToolsPinned !== true) delete state.sidebarMoreToolsPinned;
     // Renderer accessibility (renderer-accessibility.cjs): absent means "auto".
     if (Object.hasOwn(state, "rendererAccessibility") && !["auto", "on", "off"].includes(state.rendererAccessibility)) delete state.rendererAccessibility;
     for (const key of Object.keys(UPDATE_SETTINGS)) {
@@ -188,14 +191,26 @@ function normalizeState(parsed) {
   }
 }
 
+/**
+ * A change to the sidebar: its open state and width (always together), whether "More tools" is
+ * kept open, or both. Saving the pin alone leaves the open state and width as they are.
+ */
 function validateSidebarState(value) {
-  if (!value || typeof value !== "object" || typeof value.open !== "boolean") {
-    throw new Error("Sidebar state is invalid");
+  if (!value || typeof value !== "object") throw new Error("Sidebar state is invalid");
+  const patch = {};
+  if (value.open !== undefined || value.width !== undefined || value.moreToolsPinned === undefined) {
+    if (typeof value.open !== "boolean") throw new Error("Sidebar state is invalid");
+    if (!Number.isFinite(value.width) || value.width < SIDEBAR_MIN_WIDTH || value.width > SIDEBAR_MAX_WIDTH) {
+      throw new Error(`Sidebar width must be between ${SIDEBAR_MIN_WIDTH} and ${SIDEBAR_MAX_WIDTH}`);
+    }
+    patch.sidebarOpen = value.open;
+    patch.sidebarWidth = Math.round(value.width);
   }
-  if (!Number.isFinite(value.width) || value.width < SIDEBAR_MIN_WIDTH || value.width > SIDEBAR_MAX_WIDTH) {
-    throw new Error(`Sidebar width must be between ${SIDEBAR_MIN_WIDTH} and ${SIDEBAR_MAX_WIDTH}`);
+  if (value.moreToolsPinned !== undefined) {
+    if (typeof value.moreToolsPinned !== "boolean") throw new Error("Sidebar state is invalid");
+    patch.sidebarMoreToolsPinned = value.moreToolsPinned;
   }
-  return { sidebarOpen: value.open, sidebarWidth: Math.round(value.width) };
+  return patch;
 }
 
 /**
