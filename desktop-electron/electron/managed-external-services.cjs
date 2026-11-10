@@ -665,6 +665,8 @@ function createManagedExternalServicesController({
     /** Reads the proxy routes and CPA's config again (off the main thread); publishes a change. */
     refreshDiskState: refreshAndPublish,
     configure: forgettingCpaConnection(configure),
+    /** Resolves once every settings change so far is on disk (saved off the main thread). */
+    saved: () => baseController.saved(),
     inspect,
     start: forgettingCpaConnection(start),
     stop: forgettingCpaConnection(stop),
