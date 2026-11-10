@@ -75,6 +75,7 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { droppedAgentSessionEnvironment } = require("./agent-session-env.cjs");
 const { markRuntimeRootChecked, runtimeBundlePaths } = require("./runtime-command.cjs");
+const { preloadLoopbackMesh } = require("./loopback-mesh.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
@@ -4566,6 +4567,8 @@ async function start() {
     app, launch: rendererAccessibilityLaunch, logger, readMode: () => stateStore.read().rendererAccessibility,
   });
   rendererAccessibility.start();
+  // Read before the services controller publishes it, so an unchanged loopback mesh is not rewritten.
+  void preloadLoopbackMesh(path.join(app.getPath("userData"), "integrations", "loopback-mesh.json"));
   const droppedAgentEnv = droppedAgentSessionEnvironment();
   if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
   // When something other than the user started this app, why: a relaunch guard after a keep-bridge
