@@ -39,6 +39,20 @@ function sourceRuntimeInvocation(sourceRoot, args) {
   };
 }
 
+// Installed runtime roots whose bun.exe and cli.js are known to be there: checked here once, or
+// handed over by runtime-install.cjs, which stats every file of the bundle (off the main thread at
+// launch) before it returns a root. A command for one of them skips the synchronous check, which
+// ran for every daemon start, tunnel invocation and bridge ownership check: the existence check of
+// bun.exe alone held every window 5.6 s as 0.8.106 started on the busy hard disk (2026-11-10). A root that
+// goes missing is found by main's runtime root check (every 30 s, off the main thread), which
+// installs it again; until then a start fails at its spawn instead of here.
+const checkedRuntimeRoots = new Set();
+
+/** Marks a root whose whole bundle was just verified (ensurePackagedRuntime, preparePackagedRuntime). */
+function markRuntimeRootChecked(runtimeRoot) {
+  if (typeof runtimeRoot === "string" && path.isAbsolute(runtimeRoot)) checkedRuntimeRoots.add(path.resolve(runtimeRoot));
+}
+
 function runtimeInvocation({ app, sourceRoot, installedRuntimeRoot, args }) {
   if (!Array.isArray(args)) throw new Error("Runtime arguments must be an array");
   if (!app.isPackaged) return sourceRuntimeInvocation(sourceRoot, args);
@@ -47,8 +61,11 @@ function runtimeInvocation({ app, sourceRoot, installedRuntimeRoot, args }) {
     throw new Error("Packaged launcher runtime has not been installed into durable local storage");
   }
   const { runtimeRoot, executable, entrypoint } = runtimeBundlePaths(installedRuntimeRoot);
-  if (!fs.existsSync(executable)) throw new Error(`Bundled Bun runtime is missing: ${executable}`);
-  if (!fs.existsSync(entrypoint)) throw new Error(`Bundled runtime entrypoint is missing: ${entrypoint}`);
+  if (!checkedRuntimeRoots.has(path.resolve(installedRuntimeRoot))) {
+    if (!fs.existsSync(executable)) throw new Error(`Bundled Bun runtime is missing: ${executable}`);
+    if (!fs.existsSync(entrypoint)) throw new Error(`Bundled runtime entrypoint is missing: ${entrypoint}`);
+    markRuntimeRootChecked(installedRuntimeRoot);
+  }
   return {
     executable,
     args: [entrypoint, ...args],
@@ -72,6 +89,7 @@ function embeddedRuntimeInvocation({ app, sourceRoot, args }) {
 module.exports = {
   runtimeReleaseVersion,
   embeddedRuntimeInvocation,
+  markRuntimeRootChecked,
   packagedRuntimePaths,
   runtimeBundlePaths,
   runtimeInvocation,

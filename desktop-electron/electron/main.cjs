@@ -74,7 +74,7 @@ const { RuntimeSupervisor, watchdogExternalBackoff } = require("./runtime-superv
 const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smoke-exit.cjs");
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { droppedAgentSessionEnvironment } = require("./agent-session-env.cjs");
-const { runtimeBundlePaths } = require("./runtime-command.cjs");
+const { markRuntimeRootChecked, runtimeBundlePaths } = require("./runtime-command.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
@@ -4421,6 +4421,8 @@ async function start() {
         coreHome: CORE_HOME,
         resourcesPath: process.resourcesPath,
       });
+      // It has just checked every file of the bundle, so commands skip runtime-command.cjs's own check.
+      markRuntimeRootChecked(installedRuntimeRoot);
       runtimeRootResolved = true;
       runtimeRootCheck.gone = false;
       runtimeRootCheck.at = Date.now();
@@ -4437,6 +4439,9 @@ async function start() {
   });
   installedRuntimeRoot = launchRuntimeRoot;
   launcherRuntimeRoot = launchRuntimeRoot;
+  // Verified file by file off the main thread: the first runtime command needs no synchronous
+  // check of bun.exe (5.6 s on the hard disk as 0.8.106 started, 2026-11-10).
+  markRuntimeRootChecked(launchRuntimeRoot);
   runtimeRootResolved = true;
   runtimeRootCheck.at = Date.now();
 
