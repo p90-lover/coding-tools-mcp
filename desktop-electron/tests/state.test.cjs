@@ -86,6 +86,38 @@ test("sidebar state accepts only bounded native shell dimensions", () => {
   assert.throws(() => validateSidebarState({ open: "yes", width: 300 }), /invalid/);
   assert.throws(() => validateSidebarState({ open: true, width: 100 }), /between 240 and 420/);
   assert.throws(() => validateSidebarState({ open: true, width: 900 }), /between 240 and 420/);
+  assert.throws(() => validateSidebarState({}), /invalid/);
+  assert.throws(() => validateSidebarState({ open: true }), /between 240 and 420/, "open and width go together");
+});
+
+test("the sidebar's More pin is saved on its own and kept across restarts", async () => {
+  // The pin alone leaves the open state and width as they are.
+  assert.deepEqual(validateSidebarState({ moreToolsPinned: true }), { sidebarMoreToolsPinned: true });
+  assert.deepEqual(validateSidebarState({ open: true, width: 260, moreToolsPinned: false }), {
+    sidebarOpen: true,
+    sidebarWidth: 260,
+    sidebarMoreToolsPinned: false,
+  });
+  assert.throws(() => validateSidebarState({ moreToolsPinned: "yes" }), /invalid/);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-more-pin-"));
+  const file = path.join(root, "state.json");
+  try {
+    const store = createStateStore(file);
+    assert.equal(store.read().sidebarMoreToolsPinned, undefined, "absent until the user pins it");
+    store.update(validateSidebarState({ open: false, width: 300 }));
+    store.update(validateSidebarState({ moreToolsPinned: true }));
+    await store.saved();
+    const reopened = createStateStore(file).read();
+    assert.equal(reopened.sidebarMoreToolsPinned, true);
+    assert.equal(reopened.sidebarOpen, false, "pinning didn't touch the open state");
+    assert.equal(reopened.sidebarWidth, 300);
+    // Anything but true reads as unpinned.
+    fs.writeFileSync(file, JSON.stringify({ ...reopened, sidebarMoreToolsPinned: "yes" }));
+    assert.equal(Object.hasOwn(createStateStore(file).read(), "sidebarMoreToolsPinned"), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Japanese is preserved as a supported persisted launcher language", () => {

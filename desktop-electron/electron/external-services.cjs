@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
-const { readStateFile, writeStateFile } = require("./durable-state.cjs");
+const { createStateFileWriter, readStateFile, writeStateFile } = require("./durable-state.cjs");
 const { terminateOwnedProcessTree } = require("./process-tree.cjs");
 const { publicUrlMap } = require("./five-stack-cross-use.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
@@ -673,6 +673,28 @@ function createExternalServicesController({
     error: null,
   }]));
 
+  // Saves flush on a pool thread, not the main one: one flushed save held every window 2.2 s on the
+  // hard disk when CPA's managed configuration was applied at a start (0.8.106, 2026-11-10 00:51Z).
+  // A burst of changes is one write plus one with the latest settings. A failed save keeps the old
+  // file, is logged, and is tried again by the next change or keep-alive lease; saved() reports it.
+  let saveError = null;
+  const writer = createStateFileWriter(filePath, {
+    onError: (error) => {
+      saveError = error;
+      savedText = null;
+      logger?.warn?.("external_services.save_failed", { code: error?.code ?? null, message: error instanceof Error ? error.message : String(error) });
+    },
+  });
+
+  async function saved() {
+    await writer.saved();
+    if (saveError) {
+      const error = saveError;
+      saveError = null;
+      throw error;
+    }
+  }
+
   function write() {
     // Keep legacy recovery data in the live file until a later launch can archive it.
     const saved = unarchivedState ? {
@@ -683,8 +705,9 @@ function createExternalServicesController({
     } : state;
     const text = `${JSON.stringify(saved, null, 2)}\n`;
     if (text === savedText) return;
-    writeStateFile(filePath, text);
     savedText = text;
+    saveError = null;
+    writer.save(text);
   }
 
   function secretFor(id) {
@@ -1171,6 +1194,8 @@ function createExternalServicesController({
     upstreamConfiguration,
     startKeepAlive,
     startKeepAliveSupervisors,
+    /** Resolves once every settings change so far is on disk; rejects with a save that failed. */
+    saved,
     dispose,
   });
 }

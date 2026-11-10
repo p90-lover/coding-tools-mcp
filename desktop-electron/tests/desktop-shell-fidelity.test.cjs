@@ -16,8 +16,9 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(app, /SidebarGroup label=\{copy\.workspace\}/);
   assert.match(app, /SidebarGroup label=\{copy\.configuration\}/);
   assert.match(app, /SidebarGroup label=\{copy\.runtime\}/);
-  assert.match(app, /<details className="sidebar-more"/);
-  const more = app.slice(app.indexOf('<details className="sidebar-more"'), app.indexOf("</details>", app.indexOf('<details className="sidebar-more"')));
+  // More folds the rarely used pages away; a pin on its heading keeps it open (2026-11-10).
+  assert.match(app, /<section className={`sidebar-more/);
+  const more = app.slice(app.indexOf("<section className={`sidebar-more"), app.indexOf("</section>", app.indexOf("<section className={`sidebar-more")));
   assert.doesNotMatch(more, /navigateSurface\("providers"\)/, "the retired Provider Hub is not a More navigation item");
   // Connections opens with App plugins; the Providers row (ProviderHubIntegration) and More's
   // Integrations row left the sidebar on 2026-11-02.

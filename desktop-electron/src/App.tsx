@@ -510,6 +510,12 @@ function LauncherShell({
     { surface: "network", icon: "globe", label: copy.networkProxy },
   ] as const;
   const extraSurfaceActive = surface === "providers" || moreSurfaces.some((item) => item.surface === surface);
+  // "More" opens while one of its pages shows and folds away after; its heading opens or folds it in
+  // between. The pin on the heading's right keeps it open everywhere, across restarts.
+  const [moreToolsPinned, setMoreToolsPinned] = useState(snapshot.state.sidebarMoreToolsPinned === true);
+  const [moreToolsOpen, setMoreToolsOpen] = useState(extraSurfaceActive);
+  useEffect(() => setMoreToolsOpen(extraSurfaceActive), [extraSurfaceActive]);
+  const moreToolsShown = moreToolsPinned || moreToolsOpen;
   const [compactSidebar, setCompactSidebar] = useState(compactAtMount);
   const [browserSlot, setBrowserSlot] = useState<HTMLDivElement | null>(null);
   const [sessionReminderBusy, setSessionReminderBusy] = useState(false);
@@ -664,6 +670,19 @@ function LauncherShell({
     await api!.setBrowserSurfaceActive(true);
     if (show) await api!.showBrowser();
   }, []);
+
+  // Shown at once: a save waits behind whatever the main process is doing.
+  const toggleMoreToolsPin = () => {
+    const pinned = !moreToolsPinned;
+    setMoreToolsPinned(pinned);
+    if (!pinned) setMoreToolsOpen(extraSurfaceActive);
+    void api!.setSidebarState({ moreToolsPinned: pinned })
+      .then(updateState)
+      .catch((cause) => {
+        setMoreToolsPinned(!pinned);
+        setError(messageOf(cause));
+      });
+  };
 
   const persistSidebar = (open: boolean, width = sidebarWidth) => {
     sidebarPinned.current = open;
@@ -952,22 +971,47 @@ function LauncherShell({
                 <SidebarItem active={surface === "register"} icon="userPlus" label={copy.register} onClick={() => navigateSurface("register")} />
                 <SidebarItem active={surface === "workspace-auth"} icon="shield" label={copy.workspaceAuth} onClick={() => navigateSurface("workspace-auth")} />
               </SidebarGroup>
-              <details className="sidebar-more" open={extraSurfaceActive}>
-                <summary>
-                  <Icon name="chevron" className="sidebar-more-caret" width={12} height={12} />
-                  <span>{copy.moreTools}</span>
-                  <small>{moreSurfaces.length}</small>
-                </summary>
-                {moreSurfaces.map((item) => (
-                  <SidebarItem
-                    key={item.surface}
-                    active={surface === item.surface}
-                    icon={item.icon}
-                    label={item.label}
-                    onClick={() => navigateSurface(item.surface)}
-                  />
-                ))}
-              </details>
+              <section className={`sidebar-more${moreToolsShown ? " is-open" : ""}${moreToolsPinned ? " is-pinned" : ""}`}>
+                <div className="sidebar-more-head">
+                  {/* Pinned, the section can't fold, so its heading stops being a toggle. */}
+                  <button
+                    aria-controls="sidebar-more-list"
+                    aria-disabled={moreToolsPinned || undefined}
+                    aria-expanded={moreToolsShown}
+                    className="sidebar-more-toggle"
+                    onClick={moreToolsPinned ? undefined : () => setMoreToolsOpen((open) => !open)}
+                    type="button"
+                  >
+                    <Icon name="chevron" className="sidebar-more-caret" width={12} height={12} />
+                    <span>{copy.moreTools}</span>
+                    <small>{moreSurfaces.length}</small>
+                  </button>
+                  <button
+                    aria-label={moreToolsPinned ? copy.moreToolsUnpin : copy.moreToolsPin}
+                    aria-pressed={moreToolsPinned}
+                    className="sidebar-more-pin"
+                    onClick={toggleMoreToolsPin}
+                    onMouseDown={(event) => event.preventDefault()}
+                    title={moreToolsPinned ? copy.moreToolsUnpin : copy.moreToolsPin}
+                    type="button"
+                  >
+                    <Icon name="pin" width={14} height={14} />
+                  </button>
+                </div>
+                {moreToolsShown ? (
+                  <div id="sidebar-more-list">
+                    {moreSurfaces.map((item) => (
+                      <SidebarItem
+                        key={item.surface}
+                        active={surface === item.surface}
+                        icon={item.icon}
+                        label={item.label}
+                        onClick={() => navigateSurface(item.surface)}
+                      />
+                    ))}
+                  </div>
+                ) : null}
+              </section>
             </nav>
             {sidebarOpen && !compactSidebar ? (
               <button
