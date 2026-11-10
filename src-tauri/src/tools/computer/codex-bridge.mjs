@@ -149,6 +149,13 @@ const KINDS = [
 export function failureReply(error, closed = false) {
   const message = String(error?.message ?? '');
   if (/stopped by the user|physical Escape/i.test(message)) return { ok: false, code: 'CODEX_ENGINE_INTERRUPTED', fatal: true };
+  // The SDK's own words when it gives up on its helper. Its request timer kills the helper
+  // (measured with @oai/sky 0.7.12 on 2026-11-10: the exit listeners ran 20 ms after the
+  // rejection), and that exit ends this worker through loadEngine's onExit. So these replies are
+  // fatal: "control stays on" would be wrong. The helper's own "timeout" stays a refusal, since the
+  // helper is still running then.
+  if (/^computer-use request timed out/i.test(message)) return { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: true };
+  if (/^computer-use helper exited/i.test(message)) return { ok: false, code: 'CODEX_ENGINE_CLOSED', fatal: true };
   // The engine lists no window it will not control: Codex leaves out its own (ChatGPT and Codex).
   if (/window id \d+ was not found/i.test(message)) return { ok: false, code: 'CODEX_WINDOW_HIDDEN', fatal: closed };
   const code = typeof error?.code === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(error.code) ? error.code

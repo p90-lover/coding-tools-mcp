@@ -22,12 +22,16 @@ async function worker(t) {
   const helper = path.join(root, 'fixture.exe');
   fs.writeFileSync(helper, 'not executed');
   fs.writeFileSync(path.join(base, 'helper_transport.js'), `
+    export const exits = new Set();
     export class WindowsHelperTransport {
-      onExit() {}
+      onExit(listener) { exits.add(listener); }
       close() { return Promise.resolve(); }
     }
   `);
+  // scroll runs into the SDK's own request timer, as the real transport does it: the call is
+  // rejected, the helper is killed, and its exit listeners run about 20 ms later.
   fs.writeFileSync(path.join(base, 'computer_use_client.js'), `
+    import { exits } from './helper_transport.js';
     export class WindowsComputerUseClient {
       constructor() {
         this.target = 'windows';
@@ -36,6 +40,10 @@ async function worker(t) {
         this.get_window_state = async () => { throw new Error('timeout'); };
         this.activate_window = async () => { throw new Error('Computer Use was stopped by the user with the physical Escape key'); };
         this.type_text = async () => { process.exitCode = 99; };
+        this.scroll = async () => {
+          setTimeout(() => { for (const listener of exits) listener(); }, 20);
+          throw new Error('computer-use request timed out: scroll');
+        };
       }
       close() { return Promise.resolve(); }
     }
@@ -79,6 +87,19 @@ test('the stdio worker survives a screenshot timeout and answers the next observ
   const [code, signal] = await w.exited;
   assert.equal(code, 0);
   assert.equal(signal, null);
+  assert.equal(w.stderr(), '');
+});
+
+test('the SDK timing out its helper ends the stdio worker, and the reply says so', { timeout: 10000 }, async t => {
+  const w = await worker(t);
+  w.write('scroll', { x: 1, y: 1, scrollX: 0, scrollY: 3 });
+  // Until 2026-11-10 this reply said fatal:false ("control stays on"), and the helper's exit then
+  // ended the worker with code 130 anyway.
+  assert.deepEqual(await w.reply(), { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: true });
+  const [code, signal] = await w.exited;
+  assert.equal(code, 0, 'the worker ends on its fatal reply, not through the exit listener (130)');
+  assert.equal(signal, null);
+  assert.equal((await w.lines.next()).done, true);
   assert.equal(w.stderr(), '');
 });
 

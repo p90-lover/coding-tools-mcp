@@ -31,6 +31,9 @@ test('a refused call keeps the worker; a closed engine, Escape or a changed wind
   assert.equal(failureReply(new Error('request timed out after 15000ms')).code, 'CODEX_ENGINE_TIMEOUT');
   // The engine's own screenshot call, as a peer session reproduced it on 2026-11-09: a bare Error("timeout").
   assert.deepEqual(failureReply(new Error('timeout')), { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: false });
+  // The SDK's own timer and helper exit (helper_transport.js): the helper is gone, so control ends.
+  assert.deepEqual(failureReply(new Error('computer-use request timed out: get_window_state')), { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: true });
+  assert.deepEqual(failureReply(new Error('computer-use helper exited with exit code 1: C:\\secret')), { ok: false, code: 'CODEX_ENGINE_CLOSED', fatal: true });
   assert.equal(failureReply(new Error('Access is denied. (os error 5)')).code, 'CODEX_ACCESS_DENIED');
   assert.equal(failureReply(new Error('UI Automation tree unavailable')).code, 'CODEX_ACCESSIBILITY_FAILED');
   assert.equal(failureReply(new Error('something else entirely')).code, 'CODEX_ENGINE_FAILED');
