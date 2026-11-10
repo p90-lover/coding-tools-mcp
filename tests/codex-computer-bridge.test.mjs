@@ -52,6 +52,14 @@ test('a refused call keeps the worker; a closed engine, Escape or a changed wind
   assert.ok((await bridge.call('get_window_state', { include_screenshot: true })).screenshots.length);
 });
 
+test('a native policy stop ends the turn without forwarding its message or accepting a recoverable code', () => {
+  const message = 'Computer Use has been stopped for this turn because it could not verify whether the current browser URL is allowed. Stop your work and send a final message noting why Computer Use ended.';
+  for (const error of [new Error(message), Object.assign(new Error(message), { code: 'CODEX_CAPTURE_FAILED' })]) {
+    assert.deepEqual(failureReply(error), { ok: false, code: 'CODEX_POLICY_STOPPED', fatal: true });
+  }
+  assert.deepEqual(failureReply(new Error('The current browser URL is unavailable')), { ok: false, code: 'CODEX_ENGINE_FAILED', fatal: false });
+});
+
 test('the documented window2 methods reach the actual client with the approved native Window', async () => {
   const f = fixture();
   const examples = {
@@ -154,7 +162,7 @@ test('an observed native Window stays cached between actions so screenshots and 
 });
 
 test('an unexpected native-helper exit revokes the bridge even while idle and never relaunches it', async t => {
-  const scratch = fileURLToPath(new URL('../aiTemp/codex-computer-bridge-tests/', import.meta.url));
+  const scratch = process.env.CODEX_COMPUTER_TEST_SCRATCH || fileURLToPath(new URL('../aiTemp/codex-computer-bridge-tests/', import.meta.url));
   fs.mkdirSync(scratch, { recursive: true });
   const root = fs.mkdtempSync(path.join(scratch, 'runtime-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
