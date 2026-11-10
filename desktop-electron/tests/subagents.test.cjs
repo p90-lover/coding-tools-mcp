@@ -785,7 +785,8 @@ test("subagents use only the providers the user allows: the model list, a picked
     assert.match(picked.content[0].text, /served by cline-pass/, "a chat agent's own pick is held to the same list");
     assert.deepEqual(w.spawned, [], "nothing started on a provider that is off");
     assert.equal(parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it", model: "gemini-3.8-flash" })).model, "gemini-3.8-flash");
-    w.service.save({ settings: { ...w.service.config().settings, defaultRoute: { harness_id: "ao:codex", model: "gpt-6" } }, agents: STARTERS });
+    // Awaited: a save may write its file after it returns, and the test's folder goes at cleanup.
+    await w.service.save({ settings: { ...w.service.config().settings, defaultRoute: { harness_id: "ao:codex", model: "gpt-6" } }, agents: STARTERS });
     assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "reviewer", task: "Review it" })).isError, false, "Codex's own account is allowed");
     assert.equal(w.spawned.length, 2);
   } finally { w.cleanup(); }
