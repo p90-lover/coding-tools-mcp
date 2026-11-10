@@ -22,7 +22,7 @@ app.on("window-all-closed", () => {});
 const deadline = setTimeout(() => { console.error("MCP_NATIVE_TIMEOUT"); app.exit(2); }, 180_000);
 console.log("MCP_NATIVE_START");
 
-function fixture({ legacy, publicTab, menu, existing, denied, notification, labelledBy, unrelatedLabel, loadingPersonal, blockCreateToExisting, accountId }) {
+function fixture({ legacy, publicTab, menu, existing, denied, notification, labelledBy, unrelatedLabel, loadingPersonal, blockCreateToExisting, accountId, iframeRedirect }) {
   return `<!doctype html><meta charset="utf-8"><title>Plugins | ChatGPT</title><main>
     <div role="tablist"><button id="public" role="tab" aria-selected="${Boolean(publicTab)}">Public</button>
     <button id="personal" role="tab" aria-selected="${!publicTab}">Personal</button></div>
@@ -30,6 +30,7 @@ function fixture({ legacy, publicTab, menu, existing, denied, notification, labe
     ${loadingPersonal || blockCreateToExisting ? '<section><h2>Installed</h2><div class="group/plugin-row"><a aria-label="Coding Tools Native2" href="/plugins/plugin_asdk_app_existing?directoryTab=personal" data-discover="true"><span aria-hidden="true">Coding Tools Native2</span></a></div></section>' : ''}
     <section id="list"></section><button id="add">${legacy ? "Create app" : "Add"}</button></main>
     ${notification ? '<div role="alert">Unrelated notification</div>' : ''}
+    ${iframeRedirect ? '<iframe src="/__fixture/frame-redirect"></iframe>' : ''}
     <script>
     void fetch('/backend-api/aip/connectors/mcp/list_accessible', { method: 'POST', headers: { 'chatgpt-account-id': ${JSON.stringify(accountId)} } });
     const scenario = ${JSON.stringify({ legacy, publicTab, menu, existing, denied, labelledBy, unrelatedLabel, loadingPersonal, blockCreateToExisting })};
@@ -152,6 +153,7 @@ app.whenReady().then(async () => {
   console.log("MCP_NATIVE_READY");
   const cases = [
     { name: "personal-current" },
+    { name: "iframe-redirect", iframeRedirect: true },
     { name: "business-current", publicTab: true, menu: true },
     { name: "legacy", legacy: true },
     { name: "existing-private", publicTab: true, existing: true },
@@ -178,9 +180,13 @@ app.whenReady().then(async () => {
     const accessToken = `fixture.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": {
       chatgpt_user_id: userId, chatgpt_account_id: businessId, chatgpt_plan_type: "team",
     } })).toString("base64url")}.fixture`;
-    let shown = 0, focused = 0, operations = 0;
+    let shown = 0, focused = 0, operations = 0, frameRedirects = 0, frameArrivals = 0;
     await isolated.protocol.handle("https", async request => {
       const url = new URL(request.url);
+      if (scenario.iframeRedirect && url.origin === "https://frame.invalid") {
+        frameArrivals++;
+        return new Response("<!doctype html><title>Frame</title>", { headers: { "Content-Type": "text/html" } });
+      }
       if (url.origin === "https://platform.openai.com") return new Response(`<!doctype html><title>Platform fixture</title><script>
         void fetch('https://api.openai.com/v1/dashboard/onboarding/login', { method: 'POST' });
         void fetch('https://api.openai.com/v1/dashboard/organization/permissions', { headers: { 'openai-organization': '${organizationId}' } });
@@ -196,6 +202,10 @@ app.whenReady().then(async () => {
         return new Response(null, { status: 404, headers });
       }
       assert.equal(url.origin, "https://chatgpt.com", "fixture must not contact another origin");
+      if (url.pathname === "/__fixture/frame-redirect") {
+        frameRedirects++;
+        return new Response(null, { status: 302, headers: { Location: "https://frame.invalid/redirect" } });
+      }
       if (url.pathname === "/api/auth/session") return Response.json({ user: { id: userId }, accessToken });
       if (url.pathname === "/backend-api/accounts/check/v4-2023-04-27") return Response.json({ accounts: Object.fromEntries([businessId, personalId].map(id => [id, {
         can_access_with_session: true, account: { account_id: id, account_user_role: "account-owner", structure: id === personalId ? "personal" : "workspace",
@@ -260,6 +270,10 @@ app.whenReady().then(async () => {
       assert.equal(operations, 1);
       assert.equal(shown, 0, "setup must never show its window");
       assert.equal(focused, 0, "setup must never focus its window");
+      if (scenario.iframeRedirect) {
+        assert(frameRedirects > 0, "the fixture must exercise a real iframe redirect");
+        assert.equal(frameArrivals, frameRedirects, "iframe redirects must finish without invalidating main-page context");
+      }
       assert.equal(windows.length, 1);
       assert(windows.every(window => window.isDestroyed()), "setup must dispose its window");
       assert.equal(receipts.length, scenario.existing ? 0 : 1, "only one submission is allowed");
@@ -342,9 +356,11 @@ app.whenReady().then(async () => {
   assert.equal(held, false);
   clearTimeout(deadline);
   console.log(`MCP_NATIVE_ALL_PASS hidden=true focused=false cases=${cases.length + 1}`);
+  fs.writeFileSync(path.join(root, "result.json"), JSON.stringify({ passed: true, cases: cases.map(item => item.name), platformSettings: true, hidden: true, focused: false, electron: process.versions.electron }));
   app.exit(0);
 }).catch(error => {
   console.error("MCP_NATIVE_FAILED", error.stack || error);
+  fs.writeFileSync(path.join(root, "result.json"), JSON.stringify({ passed: false, error: String(error.stack || error) }));
   clearTimeout(deadline);
   app.exit(1);
 });

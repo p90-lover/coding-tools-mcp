@@ -125,8 +125,9 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
     // CDP Network.enable waits for a renderer; an untouched hidden window has none yet.
     await popup.loadURL("about:blank");
     check();
-    const guard = (event, value) => {
-      try { const url = new URL(value);
+    const guard = (event, value, _inPlace, mainFrame) => {
+      if ((event.isMainFrame ?? mainFrame) === false) return;
+      try { const url = new URL(event.url ?? value);
         if (url.origin === "https://chatgpt.com" && !url.username && !url.password) return;
       } catch {}
       changedTo(value); event.preventDefault();
