@@ -591,14 +591,21 @@ for (const update of [false, true]) for (const failure of ["none", "mkdir", "req
       now: () => "fixture-time", timestampSegment: value => value,
       assertWithin: (parent, child) => assert.ok(child.startsWith(parent + path.sep)),
       snapshot: () => ({ components: [] }), publish: () => { published++; throw new Error("fixture observer failed"); },
+      // The staging folder's bookkeeping runs off the main thread (fs.promises, writeJsonAsync);
+      // only the component's state folder is still made synchronously, before the operation starts.
       fs: {
-        existsSync: () => false,
         mkdirSync(directory) {
-          if (failure === "mkdir" && directory.startsWith(aiTempRoot) && !injected) { injected = true; throw original; }
+          assert.equal(directory.startsWith(aiTempRoot), false, "the staging folder is made off the main thread");
         },
-        renameSync() { installed = true; },
+        promises: {
+          async mkdir(directory) {
+            if (failure === "mkdir" && directory.startsWith(aiTempRoot) && !injected) { injected = true; throw original; }
+          },
+          async rename() { installed = true; },
+        },
       },
-      writeJson(file) {
+      pathExists: async () => false,
+      async writeJsonAsync(file) {
         if (failure === "request" && path.basename(file) === "INSTALL_REQUEST.json" && !injected) { injected = true; throw original; }
         if (failure === "failure-record" && path.basename(file) === "FAILED.json") throw diagnostic;
       },

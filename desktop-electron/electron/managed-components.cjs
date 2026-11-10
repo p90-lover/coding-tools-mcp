@@ -9,7 +9,7 @@ const { pipeline } = require("node:stream/promises");
 const { spawnSync } = require("node:child_process");
 const { spawnOffThread } = require("./off-thread-run.cjs");
 const { EventEmitter } = require("node:events");
-const { writePrivateFileAtomic } = require("./atomic-file.cjs");
+const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { readStateFile, writeStateFile } = require("./durable-state.cjs");
 const { processRunning, terminateOwnedProcessTree } = require("./process-tree.cjs");
 
@@ -360,6 +360,29 @@ function verifySha256(filePath, expected) {
   if (actual !== expected) throw new Error(`SHA-256 mismatch for ${path.basename(filePath)}`);
   return actual;
 }
+
+// An install's files are written, moved and checked off the main thread. Done synchronously, one
+// CPA update (8.0.63, 2026-11-10 00:53Z) held every window 0.3-1.4 s per step and 2.5 s while it
+// hashed the downloaded zip, on the busy hard disk.
+async function writeJsonAsync(filePath, value) {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await writePrivateFileAtomicAsync(filePath, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+/** The file's SHA-256, read as a stream: the event loop runs between chunks. */
+async function sha256FileAsync(filePath) {
+  const hash = crypto.createHash("sha256");
+  for await (const chunk of fs.createReadStream(filePath, { highWaterMark: 1024 * 1024 })) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function verifySha256Async(filePath, expected) {
+  const actual = await sha256FileAsync(filePath);
+  if (actual !== expected) throw new Error(`SHA-256 mismatch for ${path.basename(filePath)}`);
+  return actual;
+}
+
+const pathExists = (target) => fs.promises.access(target).then(() => true, () => false);
 
 function createSecretCodec({ safeStorage, keyPath, canCreateKey }) {
   let fallbackKey = null;
@@ -1395,7 +1418,7 @@ function createManagedComponentController({
 
   async function downloadAsset(url, destination, manifest) {
     let lastError = null;
-    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await fs.promises.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
 
     for (let attempt = 1; attempt <= DEFAULT_DOWNLOAD_ATTEMPTS; attempt += 1) {
       const partialPath = `${destination}.attempt-${attempt}-${crypto.randomUUID()}.partial`;
@@ -1421,10 +1444,10 @@ function createManagedComponentController({
 
         const file = fs.createWriteStream(partialPath, { flags: "wx", mode: 0o700 });
         await pipeline(Readable.fromWeb(response.body), file);
-        if (fs.statSync(partialPath).size > MAX_DOWNLOAD_BYTES) {
+        if ((await fs.promises.stat(partialPath)).size > MAX_DOWNLOAD_BYTES) {
           throw new Error("Managed component download exceeds the size limit");
         }
-        fs.renameSync(partialPath, destination);
+        await fs.promises.rename(partialPath, destination);
         return;
       } catch (error) {
         lastError = error;
@@ -1463,7 +1486,7 @@ function createManagedComponentController({
     const bundledAsset = bundledReleaseAssetPath(manifest, asset);
     if (bundledAsset) {
       setOperation(operationKey(manifest), { state: "installing", step: "copy-bundled-release", error: null });
-      fs.copyFileSync(bundledAsset, artifact);
+      await fs.promises.copyFile(bundledAsset, artifact);
       writeBundledMarker(stagingHome, manifest);
     } else if ((bundleRequired(manifest) || !allowNetworkInstall) && !manifest.updatedFrom) {
       throw missingBundleError(manifest);
@@ -1473,7 +1496,7 @@ function createManagedComponentController({
       await downloadAsset(asset.url, artifact, manifest);
     }
     setOperation(operationKey(manifest), { state: "installing", step: "verify-sha256", error: null });
-    verifySha256(artifact, asset.sha256);
+    await verifySha256Async(artifact, asset.sha256);
     if (platform !== "win32") fs.chmodSync(artifact, 0o700);
     return { artifact };
   }
@@ -1589,13 +1612,13 @@ function createManagedComponentController({
       if (typeof step.skipIfExists === "string" && step.skipIfExists.trim()) {
         const probe = path.join(stagingHome, assertSafeRelativePath(step.skipIfExists, `${step.id} skipIfExists`));
         assertWithin(stagingHome, probe, "Managed component skipIfExists");
-        if (fs.existsSync(probe)) continue;
+        if (await pathExists(probe)) continue;
       }
       setOperation(operationKey(manifest), { state: "installing", step: step.id, error: null });
       if (step.skipIfFile) {
         const skipPath = path.join(stagingHome, assertSafeRelativePath(step.skipIfFile, `${step.id} skipIfFile`));
         assertWithin(stagingHome, skipPath, "Managed component skip path");
-        if (fs.existsSync(skipPath)) continue;
+        if (await pathExists(skipPath)) continue;
         if ((bundleRequired(manifest) || !allowNetworkInstall) && isNetworkInstallStep(step) && !wsl2ManagedPrepareAllowed(step, context)) {
           throw new Error(`${manifest.name} bundled runtime is incomplete (missing ${step.skipIfFile})`);
         }
@@ -1605,7 +1628,7 @@ function createManagedComponentController({
       if (step.kind === "assert-file") {
         const expected = path.join(stagingHome, assertSafeRelativePath(step.path, `${step.id} path`));
         assertWithin(stagingHome, expected, "Managed component assertion");
-        if (!fs.existsSync(expected) || !fs.statSync(expected).isFile()) {
+        if (!(await fs.promises.stat(expected).then((stats) => stats.isFile(), () => false))) {
           throw new Error(`${manifest.name} is missing required file ${step.path}`);
         }
         continue;
@@ -1640,8 +1663,9 @@ function createManagedComponentController({
     try {
       setOperation(key, { state: "installing", step: "prepare", error: null });
       assertWithin(aiTempRoot, stagingRoot, "Managed component staging path");
-      fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
-      writeJson(path.join(stagingRoot, "INSTALL_REQUEST.json"), {
+      // From here the operation is marked installing, so a second install is refused while these wait.
+      await fs.promises.mkdir(stagingRoot, { recursive: true, mode: 0o700 });
+      await writeJsonAsync(path.join(stagingRoot, "INSTALL_REQUEST.json"), {
         schemaVersion: 1,
         id,
         version: manifest.version,
@@ -1651,10 +1675,10 @@ function createManagedComponentController({
       });
       let prepared;
       if (manifest.strategy === "release-binary") {
-        fs.mkdirSync(stagingHome, { recursive: true, mode: 0o700 });
+        await fs.promises.mkdir(stagingHome, { recursive: true, mode: 0o700 });
         prepared = await prepareReleaseBinary(manifest, stagingHome);
       } else if (manifest.strategy === "bundled-source") {
-        fs.mkdirSync(stagingHome, { recursive: true, mode: 0o700 });
+        await fs.promises.mkdir(stagingHome, { recursive: true, mode: 0o700 });
         prepared = await prepareBundledSource(manifest, stagingHome);
       } else {
         prepared = await prepareGitSource(manifest, stagingHome);
@@ -1667,15 +1691,15 @@ function createManagedComponentController({
         arch,
         artifact: markerArtifactRelative(stagingHome, prepared.artifact),
       };
-      writeJson(markerPath(stagingHome), marker);
+      await writeJsonAsync(markerPath(stagingHome), marker);
 
       const target = componentHome(manifest);
-      if (fs.existsSync(target)) moveToTrash(target, manifest, repair ? "repair-replaced" : "version-replaced");
-      fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-      fs.renameSync(stagingHome, target);
+      if (await pathExists(target)) moveToTrash(target, manifest, repair ? "repair-replaced" : "version-replaced");
+      await fs.promises.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+      await fs.promises.rename(stagingHome, target);
       // Status shows the new version as installed the moment the operation ends.
       await refreshSourceState(manifest);
-      writeJson(path.join(stagingRoot, "COMPLETED.json"), {
+      await writeJsonAsync(path.join(stagingRoot, "COMPLETED.json"), {
         schemaVersion: 1,
         id,
         completedAt: now(),
@@ -1687,7 +1711,7 @@ function createManagedComponentController({
       const message = error instanceof Error ? error.message : String(error);
       setOperation(key, { state: "error", step: null, error: message });
       try {
-        writeJson(path.join(stagingRoot, "FAILED.json"), {
+        await writeJsonAsync(path.join(stagingRoot, "FAILED.json"), {
           schemaVersion: 1,
           id,
           failedAt: now(),
