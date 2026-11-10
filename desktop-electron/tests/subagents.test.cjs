@@ -36,9 +36,13 @@ function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () 
     ...(models ? { models } : {}), ...(teams ? { teams: () => teams } : {}),
     logger: { info() {}, warn() {} }, now, ...(setTimer ? { setTimer } : {}), ...(routeRefusal ? { routeRefusal } : {}),
   });
-  service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
-  return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, steered, sent, observedTurns, dir,
-    cleanup: () => { service.dispose(); fs.rmSync(dir, { recursive: true, force: true }); } };
+  // The settings apply at once; `ready` is the file written.
+  const ready = service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
+  return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, steered, sent, observedTurns, dir, ready,
+    cleanup: () => {
+      service.dispose();
+      return ready.catch(() => {}).then(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+    } };
 }
 
 test("stopping a parent exits only its own children even with releaseWhenDone disabled", async () => {
@@ -168,9 +172,10 @@ test("a parent stop traverses completed children and reports a descendant exit r
   } finally { w.cleanup(); }
 });
 
-test("the saved settings and subagents are validated and kept", () => {
+test("the saved settings and subagents are validated and kept", async () => {
   const w = world();
   try {
+    await w.ready;
     const saved = JSON.parse(fs.readFileSync(path.join(w.dir, "subagents.json"), "utf8"));
     assert.deepEqual(saved.agents.map((agent) => agent.id), ["explorer", "implementer", "reviewer"], "the starters until the user changes them");
     assert.equal(saved.settings.maxConcurrent, 3);
@@ -193,6 +198,7 @@ test("a subagent preserves the model's none effort when saved and launched", asy
   const w = world({ settings: { defaultRoute: route } });
   try {
     assert.deepEqual(w.service.config().settings.defaultRoute, route);
+    await w.ready;
     const saved = JSON.parse(fs.readFileSync(path.join(w.dir, "subagents.json"), "utf8"));
     assert.equal(saved.settings.defaultRoute.effort, "none");
     const started = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read the source" });
@@ -499,7 +505,7 @@ test("a subagent with no model, a disabled one, or subagents turned off cannot s
   try {
     assert.match((await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "solo", task: "x" })).content[0].text, /has no model/);
     assert.match((await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "off", task: "x" })).content[0].text, /No enabled subagent/);
-    w.service.save({ settings: { enabled: false, defaultRoute: ROUTE }, agents: [{ name: "Solo" }] });
+    await w.service.save({ settings: { enabled: false, defaultRoute: ROUTE }, agents: [{ name: "Solo" }] });
     assert.equal(w.service.enabled(), false);
     assert.match((await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "solo", task: "x" })).content[0].text, /turned off/);
     assert.equal(w.spawned.length, 0);
@@ -943,6 +949,7 @@ test("preload reads the saved agents off the main thread; a save made while it r
   let syncReads = 0;
   const again = fresh();
   try {
+    await w.ready;
     await again.preload();
     fs.readFileSync = (...args) => { syncReads += 1; return readFileSync(...args); };
     try {
@@ -954,12 +961,49 @@ test("preload reads the saved agents off the main thread; a save made while it r
     const racing = fresh();
     try {
       const loading = racing.preload();
-      racing.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+      const saving = racing.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
       await loading;
       assert.equal(racing.config().agents.length, STARTERS.length, "the save is kept");
+      await saving;
     } finally { racing.dispose(); }
   } finally {
     again.dispose();
-    w.cleanup();
+    await w.cleanup();
+  }
+});
+
+test("saving the subagents makes no synchronous disk call, and quick saves land in order", async () => {
+  const w = world({ agents: STARTERS.slice(0, 1) });
+  const statePath = path.join(w.dir, "subagents.json");
+  const names = ["mkdirSync", "writeFileSync", "renameSync", "openSync", "readFileSync"];
+  const original = Object.fromEntries(names.map((name) => [name, fs[name]]));
+  const syncCalls = [];
+  try {
+    await w.ready;
+    try {
+      for (const name of names) fs[name] = (...args) => { syncCalls.push(name); return original[name](...args); };
+      const first = w.service.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS.slice(0, 1) });
+      const second = w.service.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+      assert.equal(w.service.config().agents.length, STARTERS.length, "the last save applies at once");
+      await Promise.all([first, second]);
+    } finally { Object.assign(fs, original); }
+    assert.deepEqual(syncCalls, [], "a save never holds Electron main on the disk");
+    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).agents.length, STARTERS.length, "the file ends with the last save");
+    assert.deepEqual(fs.readdirSync(w.dir).filter((name) => name.includes(".tmp-")), [], "no temporary file is left");
+  } finally { await w.cleanup(); }
+});
+
+test("a save the disk refuses is undone and reported", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-"));
+  const blocker = path.join(dir, "not-a-folder");
+  fs.writeFileSync(blocker, "");
+  const service = createSubagents({ statePath: path.join(blocker, "subagents.json"), launchArgs: () => ({}), harness: () => null, logger: { info() {}, warn() {} } });
+  try {
+    const before = service.config().agents.length;
+    await assert.rejects(service.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS.slice(0, 1) }));
+    assert.equal(service.config().agents.length, before, "the refused save is undone");
+  } finally {
+    service.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

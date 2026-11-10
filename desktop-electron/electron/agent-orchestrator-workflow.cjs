@@ -8909,7 +8909,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "subagents_config": return { ok: true, available: Boolean(subagents), ...(subagents ? subagents.config() : {}) };
       case "subagents_save": {
         if (!subagents) throw new Error("Subagents are unavailable");
-        return { ok: true, ...subagents.save({ settings: args.settings, agents: args.agents }) };
+        return { ok: true, ...(await subagents.save({ settings: args.settings, agents: args.agents })) };
       }
       case "subagents_runs": return { ok: true, runs: subagents ? subagents.runs() : [] };
       case "subagent_transcript": return subagentTranscript(args);
