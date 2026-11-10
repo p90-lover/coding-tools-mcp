@@ -5,8 +5,20 @@ const { signedInFromCookies } = require("./browser-accounts.cjs");
 
 // Cookie presence only selects candidates. A fresh session response authorizes inspection;
 // the existing connector helper must still prove the exact account/workspace connection.
+// A setup that gave way is tried again on the next pass once; one that keeps giving way waits
+// longer each time. A setup loads chatgpt.com in hidden windows once per signed-in account, and
+// with busy chats or the app losing focus it rarely finished: seen 2026-11-10, a round started and
+// gave way every 1-2 minutes, starting 11 hidden renderer processes in 6 minutes, each 12-51 s of
+// a chatgpt.com or OpenAI Platform page, and never connected anything.
+const GAVE_WAY_RETRY_MS = 2 * 60_000;
+const GAVE_WAY_RETRY_MAX_MS = 30 * 60_000;
+
 function createBrowserAccountMcpSync(deps) {
   const attempts = new Map();
+  // Per account: how many setups in a row gave way at this partition and target, and when the next
+  // may start. Not keyed by the session cookie: loading ChatGPT may refresh it, which must not
+  // count as a new reason to start over.
+  const gaveWays = new Map();
   const now = deps.now ?? Date.now;
   let inFlight = null;
   let generation = 0;
@@ -22,6 +34,9 @@ function createBrowserAccountMcpSync(deps) {
     for (const id of attempts.keys()) {
       if (!accounts.some(account => account.id === id)) attempts.delete(id);
     }
+    for (const id of gaveWays.keys()) {
+      if (!accounts.some(account => account.id === id)) gaveWays.delete(id);
+    }
     for (const account of accounts) {
       if (!admitted()) return;
       try {
@@ -31,6 +46,9 @@ function createBrowserAccountMcpSync(deps) {
         const current = () => revision === generation && admitted({ connecting })
           && deps.accounts().some(entry => entry.id === account.id && entry.partition === account.partition)
           && deps.target(account.id) === target;
+        const place = `${account.partition}\0${target}`;
+        const backoff = gaveWays.get(account.id);
+        if (backoff?.place === place && now() < backoff.retryAt) continue;
         const cookies = await deps.readCookies(account.partition);
         if (!current()) continue;
         if (!signedInFromCookies(cookies)) {
@@ -68,10 +86,17 @@ function createBrowserAccountMcpSync(deps) {
           });
         } finally { connecting = false; }
         if (gaveWay || !current()) {
-          // Losing admission defers work until focus/setup is available again.
+          // Losing admission defers work until focus/setup is available again. A Connect the person
+          // asked for (hold) is not counted: once it is done, this account is tried again at once.
           attempts.delete(account.id);
+          if (holds === 0) {
+            const count = backoff?.place === place ? backoff.count + 1 : 1;
+            const wait = count === 1 ? 0 : Math.min(GAVE_WAY_RETRY_MAX_MS, GAVE_WAY_RETRY_MS * 2 ** (count - 2));
+            gaveWays.set(account.id, { place, count, retryAt: now() + wait });
+          }
           continue;
         }
+        gaveWays.delete(account.id);
         // Our own recorded failure is not a new external failure that warrants another setup.
         const recorded = deps.accounts().find(entry => entry.id === account.id);
         attempts.set(account.id, { key, errorAt: recorded?.connector?.errorAt ?? null, retryAt: Infinity });
@@ -93,7 +118,7 @@ function createBrowserAccountMcpSync(deps) {
       return inFlight;
     },
     // An explicit runtime/tunnel restart starts a new round, even with unchanged login cookies.
-    invalidate() { generation++; attempts.clear(); },
+    invalidate() { generation++; attempts.clear(); gaveWays.clear(); },
     /**
      * A Connect the user asked for comes first. Until the returned release runs, no round starts, and
      * one already connecting fails its admission check at its next step, so it gives way (deferred,

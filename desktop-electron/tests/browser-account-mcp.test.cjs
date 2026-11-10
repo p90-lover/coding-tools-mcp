@@ -93,6 +93,45 @@ test("a setup that gave way to an account switch runs again, though the switch i
   assert.deepEqual(f.connected, ["one", "two", "one"], "and once connected, left alone");
 });
 
+test("a setup that keeps giving way waits longer each time, and one that finishes starts the count again", async () => {
+  // Seen 2026-11-10: with busy chats a round gave way every 1-2 minutes, each time after hidden
+  // chatgpt.com windows had loaded, and it never connected anything.
+  const f = fixture();
+  let interrupt = true;
+  f.deps.connect = async id => {
+    f.connected.push(id);
+    if (id === "one" && interrupt) throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."), { gaveWay: true });
+    return { connected: true };
+  };
+  const tries = () => f.connected.filter(id => id === "one").length;
+  const verifiedOne = () => f.verified.filter(partition => partition === "persist:one").length;
+  await f.sync.sync();
+  assert.equal(tries(), 1);
+  await f.sync.sync();
+  assert.equal(tries(), 2, "one interruption is tried again on the next pass");
+  const waits = [2, 4, 8, 16, 30, 30].map(minutes => minutes * 60_000);
+  for (const wait of waits) {
+    const before = tries(), checks = verifiedOne();
+    f.state.time += wait - 1;
+    await f.sync.sync();
+    assert.equal(tries(), before, `still waiting just before ${wait / 60_000} min`);
+    assert.equal(verifiedOne(), checks, "a waiting account is not even checked over HTTP");
+    f.state.time += 1;
+    await f.sync.sync();
+    assert.equal(tries(), before + 1, `tried again after ${wait / 60_000} min`);
+  }
+  assert.deepEqual(f.connected.filter(id => id === "two"), ["two"], "the other account connected on the first pass");
+  interrupt = false;
+  f.state.time += 30 * 60_000;
+  await f.sync.sync();
+  assert.equal(tries(), waits.length + 3, "it connects once admitted long enough");
+  interrupt = true;
+  f.accounts[0].connector = { errorAt: ++f.state.time }; // a later check reports a new failure
+  await f.sync.sync();
+  await f.sync.sync();
+  assert.equal(tries(), waits.length + 5, "after a finished setup, one interruption is tried again at once");
+});
+
 test("a Connect the user asked for holds the sync: none starts, and one connecting gives way", async () => {
   const f = fixture();
   const release = f.sync.hold();
