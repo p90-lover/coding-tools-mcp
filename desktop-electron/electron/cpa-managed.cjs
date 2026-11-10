@@ -586,7 +586,9 @@ function run(homeValue, stateValue) {
     stateRoot: state,
     logger: { warn: (event, detail) => console.error(`${event} ${detail?.message ?? ""}`.trim()) },
     // CPA listens on the loopback port this config sets; the switcher's own route fetches the list.
-    refresh: { baseUrl: "http://127.0.0.1:8317", managementKey },
+    // This wrapper is its own process with no window to hold, so it fetches in place (the app's
+    // off-thread worker is for Electron main).
+    refresh: { baseUrl: "http://127.0.0.1:8317", managementKey, fetchImpl: fetch },
   });
   child.once("exit", (code, signal) => {
     pluginModels.stop();

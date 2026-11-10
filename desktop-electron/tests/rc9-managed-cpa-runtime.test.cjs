@@ -210,16 +210,43 @@ test("a healthy managed CPA probe remains ready instead of being overwritten as 
   );
 });
 
+test("the CPA adapter loads from the unpacked files alone", () => {
+  // What the installed app has outside app.asar: only the asarUnpack entries under electron/.
+  const { spawnSync } = require("node:child_process");
+  const manifest = JSON.parse(read("desktop-electron/package.json"));
+  const unpacked = manifest.build.asarUnpack.filter((entry) => /^electron\/[^*]+\.cjs$/.test(entry));
+  const directory = fs.mkdtempSync(path.join(scratchRoot, "cpa-unpacked-"));
+  try {
+    fs.mkdirSync(path.join(directory, "electron"));
+    for (const entry of unpacked) fs.copyFileSync(path.join(desktopRoot, entry), path.join(directory, entry));
+    const adapter = path.join(directory, "electron", "cpa-managed.cjs");
+    const loaded = spawnSync(process.execPath, ["-e", `require(${JSON.stringify(adapter)})`], { encoding: "utf8", timeout: 60_000 });
+    assert.equal(loaded.status, 0, `cpa-managed.cjs failed to load from app.asar.unpacked: ${loaded.stderr}`);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("packaging keeps the CPA adapter executable outside app.asar and preserves the no-delete contract", () => {
   const manifest = JSON.parse(read("desktop-electron/package.json"));
   assert.ok(manifest.build.asarUnpack.includes("electron/cpa-managed.cjs"));
   assert.ok(manifest.build.asarUnpack.includes("vendor/bundled/cpa-plugins/**"));
   assert.ok(manifest.build.asarUnpack.includes("electron/cpa-codex-long-run.cjs"));
   assert.ok(manifest.build.asarUnpack.includes("electron/atomic-file.cjs"));
-  // The adapter runs from app.asar.unpacked, so every local module it requires must be unpacked too.
-  for (const [, name] of read("desktop-electron/electron/cpa-managed.cjs").matchAll(/require\("\.\/([^"]+)"\)/g)) {
+  // The adapter runs from app.asar.unpacked under Bun, which cannot read app.asar, so every local
+  // module it requires, and every module those require, must be unpacked too. 0.8.104-0.8.107
+  // missed one two levels down (cpa-plugin-models.cjs -> off-thread-run.cjs): CPA exited 1 at every
+  // start and every update's prepare step failed with "Cannot find module './off-thread-run.cjs'".
+  const seen = new Set();
+  const queue = ["cpa-managed.cjs"];
+  while (queue.length) {
+    const name = queue.shift();
+    if (seen.has(name)) continue;
+    seen.add(name);
     assert.ok(manifest.build.asarUnpack.includes(`electron/${name}`), `electron/${name} is unpacked for the CPA adapter`);
+    for (const [, next] of read(`desktop-electron/electron/${name}`).matchAll(/require\("\.\/([^"]+)"\)/g)) queue.push(next);
   }
+  assert.ok(seen.has("off-thread-run.cjs"), "the walk reaches the adapter's indirect requires");
 
   const workflow = read(".github/workflows/rc9-managed-cpa-runtime.yml");
   assert.match(workflow, /git diff --diff-filter=D/);
