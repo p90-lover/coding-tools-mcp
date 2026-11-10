@@ -242,14 +242,30 @@ code {
   background: transparent;
 }
 
+/* The sidebar takes the Claude desktop app's look: its warm dark surface, 32 px rows with 8 px
+   corners, quiet sentence-case section names and soft hover and selected fills. Only the sidebar:
+   the pages keep the app's own palette. */
 .app-sidebar {
+  --sb-surface: 31 30 29;
+  --sb-text: #c2c0b6;
+  --sb-text-strong: #faf9f5;
+  --sb-text-muted: #9c9a92;
+  --sb-icon: #a6a39a;
+  --sb-hover: rgb(250 249 245 / 5%);
+  --sb-active: rgb(250 249 245 / 9%);
+  --sb-line: rgb(222 220 209 / 10%);
+  --sb-accent: #d97757;
+  --sb-accent-text: #f0c4b2;
+  --sb-accent-soft: rgb(217 119 87 / 15%);
+  --sb-accent-soft-hover: rgb(217 119 87 / 22%);
+
   position: relative;
   z-index: 1;
   flex: 0 0 auto;
   height: 100%;
   min-width: 0;
   overflow: visible;
-  background: rgb(33 33 33 / 78%);
+  background: rgb(var(--sb-surface) / 86%);
   backdrop-filter: blur(28px) saturate(1.08);
   -webkit-backdrop-filter: blur(28px) saturate(1.08);
 }
@@ -260,7 +276,8 @@ code {
   top: 0;
   bottom: 0;
   left: 0;
-  border-right: 1px solid var(--color-border);
+  border-right: 1px solid var(--sb-line);
+  background: rgb(var(--sb-surface) / 97%);
 }
 
 .sidebar-clip {
@@ -277,7 +294,7 @@ code {
 }
 
 .app-shell.is-sidebar-rail .app-sidebar {
-  border-right: 1px solid var(--color-border-light);
+  border-right: 1px solid var(--sb-line);
 }
 
 .app-shell.is-sidebar-rail .sidebar-clip {
@@ -294,8 +311,8 @@ code {
 
 .app-shell.is-sidebar-rail .app-sidebar.is-expanded .sidebar-clip {
   z-index: 40;
-  border-right: 1px solid var(--color-border);
-  background: rgb(33 33 33 / 97%);
+  border-right: 1px solid var(--sb-line);
+  background: rgb(var(--sb-surface) / 97%);
 }
 
 .app-shell.is-sidebar-rail .app-sidebar.is-peek .sidebar-clip {
@@ -311,7 +328,9 @@ code {
   .sidebar-item > span,
   .sidebar-item-meta,
   .sidebar-group h2,
-  .sidebar-more summary > span
+  .sidebar-more-toggle > span,
+  .sidebar-more-toggle > small,
+  .sidebar-more-pin
 ) {
   opacity: 0;
   transform: translateX(-4px);
@@ -324,7 +343,9 @@ code {
   .sidebar-item > span,
   .sidebar-item-meta,
   .sidebar-group h2,
-  .sidebar-more summary > span
+  .sidebar-more-toggle > span,
+  .sidebar-more-toggle > small,
+  .sidebar-more-pin
 ) {
   opacity: 1;
   transform: none;
@@ -354,8 +375,9 @@ code {
   .sidebar-brand-actions,
   .sidebar-item > span,
   .sidebar-item-meta,
-  .sidebar-more summary > span,
-  .sidebar-more summary > small
+  .sidebar-more-toggle > span,
+  .sidebar-more-toggle > small,
+  .sidebar-more-pin
 ) {
   display: none;
 }
@@ -386,14 +408,14 @@ code {
   margin: 0 8px 6px;
   padding: 0;
   overflow: hidden;
-  border-top: 1px solid var(--color-border-light);
+  border-top: 1px solid var(--sb-line);
 }
 
 .app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) .sidebar-group:first-child h2 {
   border-top: 0;
 }
 
-.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) :is(.sidebar-item, .sidebar-more summary) {
+.app-shell.is-sidebar-rail .app-sidebar:not(.is-expanded) :is(.sidebar-item, .sidebar-more-toggle) {
   position: relative;
   justify-content: center;
   padding: 0;
@@ -484,48 +506,113 @@ code {
 }
 
 .sidebar-more {
-  margin-top: 10px;
-  padding: 0 2px;
+  margin-top: 16px;
 }
 
-.sidebar-more summary {
+/* The heading folds the section; the pin on its right keeps it open. */
+.sidebar-more-head {
   display: flex;
   align-items: center;
-  gap: 5px;
-  list-style: none;
+  gap: 2px;
+  margin-bottom: 2px;
+}
+
+.sidebar-more-toggle {
+  display: flex;
+  min-width: 0;
+  height: 26px;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sb-text-muted);
   cursor: pointer;
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-tertiary);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.02em;
   line-height: 16px;
+  text-align: left;
   transition: color var(--duration-micro) ease;
 }
 
-.sidebar-more summary:hover {
-  color: var(--color-text-secondary);
+.sidebar-more-toggle:hover {
+  color: var(--sb-text);
 }
 
-.sidebar-more summary::-webkit-details-marker {
-  display: none;
+.sidebar-more-toggle[aria-disabled="true"] {
+  color: var(--sb-text-muted);
+  cursor: default;
+}
+
+.sidebar-more-toggle > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar-more-caret {
   flex: none;
-  transition: transform var(--duration-micro) ease;
+  order: 2;
+  transition: transform var(--duration-micro) ease, opacity var(--duration-micro) ease;
 }
 
-.sidebar-more[open] .sidebar-more-caret {
+.sidebar-more.is-open .sidebar-more-caret {
   transform: rotate(90deg);
 }
 
-.sidebar-more summary small {
+/* Pinned, it doesn't fold, so the caret says so quietly. */
+.sidebar-more.is-pinned .sidebar-more-caret {
+  opacity: 0.35;
+}
+
+.sidebar-more-toggle > small {
+  order: 3;
   margin-left: auto;
-  color: var(--color-text-tertiary);
-  font-size: 10px;
+  color: var(--sb-text-muted);
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+}
+
+.sidebar-more-pin {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--sb-icon);
+  opacity: 0.55;
+  transition:
+    color var(--duration-micro) ease,
+    background var(--duration-micro) ease,
+    opacity var(--duration-micro) ease;
+}
+
+.sidebar-more-head:hover .sidebar-more-pin,
+.sidebar-more-pin:focus-visible {
+  opacity: 1;
+}
+
+.sidebar-more-pin:hover {
+  background: var(--sb-hover);
+  color: var(--sb-text-strong);
+}
+
+.sidebar-more-pin[aria-pressed="true"] {
+  color: var(--sb-accent);
+  opacity: 1;
+}
+
+.sidebar-more-pin[aria-pressed="true"] svg path:first-child {
+  fill: currentColor;
+  fill-opacity: 0.25;
 }
 
 .sidebar-resize {
@@ -547,7 +634,7 @@ code {
 }
 
 .sidebar-group {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .sidebar-group:first-child {
@@ -556,26 +643,31 @@ code {
 
 .sidebar-group h2 {
   margin: 0;
-  padding: 0 10px 5px;
-  color: var(--color-text-tertiary);
-  font-size: 10px;
+  padding: 0 10px 4px;
+  color: var(--sb-text-muted);
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.02em;
-  line-height: 16px;
+  line-height: 18px;
+}
+
+.sidebar-group > div,
+#sidebar-more-list {
+  display: grid;
+  gap: 1px;
 }
 
 .sidebar-item {
   display: flex;
   width: 100%;
-  height: var(--height-row);
+  height: 32px;
   align-items: center;
-  gap: 9px;
-  padding: 0 9px;
+  gap: 10px;
+  padding: 0 10px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: 8px;
   background: transparent;
-  color: var(--color-text-secondary);
-  font-size: 13px;
+  color: var(--sb-text);
+  font-size: 13.5px;
   text-align: left;
   transition:
     color var(--duration-micro) ease,
@@ -583,48 +675,60 @@ code {
 }
 
 .sidebar-item:hover {
-  background: var(--color-background-control-hover);
-  color: var(--color-text-primary);
+  background: var(--sb-hover);
+  color: var(--sb-text-strong);
+}
+
+.sidebar-item:active:not(:disabled) {
+  background: var(--sb-active);
 }
 
 .sidebar-item.is-active {
-  background: var(--color-background-control-active);
-  color: var(--color-text-primary);
+  background: var(--sb-active);
+  color: var(--sb-text-strong);
+  font-weight: 500;
+}
+
+.sidebar-item:focus-visible,
+.sidebar-more-toggle:focus-visible,
+.sidebar-more-pin:focus-visible {
+  outline: 2px solid var(--sb-accent);
+  outline-offset: -2px;
 }
 
 .sidebar-item.is-update {
-  margin-bottom: 5px;
-  background: rgb(51 156 255 / 14%);
-  color: var(--blue-100);
+  margin-bottom: 6px;
+  background: var(--sb-accent-soft);
+  color: var(--sb-accent-text);
 }
 
 .sidebar-item.is-update:hover {
-  background: rgb(51 156 255 / 22%);
-  color: var(--gray-0);
+  background: var(--sb-accent-soft-hover);
+  color: var(--sb-text-strong);
 }
 
 .sidebar-item.is-update > svg {
-  color: var(--blue-300);
+  color: var(--sb-accent);
 }
 
 .sidebar-item > svg {
   width: 16px;
   height: 16px;
   flex: none;
-  color: var(--color-icon-tertiary);
+  color: var(--sb-icon);
 }
 
 .sidebar-item > .mcp-mark {
   width: 16px;
   height: 16px;
-  color: var(--color-icon-tertiary);
+  color: var(--sb-icon);
 }
 
 .sidebar-item.is-active > svg,
 .sidebar-item:hover > svg,
 .sidebar-item.is-active > .mcp-mark,
 .sidebar-item:hover > .mcp-mark {
-  color: var(--color-icon-secondary);
+  color: var(--sb-text-strong);
 }
 
 .sidebar-item > span {
@@ -639,7 +743,7 @@ code {
 .sidebar-item-meta {
   flex: none;
   margin: 0 4px 0 12px;
-  color: var(--color-text-tertiary, var(--color-text-secondary));
+  color: var(--sb-text-muted);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -656,8 +760,8 @@ code {
 
 .sidebar-footer {
   flex: 0 0 auto;
-  border-top: 1px solid var(--color-border-light);
-  padding-top: 7px;
+  border-top: 1px solid var(--sb-line);
+  padding-top: 8px;
 }
 
 .workspace {

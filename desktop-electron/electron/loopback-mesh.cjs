@@ -168,10 +168,25 @@ function persistLoopbackMesh(filePath, mesh) {
 const lastWritten = new Map();
 const checking = new Set();
 
+/**
+ * Reads the mesh already on disk, off the main thread, so the first publish after a launch skips
+ * rewriting one that has not changed: that rewrite held every window 0.7 s on the busy hard disk at
+ * every start (0.8.107, 2026-11-10 02:06Z). A publish before this read has finished, or of a mesh that
+ * differs, still writes synchronously as before, so a process reading the file never sees an older one.
+ */
+function preloadLoopbackMesh(filePath) {
+  if (!filePath || !path.isAbsolute(filePath) || lastWritten.has(filePath)) return Promise.resolve();
+  return fs.promises.readFile(filePath, "utf8").then((text) => {
+    // A publish that wrote meanwhile knows better than this read.
+    if (!lastWritten.has(filePath)) lastWritten.set(filePath, text);
+  }, () => { /* missing or unreadable: the first publish writes it */ });
+}
+
 module.exports = {
   DEFAULT_IN_APP_LOOPBACKS,
   MESH_SCHEMA_VERSION,
   buildLoopbackMesh,
   loopbackMeshEnvironment,
   persistLoopbackMesh,
+  preloadLoopbackMesh,
 };

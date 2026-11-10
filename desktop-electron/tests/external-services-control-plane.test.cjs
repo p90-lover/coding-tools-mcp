@@ -224,7 +224,7 @@ function archivedFile(archive, snapshot, relative) {
 }
 
 for (const code of ["ENOENT", "ENOSPC"]) {
-  test(`an archive ${code} does not prevent startup or discard unarchived legacy data`, (t) => {
+  test(`an archive ${code} does not prevent startup or discard unarchived legacy data`, async (t) => {
     const directory = temporaryDirectory();
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
     const filePath = path.join(directory, "external-services.json");
@@ -267,6 +267,7 @@ for (const code of ["ENOENT", "ENOSPC"]) {
       assert.deepEqual(controller.snapshot().services.map((service) => service.id), ["cpa"]);
       assert.equal(fs.readFileSync(filePath, "utf8"), JSON.stringify(original));
       controller.configure("cpa", { enabled: false });
+      await controller.saved();
       const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
       assert.equal(saved.services.cpa.enabled, false, "CPA changes still persist");
       assert.deepEqual(saved.services.paseo, original.services.paseo);
@@ -288,6 +289,7 @@ for (const code of ["ENOENT", "ENOSPC"]) {
       assert.equal(fs.readFileSync(path.join(archive, latest, "external-services.json"), "utf8"), unarchived);
       assert.equal(fs.readFileSync(path.join(archive, latest, "external-services.key"), "utf8"), key);
       recovered.configure("cpa", { enabled: true });
+      await recovered.saved();
       const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
       assert.deepEqual(Object.keys(saved.services), ["cpa"]);
       assert.deepEqual(saved.secrets, { cpa: original.secrets.cpa });
@@ -304,29 +306,36 @@ test("a failed keep-alive lease write does not fail healthy CPA inspection", asy
   });
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   controller.configure("cpa", { keepAlive: true });
+  await controller.saved();
   const filePath = path.join(directory, "external-services.json");
   const saved = fs.readFileSync(filePath, "utf8");
-  // The state file is written flushed (durable-state.cjs), through openSync rather than writeFileSync.
-  const openSync = fs.openSync;
+  // The state file is written flushed (durable-state.cjs) off the main thread, through fs.promises.open.
+  const open = fs.promises.open;
   let failedWrites = 0;
-  fs.openSync = function (target, ...args) {
+  fs.promises.open = async function (target, ...args) {
     if (String(target).startsWith(filePath + ".tmp-")) {
       failedWrites += 1;
       throw Object.assign(new Error("ENOSPC: lease storage is full"), { code: "ENOSPC" });
     }
-    return openSync.call(this, target, ...args);
+    return open.call(this, target, ...args);
   };
   try {
-    // A change that could not be saved is tried again by the lease, which fails the same way.
-    assert.throws(() => controller.configure("cpa", { autoStart: true }), { code: "ENOSPC" });
-    assert.equal(failedWrites, 1);
-    assert.equal((await controller.inspect("cpa")).status, "ready");
-    assert.equal(failedWrites, 2);
-    assert.equal(warnings.length, 1);
-    assert.equal(warnings[0].detail.code, "ENOSPC");
-    assert.equal(fs.readFileSync(filePath, "utf8"), saved);
+    // The change stays in memory, and saved() reports that it could not be written.
+    controller.configure("cpa", { autoStart: true });
+    await assert.rejects(controller.saved(), { code: "ENOSPC" });
+    assert.ok(failedWrites >= 1);
+    assert.equal((await controller.inspect("cpa")).status, "ready", "a failed save never fails a healthy check");
+    await controller.saved().catch(() => {}); // the keep-alive lease may have tried again, failing the same way
+    assert.ok(warnings.length >= 1);
+    assert.ok(warnings.every((warning) => warning.event === "external_services.save_failed" && warning.detail.code === "ENOSPC"));
+    assert.equal(fs.readFileSync(filePath, "utf8"), saved, "the old file stays whole");
+    // Once the disk has room, the next save writes everything, the change that failed included.
+    fs.promises.open = open;
+    controller.configure("cpa", { autoStart: true });
+    await controller.saved();
+    assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).services.cpa.autoStart, true);
   } finally {
-    fs.openSync = openSync;
+    fs.promises.open = open;
     controller.dispose();
   }
 });
@@ -337,23 +346,63 @@ test("a healthy keep-alive check never rewrites settings that did not change", a
   const { controller, directory } = controllerFixture();
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   controller.configure("cpa", { keepAlive: true });
+  await controller.saved();
   const filePath = path.join(directory, "external-services.json");
-  const openSync = fs.openSync;
+  // The file is opened flushed and its copy written plainly, both through fs.promises.
+  const { open, writeFile } = fs.promises;
   let writes = 0;
-  fs.openSync = function (target, ...args) {
+  fs.promises.open = function (target, ...args) {
     if (String(target).startsWith(filePath)) writes += 1;
-    return openSync.call(this, target, ...args);
+    return open.call(this, target, ...args);
+  };
+  fs.promises.writeFile = function (target, ...args) {
+    if (String(target).startsWith(filePath)) writes += 1;
+    return writeFile.call(this, target, ...args);
   };
   try {
     assert.equal((await controller.inspect("cpa")).status, "ready");
+    await controller.saved();
     assert.equal(writes, 0, "nothing changed, so nothing is written");
     controller.configure("cpa", { autoStart: true });
+    await controller.saved();
     assert.equal(writes, 2, "a real change is still saved, the file and its copy");
     assert.equal(JSON.parse(fs.readFileSync(filePath, "utf8")).services.cpa.autoStart, true);
   } finally {
-    fs.openSync = openSync;
+    Object.assign(fs.promises, { open, writeFile });
     controller.dispose();
   }
+});
+
+test("a settings change is saved off the main thread: no synchronous call touches the file", async (t) => {
+  // 0.8.106, 2026-11-10 00:51Z: applying CPA's managed configuration at a start flushed this file
+  // on main (fsyncSync 2,240 ms in writeStateFile), holding every window.
+  const { controller, directory } = controllerFixture();
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, "external-services.json");
+  const names = ["openSync", "writeSync", "writeFileSync", "fsyncSync", "renameSync", "copyFileSync"];
+  const originals = Object.fromEntries(names.map((name) => [name, fs[name]]));
+  const synchronous = [];
+  for (const name of names) {
+    fs[name] = function (target, ...args) {
+      if (String(target).startsWith(filePath)) synchronous.push(name);
+      return originals[name].call(this, target, ...args);
+    };
+  }
+  try {
+    controller.configure("cpa", { autoStart: true, keepAlive: false });
+  } finally {
+    Object.assign(fs, originals);
+  }
+  assert.deepEqual(synchronous, [], "configure returns before the file is touched");
+  assert.equal(controller.snapshot().services.find((service) => service.id === "cpa").autoStart, true, "the change is live at once");
+  controller.configure("cpa", { autoStart: false });
+  controller.configure("cpa", { autoStart: true, endpoint: "http://127.0.0.1:8318" });
+  await controller.saved();
+  const saved = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  assert.equal(saved.services.cpa.autoStart, true, "a burst of changes lands with the latest settings");
+  assert.equal(saved.services.cpa.endpoint, "http://127.0.0.1:8318/");
+  assert.deepEqual(JSON.parse(fs.readFileSync(filePath + ".bak", "utf8")), saved, "and its copy");
+  controller.dispose();
 });
 
 test("legacy Paseo cannot reenable keep-alive through configuration", () => {
@@ -363,7 +412,7 @@ test("legacy Paseo cannot reenable keep-alive through configuration", () => {
   controller.dispose();
 });
 
-test("CPA config write keeps only CPA live secrets after archiving raw retired secrets", () => {
+test("CPA config write keeps only CPA live secrets after archiving raw retired secrets", async () => {
   const directory = temporaryDirectory();
   const filePath = path.join(directory, "external-services.json");
   const keyPath = path.join(directory, "external-services.key");
@@ -385,6 +434,7 @@ test("CPA config write keeps only CPA live secrets after archiving raw retired s
   const archive = path.join(directory, "archives", "retired-services", "external-services.json");
   assert.equal(fs.readFileSync(archive, "utf8"), original);
   controller.configure("cpa", { autoStart: true });
+  await controller.saved();
   const live = JSON.parse(fs.readFileSync(filePath, "utf8"));
   assert.deepEqual(live.secrets, { cpa: cpaSecret });
   assert.equal(live.services.cpa.autoStart, true);

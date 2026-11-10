@@ -235,7 +235,7 @@ test("main's startup, failed by Cloudflare's check at launch, brings the bridge 
 });
 
 test("main wires the retry to launch's startup and to the browser's sign-in", () => {
-  assert.match(mainSource, /runtimeStartupInFlight = startManagedRuntime\(\{ logger, stateStore, startupAuthenticationRefresh \}\)\s*\.then\(\(\) => runtimeStartupRetry\.startupSettled\(\)\)/,
+  assert.match(mainSource, /trackRuntimeStartup\(startManagedRuntime\(\{ logger, stateStore, startupAuthenticationRefresh \}\)\s*\.then\(\(\) => runtimeStartupRetry\.startupSettled\(\)\)\)/,
     "the retry is armed only after launch's own startup settles");
   assert.match(mainSource, /if \(authenticated && !wasAuthenticated\) \{[^}]*?runtimeStartupRetry\?\.browserSignedIn\(\);/,
     "the signed-in transition wakes it");
@@ -244,6 +244,6 @@ test("main wires the retry to launch's startup and to the browser's sign-in", ()
     "browserHost?.activeTraceId", "browserAccountsStatus().switching", "quitting", "shutdownInProgress"]) {
     assert.ok(busy.includes(guard), `the retry waits for ${guard}`);
   }
-  assert.match(mainSource, /run: \(\) => \{\s*runtimeStartupInFlight = startManagedRuntime\(/,
+  assert.match(mainSource, /run: \(\) => trackRuntimeStartup\(startManagedRuntime\(/,
     "the retry is the startup in flight that quit and MCP setup wait for");
 });

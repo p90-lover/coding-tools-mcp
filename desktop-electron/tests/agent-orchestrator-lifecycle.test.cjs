@@ -33,7 +33,8 @@ function createHarness(hooks = {}) {
   const warnings = [];
   const infos = [];
   const opened = [];
-  const binary = Buffer.from("fake source-built Go daemon");
+  const probes = [];
+  const binary =Buffer.from("fake source-built Go daemon");
   const files = hooks.files ?? new Map();
   const daemonReads = [];
   const resourceRoot = path.resolve("ao-lifecycle-fixture/resources");
@@ -143,6 +144,13 @@ function createHarness(hooks = {}) {
         },
         async mkdir(directory) { assert.equal(directory, dataRoot); },
         async writeFile(filename, content) { files.set(filename, String(content)); },
+        // A folder lists the names directly under it among `files` (chat-hosts/<id>/host.json).
+        async readdir(directory) {
+          const prefix = directory + path.sep;
+          const names = new Set([...files.keys()].filter((name) => name.startsWith(prefix)).map((name) => name.slice(prefix.length).split(path.sep)[0]));
+          if (!names.size) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          return [...names];
+        },
       },
     },
     "node:net": {
@@ -215,7 +223,13 @@ function createHarness(hooks = {}) {
     // the start goes to the fixture's spawn, awaited as the real one is.
     "./off-thread-run.cjs": { spawnOffThread: async (...args) => dependencies["node:child_process"].spawn(...args),
       // The AO API's requests go out from a worker (off-thread-fetch.test.cjs); here, to the fixture's fetch.
-      fetchOffThread: (...args) => sandbox.fetch(...args) },
+      fetchOffThread: (...args) => sandbox.fetch(...args),
+      // Chat-host checks connect from the probe worker (off-thread-probe.test.cjs). No chat host
+      // listens in a fixture, so a probe is refused, as a real one would be, unless a test answers it.
+      probeTcpOffThread: async (options) => {
+        probes.push(options);
+        return (await hooks.probeTcp?.(options)) ?? { ok: false, code: "ECONNREFUSED", message: "No chat host listens in a fixture" };
+      } },
   };
   const loadedModule = { exports: {} };
   const sandbox = {
@@ -262,8 +276,25 @@ function createHarness(hooks = {}) {
     logger: { warn: (...entry) => warnings.push(entry), info: (...entry) => infos.push(entry) },
     readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs,
   });
-  return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files };
+  return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files, probes };
 }
+
+test("chat-host checks go through the probe worker; only an accepted connect is a surviving host", async () => {
+  const dataRoot = path.resolve("ao-lifecycle-fixture/data");
+  const hostFile = (id) => path.join(dataRoot, "chat-hosts", id, "host.json");
+  const files = new Map([
+    [hostFile("up"), JSON.stringify({ address: "127.0.0.1:43001" })],
+    [hostFile("busy"), JSON.stringify({ address: "127.0.0.1:43002" })],
+    [hostFile("ended"), JSON.stringify({ address: "127.0.0.1:43003" })],
+    [hostFile("remote"), JSON.stringify({ address: "10.0.0.5:43004" })],
+  ]);
+  const answers = { 43001: { ok: true, latencyMs: 1 }, 43002: { ok: false, code: "ETIMEDOUT", message: "Connection timed out" } };
+  const { controller, probes } = createHarness({ files, probeTcp: ({ port }) => answers[port] });
+  // A probe that times out is not a survivor, nor is a refused one; a non-loopback record is never probed.
+  assert.equal(await controller.survivingChatHosts(), 1);
+  assert.deepEqual(probes.map((probe) => ({ ...probe })).sort((a, b) => a.port - b.port), [43001, 43002, 43003]
+    .map((port) => ({ host: "127.0.0.1", port, timeoutMs: 1500 })));
+});
 
 test("AO's report of who holds its database writer, and a slow stage of an agent's start, reach the launcher log", async (context) => {
   const { controller, children, warnings, infos } = createHarness();

@@ -665,6 +665,8 @@ export interface LauncherState {
   zeroRiskProEnabled: boolean;
   sidebarOpen: boolean;
   sidebarWidth: number;
+  /** The sidebar's "More tools" section stays open; absent means it opens while one of its pages shows. */
+  sidebarMoreToolsPinned?: boolean;
   browserSmokePassed?: boolean;
   browserSmokeVersion?: string | null;
   coreSetupComplete?: boolean;
@@ -1229,7 +1231,7 @@ export interface LauncherApi {
   saveMcpServer(server: McpServerInput, options?: { githubCliToken?: boolean }): Promise<McpServerEntry[]>;
   removeMcpServer(id: string): Promise<McpServerEntry[]>;
   setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerEntry[]>;
-  setSidebarState(state: { open: boolean; width: number }): Promise<LauncherState>;
+  setSidebarState(state: { open: boolean; width: number; moreToolsPinned?: boolean } | { moreToolsPinned: boolean }): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
   managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
   installManagedComponent(serviceId: ExternalServiceId): Promise<ExternalServiceSnapshot>;

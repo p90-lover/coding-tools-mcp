@@ -30,6 +30,7 @@ export type IconName =
   | "monitor"
   | "providers"
   | "orchestrator"
+  | "pin"
   | "minus"
   | "plug"
   | "plus"
@@ -81,6 +82,7 @@ export function Icon({ name, ...props }: { name: IconName } & SVGProps<SVGSVGEle
       {name === "mcp" ? <><path {...common} d="M8 7.5 12 4l4 3.5v5L12 16l-4-3.5v-5Z" /><path {...common} d="m8 12.5-3 2.7v3.3L8 21l3-2.5V16M16 12.5l3 2.7v3.3L16 21l-3-2.5V16" /></> : null}
       {name === "providers" ? <><rect {...common} x="3" y="5" width="8" height="6" rx="2" /><rect {...common} x="13" y="5" width="8" height="6" rx="2" /><rect {...common} x="8" y="14" width="8" height="6" rx="2" /><path {...common} d="M7 11v1.5h10V11M12 12.5V14" /></> : null}
       {name === "orchestrator" ? <><circle {...common} cx="5" cy="6" r="2" /><circle {...common} cx="19" cy="6" r="2" /><circle {...common} cx="12" cy="18" r="2" /><path {...common} d="M7 6h10M6.5 7.5 10.8 16M17.5 7.5 13.2 16" /></> : null}
+      {name === "pin" ? <><path {...common} d="M9 3.5h6M10 3.5v5.2L7 12.5V15h10v-2.5l-3-3.8V3.5" /><path {...common} d="M12 15v5.5" /></> : null}
       {name === "minus" ? <path {...common} d="M5 12h14" /> : null}
       {name === "monitor" ? <><rect {...common} x="3" y="4" width="18" height="12" rx="2" /><path {...common} d="M8 20h8M12 16v4" /></> : null}
       {name === "plug" ? <><path {...common} d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0V8Z" /><path {...common} d="M12 17v4" /></> : null}
