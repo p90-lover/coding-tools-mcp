@@ -36,7 +36,7 @@ const pluginID = "cline-pass-switcher"
 const apiPrefix = "/v0/management/" + pluginID
 const resourcePrefix = "/v0/resource/plugins/" + pluginID
 
-var pluginVersion = "0.1.0-codingtools.10"
+var pluginVersion = "0.1.0-codingtools.11"
 var hostAvailable atomic.Bool
 
 type envelope struct {
@@ -160,9 +160,56 @@ func configure(raw []byte) error {
 	}
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
-	if active != nil && active.cfg == cfg {
+	wanted = &cfg
+	if active != nil && active.cfg == cfg && running(active) {
 		return nil
 	}
+	lastStart = time.Now()
+	return startRuntimeLocked(cfg)
+}
+
+// The configuration CPA last gave (nil once CPA quiesces the plugin) and when a runtime for it was
+// last started. A runtime that exits on its own (stopped with the app's processes, crashed) is
+// started again with the same configuration by the next request. CPA never sends an unchanged
+// configuration again, so before this every Cline model failed with "connection refused" (shown
+// as Upstream HTTP 500) until CPA itself restarted; seen 2026-10-17. One that keeps dying is
+// started at most every restartEvery, not on every request.
+var wanted *pluginConfig
+var lastStart time.Time
+var restartEvery = 30 * time.Second
+
+// running reports whether s's runtime process is still alive.
+func running(s *service) bool {
+	select {
+	case <-s.done:
+		return false
+	default:
+		return true
+	}
+}
+
+// liveRuntime returns the running runtime, starting it again if it exited on its own.
+func liveRuntime() (*service, error) {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	if active != nil && running(active) {
+		return active, nil
+	}
+	if wanted == nil {
+		return nil, fmt.Errorf("managed Cline runtime is not available")
+	}
+	if wait := restartEvery - time.Since(lastStart); wait > 0 {
+		return nil, fmt.Errorf("managed Cline runtime stopped; it is started again in %s", wait.Round(time.Second))
+	}
+	lastStart = time.Now()
+	if err := startRuntimeLocked(*wanted); err != nil {
+		return nil, fmt.Errorf("managed Cline runtime stopped and did not start again: %w", err)
+	}
+	return active, nil
+}
+
+// startRuntimeLocked replaces any runtime with a new one for cfg. runtimeMu must be held.
+func startRuntimeLocked(cfg pluginConfig) error {
 	stopRuntime()
 	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return err
@@ -305,16 +352,14 @@ func stopRuntime() {
 	case <-time.After(3 * time.Second):
 	}
 }
-func quiesce() { runtimeMu.Lock(); defer runtimeMu.Unlock(); stopRuntime() }
+func quiesce() { runtimeMu.Lock(); defer runtimeMu.Unlock(); wanted = nil; stopRuntime() }
 func localRequest(method, path string, body []byte) (*http.Response, error) {
 	return localRequestWith(loopbackClient, method, path, body)
 }
 func localRequestWith(client *http.Client, method, path string, body []byte) (*http.Response, error) {
-	runtimeMu.Lock()
-	s := active
-	runtimeMu.Unlock()
-	if s == nil {
-		return nil, fmt.Errorf("managed Cline runtime is not available")
+	s, err := liveRuntime()
+	if err != nil {
+		return nil, err
 	}
 	key := s.key
 	if b, e := os.ReadFile(filepath.Join(s.cfg.DataDir, "config.json")); e == nil {
