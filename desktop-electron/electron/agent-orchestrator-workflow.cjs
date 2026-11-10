@@ -275,6 +275,13 @@ const REVIEW_SCRIPT_BYTES = 4000;
 const REVIEW_SCRIPT_LOOKUPS = 6;
 // The excerpts only help the reviewer, so a slow disk does not hold the review up past this.
 const REVIEW_SCRIPT_BUDGET_MS = 2_000;
+// The run loop passes every 500 ms. A turn it found simply working is observed again only after
+// this long: its end, a tool request or a question shows up at most this much later. Anything
+// else (an approval, a question, a start, a queued message) keeps the 500 ms pace.
+const QUIET_OBSERVE_MS = 1_500;
+// How old a shared run read the run loop takes (the app's runReadFreshMs is 300 ms). Writes through
+// requestHeadless drop shared reads, so only a change made outside this app waits this long.
+const RUN_LOOP_READ_FRESH_MS = 2_000;
 /**
  * The local scripts a tool request runs, read for the command reviewer. It saw only the command
  * line, so "run start-nova.ps1" came back "ask" every time and the person had to answer. Only
@@ -412,12 +419,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const token = { live: true };
     try { return await personTurn.run(token, work); } finally { token.live = false; }
   }
-  function sharedWorkflowRead(key, load) {
+  // `freshMs` lets a caller take an older read than runReadFreshMs: the run loop's own reads
+  // (RUN_LOOP_READ_FRESH_MS). Every write through requestHeadless still drops them all.
+  function sharedWorkflowRead(key, load, freshMs = runReadFreshMs) {
     if (!(runReadFreshMs > 0)) return load();
+    const fresh = Math.max(runReadFreshMs, Number.isFinite(freshMs) ? freshMs : 0);
     const known = runReads.get(key);
     // A person's send reads afresh rather than wait on a background read still queued behind the
     // polls (as Stop does, readForStop); a settled read that is still fresh serves it too.
-    if (known && (known.pending ? !forPerson() : Date.now() - known.at < runReadFreshMs)) return known.read;
+    if (known && (known.pending ? !forPerson() : Date.now() - known.at < fresh)) return known.read;
     const entry = { at: 0, pending: true, read: load() };
     runReads.set(key, entry);
     entry.read.then(() => {
@@ -1929,9 +1939,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const stopped = nothingToAnswer(observed)
         && (await stopStalledLaunch(session, observed, ownership) || await stopStalledTurn(session, observed, ownership));
       if (!stopped) wakeQueueOnAgentReady(workspaceId, mission, node, observed);
-      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
+      // A turn that is simply working: its agent is up, nothing asks for an answer, and the chat has
+      // nothing queued behind it. The run loop observes such a session less often (QUIET_OBSERVE_MS).
+      const taskId = mission?.project_id;
+      const quiet = !stopped && observed.turnState === "running" && observed.provisioning !== true
+        && !observed.needsInput && !observed.agentGone && !observed.exited && !pending.length
+        && !(taskId && chatQueue.list(workspaceId, taskId).length);
+      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node, quiet });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
-      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
+      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session, ...(quiet ? { quiet: true } : {}) };
     }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
@@ -1947,8 +1963,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return { ...result, pending_approvals: [] };
   }
 
-  async function savedNode(workspaceId, runId, nodeId) {
-    const saved = await runs({ workspaceId, runId });
+  async function savedNode(workspaceId, runId, nodeId, { freshMs } = {}) {
+    const saved = await runs({ workspaceId, runId }, { freshMs });
     const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
@@ -1956,7 +1972,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Callers only read what comes back (none changes a run in place), so one response is shared.
   // `taskId` reads one chat's runs: the project's read holds only its newest 100, shared by all of
   // its chats, so a busy project's other chats opened with few or none of their replies.
-  function runs({ workspaceId, runId, taskId } = {}) {
+  // `freshMs` (internal callers only, never the IPC arguments) accepts an older shared read.
+  function runs({ workspaceId, runId, taskId } = {}, { freshMs } = {}) {
     const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "", task = !run && taskId ? clean(taskId, 128) : "";
     const key = JSON.stringify(task ? [id, run, task] : [id, run]);
     return sharedWorkflowRead(key, async () => {
@@ -1965,7 +1982,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         throw new Error("AO run read failed");
       }
       return response;
-    });
+    }, freshMs);
   }
 
   // ---- Chats past the project read's newest 100 runs ----
@@ -2151,7 +2168,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // run loop's latest frame while it is fresh instead of asking AO again.
       const key = nodeKey(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
       const frame = pendingFrames.get(key);
-      if (frame && Date.now() - frame.at < 1500) {
+      // A quiet frame is the loop's latest word until its next observation is due (QUIET_OBSERVE_MS
+      // and one pass): asking AO again in between would bring back the reads it spared.
+      if (frame && Date.now() - frame.at < (frame.quiet ? QUIET_OBSERVE_MS + 500 : 1500)) {
         return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending, frame.mission ? frame : null) } };
       }
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
@@ -2716,8 +2735,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return response;
   }
 
-  async function observe({ workspaceId, runId, nodeId } = {}, stillCurrent = () => true) {
-    const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
+  async function observe({ workspaceId, runId, nodeId } = {}, stillCurrent = () => true, { readFreshMs } = {}) {
+    const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80), { freshMs: readFreshMs });
     if (!stillCurrent()) return { ok: true, cancelled: true };
     if (externalAgent(found.node)) {
       const result = await observeExternal(workspaceId, runId, found.node, found.mission);
@@ -5043,12 +5062,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const pause = () => new Promise(resolve => setTimeout(resolve, 500));
     const observing = new Map();
     const nodeAttention = new Map(); // running node id -> its last observed attention (or null)
+    // Running node id -> when it may be observed again, after an observation that found it quiet.
+    const quietUntil = new Map();
+    // The loop's own run reads may be RUN_LOOP_READ_FRESH_MS old: any write through requestHeadless
+    // drops them, so what the app changes is read on the next pass all the same.
+    const loopRead = { freshMs: RUN_LOOP_READ_FRESH_MS };
     state.driving = true;
     state.settled = false;
     try {
       for (;;) {
         if (state.stopped) { reportRun(workspaceId, runId, state, null); return; }
-        let saved = await runs({ workspaceId, runId });
+        let saved = await runs({ workspaceId, runId }, loopRead);
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed orchestrator doesn't report worker capacity. Update the runtime.");
@@ -5102,10 +5126,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (state.stopped) return;
         const active = mission.nodes.filter(node => node.state === "running");
         for (const [id] of observing) if (!active.some(node => node.id === id)) observing.delete(id);
+        for (const [id] of quietUntil) if (!active.some(node => node.id === id)) quietUntil.delete(id);
         for (const node of active) {
           if (observing.has(node.id)) continue;
+          // Observed quiet a moment ago: each observation is a session read and a conversation tail
+          // from the AO daemon, and a run read from coding-tools-headless. Nine working chats made
+          // 14 session reads and 17 run reads a second at this loop's pace (2026-11-10, 0.8.108),
+          // the AO daemon and headless at ~16% of a core each, all for turns that were just working.
+          if ((quietUntil.get(node.id) ?? 0) > performance.now()) continue;
           const pending = { done: false };
-          pending.promise = observe({ workspaceId, runId, nodeId: node.id })
+          pending.promise = observe({ workspaceId, runId, nodeId: node.id }, undefined, { readFreshMs: RUN_LOOP_READ_FRESH_MS })
             .then(result => { pending.result = result; }, error => { pending.error = error; })
             .finally(() => { pending.done = true; });
           observing.set(node.id, pending);
@@ -5124,6 +5154,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const result = observed[index];
           nodeAttention.set(node.id, result.pending_approvals?.length ? { kind: "pending_approval", node, pending: result.pending_approvals }
             : result.needs_input ? { kind: "needs_input" } : null);
+          if (result.quiet === true) quietUntil.set(node.id, performance.now() + QUIET_OBSERVE_MS);
+          else quietUntil.delete(node.id);
         }
         for (const id of [...nodeAttention.keys()]) if (!active.some(node => node.id === id)) nodeAttention.delete(id);
         const marks = [...nodeAttention.values()].filter(Boolean);
@@ -5154,7 +5186,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const helped = mission.paused || mission.cancelled ? null : await recoverHeld(workspaceId, mission, state);
         if (helped?.detail) state.detail = helped.detail;
         if (helped?.changed || completed.length) {
-          saved = await runs({ workspaceId, runId });
+          saved = await runs({ workspaceId, runId }, loopRead);
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
           // A retry needs a turn: a grant that is gone, or spent (a single chat's one turn was the
