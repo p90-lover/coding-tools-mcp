@@ -1,5 +1,6 @@
 const fs = require("node:fs");
-const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+const path = require("node:path");
+const { asyncWritePending, writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const DEFAULT_WINDOW_STATE = Object.freeze({
   bounds: { width: 1120, height: 720 },
@@ -98,19 +99,46 @@ function trackWindowState(window, filePath, onError, { quitting = () => true } =
     window.on(event, schedule);
   }
   // Closing the app saves synchronously, so the position is on disk before it can exit. The same
-  // state is queued after any save still in flight, so an older one cannot land last.
+  // state is queued after a save still in flight, so an older one cannot land last; with none in
+  // flight it is not queued again. The app exited during that second save, which left one
+  // window-state.json.tmp-* behind at every quit (50 in the data folder by 2026-11-10).
   window.on("close", () => {
     if (timer) clearTimeout(timer);
     timer = null;
     if (window.isDestroyed()) return;
     try {
       const content = `${JSON.stringify(captureWindowState(window), null, 2)}\n`;
-      if (quitting()) writePrivateFileAtomic(filePath, content);
-      writePrivateFileAtomicAsync(filePath, content).catch((error) => onError?.(error));
+      const exiting = quitting();
+      if (exiting) writePrivateFileAtomic(filePath, content);
+      if (!exiting || asyncWritePending(filePath)) writePrivateFileAtomicAsync(filePath, content).catch((error) => onError?.(error));
     } catch (error) {
       onError?.(error);
     }
   });
+  void removeStaleTemporaries(filePath);
+}
+
+/**
+ * Removes the temp files a save left when the app exited during it, off the main thread. One newer
+ * than `olderThanMs` may still be a save in flight, so it stays.
+ */
+async function removeStaleTemporaries(filePath, { olderThanMs = 10 * 60_000, now = Date.now } = {}) {
+  const directory = path.dirname(filePath);
+  const prefix = `${path.basename(filePath)}.tmp-`;
+  let names;
+  try { names = await fs.promises.readdir(directory); } catch { return 0; }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const temporary = path.join(directory, name);
+    try {
+      const stats = await fs.promises.lstat(temporary);
+      if (!stats.isFile() || now() - stats.mtimeMs < olderThanMs) continue;
+      await fs.promises.rm(temporary, { force: true });
+      removed += 1;
+    } catch { /* gone already, or held: the next start tries again */ }
+  }
+  return removed;
 }
 
 module.exports = {
@@ -119,6 +147,7 @@ module.exports = {
   captureWindowState,
   normalizeWindowState,
   readWindowState,
+  removeStaleTemporaries,
   trackWindowState,
   writeWindowState,
 };
