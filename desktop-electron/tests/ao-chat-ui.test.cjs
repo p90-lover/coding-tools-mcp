@@ -1031,6 +1031,32 @@ test("the Subagents page lists every agent's models once, and a model runs on an
   assert.doesNotMatch(source, /HarnessPicker|Clear default model|On for new chats|All changes saved/, "no harness field, default buttons, status pills or idle save text");
 });
 
+test("the Subagents page picks a model by its provider, and keeps the list of providers the user allows", () => {
+  // Asked 2026-11-10: "let user to choose which provider they want … and allowed providers … i dont
+  // want to use on some provider to cost my limit too much".
+  const page = load("SubagentsSurface.tsx", { "./AgentOrchestratorSurface": {}, "./AgentOrchestratorRoleEditor": roles });
+  const plainOf = (value) => JSON.parse(JSON.stringify(value));
+  const choices = page.modelChoices([
+    { harness: "ao:codex", catalog: { models: ["gpt-6", "cpa/gemini-3.8-flash", "cpa/cline-pass/deepseek-v4.1-flash", "cpa/glm-5"],
+      capabilities: { "cpa/gemini-3.8-flash": { efforts: ["high"], provider: "Antigravity" } } } },
+  ]);
+  assert.deepEqual(plainOf(choices.map((choice) => [choice.model, choice.provider])), [["gpt-6", "ao:codex"], ["cpa/gemini-3.8-flash", "antigravity"],
+    ["cpa/cline-pass/deepseek-v4.1-flash", "cline-pass"], ["cpa/glm-5", "cpa"]], "CPA's reported provider, else the id's prefix; Codex's own models are its own account, not CPA's codex");
+  assert.deepEqual(plainOf(page.providerChoices(choices).map((item) => [item.key, item.label, item.models])),
+    [["antigravity", "Antigravity", 1], ["cline-pass", "Cline Pass", 1], ["ao:codex", "Codex (own account)", 1], ["cpa", "Other", 1]], "by name, Other last");
+  const known = ["antigravity", "cline-pass", "ao:codex", "cpa"];
+  assert.deepEqual(plainOf(page.toggleProvider(null, "cline-pass", false, known)), ["antigravity", "ao:codex", "cpa"], "turning one off keeps the rest");
+  assert.deepEqual(plainOf(page.toggleProvider(["antigravity"], "cpa", true, known)), ["antigravity", "cpa"]);
+  assert.equal(page.toggleProvider(["antigravity", "ao:codex", "cpa"], "cline-pass", true, known), null, "every one on again allows new providers too");
+  assert.equal(page.providerOn(null, "zhipu"), true);
+  assert.equal(page.providerOn(["antigravity"], "zhipu"), false);
+  assert.equal(page.modelProvider("cpa/gone", ["ao:claude-code"]), "cpa", "a saved model no longer listed still has a provider to show");
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/SubagentsSurface.tsx"), "utf8");
+  assert.match(source, /aria-label=\{`\$\{label\} provider`\}/, "each model field starts with its provider");
+  assert.match(source, /providers\.filter\(item => providerOn\(allowed, item\.key\)\)|known\.filter\(item => providerOn\(allowed, item\.key\)\)/, "a provider that is off is not offered");
+  assert.match(source, /allowedProviders: toggleProvider\(allowed, item\.key, on, /, "the switches save the allowed list");
+});
+
 test("edits on the Subagents page survive leaving the page and coming back before saving", () => {
   // The page stays mounted and reloads the saved config on every visit; that reload replaced the
   // draft, so a renamed subagent or a changed limit was silently dropped by visiting another page.
