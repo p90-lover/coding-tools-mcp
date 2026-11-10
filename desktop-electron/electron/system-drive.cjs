@@ -3,13 +3,14 @@
 // Coding Tools keeps its writes off the system drive (on the machine it was built for, C: is the SSD
 // and everything else lives on hard disks). Its data root already sits wherever the person put it,
 // but two things it and everything it starts still wrote to C: through Windows' defaults:
-// - the temporary folder (TEMP/TMP): each update's download and the installer's rollback copy of the
-//   old install (~1.5 GB), and the scratch files of every agent it runs (Claude Code's own
-//   %TEMP%\claude, command output, sandbox helpers);
+// - the temporary folder (TEMP/TMP): the scratch files of every agent it runs (Claude Code's own
+//   %TEMP%\claude, command output, package managers' downloads) and of Chromium's helpers. Codex's
+//   Windows sandbox grants a sandboxed command the TEMP it inherits, so agents keep a writable one.
+//   (The app's own updates never used it: they stage beside the install, app-update.cjs.)
 // - rtk's history database (%LOCALAPPDATA%\rtk\history.db), written on every command an agent runs
 //   through RTK's hook.
 // systemDriveRedirects points both at the data root before anything is started, so every child
-// (AO, its agents, CPA, the bridge, the update worker and the installer) inherits them. A value the
+// (AO and its agents, CPA, the bridge, Chromium's helpers) inherits them. A value the
 // person set off the system drive is kept, and nothing changes when the data root is itself on the
 // system drive or off Windows. pruneTemp then clears old leftovers there, since Windows' Storage
 // Sense only cleans the system temporary folder.
