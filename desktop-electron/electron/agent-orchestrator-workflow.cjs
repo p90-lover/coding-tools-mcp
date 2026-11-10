@@ -1813,6 +1813,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // request or requests already answered hold.
   const nothingToAnswer = observed => answeredOnly(observed)
     || (!observed?.approvals?.length && (!observed?.needsInput || orphanedRequest(observed)));
+  // The card's AO turn id lives only in memory until its turn ends: expectedTurns has it for a
+  // follow-up or a warm start, and the receipt gets it with the result. A cold start had none, nor
+  // did any card still running when the app restarted, and the stall stop needs it, so it never
+  // ended their turns. Seen live 2026-11-10: AO lost five chats' agents while their hosts lived on,
+  // the turns read "running" for 3.5 hours, and a message queued in one went only when the person
+  // pressed Restart. The session's turn AO took after the card was reserved is the card's own: the
+  // chat sends one message at a time, so one taken before belongs to an earlier message. AO stamps
+  // whole seconds, hence the second's slack.
+  const TURN_CLOCK_SLACK_MS = 1_000;
+  function ownedTurn(ownership, node, observed) {
+    if (ownership.turnId) return ownership;
+    const reserved = Number(node.receipt?.started_at_ms);
+    const mine = typeof observed?.turnId === "string" && observed.turnId && reserved > 0
+      && Number.isFinite(observed.turnRequestedAt) && observed.turnRequestedAt >= reserved - TURN_CLOCK_SLACK_MS;
+    return mine ? { ...ownership, turnId: observed.turnId } : ownership;
+  }
   /**
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
@@ -1927,7 +1943,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const pending = aoPending(node, session, observed);
       // `pending` is observed.approvals for this card: none, or only ones already answered.
       const stopped = nothingToAnswer(observed)
-        && (await stopStalledLaunch(session, observed, ownership) || await stopStalledTurn(session, observed, ownership));
+        && (await stopStalledLaunch(session, observed, ownership) || await stopStalledTurn(session, observed, ownedTurn(ownership, node, observed)));
       if (!stopped) wakeQueueOnAgentReady(workspaceId, mission, node, observed);
       pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
@@ -5932,6 +5948,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     mine.then(forget, forget);
     return mine;
   }
+  /** The chat's newest run and the card its messages reach: a single chat's one card, a team's orchestrator. */
+  function chatAgentCard(saved, task) {
+    const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
+    const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
+      && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
+    return { run, card };
+  }
+  /**
+   * Ends a turn whose agent is gone (`waiting`, its card's observation, reads agentGone). The turn
+   * may still read running, held by a request nobody can answer (orphanedRequest): nothing settled
+   * it, and a message waited behind it for good (seen live 2026-11-02, "yes keep going" queued for
+   * an hour). Asked to restart, or once it has been silent as long as a stuck turn, its host is shut
+   * down so the turn settles and the message goes in; a host still being reattached right after AO
+   * restarts is left alone. True once the shutdown went through.
+   */
+  async function releaseOrphanedTurn(id, run, card, waiting, { restart = false, queued = false } = {}) {
+    const silent = Number.isFinite(waiting.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
+    if (TERMINAL_TURNS.has(waiting.turnState) || !(restart === true || silent > STEER_STALL_MS)) return false;
+    try {
+      const released = await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true, releaseAgent: true });
+      if (released === false) return false;
+      logger?.info?.("ao.steer_released_orphaned_turn", { idleSeconds: Math.round(silent / 1000), asked: restart === true, ...(queued ? { queued: true } : {}) });
+      return true;
+    } catch (error) {
+      logger?.warn?.("ao.steer_release_failed", { message: publicText(error?.message || error, 200) });
+      return false;
+    }
+  }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
   async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
@@ -5941,11 +5985,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!text.trim()) throw new Error("Type a message to steer the agent");
     // A steer that cannot go in now is sent as the next turn: it must fit a chat message as well.
     if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
-    const saved = await runs({ workspaceId: id });
-    const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
-    const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
-      && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
+    const { run, card } = chatAgentCard(await runs({ workspaceId: id }), task);
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
     // This turn already took the same message moments ago: it is not handed over (or noted) again,
     // unless the agent has asked a question since that what was typed answers (below).
@@ -5994,20 +6035,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // steer and nothing to stop. Steering it failed with "the agent controller for this session is
     // not running"; the message goes as the chat's next turn, which starts the agent again.
     if (waiting?.agentGone === true) {
-      // Its turn may still read running, held by a request nobody can answer (orphanedRequest): then
-      // nothing settled it and the message waited behind it for good (seen live 2026-11-02, "yes keep
-      // going" queued for an hour). Asked to restart, or once it has been silent as long as a stuck
-      // turn, its host is shut down so the turn settles and the message goes in; a host still being
-      // reattached right after AO restarts is left alone.
-      const silent = Number.isFinite(waiting.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
-      if (!TERMINAL_TURNS.has(waiting.turnState) && (restart === true || silent > STEER_STALL_MS)) {
-        try {
-          await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true, releaseAgent: true });
-          logger?.info?.("ao.steer_released_orphaned_turn", { idleSeconds: Math.round(silent / 1000), asked: restart === true });
-        } catch (error) {
-          logger?.warn?.("ao.steer_release_failed", { message: publicText(error?.message || error, 200) });
-        }
-      }
+      await releaseOrphanedTurn(id, run, card, waiting, { restart });
       return { ok: true, steered: false, waiting: true, restarted: true,
         reason: "The agent's process had stopped. Your message starts its next turn." };
     }
@@ -7538,6 +7566,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // and chatSteer checks the agent again before sending; the per-chat draining lock prevents duplicates.
     armQueue(workspaceId, taskId, 1, true, true);
   }
+  // After its chat's turn was found over (or ended here), the next look comes this soon.
+  const QUEUE_FREED_MS = 5_000;
+  /**
+   * A plain queued message waits for its chat's turn to end, and a turn whose agent AO had lost
+   * never ended: a steer released it (chatSteer), a message waiting for the turn's end did not.
+   * Seen live 2026-11-10: a message queued for 3.5 hours behind such a turn went only when the
+   * person pressed Restart. Its agent gone and the turn silent as long as a stuck one, its host is
+   * shut down as a steer's would be (releaseOrphanedTurn). A turn that is over, on a run no loop of
+   * this app session drives (after a restart with "Retry automatically" off), is then recorded
+   * (observe), which frees the chat. True when the turn is over or was ended.
+   */
+  async function unblockQueuedChat(workspaceId, taskId, saved) {
+    const { run, card } = chatAgentCard(saved, taskId);
+    if (!card || !externalAgent(card)) return false;
+    const thread = card.receipt.thread_id;
+    const waiting = await Promise.resolve().then(() => harnessService().observe?.(thread, expectedTurns.get(thread))).catch(() => null);
+    if (!waiting) return false;
+    const released = waiting.agentGone === true && await releaseOrphanedTurn(workspaceId, run, card, waiting, { queued: true });
+    const over = released || TERMINAL_TURNS.has(waiting.turnState) || waiting.exited === true;
+    const live = backgroundRuns.get(runKey(workspaceId, run.id));
+    if (over && !(live && (live.starting || live.driving || live.status === "running"))) {
+      await observe({ workspaceId, runId: run.id, nodeId: card.id }).catch(() => null);
+    }
+    return over;
+  }
   /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
   function queuedSelection(item, latest) {
     const picked = item.selection;
@@ -7576,7 +7629,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!next) return;
       const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
-        if (!next.steer) { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        if (!next.steer) {
+          const freed = await unblockQueuedChat(workspaceId, taskId, saved).catch(() => false);
+          if (!wakeupsDisposed) armQueue(workspaceId, taskId, freed ? QUEUE_FREED_MS : QUEUE_RETRY_MS);
+          return;
+        }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
         const result = await chatSteer({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}) })
           .catch(error => ({ steered: false, waiting: true, error }));
