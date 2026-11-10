@@ -177,16 +177,29 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   let polling = false;
   const answered = new Set(); // approval ids already answered
 
-  function read() {
-    if (config) return config;
+  // The saved agents from `readText()` (the file's text, or the error reading it threw), else the starters.
+  function configFrom(readText) {
     let saved = null;
-    try { saved = statePath ? JSON.parse(fs.readFileSync(statePath, "utf8")) : null; } catch { saved = null; }
-    try { config = cleanConfig(saved ?? { agents: STARTERS }); }
+    try { saved = statePath ? JSON.parse(readText()) : null; } catch { saved = null; }
+    try { return cleanConfig(saved ?? { agents: STARTERS }); }
     catch (error) {
       logger?.warn?.("subagents.config_invalid", { message: String(error?.message ?? error).slice(0, 200) });
-      config = cleanConfig({ agents: STARTERS });
+      return cleanConfig({ agents: STARTERS });
     }
+  }
+  // preload() normally reads the file first, off the main thread; this read is for a call before it.
+  function read() {
+    if (!config) config = configFrom(() => fs.readFileSync(statePath, "utf8"));
     return config;
+  }
+  // Read soon after start, off the main thread, so a chat's first launch finds the agents in memory:
+  // reading them then held every window 0.4 s on the hard disk (0.8.104, 2026-11-10).
+  async function preload() {
+    if (config || !statePath) return;
+    let text = null;
+    let failure = null;
+    try { text = await fs.promises.readFile(statePath, "utf8"); } catch (error) { failure = error; }
+    if (!config) config = configFrom(() => { if (failure) throw failure; return text; });
   }
   function save(input) {
     const next = cleanConfig(input);
@@ -826,6 +839,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   }
 
   return Object.freeze({
+    preload,
     enabled: () => read().settings.enabled,
     describe,
     call,

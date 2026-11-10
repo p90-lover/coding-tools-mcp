@@ -934,3 +934,32 @@ test("the workflow offers saved teams with a model for every role and reads a te
   assert.deepEqual(state.roles.map(role => [role.name, role.state]), [["planner", "finished"], ["Builder", "finished"]]);
   workflow.dispose();
 });
+
+test("preload reads the saved agents off the main thread; a save made while it reads is kept", async () => {
+  const w = world({ agents: STARTERS.slice(0, 1) });
+  const statePath = path.join(w.dir, "subagents.json");
+  const fresh = () => createSubagents({ statePath, launchArgs: () => ({}), harness: () => null, logger: { info() {}, warn() {} } });
+  const readFileSync = fs.readFileSync;
+  let syncReads = 0;
+  const again = fresh();
+  try {
+    await again.preload();
+    fs.readFileSync = (...args) => { syncReads += 1; return readFileSync(...args); };
+    try {
+      assert.deepEqual(again.config().agents.map((agent) => agent.id), [STARTERS[0].id]);
+      assert.equal(again.enabled(), w.service.enabled());
+    } finally { fs.readFileSync = readFileSync; }
+    assert.equal(syncReads, 0, "the agents came from the preload");
+
+    const racing = fresh();
+    try {
+      const loading = racing.preload();
+      racing.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+      await loading;
+      assert.equal(racing.config().agents.length, STARTERS.length, "the save is kept");
+    } finally { racing.dispose(); }
+  } finally {
+    again.dispose();
+    w.cleanup();
+  }
+});

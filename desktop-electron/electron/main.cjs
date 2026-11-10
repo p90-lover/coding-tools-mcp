@@ -4909,6 +4909,11 @@ async function start() {
         logger,
       });
       app.on("will-quit", () => subagentsService?.dispose());
+      // A chat's first launch reads the saved subagents and MCP servers; read them now, off the main
+      // thread (0.4 + 0.5 s of every window on the hard disk in 0.8.104, 2026-11-10). An older
+      // backend bundle's subagents have no preload and keep reading at first use.
+      void subagentsService.preload?.().catch(() => undefined);
+      void userMcpServers(logger).preload().catch(() => undefined);
     }
     if (!chatAgentTools) {
       const { createChatAgentTools } = backendBundles.requireModule(backend, "chat-agent-tools.cjs");

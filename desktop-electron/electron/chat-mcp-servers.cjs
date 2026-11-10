@@ -118,21 +118,35 @@ function sessionConfig(server) {
 
 function createChatMcpServers({ filePath, logger = null }) {
   let servers = null;
-  const load = () => {
-    if (servers) return servers;
-    servers = [];
+  // The saved list from `readText()`: the file's text, or the error reading it threw.
+  const fromSaved = (readText) => {
+    const list = [];
     let saved = null;
-    try { saved = JSON.parse(fs.readFileSync(filePath, "utf8")); } catch (error) {
+    try { saved = JSON.parse(readText()); } catch (error) {
       // Never the message: JSON.parse quotes the text around a syntax error, which can be a token.
       if (error?.code !== "ENOENT") logger?.warn?.("chat_mcp_servers.unreadable", {
         reason: error instanceof SyntaxError ? "invalid_json" : typeof error?.code === "string" ? error.code : "read_failed" });
     }
     for (const item of Array.isArray(saved?.servers) ? saved.servers.slice(0, MAX_SAVED_SERVERS) : []) {
       // A saved entry that no longer passes (edited by hand, or the rules changed) is dropped, not sent to AO.
-      try { servers.push(normalizeServer(item, servers)); } catch { logger?.warn?.("chat_mcp_servers.dropped", { name: String(item?.name ?? "").slice(0, 64) }); }
+      try { list.push(normalizeServer(item, list)); } catch { logger?.warn?.("chat_mcp_servers.dropped", { name: String(item?.name ?? "").slice(0, 64) }); }
     }
+    return list;
+  };
+  // preload() normally reads the file first, off the main thread; this read is for a call before it.
+  const load = () => {
+    if (!servers) servers = fromSaved(() => fs.readFileSync(filePath, "utf8"));
     return servers;
   };
+  // Read soon after start, off the main thread, so a chat's first launch finds the list in memory:
+  // reading it then held every window 0.5 s on the hard disk (0.8.104, 2026-11-10).
+  async function preload() {
+    if (servers) return;
+    let text = null;
+    let failure = null;
+    try { text = await fs.promises.readFile(filePath, "utf8"); } catch (error) { failure = error; }
+    if (!servers) servers = fromSaved(() => { if (failure) throw failure; return text; });
+  }
   // Saves run off the main thread: written synchronously, one save held every window for 0.5 s on
   // the busy hard disk. The list changes at once; a burst of changes is one write plus at most one
   // more with the latest list, and saved() reports a failed write (the next change writes it all).
@@ -156,6 +170,7 @@ function createChatMcpServers({ filePath, logger = null }) {
   const list = () => load().map((server) => structuredClone(server));
   return Object.freeze({
     list,
+    preload,
     /** Resolves once every change so far is on disk; rejects when the last write failed. */
     async saved() {
       while (saving) await saving;
