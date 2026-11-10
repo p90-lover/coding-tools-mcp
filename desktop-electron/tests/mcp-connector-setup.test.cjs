@@ -897,3 +897,109 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   assert.deepEqual(records, [{ id: "other", error: "ChatGPT refused this connector" }]);
   assert.equal(operations.at(-1).status, "failed");
 });
+
+test("a request the page cancels itself neither confirms nor fails the workspace", async t => {
+  // The plugins page drops its own list request on a tab switch or re-render, and Platform's SPA
+  // drops its in-flight requests when it routes to sign-in. Each of those read as "MCP ownership
+  // metadata is unavailable or exceeded its bound." and stopped Connect (2026-11-09).
+  const businessId = "602b5d8d-e211-49b1-9762-206108d52954", otherId = "6d4774fd-0e67-4b5b-a3b7-4c0e61357122";
+  const tunnelId = `tunnel_${"a".repeat(32)}`;
+  const { debuggerClient, observed } = fakeMcpNetwork();
+  const observer = await observeMcpSetupContext({ debugger: debuggerClient }, tunnelId);
+  t.after(() => observer.dispose());
+  observed("GET", "https://chatgpt.com/backend-api/ps/plugins/list", { "chatgpt-account-id": businessId }, {});
+  const confirmed = observer.snapshot();
+  assert.equal(confirmed.activeAccountId, businessId);
+  const send = (requestId, url, headers) => debuggerClient.emit("message", {}, "Network.requestWillBeSent", { requestId,
+    request: { method: "GET", url, headers } });
+  const cancel = requestId => debuggerClient.emit("message", {}, "Network.loadingFailed", { requestId, canceled: true, errorText: "net::ERR_ABORTED" });
+
+  send("same-again", "https://chatgpt.com/backend-api/ps/plugins/list", { "chatgpt-account-id": businessId });
+  cancel("same-again");
+  assert.equal(observer.snapshot().error, null, "a cancelled list request is not a failure");
+  assert.equal(observer.snapshot().activeAccountId, businessId, "the same workspace stays confirmed");
+  assert.equal(observer.snapshot().selectionVersion, confirmed.selectionVersion);
+
+  send("other-cancelled", "https://chatgpt.com/backend-api/ps/plugins/list", { "chatgpt-account-id": otherId });
+  cancel("other-cancelled");
+  assert.equal(observer.snapshot().error, null);
+  assert.equal(observer.snapshot().activeAccountId, null, "a cancelled request for another workspace still withdraws the old proof");
+  observed("GET", "https://chatgpt.com/backend-api/ps/plugins/list", { "chatgpt-account-id": otherId }, {});
+  assert.equal(observer.snapshot().activeAccountId, otherId, "only an answered request confirms the new one");
+
+  send("platform-cancelled", "https://api.openai.com/v1/tunnels", { "openai-organization": "org-fixture" });
+  cancel("platform-cancelled");
+  assert.equal(observer.snapshot().error, null, "Platform's own redirect cancelling a request is not a failure");
+  assert.equal(observer.snapshot().platform.tunnels, null, "and it proves nothing");
+
+  send("refused", "https://chatgpt.com/backend-api/ps/plugins/list", { "chatgpt-account-id": otherId });
+  debuggerClient.emit("message", {}, "Network.loadingFailed", { requestId: "refused", errorText: "net::ERR_CONNECTION_RESET" });
+  assert.match(observer.snapshot().error, /metadata.*unavailable/i, "a request that really failed still stops setup");
+});
+
+test("an account with no personal plugins has no Personal tab; Connect goes on to Add instead of failing", async () => {
+  // Live 2026-11-09: "ChatGPT did not expose one Personal plugins tab." on accounts that never made a
+  // plugin. ChatGPT drops the tab and ?view=personal while that list is empty.
+  const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    headless: true,
+    args: ["--no-proxy-server"],
+  });
+  const settings = { name: "Coding Tools Native2", tunnelId: `tunnel_${"a".repeat(32)}`, authentication: "none" };
+  const emptyPage = `<meta charset="utf-8"><main><div role="tablist"><button role="tab" aria-selected="true">Public</button>
+    <button role="tab" aria-selected="false">leung workspace</button></div><input type="search" aria-label="Search plugins">
+    <p>No plugins found</p><button id="add">Add</button></main>
+    <script>window.addClicks = 0; document.querySelector('#add').onclick = () => { addClicks++; };</script>`;
+  const open = async (body, script) => {
+    const page = await browser.newPage();
+    // ChatGPT's own redirect for an empty personal list lands on the bare path.
+    await page.route("https://chatgpt.com/plugins", route => route.fulfill({ contentType: "text/html", body }));
+    await page.goto("https://chatgpt.com/plugins");
+    if (script) await page.evaluate(script);
+    await page.evaluate(extensionHelpersSource({ testLegacy: true }));
+    return page;
+  };
+  const outcome = (page, call) => page.evaluate(async ([call, settings]) => {
+    const h = globalThis.__codingToolsConnectorHelpers;
+    try {
+      const value = call === "existing" ? await h.prepareTunnelConnector(settings, true) : await h.createTunnelConnector(settings);
+      return { value, addClicks: globalThis.addClicks };
+    } catch (error) { return { error: error.message, addClicks: globalThis.addClicks }; }
+  }, [call, settings]);
+  try {
+    // What the helper itself reads.
+    const page = await open(emptyPage);
+    assert.equal(await page.evaluate(() => globalThis.__codingToolsConnectorHelpers.personalListEmpty()), true, "a settled tab bar with no Personal tab is an empty list");
+    for (const [name, change] of [
+      ["the tab bar is still a placeholder", () => document.querySelector("main").insertAdjacentHTML("beforeend", '<div data-testid="plugin-source-tabs-placeholder"></div>')],
+      ["the directory still shows its loader", () => document.querySelector("main").insertAdjacentHTML("beforeend", '<div style="width:80px;height:20px">Loading plugins…</div>')],
+      ["a Personal tab is there", () => document.querySelector('[role="tablist"]').insertAdjacentHTML("beforeend", '<button role="tab" aria-selected="false">Personal</button>')],
+      ["no tab bar has painted yet", () => document.querySelector('[role="tablist"]').remove()],
+    ]) {
+      const probe = await open(emptyPage, change);
+      assert.equal(Boolean(await probe.evaluate(() => globalThis.__codingToolsConnectorHelpers.personalListEmpty())), false, `not empty while ${name}`);
+      await probe.close();
+    }
+
+    // A member's existing-only run: nothing personal, so the connector is absent (not a page failure).
+    const existing = await outcome(page, "existing");
+    assert.match(existing.error, /exact tunnel identity is unverified/, JSON.stringify(existing));
+    assert.equal(existing.addClicks, 0, "an existing-only run never opens Add");
+    // An owner's run goes on to the Add action (this fixture's Add opens nothing).
+    const create = await outcome(page, "create");
+    assert.equal(create.error, "ChatGPT did not open its custom MCP server form.", JSON.stringify(create));
+    assert.equal(create.addClicks, 1);
+
+    // A Personal tab that is only late wins: its existing connector is reused and Add is never clicked.
+    const late = await open(emptyPage, () => setTimeout(() => {
+      document.querySelector('[role="tablist"]').insertAdjacentHTML("beforeend", '<button role="tab" aria-selected="true">Personal</button>');
+      document.querySelector('[role="tab"]').setAttribute("aria-selected", "false");
+      document.querySelector("main p").outerHTML = '<section><h2>Created by you</h2><article style="width:320px;height:140px"><a aria-label="Open Coding Tools Native2" href="/plugins/plugins~Plugin_managed"><h2>Coding Tools Native2</h2></a></article></section>';
+    }, 600));
+    const reused = await outcome(late, "create");
+    assert.deepEqual(reused, { value: { created: false, href: "/plugins/plugins~Plugin_managed" }, addClicks: 0 });
+  } finally {
+    await browser.close();
+  }
+});

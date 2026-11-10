@@ -279,7 +279,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
               account = latest.accounts.find(entry => entry.id === target.id) ?? account;
               access = accessOf(account, latest);
             } catch (cause) {
-              const detail = cause instanceof Error ? cause.message : String(cause);
+              const detail = ipcErrorText(cause);
               setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
               continue;
             }

@@ -30,6 +30,9 @@ const PREFLIGHT_FAILURES = new Map([
   ["owner_context_unavailable", "MCP context inspection did not finish."],
   ["connector_identity_unverified", "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted."],
   ["busy", "Browser account switching or shutdown is in progress"],
+  ["busy", "Wait for the current runtime setup to finish before connecting MCP."],
+  ["busy", "Automatic MCP setup is waiting for the focused, idle app and current account."],
+  ["verification_required", "Sign in to this account in the Browser tab before connecting MCP."],
   ["creation_failed", "The account's MCP tunnel is not ready. Reconnect it before creating the connector."],
   ["creation_failed", "The account's MCP tunnel changed or is not ready."],
   ["verification_required", SETUP_CHECK_MESSAGE],
@@ -62,7 +65,38 @@ const CHATGPT_PAGE_FAILURES = new Set([
   "ChatGPT did not prepare the exact connector consent.",
   "ChatGPT did not prepare the exact tunnel connector.",
   "ChatGPT did not retain the configured connector values.",
+  // The setup's other fixed texts. Each fell through to the catch-all until 2026-11-09, so cards
+  // read "Check Configuration" for a list that never loaded or a page that showed two Add buttons.
+  "ChatGPT exposed more than one Add action.",
+  "ChatGPT exposed more than one Connect action.",
+  "ChatGPT exposed more than one Create action.",
+  "ChatGPT exposed more than one matching app row.",
+  "ChatGPT returned an invalid connector identity.",
+  "ChatGPT showed an existing connector after Create; creation was not confirmed.",
+  "ChatGPT workspace controls are unavailable.",
+  "More than one connector has the configured name.",
+  "Open the exact ChatGPT plugin before connecting it.",
+  "Open the intended ChatGPT workspace before inspecting MCP access.",
+  "Saved account connector bindings could not be read; they were kept for recovery.",
+  "The MCP configuration changed during setup.",
+  "The Personal plugins list did not finish loading, so the connector was not created.",
+  "The Personal plugins tab did not finish loading.",
+  "The connector form is not visible.",
+  "The current ChatGPT connector settings are invalid.",
+  "The exact workspace connector page changed.",
+  "The pinned MCP extension helper boundary is missing.",
+  "The plugin consent page changed.",
+  "The prepared Connect control changed. Connection was not attempted.",
+  "The prepared connector controls changed. Creation was not attempted.",
+  "The prepared connector page changed.",
+  "The prepared plugin consent changed. Connection was not attempted.",
+  "The prepared workspace publishing controls changed.",
+  "The tunnel has no valid tunnel ID.",
 ]);
+
+// ChatGPT's own error line on its connector form follows this prefix. Its words stay out (they
+// could carry page data); the card says where it stopped instead of the catch-all.
+const CHATGPT_FORM_ERROR = "ChatGPT connector creation failed: ";
 
 function mcpConnectorCommandFailure(error, action = "create") {
   if (action === "add-tunnel") return { code: "tunnel_add_failed", message: "MCP tunnel connection failed. The private input was retained for retry." };
@@ -76,6 +110,9 @@ function mcpConnectorCommandFailure(error, action = "create") {
     return { ...known, message: `${known.message} ${known.code === "platform_sign_in_required" ? "It stopped at" : "It moved to"} ${place}.` };
   }
   if (CHATGPT_PAGE_FAILURES.has(text)) return { code: "creation_failed", message: text };
+  if (text.startsWith(CHATGPT_FORM_ERROR)) {
+    return { code: "creation_failed", message: "ChatGPT showed an error on its connector form. Open the account in the Browser tab to read it." };
+  }
   const [code, message] = /denied access/i.test(text)
     ? ["mcp_access_denied", "The MCP server denied access. Check its authentication and workspace access."]
     : /verification|authenticate|sign.?in|cloudflare/i.test(text)

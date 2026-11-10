@@ -254,7 +254,14 @@ async function observeMcpSetupContext(contents, tunnelId) {
     const fact = requests.get(id);
     if (!fact) return;
     if (latest.get(fact.key) !== fact.sequence || (fact.kind !== "chatgpt" && fact.identityVersion !== platformIdentityVersion)) { requests.delete(id); return; }
-    if (method === "Network.loadingFailed") { requests.delete(id); failed(fact); return; }
+    if (method === "Network.loadingFailed") {
+      requests.delete(id);
+      // The page dropped its own request (a tab switch, a re-render, Platform's sign-in redirect):
+      // no answer either way, so nothing is confirmed and nothing failed. Sending it already cleared
+      // any different context it asked for, so only a later answered request can confirm that.
+      if (params.canceled === true) return;
+      failed(fact); return;
+    }
     if (method === "Network.responseReceived") {
       let url;
       try { url = new URL(params.response?.url); } catch { requests.delete(id); failed(fact); return; }
@@ -462,13 +469,43 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     "const canonicalAppIdentity = (value) => normalize(value).replace(/[^\\p{L}\\p{N}]+/gu, '');",
     "const canonicalAppIdentity = (value) => normalize(value);",
   ) + `
-  function personalPluginsLoaded() {
-    const selected = [...document.querySelectorAll('main [role="tab"][aria-selected="true"]')]
-      .some(tab => textMatches(tab, PERSONAL_VIEW_LABELS, true));
+  // The directory is still painting: its loader line or one of its skeletons is on screen.
+  function directoryLoading() {
     const loading = [...document.querySelectorAll('main *')].some(element =>
       ['loading plugins', 'loading plugins…', 'loading plugins...'].includes(normalize(element.innerText ?? element.textContent))
       && visible(element));
-    return selected && !loading && !document.querySelector('main [data-testid="plugin-source-tabs-placeholder"],main [data-testid="directory-section-heading-skeleton"],main [data-testid="plugin-row-skeleton-icon-frame"]');
+    return loading || Boolean(document.querySelector('main [data-testid="plugin-source-tabs-placeholder"],main [data-testid="directory-section-heading-skeleton"],main [data-testid="plugin-row-skeleton-icon-frame"]'));
+  }
+  function personalPluginsLoaded() {
+    const selected = [...document.querySelectorAll('main [role="tab"][aria-selected="true"]')]
+      .some(tab => textMatches(tab, PERSONAL_VIEW_LABELS, true));
+    return selected && !directoryLoading();
+  }
+  // ChatGPT shows no Personal tab while an account's personal list is empty, and drops
+  // ?view=personal on the way (the extension's ensurePersonalView relies on the same). Until
+  // 2026-11-09 the setup read that as a page that failed: "ChatGPT did not expose one Personal
+  // plugins tab" on every account that had never created a plugin.
+  //
+  // Wrongly saying "empty" while a Personal tab is merely late would let Create add a second
+  // connector beside an existing one, so this must prove emptiness, not guess it.
+  //
+  // Every sign is required: ChatGPT's own empty-list redirect (the bare plugins path, view dropped),
+  // a tab bar that has finished painting, and no personal tab in it. If ChatGPT stops redirecting,
+  // this reads "not empty" and the setup fails as it did before, never the other way round.
+  // (No backslashes here: this text is a template literal.)
+  function personalListEmpty() {
+    let url;
+    try { url = new URL(location.href); } catch { return false; }
+    if (!['/plugins', '/plugins/'].includes(url.pathname) || url.searchParams.has('view')) return false;
+    if (directoryLoading()) return false;
+    const tabs = [...document.querySelectorAll('main [role="tab"]')].filter(tab => visible(tab));
+    return tabs.length > 0 && !tabs.some(tab => textMatches(tab, PERSONAL_VIEW_LABELS, true));
+  }
+  // Empty, and still empty a moment later: a tab bar that is still filling in does not count.
+  async function personalListSettledEmpty() {
+    if (!personalListEmpty()) return false;
+    await sleep(1500);
+    return personalListEmpty();
   }
   function findManagedAppCard(name) {
     if (!personalPluginsLoaded()) return null;
@@ -548,19 +585,31 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       || settings.authentication !== 'none') {
       throw new Error('The current ChatGPT connector settings are invalid.');
     }
-    const personal = await waitFor(() => {
-      const tabs = [...document.querySelectorAll('main [role="tab"]')]
-        .filter(tab => visible(tab) && textMatches(tab, PERSONAL_VIEW_LABELS, true));
-      return tabs.length === 1 ? tabs[0] : null;
-    }, 10_000);
+    let personal = null;
+    for (let tries = 0; tries < 2 && !personal; tries++) {
+      const found = await waitFor(() => {
+        const tabs = [...document.querySelectorAll('main [role="tab"]')]
+          .filter(tab => visible(tab) && textMatches(tab, PERSONAL_VIEW_LABELS, true));
+        if (tabs.length === 1) return tabs[0];
+        return tabs.length === 0 && personalListEmpty() ? 'empty' : null;
+      }, 10_000);
+      if (!found) break;
+      // An empty list must still read empty a moment later; a Personal tab that was only late wins.
+      personal = found !== 'empty' || await personalListSettledEmpty() ? found : null;
+    }
     if (!personal) throw new Error('ChatGPT did not expose one Personal plugins tab.');
-    // The URL can say view=personal while the rendered directory still selects Public.
-    if (personal.getAttribute('aria-selected') !== 'true') personal.click();
-    if (!await waitFor(() => personalPluginsLoaded(), 10_000)) {
-      throw new Error('The Personal plugins tab did not finish loading.');
+    const empty = personal === 'empty';
+    if (!empty) {
+      // The URL can say view=personal while the rendered directory still selects Public.
+      if (personal.getAttribute('aria-selected') !== 'true') personal.click();
+      if (!await waitFor(() => personalPluginsLoaded(), 10_000)) {
+        throw new Error('The Personal plugins tab did not finish loading.');
+      }
     }
     await clearPluginSearch();
     const listed = await waitFor(() => {
+      // Nothing personal to find: the connector is absent, and Create starts from the Add action.
+      if (empty) return personalListEmpty() ? { absent: true } : null;
       if (!personalPluginsLoaded()) return null;
       const card = findManagedAppCard(settings.name);
       if (card) return { card };
@@ -763,7 +812,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     prepareTunnelConnectorConnection, openTunnelConnectorConsent, confirmTunnelConnectorConsent,
     ${testLegacy ? "createTunnelConnector, ensureTunnelConnectorConnected," : ""}
     findGridArticle, findInput, findManagedAppCard, isPersonalPluginsPage, observeAppConnection, personalPluginsLoaded,
-    openCreateFormStrict, pluginCardLinks, pointerActivate, setInputValue,
+    personalListEmpty, personalListSettledEmpty, openCreateFormStrict, pluginCardLinks, pointerActivate, setInputValue,
     textMatches, visible, waitFor, waitForPersonalPluginsPage, waitForPluginsPageReady, selectWorkspace
   });
 })();`;
