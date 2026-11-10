@@ -1162,12 +1162,15 @@ class RuntimeSupervisor {
     });
   }
 
-  assertTunnelClientReady(config) {
+  /** Checked off the main thread: the synchronous check of tunnel-client.exe held every window 6.6 s
+   * on the busy hard disk as the MCP tunnel started (0.8.106, Activity 2026-11-10 02:04Z). */
+  async assertTunnelClientReady(config) {
     const tunnel = config.tunnel;
-    if (!tunnel || !fs.existsSync(tunnel.binaryPath)) {
+    const exists = (file) => fs.promises.access(file).then(() => true, () => false);
+    if (!tunnel || !(await exists(tunnel.binaryPath))) {
       throw new Error(`Tunnel client is missing: ${tunnel?.binaryPath || "not configured"}`);
     }
-    if (!fs.existsSync(tunnel.runtimeKeyFile)) {
+    if (!(await exists(tunnel.runtimeKeyFile))) {
       throw new Error(`Tunnel runtime key is missing: ${tunnel.runtimeKeyFile}`);
     }
   }
@@ -1605,7 +1608,7 @@ class RuntimeSupervisor {
 
   async startTunnel(config, operationName = "runtime-start", { forceRestart = false } = {}) {
     if (config.mode !== "full") return;
-    this.assertTunnelClientReady(config);
+    await this.assertTunnelClientReady(config);
     // Every acquisition binds diagnostics to this runtime, including adoption of an existing alias.
     this.tunnelHealthBaseUrl = null;
     try {
