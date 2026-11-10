@@ -322,6 +322,8 @@ let updateController = null;
 // for a screen reader and follows Settings.
 let rendererAccessibilityLaunch = { mode: "auto", blocked: false };
 let rendererAccessibility = null;
+// The Update click being prepared; clicks meanwhile join it (launcher:update-install).
+let updateInstallInFlight = null;
 let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
 let rendererLoaded = false;
@@ -4185,9 +4187,23 @@ function registerIpc({ logger, stateStore }) {
     }
     return state;
   });
+  // An Update click goes ahead of the background connector setup, as Connect does (#1162). The setup
+  // holds the browser 15-45 s per account while it works through every account, and each click in
+  // that time was refused at once (0.8.104, 2026-11-10 00:02-00:03 UTC: 35 clicks, "Wait for MCP
+  // connector creation to finish before quitting"). It starts no account while the install is
+  // prepared, and clicks meanwhile join that attempt instead of each asking again.
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    return updateController.beginInstall({ beforeAppInstall: stopBrowserTurnsForUpdate });
+    updateInstallInFlight ??= (async () => {
+      const release = automaticAccountMcp?.hold();
+      try {
+        return await updateController.beginInstall({ beforeAppInstall: prepareBrowserForUpdate });
+      } finally {
+        release?.();
+        updateInstallInFlight = null;
+      }
+    })();
+    return updateInstallInFlight;
   });
   handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -4199,6 +4215,14 @@ function registerIpc({ logger, stateStore }) {
     reason: "ready-path",
     channels: registeredIpcChannels.size,
   });
+}
+
+// Before a whole-app install: the background connector setup's account in progress gets up to a
+// minute to finish (the Update handler's hold keeps it from starting another), then a running
+// ChatGPT turn is offered to stop. Whatever still holds the browser refuses the install, as before.
+async function prepareBrowserForUpdate() {
+  if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+  await stopBrowserTurnsForUpdate();
 }
 
 // The user clicked Update while a ChatGPT turn still runs. A turn whose chat already died keeps its
