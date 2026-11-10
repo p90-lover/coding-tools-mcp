@@ -79,9 +79,7 @@ function rank(account) {
 }
 
 function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.now, logger = console } = {}) {
-  let cached = null; // { at, value }
-  let pending = null;
-  const refreshedAt = new Map(); // auth_index -> ms
+  let active = null; // { base, key, cached, pending, refreshedAt }
 
   function connection() {
     const value = getConnection?.();
@@ -102,6 +100,7 @@ function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.
 
   /** Asks CPA Helper to re-check stale accounts, in the background; their next read is current. */
   function refreshStale(target, accounts) {
+    const { refreshedAt } = target;
     const at = now();
     const stale = accounts.filter((account) => account.id && !account.disabled
       && (!account.checkedAt || at - account.checkedAt >= STALE_MS) && at - (refreshedAt.get(account.id) ?? 0) >= STALE_MS)
@@ -110,14 +109,12 @@ function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.
     for (const account of stale) {
       refreshedAt.set(account.id, at);
       void request(target, "POST", "/codex/refresh", { auth_index: account.id })
-        .then(() => { cached = null; })
+        .then(() => { target.cached = null; })
         .catch((error) => logger.warn?.("cpa_quota.refresh_failed", { message: String(error?.message ?? error).slice(0, 200) }));
     }
   }
 
-  async function load() {
-    const target = connection();
-    if (!target) return { ok: true, available: false, reason: "CPA is not running" };
+  async function load(target) {
     let response;
     try { response = await request(target, "GET", "/codex/accounts"); }
     catch { return { ok: true, available: false, reason: "CPA did not answer" }; }
@@ -125,6 +122,7 @@ function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.
     if (response.status === 401 || response.status === 403) return { ok: true, available: false, reason: "CPA refused the management key" };
     if (!response.ok) return { ok: true, available: false, reason: `CPA answered HTTP ${response.status}` };
     const payload = await response.json().catch(() => null);
+    if (target !== active) return { ok: true, available: false, reason: "CPA connection changed while reading quota" };
     const items = Array.isArray(payload?.items) ? payload.items : [];
     const ranked = items.map(accountOf).map((account, index) => ({ account, index }))
       .sort((a, b) => rank(a.account) - rank(b.account) || a.index - b.index).map(({ account }) => account);
@@ -134,13 +132,23 @@ function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.
     return { ok: true, available: true, accounts: ranked.slice(0, MAX_ACCOUNTS) };
   }
 
-  /** The accounts' limits, cached CACHE_MS; concurrent reads share one request. */
+  /** The accounts' limits, cached CACHE_MS per connection; concurrent reads share one request. */
   async function read() {
-    if (cached && now() - cached.at < CACHE_MS) return cached.value;
-    if (!pending) {
-      pending = load().then((value) => { cached = { at: now(), value }; return value; }).finally(() => { pending = null; });
+    const target = connection();
+    if (!target) {
+      active = null;
+      return { ok: true, available: false, reason: "CPA is not running" };
     }
-    return pending;
+    if (!active || active.base !== target.base || active.key !== target.key) {
+      active = { ...target, cached: null, pending: null, refreshedAt: new Map() };
+    }
+    const state = active;
+    if (state.cached && now() - state.cached.at < CACHE_MS) return state.cached.value;
+    if (!state.pending) {
+      state.pending = load(state).then((value) => { state.cached = { at: now(), value }; return value; })
+        .finally(() => { state.pending = null; });
+    }
+    return state.pending;
   }
 
   return Object.freeze({ read });
