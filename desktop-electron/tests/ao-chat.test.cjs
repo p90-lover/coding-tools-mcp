@@ -776,7 +776,7 @@ const tenScreens = () => [[0, 1], ...[1, 2, 3, 4].flatMap(col => [[col, 0], [col
   .map(([col, row], index) => ({ id: `p${index}`, workspaceId: "w", taskId: `t${index + 1}`, col, row }));
 function fakePages(handOn = true) {
   const asked = [];
-  return { asked, waiting: null, has: () => false, reveal: () => false, register: () => () => {},
+  return { asked, waiting: null, has: () => false, reveal: () => false, releaseChat: () => true, register: () => () => {},
     openElsewhere(from, open) { asked.push(plain({ from, ...open })); return handOn; },
     takeOpen() { const open = this.waiting; this.waiting = null; return open; } };
 }
@@ -1318,9 +1318,13 @@ function rendererCallback(file, name, globals) {
   };
   visit(tree); assert.ok(body, name);
   const exports = {};
+  const context = { exports, pane: undefined, paneWanted: { current: null }, pageRegistry: null, pageNumber: 1, initialPageSelection: null, ...globals };
+  if (file === "AgentOrchestratorSurface.tsx" && name !== "takeChatHere" && !("takeChatHere" in globals)) {
+    context.takeChatHere = rendererCallback(file, "takeChatHere", globals);
+  }
   vm.runInNewContext(ts.transpileModule("exports.callback = " + body.getText(tree), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
-  }).outputText, { exports, pane: undefined, paneWanted: { current: null }, pageRegistry: null, pageNumber: 1, initialPageSelection: null, ...globals });
+  }).outputText, context);
   return exports.callback;
 }
 const delayedReply = () => { let resolve, reject; const promise = new Promise((done, fail) => { resolve = done; reject = fail; }); return { promise, resolve, reject }; };
@@ -1907,7 +1911,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
     rendererCallback("AgentOrchestratorChat.tsx", "effect:registration.entry.snapshot", globals())();
   };
   const selectChat = rendererCallback("AgentOrchestratorSurface.tsx", "selectChat", { switchTarget: { current: "" }, pendingSelect: { current: null }, pendingChat: null,
-    composerIntent: { current: 0 },
+    workspaceId: "project", composerIntent: { current: 0 },
     setPendingChat() {}, setSheet() {}, setInspectedId() {}, setDraftTeam() {}, setConfigStatus() {}, setView() {}, setChatTaskId: set("taskId"), chatUnread: [],
     chatList: chat.chatList, missions: [], board: { tasks: [] }, taskLifecycle: [], setSelectedRunId() {} });
   const showChat = rendererCallback("AgentOrchestratorSurface.tsx", "showChat", { paneShowing: () => undefined, focusedSplit: null, workspaceId: "project", selectChat });
