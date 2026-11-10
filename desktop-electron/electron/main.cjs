@@ -2676,10 +2676,13 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.snapshot();
   });
-  handle("launcher:external-service-configure", (event, serviceId, input) => {
+  handle("launcher:external-service-configure", async (event, serviceId, input) => {
     assertFocusedMainWindow(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
-    return externalServicesController.configure(serviceId, input);
+    const service = externalServicesController.configure(serviceId, input);
+    // The change is saved off the main thread; one that could not be saved still fails here.
+    await externalServicesController.saved?.();
+    return service;
   });
   handle("launcher:external-service-inspect", (event, serviceId) => {
     assertFocusedMainWindow(event, false);
@@ -4307,7 +4310,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     // each file keeps the change before.
     await Promise.race([
       Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(),
-        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved(), launcherStateStore?.saved()]),
+        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved(), launcherStateStore?.saved(),
+        externalServicesController?.saved?.().catch(() => undefined)]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
     const runtimeOperation = runtimeHost?.currentOperation();
