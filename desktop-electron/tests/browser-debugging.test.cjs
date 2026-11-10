@@ -105,6 +105,7 @@ function startupFixture(gotLock = true) {
       calls.push([name, value]);
     } },
     whenReady: async () => { ready = true; },
+    getPath: (name) => `G:/fixture/${name}`,
   };
   const context = {
     app, fs, path, cdpPort: 0, IS_DEV_PROFILE: false, CORE_HOME: "G:/fixture",
@@ -114,6 +115,12 @@ function startupFixture(gotLock = true) {
     findFreePort: async () => 42424,
     session: { defaultSession: { setCertificateVerifyProc: () => {} } },
     caDistrust: { verifyCertificate: () => {} },
+    // renderer-accessibility.cjs has its own tests; here it is one more launch switch.
+    rendererAccessibilityLaunch: null,
+    applyRendererAccessibilitySwitch: (application) => {
+      application.commandLine.appendSwitch("disable-renderer-accessibility");
+      return { mode: "auto", blocked: true };
+    },
     prepareBrowserDebugging: () => {
       app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
       app.commandLine.appendSwitch("remote-debugging-port", "0");
@@ -128,6 +135,9 @@ test("slow runtime preparation cannot move browser flags past Electron readiness
   await assert.doesNotReject(run);
   assert.equal(context.cdpPort, 42424);
   assert.ok(calls.some(call => Array.isArray(call) && call[0] === "remote-debugging-port" && call[1] === "0"));
+  // Chromium reads it only at launch: blocking accessibility is applied before Electron is ready too.
+  assert.ok(calls.some(call => Array.isArray(call) && call[0] === "disable-renderer-accessibility"));
+  assert.deepEqual({ ...context.rendererAccessibilityLaunch }, { mode: "auto", blocked: true });
 });
 
 test("secondary launches do not configure a browser automation port", async () => {
