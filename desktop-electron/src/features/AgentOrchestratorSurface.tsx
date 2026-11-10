@@ -23,7 +23,7 @@ import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, typ
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
-  cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, modelShortLabel, permissionsFitted, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
@@ -269,8 +269,9 @@ function lastChatRoute(): AoRoute | null {
     const route = Object.fromEntries(Object.entries(saved).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name)
       && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)))));
     const required = ["harness_id", "provider_id", "account_id", "model", "permission_profile"];
+    // A route remembered before Pi/opencode dropped a carried-over mode still holds one.
     return required.every(name => typeof route[name] === "string") && route.model && route.model !== AGENT_DEFAULT_MODEL
-      ? route as unknown as AoRoute : null;
+      ? permissionsFitted(route as unknown as AoRoute) : null;
   } catch { return null; }
 }
 function rememberChatRoute(route: AoRoute) {
@@ -520,7 +521,8 @@ export const CHAT_CONTEXT_LIMIT = 8192;
 export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
   if (mode === "single") {
     if (!route.model || route.model === "default") throw new Error("Choose a model first.");
-    return { executionMode: "single", singleRoute: { ...route } };
+    // Every send and pre-warm comes through here: a mode Pi or opencode can't honor never leaves.
+    return { executionMode: "single", singleRoute: { ...permissionsFitted(route) } };
   }
   const selected = teams.find(team => team.id === teamId);
   if (!selected || !Number.isSafeInteger(selected.revision)) throw new Error("This saved team changed. Refresh and choose it again.");
@@ -1448,7 +1450,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         }
         if (intent?.approval_policy !== undefined) route.approval_policy = intent.approval_policy;
         if (intent?.approvals_reviewer !== undefined) route.approvals_reviewer = intent.approvals_reviewer;
-        setSingleRoute(route);
+        // A saved Pi/opencode chat whose launch was refused for a carried-over mode can go on.
+        setSingleRoute(permissionsFitted(route));
       }
     } else {
       setComposerMode("team");
