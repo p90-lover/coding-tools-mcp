@@ -863,9 +863,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       // Initialize the hidden renderer before awaiting CDP Network.enable.
       await popup.loadURL("about:blank");
       checkHost();
-      const guardNavigation = (event, value) => {
+      const guardNavigation = (event, value, _inPlace, mainFrame) => {
+        if ((event.isMainFrame ?? mainFrame) === false) return;
         try {
-          const url = new URL(value);
+          const url = new URL(event.url ?? value);
           if (url.protocol === "https:" && !url.username && !url.password && !url.port
             && (url.hostname === "chatgpt.com" || (platformPhase && PLATFORM_SIGN_IN_HOSTS.includes(url.hostname)))) return;
         } catch {}
