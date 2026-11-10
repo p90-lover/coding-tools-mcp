@@ -285,7 +285,12 @@ let rtkService = null;
 /** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
 const QUIT_EXIT_GRACE_MS = 10_000;
 let codexBridgeConnectInFlight = null;
+// The runtime startup now running (launch's, its one retry, or a tunnel reconnect's); null once it
+// settles. Only trackRuntimeStartup sets it: a settled promise left here kept the app "busy" for good.
 let runtimeStartupInFlight = null;
+// How many runtime startups have begun. A caller that awaited one compares it to tell whether
+// another began meanwhile (runtimeStartupInFlight is null again by then, whichever ran).
+let runtimeStartups = 0;
 // Launch's runtime start, run once more when its upgrade failed and ChatGPT is signed in (production only).
 let runtimeStartupRetry = null;
 let smokePassedThisSession = false;
@@ -1260,6 +1265,19 @@ function startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh 
     send("launcher:state-changed", state);
     publishOperation({ name: "runtime-start", status: "failed", message });
   });
+}
+
+/**
+ * Holds `startup` in runtimeStartupInFlight until it settles. Update installs, update rollbacks and
+ * CPA's swap wait while it runs (localAppBusy); it used to stay set once settled, so they waited for
+ * good. A newer startup replaces it, and the older one settling then leaves the newer in place.
+ */
+function trackRuntimeStartup(startup) {
+  runtimeStartups += 1;
+  runtimeStartupInFlight = startup;
+  const settled = () => { if (runtimeStartupInFlight === startup) runtimeStartupInFlight = null; };
+  startup.then(settled, settled);
+  return startup;
 }
 
 // Browser-tab accounts (browser-accounts.cjs). The Browser tab is the Codex bridge's browser, so
@@ -3852,8 +3870,9 @@ function registerIpc({ logger, stateStore }) {
     };
     assertCurrent();
     const previousOperation = lastOperation;
-    let startup = runtimeStartupInFlight;
-    await startup;
+    // The startup count, not the promise: a joined startup is null here once it settles.
+    let startups = runtimeStartups;
+    await runtimeStartupInFlight;
     if (lastOperation !== previousOperation && lastOperation?.name === "runtime-start" && lastOperation.status === "failed") {
       throw new Error(lastOperation.message);
     }
@@ -3861,17 +3880,17 @@ function registerIpc({ logger, stateStore }) {
     let health = await supervisor.ownedRuntimeCheck(config);
     assertCurrent();
     const primaryFailures = ["tunnel_missing", "tunnel_health"];
-    if (runtimeStartupInFlight !== startup || !extraTunnels.config || host.managedRuntimeUpgradeRequired()
+    if (runtimeStartups !== startups || !extraTunnels.config || host.managedRuntimeUpgradeRequired()
       || (!health.ready && !primaryFailures.includes(health.failed))) {
-      if (runtimeStartupInFlight === startup) {
+      if (runtimeStartups === startups) {
         if (host.currentOperation() || operationBrowser?.currentOperation() || operationBrowser?.activeTraceId) {
           throw new Error("Wait for the active browser or runtime operation before reconnecting a tunnel.");
         }
-        runtimeStartupInFlight = startManagedRuntime({ logger, stateStore,
-          startupAuthenticationRefresh: Promise.resolve(operationBrowser?.snapshot()) });
+        trackRuntimeStartup(startManagedRuntime({ logger, stateStore,
+          startupAuthenticationRefresh: Promise.resolve(operationBrowser?.snapshot()) }));
       }
-      startup = runtimeStartupInFlight;
-      await startup;
+      startups = runtimeStartups;
+      await runtimeStartupInFlight;
       if (lastOperation !== previousOperation && lastOperation?.name === "runtime-start" && lastOperation.status === "failed") {
         throw new Error(lastOperation.message);
       }
@@ -3879,7 +3898,7 @@ function registerIpc({ logger, stateStore }) {
       health = await supervisor.ownedRuntimeCheck(config);
       assertCurrent();
     }
-    if (runtimeStartupInFlight !== startup || host.currentOperation()) throw new Error("Runtime setup changed during reconnect. Retry when it finishes.");
+    if (runtimeStartups !== startups || host.currentOperation()) throw new Error("Runtime setup changed during reconnect. Retry when it finishes.");
     if (!extraTunnels.config || host.managedRuntimeUpgradeRequired() || (!health.ready && !primaryFailures.includes(health.failed))) {
       throw new Error((lastOperation?.name === "runtime-start" && lastOperation.status === "failed" ? lastOperation.message : supervisor.readState()?.detail)
         || "The MCP runtime did not become ready. Check Setup before reconnecting this tunnel.");
@@ -5808,15 +5827,12 @@ async function start() {
       // turn or an account switch: the upgrade restarts the bridge and checks the browser's page.
       busy: () => Boolean(quitting || shutdownInProgress || runtimeHost.currentOperation() || codexBridgeConnectInFlight
         || browserHost?.currentOperation() || browserHost?.activeTraceId || browserAccountsStatus().switching),
-      run: () => {
-        runtimeStartupInFlight = startManagedRuntime({
-          logger, stateStore, startupAuthenticationRefresh: Promise.resolve(browserHost.snapshot()),
-        });
-        return runtimeStartupInFlight;
-      },
+      run: () => trackRuntimeStartup(startManagedRuntime({
+        logger, stateStore, startupAuthenticationRefresh: Promise.resolve(browserHost.snapshot()),
+      })),
     });
-    runtimeStartupInFlight = startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh })
-      .then(() => runtimeStartupRetry.startupSettled());
+    trackRuntimeStartup(startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh })
+      .then(() => runtimeStartupRetry.startupSettled()));
   }
   // From launch on, keep the bridge and MCP tunnel alive while the app is open; the supervisor
   // coalesces a watchdog start with any launch-time start that is still in flight.

@@ -58,10 +58,13 @@ function reconnectFixture(options = {}) {
   const supervisor = { extraTunnels: manager, readConfig: () => structuredClone(config),
     readState: () => ({ status: world.ready ? options.degraded ? "degraded" : "ready" : "failed", detail: world.failure }),
     ownedRuntimeCheck: async () => {
-      const health = world.ready && !options.healthFailure
+      const read = ++healthReads;
+      // A function fails only the reads it picks.
+      const failing = typeof options.healthFailure === "function" ? options.healthFailure(read) : options.healthFailure;
+      const health = world.ready && !failing
         ? options.degraded ? { ready: false, failed: "tunnel_health" } : { ready: true }
         : { ready: false, failed: "daemon_missing" };
-      await options.duringHealth?.({ world, host, manager, context, state, read: ++healthReads });
+      await options.duringHealth?.({ world, host, manager, context, state, read });
       return health;
     },
     startIfConfigured: async () => {
@@ -74,7 +77,7 @@ function reconnectFixture(options = {}) {
   const logger = { info() {}, warn() {}, error() {} };
   const stateStore = { read: () => ({ ...state }), update: patch => Object.assign(state, patch) };
   const context = { Error, Promise, JSON, Boolean, IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false,
-    runtimeStartupInFlight: Promise.resolve(), lastOperation: null,
+    runtimeStartupInFlight: null, runtimeStartups: 0, lastOperation: null,
     runtimeHost: runtime, runtimeSupervisor: supervisor, browserHost: host,
     browserAccounts: { has: id => world.entries.some(entry => entry.accountId === id),
       partitionOf: id => id === "account-1" ? world.partition : "persist:account-2" },
@@ -90,7 +93,7 @@ function reconnectFixture(options = {}) {
   vm.runInNewContext(`${startup}\n${handlerSource}`, context);
   return { context, world, events, manager, state, tunnel, host, release,
     run: (id = tunnel.id) => handler({}, id),
-    startPending: () => (context.runtimeStartupInFlight = context.startManagedRuntime({ logger, stateStore,
+    startPending: () => context.trackRuntimeStartup(context.startManagedRuntime({ logger, stateStore,
       startupAuthenticationRefresh: Promise.resolve(host.snapshot()) })) };
 }
 
@@ -159,6 +162,21 @@ test("saved tunnel reconnect joins a captured startup and propagates its failure
     assert.equal(f.events.filter(value => value === "upgrade").length, 1);
     assert.equal(f.events.filter(value => value.startsWith("reconnect:")).length, failure ? 0 : 1);
   }
+});
+
+// The joined startup is cleared from runtimeStartupInFlight as it settles; the startup count, not
+// that promise, tells the handler no other startup began, so it still starts one of its own.
+test("saved tunnel reconnect starts its own startup when a joined one left the runtime unready", async () => {
+  const f = reconnectFixture({ wait: true, managerStarted: true, ready: true, healthFailure: read => read === 1 });
+  f.startPending();
+  const pending = f.run();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.events, ["upgrade"]);
+  f.release();
+  assert.equal((await pending).state, "ready");
+  assert.deepEqual(f.events, ["upgrade", "start", "upgrade", "start", `reconnect:${f.tunnel.id}`]);
+  assert.equal(f.context.runtimeStartups, 2);
+  assert.equal(f.context.runtimeStartupInFlight, null, "no startup is left looking in flight");
 });
 
 test("saved tunnel reconnect joins a startup begun by another caller during its health await", async () => {
