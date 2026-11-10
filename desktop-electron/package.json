@@ -61,7 +61,8 @@
       "vendor/bundled/cpa-plugins/**",
       "electron/cpa-codex-long-run.cjs",
       "electron/atomic-file.cjs",
-      "electron/cpa-plugin-models.cjs"
+      "electron/cpa-plugin-models.cjs",
+      "electron/off-thread-run.cjs"
     ],
     "directories": {
       "output": "release"
