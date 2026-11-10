@@ -111,6 +111,9 @@ function startupFixture(gotLock = true) {
     process: { platform: "test", resourcesPath: "G:/fixture/runtime", execPath: "G:/fixture/app.exe" },
     preparePackagedRuntime: async () => { ready = true; return "G:/fixture/runtime"; },
     ensurePackagedRuntime: () => assert.fail("the prepared runtime must be reused"),
+    // runtime-command.cjs skips its own existence check for a root startup has verified.
+    checkedRuntimeRoots: [],
+    markRuntimeRootChecked: (root) => context.checkedRuntimeRoots.push(root),
     findFreePort: async () => 42424,
     session: { defaultSession: { setCertificateVerifyProc: () => {} } },
     caDistrust: { verifyCertificate: () => {} },
@@ -127,6 +130,7 @@ test("slow runtime preparation cannot move browser flags past Electron readiness
   const { run, calls, context } = startupFixture();
   await assert.doesNotReject(run);
   assert.equal(context.cdpPort, 42424);
+  assert.deepEqual(context.checkedRuntimeRoots, ["G:/fixture/runtime"], "the runtime startup prepared is marked checked");
   assert.ok(calls.some(call => Array.isArray(call) && call[0] === "remote-debugging-port" && call[1] === "0"));
 });
 
