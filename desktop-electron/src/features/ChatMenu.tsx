@@ -199,6 +199,12 @@ export function ChatMenu({ menu, onClose }: { menu: ChatMenuState; onClose: () =
  */
 const THEME_VARIABLES = ["--color-bg-primary", "--color-text-primary", "--color-text-secondary", "--ao-line", "--ao-muted", "--ao-red", "--ao-blue", "--ao-green", "--ao-amber", "--cx-hover", "--cx-active"] as const;
 
+/** The chat surface's palette where `from` is, for a layer drawn on <body> outside it (see ChatMenu). */
+export function chatPalette(from: Element): CSSProperties {
+  const computed = getComputedStyle(from);
+  return { ...Object.fromEntries(THEME_VARIABLES.map((name) => [name, computed.getPropertyValue(name)])), fontFamily: computed.fontFamily } as CSSProperties;
+}
+
 /**
  * A position:fixed layer (e.g. a hover card) rendered on <body> with the chat surface's palette,
  * so it sits exactly at the window coordinates it is given. See ChatMenu for why.
