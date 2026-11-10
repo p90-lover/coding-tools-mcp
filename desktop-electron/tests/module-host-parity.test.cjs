@@ -86,6 +86,7 @@ test("host window installs the private CPA panel session on its webContents", ()
   const createWindow = functions.get("createWindow");
   assert.ok(createWindow);
   const installed = [];
+  const watched = [];
   const contents = { on() {}, setWindowOpenHandler() {} };
   class Window {
     webContents = contents;
@@ -107,11 +108,14 @@ test("host window installs the private CPA panel session on its webContents", ()
     logger: { warn() {}, info() {} }, cdpPort: 0,
     // The window's hang watchdog (renderer-watchdog.cjs) has its own tests.
     createRendererWatchdog: () => ({ dispose() {} }),
+    // Each window follows the screen reader setting (renderer-accessibility.cjs has its own tests).
+    rendererAccessibility: { watchWindow: (window) => watched.push(window) },
   };
   const window = vm.runInNewContext(`(${createWindow})`, context)({
     logger: context.logger, stateStore: context.stateStore, windowStatePath: "state", startHidden: true,
   });
   assert.equal(window.webContents, contents);
+  assert.deepEqual(watched, [window], "the window is watched for screen reader changes");
   assert.equal(installed.length, 1);
   assert.equal(installed[0].webContents, contents);
   assert.deepEqual({ ...installed[0].getConnection() }, {

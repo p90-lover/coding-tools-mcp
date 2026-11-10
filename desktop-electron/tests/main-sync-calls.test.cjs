@@ -38,6 +38,9 @@ const ALLOWED = {
   "managed-components.cjs": 62, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9,
+  // The saved accessibility mode is read once in start()'s first tick, before any window exists:
+  // Chromium reads --disable-renderer-accessibility as soon as start() awaits.
+  "renderer-accessibility.cjs": 1,
   // Three run once at quit, as the app exits (spawnRelaunchGuard); the rest only in the guard, its own process under Bun.
   "relaunch-guard.cjs": 6,
   "rtk.cjs": 4, "runtime-command.cjs": 6, "runtime-install.cjs": 24,

@@ -125,6 +125,11 @@ const {
 const { createRendererWatchdog } = require("./renderer-watchdog.cjs");
 const { createMainStallMonitor, createMainStallProbe } = require("./main-stall-monitor.cjs");
 const { createDiskHealthMonitor } = require("./disk-health.cjs");
+const {
+  MODES: RENDERER_ACCESSIBILITY_MODES,
+  applyLaunchSwitch: applyRendererAccessibilitySwitch,
+  createRendererAccessibility,
+} = require("./renderer-accessibility.cjs");
 const { createMemoryWatch } = require("./memory-watch.cjs");
 const { createRuntimeStartupRetry } = require("./runtime-startup-retry.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
@@ -313,6 +318,12 @@ function dispatchMcpConnectorCommand() {
   void mcpConnectorCommand.request(action, "command").catch(() => undefined);
 }
 let updateController = null;
+// Renderer accessibility (renderer-accessibility.cjs): how this run started, and what turns it on
+// for a screen reader and follows Settings.
+let rendererAccessibilityLaunch = { mode: "auto", blocked: false };
+let rendererAccessibility = null;
+// The Update click being prepared; clicks meanwhile join it (launcher:update-install).
+let updateInstallInFlight = null;
 let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
 let rendererLoaded = false;
@@ -1808,6 +1819,7 @@ function createWindow({ logger, stateStore, windowStatePath, startHidden }) {
     },
   });
   window.setMenuBarVisibility(false);
+  rendererAccessibility?.watchWindow(window);
   installCpaPanelSession({
     webContents: window.webContents,
     webFrameMain,
@@ -4151,6 +4163,16 @@ function registerIpc({ logger, stateStore }) {
     }
     return { values: resolveUpdateSettings(stateStore.read()), limits: UPDATE_SETTINGS };
   });
+  // Settings → General → Accessibility: no mode reads it; a mode saves it, and this run does what it
+  // can at once (turning it off after a start without the switch waits for a restart).
+  handle("launcher:renderer-accessibility", async (_event, mode) => {
+    if (mode !== undefined && mode !== null) {
+      if (!RENDERER_ACCESSIBILITY_MODES.includes(mode)) throw new Error("Accessibility must be auto, on or off");
+      send("launcher:state-changed", stateStore.update({ rendererAccessibility: mode }));
+      return rendererAccessibility ? rendererAccessibility.apply() : null;
+    }
+    return rendererAccessibility ? rendererAccessibility.status() : null;
+  });
   handle("launcher:update-automatic", async (_event, enabled) => {
     const state = stateStore.update({ automaticUpdates: enabled === true });
     send("launcher:state-changed", state);
@@ -4165,9 +4187,23 @@ function registerIpc({ logger, stateStore }) {
     }
     return state;
   });
+  // An Update click goes ahead of the background connector setup, as Connect does (#1162). The setup
+  // holds the browser 15-45 s per account while it works through every account, and each click in
+  // that time was refused at once (0.8.104, 2026-11-10 00:02-00:03 UTC: 35 clicks, "Wait for MCP
+  // connector creation to finish before quitting"). It starts no account while the install is
+  // prepared, and clicks meanwhile join that attempt instead of each asking again.
   handle("launcher:update-install", async () => {
     if (!updateController) throw new Error("Launcher updates are unavailable");
-    return updateController.beginInstall({ beforeAppInstall: stopBrowserTurnsForUpdate });
+    updateInstallInFlight ??= (async () => {
+      const release = automaticAccountMcp?.hold();
+      try {
+        return await updateController.beginInstall({ beforeAppInstall: prepareBrowserForUpdate });
+      } finally {
+        release?.();
+        updateInstallInFlight = null;
+      }
+    })();
+    return updateInstallInFlight;
   });
   handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -4179,6 +4215,14 @@ function registerIpc({ logger, stateStore }) {
     reason: "ready-path",
     channels: registeredIpcChannels.size,
   });
+}
+
+// Before a whole-app install: the background connector setup's account in progress gets up to a
+// minute to finish (the Update handler's hold keeps it from starting another), then a running
+// ChatGPT turn is offered to stop. Whatever still holds the browser refuses the install, as before.
+async function prepareBrowserForUpdate() {
+  if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+  await stopBrowserTurnsForUpdate();
 }
 
 // The user clicked Update while a ChatGPT turn still runs. A turn whose chat already died keeps its
@@ -4369,6 +4413,11 @@ async function start() {
   }
   // Keep shader caches off before Chromium starts, including while runtime files are prepared.
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+  // Renderer accessibility stays off unless a screen reader runs or Settings turns it on: any UI
+  // Automation client otherwise turns it on for good, and every chat DOM change then costs main
+  // seconds (renderer-accessibility.cjs). Decided here, before the first await, while Chromium
+  // still reads its switches.
+  rendererAccessibilityLaunch = applyRendererAccessibilitySwitch(app, path.join(app.getPath("userData"), "launcher-state.json"));
   app.on("second-instance", (_event, argv) => {
     const commandAction = mcpConnectorCommandAction(argv);
     if (commandAction) {
@@ -4504,6 +4553,10 @@ async function start() {
     publish: (record) => send("launcher:log", record),
   });
   quitLogger = logger;
+  rendererAccessibility = createRendererAccessibility({
+    app, launch: rendererAccessibilityLaunch, logger, readMode: () => stateStore.read().rendererAccessibility,
+  });
+  rendererAccessibility.start();
   const droppedAgentEnv = droppedAgentSessionEnvironment();
   if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
   // When something other than the user started this app, why: a relaunch guard after a keep-bridge
