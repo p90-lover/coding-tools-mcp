@@ -42,7 +42,9 @@ const toolParts = load("ChatToolParts.tsx", { "./ao-chat": chat, "./ChatMarkdown
 const dsh = load("DshTranscript.tsx", { "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatToolParts": toolParts });
 const clawd = load("Clawd.tsx");
 const petHome = load("chat-pet-home.ts");
-const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts"), "./chat-pet-home": petHome, "./page-visibility": visibility });
+const house = load("chat-pet-house.tsx", { "./Clawd": clawd });
+const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts"), "./chat-pet-home": petHome,
+  "./chat-pet-motion": load("chat-pet-motion.ts"), "./chat-pet-house": house, "./ChatMenu": menu, "./page-visibility": visibility });
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 // Settings › Chat's mission switch, as this computer keeps it: on unless `saved` is "off".
 const viewSettings = (saved = null) => load("chat-view-settings.ts", {}, { localStorage: { getItem: () => saved, setItem() {} } });
@@ -1190,68 +1192,54 @@ test("at home Clawd climbs into bed, cooks and eats, bathes and works, using the
   }
 });
 
-test("the house shows what Clawd is doing in it, and every piece of furniture is a button that sends it there", () => {
-  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+test("Clawd's cottage shows what it is doing inside, and in the peek every piece of furniture is a button that sends it there", () => {
+  // The user (2026-11-10): "its house blocking the screen". The house is an 88 x 64 cottage beside the
+  // box now; its rooms show only in the peek you open by clicking it.
+  const cottage = (props) => renderToStaticMarkup(React.createElement(house.Cottage, { home: false, asleep: false, doing: null, open: false, peeking: false, onClick() {}, ...props }));
+  assert.match(cottage({}), /<svg viewBox="0 0 22 8" width="88" height="64"/, "never taller than the box beside it");
+  assert.match(cottage({}), /aria-label="Clawd&#x27;s house"/);
+  assert.doesNotMatch(cottage({}), /cx-pet-cottage-smoke|cx-pet-house-z/);
+  assert.match(cottage({ home: true, asleep: true }), /cx-pet-cottage-z/, "z's over the roof while it sleeps");
+  assert.match(cottage({ home: true, doing: "cook" }), /cx-pet-cottage-smoke/, "smoke from the chimney while it cooks");
+  assert.match(cottage({ open: true }), /fill="#2a1f18"/, "the dark doorway while it goes in or out");
+  assert.match(cottage({ peeking: true }), /aria-expanded="true"/);
+  const used = [];
+  const front = renderToStaticMarkup(React.createElement(house.HouseFront, { home: true, asleep: false, doing: null, tick: 0, step: false, bites: 3, onUse: (chore) => used.push(chore) }));
   for (const piece of ["bed", "table", "stove", "fridge", "tub", "bookshelf", "desk", "window"]) {
-    assert.match(source, new RegExp(`label: "the ${piece}: Clawd`), `${piece} is clickable`);
+    assert.match(front, new RegExp(`<button[^>]*aria-label="the ${piece}: Clawd`), `${piece} is clickable`);
   }
-  assert.match(source, /onClick=\{\(\) => onUse\(piece\.chore\)\}/);
+  const houseSource = fs.readFileSync(path.join(__dirname, "../src/features/chat-pet-house.tsx"), "utf8");
+  assert.match(houseSource, /onClick=\{\(\) => onUse\(piece\.chore\)\}/);
   // Woken in bed by a click elsewhere, it gets up then and there (homeLife reads the ref right away).
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
   const toFurniture = source.slice(source.indexOf("const toFurniture ="), source.indexOf("// Nothing running for a while"));
   assert.match(toFurniture, /asleepNow\.current = false; setAsleep\(false\)/);
   const css = fs.readFileSync(path.join(__dirname, "../src/features/codex-chat.css"), "utf8");
-  assert.match(css, /\.cx-pet\.is-home \.cx-pet-body \{ transform: scale\(\.5\);/, "half size at home, as big as its furniture");
+  assert.match(css, /\.cx-pet-peek-sprite \{[^}]*transform: scale\(\.5\);/, "half size inside, as big as its furniture");
+  assert.match(css, /\.cx-pet-peek \{ position: fixed; z-index: 70;/, "the peek floats over the page, opened on demand");
 });
 
 test("the pet stays where it stands while the chat box grows and shrinks a line at a time", () => {
-  const box = (width, height) => ({ width, height, length: 2 * (width + height), beside: true });
-  const short = box(740, 87), tall = box(740, 159);
-  // Four laps backwards round (it never wraps), on the right side 30 px above the bottom: the box
-  // growing from its top keeps it 30 px above the bottom, on the right side, on the same lap.
-  const right = -4 * short.length + 740 + 57;
-  const grown = pet.reanchor(short, tall, right);
-  assert.equal(Math.floor(grown / tall.length), -4, "same lap, so it never spins round");
-  assert.equal(grown - -4 * tall.length, 740 + 129, "right side, 30 px above the bottom");
-  // On the top edge it keeps its distance from the left corner and rides the edge up.
-  assert.equal(pet.reanchor(short, tall, 2 * short.length + 500), 2 * tall.length + 500);
-  // On the bottom it keeps its distance from the left; on the left side, its height above the bottom.
-  assert.equal(pet.reanchor(short, tall, 740 + 87 + 100), 740 + 159 + 100);
-  assert.equal(pet.reanchor(short, tall, 2 * 740 + 87 + 20), 2 * 740 + 159 + 20);
-  // Shrinking back puts it where it was.
-  assert.equal(pet.reanchor(tall, short, grown), right);
+  // Its spot is how far along the box's top edge it stands: the box growing from its top as you type
+  // carries it up with the edge. Only a narrower box moves it, to stay clear of the ends.
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
+  const measure = source.slice(source.indexOf("const measure = () =>"), source.indexOf("measure();"));
+  assert.match(measure, /feet\.current\.x = clamp\(feet\.current\.x, WIDTH \/ 2, width - WIDTH \/ 2\);/);
+  assert.doesNotMatch(measure, /feet\.current\.y/, "its feet stay on the top edge");
+  // Where it was left is remembered as a share of the width, so a resized window keeps its place.
+  assert.match(source, /localStorage\.setItem\(POSITION_KEY, \(feet\.current\.x \/ current\.width\)\.toFixed\(4\)\)/);
 });
 
 test("in split view the pet keeps to its box's top edge and leaps to another pane only when called", () => {
   // Seen 2026-10-24: in a pane the box's sides and bottom are a few px from the pane's edge, and
   // Clawd walked there sideways, half cut off; it also leapt off to visit so often it never napped.
-  const box = { width: 500, height: 60, length: 1120, beside: false };
-  assert.equal(pet.onTop(box, 200), 200, "on the top edge it stays put");
-  assert.equal(pet.onTop(box, 10), 36, "clear of the left end (half its 72 px width)");
-  assert.equal(pet.onTop(box, 495), 464, "clear of the right end");
-  assert.equal(pet.onTop(box, 520), 464, "off the right side: up to its top corner");
-  assert.equal(pet.onTop(box, 500 + 60 + 100), 464, "underneath, right half: the right corner");
-  assert.equal(pet.onTop(box, 2 * 500 + 60 + 30), 1120 + 36, "off the left side: on to the next lap's left end");
-  assert.equal(pet.onTop(box, -1120 + 200), -920, "on the lap it is on, so it never spins round");
   const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
   const act = source.slice(source.indexOf("const act = () =>"), source.indexOf("const wander = () =>"));
   assert.doesNotMatch(act, /hop\(/, "no leap to another pane on a whim");
-  assert.match(source, /const spot = split \|\| working \? onTop\(current, target\) : target;/, "its strolls stay on the top edge");
-});
-
-test("a walking pet reads no layout per frame and is redrawn at most 60 times a second", () => {
-  // Seen 2026-10-23 on a 165 Hz screen: each walk step set the pet's spot and then read the box's
-  // rect, a forced layout every frame (1,917 layouts and 3,933 style recalcs in 20 s).
-  const source = fs.readFileSync(path.join(__dirname, "../src/features/ChatPet.tsx"), "utf8");
-  const walk = source.slice(source.indexOf("const walkTo ="), source.indexOf("const nextSpot ="));
-  const step = walk.slice(walk.indexOf("const frame = (now: number)"));
-  assert.match(walk, /const box = composer\.current\?\.getBoundingClientRect\(\);[\s\S]*const frame = \(now: number\)/, "the box is read once, before the walk");
-  assert.doesNotMatch(step, /getBoundingClientRect|obstacles\(\)/, "no layout read inside a step");
-  assert.match(step, /blocked\(atNow\.current, rects, box\)/);
-  assert.match(step, /if \(arrived \|\| now - shown >= 1000 \/ WALK_FPS\) \{ shown = now; setAt\(atNow\.current\); \}/);
-  assert.match(source, /const WALK_FPS = 60;/);
-  // Asking for a frame every refresh costs one even when nothing draws: the step waits out its interval.
-  assert.match(step, /const wait = shown \+ 1000 \/ WALK_FPS - now;[\s\S]*walkTimer\.current = window\.setTimeout\(/);
-  assert.match(source, /const stopWalking = \(\) => \{[\s\S]*?window\.clearTimeout\(walkTimer\.current\);/, "stopping cancels a waiting step too");
+  assert.doesNotMatch(source, /\bonTop\(|\breanchor\(|\blaps?\b/, "no laps round the box: it lives on its top edge");
+  const nextSpot = source.slice(source.indexOf("const nextSpot ="), source.indexOf("const act = () =>"));
+  assert.match(nextSpot, /pickClear\(clearSpans\(length, blocked, width\)/, "its strolls go only where nothing is under it");
+  assert.match(nextSpot, /\?\? leastCovered\(length, blocked, width, feet\.current\.x\)/, "or, with nowhere clear, where it covers least");
 });
 
 test("a reviewer keeps every earlier cycle, oldest first and folded, not only the last review", () => {

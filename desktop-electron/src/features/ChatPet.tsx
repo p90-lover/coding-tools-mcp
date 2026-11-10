@@ -2,119 +2,99 @@ import { useContext, useEffect, useLayoutEffect, useRef, useState, useSyncExtern
   type ReactElement } from "react";
 import { createPortal } from "react-dom";
 
-// Bit, the chat's pet: Claude Code's Clawd living on the chat box. It walks all the way around the
-// box (along the top, down the right side, upside down underneath, up the left side), dashing across
-// any button it passes and never stopping on one. While the agent works it gets to work itself:
-// typing at a little laptop, searching with a magnifier, hammering, carrying a file box; idle, it
-// sips coffee, reads, looks around, waves. When the pointer comes close it may leap onto it, for a
-// hug with hearts or a ride wherever the pointer goes, then jump back home to the box. It runs to
-// the send button to wave when a request waits for you, dances when a turn finishes and frets when
-// one fails. Left alone while nothing runs, it walks home to its house beside the box's right side
-// and sleeps there. Click to pet it, double-click to feed it, drag it anywhere on the screen (let
-// go, it falls back onto the box). Pure view: it reads the chat's state and changes nothing.
+// Bit, the chat's pet: Claude Code's Clawd living on the chat box's top edge. It strolls along the
+// edge, never stopping over the text or the chips just above the box; while the agent works it gets
+// to work itself (typing at a little laptop, searching with a magnifier, hammering, carrying a file
+// box); idle, it sips coffee, reads, looks around. When the pointer comes close it may leap onto it
+// for a hug or a ride. It runs to the send button when a request waits for you, celebrates a finished
+// turn and frets at a failed one. Left alone while nothing runs, it goes home to its cottage beside
+// the box (or in the yard under the chat list) and sleeps there; click the cottage to look inside,
+// where it cooks, bathes, reads and works (chat-pet-house.tsx, chat-pet-home.ts). Click Clawd to
+// pet it, double-click to feed it, drag it anywhere (let go, it falls back onto the box), right-click
+// to hide it. Pure view: it reads the chat's state and changes nothing.
 //
 // Clawd itself (Clawd.tsx) is Claude Code's: the CLI's glyphs, poses and animations, frame for frame.
 //
-// In split view there is one Clawd for all the panes (chat-pet-stage.ts). It lives on one pane's box,
-// walking only its top edge (a pane's edge would cut it off on the sides and underneath), and leaps
-// across to the others only to follow you to the pane you click into, and when another chat asks for
-// you, finishes or fails. Its house stands under the chat list, on the page it is on; it leaps there
-// to sleep, onto the porch in front of it, walks in, and walks back out onto the porch before it
-// leaps out to the pane you are in. With the chat list hidden there is no house in split view (a
-// house on a pane's box covered its last messages): it naps where it stands. Drop it over another
-// pane's box and it lands there.
+// How it moves (the user, 2026-11-10: "all clawd animation are broken and dumb when moving"): one
+// frame clock writes its position and its squash and stretch straight onto the page (paint), from
+// pure functions of time (chat-pet-motion.ts). A walk speeds up and slows down, its feet and a bob
+// follow the distance walked, it turns before walking back the other way, a leap crouches, flies a
+// parabola and lands with a squash, a drop falls under gravity, and it goes into its cottage through
+// the door. Nothing is a CSS transition racing a timer, so nothing lands before it arrives.
 //
-// It never pops in or out of its house: every way out (a turn starting, another pane calling, a
-// click, the end of a visit) climbs out of bed, down the ladder and out through the front, the way it
-// came in. Only a drag lifts it straight out.
+// In split view there is one Clawd for all the panes (chat-pet-stage.ts). It lives on one pane's box
+// and leaps across to another only to follow you to the pane you click into, and when another chat
+// asks for you, finishes or fails.
 
 import type { PetMood } from "./ao-chat";
 import { SurfaceHiddenContext } from "./page-visibility";
-import { findPetYard, petCall, petFlight, petStage, type PetArrival } from "./chat-pet-stage";
-import { advancePetWalk, petLeap, petPorchX, petToolSide } from "./chat-pet-motion";
-import { ENTRY, FLOOR_LINE, choreBeats, exitBeats, pickChore, type Chore, type Doing, type HomeBeat, type HomeMemory } from "./chat-pet-home";
+import { chatPalette } from "./ChatMenu";
+import { findPetYard, petCall, petFlight, petStage } from "./chat-pet-stage";
+import { clearSpans, crouchAt, fallAt, fallPlan, flightAt, follow, gaitAt, impactOf, landAt, leapAt, leapPlan, leastCovered, nearestClear, petToolSide, pickClear,
+  walkAt, walkPlan, type Point, type Span } from "./chat-pet-motion";
+import { ENTRY, FLOOR_LINE, choreBeats, exitBeats, pickChore, type Chore, type HomeBeat, type HomeMemory } from "./chat-pet-home";
+import { COTTAGE_H, COTTAGE_W, Cottage, DOOR_SCALE, DOOR_X, HousePeek, P, PIXEL_H, PIXEL_W, rect, type HomeView } from "./chat-pet-house";
 import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
   type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
 
-// Where it was left, as a fraction of the way around the box from the top-left corner.
-const POSITION_KEY = "coding-tools:ao:pet-around";
-// LIFT_KEY is where an older build kept how far it was held off the box (it then hovered there after
-// every restart); it is only cleared now. Dragged, it follows the pointer anywhere on the screen
-// (it was held only straight out from the box's edge, and never past the box's ends); let go, it
-// falls onto the box's top edge under where it was dropped, faster the shorter the drop.
-const LIFT_KEY = "coding-tools:ao:pet-lift";
-const FALL_MS = 420;
-/** The squash on landing and the dust it kicks up (codex-chat.css cx-pet-land, cx-pet-dust). */
-const LAND_MS = 420;
-/** How a drop lands: how hard it squashes and kicks up dust (0 none, 1 the most), whether it bounces
- *  back up with a hop once it has squashed, and what it says (null: nothing). */
-type Landing = { impact: number; hop: boolean; line: string | null };
-/** The landing for a drop from `height` px above the box's top edge (0: let go level with it or below). */
-function landingFor(height: number): Landing {
-  // Harder with the drop's square root, as its fall time grows, so small drops still show; even let
-  // go at the edge, a little squash. A middling drop bounces back up with a hop; a big one flattens
-  // it too much to bounce.
-  const impact = Math.min(1, 0.15 + 0.85 * Math.sqrt(height / 400));
-  if (height >= 300) return { impact, hop: false, line: "Oof!" };
-  if (height >= 80) return { impact, hop: true, line: height >= 160 ? "Nailed it" : null };
-  return { impact, hop: false, line: null };
-}
-const NAP_MS = 45_000;
-const CHEER_MS = 6_000;
-// Props and the house use the same pixels as Clawd's quadrants: half a terminal cell, twice as tall
-// as wide.
-const PIXEL_W = CELL_W / 2;
-const PIXEL_H = CELL_H / 2;
+/** Where it was left: how far along the box's top edge, as a share of its width. */
+const POSITION_KEY = "coding-tools:ao:pet-x";
+/** Where older builds kept its spot (a share of the way round the box's outline) and how far it was
+ *  held off the box: only cleared now. */
+const OLD_KEYS = ["coding-tools:ao:pet-around", "coding-tools:ao:pet-lift"];
 const WIDTH = COLS * CELL_W;
 const HEIGHT = ROWS * CELL_H;
-/** Clawd's house, 40×20 pixels (two storeys under the roof), standing beside the box's right side
- *  (not on top of it, where it covered the box's top edge), its floor level with the box's bottom,
- *  this far out from it. */
-const HOUSE_COLS = 40;
-const HOUSE_ROWS = 20;
-const HOUSE_W = HOUSE_COLS * PIXEL_W;
-const HOUSE_H = HOUSE_ROWS * PIXEL_H;
-/** Clawd's spot as it comes in, px from the house's left: the ground floor, between the table and
- *  the stove, clear of everything that stands in front of it (chat-pet-home.ts ENTRY). */
-const HOME_X = ENTRY.x * PIXEL_W;
-/** A hop up onto (or down off) the bed, a chair or the tub: up first, then down onto it. */
+/**
+ * Where its feet touch the ground in its 72 × 48 box: its feet are the top half of the last row. It
+ * stood on the box's bottom edge, with 8 px of nothing under its feet, so it hovered over the chat
+ * box's edge instead of standing on it.
+ */
+const FEET = HEIGHT - CELL_H / 2;
+/** Between the chat box's right end and its cottage. */
+const COTTAGE_GAP = 18;
+const NAP_MS = 45_000;
+const CHEER_MS = 6_000;
+/** Walking speed in px/s: a stroll while nothing runs, a scurry while the agent works. */
+const STROLL = 52;
+const SCURRY = 120;
+/** How high it bobs each stride (px). */
+const BOB = 2;
+/** The frame clock's cap: no more than 60 paints a second, whatever the screen's rate. */
+const FPS = 60;
+/** Turning round to walk back the other way (ms). */
+const TURN_MS = 140;
+/** The crouch before a leap, and the squash after a landing (ms). */
+const CROUCH_MS = 110;
+const LAND_MS = 320;
+/** Going in or out through the cottage's door (ms). */
+const DOOR_MS = 420;
+/** A hop up onto (or down off) the bed, a chair or the tub, seen through the peek: up first, then down onto it. */
 const HOP_EASE = "cubic-bezier(.3,-.6,.6,1)";
 /** Chores on a visit, before it goes back out to the box (a click on furniture adds one). */
 const VISIT_CHORES = 2;
-/** On the top edge (no room beside the box), this far in from its right end. */
-const HOUSE_INSET = 18;
-/** The entrance plays once per window, as the CLI plays one once per version. */
-let entrancePlayed = false;
-/** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
-const SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
-/** Walking speed in px/s: a stroll while nothing runs, a scurry while the agent works. */
-const STROLL = 46;
-const SCURRY = 115;
-/** Over a button or chip it dashes, so it never sits in the way of a click. */
-const DASH = 2.8;
-/** How often a walking Bit is redrawn; it still moves by the time each frame took. */
-const WALK_FPS = 60;
+/** Leaving the house in a hurry (a request waits on you), its way out takes this share as long. */
+const HURRY = 0.6;
 /** How near (px) the pointer must come before Bit turns its eyes to it, and before it leaps on. */
 const NOTICE = 180;
 const REACH = 70;
-/** How often (ms), while the pointer moves, Bit checks where it is (every frame only while riding it). */
+/** How often (ms), while the pointer moves, Bit checks where it is. */
 const LOOK_EVERY_MS = 100;
 /** Between two leaps onto the pointer, so it plays now and then rather than pestering. */
 const PLAY_EVERY = 15_000;
 /** A ride lasts at most this long (ms) before it jumps off by itself; a click, Escape or a quick
  *  shake of the pointer makes it jump off at once. */
 const MAX_RIDE = 4_000;
-/** A pointer move this fast (px in one frame) shakes it off. */
+/** A pointer move this fast (px between two checks) shakes it off. */
 const SHAKE = 90;
 /** What it does now and then while riding, from Claude Code's own animations. */
 const RIDE_PLAYS: AnimationName[] = ["jump", "wink", "look", "boop", "tap"];
-/** From its doorstep beside the box up onto the foot of the box's side (ms): a step, not a jump cut. */
-const STEP_MS = 320;
-/** Leaving the house in a hurry (a request waits on you), its way out of the house takes this share as long. */
-const HURRY = 0.6;
 /** How often it follows you into the pane you click into, and how long it takes to notice (ms). */
 const FOLLOW_CHANCE = 0.6;
 const FOLLOW_MS = 900;
+/** The entrance plays once per window, as the CLI plays one once per version. */
+let entrancePlayed = false;
+/** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
+const SPINNER = ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"];
 
 const LINES: Record<PetMood, string> = {
   idle: "Nothing running. Want to start something?",
@@ -128,31 +108,11 @@ const MUSINGS = ["Hmm…", "*looks around*", "What are we building?", "♪", "Ni
 const RIDING = ["Wheee!", "Take me somewhere", "Faster!", "Hold on tight"];
 const FOLLOWING = ["Wait for me!", "Coming along", "Right behind you"];
 
-// Props and the house, in Clawd's pixels.
-const P = { frame: "#3d3d3a", screen: "#1f2a33", glow: "#7fd1ff", key: "#b4b2a7", mug: "#efede6", rim: "#8c8a82", steam: "#c9c7bd",
-  page: "#faf9f5", cover: "#6a9bcc", wood: "#8a5a3c", metal: "#5b5a55", lens: "#bfe3f5", box: "#c8a26b", boxDark: "#9b7a48",
-  roof: "#b85c3f", roofEdge: "#8f4430", wall: "#e3cfa6", wallEdge: "#b89b6a", door: "#5a3a26", knob: "#f5c451",
-  glass: "#3d5a73", lit: "#f5c451", frameLight: "#faf9f5",
-  // The room: walls a shade darker than the house's outside, so the furniture stands out against them.
-  inside: "#cfb586", insideEdge: "#a8895a", floor: "#8a5a3c", plank: "#74482e", rug: "#4f7fb3", rugEdge: "#c0563f",
-  shelf: "#5a3a26", sky: "#9fd3f0", leaf: "#5f9a4c", leafDark: "#3f7a34",
-  // The washroom's tiles and porcelain, the bed's linen, and the kitchen's fridge and flame.
-  tile: "#cfe3ea", tileEdge: "#a9c6d1", porcelain: "#f4f3ee", porcelainEdge: "#c9c7bd", water: "#6fb3dc",
-  blanket: "#6a9bcc", pillow: "#faf9f5", fridge: "#e8ebe6", flame: "#e8743b",
-  // Home life: the turned-down blanket, the open fridge's light, the night sky, a cookie and its chips,
-  // and the stew it cooks.
-  blanketFold: "#9cc0e4", fridgeLight: "#fff6d6", night: "#22314a", cookie: "#c08a4a", chip: "#5a3a26", stew: "#c0563f" };
-
 /** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. At home it also
  *  stirs a pot (cook), eats a cookie (snack) and carries its plate to the table (serve). */
 export type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read" | "cook" | "snack" | "serve";
 type Arms = "down" | "left" | "right" | "both" | "reach";
 export type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
-/** On the pointer: leaping on, riding along, or leaping back home to the box (screen px). */
-type Ride = { x: number; y: number; mode: "boarding" | "riding" | "leaving"; look: -1 | 0 | 1 };
-
-const rect = (x: number, y: number, w: number, h: number, color: string, key: string) =>
-  <rect key={key} x={x} y={y} width={w} height={h} fill={color} />;
 
 /**
  * The frame Clawd rests in between animations, built from the CLI's own parts: eyes turned where it
@@ -181,145 +141,6 @@ export function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { 
   }
   const feet: Feet = pose.walking ? (step ? "left" : "right") : "both";
   return { pose: { eyes, arms, feet }, offset: pose.sit ? 1 : 0 };
-}
-
-const houseSvg = (parts: ReactElement[]) =>
-  <svg viewBox={`0 0 ${HOUSE_COLS} ${HOUSE_ROWS}`} width={HOUSE_W} height={HOUSE_H} preserveAspectRatio="none" aria-hidden="true"
-    shapeRendering="crispEdges">{parts}</svg>;
-
-/** What the house shows: whether Clawd is in, asleep, what it is doing there, and the beat it is on. */
-type HomeView = { home: boolean; asleep: boolean; doing: Doing | null; tick: number; step: boolean; bites: number };
-
-/**
- * Clawd's house is a doll's house with its front swung open, so you can see in: its rooms are drawn
- * behind Clawd (HouseInside), and its roof, walls and the furniture it gets into in front (House).
- * Inside, Clawd is half size, as wide as its bed (chat-pet-home.ts), and uses everything:
- * - downstairs (rows 13-19): its bed with a lamp, a ladder up through a hatch, the table it eats at
- *   under a framed landscape, and the kitchen: a stove whose pot bubbles while it cooks, and a
- *   fridge that opens, lit inside, for a snack;
- * - upstairs (rows 6-12): a tiled washroom with a tub it bathes in, the bookshelf it reads from,
- *   the desk with a laptop it works at, and a window, sky by day and the moon while it sleeps.
- * The lamp, laptop and window light up while it is home and awake.
- */
-function HouseInside({ home, asleep, doing, tick, step }: HomeView) {
-  const r = rect;
-  const lit = home && !asleep;
-  const cooking = home && doing === "cook";
-  const fridgeOpen = home && doing === "fridge";
-  const working = home && doing === "work";
-  return houseSvg([
-    // Upstairs: back wall with a skirting board, and its planked floor (the ground floor's ceiling)
-    // with the hatch the ladder comes up through.
-    r(3, 6, 34, 6, P.inside, "up-back"), r(3, 11, 34, 1, P.insideEdge, "up-skirting"),
-    r(3, 12, 10, 1, P.floor, "up-floor-l"), r(16, 12, 21, 1, P.floor, "up-floor-r"),
-    ...[6, 20, 26, 33].map((x) => r(x, 12, 1, 1, P.plank, `up-plank${x}`)),
-    // The washroom (columns 3-11), tiled, under a lintel: a mirror, a towel on its rail, the tap and
-    // the tub's back (its front stands in front of Clawd, in House).
-    r(3, 6, 9, 6, P.tile, "bath-tiles"), ...[5, 8].map((x) => r(x, 8, 1, 1, P.tileEdge, `bath-grout${x}`)),
-    r(12, 6, 1, 2, P.wallEdge, "bath-lintel"),
-    r(4, 6, 3, 2, P.frameLight, "mirror-frame"), r(5, 7, 1, 1, P.lens, "mirror"),
-    r(9, 7, 2, 1, P.metal, "towel-rail"), r(10, 7, 1, 2, P.rugEdge, "towel"),
-    r(3, 8, 1, 1, P.metal, "tub-tap"), r(3, 9, 9, 1, P.porcelainEdge, "tub-back"),
-    // The study: the bookshelf with a plant on top, and the window, sky by day, the moon at night.
-    r(15, 7, 4, 5, P.shelf, "shelf"),
-    r(15, 8, 1, 1, P.cover, "book-1"), r(16, 8, 1, 1, P.roof, "book-2"), r(17, 8, 1, 1, P.knob, "book-3"),
-    r(15, 10, 1, 1, P.leaf, "book-4"), r(16, 10, 1, 1, P.page, "book-5"), r(17, 10, 1, 1, P.cover, "book-6"),
-    r(15, 6, 3, 1, P.leaf, "plant"), r(16, 6, 1, 1, P.leafDark, "plant-middle"),
-    r(31, 7, 5, 3, P.frameLight, "window-frame"), r(32, 8, 3, 1, home && asleep ? P.night : P.sky, "window"),
-    ...(home && asleep ? [r(34, 8, 1, 1, P.knob, "moon")] : [r(32, 8, 1, 1, P.page, "cloud")]),
-    // Downstairs: back wall with a skirting board, a planked floor and a rug in the middle.
-    r(3, 13, 34, 6, P.inside, "back"), r(3, 18, 34, 1, P.insideEdge, "skirting"), r(3, 19, 34, 1, P.floor, "floor"),
-    ...[5, 9, 31, 35].map((x) => r(x, 19, 1, 1, P.plank, `plank${x}`)),
-    r(23, 19, 6, 1, P.rug, "rug"), r(23, 19, 1, 1, P.rugEdge, "rug-l"), r(28, 19, 1, 1, P.rugEdge, "rug-r"),
-    // The ladder, from the floor up through the hatch.
-    r(13, 10, 1, 10, P.wood, "ladder-l"), r(15, 10, 1, 10, P.wood, "ladder-r"),
-    ...[11, 13, 15, 17].map((y) => r(14, y, 1, 1, P.wood, `rung${y}`)),
-    // A framed landscape over the table.
-    r(17, 13, 5, 3, P.wood, "picture"), r(18, 14, 3, 1, P.sky, "picture-sky"), r(19, 14, 1, 1, P.leaf, "picture-hill"),
-    // The bed, head to the wall: headboard, a mattress and its pillow, a footboard, and the lamp over
-    // it (on while Clawd is up). The blanket is in House, over Clawd when it is tucked in.
-    r(3, 14, 1, 6, P.shelf, "bed-head"), r(4, 18, 8, 1, P.porcelain, "mattress"), r(4, 19, 8, 1, P.wood, "bed-frame"),
-    r(4, 17, 2, 1, P.pillow, "pillow"), r(12, 17, 1, 3, P.shelf, "bed-foot"),
-    r(5, 13, 1, 1, lit ? P.lit : P.porcelainEdge, "bed-lamp"),
-    // The stove: a pot on the hob, its lid lifting and steam rising while Clawd cooks over the flame.
-    r(30, 18, 4, 2, P.metal, "stove"), r(31, 18, 2, 1, P.glass, "oven-door"), r(30, 17, 4, 1, P.frame, "hob"),
-    r(31, 15, 2, 2, P.metal, "pot"), r(31, cooking && step ? 14 : 15, 2, 1, P.rim, "pot-lid"),
-    ...(cooking ? [r(31, 17, 2, 1, P.flame, "flame"), r(31 + (tick % 2), 13, 1, 1, P.steam, "pot-steam")] : []),
-    // The fridge: shut, its two doors and handles; open, lit inside with milk, an apple and the cookie
-    // jar, its door swung out to the left.
-    ...(fridgeOpen
-      ? [r(34, 13, 3, 7, P.fridgeLight, "fridge-inside"), r(34, 15, 3, 1, P.porcelainEdge, "fridge-shelf-1"),
-        r(34, 17, 3, 1, P.porcelainEdge, "fridge-shelf-2"), r(35, 13, 1, 2, P.page, "milk"), r(34, 14, 1, 1, P.roof, "apple"),
-        r(36, 16, 1, 1, P.cookie, "cookie-jar"), r(33, 13, 1, 7, P.fridge, "fridge-door-open")]
-      : [r(34, 13, 3, 7, P.fridge, "fridge"), r(34, 15, 3, 1, P.porcelainEdge, "fridge-door"),
-        r(34, 14, 1, 1, P.metal, "fridge-handle-1"), r(34, 17, 1, 1, P.metal, "fridge-handle-2")]),
-    // The desk chair's back, behind Clawd at the desk.
-    r(21, 8, 1, 2, P.shelf, "chair-back"),
-    // The laptop's screen faces Clawd, lines of code running down it while it works.
-    ...(working ? [r(27 + (tick % 2), 7, 1, 1, P.glow, "screen-line")] : []),
-  ]);
-}
-
-/** Furniture you can click: the chore Clawd goes there to do, and where it stands (house pixels). */
-const FURNITURE: readonly { chore: Chore; label: string; x: number; y: number; w: number; h: number }[] = [
-  { chore: "sleep", label: "the bed: Clawd tucks itself in for a nap", x: 3, y: 14, w: 10, h: 6 },
-  { chore: "cook", label: "the table: Clawd cooks something and eats it here", x: 16, y: 15, w: 6, h: 5 },
-  { chore: "cook", label: "the stove: Clawd cooks something and eats it at the table", x: 30, y: 14, w: 4, h: 6 },
-  { chore: "snack", label: "the fridge: Clawd grabs a cookie", x: 33, y: 13, w: 4, h: 7 },
-  { chore: "bath", label: "the tub: Clawd takes a bath", x: 3, y: 8, w: 9, h: 5 },
-  { chore: "read", label: "the bookshelf: Clawd reads a book", x: 15, y: 6, w: 4, h: 6 },
-  { chore: "work", label: "the desk: Clawd works on its laptop", x: 21, y: 7, w: 9, h: 6 },
-  { chore: "window", label: "the window: Clawd looks outside", x: 31, y: 7, w: 5, h: 3 },
-];
-
-/**
- * The front of Clawd's house, drawn over Clawd: a clay roof with its chimney, the side walls, the
- * front wall swung open on its hinge at the left, and the furniture Clawd gets into or behind: the
- * blanket on its bed, the table with its plate, the tub with its water and bubbles, and the desk with
- * its laptop. Each piece of furniture is a button: Clawd comes over and uses it. Asleep, z's rise
- * over its bed.
- */
-function House({ home, asleep, doing, tick, step, bites, onKnock, onUse }: HomeView & { onKnock: () => void; onUse: (chore: Chore) => void }) {
-  const r = rect;
-  const parts: ReactElement[] = [r(30, 0, 2, 3, P.roofEdge, "chimney")];
-  // The roof, three pixels wider each side each row down, with an eave line under it.
-  [[14, 12], [11, 18], [8, 24], [5, 30], [2, 36]].forEach(([x, w], row) => parts.push(r(x!, row, w!, 1, P.roof, `roof${row}`)));
-  parts.push(r(1, 5, 38, 1, P.roofEdge, "eave"));
-  // A puff from the chimney while the stove is on.
-  if (home && doing === "cook") parts.push(r(30 + (tick % 2), tick % 2 ? -1 : 0, 1, 1, P.steam, "chimney-puff"));
-  // The side walls, edged darker outside, up both storeys; between them the rooms are open.
-  parts.push(r(2, 6, 1, 14, P.wall, "wall-l"), r(1, 6, 1, 14, P.wallEdge, "wall-l-edge"),
-    r(37, 6, 1, 14, P.wall, "wall-r"), r(38, 6, 1, 14, P.wallEdge, "wall-r-edge"));
-  // The front wall, swung open on its left hinge so its edge shows, with the door's knob on it.
-  parts.push(r(0, 6, 1, 14, P.wall, "front"), r(0, 16, 1, 1, P.knob, "front-knob"));
-  // The blanket, turned down at the pillow end: tucked in, Clawd's feet are under it.
-  parts.push(r(6, 17, 6, 1, P.blanket, "blanket"), r(6, 17, 1, 1, P.blanketFold, "blanket-fold"));
-  // The table, its plate with what is left of the meal while Clawd eats.
-  parts.push(r(16, 17, 6, 1, P.wood, "table"), r(16, 18, 1, 2, P.wood, "table-leg-l"), r(21, 18, 1, 2, P.wood, "table-leg-r"));
-  if (home && doing === "eat") {
-    parts.push(r(16.5, 16, 5, 1, P.porcelain, "plate"));
-    if (bites > 0) parts.push(r(17.5, 16, bites, 1, P.stew, "food"));
-  }
-  // The tub on its feet: its water up to the rim and bubbles round Clawd while it bathes.
-  const bathing = home && doing === "bath";
-  parts.push(r(3, 10, 9, 2, P.porcelain, "tub"), r(3, 10, 9, 1, bathing ? P.water : P.porcelainEdge, "tub-rim"),
-    r(4, 12, 1, 1, P.metal, "tub-foot-l"), r(10, 12, 1, 1, P.metal, "tub-foot-r"));
-  if (bathing) parts.push(...[3, 6, 9].map((x, index) => r(x + ((tick + index) % 2), step === (index % 2 === 0) ? 9 : 10, 1, 1, P.page, `bubble${x}`)));
-  // The desk with its laptop, the screen turned to Clawd's seat.
-  parts.push(r(21, 10, 9, 1, P.wood, "desk"), r(21, 11, 1, 2, P.wood, "desk-leg-l"), r(29, 11, 1, 2, P.wood, "desk-leg-r"),
-    r(26, 9, 3, 1, P.key, "laptop-base"), r(28, 7, 1, 2, P.frame, "laptop-lid"));
-  return <>
-    <button type="button" className={`cx-pet-house${home ? " is-home" : ""}${asleep ? " is-asleep" : ""}`}
-      title={home ? (asleep ? "Clawd is napping. Click to wake it" : "Clawd is home") : "Clawd's house. Click to call Clawd home"}
-      aria-label={home ? (asleep ? "Clawd's house: Clawd is napping inside" : "Clawd's house: Clawd is home") : "Clawd's house"}
-      onClick={onKnock}>
-      {houseSvg(parts)}
-      {home && asleep ? <span className="cx-pet-house-z" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></span> : null}
-    </button>
-    {FURNITURE.map((piece) => <button key={`${piece.chore}-${piece.x}`} type="button" className="cx-pet-furniture"
-      style={{ left: piece.x * PIXEL_W, top: piece.y * PIXEL_H, width: piece.w * PIXEL_W, height: piece.h * PIXEL_H }}
-      title={`Clawd's ${piece.label}`} aria-label={`Clawd's ${piece.label}`} onClick={() => onUse(piece.chore)} />)}
-  </>;
 }
 
 /** A file box carried over its head, held up in both hands. */
@@ -392,70 +213,26 @@ type Floater = { id: number; text: string; offset: number };
 const REST: Pose = { look: 0, arms: "down", walking: false, sit: false };
 const pick = <T,>(items: readonly T[]) => items[Math.floor(Math.random() * items.length)]!;
 const WORK: readonly Job[] = ["laptop", "laptop", "search", "build", "carry"];
+const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 
 /**
- * The box's outline as one loop: its size, and the spot and side at a distance around it. `beside`:
- * there is room for the house to the box's right (it stood on the box's top edge, over the corner of
- * the text box; the user wanted it beside the box).
+ * Where Clawd is drawn, and so what its feet's x and y are measured from:
+ * - "box": its chat box, in the box's own px: the top edge it lives on is y 0, and the ground its
+ *   cottage stands on beside the box is y = the box's height;
+ * - "yard": the lot under the chat list where its cottage stands (the lot's px, the ground at
+ *   y = COTTAGE_H), in split view or when there is no room beside the box;
+ * - "screen": the page itself (client px), while it leaps across, is carried or rides the pointer.
  */
-type Loop = { width: number; height: number; length: number; beside: boolean };
-/**
- * The yard between the box's right edge and a house standing beside it: wider than Clawd is tall, so
- * walking down the box's right side (sideways, its body out by its height) it passes beside the
- * house. At 10 px it walked through the house's front, as if no house stood there.
- */
-const HOUSE_GAP = HEIGHT + 4;
-/** From its doorstep in the yard through the open front to the middle of its room (ms), and back. */
-const DOOR_MS = 900;
-function spotAt(loop: Loop, at: number): { x: number; y: number; side: 0 | 1 | 2 | 3 } {
-  const { width: w, height: h, length } = loop;
-  const s = ((at % length) + length) % length;
-  if (s < w) return { x: s, y: 0, side: 0 };
-  if (s < w + h) return { x: w, y: s - w, side: 1 };
-  if (s < 2 * w + h) return { x: w - (s - w - h), y: h, side: 2 };
-  return { x: 0, y: h - (s - 2 * w - h), side: 3 };
-}
-/**
- * `at` on a box that has just resized: the same spot on the same side and the same lap. The box
- * grows and shrinks from its top as text is typed or sent, so on the top edge it keeps its distance
- * from the left corner (riding the edge up and down), and on the sides it keeps its distance from
- * the bottom, which stays put. (Kept as a bare distance, every line typed slid it to another side
- * and turned it a quarter: the user saw it go crazy.)
- */
-export function reanchor(from: Loop, to: Loop, at: number): number {
-  const lap = Math.floor(at / from.length);
-  const { x, y, side } = spotAt(from, at);
-  const { width: w, height: h } = to;
-  const clamp = (value: number, max: number) => Math.max(0, Math.min(max, value));
-  // Its height down the side, from the top, at the same distance from the bottom as before.
-  const down = clamp(h - (from.height - y), h);
-  const along = side === 0 ? clamp(x, w)
-    : side === 1 ? w + down
-    : side === 2 ? w + h + (w - clamp(x, w))
-    : 2 * w + h + (h - down);
-  // A spot at the very end of a side is the next side's start; keep it under one lap.
-  return lap * to.length + Math.min(along, to.length - 0.001);
-}
-/** Where the house stands on the top edge (with no room beside the box): its left side, in from the box's right end. */
-const houseLeft = (loop: Loop) => Math.max(0, loop.width - HOUSE_W - HOUSE_INSET);
-/** The house's top-left corner, from the box's: beside the box on its right, its floor level with
- *  the box's bottom, or on the top edge when there is no room beside it. */
-const housePlace = (loop: Loop) => loop.beside
-  ? { left: loop.width + HOUSE_GAP, top: loop.height - HOUSE_H }
-  : { left: houseLeft(loop), top: -HOUSE_H };
-/** `along` (a distance from the top-left corner, under one lap) on the lap nearest `near`. */
-const nearLap = (loop: Loop, along: number, near: number) => along + Math.round((near - along) / loop.length) * loop.length;
-/**
- * `spot` moved onto the box's top edge, clear of its ends, on the nearest lap: off a side to that
- * side's top corner, from underneath to the nearer one. In split view the box fills its pane but for
- * a few px, so on the sides and underneath the pane's edge cut Clawd off (seen 2026-10-24: sideways,
- * half gone at a pane's left edge); there it only walks the top edge.
- */
-export function onTop(loop: Loop, spot: number): number {
-  const { x, side } = spotAt(loop, spot);
-  const along = side === 0 ? x : side === 1 ? loop.width : side === 3 ? 0 : x < loop.width / 2 ? 0 : loop.width;
-  return nearLap(loop, Math.max(WIDTH / 2, Math.min(loop.width - WIDTH / 2, along)), spot);
-}
+type Space = "box" | "yard" | "screen";
+type Place = Point & { space: Space };
+/** What it is up to: on its box (strolling, working, napping there), on its way somewhere (a leap,
+ *  the door), on the pointer, carried, or in its house. */
+type Activity = "box" | "travel" | "ride" | "held" | "home";
+/** The box it lives on: its size (border included), whether there is room for its cottage beside its
+ *  right end, and its border's width (what it stands on is placed inside the border). */
+type BoxSize = { width: number; height: number; room: boolean; edge: number };
+/** Elements just above the box that hold something to read or click: Clawd never stops on them. */
+const CONTENT = "button, a, input, select, textarea, img, svg, video, canvas, [role='button']";
 
 type PetProps = {
   mood: PetMood;
@@ -463,144 +240,123 @@ type PetProps = {
   context: number | null;
   onHide: () => void;
 };
-/** Where Clawd's feet are on the screen (the middle of its bottom edge). */
-type Point = { x: number; y: number };
 
 function PetBody({ mood, context, onHide, split }: PetProps & {
   /** In split view: the pane it lives in now (one pet for all panes). Null outside split view. */
   split: { pane: HTMLElement } | null;
 }) {
-  const box = useRef<HTMLDivElement>(null);
-  // The chat box it lives on: its parent when first mounted (it rides the pointer outside it).
+  const anchor = useRef<HTMLSpanElement>(null);
+  const el = useRef<HTMLDivElement>(null);
+  const body = useRef<HTMLButtonElement>(null);
+  // The chat box it lives on: the parent it is mounted in.
   const composer = useRef<HTMLElement | null>(null);
-  // Distance walked around the box from its top-left corner, NaN until the box is measured. It is
-  // never wrapped, so every lap keeps turning the same way at the corners.
-  const [at, setAt] = useState(Number.NaN);
-  useEffect(() => { try { localStorage.removeItem(LIFT_KEY); } catch { /* nothing saved */ } }, []);
-  // Picked up: the middle of its body on the screen, and, once let go, how long its fall back onto
-  // the box takes (ms; 0 while held). Null on the box.
-  const [held, setHeld] = useState<{ x: number; y: number; fall: number } | null>(null);
-  const heldNow = useRef(held);
-  heldNow.current = held;
-  // Where along the box's top edge a fall lands (px from its left), for the shadow growing there.
-  const [dropX, setDropX] = useState<number | null>(null);
-  // Just landed: how hard (0–1), squashing it and kicking up dust until the squash ends (null: not).
-  const [landing, setLanding] = useState<number | null>(null);
-  const [loop, setLoop] = useState<Loop | null>(null);
+  const lot = useRef<HTMLDivElement>(null);
+  const cottageSpot = useRef<HTMLSpanElement>(null);
+  // Where its feet are (see Space), and its squash, stretch, bob, size and fade: written onto the
+  // page every frame by paint, never through React.
+  const feet = useRef<Place>({ space: "box", x: Number.NaN, y: 0 });
+  const shape = useRef({ sx: 1, sy: 1, bob: 0, shrink: 1, fade: 1 });
+  const [space, setSpace] = useState<Space>("box");
+  // The space React has drawn it in so far: paint waits for it to get there.
+  const spaceNow = useRef<Space>("box");
+  const [placed, setPlaced] = useState(false);
+  const [box, setBox] = useState<BoxSize | null>(null);
+  const boxNow = useRef(box);
+  const [yard, setYard] = useState<HTMLElement | null>(null);
+  const activity = useRef<Activity>("box");
+  const [inside, setInside] = useState(false);
+  const insideNow = useRef(inside);
+  insideNow.current = inside;
+  const [doorOpen, setDoorOpen] = useState(false);
+  // A frame shown instead of its resting one: its back as it goes in at the door.
+  const [face, setFace] = useState<Frame | null>(null);
+  const [foot, setFoot] = useState(false);
+  const footNow = useRef(false);
+  const facing = useRef<-1 | 1>(1);
   const [pose, setPose] = useState<Pose>(REST);
   const [job, setJob] = useState<Job>("none");
-  // Inside its house (out of sight behind the walls), asleep or not.
-  const [home, setHome] = useState(false);
-  // Walking in or out through the open front of the house beside the box (DOOR_MS): on the doorstep
-  // in the yard, or on its way between there and the room. Its own timer: a click that clears the
-  // wander plans must not leave it stuck in the doorway.
-  const [door, setDoor] = useState(false);
-  const doorTimer = useRef<number | undefined>(undefined);
-  const [ride, setRide] = useState<Ride | null>(null);
   const [step, setStep] = useState(false);
   const [tick, setTick] = useState(0);
   const [blink, setBlink] = useState(false);
   const [spin, setSpin] = useState(0);
   const [asleep, setAsleep] = useState(false);
+  const asleepNow = useRef(asleep);
+  asleepNow.current = asleep;
   const [cheering, setCheering] = useState(false);
   const [bubble, setBubble] = useState<string | null>(null);
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [fed, setFed] = useState(0);
-  // At home: the beat it is on (where in the house it stands and what it is doing there), null while
-  // it comes in at the entry; what it has done there lately; and the chores left before it goes out.
+  // At home: the beat it is on (where in the house it stands and what it is doing there), what it has
+  // done there lately, and the chores left before it goes out.
   const [scene, setScene] = useState<HomeBeat | null>(null);
   const sceneNow = useRef(scene);
   sceneNow.current = scene;
   const homeMemory = useRef<HomeMemory>({ last: null, sinceMeal: 0, hour: 0 });
   const visitLeft = useRef(0);
+  const [peek, setPeek] = useState(false);
+  // The chat's colours, for what is drawn on <body> outside its theme: the peek, and Clawd's speech
+  // bubble while it is over the page (white on white otherwise: <body>'s text colour is the dark theme's).
+  const [palette, setPalette] = useState<CSSProperties>({});
+  const peekNow = useRef(peek);
+  peekNow.current = peek;
+  const [riding, setRiding] = useState(false);
+  const [held, setHeld] = useState(false);
+  // In a leap or a fall: nothing on it can be clicked.
+  const [airborne, setAirborne] = useState(false);
+  // Just landed: how hard (0-1), for its dust, and a count that restarts the dust's animation.
+  const [landed, setLanded] = useState<{ count: number; impact: number } | null>(null);
+  // Falling onto its box: its shadow there, where it will land (px along the box) and when (ms).
+  const [drop, setDrop] = useState<{ x: number; ms: number } | null>(null);
+  // Called out by another pane while in its house: it leaps there once it is out.
+  const outToward = useRef<HTMLElement | null>(null);
   const drag = useRef<{ moved: boolean; x: number; y: number; lastX: number; lastY: number } | null>(null);
-  // The window listeners of a drag in progress (removed on drop or unmount), and its fall's timer.
+  // The window listeners of a drag in progress (removed on drop or unmount).
   const dragEnd = useRef<(() => void) | null>(null);
-  const fallTimer = useRef<number | undefined>(undefined);
   const pointer = useRef({ x: 0, y: 0 });
   const lastPlay = useRef(0);
   const clickTimer = useRef<number | undefined>(undefined);
-  // The end of a ride: its own timer, so nothing that clears the wander plans can leave it riding.
   const rideTimer = useRef<number | undefined>(undefined);
   const bubbleTimer = useRef<number | undefined>(undefined);
   const napTimer = useRef<number | undefined>(undefined);
-  // Non-zero while it walks (reanchor reads it): the next frame's id, or -1 while the walk waits on walkTimer.
-  const walkFrame = useRef(0);
-  const walkTimer = useRef(0);
-  // The two paint frames that start a leap, pointer ride, or drop must not outlive that motion.
-  const transitionFrame = useRef(0);
-  // Where the walk under way ends (a distance around), moved with the box when it resizes.
-  const walkTarget = useRef(0);
-  // Every scheduled behaviour (the next stroll, an arrival, an action's frames), cleared together.
+  const wanderTimer = useRef<number | undefined>(undefined);
+  // Every scheduled behaviour (an arrival, an action's end, a turn's pause), cleared together.
   const plans = useRef<number[]>([]);
-  // Floaters, feeding and returning from the pointer finish independently of mood plans,
-  // but none may outlive this decoration (including when its chat page becomes hidden).
+  // Floaters, feeding and the door closing finish independently of the plans, but none may outlive
+  // this pet (including when its chat page becomes hidden).
   const decorationTimers = useRef(new Set<number>());
   const seq = useRef(0);
-  // Timers and listeners fire later; they read the state then, not the state they were set up in.
-  const atNow = useRef(at);
-  atNow.current = at;
-  const loopNow = useRef(loop);
-  loopNow.current = loop;
   const moodNow = useRef(mood);
   moodNow.current = mood;
-  const asleepNow = useRef(asleep);
-  asleepNow.current = asleep;
-  const homeNow = useRef(home);
-  homeNow.current = home;
-  const doorNow = useRef(door);
-  doorNow.current = door;
-  const rideNow = useRef(ride);
-  rideNow.current = ride;
-  // Which way it is going through the door (the open front): "in" from the moment it sets off for the
-  // house (walking, leaping or stepping in) until it is inside, "out" until it is back on its box.
-  const doorWay = useRef<"in" | "out" | null>(null);
-  // Called out while it was still on its way in: it turns round as soon as it is inside, toward this pane.
-  const wantOut = useRef(false);
-  const outToward = useRef<HTMLElement | null>(null);
-  // Stepping from its doorstep up onto the box's side (STEP_MS): its spot on the box eases there.
-  const [glide, setGlide] = useState(false);
-  // Leaping across the screen (to another pane's box, or to and from its house under the chat list):
-  // its feet, how long the leap takes (ms; 0 at the start, before it takes off) and how high it arcs
-  // (petLeap). Its own timer.
-  const [leap, setLeap] = useState<(Point & { ms: number; arc: number }) | null>(null);
-  const leapNow = useRef(leap);
-  leapNow.current = leap;
-  const leapTimer = useRef<number | undefined>(undefined);
-  // In split view, the yard under its page's chat list where its house stands (none while the list
-  // is hidden or too narrow: then there is no house, and it naps on its box), and the house's lot.
-  const [yard, setYard] = useState<HTMLElement | null>(null);
-  const yardNow = useRef(yard);
-  yardNow.current = yard;
-  const lot = useRef<HTMLDivElement>(null);
   const [still] = useState(() => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; } });
   const clawd = useClawdPlayer(still);
+  // The frame clock: the motion under way (null when nothing moves), its frame request and the wait
+  // before it, when it last painted, the screen's refresh interval as measured, and whether the
+  // pending frame was asked for straight away (so its gap measures that interval).
+  const motion = useRef<((now: number) => boolean) | null>(null);
+  const frameId = useRef(0);
+  const frameTimer = useRef(0);
+  const lastFrame = useRef(0);
+  const vsync = useRef(1000 / FPS);
+  const direct = useRef(false);
 
   const later = (ms: number, run: () => void) => { plans.current.push(window.setTimeout(run, ms)); };
   const afterDecoration = (ms: number, run: () => void) => {
     const timer = window.setTimeout(() => { decorationTimers.current.delete(timer); run(); }, ms);
     decorationTimers.current.add(timer);
   };
-  const stopWalking = () => {
-    if (walkFrame.current > 0) window.cancelAnimationFrame(walkFrame.current);
-    window.clearTimeout(walkTimer.current);
-    walkFrame.current = 0;
-    walkTimer.current = 0;
+  const stopMotion = () => {
+    motion.current = null;
+    if (frameId.current) window.cancelAnimationFrame(frameId.current);
+    window.clearTimeout(frameTimer.current);
+    frameId.current = 0;
+    frameTimer.current = 0;
   };
-  const cancelTransitionFrame = () => {
-    if (transitionFrame.current) window.cancelAnimationFrame(transitionFrame.current);
-    transitionFrame.current = 0;
+  const cancelPlans = () => {
+    plans.current.forEach((timer) => window.clearTimeout(timer));
+    plans.current = [];
+    window.clearTimeout(wanderTimer.current);
+    stopMotion();
   };
-  const afterTwoFrames = (run: () => void) => {
-    cancelTransitionFrame();
-    transitionFrame.current = window.requestAnimationFrame(() => {
-      transitionFrame.current = window.requestAnimationFrame(() => {
-        transitionFrame.current = 0;
-        run();
-      });
-    });
-  };
-  const cancelPlans = () => { plans.current.forEach((timer) => window.clearTimeout(timer)); plans.current = []; stopWalking(); };
   const say = (text: string, ms = 1800) => {
     setBubble(text);
     window.clearTimeout(bubbleTimer.current);
@@ -613,241 +369,296 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     setFloaters((current) => [...current, { id, text, offset: left }]);
     afterDecoration(1100, () => setFloaters((current) => current.filter((item) => item.id !== id)));
   };
-  const busyElsewhere = () => asleepNow.current || drag.current !== null || heldNow.current !== null || rideNow.current !== null || homeNow.current
-    || doorNow.current || leapNow.current !== null;
+  /** Busy with something other than its life on the box. */
+  const busy = () => activity.current !== "box" || asleepNow.current || drag.current !== null;
   /** The other panes' boxes it can leap to (split view). */
   const otherPanes = () => split ? [...petStage.seats().keys()].filter((pane) => pane !== split.pane && pane.isConnected) : [];
 
-  // Its yard under its own page's chat list, while the list shows wide enough for the house: the house
-  // goes back there by itself as the list comes back.
+  /** Its position, squash and fade onto the page: one transform each on it and its body, no layout. */
+  const paint = () => {
+    const node = el.current;
+    const { x, y, space: at } = feet.current;
+    if (!node || !Number.isFinite(x) || at !== spaceNow.current) return;
+    const look = shape.current;
+    node.style.transform = `translate3d(${Math.round(x - WIDTH / 2)}px, ${Math.round(y - FEET - look.bob)}px, 0)`;
+    const sprite = body.current;
+    if (sprite) {
+      const sx = look.sx * look.shrink, sy = look.sy * look.shrink;
+      sprite.style.transform = sx === 1 && sy === 1 ? "" : `scale(${sx.toFixed(3)}, ${sy.toFixed(3)})`;
+      sprite.style.opacity = look.fade >= 1 ? "" : look.fade.toFixed(2);
+    }
+    // Over the page, a native view it passes over (the chat's Preview) swaps in a still of its page.
+    if (at === "screen") petFlight.set({ left: x - WIDTH / 2, top: y - FEET, right: x + WIDTH / 2, bottom: y - FEET + HEIGHT });
+  };
+  const rest = () => { Object.assign(shape.current, { sx: 1, sy: 1, bob: 0, shrink: 1, fade: 1 }); };
+  /** Its feet at `place`, moving it into that space's part of the page if it is drawn in another
+   *  (React moves it there; it is painted once it is there). */
+  const moveTo = (place: Place) => {
+    feet.current = { ...place };
+    if (place.space !== spaceNow.current) setSpace(place.space);
+    paint();
+  };
+  /** The page position of a spot in a space. */
+  const toScreen = (place: Place): Point => {
+    if (place.space === "screen") return { x: place.x, y: place.y };
+    const origin = place.space === "yard" ? lot.current : composer.current;
+    const frame = origin?.getBoundingClientRect();
+    return frame && origin ? { x: frame.left + origin.clientLeft + place.x, y: frame.top + origin.clientTop + place.y } : { x: place.x, y: place.y };
+  };
+
+  // The frame clock: one motion at a time, painted at most FPS times a second.
+  const onFrame = (now: number) => {
+    frameId.current = 0;
+    const run = motion.current;
+    if (!run) return;
+    const gap = now - lastFrame.current;
+    // Asked for straight away, a frame comes the next refresh: its gap is the screen's interval.
+    if (direct.current && gap > 2) vsync.current = Math.min(gap, vsync.current * 0.9 + gap * 0.1);
+    // Too soon on a fast screen (120, 165 Hz): wait for a later one.
+    if (gap < 1000 / FPS - 4) { schedule(); return; }
+    lastFrame.current = now;
+    const going = run(now);
+    paint();
+    if (motion.current === run && !going) motion.current = null;
+    if (motion.current) schedule();
+  };
+  /**
+   * The next frame. Asking for one every refresh costs Chromium a main-thread frame even when nothing
+   * draws, so on a screen faster than FPS it waits out most of the interval first. At FPS it asks
+   * straight away: a wait there missed the next refresh whenever the timer ran late, and Clawd moved
+   * at 30 frames a second, in fits (measured 2026-11-10: frame gaps of 16 and 33 ms, median 28).
+   */
+  const schedule = () => {
+    if (frameId.current || frameTimer.current) return;
+    const wait = lastFrame.current + 1000 / FPS - performance.now() - vsync.current;
+    direct.current = wait <= 2;
+    if (direct.current) { frameId.current = window.requestAnimationFrame(onFrame); return; }
+    frameTimer.current = window.setTimeout(() => {
+      frameTimer.current = 0;
+      frameId.current = window.requestAnimationFrame(onFrame);
+    }, wait);
+  };
+  const animate = (run: (now: number) => boolean) => { motion.current = run; schedule(); };
+  /**
+   * A motion lasting `ms`: `update(t)` every frame, `t` from 0 on its first frame to 1, then `done`.
+   * Timed from its first frame, so it starts from where Clawd stood and a late frame never cuts it
+   * short. Reduced motion jumps straight to the end.
+   */
+  const timed = (ms: number, update: (t: number) => void, done?: () => void) => {
+    if (still || ms <= 0) { stopMotion(); update(1); paint(); done?.(); return; }
+    let began = Number.NaN;
+    animate((now) => {
+      if (Number.isNaN(began)) began = now;
+      const t = Math.min(1, (now - began) / ms);
+      update(t);
+      if (t < 1) return true;
+      done?.();
+      return false;
+    });
+  };
+
+  // The box it lives on: measured now and whenever it or the window resizes, with whether there is
+  // room for its cottage beside the box's right end.
+  useLayoutEffect(() => {
+    const parent = anchor.current?.parentElement;
+    if (!parent) return undefined;
+    composer.current = parent;
+    // The nearest surface around the box that clips what stands outside it (the chat's pane).
+    let clip: HTMLElement | null = parent.parentElement;
+    while (clip && getComputedStyle(clip).overflowX === "visible") clip = clip.parentElement;
+    const measure = () => {
+      const width = parent.offsetWidth, height = parent.offsetHeight;
+      if (width <= 0 || height <= 0) return;
+      // Room beside it, and a box at least as tall as the cottage, so its roof never rises above the
+      // box's top edge into the chat.
+      const room = height >= COTTAGE_H
+        && (clip ? clip.getBoundingClientRect().right : window.innerWidth) - parent.getBoundingClientRect().right >= COTTAGE_GAP + COTTAGE_W + 4;
+      const current = boxNow.current;
+      const edge = parent.clientLeft;
+      if (current && current.width === width && current.height === height && current.room === room && current.edge === edge) return;
+      boxNow.current = { width, height, room, edge };
+      setBox(boxNow.current);
+      // On its box it stays where it stands, clear of the ends (the box grows a line at a time from
+      // its top as text is typed, and its top edge, Clawd's ground, moves with it).
+      if (activity.current === "box" && feet.current.space === "box" && Number.isFinite(feet.current.x)) {
+        feet.current.x = clamp(feet.current.x, WIDTH / 2, width - WIDTH / 2);
+        paint();
+      }
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(parent);
+    window.addEventListener("resize", measure);
+    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
+  }, []);
+  // The yard under its own page's chat list, while the list shows wide enough for the cottage and
+  // Clawd in front of it. Used when there is no room beside the box (split view panes have none).
   useEffect(() => {
-    if (!split) return undefined;
-    const found = findPetYard<HTMLElement>(box.current);
-    const check = () => setYard(found && found.isConnected && found.offsetWidth >= HOUSE_W ? found : null);
+    const found = findPetYard<HTMLElement>(anchor.current);
+    const check = () => setYard(found && found.isConnected && found.offsetWidth >= COTTAGE_W + WIDTH ? found : null);
     check();
     if (!found) return undefined;
     const observer = new ResizeObserver(check);
     observer.observe(found);
     return () => observer.disconnect();
   }, []);
-  // The chat list went away (hidden, or too narrow) with Clawd in its house or on its way there: it is
-  // back on its box, still asleep if it was, as there is no house in split view without the list.
-  useEffect(() => {
-    if (!split || yard || (!homeNow.current && !doorNow.current && doorWay.current !== "in")) return;
-    cancelPlans();
-    window.clearTimeout(doorTimer.current);
-    homeNow.current = false; setHome(false);
-    doorNow.current = false; setDoor(false);
-    doorWay.current = null; wantOut.current = false;
-    sceneNow.current = null; setScene(null);
-    setJob("none");
-    const current = loopNow.current;
-    if (current && !Number.isNaN(atNow.current)) { atNow.current = onTop(current, atNow.current); setAt(atNow.current); }
-    if (asleepNow.current) setPose({ ...REST, sit: true }); else { setPose(REST); wander(); }
-  }, [yard]);
+  /** Where its cottage stands: beside the box when there is room, else in the yard, else nowhere. */
+  const houseAt: "beside" | "yard" | null = box?.room ? "beside" : yard ? "yard" : null;
+  const houseNow = useRef(houseAt);
+  houseNow.current = houseAt;
+  /** Its feet on the doorstep, in front of the cottage's door. */
+  const doorstep = (): Place | null => {
+    const current = boxNow.current;
+    if (houseNow.current === "beside" && current) return { space: "box", x: current.width - current.edge + COTTAGE_GAP + DOOR_X, y: current.height - current.edge };
+    if (houseNow.current === "yard" && lot.current) return { space: "yard", x: DOOR_X, y: COTTAGE_H };
+    return null;
+  };
 
-  // The box it walks around: measured now and whenever it resizes.
-  useEffect(() => {
-    const parent = box.current?.parentElement;
-    if (!parent) return undefined;
-    composer.current = parent;
-    // The nearest surface around the box that clips what stands outside it (the chat's workflow pane).
-    let clip: HTMLElement | null = parent.parentElement;
-    while (clip && getComputedStyle(clip).overflowX === "visible") clip = clip.parentElement;
-    const measure = () => {
-      const width = parent.offsetWidth, height = parent.offsetHeight;
-      if (width <= 0 || height <= 0) return;
-      const room = (clip ? clip.getBoundingClientRect().right : window.innerWidth) - parent.getBoundingClientRect().right;
-      const beside = room >= HOUSE_GAP + HOUSE_W;
-      const current = loopNow.current;
-      if (current && current.width === width && current.height === height && current.beside === beside) return;
-      const next: Loop = { width, height, length: 2 * (width + height), beside };
-      // Resized (the box grows a line at a time as text is typed): it stays where it stands, and a
-      // walk under way still heads for the same spot.
-      if (current && !Number.isNaN(atNow.current)) {
-        atNow.current = reanchor(current, next, atNow.current);
-        setAt(atNow.current);
-        if (walkFrame.current) walkTarget.current = reanchor(current, next, walkTarget.current);
-      }
-      loopNow.current = next;
-      setLoop(next);
+  /**
+   * Stretches of `target`'s top edge (its px) where a footprint `width` px wide covers nothing to read
+   * or click just above the box: the branch bar's chip, the chat's last line, a button. Text counts
+   * only where its words are, not the whole width of its paragraph.
+   */
+  const blockedOn = (target: HTMLElement): { length: number; blocked: Span[] } => {
+    const frame = target.getBoundingClientRect();
+    if (frame.width <= 0) return { length: 0, blocked: [] };
+    const top = frame.top - FEET, bottom = frame.top;
+    const blocked: Span[] = [];
+    const add = (found: DOMRect | DOMRectReadOnly) => {
+      if (found.width > 0 && found.bottom > top && found.top < bottom) blocked.push({ left: found.left - frame.left - 6, right: found.right - frame.left + 6 });
     };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(parent);
-    // The room beside the box changes with the window as well as with the box itself.
-    window.addEventListener("resize", measure);
-    return () => { observer.disconnect(); window.removeEventListener("resize", measure); };
-  }, []);
-  // First placement: where it just leapt to from another pane, else the saved fraction of the way
-  // round, else near the top-right corner.
-  useEffect(() => {
-    if (!loop || !Number.isNaN(atNow.current)) return;
-    const arrival = split ? petStage.arrivalFor(split.pane) : null;
-    if (arrival) { land(arrival); return; }
-    let saved = Number.NaN;
-    try { saved = Number(localStorage.getItem(POSITION_KEY) ?? Number.NaN); } catch { /* first visit */ }
-    const start = saved >= 0 && saved < 1 ? saved * loop.length : Math.max(WIDTH / 2, loop.width - 2 * WIDTH);
-    setAt(split ? onTop(loop, start) : start);
-    if (!entrancePlayed && !still) { entrancePlayed = true; play(pickOne(ENTRANCES)); }
-  }, [loop]);
-  /** Landed on this pane's box from another pane: a hop, a word, and on with what it came to do. */
-  const land = (arrival: PetArrival) => {
-    const current = loopNow.current;
-    if (!current) return;
-    atNow.current = nearLap(current, Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, arrival.x)), 0);
-    setAt(atNow.current);
-    play("jump");
-    if (arrival.line) say(arrival.line, 1600);
-    remember();
-    poke();
-    cancelPlans();
-    if (moodNow.current === "ask") runToSend();
-    wander();
+    const seen = new Set<Element>();
+    for (let x = frame.left + 4; x < frame.right; x += 14) {
+      for (const y of [bottom - 6, bottom - 20, top + 6]) {
+        const hit = document.elementsFromPoint(x, y).find((found) => !found.closest(".cx-pet, .cx-pet-cottage-spot, .cx-pet-peek"));
+        if (!hit || seen.has(hit) || target.contains(hit)) continue;
+        seen.add(hit);
+        const control = hit.closest(CONTENT);
+        if (control) { add(control.getBoundingClientRect()); continue; }
+        for (const node of hit.childNodes) {
+          if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) continue;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          for (const line of range.getClientRects()) add(line);
+        }
+      }
+    }
+    return { length: frame.width, blocked };
+  };
+  /** The spot on `target` nearest `x` that covers nothing; when nowhere is clear, the one covering least. */
+  const spotOn = (target: HTMLElement, x: number, width = WIDTH + 8): number | null => {
+    const { length, blocked } = blockedOn(target);
+    return nearestClear(clearSpans(length, blocked, width), x) ?? leastCovered(length, blocked, width, x);
+  };
+  /** Its spot on its own box nearest `x` (see spotOn), clear of the ends. */
+  const restNear = (x: number, width = WIDTH + 8) => {
+    const current = boxNow.current;
+    const spot = composer.current ? spotOn(composer.current, x, width) : null;
+    return spot ?? (current ? clamp(x, WIDTH / 2, current.width - WIDTH / 2) : x);
   };
   const remember = () => {
-    const current = loopNow.current;
-    if (!current || Number.isNaN(atNow.current)) return;
-    try {
-      localStorage.setItem(POSITION_KEY, String((((atNow.current % current.length) + current.length) % current.length) / current.length));
-    } catch { /* the spot still applies now */ }
+    const current = boxNow.current;
+    if (!current || activity.current !== "box" || feet.current.space !== "box" || !Number.isFinite(feet.current.x)) return;
+    try { localStorage.setItem(POSITION_KEY, (feet.current.x / current.width).toFixed(4)); } catch { /* the spot still applies now */ }
   };
 
-  /** Buttons, chips and fields around the box: Bit dashes across them and never rests on one. */
-  const obstacles = () => {
-    const area = composer.current?.parentElement;
-    if (!area) return [];
-    return [...area.querySelectorAll("button, a, input, select, [role='button']"), ...document.querySelectorAll(".cx-turn-stats > *")]
-      .filter((element) => !composer.current?.contains(element))
-      .map((element) => element.getBoundingClientRect())
-      .filter((found) => found.width > 0 && found.height > 0);
-  };
-  /** Whether standing at `spot` (a distance around) would cover one of `rects`. `frame` is the box's
-   *  rect: a walk reads it once, since reading it right after each step moved Bit forced a layout on
-   *  every frame (1,917 layouts in 20 s while Bit strolled, seen 2026-10-23). */
-  const blocked = (spot: number, rects: DOMRect[], frame = composer.current?.getBoundingClientRect()) => {
-    const current = loopNow.current;
-    if (!current || !frame) return false;
-    const { x, y, side } = spotAt(current, spot);
-    const half = WIDTH / 2;
-    // Its footprint stands outward from the box: above the top, right of the right side, and so on.
-    const [left, top, right, bottom] = side === 0 ? [x - half, y - HEIGHT, x + half, y]
-      : side === 1 ? [x, y - half, x + HEIGHT, y + half]
-      : side === 2 ? [x - half, y, x + half, y + HEIGHT]
-      : [x - HEIGHT, y - half, x, y + half];
-    return rects.some((found) => found.left < frame.left + right && found.right > frame.left + left
-      && found.top < frame.top + bottom && found.bottom > frame.top + top);
-  };
-  /** Where Clawd walks to go in: behind its spot in the house on the top edge, or, with the house beside
-   *  the box, the foot of the box's right side, from where it steps down into the yard and walks in
-   *  through the open front (it used to vanish into the room from the top edge's right end). */
-  const homeSpot = () => {
-    const current = loopNow.current;
-    if (!current) return atNow.current;
-    // With its house under the chat list, it leaps off the top edge's left end, the end nearest the list.
-    if (yardNow.current) return nearLap(current, WIDTH / 2, atNow.current);
-    return nearLap(current, current.beside ? current.width + current.height - WIDTH / 2 : houseLeft(current) + HOME_X, atNow.current);
-  };
-  /** Whether standing at `spot` would leave it half behind the house: it only stops there to go in.
-   *  Beside the box that is the right side next to the house, and the top edge's right end when the
-   *  house is taller than the box and stands up past its top; on the top edge, the house's span. */
-  const inHouse = (spot: number) => {
-    const current = loopNow.current;
-    // In split view its house is under the chat list or nowhere, never on the box.
-    if (!current || current.beside || split) return false;
-    const { x, side } = spotAt(current, spot);
-    const left = houseLeft(current);
-    return side === 0 && x > left - WIDTH / 2 && x < left + HOUSE_W + WIDTH / 2;
-  };
-  /** The nearest spot to `spot` that covers no button. */
-  const freeNear = (spot: number) => {
-    const current = loopNow.current;
-    const rects = obstacles();
-    if (!current || !blocked(spot, rects)) return spot;
-    for (let offset = 8; offset < current.length / 2; offset += 8) {
-      const free = [spot + offset, spot - offset].map((candidate) => split ? onTop(current, candidate) : candidate)
-        .find((candidate) => !blocked(candidate, rects));
-      if (free !== undefined) return free;
-    }
-    return spot;
-  };
-
-  /** Walks around the box to `target` (a distance around it), dashing over buttons; then `arrive`. */
-  const walkTo = (target: number, speed: number, arrive?: () => void) => {
-    stopWalking();
-    const rects = obstacles();
-    const box = composer.current?.getBoundingClientRect();
-    let direction = target >= atNow.current ? 1 : -1;
-    walkTarget.current = target;
-    setPose({ ...REST, walking: true, look: direction > 0 ? 1 : -1 });
-    let last = performance.now();
-    let shown = 0;
-    const frame = (now: number) => {
-      const elapsed = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      // Where it is headed: the box resizing (reanchor) can move the spot while it walks.
-      const end = walkTarget.current;
-      const step = advancePetWalk(atNow.current, end, speed * (blocked(atNow.current, rects, box) ? DASH : 1) * elapsed);
-      if (step.direction && step.direction !== direction) {
-        direction = step.direction;
-        setPose({ ...REST, walking: true, look: direction > 0 ? 1 : -1 });
-      }
-      const { arrived } = step;
-      atNow.current = step.position;
-      // Bit moves every frame but is drawn at most WALK_FPS times a second: on a 165 Hz screen each
-      // step re-rendered the pet and recalculated styles 165 times a second.
-      if (arrived || now - shown >= 1000 / WALK_FPS) { shown = now; setAt(atNow.current); }
-      if (!arrived) {
-        // Each requestAnimationFrame costs Chromium a main-thread frame even when the step draws
-        // nothing, so asking for one every refresh still ran 165 frames a second while it walked.
-        // Wait out the rest of the WALK_FPS interval first; the frame after it draws.
-        const wait = shown + 1000 / WALK_FPS - now;
-        if (wait > 4) {
-          walkFrame.current = -1;
-          walkTimer.current = window.setTimeout(() => {
-            walkTimer.current = 0;
-            walkFrame.current = window.requestAnimationFrame(frame);
-          }, wait - 4);
-        } else walkFrame.current = window.requestAnimationFrame(frame);
-        return;
-      }
-      walkFrame.current = 0;
-      setPose(REST);
-      remember();
-      arrive?.();
+  /** Walks along the top edge to `x`, turning round first if it faces the other way; then `arrive`. */
+  const walkTo = (x: number, speed: number, arrive?: () => void) => {
+    stopMotion();
+    const current = boxNow.current;
+    const from = feet.current.x;
+    const to = current ? clamp(x, WIDTH / 2, current.width - WIDTH / 2) : x;
+    const plan = walkPlan(from, to, speed);
+    if (!plan.ms) { arrive?.(); return; }
+    const way: -1 | 1 = to > from ? 1 : -1;
+    const go = () => {
+      setPose({ ...REST, walking: true, look: way });
+      timed(plan.ms, (t) => {
+        const at = walkAt(plan, t * plan.ms);
+        const width = boxNow.current?.width;
+        feet.current.x = width ? clamp(at.x, WIDTH / 2, width - WIDTH / 2) : at.x;
+        // Its feet and bob follow the distance walked, easing in and out with its speed.
+        const gait = gaitAt(at.x - from);
+        shape.current.bob = at.done ? 0 : BOB * gait.lift * Math.min(1, at.speed / (0.6 * speed));
+        if (gait.left !== footNow.current) { footNow.current = gait.left; setFoot(gait.left); }
+      }, () => { shape.current.bob = 0; setPose(REST); remember(); arrive?.(); });
     };
-    walkFrame.current = window.requestAnimationFrame(frame);
+    // Facing the other way, it turns round first rather than walking off backwards.
+    if (facing.current !== way && !still) { facing.current = way; setPose({ ...REST, look: way }); later(TURN_MS, go); return; }
+    facing.current = way;
+    go();
   };
 
-  /** A spot to walk to: mostly a short way along, sometimes a long way round, never on a button. In
-   *  split view it keeps to the top edge (onTop), where a long way is anywhere along it. */
+  /** The landing: a squash by `impact` (0-1) that springs back, and dust either side; then `then`. */
+  const land = (impact: number, then?: () => void) => {
+    const count = seq.current + 1;
+    seq.current = count;
+    setLanded({ count, impact });
+    afterDecoration(600, () => setLanded((current) => current?.count === count ? null : current));
+    setPose(REST);
+    timed(LAND_MS, (t) => { Object.assign(shape.current, landAt(t, impact)); }, () => { rest(); then?.(); });
+  };
+  /**
+   * A leap to `to`: it crouches, takes off stretched, flies a parabola (over the page itself when it
+   * goes to another space, so no pane's edge clips it) and lands with a squash. `land: false` skips the
+   * landing (the pet in the pane it leapt to lands instead); `crouch: false` takes off at once.
+   */
+  const leapTo = (to: Place, then: () => void, options: { impact?: number; land?: boolean; crouch?: boolean } = {}) => {
+    stopMotion();
+    const start = { ...feet.current };
+    const across = start.space !== to.space;
+    const a = across ? toScreen(start) : start;
+    const b = across ? toScreen(to) : to;
+    const way: -1 | 1 = b.x < a.x ? -1 : 1;
+    facing.current = way;
+    setJob("none");
+    setFace(null);
+    setPose({ ...REST, look: way });
+    const fly = () => {
+      if (across) moveTo({ space: "screen", x: a.x, y: a.y });
+      setAirborne(true);
+      setPose({ ...REST, arms: "both", walking: true, look: way });
+      const plan = leapPlan(a, b);
+      timed(plan.ms, (t) => {
+        const at = leapAt(plan, t * plan.ms);
+        feet.current.x = at.x;
+        feet.current.y = at.y;
+        Object.assign(shape.current, flightAt(t));
+      }, () => {
+        setAirborne(false);
+        rest();
+        if (options.land === false) { setPose(REST); then(); return; }
+        moveTo(to);
+        land(options.impact ?? 0.5, then);
+      });
+    };
+    if (options.crouch === false || still) { fly(); return; }
+    timed(CROUCH_MS, (t) => { Object.assign(shape.current, crouchAt(t)); }, fly);
+  };
+
+  /**
+   * A spot to stroll to on its box: mostly a short way along, sometimes far, never over the chat.
+   * With nowhere clear, it goes to where it covers least and stays there.
+   */
   const nextSpot = (working: boolean) => {
-    const current = loopNow.current;
-    if (!current) return atNow.current;
-    const rects = obstacles();
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const far = Math.random() < (working ? 0.4 : 0.25);
-      const span = far ? current.length * (0.5 + Math.random() * 0.7) : 60 + Math.random() * 200;
-      const target = split && far ? nearLap(current, WIDTH / 2 + Math.random() * Math.max(0, current.width - WIDTH), atNow.current)
-        : atNow.current + (Math.random() < 0.5 ? -1 : 1) * span;
-      // A work scene needs Clawd upright next to its tool, never upside-down on
-      // the underside of the composer. Idle walks can still circle every edge.
-      const spot = split || working ? onTop(current, target) : target;
-      if (!blocked(spot, rects) && !inHouse(spot)) return spot;
-    }
-    return atNow.current;
+    const current = composer.current;
+    if (!current) return null;
+    const width = working ? WIDTH + 40 : WIDTH + 8;
+    const { length, blocked } = blockedOn(current);
+    return pickClear(clearSpans(length, blocked, width), feet.current.x, Math.random, working ? 0.4 : 0.25)
+      ?? leastCovered(length, blocked, width, feet.current.x);
   };
-
   /** One thing to do on arriving somewhere, so a stroll never looks like sliding. */
   const act = () => {
-    if (busyElsewhere()) return;
-    // It stays with its own chat: it leaps to another pane only when that chat calls it or you click
-    // into it (the split-view effect below). Leaping off on a whim to visit or carry a box over, it
-    // was rarely quiet for NAP_MS, so it hardly ever went home to its house (the user, 2026-10-24).
+    if (busy()) return;
     if (moodNow.current === "working") {
       // At work: settle at a tool for a while; carrying walks on to drop the box somewhere.
       const next = pick(WORK);
-      if (next === "carry") { setJob("carry"); walkTo(nextSpot(true), SCURRY * 0.8, () => { setJob("none"); play("jump"); }); return; }
+      if (next === "carry") {
+        const to = nextSpot(true);
+        if (to !== null) { setJob("carry"); walkTo(to, SCURRY * 0.8, () => { setJob("none"); play("jump"); }); }
+        return;
+      }
       setJob(next);
       later(5000 + Math.random() * 4000, () => setJob("none"));
       return;
@@ -858,100 +669,78 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     else if (choice === "coffee" || choice === "read") { setJob(choice); later(3500 + Math.random() * 2500, () => setJob("none")); }
     else if (choice === "muse" && moodNow.current === "idle") say(pick(MUSINGS), 1500);
   };
-
-  /** The wander loop: a pause (or a job), a walk somewhere, an action, again. */
+  /** The wander loop: a pause (or a job), a walk somewhere clear, an action, again. One loop at a time. */
   const wander = () => {
+    window.clearTimeout(wanderTimer.current);
     if (still) return;
     const working = moodNow.current === "working";
-    const pause = working ? 5500 + Math.random() * 4000 : 2000 + Math.random() * 3000;
-    later(pause, () => {
-      if (busyElsewhere() || moodNow.current === "ask" || moodNow.current === "error") { wander(); return; }
+    const pause = working ? 5500 + Math.random() * 4000 : 2200 + Math.random() * 3200;
+    wanderTimer.current = window.setTimeout(() => {
+      if (busy() || motion.current || moodNow.current === "ask" || moodNow.current === "error") { wander(); return; }
       setJob("none");
-      walkTo(nextSpot(working), working ? SCURRY : STROLL, () => { act(); wander(); });
-    });
+      const to = nextSpot(working);
+      if (to === null || Math.abs(to - feet.current.x) < 8) { act(); wander(); return; }
+      walkTo(to, working ? SCURRY : STROLL, () => { act(); wander(); });
+    }, pause);
   };
-
-  /** Feet on the box's top edge at `x` (px from its left end), on the screen. */
-  const topEdge = (composer: HTMLElement, x: number): Point & { along: number } => {
-    const frame = composer.getBoundingClientRect();
-    const along = Math.max(WIDTH / 2, Math.min(frame.width - WIDTH / 2, x));
-    return { x: frame.left + along, y: frame.top, along };
-  };
-  /** The porch's spot in front of its house under the chat list (px from the house's left; petPorchX). */
-  const porchX = () => petPorchX(yardNow.current?.clientWidth ?? HOUSE_W, HOUSE_W, WIDTH, HOME_X);
-  /** Its feet on that porch, on the screen. */
-  const porchFeet = (): Point | null => {
-    const spot = lot.current?.getBoundingClientRect();
-    return spot ? { x: spot.left + porchX(), y: spot.top + HOUSE_H } : null;
-  };
-  /**
-   * A leap across the screen, feet from `from` to `to`, then `done`: along the straight line between
-   * them while it arcs up over it and comes down onto the spot (petLeap; codex-chat.css cx-pet-arc).
-   * It flies on the page itself, over every pane, so no pane's edge clips it.
-   */
-  const leapTo = (from: Point, to: Point, done: () => void) => {
-    window.clearTimeout(leapTimer.current);
-    const { ms, arc } = still ? { ms: 0, arc: 0 } : petLeap(from, to);
-    leapNow.current = { ...from, ms: 0, arc };
-    setLeap(leapNow.current);
-    setPose({ ...REST, arms: "both", walking: true, look: to.x < from.x ? -1 : 1 });
-    const land = () => {
-      window.clearTimeout(leapTimer.current);
-      leapNow.current = null;
-      setLeap(null);
-      setPose(REST);
-      done();
-    };
-    // Two frames later, so the leap starts from where it stood, and it lands a whole leap after it
-    // takes off: timed from the start, a busy window's late frames ate into the flight (two frames
-    // took 290 ms in a loaded run, and a 420 ms leap flew in 170 ms, a zip again). The first timer
-    // only keeps it from staying in the air if those frames never come.
-    leapTimer.current = window.setTimeout(land, ms + 1000);
-    afterTwoFrames(() => {
-      setLeap((current) => current && { ...to, ms, arc });
-      window.clearTimeout(leapTimer.current);
-      leapTimer.current = window.setTimeout(land, ms + 34);
-    });
-  };
-  /**
-   * Over to another pane's box (split view): it leaps onto that box's top edge, and the pet there
-   * carries on. False when it cannot go there now.
-   */
-  const hop = (pane: HTMLElement, line: string) => {
-    const seat = petStage.seats().get(pane);
-    if (!split || !seat || pane === split.pane || !seat.composer.isConnected || seat.composer.offsetWidth < 2 * WIDTH) return false;
-    cancelPlans();
-    window.clearTimeout(doorTimer.current);
-    setJob("none");
-    // Napping on its box (no house in this split view), it wakes to go.
-    if (asleepNow.current) { asleepNow.current = false; setAsleep(false); }
-    const from = screenAt(atNow.current);
-    const frame = seat.composer.getBoundingClientRect();
-    const to = topEdge(seat.composer, from.x - frame.left);
-    leapTo(from, to, () => {
-      if (petStage.handoff(pane, { x: to.along, carry: false, line })) return;
-      // That pane closed mid-leap: it is back where it took off.
-      wander();
-    });
-    return true;
-  };
-  /** It runs to the top-right corner, by the send button, and waves for attention. */
+  /** It runs along to the send button's end of the box and jumps for attention. */
   const runToSend = () => {
-    const current = loopNow.current;
-    // In its house or on its way out, it comes here once it is out (settleOut).
-    if (still || !current || leapNow.current || homeNow.current || doorNow.current) return;
-    walkTo(freeNear(nearLap(current, current.width - WIDTH / 2, atNow.current)), SCURRY * 1.4, () => play("jump"));
+    const current = boxNow.current;
+    if (still || !current || busy()) return;
+    walkTo(restNear(current.width - WIDTH / 2), SCURRY * 1.4, () => play("jump"));
   };
-  /** Back out on its box from its house: on with the chat's mood (over to the send button for a
-   *  request, its laptop while the agent works), and its wander. */
+  /** Back on its box from somewhere else: on with the chat's mood, and its wander. */
   const settleOut = () => {
+    activity.current = "box";
     remember();
     poke();
     if (moodNow.current === "ask") runToSend();
     else if (moodNow.current === "working") setJob("laptop");
     wander();
   };
-  /** Bedtime with no house to go to (split view with the chat list hidden): it curls up where it stands. */
+  /**
+   * From wherever it is off its box (in the air, by its cottage, in the yard), a leap back onto its
+   * box's top edge. Anything that interrupts a trip (a turn starting mid-way) brings it back this way,
+   * so it is never left half through a door or hanging in the air.
+   */
+  const flyBack = (then: () => void = settleOut) => {
+    stopMotion();
+    setAirborne(false);
+    setFace(null);
+    setDoorOpen(false);
+    const current = boxNow.current;
+    const parent = composer.current;
+    if (!current || !parent) return;
+    const at = feet.current;
+    // Still on its box's top edge (stopped mid-walk): it is back already.
+    if (at.space === "box" && at.y === 0 && Number.isFinite(at.x)) { rest(); paint(); then(); return; }
+    activity.current = "travel";
+    const x = restNear(toScreen(at).x - parent.getBoundingClientRect().left);
+    if (!Number.isFinite(at.x)) { rest(); moveTo({ space: "box", x, y: 0 }); then(); return; }
+    shape.current.shrink = 1;
+    shape.current.fade = 1;
+    leapTo({ space: "box", x, y: 0 }, then, { crouch: false, impact: 0.4 });
+  };
+
+  /** Over to another pane's box (split view): it leaps onto that box's top edge, and the pet there carries on. */
+  const hop = (pane: HTMLElement, line: string) => {
+    const seat = petStage.seats().get(pane);
+    if (!split || !seat || pane === split.pane || !seat.composer.isConnected || seat.composer.offsetWidth < 2 * WIDTH) return false;
+    cancelPlans();
+    setJob("none");
+    if (asleepNow.current) { asleepNow.current = false; setAsleep(false); }
+    activity.current = "travel";
+    const from = toScreen(feet.current);
+    const frame = seat.composer.getBoundingClientRect();
+    const along = spotOn(seat.composer, from.x - frame.left) ?? clamp(from.x - frame.left, WIDTH / 2, frame.width - WIDTH / 2);
+    leapTo({ space: "screen", x: frame.left + along, y: frame.top }, () => {
+      if (petStage.handoff(pane, { x: along, carry: false, line })) return;
+      // That pane closed mid-leap: back to its own box.
+      flyBack();
+    }, { land: false });
+    return true;
+  };
+  /** Bedtime with no cottage to go to: it curls up where it stands. */
   const napHere = () => {
     cancelPlans();
     setJob("none");
@@ -961,178 +750,121 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     setPose({ ...REST, sit: true });
   };
 
-  /** Bedtime: it walks home to its house, goes in, climbs into bed and falls asleep there. A visit
-   *  (`nap` false) does a couple of chores, or `chore` first when you clicked a piece of furniture,
-   *  and comes back out. */
+  /** In through the cottage's door from the doorstep: its back to us, smaller through the doorway, gone; the door shuts. */
+  const enterDoor = (then: () => void) => {
+    setDoorOpen(true);
+    setPose(REST);
+    setFace({ pose: { facing: "back" }, offset: 0 });
+    later(still ? 0 : 160, () => {
+      const base = feet.current.y;
+      timed(DOOR_MS, (t) => {
+        const e = t * t * (3 - 2 * t);
+        shape.current.shrink = 1 - (1 - DOOR_SCALE) * e;
+        shape.current.fade = t < 0.65 ? 1 : Math.max(0, 1 - (t - 0.65) / 0.35);
+        feet.current.y = base - 8 * e;
+      }, () => {
+        feet.current.y = base;
+        rest();
+        setFace(null);
+        activity.current = "home";
+        setInside(true);
+        afterDecoration(still ? 0 : 260, () => setDoorOpen(false));
+        then();
+      });
+    });
+  };
+  /** Out through the door onto the doorstep, growing back to full size as it steps out; then `then`. */
+  const exitDoor = (from: Place, then: () => void) => {
+    activity.current = "travel";
+    rest();
+    shape.current.shrink = DOOR_SCALE;
+    shape.current.fade = 0;
+    moveTo({ ...from, y: from.y - 8 });
+    setScene(null);
+    setJob("none");
+    setFace(null);
+    setPose(REST);
+    setInside(false);
+    setDoorOpen(true);
+    later(still ? 0 : 180, () => timed(DOOR_MS, (t) => {
+      const e = 1 - (1 - t) * (1 - t);
+      shape.current.shrink = DOOR_SCALE + (1 - DOOR_SCALE) * e;
+      shape.current.fade = Math.min(1, t / 0.3);
+      feet.current.y = from.y - 8 * (1 - e);
+    }, () => {
+      rest();
+      feet.current.y = from.y;
+      afterDecoration(still ? 0 : 240, () => setDoorOpen(false));
+      then();
+    }));
+  };
+
+  /**
+   * Home to its cottage: along its box to the end nearest the cottage, a hop down (or a leap across to
+   * the yard) onto the doorstep, and in through the door. Bedtime (`nap`) takes it to bed; a visit does
+   * a couple of chores, or `chore` first when you clicked a piece of furniture, and comes back out.
+   */
   const goHome = (nap = true, chore?: Chore) => {
-    // Already in, or on its way in or out: bedtime takes it to bed from where it is in the house. (The
-    // nap timer firing mid-visit sent it walking to the box from inside, unseen, then leaping in again.)
-    if (homeNow.current || doorNow.current || doorWay.current) {
-      if (nap && homeNow.current && !doorNow.current && !asleepNow.current) { cancelPlans(); visitLeft.current = 0; homeLife("sleep"); }
+    if (activity.current === "home") {
+      if (nap && !asleepNow.current) { cancelPlans(); visitLeft.current = 0; homeLife("sleep"); }
       return;
     }
+    if (activity.current !== "box" || drag.current) return;
+    const step = doorstep();
+    const current = boxNow.current;
+    if (!step || !current) { if (nap) napHere(); return; }
     cancelPlans();
-    window.clearTimeout(doorTimer.current);
     setJob("none");
-    sceneNow.current = null;
-    setScene(null);
-    if (!loopNow.current) return;
-    // No house in split view without the chat list: it naps on its box (a visit has nowhere to go).
-    if (split && !yardNow.current) { if (nap) napHere(); return; }
+    if (asleepNow.current) { asleepNow.current = false; setAsleep(false); }
     say(nap ? "Home time…" : "Coming!", 1300);
-    wantOut.current = false;
-    const inside = () => {
-      homeNow.current = true;
-      doorNow.current = false;
-      setDoor(false);
-      setHome(true);
-      setPose(REST);
-      doorWay.current = null;
+    activity.current = "travel";
+    const comeIn = () => enterDoor(() => {
       visitLeft.current = nap ? 0 : VISIT_CHORES;
-      // Called out while it was on its way in: back out the way it came.
-      if (wantOut.current) { wantOut.current = false; goOut(outToward.current ?? undefined); return; }
-      later(still ? 0 : 400, () => homeLife(nap ? "sleep" : chore));
-    };
-    const settle = () => {
-      doorWay.current = "in";
-      // Its house under the chat list: from the box's left end it leaps across onto the porch in front
-      // of the house (it used to land inside the room and shrink to half size in one frame), then walks
-      // in through the open front, shrinking to its house size on the way.
-      const porch = split && yardNow.current && !still ? porchFeet() : null;
-      if (porch) {
-        leapTo(screenAt(atNow.current), porch, () => {
-          // The chat list went away mid-leap: no house to go into, it is back on its box.
-          if (!yardNow.current) { doorWay.current = null; settleOut(); return; }
-          doorNow.current = true;
-          setDoor(true);
-          setLanding(0.35);
-          setPose({ ...REST, walking: true, look: -1 });
-          // In once the landing's squash is over: shrinking while the squash animation still held its
-          // size, it dropped to half size in one frame as the squash ended.
-          doorTimer.current = window.setTimeout(() => {
-            homeNow.current = true;
-            setHome(true);
-            doorTimer.current = window.setTimeout(inside, DOOR_MS + 40);
-          }, LAND_MS + 100);
-        });
-        return;
-      }
-      if (still || !loopNow.current?.beside) { inside(); return; }
-      // Beside the box it steps down off the box's side onto its doorstep, then walks in through the
-      // open front to the middle of its room, the walls passing in front of it.
-      doorNow.current = true;
-      setDoor(true);
-      setPose({ ...REST, walking: true, look: 1 });
-      window.clearTimeout(doorTimer.current);
-      doorTimer.current = window.setTimeout(() => {
-        setHome(true);
-        doorTimer.current = window.setTimeout(inside, DOOR_MS);
-      }, 200);
-    };
-    if (still) { atNow.current = homeSpot(); setAt(atNow.current); settle(); return; }
-    walkTo(homeSpot(), nap ? STROLL * 1.3 : SCURRY, settle);
+      later(still ? 0 : 350, () => homeLife(nap ? "sleep" : chore));
+    });
+    const speed = nap ? STROLL * 1.3 : SCURRY;
+    // Beside the box: to its right end and a hop down. In the yard: to its left end, nearest the chat list, and a leap across.
+    walkTo(step.space === "box" ? current.width - WIDTH / 2 : WIDTH / 2, speed, () => leapTo(step, comeIn, { impact: step.space === "box" ? 0.35 : 0.45 }));
   };
   /**
-   * Out of the house the way it came in (toward `toward`'s pane when another pane called it): down off
-   * what it is on, out of bed, down the ladder, across to the front, out through it and onto its box.
-   * On its way in, it turns round as soon as it is inside. Every way out but a drag comes here: a turn
-   * starting or another pane calling popped it straight out of bed onto the box at full size, in one
-   * frame (the user, 2026-11-09: "it just straight teleport to the platform instead of walking").
+   * Out of its cottage (toward `toward`'s pane when another pane called it). Watched through the peek,
+   * it gets out of bed, down the ladder and across to the door first; unwatched, it is straight out.
    */
   const goOut = (toward?: HTMLElement) => {
     if (toward) outToward.current = toward;
-    if (doorWay.current === "in") { wantOut.current = true; return; }
-    if (!homeNow.current || doorNow.current) return;
+    if (activity.current !== "home") return;
     cancelPlans();
     asleepNow.current = false;
     setAsleep(false);
-    // A request waiting on you: it hurries out.
     const hurry = moodNow.current === "ask" ? HURRY : 1;
-    homeRun(exitBeats(homePlace()).map((beat) => ({ ...beat, ms: Math.round(beat.ms * hurry) })), () => leaveHome(true));
+    if (peekNow.current) homeRun(exitBeats(homePlace()).map((beat) => ({ ...beat, ms: Math.round(beat.ms * hurry) })), leaveHome);
+    else leaveHome();
   };
-  /**
-   * Out through the open front from the entry: from its house under the chat list onto the porch,
-   * growing to full size, and a leap across onto a box (leapOut); from the house beside the box onto
-   * its doorstep and a step up onto the box's side; from the house on the top edge straight along it.
-   * `walkOut` false: lifted out by a drag, it is just gone from the house.
-   */
-  const leaveHome = (walkOut = true, toward?: HTMLElement) => {
-    if (!homeNow.current && !doorNow.current) return;
-    window.clearTimeout(doorTimer.current);
-    if (toward) outToward.current = toward;
-    sceneNow.current = null;
-    setScene(null);
-    setJob("none");
-    wantOut.current = false;
-    if (!walkOut) {
-      homeNow.current = false; setHome(false);
-      doorNow.current = false; setDoor(false);
-      doorWay.current = null;
-      setGlide(false);
+  /** Through the door and onto its box: a hop up beside the box, or a leap from the yard to the pane that called it. */
+  const leaveHome = () => {
+    const step = doorstep();
+    const current = boxNow.current;
+    setPeek(false);
+    if (!step || !current) {
+      // Its cottage went away (the window narrowed, the chat list closed): it is back on its box.
+      activity.current = "travel";
+      setInside(false);
+      setScene(null);
+      rest();
+      moveTo({ space: "box", x: restNear(current ? current.width - WIDTH / 2 : WIDTH), y: 0 });
+      land(0.3, settleOut);
       return;
     }
-    doorWay.current = "out";
-    if (split && yardNow.current) {
-      homeNow.current = false;
-      setHome(false);
-      asleepNow.current = false;
-      setAsleep(false);
-      doorNow.current = true;
-      setDoor(true);
-      setPose({ ...REST, walking: true, look: 1 });
-      doorTimer.current = window.setTimeout(leapOut, still ? 0 : DOOR_MS);
-      return;
-    }
-    const out = () => {
-      homeNow.current = false;
-      setHome(false);
-      doorNow.current = false;
-      setDoor(false);
-      const current = loopNow.current;
-      if (still || !current) { doorWay.current = null; settleOut(); return; }
-      // Back the way it came, clear of the house: up the right side and along the top, or back along the top.
-      const { y, side } = spotAt(current, atNow.current);
-      const away = freeNear(atNow.current - (side === 1 ? y + 1.5 * WIDTH : HOME_X + WIDTH));
-      const speed = moodNow.current === "idle" || moodNow.current === "done" ? STROLL : SCURRY;
-      const walkOn = () => {
-        doorWay.current = null;
-        setGlide(false);
-        walkTo(away, speed, () => { play("jump"); settleOut(); });
-      };
-      if (side !== 1) { walkOn(); return; }
-      // From its doorstep it steps up onto the foot of the box's side, turning onto it (it was put
-      // there in one frame, a jump left and up and a quarter turn).
-      setGlide(true);
-      setPose({ ...REST, walking: true, look: -1 });
-      doorTimer.current = window.setTimeout(walkOn, STEP_MS);
-    };
-    // From the room beside the box it walks out through the open front to its doorstep first.
-    if (still || !homeNow.current || !loopNow.current?.beside) { out(); return; }
-    doorNow.current = true;
-    setDoor(true);
-    setPose({ ...REST, walking: true, look: -1 });
-    setHome(false);
-    doorTimer.current = window.setTimeout(out, DOOR_MS);
-  };
-  /** From the porch of its house under the chat list it leaps onto a box near its left end (the end
-   *  nearest the house): the box of the pane that called it, else the focused pane's, else its own. */
-  const leapOut = () => {
-    doorNow.current = false;
-    setDoor(false);
-    doorWay.current = null;
-    const from = porchFeet();
-    const focused = petStage.focused();
-    const pane = split ? outToward.current ?? (focused && petStage.seats().has(focused) ? focused : split.pane) : null;
-    outToward.current = null;
-    const target = (split && pane && pane !== split.pane ? petStage.seats().get(pane)?.composer : null) ?? composer.current;
-    if (!from || !target) { settleOut(); return; }
-    const to = topEdge(target, 1.5 * WIDTH);
-    leapTo(from, to, () => {
-      if (pane && target !== composer.current && petStage.handoff(pane, { x: to.along, carry: false, line: "" })) return;
-      const current = loopNow.current;
-      if (current) { atNow.current = nearLap(current, to.along, atNow.current); setAt(atNow.current); }
-      play("jump");
-      settleOut();
+    exitDoor(step, () => {
+      const toward = outToward.current;
+      outToward.current = null;
+      if (split) {
+        const focused = petStage.focused();
+        const pane = toward ?? (focused && focused !== split.pane && petStage.seats().has(focused) ? focused : null);
+        if (pane && hop(pane, "")) return;
+      }
+      const x = restNear(step.space === "box" ? current.width - WIDTH / 2 - 12 : 1.5 * WIDTH);
+      leapTo({ space: "box", x, y: 0 }, settleOut, { impact: 0.4 });
     });
   };
   /** Plays home beats one after another, each for its ms (a move takes that long to get there), then `done`. */
@@ -1149,26 +881,28 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     later(still && (moving || beat.doing === "hop") ? 0 : beat.ms, () => homeRun(rest, done));
   };
   const homePlace = (): HomeBeat => sceneNow.current ?? { ...ENTRY, doing: "stand", look: 0, ms: 0 };
-  /** One chore (`chore`, else one it picks), then the next until the visit is over, then out to the
-   *  box. Sleep ends in bed, asleep, until something wakes it. */
+  /**
+   * One chore (`chore`, else one it picks), then the next until the visit is over, then out to its
+   * box. While you look in through the peek it stays and keeps busy. Sleep ends in bed, asleep, until
+   * something wakes it.
+   */
   const homeLife = (chore?: Chore) => {
-    if (!homeNow.current || asleepNow.current) return;
-    if (!chore && visitLeft.current <= 0) { homeRun(exitBeats(homePlace()), () => leaveHome()); return; }
-    if (!chore) visitLeft.current -= 1;
+    if (activity.current !== "home" || asleepNow.current) return;
+    if (!chore && visitLeft.current <= 0 && !peekNow.current) { goOut(); return; }
+    if (!chore && visitLeft.current > 0) visitLeft.current -= 1;
     const memory = homeMemory.current;
     const next = chore ?? pickChore({ ...memory, hour: new Date().getHours() });
     homeRun(choreBeats(next, homePlace()), () => {
       homeMemory.current = { last: next, sinceMeal: next === "cook" || next === "snack" ? 0 : memory.sinceMeal + 1, hour: 0 };
-      if (next === "sleep") { setAsleep(true); return; }
+      if (next === "sleep") { asleepNow.current = true; setAsleep(true); return; }
       homeLife();
     });
   };
-  /** A piece of furniture clicked: Clawd comes home if it is out (to bed for a nap), and goes to use it. */
+  /** A piece of furniture clicked in the peek: Clawd comes home if it is out, and goes to use it. */
   const toFurniture = (chore: Chore) => {
     poke();
-    // Walking in or out through the door (or leaping to or from it): it finishes that first.
-    if (doorNow.current || doorWay.current || leapNow.current) return;
-    if (!homeNow.current) { goHome(chore === "sleep", chore === "sleep" ? undefined : chore); return; }
+    if (activity.current === "box") { goHome(chore === "sleep", chore === "sleep" ? undefined : chore); return; }
+    if (activity.current !== "home") return;
     if (asleepNow.current && chore === "sleep") return;
     cancelPlans();
     // Up now, not at the next render: homeLife reads it right away.
@@ -1176,87 +910,158 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     visitLeft.current = Math.max(visitLeft.current, 1);
     homeLife(chore);
   };
+  /** Clawd clicked in the peek: up out of bed if it was asleep, and on with a chore. */
+  const wakeInside = () => {
+    poke();
+    if (activity.current !== "home" || !asleepNow.current) return;
+    cancelPlans();
+    asleepNow.current = false;
+    setAsleep(false);
+    say("Huh? I'm up.", 1400);
+    visitLeft.current = Math.max(visitLeft.current, 1);
+    homeLife();
+  };
+  /** The cottage clicked: the peek opens (or closes), and Clawd, if it is out on its box, comes home to show you round. */
+  const onCottage = () => {
+    if (peekNow.current) { setPeek(false); return; }
+    peekNow.current = true;
+    setPeek(true);
+    poke();
+    if (activity.current === "box") goHome(false);
+  };
+  // One function for the peek's lifetime, so its outside-click and Escape listeners are set up once.
+  const closePeek = useRef(() => setPeek(false)).current;
   // Nothing running for a while: it goes home to sleep. Any touch, or the agent starting, wakes it.
   const poke = () => {
     window.clearTimeout(napTimer.current);
     napTimer.current = window.setTimeout(() => {
-      if ((moodNow.current === "idle" || moodNow.current === "done") && !rideNow.current && !drag.current) goHome();
+      if ((moodNow.current === "idle" || moodNow.current === "done") && activity.current === "box" && !drag.current) goHome();
     }, NAP_MS);
   };
+  /** Napping on its box: up, and on with its day. */
   const wake = () => {
-    if (!asleepNow.current && !homeNow.current) return false;
+    if (!asleepNow.current || activity.current !== "box") return false;
     asleepNow.current = false;
     setAsleep(false);
     setPose(REST);
     say("Huh? I'm up.", 1500);
     poke();
-    // Out of bed (or off whatever it is on, down the ladder), across to the front, and out; napping
-    // on its box, on with its day.
-    if (homeNow.current) goOut(); else { cancelPlans(); wander(); }
+    cancelPlans();
+    wander();
     return true;
   };
 
-  /** Feet on the box at `spot`, in screen px. */
-  const screenAt = (spot: number) => {
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) return { x: pointer.current.x, y: pointer.current.y };
-    const { x, y } = spotAt(current, spot);
-    return { x: frame.left + x, y: frame.top + y };
-  };
-  /** It jumps off the pointer, back onto the box's top edge below it (never onto a button). */
+  /** It leaps off the pointer back onto its box below where the pointer is (never onto the chat). */
   const leave = () => {
-    cancelTransitionFrame();
     window.clearTimeout(rideTimer.current);
-    if (rideNow.current?.mode === "leaving") return;
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!rideNow.current || !current || !frame) { setRide(null); return; }
-    rideNow.current = { ...rideNow.current, mode: "leaving" };
-    const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, pointer.current.x - frame.left));
-    const spot = freeNear(nearLap(current, x, atNow.current));
-    setPose({ ...REST, arms: "both" });
-    setRide((ridden) => ridden && { ...ridden, ...screenAt(spot), mode: "leaving" });
-    afterDecoration(still ? 0 : 480, () => {
-      atNow.current = spot;
-      setAt(spot);
-      setRide(null);
-      setPose(REST);
-      play("jump");
+    if (activity.current !== "ride") return;
+    setRiding(false);
+    const current = boxNow.current;
+    const parent = composer.current;
+    if (!current || !parent) return;
+    activity.current = "travel";
+    const x = restNear(clamp(pointer.current.x - parent.getBoundingClientRect().left, WIDTH / 2, current.width - WIDTH / 2));
+    leapTo({ space: "box", x, y: 0 }, () => {
+      activity.current = "box";
       remember();
       poke();
       cancelPlans();
       wander();
-    });
+    }, { crouch: false, impact: 0.5 });
   };
   /** It leaps onto the pointer: for a short hug with hearts, or for a ride of a few seconds. */
   const board = (stay: number) => {
     cancelPlans();
     setJob("none");
-    setRide({ ...screenAt(atNow.current), mode: "boarding", look: 0 });
-    setPose({ ...REST, arms: "both" });
-    // Two frames later, so the leap starts from where it stood.
-    afterTwoFrames(() => setRide((current) => current && { ...current, ...pointer.current, mode: "boarding" }));
-    later(420, () => {
-      setRide((current) => current && { ...current, ...pointer.current, mode: "riding" });
-      // Aboard, its feet dangle and it looks the way it is carried (see the ride frame below).
+    activity.current = "ride";
+    setRiding(true);
+    // Sitting on the pointer's tip, a little behind it as it moves.
+    const seat = (): Place => ({ space: "screen", x: pointer.current.x, y: pointer.current.y - 2 });
+    leapTo(seat(), () => {
+      if (activity.current !== "ride") return;
       setPose({ ...REST, walking: true });
       float("♥", 18); float("♥", 40);
-      later(200, () => float("♥", 28));
+      afterDecoration(200, () => float("♥", 28));
       say(stay > 2000 ? pick(RIDING) : "Hi!", 1400);
-    });
-    window.clearTimeout(rideTimer.current);
-    rideTimer.current = window.setTimeout(leave, 420 + Math.min(stay, MAX_RIDE));
+      let last = Number.NaN;
+      animate((now) => {
+        const ms = Number.isNaN(last) ? 16 : now - last;
+        last = now;
+        const goal = seat();
+        const before = feet.current.x;
+        feet.current.x = follow(feet.current.x, goal.x, ms);
+        feet.current.y = follow(feet.current.y, goal.y, ms);
+        const moved = feet.current.x - before;
+        const way = moved < -0.6 ? -1 : moved > 0.6 ? 1 : 0;
+        if (way && way !== facing.current) { facing.current = way; setPose((current) => ({ ...current, look: way })); }
+        return activity.current === "ride";
+      });
+      window.clearTimeout(rideTimer.current);
+      rideTimer.current = window.setTimeout(leave, Math.min(stay, MAX_RIDE));
+    }, { land: false });
   };
+
+  // First placement, once the box is measured: where it just leapt to from another pane, else where
+  // it was left, else near the right end.
+  useEffect(() => {
+    if (!box || placed) return;
+    const arrival = split ? petStage.arrivalFor(split.pane) : null;
+    let x = Number.NaN;
+    if (arrival) x = arrival.x;
+    else {
+      try {
+        const saved = Number(localStorage.getItem(POSITION_KEY) ?? Number.NaN);
+        if (saved >= 0 && saved <= 1) x = saved * box.width;
+        OLD_KEYS.forEach((key) => localStorage.removeItem(key));
+      } catch { /* first visit */ }
+      if (!Number.isFinite(x)) x = box.width - 2 * WIDTH;
+      // Never over the chat's last line or a chip, even where it was left.
+      x = restNear(clamp(x, WIDTH / 2, box.width - WIDTH / 2));
+    }
+    activity.current = "box";
+    moveTo({ space: "box", x: clamp(x, WIDTH / 2, box.width - WIDTH / 2), y: 0 });
+    setPlaced(true);
+    if (arrival) {
+      // Landed here from another pane: the landing it leapt into, a word, and on with its day.
+      land(0.55, () => {
+        if (arrival.line) say(arrival.line, 1600);
+        remember();
+        poke();
+        if (moodNow.current === "ask") runToSend();
+        wander();
+      });
+      return;
+    }
+    if (!entrancePlayed && !still) { entrancePlayed = true; play(pickOne(ENTRANCES)); }
+  }, [box]);
+  // React has drawn it in the space it went to: paint it there now, before the page shows.
+  useLayoutEffect(() => {
+    spaceNow.current = space;
+    paint();
+    if (space !== "screen") petFlight.set(null);
+  }, [space, inside, placed]);
+  // Read when it goes over the page or the peek opens, so a theme switched since is picked up.
+  useLayoutEffect(() => {
+    if ((space === "screen" || peek) && composer.current) setPalette(chatPalette(composer.current));
+  }, [space, peek]);
+  // Its cottage went away (the window narrowed, the chat list closed) while it was in it or on its way:
+  // it is back on its box.
+  useEffect(() => {
+    if (houseAt) return;
+    if (activity.current === "home") { cancelPlans(); leaveHome(); }
+    else if (activity.current === "travel" && feet.current.space !== "box") { cancelPlans(); flyBack(); }
+    setPeek(false);
+  }, [houseAt]);
 
   // React to the agent: each mood gets its own little scene, then the wander loop resumes.
   useEffect(() => {
     cancelPlans();
-    if (rideNow.current) leave();
-    // In its house, or on its way in or out: it comes out the way it went in (goOut), and takes up the
-    // new mood's scene once it is out (settleOut). It used to be popped straight out of bed.
-    if (homeNow.current || doorNow.current || doorWay.current) goOut();
-    else {
+    // On the pointer: it jumps off. In its house: it comes out through the door. On its way somewhere:
+    // back onto its box. It takes up the new mood's scene once it is back (settleOut).
+    if (activity.current === "ride") leave();
+    else if (activity.current === "home") goOut();
+    else if (activity.current === "travel") flyBack();
+    else if (activity.current === "box") {
       asleepNow.current = false;
       setAsleep(false);
       setPose(REST);
@@ -1273,14 +1078,11 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     }
     setCheering(false);
     if (mood === "working" && !still) later(400, () => {
-      // Still in its house or on its way out: it takes up its laptop once it is out (settleOut).
-      if (homeNow.current || doorNow.current || doorWay.current || leapNow.current) return;
-      const current = loopNow.current;
-      if (current && Number.isFinite(atNow.current) && spotAt(current, atNow.current).side !== 0) {
-        walkTo(onTop(current, atNow.current), SCURRY, () => {
-          if (moodNow.current === "working") setJob("laptop");
-        });
-      } else setJob("laptop");
+      // Still out somewhere: it takes up its laptop once it is back (settleOut).
+      if (busy() || motion.current || moodNow.current !== "working") return;
+      const spot = restNear(feet.current.x, WIDTH + 40);
+      if (Math.abs(spot - feet.current.x) > 4) walkTo(spot, SCURRY, () => { if (moodNow.current === "working") setJob("laptop"); });
+      else setJob("laptop");
     });
     if (mood === "error") { play("look"); say("Uh oh", 1600); }
     if (mood === "ask") { say(LINES.ask, 2600); runToSend(); }
@@ -1292,50 +1094,48 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   // failure), and it now and then follows you into the pane you click into.
   useEffect(() => {
     if (!split || still) return undefined;
-    let follow = 0;
+    let following = 0;
     const off = petStage.subscribe((event) => {
       if (event.kind === "host" || event.pane === split.pane) return;
-      if (drag.current || heldNow.current || rideNow.current || leapNow.current || moodNow.current === "ask") return;
+      if (drag.current || activity.current === "held" || activity.current === "ride" || activity.current === "travel" || moodNow.current === "ask") return;
       if (event.kind === "mood") {
         const line = petCall(event.mood, event.was, Math.random());
         if (line === null) return;
-        window.clearTimeout(follow);
-        if (homeNow.current || doorNow.current || doorWay.current) { goOut(event.pane); return; }
-        cancelPlans();
+        window.clearTimeout(following);
+        if (activity.current === "home") { goOut(event.pane); return; }
         hop(event.pane, line);
         return;
       }
-      window.clearTimeout(follow);
+      window.clearTimeout(following);
       const calm = moodNow.current === "idle" || moodNow.current === "done";
-      if (!calm || asleepNow.current || homeNow.current || Math.random() >= FOLLOW_CHANCE) return;
-      follow = window.setTimeout(() => { if (!busyElsewhere() && petStage.focused() === event.pane) hop(event.pane, pick(FOLLOWING)); }, FOLLOW_MS);
+      if (!calm || asleepNow.current || activity.current !== "box" || Math.random() >= FOLLOW_CHANCE) return;
+      following = window.setTimeout(() => { if (!busy() && petStage.focused() === event.pane) hop(event.pane, pick(FOLLOWING)); }, FOLLOW_MS);
     });
-    return () => { off(); window.clearTimeout(follow); };
+    return () => { off(); window.clearTimeout(following); };
   }, []);
   const full = context !== null && context >= 0.8;
   useEffect(() => { if (full) say("I'm getting full. Compact soon?", 2600); }, [full]);
 
-  // Legs cycle while it walks; at work, its arms and tools keep the same beat.
-  // At home its chores keep the beat too: the pot's lid, the bubbles, the bites, the laptop's lines.
-  const homeBusy = home && scene !== null && scene.doing !== "stand";
-  const walking = !asleep && (pose.walking || mood === "working" || job !== "none" || homeBusy);
+  // At work its arms and tools keep a beat; at home so do its chores (the pot's lid, the bubbles, the
+  // bites, the laptop's lines, its feet across the floor); carried or riding, its feet kick.
+  const homeBusy = inside && scene !== null && scene.doing !== "stand";
+  const homeWalking = inside && scene !== null && (scene.doing === "walk" || scene.doing === "climb" || scene.doing === "serve");
+  const beating = !asleep && (mood === "working" || job !== "none" || homeBusy || riding || held);
   useEffect(() => {
-    if (!walking) { setStep(false); return undefined; }
-    const beat = pose.walking ? 120 : job === "build" ? 260 : job === "coffee" || job === "read" ? 900 : 200;
+    if (!beating) { setStep(false); return undefined; }
+    const beat = homeWalking || riding || held ? 140 : job === "build" ? 260 : job === "coffee" || job === "read" ? 900 : 200;
     const timer = window.setInterval(() => { setStep((current) => !current); setTick((current) => current + 1); }, beat);
     return () => window.clearInterval(timer);
-  }, [walking, pose.walking, job]);
-  // The hammer's own spark marks each blow (Prop): a ✦ also rose from every one, twice a second, and
-  // with the spinner overhead Clawd looked to be setting off fireworks (the user, 2026-10-30).
-  // Light code bubbles make the typing motion recognizable without replacing Clawd's original pixels.
-  useEffect(() => { if (job === "laptop" && step && tick % 4 === 0 && !still) float("{}", 20); }, [job, step, tick, still]);
+  }, [beating, homeWalking, riding, held, job]);
+  // Light code bubbles make the typing recognizable without replacing Clawd's original pixels.
+  useEffect(() => { if (job === "laptop" && step && tick % 4 === 0 && !still && !inside) float("{}", 20); }, [job, step, tick, still]);
   // While the agent works, Claude Code's spinner turns over its head.
-  const busy = mood === "working" && !asleep && job !== "carry" && !ride;
+  const spinning = mood === "working" && !asleep && job !== "carry" && !riding && !inside;
   useEffect(() => {
-    if (!busy || still) { setSpin(0); return undefined; }
+    if (!spinning || still) { setSpin(0); return undefined; }
     const timer = window.setInterval(() => setSpin((current) => (current + 1) % SPINNER.length), 120);
     return () => window.clearInterval(timer);
-  }, [busy, still]);
+  }, [spinning, still]);
   // Awake, it blinks now and then.
   useEffect(() => {
     if (asleep || still) return undefined;
@@ -1350,43 +1150,36 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     return () => { window.clearTimeout(timer); setBlink(false); };
   }, [asleep, still]);
 
-  // It watches the pointer when it comes near, rides it once aboard, now and then leaps onto it,
-  // and perks up while you type in the box.
+  // It watches the pointer when it comes near, now and then leaps onto it, and perks up while you
+  // type in the box.
   useEffect(() => {
     if (still) return undefined;
-    let frame = 0;
     let timer = 0;
     let moved = 0;
     const onMove = (event: PointerEvent) => {
       moved += event.clientX - pointer.current.x;
       pointer.current = { x: event.clientX, y: event.clientY };
-      if (frame || timer) return;
-      // Aboard, it follows the pointer every frame. Otherwise it only turns its head or starts a
-      // game, which ten checks a second cover: a frame asked for on every move made the whole window
-      // lay out and paint at the screen's rate (136 times a second) whenever the mouse moved.
-      if (rideNow.current) frame = window.requestAnimationFrame(check);
-      else timer = window.setTimeout(check, LOOK_EVERY_MS);
+      // Aboard, the frame clock follows the pointer and these checks only catch a shake. Otherwise it
+      // only turns its head or starts a game, which ten checks a second cover.
+      if (timer) return;
+      timer = window.setTimeout(check, LOOK_EVERY_MS);
     };
     const check = () => {
-      frame = 0;
       timer = 0;
-      const { x, y } = pointer.current;
       const dx = moved;
       moved = 0;
-      if (rideNow.current) {
-        // Aboard, it goes wherever the pointer goes, facing the way it is carried.
-        if (rideNow.current.mode !== "riding") return;
+      if (activity.current === "ride") {
         // Shaken hard, it lets go and jumps back to the box.
-        if (Math.abs(dx) > SHAKE) { say("Whoa!", 900); leave(); return; }
-        setRide((current) => current && { ...current, x, y, look: dx < -1 ? -1 : dx > 1 ? 1 : current.look });
+        if (Math.abs(dx) > SHAKE) { say("Whoa!", 900); leave(); }
         return;
       }
-      const body = box.current?.getBoundingClientRect();
-      if (!body || asleepNow.current || drag.current || heldNow.current || leapNow.current) return;
-      const middle = body.left + body.width / 2;
-      const distance = Math.hypot(x - middle, y - (body.top + body.height / 2));
+      if (activity.current !== "box" || asleepNow.current || drag.current || feet.current.space !== "box") return;
+      const { x, y } = pointer.current;
+      const at = toScreen(feet.current);
+      const middle = at.x;
+      const distance = Math.hypot(x - middle, y - (at.y - FEET / 2));
       const calm = moodNow.current === "idle" || moodNow.current === "done";
-      if (calm && distance < REACH && !homeNow.current && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
+      if (calm && distance < REACH && !motion.current && Date.now() - lastPlay.current > PLAY_EVERY && Math.random() < 0.6) {
         lastPlay.current = Date.now();
         board(Math.random() < 0.5 ? 1200 : 2200 + Math.random() * 1800);
         return;
@@ -1398,10 +1191,10 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       });
     };
     let lastTyped = 0;
-    const form = composer.current ?? box.current?.parentElement;
+    const form = composer.current ?? anchor.current?.parentElement;
     const onInput = () => {
       const now = Date.now();
-      if (now - lastTyped < 1500 || asleepNow.current) return;
+      if (now - lastTyped < 1500 || asleepNow.current || activity.current !== "box") return;
       lastTyped = now;
       play("wink");
       poke();
@@ -1409,14 +1202,13 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     window.addEventListener("pointermove", onMove);
     form?.addEventListener("input", onInput);
     return () => {
-      window.removeEventListener("pointermove", onMove); form?.removeEventListener("input", onInput);
-      if (frame) window.cancelAnimationFrame(frame);
+      window.removeEventListener("pointermove", onMove);
+      form?.removeEventListener("input", onInput);
       if (timer) window.clearTimeout(timer);
     };
   }, [still]);
 
   // While it rides: any click or Escape makes it jump off, and it hops, winks and looks about.
-  const riding = ride?.mode === "riding";
   useEffect(() => {
     if (!riding) return undefined;
     const off = () => leave();
@@ -1432,121 +1224,106 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   }, [riding]);
 
   useEffect(() => () => {
-    cancelTransitionFrame();
     decorationTimers.current.forEach((timer) => window.clearTimeout(timer));
     decorationTimers.current.clear();
     window.clearTimeout(rideTimer.current); window.clearTimeout(clickTimer.current); window.clearTimeout(bubbleTimer.current);
-    window.clearTimeout(napTimer.current); window.clearTimeout(fallTimer.current); window.clearTimeout(doorTimer.current); window.clearTimeout(leapTimer.current);
+    window.clearTimeout(napTimer.current);
     dragEnd.current?.(); cancelPlans();
+    petFlight.set(null);
   }, []);
 
-  const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
-
-  // Off its box (carried, riding the pointer, leaping), where it is on the screen each frame: a
-  // native view it passes over (the chat's Preview) swaps in a still of its page, or it covered Clawd.
-  const airborne = Boolean(held || ride || leap);
-  useEffect(() => {
-    if (!airborne) return undefined;
-    let frame = 0;
-    const follow = () => {
-      const rect = box.current?.getBoundingClientRect();
-      if (rect) petFlight.set({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
-      frame = requestAnimationFrame(follow);
-    };
-    follow();
-    return () => { cancelAnimationFrame(frame); petFlight.set(null); };
-  }, [airborne]);
-
-  /** Picked up and moved: it follows the pointer anywhere on the screen, held by its middle. */
+  /** Picked up and moved: it follows the pointer anywhere on the screen, held by its middle, feet kicking. */
   const dragMove = (clientX: number, clientY: number) => {
     const state = drag.current;
     if (!state) return;
-    if (!state.moved && Math.hypot(clientX - state.x, clientY - state.y) > 4) {
+    if (!state.moved) {
+      if (Math.hypot(clientX - state.x, clientY - state.y) <= 4) return;
       state.moved = true;
-      // Lifted out of its house.
-      setAsleep(false);
-      leaveHome(false);
+      cancelPlans();
+      setJob("none");
+      setFace(null);
+      setAirborne(false);
+      rest();
+      if (asleepNow.current) { asleepNow.current = false; setAsleep(false); }
+      activity.current = "held";
+      setHeld(true);
     }
-    if (!state.moved) return;
-    const look: Pose["look"] = clientX < state.lastX - 1 ? -1 : clientX > state.lastX + 1 ? 1 : pose.look;
+    const way: -1 | 0 | 1 = clientX < state.lastX - 1 ? -1 : clientX > state.lastX + 1 ? 1 : 0;
     state.lastX = clientX;
     state.lastY = clientY;
-    // Its feet dangle while it is carried, facing the way it goes.
-    setPose({ ...REST, walking: true, look });
-    setHeld({
-      x: Math.max(WIDTH / 2, Math.min(window.innerWidth - WIDTH / 2, clientX)),
-      y: Math.max(HEIGHT / 2, Math.min(window.innerHeight - HEIGHT / 2, clientY)),
-      fall: 0,
+    if (way) facing.current = way;
+    setPose((current) => current.walking && current.look === facing.current ? current : { ...REST, walking: true, look: facing.current });
+    moveTo({
+      space: "screen",
+      x: clamp(clientX, WIDTH / 2, window.innerWidth - WIDTH / 2),
+      y: clamp(clientY, HEIGHT / 2, window.innerHeight - HEIGHT / 2) + FEET - HEIGHT / 2,
     });
   };
   /**
-   * Let go, it falls onto the box's top edge under where it was dropped (as far as the box reaches),
-   * from wherever on the screen it was let go: arms up and feet kicking, its shadow growing where it
-   * will land. It lands with a squash and a puff of dust (landingFor: harder the higher), a hop after
-   * a middling drop, then hops off any button it landed on.
+   * Let go, it falls under gravity onto the top edge of the box under where it was let go (another
+   * pane's box, in split view), arms up and feet kicking, its shadow growing where it will land. It
+   * lands harder the further it fell, with a word after a big drop and a hop after a middling one.
+   * Let go below the box's top edge, it hops up onto it instead.
    */
   const dragDrop = () => {
     const state = drag.current;
     drag.current = null;
-    if (!state?.moved) { if (!asleepNow.current) wander(); return; }
-    const current = loopNow.current;
-    const frame = composer.current?.getBoundingClientRect();
-    if (!current || !frame) { setPose(REST); setHeld(null); wander(); return; }
-    setPose({ ...REST, arms: "both", walking: true });
-    // In split view, let go over another pane, it falls onto that pane's box and lives there.
+    if (!state?.moved) return;
+    setHeld(false);
+    const parent = composer.current;
+    const current = boxNow.current;
+    if (!parent || !current) { activity.current = "box"; return; }
     const other = otherPanes().find((pane) => {
-      const rect = pane.getBoundingClientRect();
-      return state.lastX >= rect.left && state.lastX <= rect.right && state.lastY >= rect.top && state.lastY <= rect.bottom;
+      const frame = pane.getBoundingClientRect();
+      return state.lastX >= frame.left && state.lastX <= frame.right && state.lastY >= frame.top && state.lastY <= frame.bottom;
     });
-    const otherBox = other && petStage.seats().get(other)?.composer;
-    const across = otherBox ? topEdge(otherBox, state.lastX - otherBox.getBoundingClientRect().left) : null;
-    const x = Math.max(WIDTH / 2, Math.min(current.width - WIDTH / 2, state.lastX - frame.left));
-    const spot = nearLap(current, x, atNow.current);
-    const to = across ? { x: across.x, y: across.y - HEIGHT / 2 } : { x: frame.left + x, y: frame.top - HEIGHT / 2 };
-    // How far above the top edge it lands on it was let go (0 level with it or below).
-    const height = Math.max(0, Math.round(to.y - state.lastY));
-    // A longer drop takes longer, as a fall does: 420 ms from 400 px.
-    const distance = Math.hypot(to.x - state.lastX, to.y - state.lastY);
-    const fallMs = still ? 0 : Math.round(Math.min(1100, Math.max(260, FALL_MS * Math.sqrt(Math.max(distance, 1) / 400))));
-    if (height > 40) say("Wheee", 900);
-    // The shadow is drawn on this box's top edge; over another pane's box it has none.
-    setDropX(across ? null : x);
-    // Two frames later, so the fall starts from where it was let go.
-    afterTwoFrames(() => setHeld({ ...to, fall: fallMs }));
-    // Its own timer: a mood change clears the wander plans, and must not leave it in the air.
-    window.clearTimeout(fallTimer.current);
-    fallTimer.current = window.setTimeout(() => {
-      if (other && across && petStage.handoff(other, { x: across.along, carry: false, line: "" })) return;
-      atNow.current = spot;
-      setAt(spot);
-      setHeld(null);
-      setPose(REST);
-      const { impact, hop, line } = landingFor(height);
-      const squashed = !still && impact > 0;
-      if (squashed) setLanding(Math.min(1, impact));
+    const target = (other && petStage.seats().get(other)?.composer) || parent;
+    const frame = target.getBoundingClientRect();
+    const along = spotOn(target, state.lastX - frame.left) ?? clamp(state.lastX - frame.left, WIDTH / 2, frame.width - WIDTH / 2);
+    const to = { x: frame.left + along, y: frame.top };
+    const from = { x: feet.current.x, y: feet.current.y };
+    activity.current = "travel";
+    const arrive = (impact: number, line: string | null, bounce: boolean) => {
+      if (target !== parent && other && petStage.handoff(other, { x: along, carry: false, line: line ?? "" })) return;
+      activity.current = "travel";
+      moveTo({ space: "box", x: along, y: 0 });
       if (line) say(line, 1100);
-      poke();
-      // Once the squash is over, a hop if it bounces, then off any button and on with its day.
-      later(squashed ? LAND_MS : 0, () => {
-        if (hop) play("jump");
-        const free = freeNear(atNow.current);
-        if (free !== atNow.current) walkTo(free, SCURRY * DASH, () => { remember(); wander(); });
-        else { remember(); wander(); }
+      land(impact, () => {
+        activity.current = "box";
+        if (bounce) play("jump");
+        remember();
+        poke();
+        wander();
       });
-    }, fallMs + 34);
+    };
+    if (from.y > to.y - 12) {
+      leapTo({ space: "screen", ...to }, () => arrive(0.35, null, false), { land: false, crouch: false });
+      return;
+    }
+    const plan = fallPlan(from, to);
+    const height = to.y - from.y;
+    if (height > 40) say("Wheee", 900);
+    setPose({ ...REST, arms: "both", walking: true, look: facing.current });
+    if (target === parent) setDrop({ x: along, ms: plan.ms });
+    setAirborne(true);
+    timed(plan.ms, (t) => {
+      const at = fallAt(plan, t * plan.ms);
+      feet.current.x = at.x;
+      feet.current.y = at.y;
+      Object.assign(shape.current, { sx: 1 - 0.05 * t, sy: 1 + 0.08 * t });
+    }, () => {
+      setAirborne(false);
+      setDrop(null);
+      rest();
+      arrive(impactOf(plan.speed), height >= 300 ? "Oof!" : height >= 160 ? "Nailed it" : null, height >= 80 && height < 300);
+    });
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    // Still falling from the last drop: a press now would cancel nothing and could leave it in the
-    // air (the landing is its own timer), so it lands first.
-    if (event.button !== 0 || drag.current || heldNow.current) return;
-    // Picked up mid-walk or mid-job: it stops where it is and goes where it is carried.
-    cancelPlans();
-    setJob("none");
+    if (event.button !== 0 || drag.current || activity.current === "held" || activity.current === "ride") return;
     drag.current = { moved: false, x: event.clientX, y: event.clientY, lastX: event.clientX, lastY: event.clientY };
-    // The window follows the drag: carried off the box, Clawd moves onto the page itself, and the
-    // button it was picked up by is no longer the one under the pointer. Only the pointer that
-    // picked it up counts: a second finger or a pen neither moves nor drops it.
+    // The window follows the drag: carried off the box, Clawd moves onto the page itself. Only the
+    // pointer that picked it up counts: a second finger or a pen neither moves nor drops it.
     const id = event.pointerId;
     const move = (moved: PointerEvent) => { if (moved.pointerId === id) dragMove(moved.clientX, moved.clientY); };
     const end = () => {
@@ -1562,76 +1339,27 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     window.addEventListener("pointercancel", up);
   };
 
+  const shown: PetMood = mood === "done" && !cheering ? "idle" : mood;
   const percent = context === null ? null : Math.round(context * 100);
-  // Home in the house beside the box: upright in the middle of its room, feet on its floor, as it
-  // stands in the house on the top edge (its walk ends sideways at the foot of the box's right side).
-  // Home in its house under the chat list (split view): in the middle of the room there. That house's
-  // lot also holds it on the porch in front of the house, so it is the same element walking in and out.
-  const inLot = Boolean(yard && (home || door) && !ride && !held && !leap);
-  const inRoom = home && !ride && !held && !leap && (yard ? { left: 0, top: 0 } : !split && loop ? housePlace(loop) : null) || null;
-  // Inside, where it stands in the house now (half size, see codex-chat.css), moving there over the
-  // beat: walking along a floor, climbing the ladder, or hopping up onto or down off a piece.
-  const place = scene ?? ENTRY;
-  const homeMove: CSSProperties = still || !scene ? {}
-    : { transition: `left ${scene.ms}ms linear, top ${scene.ms}ms ${scene.doing === "hop" ? HOP_EASE : "linear"}, transform .18s ease-out` };
-  // On its doorstep in the yard: upright on the ground, just out from the box's right side, facing the
-  // open front. Between there and the room it walks at DOOR_MS (the walls are drawn over it).
-  const atDoor = door && !home && !ride && !held && !leap && !yard && loop?.beside ? { left: loop.width + 2, top: loop.height - HEIGHT } : null;
-  // On the porch in front of its house under the chat list: full size, in front of the house (is-porch),
-  // its feet on the ground. It walks between there and the entry at DOOR_MS, growing on the way out
-  // and shrinking on the way in, still in front of the walls until it is inside.
-  const onPorch = yard && door && !home && !ride && !held && !leap ? { left: porchX() - WIDTH / 2, top: HOUSE_H - HEIGHT } : null;
-  const doorWalk: CSSProperties = door && (inRoom || atDoor || onPorch) ? { transition: `left ${DOOR_MS}ms linear, top .2s ease-in, transform .18s ease-out` } : {};
-  // Upright on the ground, as many whole turns as the laps it walked: stepping off the box's side is
-  // a quarter turn back, not a spin through every lap.
-  const upright: CSSProperties = { transform: `rotate(${loop && !Number.isNaN(at) ? Math.floor(at / loop.length) * 360 : 0}deg)`,
-    transformOrigin: `${WIDTH / 2}px ${HEIGHT}px` };
-  const side = loop && !Number.isNaN(at) && !ride && !held && !leap && !inRoom && !atDoor && !onPorch ? spotAt(loop, at).side : 0;
-  // Keep tools on the inward side of the composer so a computer cannot disappear
-  // through its right edge. Clawd turns toward whichever side holds the tool.
-  // At home it holds things on the side it faces: the ladle toward the stove, the cookie toward the fridge.
-  const toolSide = home && scene ? (scene.look < 0 ? "left" : "right")
-    : loop && !Number.isNaN(at) ? petToolSide(spotAt(loop, at).x, loop.width) : "left";
-  // On the box: feet on the outline, body outward, so upright on top, sideways on the sides and
-  // upside down under it. On the pointer or held: upright, above everything.
-  const placement: CSSProperties = inRoom
-    ? { left: inRoom.left + place.x * PIXEL_W - WIDTH / 2, top: inRoom.top + (FLOOR_LINE[place.storey] - place.lift) * PIXEL_H - HEIGHT,
-      ...upright, ...homeMove, ...doorWalk }
-    : onPorch
-    ? { ...onPorch, ...upright, ...doorWalk }
-    : atDoor
-    ? { ...atDoor, ...upright, ...doorWalk }
-    : leap
-    // Leaping: along the straight line between the two spots while it arcs up over it and back down
-    // (is-flying: codex-chat.css cx-pet-arc, as high as petLeap says).
-    ? { position: "fixed", left: leap.x - WIDTH / 2, top: leap.y - HEIGHT, zIndex: 60, pointerEvents: "none",
-      transition: leap.ms ? `left ${leap.ms}ms linear, top ${leap.ms}ms linear` : "none",
-      animationDuration: `${leap.ms}ms`, "--cx-pet-arc": `${leap.arc}px` } as CSSProperties
-    : ride
-    ? { position: "fixed", left: ride.x - WIDTH / 2, top: ride.y - HEIGHT + 4, zIndex: 60, pointerEvents: "none",
-      transition: ride.mode === "riding" ? "none" : "left .42s ease-out, top .42s cubic-bezier(.3,-.7,.6,1)" }
-    : held
-    ? { position: "fixed", left: held.x - WIDTH / 2, top: held.y - HEIGHT / 2, zIndex: 60,
-      transition: held.fall ? `left ${held.fall}ms ease-out, top ${held.fall}ms cubic-bezier(.55, 0, 1, .45)` : "none" }
-    : loop && !Number.isNaN(at) ? (() => {
-      const { x, y } = spotAt(loop, at);
-      return { left: x - WIDTH / 2, top: y - HEIGHT, transform: `rotate(${side * 90 + Math.floor(at / loop.length) * 360}deg)`,
-        transformOrigin: `${WIDTH / 2}px ${HEIGHT}px`,
-        // Stepping up from its doorstep onto the box's side: it eases there, turning onto the side.
-        ...(glide ? { transition: `left ${STEP_MS}ms ease-out, top ${STEP_MS}ms ease-out, transform ${STEP_MS}ms ease-out` } : {}) };
-    })() : { visibility: "hidden" };
-  const pet = <div ref={box} className={`cx-pet side-${side}${held ? " is-held" : ""}${ride ? ` is-riding ride-${ride.mode}` : ""}${home ? " is-home" : ""}${leap ? " is-leaping" : ""}${leap?.ms ? " is-flying" : ""}${inLot && door ? " is-porch" : ""}`}
-    style={{ ...placement, ...(landing !== null ? { "--cx-pet-impact": landing } as CSSProperties : {}) }}>
+  // Tools go on the box's inward side, so a laptop never disappears past its end; at home it holds
+  // things on the side it faces (the ladle toward the stove, the cookie toward the fridge).
+  const toolSide = inside && scene ? (scene.look < 0 ? "left" : "right")
+    : box && Number.isFinite(feet.current.x) ? petToolSide(feet.current.x, box.width) : "left";
+  const frame: Frame = face ?? clawd.frame ?? restFrame({ mood: shown, asleep, job, toolSide,
+    step: pose.walking && !riding && !held && !inside ? foot : step,
+    // Chewing at the table: its eyes squeeze shut on each bite.
+    blink: blink || (inside && scene?.doing === "eat" && step), pose });
+  const label = `Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`;
+  const pet = <div ref={el} className={`cx-pet${space === "screen" ? " is-screen" : ""}${held ? " is-held" : ""}${riding ? " is-riding" : ""}${airborne ? " is-flying" : ""}`}
+    style={{ ...(space === "screen" ? palette : {}), ...(placed ? {} : { visibility: "hidden" }), ...(landed ? { "--cx-pet-impact": landed.impact } as CSSProperties : {}) }}>
     {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
-    {/* Napping on its box (no house in this split view): z's rise over it, as over its bed at home. */}
-    {asleep && !home ? <span className="cx-pet-house-z cx-pet-nap-z" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></span> : null}
-    {landing !== null ? <><span className="cx-pet-dust is-left" aria-hidden="true" /><span className="cx-pet-dust is-right" aria-hidden="true" /></> : null}
-    {busy ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
+    {/* Napping on its box (no cottage to go to): z's rise over it. */}
+    {asleep ? <span className="cx-pet-house-z cx-pet-nap-z" aria-hidden="true"><span>z</span><span>z</span><span>Z</span></span> : null}
+    {landed ? <span key={landed.count} className="cx-pet-dusts" aria-hidden="true"><span className="cx-pet-dust is-left" /><span className="cx-pet-dust is-right" /></span> : null}
+    {spinning ? <span className="cx-pet-spinner" aria-hidden="true">{SPINNER[spin]}</span> : null}
     {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
-    <button type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job} is-tool-${toolSide}` : ""}${landing !== null ? " is-landing" : ""}`}
-      // The squash ends itself, so no cancelled plan can leave it squashed.
-      onAnimationEnd={(event) => { if (event.animationName === "cx-pet-land") setLanding(null); }}
-      aria-label={`Bit the pet: ${asleep ? "napping" : LINES[shown]}${percent !== null ? ` Context ${percent}%.` : ""}`}
+    <button ref={body} type="button" className={`cx-pet-body is-${shown}${asleep ? " is-asleep" : ""}${pose.walking ? " is-walking" : ""}${job !== "none" ? ` is-${job} is-tool-${toolSide}` : ""}`}
+      aria-label={label}
       title={asleep ? "Napping. Click to wake" : `${LINES[shown]}${percent !== null ? ` · ${percent}% context` : ""}\nClick to pet · double-click to feed · drag to move`}
       onPointerDown={onPointerDown}
       onClick={() => {
@@ -1656,33 +1384,50 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       }}
       onContextMenu={(event) => { event.preventDefault(); onHide(); }}>
       {!asleep && job === "carry" ? <CarriedBox /> : null}
-      {!asleep && job === "serve" ? <CarriedPlate tick={tick} /> : null}
-      <ClawdFrame frame={clawd.frame ?? restFrame({ mood: shown, asleep, step, job, toolSide,
-        // Chewing at the table: its eyes squeeze shut on each bite.
-        blink: blink || (home && scene?.doing === "eat" && step),
-        pose: ride ? { ...pose, walking: ride.mode === "riding", look: ride.look } : pose })} />
-      <Prop job={asleep || ride ? "none" : job} step={step} tick={tick} bites={scene?.bites ?? 3} />
+      <ClawdFrame frame={frame} />
+      <Prop job={asleep || riding ? "none" : job} step={step} tick={tick} />
     </button>
   </div>;
-  // The room behind Clawd, the roof and walls in front of it: with the front open, it shows inside.
-  // In split view the house stands in its yard under the chat list, with Clawd in it when home.
-  const view: HomeView = { home, asleep, doing: home ? scene?.doing ?? null : null, tick, step, bites: scene?.bites ?? 3 };
-  const rooms = (spot: CSSProperties, inside: ReactElement | null) => <>
-    <div className="cx-pet-house-spot is-inside" style={spot}><HouseInside {...view} /></div>
-    {inside}
-    <div className="cx-pet-house-spot" style={spot}>
-      <House {...view} onKnock={() => { if (!wake()) goHome(false); }} onUse={toFurniture} />
-    </div>
+
+  // Its cottage: beside the box, its floor level with the box's bottom, or in the yard under the
+  // chat list. Never above the box, where it covered the chat's last messages.
+  const view: HomeView = { home: inside, asleep, doing: inside ? scene?.doing ?? null : null, tick, step, bites: scene?.bites ?? 3 };
+  const cottage = <Cottage home={inside} asleep={asleep} doing={view.doing} open={doorOpen} peeking={peek} onClick={onCottage} />;
+  // Seen through the peek: Clawd at half size where it is in the house, moving there over the beat
+  // (walking a floor, climbing the ladder, hopping onto a piece).
+  const place = scene ?? { ...ENTRY, doing: "stand" as const, look: 0 as const, ms: 0 };
+  const inRoom: CSSProperties = {
+    left: place.x * PIXEL_W - WIDTH / 2,
+    top: (FLOOR_LINE[place.storey] - place.lift) * PIXEL_H - FEET,
+    transition: still || !scene ? "none" : `left ${scene.ms}ms linear, top ${scene.ms}ms ${scene.doing === "hop" ? HOP_EASE : "linear"}`,
+  };
+  const roomClawd = inside ? <div className="cx-pet-peek-clawd" style={inRoom}>
+    {bubble ? <span className="cx-pet-bubble" role="status">{bubble}</span> : null}
+    {floaters.map((item) => <span key={item.id} className="cx-pet-float" style={{ left: item.offset }} aria-hidden="true">{item.text}</span>)}
+    <button type="button" className={`cx-pet-peek-sprite${job !== "none" ? ` is-tool-${toolSide}` : ""}`} aria-label={asleep ? "Clawd, asleep: click to wake it" : "Clawd"}
+      onClick={wakeInside}>
+      {!asleep && job === "serve" ? <CarriedPlate tick={tick} /> : null}
+      <ClawdFrame frame={frame} />
+      <Prop job={asleep ? "none" : job} step={step} tick={tick} bites={scene?.bites ?? 3} />
+    </button>
+  </div> : null;
+  return <>
+    <span ref={anchor} hidden />
+    {houseAt === "beside" && box
+      ? <span ref={cottageSpot} className="cx-pet-cottage-spot" style={{ left: box.width - box.edge + COTTAGE_GAP, top: box.height - box.edge - COTTAGE_H }}>{cottage}</span>
+      : null}
+    {houseAt === "yard" && yard
+      ? createPortal(<div ref={lot} className="cx-pet-lot"><span ref={cottageSpot} className="cx-pet-cottage-spot">{cottage}</span>
+        {space === "yard" && !inside ? pet : null}</div>, yard)
+      : null}
+    {drop ? <span className="cx-pet-drop-shadow" aria-hidden="true" style={{ left: drop.x, animationDuration: `${drop.ms}ms` }} /> : null}
+    {!inside && space === "box" ? pet : null}
+    {!inside && space === "screen" && typeof document !== "undefined" ? createPortal(pet, document.body) : null}
+    {peek && houseAt && typeof document !== "undefined"
+      ? createPortal(<HousePeek view={view} anchor={() => cottageSpot.current?.getBoundingClientRect() ?? null} clawd={roomClawd}
+        palette={palette} onUse={toFurniture} onClose={closePeek} />, document.body)
+      : null}
   </>;
-  // In split view with the chat list hidden there is no house: standing on a pane's box, it covered
-  // that chat's last messages (the user, 2026-11-09). Clawd naps on its box instead (napHere).
-  const house = yard ? createPortal(<div ref={lot} className="cx-pet-lot">{rooms({ left: 0, top: 0 }, inLot ? pet : null)}</div>, yard)
-    : loop && !split ? rooms(housePlace(loop), null) : null;
-  // Falling onto this box, its shadow grows on the top edge where it will land.
-  const shadow = held?.fall && dropX !== null ? <span className="cx-pet-drop-shadow" aria-hidden="true"
-    style={{ left: dropX, animationDuration: `${held.fall}ms` }} /> : null;
-  // Aboard the pointer, carried or leaping, it lives on the page itself, so no panel's edge clips it.
-  return <>{house}{shadow}{inLot ? null : (ride || held || leap) && typeof document !== "undefined" ? createPortal(pet, document.body) : pet}</>;
 }
 
 /**

@@ -1759,28 +1759,30 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-browser-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ao-green, #2e9d5b); animation: cx-pulse 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { .cx-browser-chip, .cx-browser-dot { animation: none; } }
 
-/* Bit, the chat's pet (ChatPet.tsx): Clawd walking around the chat box's outline. ChatPet sets its
-   left/top so its feet sit on the outline, and turns it about its feet: upright on top, sideways on
-   the sides, upside down underneath. Clawd is Claude Code's (Clawd.tsx): 9×3 terminal cells of
-   8×16 px, its moves the CLI's own frames, so nothing here bobs it; only a drop squashes it as a whole. */
-.cx-pet { position: absolute; top: 0; left: 0; z-index: 2; width: 72px; height: 48px; pointer-events: none; transition: transform .18s ease-out; }
-/* Carried anywhere on the screen (ChatPet places it on the page, and times its fall back onto the box). */
-.cx-pet.is-held .cx-pet-body { cursor: grabbing; }
+/* Bit, the chat's pet (ChatPet.tsx): Claude Code's Clawd on the chat box's top edge, and its cottage.
+   ChatPet moves Clawd with one transform on .cx-pet (where its feet are) and one on its body (its
+   squash, stretch and size), from a single frame clock (chat-pet-motion.ts). Nothing here moves it:
+   a transition here would race that clock. Clawd is Claude Code's (Clawd.tsx): 9×3 terminal cells of
+   8×16 px, its feet on the line 40 px down its 48 px box. */
+.cx-pet { position: absolute; top: 0; left: 0; z-index: 3; width: 72px; height: 48px; pointer-events: none; will-change: transform; }
+/* Leaping across the page, carried or riding the pointer: over everything, on the page itself. */
+.cx-pet.is-screen { position: fixed; z-index: 60; }
+.cx-pet-body { position: relative; display: block; width: 72px; height: 48px; padding: 0; border: 0; background: transparent; cursor: grab;
+  touch-action: none; pointer-events: auto; transform-origin: 36px 40px; }
+.cx-pet.is-held .cx-pet-body, .cx-pet-body:active { cursor: grabbing; }
+.cx-pet.is-riding .cx-pet-body, .cx-pet.is-flying .cx-pet-body { pointer-events: none; }
+.cx-pet-body:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
 /* Its shadow on the box's top edge under where it will land, growing and darkening as it falls. */
 .cx-pet-drop-shadow { position: absolute; top: 0; z-index: 1; width: 44px; height: 6px; margin: -3px 0 0 -22px; border-radius: 50%;
   background: rgba(31, 30, 29, .28); pointer-events: none; animation: cx-pet-shadow .42s cubic-bezier(.55, 0, 1, .45) forwards; }
-/* Landed: squashed flat by the impact, springing up a little taller, then settling. --cx-pet-impact
-   (0–1, ChatPet landingFor) sets how hard; dust puffs out either side of its feet. */
-.cx-pet-body.is-landing { transform-origin: 50% 100%; animation: cx-pet-land .42s cubic-bezier(.3, .7, .4, 1); }
+/* Landed: dust puffs out either side of its feet, further the harder it landed (--cx-pet-impact, 0-1). */
+.cx-pet-dusts { position: absolute; left: 0; right: 0; bottom: 8px; height: 0; pointer-events: none; }
 .cx-pet-dust { position: absolute; bottom: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--ao-muted, #8a8986);
-  opacity: 0; pointer-events: none; animation: cx-pet-dust .42s ease-out forwards; }
+  opacity: 0; animation: cx-pet-dust .42s ease-out forwards; }
 .cx-pet-dust.is-left { left: 14px; --cx-pet-dust-dir: -1; }
 .cx-pet-dust.is-right { right: 14px; --cx-pet-dust-dir: 1; }
-.cx-pet-body { position: relative; pointer-events: auto; display: block; width: 72px; height: 48px; padding: 0; border: 0; background: transparent; cursor: grab; touch-action: none; }
 /* Claude Code's working spinner, turning over its head while the agent works. */
 .cx-pet-spinner { position: absolute; top: -18px; left: 50%; transform: translateX(-50%); color: #d77757; font-size: 16px; font-weight: 700; line-height: 1; }
-.cx-pet-body:active { cursor: grabbing; }
-.cx-pet-body:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
 /* Clawd's box, as the CLI's: it clips, so a crouch sinks its feet out of sight, peekaboo rises from
    the ground and a skip comes in from the left. Landing puffs and a hop's shadow sit on its last row. */
 .cx-clawd { position: relative; display: block; overflow: hidden; }
@@ -1788,81 +1790,76 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-clawd-glyphs { display: block; }
 .cx-clawd-mark { position: absolute; width: 8px; height: 16px; color: var(--ao-muted, #8a8986);
   font: 700 13px/16px ui-monospace, "Cascadia Mono", Consolas, monospace; text-align: center; white-space: pre; pointer-events: none; }
-/* Its tool sits at the hand on its side: the laptop on the ground, the magnifier, hammer, mug and book
-   in its raised hand (column 0 of the prop touches the hand); a carried file box rides over its raised arms. */
-.cx-pet-body svg.cx-pet-prop { position: absolute; left: 72px; bottom: 0; pointer-events: none; }
+/* Its tool sits at the hand on its side, its bottom on the ground Clawd stands on: the laptop on the
+   ground, the magnifier, hammer, mug and book in its raised hand; a carried box rides over its arms. */
+.cx-pet-body svg.cx-pet-prop, .cx-pet-peek-sprite svg.cx-pet-prop { position: absolute; left: 72px; bottom: 8px; pointer-events: none; }
 /* Keep the keyboard next to Clawd's claw, not off-screen beyond the chat field. */
-.cx-pet-body.is-tool-left svg.cx-pet-prop { left: auto; right: 68px; transform: scaleX(-1); }
-.cx-pet-body svg.cx-pet-box { position: absolute; left: 20px; top: -16px; }
+.cx-pet-body.is-tool-left svg.cx-pet-prop, .cx-pet-peek-sprite.is-tool-left svg.cx-pet-prop { left: auto; right: 68px; transform: scaleX(-1); }
+.cx-pet-body svg.cx-pet-box, .cx-pet-peek-sprite svg.cx-pet-box { position: absolute; left: 20px; top: -16px; }
 .cx-pet-bubble { position: absolute; bottom: 54px; right: 0; padding: 3px 9px; border: 1px solid var(--ao-line, rgba(31, 30, 29, .15)); border-radius: 8px;
-  background: var(--color-bg-primary, #fff); color: var(--color-text-primary, #1f1e1d); font-size: 12px; line-height: 1.4; white-space: nowrap; }
-/* Turned with Clawd on the box's sides and underside, its bubble turns back to read level. */
-.cx-pet.side-1 .cx-pet-bubble { transform: rotate(-90deg); }
-.cx-pet.side-2 .cx-pet-bubble { transform: rotate(180deg); }
-.cx-pet.side-3 .cx-pet-bubble { transform: rotate(90deg); }
-.cx-pet-float { position: absolute; bottom: 40px; font-size: 13px; animation: cx-pet-rise 1.1s ease-out forwards; }
-/* Home: Clawd shows in its open house; a click there knocks on the house, not on Clawd. */
-.cx-pet.is-home .cx-pet-body { pointer-events: none; }
-/* Inside it is half size, one house pixel per glyph cell, so it fits its bed, tub and table
-   (chat-pet-home.ts); it shrinks as it walks in through the open front and grows again on the way out. */
-.cx-pet-body { transition: transform .9s ease-in-out; }
-.cx-pet.is-home .cx-pet-body { transform: scale(.5); transform-origin: 50% 100%; }
-.cx-pet.is-home .cx-pet-bubble { bottom: 30px; font-size: 11px; }
-.cx-pet.is-home .cx-pet-float { bottom: 22px; font-size: 10px; }
+  background: var(--color-bg-primary, #fff); color: var(--color-text-primary, #1f1e1d); font-size: 12px; line-height: 1.4; white-space: nowrap; pointer-events: none; }
+.cx-pet-float { position: absolute; bottom: 40px; font-size: 13px; pointer-events: none; animation: cx-pet-rise 1.1s ease-out forwards; }
+/* Napping on its box (no cottage to go to): z's rise over its head. */
+.cx-pet > .cx-pet-nap-z { top: -18px; left: 46px; }
+.cx-pet-house-z { position: absolute; top: 98px; left: 26px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; pointer-events: none; }
+.cx-pet-house-z span { animation: cx-pet-z 2.4s ease-in-out infinite; opacity: 0; }
+.cx-pet-house-z span:nth-child(2) { animation-delay: .8s; }
+.cx-pet-house-z span:nth-child(3) { animation-delay: 1.6s; font-size: 14px; }
+
+/* Its cottage, 88 × 64: beside the box's right end, its floor level with the box's bottom, or in the
+   yard under the chat list. Never above the box, where the old 160 px doll's house covered the chat. */
+.cx-pet-cottage-spot { position: absolute; z-index: 1; width: 88px; height: 64px; }
+.cx-pet-cottage { position: relative; display: block; width: 88px; height: 64px; padding: 0; border: 0; background: transparent;
+  cursor: pointer; pointer-events: auto; }
+.cx-pet-cottage svg { display: block; transition: filter .15s ease; }
+.cx-pet-cottage:hover svg, .cx-pet-cottage.is-peeking svg { filter: brightness(1.06) drop-shadow(0 2px 3px rgba(31, 30, 29, .18)); }
+.cx-pet-cottage:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 4px; }
+/* Asleep: z's over the roof. Cooking: smoke from the chimney. */
+.cx-pet-cottage > .cx-pet-cottage-z { top: -14px; left: 14px; }
+.cx-pet-cottage-smoke { position: absolute; top: -4px; left: 64px; width: 12px; height: 0; pointer-events: none; }
+.cx-pet-cottage-smoke span { position: absolute; left: 2px; bottom: 0; width: 6px; height: 6px; border-radius: 50%; background: #c9c7bd;
+  opacity: 0; animation: cx-pet-smoke 2.1s ease-out infinite; }
+.cx-pet-cottage-smoke span:nth-child(2) { animation-delay: .7s; }
+.cx-pet-cottage-smoke span:nth-child(3) { animation-delay: 1.4s; }
+/* The yard under the chat list: a strip as tall as the cottage, with room in front of it for Clawd. */
+.cx-pet-yard { position: relative; flex: none; }
+.cx-pet-lot { position: relative; height: 64px; margin: 4px 12px 8px; }
+.cx-pet-lot > .cx-pet-cottage-spot { left: 0; top: 0; }
+
+/* A look inside the cottage (HousePeek), over the page beside it: the doll's house with its front open,
+   Clawd at half size inside, and its furniture to click. */
+.cx-pet-peek { position: fixed; z-index: 70; width: 184px; padding: 8px 12px 10px; border: 1px solid var(--ao-line, rgba(31, 30, 29, .15));
+  border-radius: 12px; background: var(--color-bg-primary, #fff); color: var(--color-text-primary, #1f1e1d);
+  box-shadow: 0 16px 36px -14px rgba(31, 30, 29, .35), 0 2px 6px rgba(31, 30, 29, .08); animation: cx-pet-peek-in .16s ease-out; }
+.cx-pet-peek-head { display: flex; align-items: center; justify-content: space-between; margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+.cx-pet-peek-close { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--ao-muted, #8a8986);
+  font-size: 16px; line-height: 1; cursor: pointer; }
+.cx-pet-peek-close:hover { background: var(--cx-hover, rgba(31, 30, 29, .06)); color: inherit; }
+.cx-pet-peek-room { position: relative; width: 160px; height: 160px; margin: 0 auto; }
+.cx-pet-peek-room > svg, .cx-pet-peek-front { position: absolute; left: 0; top: 0; pointer-events: none; }
+.cx-pet-peek-front svg { display: block; }
+.cx-pet-peek-hint { margin: 6px 0 0; color: var(--ao-muted, #8a8986); font-size: 11px; line-height: 1.35; }
+/* Clawd inside, at half size so it fits its bed, tub and table (chat-pet-home.ts), its feet on the floor. */
+.cx-pet-peek-clawd { position: absolute; width: 72px; height: 48px; }
+.cx-pet-peek-clawd > .cx-pet-bubble { bottom: 30px; font-size: 11px; }
+.cx-pet-peek-clawd > .cx-pet-float { bottom: 22px; font-size: 10px; }
+.cx-pet-peek-sprite { position: absolute; left: 0; top: 0; display: block; width: 72px; height: 48px; padding: 0; border: 0; background: transparent;
+  transform: scale(.5); transform-origin: 36px 40px; cursor: pointer; }
 /* Each piece of furniture is a button: Clawd comes over and uses it. */
 .cx-pet-furniture { position: absolute; padding: 0; border: 0; border-radius: 2px; background: transparent; cursor: pointer; pointer-events: auto; }
 .cx-pet-furniture:hover { background: rgba(255, 255, 255, .16); box-shadow: inset 0 0 0 1px rgba(31, 30, 29, .3); }
 .cx-pet-furniture:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 1px; }
-/* Clawd's house, standing beside the box's right side (on its top edge near the right end when the
-   window leaves no room there): a doll's house with its front
-   open. Its room is drawn behind Clawd and its roof and side walls in front, so Clawd shows inside. */
-.cx-pet-house-spot { position: absolute; z-index: 3; width: 160px; height: 160px; pointer-events: none; }
-.cx-pet-house-spot.is-inside { z-index: 1; }
-.cx-pet-house-spot.is-inside svg { display: block; }
-.cx-pet-house { position: relative; display: block; width: 160px; height: 160px; padding: 0; border: 0; background: transparent;
-  cursor: pointer; pointer-events: auto; }
-.cx-pet-house svg { display: block; }
-.cx-pet-house:focus-visible { outline: 2px solid var(--ao-blue); outline-offset: 2px; border-radius: 6px; }
-/* Over its pillow, tucked into bed downstairs. */
-.cx-pet-house-z { position: absolute; top: 98px; left: 26px; display: flex; gap: 3px; color: var(--ao-muted, #8a8986); font-size: 12px; font-weight: 700; }
-.cx-pet-house-z span { animation: cx-pet-z 2.4s ease-in-out infinite; opacity: 0; }
-.cx-pet-house-z span:nth-child(2) { animation-delay: .8s; }
-.cx-pet-house-z span:nth-child(3) { animation-delay: 1.6s; font-size: 14px; }
-/* On the pointer: carried along above everything, never in the way of a click. */
-.cx-pet.is-riding { z-index: 60; transition: none; }
-.cx-pet.is-riding .cx-pet-body { pointer-events: none; }
-/* Leaping between split panes, or to and from its house under the chat list: over everything. It
-   arcs over the straight line it flies along (ChatPet's leap moves it; petLeap sets --cx-pet-arc and
-   the duration): rising slower as it nears the top, then falling faster onto the spot. */
-.cx-pet.is-leaping .cx-pet-body { pointer-events: none; }
-.cx-pet.is-flying { animation-name: cx-pet-arc; animation-fill-mode: both; }
-/* Napping on its box (split view with no house): z's rise over its head. */
-.cx-pet > .cx-pet-nap-z { top: -18px; left: 46px; }
-/* Split view: one Clawd for all panes, its house in a yard under the chat list (empty otherwise). On
-   the porch in front of the house, or walking between there and the door, it stands in front of the
-   walls; inside, behind them. */
-.cx-pet-yard { position: relative; flex: none; }
-.cx-pet-lot { position: relative; width: 160px; height: 160px; margin: 6px auto 10px; }
-.cx-pet.is-porch { z-index: 4; }
-@keyframes cx-pet-arc {
-  0% { transform: translateY(0); animation-timing-function: cubic-bezier(.33, .66, .66, 1); }
-  50% { transform: translateY(calc(-1 * var(--cx-pet-arc, 60px))); animation-timing-function: cubic-bezier(.33, 0, .66, .33); }
-  100% { transform: translateY(0); } }
 @keyframes cx-pet-z { 0% { transform: translateY(6px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px); opacity: 0; } }
 @keyframes cx-pet-rise { to { transform: translateY(-36px); opacity: 0; } }
 @keyframes cx-pet-shadow { from { transform: scale(.4); opacity: .3; } to { transform: scale(1); opacity: 1; } }
-@keyframes cx-pet-land {
-  0% { transform: scale(calc(1 + .3 * var(--cx-pet-impact, .5)), calc(1 - .35 * var(--cx-pet-impact, .5))); }
-  40% { transform: translateY(calc(-8px * var(--cx-pet-impact, .5))) scale(calc(1 - .08 * var(--cx-pet-impact, .5)), calc(1 + .12 * var(--cx-pet-impact, .5))); }
-  70% { transform: scale(calc(1 + .05 * var(--cx-pet-impact, .5)), calc(1 - .05 * var(--cx-pet-impact, .5))); }
-  100% { transform: none; } }
 @keyframes cx-pet-dust {
   0% { transform: translate(0, 0) scale(.5); opacity: calc(.3 + .6 * var(--cx-pet-impact, .5)); }
   100% { transform: translate(calc(var(--cx-pet-dust-dir) * (8px + 16px * var(--cx-pet-impact, .5))), -6px) scale(calc(1 + var(--cx-pet-impact, .5))); opacity: 0; } }
+@keyframes cx-pet-smoke { 0% { transform: translate(0, 0) scale(.6); opacity: 0; } 20% { opacity: .8; } 100% { transform: translate(6px, -22px) scale(1.4); opacity: 0; } }
+@keyframes cx-pet-peek-in { from { opacity: 0; transform: translateY(4px) scale(.98); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
-  .cx-pet { transition: none; }
-  .cx-pet-drop-shadow, .cx-pet-dust { display: none; }
-  .cx-pet-float, .cx-pet-house-z span, .cx-pet-body.is-landing, .cx-pet.is-flying { animation: none !important; }
+  .cx-pet-drop-shadow, .cx-pet-dusts, .cx-pet-cottage-smoke { display: none; }
+  .cx-pet-float, .cx-pet-house-z span, .cx-pet-peek { animation: none !important; }
   .cx-pet-house-z span { opacity: 1; } }
 /* The side panel's Overview (ChatWorkbench OverviewPane), as Claude Code's side column. */
 .cx-overview { display: flex; flex-direction: column; gap: 0; padding: 4px 14px 14px; overflow-y: auto; font-size: 12.5px; }
