@@ -137,6 +137,11 @@ function fixture(options = {}) {
       destroy: () => { state.destroyed = true; }, loadURL: async url => {
         if (url === "about:blank") { contents.rendererInitialized = true; return; }
         contents.emit("did-start-navigation", {}, url, false, true);
+        if (options.redirect) {
+          const destination = "https://frame.invalid/redirect", mainFrame = options.redirect === "unknown" ? undefined : options.redirect === "main";
+          const event = { preventDefault() { calls.push(["blocked-redirect", partition]); }, ...(options.details ? { url: destination, isMainFrame: mainFrame } : {}) };
+          contents.emit("will-redirect", event, options.details ? undefined : destination, false, options.details ? undefined : mainFrame);
+        }
       } };
     windows.push(window);
     return window;
@@ -251,6 +256,17 @@ test("same-page directory filters keep the verified workspace inspection usable"
   const f = fixture({ owner: true, filterNavigation: true });
   const result = await f.run();
   assert.equal(result.connected, true);
+});
+
+test("workspace inspection ignores only explicitly identified iframe redirects", async t => {
+  for (const details of [false, true]) for (const redirect of ["iframe", "main", "unknown"]) await t.test(`${details ? "details" : "legacy"} ${redirect}`, async () => {
+    const f = fixture({ redirect, details });
+    const action = () => f.inspectChatGptAccount({ ...f.input, partition: "persist:member", metadataOnly: true });
+    if (redirect === "iframe") assert.equal((await action()).workspaceId, workspaceId);
+    else await assert.rejects(action(), /context changed/i);
+    assert.equal(f.calls.filter(call => call[0] === "blocked-redirect").length, redirect === "iframe" ? 0 : 1);
+    assert(f.windows.every(window => window.isDestroyed()));
+  });
 });
 
 test("subscription inspection can use normal account navigation without lending it MCP authority", async () => {

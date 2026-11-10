@@ -260,6 +260,11 @@ test("the production connector action verifies fresh owner and workspace proof b
   for (const scenario of [
     { name: "Personal free succeeds with its actual observed workspace" },
     { name: "Business succeeds with its distinct binding", business: true },
+    { name: "an iframe redirect cannot invalidate the account context", redirect: "iframe" },
+    { name: "a details-event iframe redirect cannot invalidate the account context", redirect: "iframe", details: true },
+    { name: "a main-frame redirect to another site stays blocked", redirect: "main", error: /navigation.*changed/i },
+    { name: "a details-event main-frame redirect to another site stays blocked", redirect: "main", details: true, error: /navigation.*changed/i },
+    { name: "a redirect without frame information stays blocked", redirect: "unknown", error: /navigation.*changed/i },
     { name: "a team admin cannot create even when the tunnel belongs to that user", business: true, creatorRole: "account-admin", error: /verified owner/ },
     { name: "a team member cannot create even when the tunnel belongs to that user", business: true, creatorRole: "standard-user", error: /verified owner/ },
     { name: "a team admin reuses exact fresh saved identity without Platform access", business: true, creatorRole: "account-admin", existingOnly: true, existing: true },
@@ -332,7 +337,7 @@ test("the production connector action verifies fresh owner and workspace proof b
       ...(scenario.oversized ? { padding: "x".repeat(64 * 1024) } : {}) });
     fs.writeFileSync(bindingPath, original);
     const network = fakeMcpNetwork(), counts = { create: 0, open: 0, confirm: 0 };
-    let platformVisits = 0;
+    let platformVisits = 0, blockedRedirects = 0;
     let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     let workspaceRole = scenario.shared ? "standard-user" : scenario.creatorRole ?? "account-owner", publishing = false, held = false, publisherResult;
     const runtimeHost = runtime();
@@ -439,7 +444,14 @@ test("the production connector action verifies fresh owner and workspace proof b
                 observePlatform();
               });
             } else observePlatform();
-          } else if (next.startsWith("https://chatgpt.com/plugins")) select(accountId);
+          } else if (next.startsWith("https://chatgpt.com/plugins")) {
+            select(accountId);
+            if (scenario.redirect) {
+              const destination = "https://frame.invalid/redirect", mainFrame = scenario.redirect === "unknown" ? undefined : scenario.redirect === "main";
+              const event = { preventDefault() { blockedRedirects++; }, ...(scenario.details ? { url: destination, isMainFrame: mainFrame } : {}) };
+              contents.emit("will-redirect", event, scenario.details ? undefined : destination, false, scenario.details ? undefined : mainFrame);
+            }
+          }
         } };
     }
     const action = () => createConfiguredConnector({ app: { getPath: () => userData }, BrowserWindow: Window, browserHost: host, runtimeHost,
@@ -484,6 +496,7 @@ test("the production connector action verifies fresh owner and workspace proof b
       if (scenario.replay) await assert.rejects(action(), /unverified/i);
     }
     if (scenario.creatorRole) assert.equal(platformVisits, 0, "nonowners stop before Platform or form setup");
+    if (scenario.redirect) assert.equal(blockedRedirects, scenario.redirect === "iframe" ? 0 : 1);
     assert.equal(windowCount, scenario.transient ? 2 : scenario.shared ? 0 : scenario.name.startsWith("a failed consent") ? 2 : 1);
     if (windowCount) assert.equal(destroyed, true);
     assert.equal(network.debuggerClient.isAttached(), false);
