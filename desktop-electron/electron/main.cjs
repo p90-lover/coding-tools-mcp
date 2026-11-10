@@ -75,6 +75,7 @@ const { assertLauncherRuntimeVersion, terminateLauncherSmoke } = require("./smok
 const { DEVELOPMENT_PROFILE, resolveLauncherProfile } = require("./profile.cjs");
 const { droppedAgentSessionEnvironment } = require("./agent-session-env.cjs");
 const { markRuntimeRootChecked, runtimeBundlePaths } = require("./runtime-command.cjs");
+const { preloadLoopbackMesh } = require("./loopback-mesh.cjs");
 const { createGuiUpdateController, guiShellHash } = require("./gui-update.cjs");
 const {
   combineUpdateControllers, commitAppliedUpdate, createAppUpdateController, createAutoInstaller, handOffUpdateRecovery,
@@ -2694,10 +2695,13 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.snapshot();
   });
-  handle("launcher:external-service-configure", (event, serviceId, input) => {
+  handle("launcher:external-service-configure", async (event, serviceId, input) => {
     assertFocusedMainWindow(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
-    return externalServicesController.configure(serviceId, input);
+    const service = externalServicesController.configure(serviceId, input);
+    // The change is saved off the main thread; one that could not be saved still fails here.
+    await externalServicesController.saved?.();
+    return service;
   });
   handle("launcher:external-service-inspect", (event, serviceId) => {
     assertFocusedMainWindow(event, false);
@@ -4326,7 +4330,8 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     // each file keeps the change before.
     await Promise.race([
       Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(),
-        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved(), launcherStateStore?.saved()]),
+        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved(), launcherStateStore?.saved(),
+        externalServicesController?.saved?.().catch(() => undefined)]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
     const runtimeOperation = runtimeHost?.currentOperation();
@@ -4581,6 +4586,8 @@ async function start() {
     app, launch: rendererAccessibilityLaunch, logger, readMode: () => stateStore.read().rendererAccessibility,
   });
   rendererAccessibility.start();
+  // Read before the services controller publishes it, so an unchanged loopback mesh is not rewritten.
+  void preloadLoopbackMesh(path.join(app.getPath("userData"), "integrations", "loopback-mesh.json"));
   const droppedAgentEnv = droppedAgentSessionEnvironment();
   if (droppedAgentEnv.length) logger.warn("launcher.agent_session_env_dropped", { names: droppedAgentEnv });
   // When something other than the user started this app, why: a relaunch guard after a keep-bridge

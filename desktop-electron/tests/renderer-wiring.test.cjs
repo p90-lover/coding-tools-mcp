@@ -150,13 +150,30 @@ test("Chat mounts the AO chat surface and the original AO UI links back to it", 
 });
 
 test("Register keeps its Connections destination and native overlay visibility gate", () => {
-  const connections = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.connections}>"), appSource.indexOf('<details className="sidebar-more"'));
+  const connections = appSource.slice(appSource.indexOf("<SidebarGroup label={copy.connections}>"), appSource.indexOf('<section className={`sidebar-more'));
   assert.match(connections, /active=\{surface === "register"\}[\s\S]*?label=\{copy.register\}[\s\S]*?navigateSurface\("register"\)/);
   assert.ok(appSource.includes('{keepAlive("register"'));
   const gate = /<RegisterSurface[\s\S]*?active=\{([^}]+)\}/.exec(appSource)?.[1];
   assert.equal(gate, 'surface === "register" && !sidebarCovers && !biggerContextRecommendationOpen && !sessionReminderDue && !refreshMenuOpen');
   assert.match(typesSource, /type Surface[^;]*"register"/);
   assert.equal((i18nSource.match(/register: /g) || []).length, 4);
+});
+
+test("the sidebar's More section has a pin on its heading's right that keeps it open", () => {
+  const more = appSource.slice(appSource.indexOf('<section className={`sidebar-more'), appSource.indexOf("</nav>"));
+  // Open while one of its pages shows, or always once pinned; the pin is saved with the sidebar state.
+  assert.match(appSource, /const moreToolsShown = moreToolsPinned \|\| moreToolsOpen;/);
+  assert.match(appSource, /useState\(snapshot\.state\.sidebarMoreToolsPinned === true\)/);
+  assert.match(appSource, /api!\.setSidebarState\(\{ moreToolsPinned: pinned \}\)/);
+  assert.match(more, /className="sidebar-more-toggle"[\s\S]*?className="sidebar-more-pin"/, "the pin follows the heading, on its right");
+  assert.match(more, /aria-pressed=\{moreToolsPinned\}/);
+  assert.match(more, /onClick=\{moreToolsPinned \? undefined : /, "a pinned section's heading doesn't fold it");
+  assert.match(more, /\{moreToolsShown \? \(\s*<div id="sidebar-more-list">/);
+  const zhTW = fs.readFileSync(path.join(launcherRoot, "src", "i18n", "locales", "zh-TW.ts"), "utf8");
+  for (const key of ["moreToolsPin", "moreToolsUnpin"]) {
+    assert.equal((i18nSource.match(new RegExp(key + ": ", "g")) || []).length, 3, key + " in English, Simplified Chinese and Japanese");
+    assert.ok(zhTW.includes(key + ": "), key + " in Traditional Chinese");
+  }
 });
 
 test("a hidden docked sidebar folds to an icon rail that shows the whole panel on hover", () => {
