@@ -514,7 +514,7 @@ function createManagedExternalServicesController({
     if (managed.installState === "installed") {
       // Not yet started by this launcher, with an update waiting: the start is the switch, health
       // check and rollback included. A component this launcher already runs keeps running.
-      if (!managed.processes.some((entry) => entry.running) && managedController.pendingComponentUpdate(serviceId)) {
+      if (!managed.processes.some((entry) => entry.running) && await managedController.pendingComponentUpdateAsync(serviceId)) {
         await swapManagedComponent(serviceId);
         return serviceFromSnapshot(serviceId);
       }

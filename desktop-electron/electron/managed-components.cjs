@@ -1789,7 +1789,18 @@ function createManagedComponentController({
   /** The installed update the active version should switch to, through the health check. */
   function pendingComponentUpdate(idValue) {
     const id = requiredComponentId(idValue);
-    const staged = stagedManifest(id);
+    return pendingFrom(id, stagedManifest(id));
+  }
+
+  /** pendingComponentUpdate with its record read off the main thread, for a service start: the
+   * synchronous read held every window 604 ms on the busy disk (Activity, 2026-11-10 00:37:14Z). */
+  async function pendingComponentUpdateAsync(idValue) {
+    const id = requiredComponentId(idValue);
+    const record = await readUpdateRecordAsync(id);
+    return pendingFrom(id, record ? recordedManifest(id, record, record) : null);
+  }
+
+  function pendingFrom(id, staged) {
     if (!staged || compareVersions(staged.version, manifestFor(id).version) <= 0) return null;
     return sourceState(staged).state === "installed" ? staged : null;
   }
@@ -2502,6 +2513,7 @@ function createManagedComponentController({
     checkComponentUpdate,
     installComponentUpdate,
     pendingComponentUpdate,
+    pendingComponentUpdateAsync,
     activateComponentUpdate,
     confirmComponentUpdate,
     rejectComponentUpdate,

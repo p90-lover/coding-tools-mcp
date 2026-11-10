@@ -135,3 +135,37 @@ test("saving never touches the disk on the calling thread and reports a failed w
   assert.deepEqual(createChatMcpServers({ filePath }).list().map((server) => server.name), ["notes", "docs"],
     "the next change writes every server, including the one whose write failed");
 });
+
+test("preload reads the saved list off the main thread, so the first chat reads nothing synchronously", async (t) => {
+  const { filePath, servers, done } = store();
+  t.after(done);
+  servers.save({ name: "notes", type: "stdio", command: "notes-mcp" });
+  await servers.saved();
+  const readFileSync = fs.readFileSync;
+  let syncReads = 0;
+  const again = createChatMcpServers({ filePath });
+  await again.preload();
+  fs.readFileSync = (...args) => { syncReads += 1; return readFileSync(...args); };
+  try {
+    assert.deepEqual(again.forSession("codex").map((server) => server.name), ["notes"]);
+    assert.deepEqual(again.list().map((server) => server.name), ["notes"]);
+  } finally { fs.readFileSync = readFileSync; }
+  assert.equal(syncReads, 0, "the list came from the preload");
+
+  // A change made while the preload is still reading is kept, not replaced by the file's older list.
+  const racing = createChatMcpServers({ filePath });
+  const loading = racing.preload();
+  racing.save({ name: "docs", command: "docs-mcp" });
+  await loading;
+  assert.deepEqual(racing.list().map((server) => server.name), ["notes", "docs"]);
+  await racing.saved();
+
+  // No file yet: an empty list, and a torn one: an empty list too (with the same warning as before).
+  const warnings = [];
+  assert.deepEqual(await (async () => { const none = createChatMcpServers({ filePath: `${filePath}.missing` }); await none.preload(); return none.list(); })(), []);
+  fs.writeFileSync(`${filePath}.torn`, "{\"servers\": [");
+  const torn = createChatMcpServers({ filePath: `${filePath}.torn`, logger: { warn: (event, data) => warnings.push([event, data]) } });
+  await torn.preload();
+  assert.deepEqual(torn.list(), []);
+  assert.deepEqual(warnings, [["chat_mcp_servers.unreadable", { reason: "invalid_json" }]]);
+});

@@ -167,7 +167,7 @@ test("the running version stays installed while an update downloads beside it", 
   controller.dispose();
 });
 
-test("a new launcher runs only a confirmed update; an unchecked one waits as pending", async () => {
+test("a new launcher runs only a confirmed update; an unchecked one waits as pending", async (t) => {
   const first = fixture();
   await first.controller.installComponent("cpa");
   await first.controller.installComponentUpdate("cpa");
@@ -175,6 +175,15 @@ test("a new launcher runs only a confirmed update; an unchecked one waits as pen
 
   const second = fixture(fakeGitHub(), first.dataRoot);
   assert.equal(second.controller.project("cpa").version, "1.0.0", "an update that never passed a health check ran at startup");
+  // A service start asks off the main thread (a synchronous read held every window 604 ms on
+  // 2026-11-10) and gets the same answer.
+  const readFileSync = fs.readFileSync;
+  t.mock.method(fs, "readFileSync", (file, ...rest) => {
+    if (String(file).endsWith(".update.json")) throw new Error("the start read its update record synchronously");
+    return readFileSync.call(fs, file, ...rest);
+  });
+  assert.equal((await second.controller.pendingComponentUpdateAsync("cpa")).version, "1.2.0");
+  t.mock.restoreAll();
   assert.equal(second.controller.pendingComponentUpdate("cpa").version, "1.2.0");
   second.controller.activateComponentUpdate("cpa");
   second.controller.confirmComponentUpdate("cpa");
@@ -183,6 +192,7 @@ test("a new launcher runs only a confirmed update; an unchecked one waits as pen
   const third = fixture(fakeGitHub(), first.dataRoot);
   assert.equal(third.controller.project("cpa").version, "1.2.0");
   assert.equal(third.controller.pendingComponentUpdate("cpa"), null);
+  assert.equal(await third.controller.pendingComponentUpdateAsync("cpa"), null);
   third.controller.dispose();
 });
 
