@@ -366,13 +366,77 @@ function splitBindings(registry, pageNumber = 2, splitPanes = []) {
   const splitSource = fs.readFileSync(path.join(root, "src/features/chat-split.ts"), "utf8");
   vm.runInNewContext(ts.transpileModule(splitSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports });
   const state = { panes: splitPanes, errors: [], focus: "main", main: null };
-  return { ...exports, state, splitPanes, pageRegistry: registry, pageNumber, workspaceId: "ws", chatTaskId: "local-chat", splitMaxCols: 3,
+  const bindings = { ...exports, state, splitPanes, pageRegistry: registry, pageNumber, workspaceId: "ws", chatTaskId: "local-chat", splitMaxCols: 3,
     crypto: { randomUUID: () => "new-pane" }, paneShowing: (workspaceId, taskId) => splitPanes.find((pane) => pane.workspaceId === workspaceId && pane.taskId === taskId)?.id,
     setView: () => {}, setSheet: () => {}, setFocusedPane: (id) => { state.focus = id; },
     setSplitPanes: (update) => { state.panes = typeof update === "function" ? update(state.panes) : update; },
     showInMain: (workspaceId, taskId) => { state.main = { workspaceId, taskId }; },
     setError: (error) => state.errors.push(error), moveSplitPane: () => {}, moveMainChat: () => {} };
+  bindings.takeChatHere = surfaceCallback("takeChatHere", bindings);
+  return bindings;
 }
+
+function selectionActionBindings(registry, page = 2) {
+  const bindings = splitBindings(registry, page);
+  return { ...bindings, composerIntent: { current: 0 }, switchTarget: { current: "" }, pendingSelect: { current: null },
+    pendingChat: null, chatUnread: [], missions: [], board: { tasks: [] }, taskLifecycle: [], chatList: () => [],
+    focusedSplit: undefined, loadedWorkspace: "ws", preloaded: { current: null },
+    setPendingChat() {}, setInspectedId() {}, setDraftTeam() {}, setConfigStatus() {}, setSelectedRunId() {},
+    setView: (view) => { bindings.state.view = view; }, setChatTaskId: (taskId) => { bindings.state.taskId = taskId; },
+    switchToWorkspace: (id) => { bindings.state.workspaceId = id; }, markUnread() {} };
+}
+
+test("chat selection and structure actions stay on later pages instead of revealing page one", () => {
+  for (const page of [2, 3]) for (const action of ["showChat", "selectChat", "structure", "selectChatIn"]) {
+    const { api } = load();
+    const seen = [];
+    const registry = api.createChatPageRegistry((page) => seen.push(["page", page]));
+    registry.register(1, [{ workspaceId: "ws", taskId: "other-chat", paneId: "main" }], () => {}, { release: (id) => seen.push(["release", id]) });
+    const bindings = selectionActionBindings(registry, page);
+    bindings.selectChat = surfaceCallback("selectChat", bindings);
+    bindings.selectChatIn = surfaceCallback("selectChatIn", bindings);
+    if (action === "showChat") surfaceCallback("showChat", bindings)("ws", "other-chat");
+    else if (action === "selectChatIn") bindings.selectChatIn("ws", "other-chat");
+    else bindings.selectChat("other-chat", action === "structure" ? "overview" : "chat");
+    assert.deepEqual(seen, [["release", "main"]], `${action} on page ${page} transfers once without navigating`);
+    assert.equal(bindings.state.taskId, "other-chat");
+    assert.equal(bindings.state.view, action === "structure" ? "overview" : "chat");
+  }
+});
+
+test("selection targets the focused pane and cross-project loading stays on its requesting page", async () => {
+  const { api } = load();
+  const registry = api.createChatPageRegistry(() => { throw new Error("Must not turn pages"); });
+  registry.register(1, [{ workspaceId: "other", taskId: "other-chat", paneId: "main" }], () => {}, { release() {} });
+  const bindings = selectionActionBindings(registry, 3);
+  bindings.focusedSplit = { id: "focused" };
+  bindings.state.panes = [{ id: "focused", workspaceId: "ws", taskId: "previous", col: 1, row: 0 }];
+  surfaceCallback("showChat", bindings)("other", "other-chat");
+  assert.equal(bindings.state.panes[0].workspaceId, "other");
+  assert.equal(bindings.state.panes[0].taskId, "other-chat");
+  const calls = [];
+  const switching = selectionActionBindings(registry, 2);
+  switching.moduleCall = async (operation, args) => { calls.push([operation, args.workspaceId]); return {}; };
+  surfaceCallback("selectChatIn", switching)("other", "other-chat");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [["board", "other"], ["runs", "other"]]);
+  assert.equal(switching.state.workspaceId, "other");
+  assert.equal(switching.pendingSelect.current.taskId, "other-chat");
+});
+
+test("an unavailable source release rejects every local selection action without navigating", () => {
+  for (const action of ["showChat", "selectChat", "selectChatIn"]) {
+    const { api } = load();
+    const registry = api.createChatPageRegistry(() => { throw new Error("Must not navigate"); });
+    registry.register(1, [{ workspaceId: "ws", taskId: "other-chat", paneId: "main" }], () => {});
+    const bindings = selectionActionBindings(registry);
+    if (action === "selectChat") surfaceCallback(action, bindings)("other-chat");
+    else surfaceCallback(action, bindings)("ws", "other-chat");
+    assert.equal(bindings.state.errors.length, 1);
+    assert.equal(bindings.state.taskId, undefined);
+    assert.equal(registry.has(2, "ws", "other-chat"), true);
+  }
+});
 
 test("an explicit split moves the existing owner to the current page without navigating or duplicating it", () => {
   for (const target of [undefined, { kind: "column" }, { kind: "cell", col: 0, row: 1 }, { kind: "left" }]) {
@@ -389,7 +453,7 @@ test("an explicit split moves the existing owner to the current page without nav
   }
 });
 
-test("a page releases only the requested chat and project, while normal selection still reveals its owner", () => {
+test("a page releases only the requested chat and project, while explicit registry reveal remains available", () => {
   const { api } = load();
   const seen = [];
   const registry = api.createChatPageRegistry((page) => seen.push(["page", page]));
