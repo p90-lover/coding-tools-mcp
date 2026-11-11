@@ -148,6 +148,11 @@ test("launcher startup resolves a linked userData root before setting every app 
   vm.runInNewContext(startup, {
     fs,
     path,
+    // The profile setup loads system-drive.cjs (temp files off the system drive); it is the real one.
+    require: (id) => {
+      assert.equal(id, "./system-drive.cjs", "the profile setup requires nothing else");
+      return require("../electron/system-drive.cjs");
+    },
     process: { env: {}, platform: process.platform },
     CORE_HOME: path.join(directory, "core"),
     LAUNCHER_PROFILE: { userData: alias, codexHome: path.join(directory, "codex"), displayName: "Test" },
