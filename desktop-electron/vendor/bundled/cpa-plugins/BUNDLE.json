@@ -55,16 +55,19 @@
   },
   "helper": {
     "id": "cpa-helper",
-    "version": "0.1.1",
+    "version": "0.2.0",
     "source": {
       "repository": "https://github.com/p90-lover/cpa-helper-plugin",
-      "commit": "bb2287a",
+      "commit": "0b7178b8b46ededfd7cf67fd0bdb1df11a99a68f",
       "license": "MIT",
       "upstream": "https://github.com/walkingddd/CPA-Helper"
     },
     "changes": [
       "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)",
-      "Each Codex account's credit balance (exact, as chatgpt.com sends it) in /codex/accounts and the console's Credits column; credits pay for every request once a limit is reached"
+      "Each Codex account's credit balance (exact, as chatgpt.com sends it) in /codex/accounts and the console's Credits column; credits pay for every request once a limit is reached",
+      "Native scheduler.pick prefers CPA-eligible Codex accounts with more remaining five-hour/weekly quota, without per-model route imports or inference replay",
+      "Confirmed exhausted quota windows are skipped until reset; account pins, provider/model eligibility, disabled state, priority tiers and CPA cooldowns remain binding",
+      "Bounded read-only background quota refresh and a nonblocking memory snapshot keep credential/network/disk work off request selection; quota_routing_enabled: false opts out"
     ],
     "build": {
       "rust": "stable",
@@ -72,9 +75,9 @@
     },
     "platforms": {
       "win32/x64": {
-        "path": "windows/amd64/cpa-helper-v0.1.1.dll",
-        "sha256": "7ea766d0b569f0f6c402f02918d1d52137071425e4544c791ff773af6fbba6ce",
-        "size": 813568
+        "path": "windows/amd64/cpa-helper-v0.2.0.dll",
+        "sha256": "b7e780535ef0ceb998cfba94ed482a8a2a53957b5cc4d6f66c15ce03432769a3",
+        "size": 850432
       }
     }
   },
