@@ -126,8 +126,14 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 // Agents without an AO chat controller run in their own terminal UI and report here.
 // How often the harness list re-runs AO's install checks, so a newly installed CLI shows up.
 const AGENT_RECHECK_MS = 60_000;
-// How long a started AO daemon that is still running may take to answer /readyz (see start).
-const AO_READY_TIMEOUT_MS = 90_000;
+// How long a started AO daemon that is still running may take to answer /readyz (see start). Only
+// past this is a slow daemon killed: a kill never made a start faster, it threw away the work done
+// so far and the next daemon began it again. On 2026-11-11 AO's first write copied a 483 MB
+// write-ahead log into its database before AO listened; killed at 90, 180 and 360 s, each new
+// daemon started that copy over, and AO was down about 25 minutes over five starts.
+const AO_READY_TIMEOUT_MS = 15 * 60_000;
+// While a start is slow, ao.start_slow reports it this often, with AO's latest output.
+const AO_START_SLOW_REPORT_MS = 60_000;
 // To profile AO's CPU on a user's machine: a one-line "pprof-addr" file in AO's data folder holding
 // a loopback host:port turns on AO's pprof listener (AO_PPROF_ADDR) at its next start. Without it AO
 // starts as before; the app clears AO_* from its own environment, so this is the only switch.
@@ -273,11 +279,6 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let error = null;
   let logTail = "";
   let databaseCompacted = false;
-  // Starts in a row that ran out of time getting ready. Each next start waits twice as long (up to
-  // four times the limit): on 2026-10-24, after a reboot, AO's first database cleanup read a cold
-  // HDD for over a minute while it started. Every start was killed at 90 s, which threw that work
-  // away, and the next start began it again, so AO stayed down (five starts in eight minutes).
-  let readyTimeouts = 0;
   /**
    * AO's recent meaningful output (no debug lines or quick polls, see ao-daemon-log.cjs), in memory
    * only. AO's output never goes to disk: logs/ao-daemon.log took about 65 MB a day, nearly all of
@@ -2286,32 +2287,31 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        // A daemon that exits fails at once (checkStartup); one still starting is waited for. 30 s
-        // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
-        // database compaction running), the first start was given up as "AO readiness timed out",
-        // its daemon killed and a new one started from nothing, and the chats that outlived the
-        // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
-        // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
+        // A daemon that exits fails at once (checkStartup); one still running is waited for, up to
+        // readyLimitMs. Killing a slow one only made AO slower: on 2026-10-22 (30 s limit) AO stayed
+        // down 12 minutes over 16 starts, on 2026-10-24 (90 s) five starts in eight minutes, and on
+        // 2026-11-11 (90/180/360 s) about 25 minutes, each new daemon beginning again what the
+        // killed one had nearly done. ao.start_slow reports a slow start every minute, with AO's
+        // latest output, so the log shows how long a real one takes and what it was doing.
         const startedAt = Date.now();
-        const limitMs = readyLimitMs * 2 ** Math.min(readyTimeouts, 2);
-        let slowLogged = false;
-        while (Date.now() - startedAt < limitMs) {
+        let slowReportAt = readySlowMs;
+        while (Date.now() - startedAt < readyLimitMs) {
           checkStartup();
-          if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
-            slowLogged = true;
-            logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
+          const waitedMs = Date.now() - startedAt;
+          if (waitedMs >= slowReportAt) {
+            slowReportAt = waitedMs + AO_START_SLOW_REPORT_MS;
+            logger.warn?.("ao.start_slow", { waitedMs, output: logTail.slice(-300) });
           }
           try {
             const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(1000) });
             checkStartup();
             const ready = await response.json();
             checkStartup();
-            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") { state = "ready"; readyTimeouts = 0; return snapshot(); }
+            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") { state = "ready"; return snapshot(); }
           } catch { checkStartup(); }
           await new Promise((resolve) => setTimeout(resolve, 200));
           checkStartup();
         }
-        readyTimeouts += 1;
         // "timed out" keeps TRANSIENT_CHAT_START treating it as a start to retry, not a failure.
         throw new Error(`Agent Orchestrator timed out getting ready. ${logTail.slice(-1500)}`);
       } catch (cause) {
