@@ -20,7 +20,6 @@ import primeAgentLogo from "../assets/harness/ao/prime-agent.png";
 import unrealAgentLogo from "../assets/harness/ao/unreal-agent.png";
 import vibeLogo from "../assets/harness/ao/vibe.png";
 import ampLogo from "../assets/harness/brand/amp.svg";
-import claudeCodeLogo from "../assets/harness/brand/claude-code.png";
 import clineLogo from "../assets/harness/brand/cline.svg";
 import cursorLogo from "../assets/harness/brand/cursor.svg";
 import geminiCliLogo from "../assets/harness/brand/gemini-cli.svg";
@@ -48,6 +47,9 @@ import zhipuLogo from "../assets/models/zhipu.svg";
 // - ao/: Agent Orchestrator's own AgentAvatar files (unmodified), kept only where they are the
 //   product's own icon. Unreal Agent is AO's own harness.
 // - Kimi Code, Qwen Code and Muse Code (Meta's) share their maker's mark with the model lists.
+// - Claude Code is the Claude spark alone, transparent (models/claude.svg): the user, 2026-11-11,
+//   "the claude one background is black, it should only shows its own logo without any background".
+//   Its docs icon (brand/claude-code.png) is that spark on a dark rounded tile.
 // AO's copies were wrong for these, and the user saw them: Claude Code showed the pixel mascot,
 // Qwen Code showed Alibaba Cloud, Kimi showed Moonshot's ball, Grok Build showed a stray "xI",
 // Gemini CLI showed the Gemini model's sparkle, Amp showed its retired chevrons, and opencode,
@@ -67,7 +69,7 @@ const gemini = image(geminiLogo);
 // Harness id (without "ao:") → its mark, keyed as AO's AgentAvatar keys them. Cline's robot and
 // Grok Build's SpaceXAI symbol are black glyphs (mono); Kimi's black K keeps a light backing.
 const MARKS: Record<string, Mark> = {
-  "claude-code": image(claudeCodeLogo), codex: image(codexLogo), agy: image(agyLogo), opencode: image(opencodeLogo),
+  "claude-code": image(claudeLogo), codex: image(codexLogo), agy: image(agyLogo), opencode: image(opencodeLogo),
   "opencode-v2": image(opencodeLogo), aider: image(aiderLogo), amp: image(ampLogo), auggie: image(auggieLogo),
   autohand: image(autohandLogo), cline: image(clineLogo, true), continue: image(continueLogo), copilot: image(copilotLogo),
   crush: image(crushLogo), cursor: image(cursorLogo), "deepseek-harness": image(deepseekHarnessLogo), devin: image(devinLogo),

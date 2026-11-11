@@ -3,7 +3,6 @@
 Each harness shows the icon its own product site or repository shows. Checked against those sites on 2026-11-10.
 
 - `brand/*`: copied byte for byte (no line-ending changes, see `.gitattributes`). `harness-picker.test.cjs` checks every SHA-256 below.
-  - `brand/claude-code.png`: Claude Code. Claude Code docs' apple-touch icon, <https://code.claude.com/docs/mintlify-assets/_mintlify/favicons/claude-code/pLsy-mRpNksna2sx/_generated/favicon/apple-touch-icon.png>. SHA-256 `9b1fa78fa1d19195076f30cd386a76c51688fee7b36eb1af51a87c68548d20cf`.
   - `brand/cursor.svg`: Cursor. <https://cursor.com/marketing-static/favicon-light.svg>. SHA-256 `78f169abca311d70e18ada789ccf1a55b4ca0306822f21a9ab0c2658ed88dbe0`.
   - `brand/kilocode.svg`: Kilo Code. <https://kilo.ai/favicon/favicon.svg?v=3>. SHA-256 `729bf088d9a114d567f133acf36f613cabd83662e4616afcea5ea403e87be8d2`.
   - `brand/cline.svg`: Cline. <https://cline.bot/assets/branding/logos/cline-icon-dark.svg>. SHA-256 `a34dcb49437c420e107c986e1e63b721d64843e82238ba0c43786447c92e0589`.
@@ -12,7 +11,8 @@ Each harness shows the icon its own product site or repository shows. Checked ag
   - `brand/pi.svg`: Pi. The logo in Pi's README (`earendil-works/pi`), <https://pi.dev/logo-auto.svg>. SHA-256 `abd66e7868b2d24f0f0895f9237ee8a6dcb22337583b0dc54aeb595acecb4d6b`.
   - `brand/grok-build.png`: Grok Build. The SpaceXAI symbol in Grok Build's README (`xai-org/grok-build`), <https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png>. SHA-256 `d2ce9e34b770aeb1e6155646e37573a9eabc380c3fe48e72f7fe19c4b0b59e07`.
   - `brand/gemini-cli.svg`: Gemini CLI. The ">" tile geminicli.com shows, as LobeHub Icons `geminicli-color.svg` (MIT; the site serves only a 1645 px PNG), <https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/geminicli-color.svg>. SHA-256 `c2f54ebaa4c3b9191c6a07f7b0c66bc78e4abe486003dc564469cf650672663e`.
-- Kimi Code, Qwen Code and Muse Code use their maker's mark, the same file the model lists use:
+- Claude Code, Kimi Code, Qwen Code and Muse Code use their maker's mark, the same file the model lists use:
+  - Claude Code: `../models/claude.svg`, Claude's spark alone on a transparent background. Claude Code's docs icon (its apple-touch icon) is this spark on a dark rounded tile; the user saw that tile as a black background and asked for the mark alone (2026-11-11), so the tile file was removed.
   - Kimi Code: `kimi.svg`, Kimi's "K" from kimi.com.
   - Qwen Code: `qwen.svg`, Qwen's star from the Qwen Code docs.
   - Muse Code: `meta.svg`, Meta's mark from dev.meta.ai, where Muse Code installs from.

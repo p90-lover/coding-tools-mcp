@@ -348,7 +348,12 @@ test("the chat and Team pages keep asking for the harness list while AO is still
   const surface = read("AgentOrchestratorSurface.tsx");
   const watch = surface.slice(surface.indexOf("export function watchHarnesses"), surface.indexOf("/** Per-viewer chat list state"));
   assert.ok(watch.includes("if (!notice) return;"), "it stops once AO answers without a notice");
-  assert.ok(watch.includes("attempt < 20"), "and gives up after a few minutes");
+  // 2026-11-11: AO took 25 minutes to get ready (a 3.4 GB ao.db on the busy disk); the old three-minute
+  // limit left the chat's harness list holding only Native Codex until the page reloaded.
+  assert.ok(watch.includes("for (let attempt = 0; live; attempt++)"), "and keeps asking until then, however long AO takes");
+  const line = surface.match(/export const harnessRetryMs = [^\n]+/)[0];
+  const harnessRetryMs = eval(require("typescript").transpileModule(line.replace("export const", "const") + "\nharnessRetryMs;", { compilerOptions: { target: 9 } }).outputText);
+  assert.deepEqual([1, 3, 5, 19, 20, 500].map(harnessRetryMs), [2000, 6000, 10000, 10000, 30000, 30000], "a growing pause, then every 30 s");
   for (const page of ["AgentOrchestratorSurface.tsx", "AgentOrchestratorTeamsSurface.tsx"]) {
     assert.ok(read(page).includes("const stopHarnesses = watchHarnesses("), page);
     assert.ok(read(page).includes("stopHarnesses(); };"), page + " stops asking when it closes");
