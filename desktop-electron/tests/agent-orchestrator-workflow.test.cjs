@@ -12960,3 +12960,34 @@ test("a send's other board refusals are not retried", async () => {
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "and the other dots" }), /approved workspace/);
   assert.equal(writes, 1);
 });
+
+
+// 2026-11-11 10:34:28Z: a rewind in a busy project's older chat was refused every time, "This chat's
+// messages are still synchronizing; reload before rewind": the send read only the project's newest 100
+// runs, and the chat's own were older.
+test("a rewind in a busy project reads the chat's own runs, not only the project's newest 100", async () => {
+  const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
+  const done = (id, task) => ({ id, workspace_id: "ws-1", project_id: task, cancelled: false,
+    nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { thread_id: `session-${id}`, answer: `answer ${id}` } }] });
+  const busy = Array.from({ length: 100 }, (_, index) => done(`busy-${index}`, "task-2"));
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix auth", description }, { id: "task-2", title: "Busy", description: "busy" }],
+    runs: [done("r1", "task-1"), done("r2", "task-1"), ...busy] });
+  const projectReads = [], chatReads = [];
+  // As the headless read does: a project read holds its newest 100 runs, a chat read that chat's own.
+  const requestHeadless = async (endpoint, body = {}, ...rest) => {
+    const response = await world.requestHeadless(endpoint, body, ...rest);
+    if (endpoint !== "/api/v1/ao/read" || body.run_id) return response;
+    if (body.task_id) { chatReads.push(body.task_id); return { ...response, runs: response.runs.filter(run => run.project_id === body.task_id) }; }
+    projectReads.push(body.workspace_id);
+    return { ...response, runs: response.runs.slice(-100) };
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless,
+    findCodexExecutable: () => process.execPath, resolveHarness: async () => { throw new Error("offline test"); } });
+  const result = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask",
+    rewind: { index: 1, description }, deferStart: true });
+  assert.equal(result.taskId, "task-1");
+  assert.ok(result.runId, "the rewound message starts a run");
+  assert.ok(chatReads.includes("task-1"), "the send read the chat's own runs");
+  assert.deepEqual(Array.from(aoChat.chatMessagesFromDescription(world.tasks[0].description), item => item.text),
+    ["first ask", "second ask"]);
+});

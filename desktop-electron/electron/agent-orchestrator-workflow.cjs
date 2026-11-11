@@ -2044,6 +2044,28 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }, freshMs);
   }
 
+  // A send's view of the project: its read (the newest 100 runs of all its chats) with the chat's own
+  // runs, and its lifecycle, from the chat's read. With the project read alone a busy project's older
+  // chat was short of its early runs, so a rewind there never matched its messages to runs ("This
+  // chat's messages are still synchronizing; reload before rewind", 2026-11-11 10:34:28Z) however often
+  // it was reloaded, and a background continuation found no parent turn ("A newer turn superseded
+  // this background continuation"). Without a chat, or when the chat's read fails, the project read
+  // is used as before.
+  async function runsForSend(workspaceId, taskId) {
+    const project = await runs({ workspaceId });
+    const task = typeof taskId === "string" ? clean(taskId, 128) : "";
+    if (!task) return project;
+    let own;
+    try { own = await runs({ workspaceId, taskId: task }); } catch { return project; }
+    if (!Array.isArray(own?.runs)) return project;
+    const lifecycle = Array.isArray(own.task_lifecycle) ? own.task_lifecycle.filter(item => item?.task_id === task) : [];
+    return {
+      ...project,
+      runs: [...project.runs.filter(run => run.project_id !== task), ...own.runs.filter(run => run.project_id === task)],
+      ...(lifecycle.length ? { task_lifecycle: [...(project.task_lifecycle ?? []).filter(item => item?.task_id !== task), ...lifecycle] } : {}),
+    };
+  }
+
   // ---- Chats past the project read's newest 100 runs ----
   // The chat list is made from the project read's runs, and that read holds the project's newest
   // 100 only, shared by all of its chats: busy goal chats pushed every other chat off the list, no
@@ -6280,7 +6302,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Rolling the record over cannot make room for one message over the budget by itself.
     if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const selectedExecutable = codexExecutable(executable);
-    const saved = await runs({ workspaceId: id });
+    const saved = await runsForSend(id, taskId);
     checkCurrent();
     if (afterRunId !== undefined) {
       const parent = saved.runs.filter(run => run.project_id === taskId).at(-1);
