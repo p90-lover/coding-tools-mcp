@@ -284,7 +284,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   zhipu: "Zhipu", glm: "Zhipu", openrouter: "OpenRouter", commandcode: "CommandCode", "commandcode-go": "CommandCode Go", "opencode-go": "OpenCode Go", stepfun: "StepFun",
   minimax: "MiniMax", mistral: "Mistral",
 };
-const providerName = (provider: string) => PROVIDER_NAMES[provider.toLowerCase()] ?? provider;
+export const providerName = (provider: string) => PROVIDER_NAMES[provider.toLowerCase()] ?? provider;
 /** The CPA provider serving a "cpa/<id>" route model (as CPA reported it, else the id's own prefix); null for other models. */
 export function cpaProviderOf(model: string | undefined): string | null {
   if (!model?.startsWith("cpa/")) return null;

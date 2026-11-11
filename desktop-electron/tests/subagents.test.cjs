@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createSubagents, cleanConfig, SUBAGENT_TOOLS, STARTERS } = require("../electron/subagents.cjs");
+const { createSubagents, cleanConfig, providerOf, providerAllowed, SUBAGENT_TOOLS, STARTERS } = require("../electron/subagents.cjs");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
 const ROUTE = { harness_id: "ao:claude-code", model: "cpa/test-model" };
@@ -755,6 +755,60 @@ test("a chat agent picks a subagent's model, effort and window, and it always ru
     assert.doesNotMatch(w.spawned[1].prompt, /read-only explorer/);
     assert.equal(w.spawned.length, 2);
   } finally { w.cleanup(); }
+});
+
+test("the allowed providers are saved clean; none saved allows every one", () => {
+  assert.equal(cleanConfig({}).settings.allowedProviders, null);
+  assert.deepEqual(cleanConfig({ settings: { allowedProviders: ["Antigravity", "antigravity", "not a key!", "ao:codex", 7] } }).settings.allowedProviders,
+    ["antigravity", "ao:codex"]);
+  assert.throws(() => cleanConfig({ settings: { allowedProviders: "antigravity" } }), /must be a list/);
+  assert.equal(providerOf("cpa/gemini-3.8-flash", "ao:claude-code", { provider: "Antigravity" }, true), "antigravity");
+  assert.equal(providerOf("cpa/cline-pass/deepseek-v4.1-flash", "ao:claude-code", undefined, false), "cline-pass");
+  assert.equal(providerOf("cpa/glm-5", "ao:claude-code", {}, true), "cpa", "listed with no provider: the page's Other");
+  assert.equal(providerOf("cpa/glm-5", "ao:claude-code", undefined, false), null, "not listed: cannot be told");
+  assert.equal(providerOf("gpt-6", "ao:codex", undefined, true), "ao:codex", "an agent's own model is its own account");
+});
+
+test("subagents use only the providers the user allows: the model list, a picked model and a saved one", async () => {
+  // Asked 2026-11-10: "i dont want to use on some provider to cost my limit too much".
+  const catalog = { ok: true, harness: "ao:claude-code", models: ["cpa/glm-5", "cpa/gemini-3.8-flash", "cpa/cline-pass/deepseek-v4.1-flash"],
+    capabilities: { "cpa/glm-5": { efforts: [], provider: "zhipu" }, "cpa/gemini-3.8-flash": { efforts: ["high"], provider: "antigravity" }, "cpa/cline-pass/deepseek-v4.1-flash": { efforts: [] } } };
+  const w = world({ settings: { allowedProviders: ["antigravity", "ao:codex"], defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5" } }, models: async () => catalog });
+  try {
+    const listed = parse(await w.service.call("chat-1", "ws-1", "subagent_models", {}));
+    assert.deepEqual(listed.models.map((model) => [model.id, model.provider]), [["gemini-3.8-flash", "antigravity"]], "only allowed providers' models, each naming its provider");
+    assert.deepEqual(listed.allowed_providers, ["antigravity", "ao:codex"]);
+    const saved = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" });
+    assert.equal(saved.isError, true);
+    assert.match(saved.content[0].text, /"Explorer" would run on glm-5, served by zhipu, a provider the user turned off for subagents/);
+    const picked = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it", model: "cline-pass/deepseek-v4.1-flash" });
+    assert.match(picked.content[0].text, /served by cline-pass/, "a chat agent's own pick is held to the same list");
+    assert.deepEqual(w.spawned, [], "nothing started on a provider that is off");
+    assert.equal(parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it", model: "gemini-3.8-flash" })).model, "gemini-3.8-flash");
+    // Awaited: a save may write its file after it returns, and the test's folder goes at cleanup.
+    await w.service.save({ settings: { ...w.service.config().settings, defaultRoute: { harness_id: "ao:codex", model: "gpt-6" } }, agents: STARTERS });
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "reviewer", task: "Review it" })).isError, false, "Codex's own account is allowed");
+    assert.equal(w.spawned.length, 2);
+  } finally { w.cleanup(); }
+});
+
+test("with only some providers allowed, a model whose provider cannot be told is refused, not guessed", async () => {
+  assert.equal(providerAllowed(null, null), true, "no list: every provider, known or not");
+  assert.equal(providerAllowed([], "antigravity"), false, "every provider off");
+  assert.equal(providerAllowed(["antigravity"], null), false);
+  const down = world({ settings: { allowedProviders: ["antigravity"], defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5" } },
+    models: async () => { throw new Error("CPA down"); } });
+  try {
+    const refused = await down.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /who serves it cannot be told right now/);
+    assert.deepEqual(down.spawned, []);
+  } finally { down.cleanup(); }
+  // Without a list the same unreadable catalog leaves the launch alone, as before.
+  const open = world({ settings: { defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5" } }, models: async () => { throw new Error("CPA down"); } });
+  try {
+    assert.equal((await open.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" })).isError, false);
+  } finally { open.cleanup(); }
 });
 
 test("an effort or window alone keeps a saved Claude Code route's model; an unreadable catalog leaves the launch to check", async () => {
