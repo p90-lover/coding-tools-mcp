@@ -564,6 +564,20 @@
 .ao-workflow .ao-context-custom input[aria-invalid="true"] { border-color: var(--ao-red, #c0392b); }
 .ao-workflow .ao-popover-apply { height: 28px; padding: 0 10px; border: 1px solid var(--ao-line); border-radius: 6px; background: transparent; color: inherit; font: inherit; font-size: 12px; cursor: pointer; }
 .ao-workflow .ao-popover-apply:disabled { opacity: .5; cursor: default; }
+/* The window menu is a slim, see-through column of sizes: no title or notes, a custom size typed in
+   its last row. It shows more of the chat through it than the model menu does: it is short, and
+   only the sizes need reading. (The base popover's 360px width came after .ao-tuning-popup's and won.) */
+.ao-workflow .ao-composer-popover.ao-context-popup { width: max-content; min-width: 0; padding: 3px; border-radius: 10px;
+  background: color-mix(in srgb, var(--claude-raised, #fff) 68%, transparent);
+  backdrop-filter: blur(16px) saturate(1.3); -webkit-backdrop-filter: blur(16px) saturate(1.3); }
+.ao-workflow .ao-context-popup [role="radiogroup"] { gap: 1px; }
+.ao-workflow .ao-context-popup .ao-picker-option { margin: 0; min-height: 24px; padding: 3px 8px; gap: 8px; background: transparent;
+  font-size: 12px; font-variant-numeric: tabular-nums; }
+.ao-workflow .ao-context-popup .ao-option-radio { display: none; }
+.ao-workflow .ao-context-popup .ao-picker-option > svg { flex: none; width: 12px; height: 12px; }
+.ao-workflow .ao-context-popup .ao-context-custom { gap: 2px; margin-top: 2px; }
+.ao-workflow .ao-context-popup .ao-context-custom input { flex: 1 1 58px; width: 58px; height: 24px; padding: 0 6px; background: transparent; font-size: 12px; }
+.ao-workflow .ao-context-popup .ao-popover-apply { display: grid; flex: none; place-items: center; width: 24px; height: 24px; padding: 0; }
 .ao-workflow .ao-composer-popover { position: absolute; z-index: 40; bottom: calc(100% + 12px); left: 0; right: auto; width: min(360px, calc(100vw - 40px)); max-height: min(72vh, 650px); overflow: auto; padding: 16px; border: 1px solid #dfe7f0; border-radius: 12px; background: #fff; color: #17243a; box-shadow: 0 10px 36px rgb(31 54 86 / 13%); }
 .ao-workflow .ao-composer-popover header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; gap: 12px; }
 .ao-workflow .ao-composer-popover h3 { margin: 0; font-size: 15px; font-weight: 600; }

@@ -164,9 +164,12 @@ test("the effort and window chips show the pick and offer exactly what the model
   assert.match(text(window.props.label), /400k/i, "an unpicked window reads as the 400K default");
   const sizes = optionsIn(window).map(row => text(row.props.children));
   assert.ok(!sizes.some(size => /default/i.test(size)), `no default row: ${sizes}`);
-  assert.ok(sizes.includes("400k") && sizes.includes("1Mfull model limit") && !sizes.includes("2M"), `presets stay within the model's range: ${sizes}`);
-  assert.equal(optionsIn(window).find(row => row.props.picked).props.children[0], "400k");
-  optionsIn(window).find(row => text(row.props.children) === "1Mfull model limit").props.onPick();
+  assert.ok(sizes.includes("400k") && sizes.includes("1M") && !sizes.includes("2M"), `presets stay within the model's range: ${sizes}`);
+  // A slim menu of sizes only (the user: "remove all useless text", "context window are useless text too").
+  assert.equal(window.props.showHeading, false, "no title bar: the chip already names the setting");
+  assert.equal(text(window.props.children(() => {})), sizes.join(""), "no row notes, range line or button words: only the sizes read");
+  assert.equal(text(optionsIn(window).find(row => row.props.picked).props.children), "400k");
+  optionsIn(window).find(row => text(row.props.children) === "1M").props.onPick();
   assert.equal(routes.at(-1).context_window, 1_000_000);
   const harness = menuNamed(tree, "Harness");
   assert.doesNotMatch(text(harness.props.label), /Claude Code/, "the harness chip shows only its logo");
@@ -823,7 +826,7 @@ test("saved model tuning survives A-B-A and a fresh composer, with defaults for 
   picker.model("cpa/big");
   assert.equal(picker.route.effort, "medium");
   assert.equal(picker.route.context_window, 400_000);
-  picker.effort("Max"); picker.window("1Mfull model limit");
+  picker.effort("Max"); picker.window("1M");
   picker.model("cpa/small");
   assert.equal(picker.route.effort, "high", "the unconfigured model starts on a supported effort");
   assert.equal(picker.route.context_window, 262144);
@@ -853,7 +856,7 @@ test("explicit Auto is saved, and changing one tuning field does not invent an o
 test("changed model capabilities fit saved tuning without destroying the preferred window", async () => {
   const storage = tuningStorage();
   const picker = tuningPicker(storage);
-  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1M");
   const smaller = { ...tuningCaps, "cpa/big": { efforts: ["low", "high"], contextLimit: 128_000, contextWindow: { min: 4096, max: 128_000 } } };
   const fresh = tuningPicker(storage, smaller);
   fresh.model("cpa/big"); await fresh.load();
@@ -869,7 +872,7 @@ test("changed model capabilities fit saved tuning without destroying the preferr
 test("initial catalog loading restores saved tuning only for fields the chat has not picked", async () => {
   const storage = tuningStorage();
   const picker = tuningPicker(storage);
-  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1M");
   const fresh = tuningPicker(storage, tuningCaps, { model: "cpa/big" });
   await fresh.load();
   assert.equal(fresh.route.effort, "max");
@@ -888,7 +891,7 @@ test("initial catalog loading restores saved tuning only for fields the chat has
 test("a late catalog fits saved tuning without replacing the stored preference", async () => {
   const storage = tuningStorage();
   const picker = tuningPicker(storage);
-  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1M");
   const smaller = { ...tuningCaps, "cpa/big": { efforts: ["low", "high"], contextLimit: 600_000, contextWindow: { min: 4096, max: 600_000 } } };
   const fresh = tuningPicker(storage, smaller);
   fresh.model("cpa/big", {});
@@ -901,7 +904,7 @@ test("a late catalog fits saved tuning without replacing the stored preference",
 test("model preferences are isolated by harness and account, and routing keeps approval policy", () => {
   const storage = tuningStorage();
   const picker = tuningPicker(storage);
-  picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  picker.model("cpa/big"); picker.effort("Max"); picker.window("1M");
   const otherHarness = tuningPicker(storage, tuningCaps, { harness_id: "ao:codex", native_permission_profile: "managed/custom", approvals_reviewer: "auto_review" });
   otherHarness.model("cpa/big");
   assert.equal(otherHarness.route.effort, "medium"); assert.equal(otherHarness.route.context_window, 400_000);
@@ -920,7 +923,7 @@ test("malformed or blocked model preference storage falls back safely without pr
     assert.equal(picker.route.effort, "medium"); assert.equal(picker.route.context_window, 400_000);
   }
   const blocked = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("quota"); } };
-  const picker = tuningPicker(blocked); picker.model("cpa/big"); picker.effort("Max"); picker.window("1Mfull model limit");
+  const picker = tuningPicker(blocked); picker.model("cpa/big"); picker.effort("Max"); picker.window("1M");
   assert.equal(picker.route.effort, "max"); assert.equal(picker.route.context_window, 1_000_000);
 });
 

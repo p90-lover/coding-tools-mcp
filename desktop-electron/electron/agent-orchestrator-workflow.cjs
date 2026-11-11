@@ -1207,6 +1207,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    */
   const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000]];
   const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
+  /**
+   * The largest window a card may set for a model whose catalog reports `limit`. CPA's
+   * max_context_window counts what the model takes in: its window less the reply's 128K reserve,
+   * as Codex reckons it, so GPT-6, GPT-5.6 and Claude Fable 5 report 872K for their 1M. Their
+   * window menu goes up to the 1M itself (the user: "it should up 1m context window"). A card
+   * left unset still starts at the reported limit (defaultContextWindow): 1M is only ever picked.
+   */
+  const REPLY_RESERVE = 128_000;
+  const windowCeiling = limit => Number.isSafeInteger(limit) && limit < 1_000_000 && limit + REPLY_RESERVE >= 1_000_000 ? 1_000_000 : limit;
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -1231,7 +1240,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // Pi takes one only on a CPA model (AO's Pi extension declares it); Unreal Agent takes none.
     const windowed = GATEWAY_AGENTS.has(agent) && agent !== "agy" && agent !== "unreal-agent" && (agent !== "pi" || viaCpa);
     if (windowed && !unqualifiedOpenCode && (!limit || limit >= 4096)) {
-      capabilities.contextWindow = { min: 4096, max: Math.min(2000000, limit || 2000000), kind: "context" };
+      capabilities.contextWindow = { min: 4096, max: Math.min(2000000, windowCeiling(limit) || 2000000), kind: "context" };
       capabilities.contextReason = limit
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
         : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
@@ -1594,7 +1603,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         }
         if (node.route.context_window != null) {
           const setting = capability?.contextWindow, tokens = node.route.context_window;
-          const maximum = Math.min(setting?.max ?? 2000000, capability?.contextLimit ?? 2000000);
+          const maximum = Math.min(setting?.max ?? 2000000, windowCeiling(capability?.contextLimit) ?? 2000000);
           if (!setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum) {
             throw new Error("This model's context window can't be set to that. Its limit is " + maximum + " tokens.");
           }
