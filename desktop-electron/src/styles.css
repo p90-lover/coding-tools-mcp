@@ -859,8 +859,12 @@ code {
   background: var(--green-300);
 }
 
+/* Three beats when the dot appears, then it stays lit. It marks a state that can last for days (setup
+   not finished), and a pulse that never ends makes the compositor draw a frame at every refresh: on
+   2026-11-11 the Setup dot alone kept the GPU process at ~15% CPU and moved 60 MB/min from the
+   renderer to it, both 0 with the pulse paused. */
 .action-dot.is-pulse {
-  animation: statePulse 1.3s ease-in-out infinite;
+  animation: statePulse 1.3s ease-in-out 3;
 }
 
 @keyframes statePulse {
