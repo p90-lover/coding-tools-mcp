@@ -12,7 +12,7 @@ const tempRoot = (name) => fs.mkdtempSync(path.join(__dirname, `../../aiTemp/${n
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 /** A fake GitHub: the release lists per repository, branch heads, and asset bytes behind a redirect. */
-function fakeGitHub({ releases, assets = {}, branches = {} }) {
+function fakeGitHub({ releases, assets = {}, branches = {}, compares = {}, defaultBranches = {} }) {
   const calls = [];
   const fetchImpl = async (input, init = {}) => {
     const url = new URL(String(input));
@@ -27,6 +27,15 @@ function fakeGitHub({ releases, assets = {}, branches = {} }) {
       const known = branches[`${branch[1]}@${branch[2]}`];
       return known ? json({ name: branch[2], commit: { sha: known.head } }) : json({ message: "Not Found" }, 404);
     }
+    // A repository's default branch ("owner/name": "main").
+    const repository = /^\/repos\/([^/]+\/[^/]+)$/.exec(url.pathname);
+    if (url.hostname === "api.github.com" && repository) {
+      return defaultBranches[repository[1]] ? json({ default_branch: defaultBranches[repository[1]] }) : json({ message: "Not Found" }, 404);
+    }
+    // A commit against a release tag ({ "owner/name@<commit>...<tag>": ahead }).
+    const tagged = /^\/repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]+)\.\.\.(.+)$/.exec(url.pathname);
+    const taggedAhead = tagged ? compares[`${tagged[1]}@${tagged[2]}...${decodeURIComponent(tagged[3])}`] : undefined;
+    if (url.hostname === "api.github.com" && taggedAhead !== undefined) return json({ status: "ahead", ahead_by: taggedAhead, behind_by: 0 });
     const compare = /^\/repos\/([^/]+\/[^/]+)\/compare\/([0-9a-f]+)\.\.\.([0-9a-f]+)$/.exec(url.pathname);
     if (url.hostname === "api.github.com" && compare) {
       const known = Object.entries(branches).find(([key, value]) => key.startsWith(`${compare[1]}@`) && value.head === compare[3])?.[1];
@@ -52,13 +61,16 @@ function fakeGitHub({ releases, assets = {}, branches = {} }) {
   return { fetchImpl, calls };
 }
 
-function setup({ releases, assets, branches, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null, aoManifest = null }) {
+function setup({ releases, assets, branches, compares, defaultBranches, bundle = null, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null, aoManifest = null }) {
   const root = tempRoot("app-plugins");
   const stateDir = path.join(root, "cpa");
   const pluginDir = path.join(stateDir, "plugins", "windows", "amd64");
   fs.mkdirSync(pluginDir, { recursive: true });
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(pluginDir, name), body);
-  const github = fakeGitHub({ releases, assets, branches });
+  const github = fakeGitHub({ releases, assets, branches, compares, defaultBranches });
+  // The app's BUNDLE.json of shipped plugin builds: none unless a test gives one.
+  const pluginBundleFile = path.join(root, "BUNDLE.json");
+  if (bundle) fs.writeFileSync(pluginBundleFile, JSON.stringify(bundle));
   const aoRoot = path.join(root, "agent-orchestrator");
   if (aoManifest) {
     fs.mkdirSync(aoRoot, { recursive: true });
@@ -74,7 +86,7 @@ function setup({ releases, assets, branches, files = {}, cpa = { version: "8.0.4
   const plugins = createAppPlugins({
     cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk, agentOrchestratorRoot: () => aoRoot,
     fetchImpl: github.fetchImpl, env: { GH_TOKEN: "ghp_testtoken0123456789abcdef" }, spawnImpl: () => { throw new Error("no gh"); },
-    platform: "win32", arch: "x64", logger: { info() {} },
+    platform: "win32", arch: "x64", logger: { info() {} }, pluginBundleFile,
   });
   return { root, stateDir, pluginDir, plugins, github, updates, restarts: () => restarts };
 }
@@ -124,6 +136,69 @@ test("App plugins lists CPA and each plugin with its installed and latest GitHub
   assert.deepEqual([switcher.latest, switcher.error, switcher.updateAvailable], [null, null, false]);
   // The token went to api.github.com only.
   assert.ok(github.calls.every((call) => call.auth === null || new URL(call.url).hostname === "api.github.com"));
+});
+
+test("a rebuild is compared by the upstream commit it was built from, not by its own version", async () => {
+  // 0.8.107 (2026-11-10): Grok login 0.1.0-codingtools.2 is built from grok2api, whose releases are
+  // 3.x, so comparing versions offered "3.1.8" forever, even after rebuilding from it.
+  const grokCommit = "7c889a960e2638341b4dae9a5c81af0e0f38c87f";
+  const clineCommit = "02538a3137a08948a94f26f17dd4aeff8c029ed1";
+  const clineHead = "9a8b7c6d".padEnd(40, "e");
+  const helperHead = "bb2287a".padEnd(40, "0");
+  const bundle = {
+    id: "commandcode-go", version: "1.0.0-codingtools.3", source: { commit: "444ee977daaa96e6fa6ef5155b14cac3a6f9cdc3" },
+    grok: { id: "grok-login-provider", version: "0.1.0-codingtools.2", source: { commit: grokCommit } },
+    cline: { id: "cline-pass-switcher", version: "0.1.0-codingtools.10", source: { commit: clineCommit } },
+    helper: { id: "cpa-helper", version: "0.1.1", source: { commit: "bb2287a" } },
+  };
+  const files = {
+    "grok-login-provider-v0.1.0-codingtools.2.dll": "grok",
+    "cline-pass-switcher-v0.1.0-codingtools.10.dll": "cline",
+    "cpa-helper-v0.1.1.dll": "helper",
+  };
+  const rows = async (grokAhead) => {
+    const context = setup({
+      files, bundle,
+      releases: { "chenyme/grok2api": [release("v3.1.8")], "munmunjaklin458-afk/cline-pass-switcher": [], "p90-lover/cpa-helper-plugin": [] },
+      compares: { [`chenyme/grok2api@${grokCommit}...v3.1.8`]: grokAhead },
+      defaultBranches: { "munmunjaklin458-afk/cline-pass-switcher": "main", "p90-lover/cpa-helper-plugin": "main" },
+      branches: { "munmunjaklin458-afk/cline-pass-switcher@main": { head: clineHead, ahead: 2 }, "p90-lover/cpa-helper-plugin@main": { head: helperHead, ahead: 0 } },
+    });
+    const { items } = await context.plugins.list();
+    return Object.fromEntries(items.map((item) => [item.id, item]));
+  };
+  const behind = await rows(24);
+  const grok = behind["cpa-plugin:grok-login-provider"];
+  assert.deepEqual([grok.installed, grok.latest, grok.updateAvailable, grok.viaAppUpdate, grok.canUpdate, grok.error],
+    ["0.1.0-codingtools.2", "3.1.8", true, true, false, null]);
+  assert.equal(grok.note, "Built from 7c889a9; v3.1.8 has 24 newer commits.");
+  assert.match(grok.releaseUrl, /\/chenyme\/grok2api\/compare\/7c889a960e26\.\.\.v3\.1\.8$/);
+  // Rebuilt from that release (or later): nothing to offer, whatever the versions say.
+  const current = (await rows(0))["cpa-plugin:grok-login-provider"];
+  assert.deepEqual([current.latest, current.updateAvailable, current.viaAppUpdate, current.note], ["3.1.8", false, false, "Built from 7c889a9, v3.1.8 or later."]);
+  // No release upstream: its default branch. Neither row was a silent null.
+  const cline = behind["cpa-plugin:cline-pass-switcher"];
+  assert.deepEqual([cline.latest, cline.updateAvailable, cline.viaAppUpdate, cline.canUpdate], ["9a8b7c6", true, true, false]);
+  assert.equal(cline.note, "Built from 02538a3; main has 2 newer commits (no release yet).");
+  // CPA Helper ships with the app: nothing here to auto-update.
+  const helper = behind["cpa-plugin:cpa-helper"];
+  assert.deepEqual([helper.updateAvailable, helper.canUpdate, helper.autoUpdatable, helper.autoUpdate], [false, false, false, false]);
+  assert.equal(helper.note, "Built from bb2287a, main's latest (no release yet).");
+});
+
+test("a rebuild that isn't the copy the app ships, or whose repository has no release, still says so", async () => {
+  const context = setup({
+    files: { "grok-login-provider-v0.1.0-codingtools.9.dll": "hand-built", "cline-pass-switcher-v0.1.0-codingtools.10.dll": "cline" },
+    bundle: { grok: { id: "grok-login-provider", version: "0.1.0-codingtools.2", source: { commit: "7c889a960e2638341b4dae9a5c81af0e0f38c87f" } } },
+    releases: { "chenyme/grok2api": [release("v0.1.0")], "munmunjaklin458-afk/cline-pass-switcher": [] },
+  });
+  const byId = Object.fromEntries((await context.plugins.list()).items.map((item) => [item.id, item]));
+  // A hand-built copy isn't the bundled build: compared by version, as before.
+  const grok = byId["cpa-plugin:grok-login-provider"];
+  assert.deepEqual([grok.latest, grok.updateAvailable, grok.error], ["0.1.0", false, null]);
+  assert.equal(context.github.calls.some((call) => call.url.includes("/compare/")), false);
+  // No bundled build and no release: a note, not a blank row.
+  assert.equal(byId["cpa-plugin:cline-pass-switcher"].note, "Updates with the app; its repository has no release yet.");
 });
 
 test("Agent Orchestrator shows the commit built into the app against its fork's main branch", async () => {

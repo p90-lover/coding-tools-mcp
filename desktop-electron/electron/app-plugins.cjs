@@ -10,8 +10,10 @@
  *   repository publishes `<id>-v<version>.dll` with GitHub's SHA-256 digest is downloaded,
  *   checked against that digest, put beside the old one (which goes to Trash) and recorded in
  *   plugin-updates.json, so CPA's start keeps it over an older bundled copy.
- * - Plugins rebuilt for Coding Tools from someone else's repository show that repository's latest
- *   version; its releases have no Windows build of ours, so a new one arrives in an app update.
+ * - Plugins rebuilt for Coding Tools (from someone else's repository, or our own without releases)
+ *   arrive in an app update. They are compared by the upstream commit they were built from
+ *   (BUNDLE.json) with that repository's newest release, or its default branch when it has none:
+ *   a rebuild's own version (Grok's 0.1.0) isn't upstream's (grok2api 3.1.8).
  * - The Antigravity CLI updates to the latest release's archive for this platform, checked against
  *   GitHub's size and SHA-256 and unpacked with the pinned install's archive checks
  *   (antigravity-cli.cjs update).
@@ -37,7 +39,8 @@ const { compareVersions } = require("./update.cjs");
 const { releaseManifest, platformAsset } = require("./antigravity-cli.cjs");
 
 const PLUGIN_SOURCES = Object.freeze({
-  "cpa-helper": { name: "CPA Helper", repository: "p90-lover/cpa-helper-plugin" },
+  // Our Rust rewrite of walkingddd/CPA-Helper, built into the app; its repository publishes no release.
+  "cpa-helper": { name: "CPA Helper", repository: "p90-lover/cpa-helper-plugin", rebuilt: true },
   "codex-review-account-selector": { name: "CPA Auto Review", repository: "p90-lover/cpa_auto_review" },
   "cpa-provider-manager": { name: "CPA Provider Manager", repository: "p90-lover/cpa_provider_manager" },
   "commandcode-go": { name: "CommandCode", repository: "sperictao/cpa-plugin-commandcode-go", rebuilt: true },
@@ -63,6 +66,10 @@ const CHECK_TTL_MS = 30 * 60_000;
 const UPDATES_FILE = "plugin-updates.json";
 const SETTINGS_FILE = "app-plugins.json";
 const AUTO_FIRST_MS = 5 * 60_000;
+// The plugins the app ships and what each was built from (beside them in the app's resources).
+const BUNDLE_FILE = path.join(__dirname, "..", "vendor", "bundled", "cpa-plugins", "BUNDLE.json");
+const COMMIT = /^[0-9a-f]{7,40}$/u;
+const newerCommits = (count) => `${count} newer commit${count === 1 ? "" : "s"}`;
 const AUTO_EVERY_MS = 6 * 60 * 60_000;
 
 /** A plugin DLL's id and version, from its file name (`<id>-v<version>.dll` or `<id>.dll`). */
@@ -125,6 +132,7 @@ function createAppPlugins({
   agentOrchestratorRoot = () => null,
   // Where the auto-update choices are kept: beside CPA's state folder by default.
   settingsDir = null,
+  pluginBundleFile = BUNDLE_FILE,
   logger = console,
   fetchImpl = fetch,
   env = process.env,
@@ -197,6 +205,56 @@ function createAppPlugins({
     }
     releases.set(key, entry);
     return entry;
+  }
+
+  /** A repository's default branch: { name }, or { error }. */
+  async function defaultBranch(repository, force) {
+    const key = `${repository}#default-branch`;
+    const cached = releases.get(key);
+    if (!force && cached && now() - cached.at < CHECK_TTL_MS) return cached;
+    let entry;
+    try {
+      const name = String((await github(`/repos/${repository}`))?.default_branch || "");
+      if (!name) throw new Error("GitHub gave no default branch");
+      entry = { at: now(), name };
+    } catch (error) {
+      entry = { at: now(), error: error instanceof Error ? error.message : String(error) };
+    }
+    releases.set(key, entry);
+    return entry;
+  }
+
+  /** How many commits `tag` has that `commit` lacks: { ahead, url }, or { error }. */
+  async function tagAhead(repository, tag, commit, force) {
+    const key = `${repository}@${tag}..${commit}`;
+    const cached = releases.get(key);
+    if (!force && cached && now() - cached.at < CHECK_TTL_MS) return cached;
+    let entry;
+    try {
+      const ahead = Number((await github(`/repos/${repository}/compare/${commit}...${encodeURIComponent(tag)}?per_page=1`))?.ahead_by) || 0;
+      entry = { at: now(), ahead, url: `https://github.com/${repository}/compare/${commit.slice(0, 12)}...${encodeURIComponent(tag)}` };
+    } catch (error) {
+      entry = { at: now(), error: error instanceof Error ? error.message : String(error) };
+    }
+    releases.set(key, entry);
+    return entry;
+  }
+
+  // Each shipped plugin's build, by id: BUNDLE.json's entries (its top level and those nested in it).
+  let bundled = null;
+  function bundledBuilds() {
+    bundled ??= fs.promises.readFile(pluginBundleFile, "utf8").then((text) => {
+      const builds = new Map();
+      const visit = (entry, depth) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry) || depth > 3) return;
+        const commit = String(entry.source?.commit || "");
+        if (typeof entry.id === "string" && COMMIT.test(commit)) builds.set(entry.id, { version: entry.version ?? null, commit });
+        for (const value of Object.values(entry)) visit(value, depth + 1);
+      };
+      visit(JSON.parse(text), 0);
+      return builds;
+    }).catch(() => new Map());
+    return bundled;
   }
 
   /** How far `branch` is ahead of `commit`: { head, ahead, url }, or { error }. */
@@ -288,20 +346,43 @@ function createAppPlugins({
       updateAvailable: false, canUpdate: false, note: null, error: null, updating: updating.has(`cpa-plugin:${plugin.id}`), releaseUrl: null,
     };
     if (!source) return { ...base, note: "Added by hand; its GitHub repository isn't known." };
-    const release = await latestRelease(source, force);
+    const [release, builds] = await Promise.all([latestRelease(source, force), source.rebuilt ? bundledBuilds() : null]);
     if (release.error) return { ...base, error: release.error };
-    // Nothing published yet: nothing to compare with, and not a failure.
-    if (release.none) return base;
-    const latest = release.version;
     if (source.rebuilt) {
-      const newer = Boolean(plugin.version && compare(baseVersion(latest), baseVersion(plugin.version)) > 0);
+      // The copy the app ships is compared by the commit it was built from (one added by hand, by version).
+      const build = builds.get(plugin.id);
+      if (build && build.version === plugin.version) return rebuiltItem(base, source, release, build.commit, force);
+      if (release.none) return { ...base, note: "Updates with the app; its repository has no release yet." };
+      const newer = Boolean(plugin.version && compare(baseVersion(release.version), baseVersion(plugin.version)) > 0);
       // Built for Coding Tools from this repository: a newer version arrives in an app update.
-      return { ...base, latest, releaseUrl: release.url, updateAvailable: newer, viaAppUpdate: newer };
+      return { ...base, latest: release.version, releaseUrl: release.url, updateAvailable: newer, viaAppUpdate: newer };
     }
+    // Nothing published yet: nothing to compare with, and not a failure.
+    if (release.none) return { ...base, note: "Its repository has no release yet." };
+    const latest = release.version;
     const newer = !plugin.version || compare(latest, plugin.version) > 0;
     const dll = newer ? releaseDll(release, plugin.id) : null;
     return { ...base, latest, releaseUrl: release.url, updateAvailable: newer, canUpdate: Boolean(dll),
       note: newer && !dll ? "This release has no Windows build to install." : null };
+  }
+
+  /** A rebuild against upstream: the release it predates, or its default branch while it has none. */
+  async function rebuiltItem(base, source, release, commit, force) {
+    const built = `Built from ${commit.slice(0, 7)}`;
+    if (release.none) {
+      const branch = await defaultBranch(source.repository, force);
+      const head = branch.error ? branch : await branchAhead(source.repository, branch.name, commit, force);
+      if (head.error) return { ...base, error: head.error };
+      const newer = head.ahead > 0;
+      return { ...base, latest: head.head.slice(0, 7), releaseUrl: head.url, updateAvailable: newer, viaAppUpdate: newer,
+        note: newer ? `${built}; ${branch.name} has ${newerCommits(head.ahead)} (no release yet).` : `${built}, ${branch.name}'s latest (no release yet).` };
+    }
+    const shown = { ...base, latest: release.version, releaseUrl: release.url };
+    const ahead = await tagAhead(source.repository, release.tag, commit, force);
+    if (ahead.error) return { ...shown, error: ahead.error };
+    const newer = ahead.ahead > 0;
+    return { ...shown, releaseUrl: newer ? ahead.url : release.url, updateAvailable: newer, viaAppUpdate: newer,
+      note: newer ? `${built}; ${release.tag} has ${newerCommits(ahead.ahead)}.` : `${built}, ${release.tag} or later.` };
   }
 
   const toolBase = (id) => ({

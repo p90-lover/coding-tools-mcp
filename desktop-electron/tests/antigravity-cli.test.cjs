@@ -118,6 +118,56 @@ function fakeCpa(files) {
   return { calls, fetchImpl };
 }
 
+test("an install or update reads, unpacks and writes nothing synchronously on the main thread",
+  { skip: process.platform !== "win32" }, async () => {
+    // 2026-11-10 05:50Z: an auto-update to 1.5.4 held every window 1.1 s, then 2.9 s, in
+    // writeFileSync < updateAntigravity, with tar's listing and extraction run by spawnSync.
+    const root = temp();
+    const childProcess = require("node:child_process");
+    const archiveFor = (version) => {
+      const payload = path.join(root, `payload-${version}`);
+      fs.mkdirSync(payload);
+      fs.writeFileSync(path.join(payload, "antigravity.exe"), `binary ${version}`);
+      const archive = path.join(root, `agy-${version}.zip`);
+      childProcess.execFileSync(require("../electron/antigravity-cli.cjs").tarBinary(), ["-a", "-cf", archive, "-C", payload, "antigravity.exe"]);
+      return fs.readFileSync(archive);
+    };
+    const manifestFor = (version, bytes) => ({ id: "antigravity-cli", version, command: "agy", repository: "google-antigravity/antigravity-cli",
+      platforms: { win32: { x64: { fileName: "agy_cli_windows_x64.zip", size: bytes.length, sha256: crypto.createHash("sha256").update(bytes).digest("hex") } } } });
+    const first = archiveFor("2.0.0");
+    const second = archiveFor("2.1.0");
+    const manifestPath = path.join(root, "manifest.json");
+    fs.writeFileSync(manifestPath, JSON.stringify(manifestFor("2.0.0", first)));
+    let serving = first;
+    const cli = createAntigravityCli({
+      toolsRoot: path.join(root, "tools"), manifestPath, platform: "win32", arch: "x64", confirm: async () => true, getWorkspaces: async () => [],
+      fetchImpl: async () => ({ status: 200, ok: true, body: (async function* () { yield serving; })() }),
+    });
+    const synchronous = [];
+    const saved = { fs: {}, childProcess: {} };
+    for (const name of Object.keys(fs).filter((key) => key.endsWith("Sync"))) {
+      saved.fs[name] = fs[name];
+      fs[name] = function (...args) { synchronous.push(name); return saved.fs[name].apply(this, args); };
+    }
+    for (const name of ["spawnSync", "execFileSync", "execSync"]) {
+      saved.childProcess[name] = childProcess[name];
+      childProcess[name] = function (...args) { synchronous.push(name); return saved.childProcess[name].apply(this, args); };
+    }
+    let installed, updated;
+    try {
+      installed = await cli.install();
+      serving = second;
+      updated = await cli.update(manifestFor("2.1.0", second));
+    } finally {
+      Object.assign(fs, saved.fs);
+      Object.assign(childProcess, saved.childProcess);
+    }
+    assert.deepEqual(synchronous, []);
+    assert.deepEqual([installed.installed, installed.version, updated.version, updated.previous], [true, "2.0.0", "2.1.0", []]);
+    assert.equal(cli.executable(), path.join(root, "tools", "antigravity-cli", "2.1.0", "antigravity.exe"));
+    assert.match(fs.readFileSync(path.join(root, "tools", "bin", "agy.cmd"), "utf8"), /2\.1\.0.*antigravity\.exe/s);
+  });
+
 test("CPA Antigravity re-auth refreshes first, then signs in once and disables the stale account", async () => {
   let files = [
     { name: "antigravity-old.json", provider: "antigravity", email: "me@example.com", status: "error", status_message: "invalid_grant" },
