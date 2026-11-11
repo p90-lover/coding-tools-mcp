@@ -17,7 +17,7 @@ function logos() {
 // maker's mark with the model lists.
 const assets = path.resolve(root, "../assets/harness");
 const harnesses = {
-  "claude-code": "brand/claude-code.png", codex: "ao/codex.svg", "codex-native": "ao/codex.svg", agy: "ao/agy.png", antigravity: "ao/agy.png",
+  "claude-code": "../models/claude.svg", codex: "ao/codex.svg", "codex-native": "ao/codex.svg", agy: "ao/agy.png", antigravity: "ao/agy.png",
   opencode: "brand/opencode.png", "opencode-v2": "brand/opencode.png", aider: "ao/aider.png", amp: "brand/amp.svg", auggie: "ao/auggie.svg",
   autohand: "ao/autohand.svg", cline: "brand/cline.svg", continue: "ao/continue.png", crush: "ao/crush.png", cursor: "brand/cursor.svg",
   deepseek: "ao/deepseek-harness.svg", "deepseek-harness": "ao/deepseek-harness.svg", devin: "ao/devin.png", droid: "ao/droid.png", fx: "ao/fx.svg",
@@ -39,8 +39,9 @@ test("every harness shows its own product's icon, never another brand's", () => 
     const ao = path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/assets/agents", path.basename(asset));
     if (fs.existsSync(ao)) assert.ok(logoBytes(ao).equals(logoBytes(path.join(assets, asset))), `${asset} is AO's file unmodified`);
   }
-  // The marks the user saw as wrong (2026-11-10), and the ones before them.
-  for (const [id, wrong] of [["claude-code", "ao/claude-code.svg"], ["claude-code", "claude-code.png"], ["qwen", "ao/qwen.png"], ["kimi", "ao/kimi.png"],
+  // The marks the user saw as wrong (2026-11-10), and the ones before them. 2026-11-11: Claude Code's
+  // docs icon drew its spark on a dark tile ("the claude one background is black").
+  for (const [id, wrong] of [["claude-code", "ao/claude-code.svg"], ["claude-code", "claude-code.png"], ["claude-code", "brand/claude-code.png"], ["qwen", "ao/qwen.png"], ["kimi", "ao/kimi.png"],
     ["grok", "ao/grok.png"], ["gemini", "gemini.svg"], ["muse", "ao/muse.png"], ["pi", "ao/pi.png"], ["amp", "ao/amp.svg"], ["codex", "openai.png"],
     ["unreal-agent", "unreal.svg"]]) {
     assert.notEqual(assetOf(harnessMark(`ao:${id}`, id)(16).props.src), wrong, id);
@@ -73,7 +74,7 @@ test("display-name aliases identify known brands without guessing an unknown har
   const { harnessMark } = logos();
   for (const [label, asset] of [["Gemini CLI", "brand/gemini-cli.svg"], ["DeepSeek", "ao/deepseek-harness.svg"], ["Prime Agent", "ao/prime-agent.png"],
     ["Kilo Code", "brand/kilocode.svg"], ["GitHub Copilot", "ao/copilot.svg"], ["Unreal Agent", "ao/unreal-agent.png"], ["Grok Build", "brand/grok-build.png"],
-    ["Qwen Code", "qwen.svg"], ["Muse Code", "meta.svg"], ["Claude Code", "brand/claude-code.png"]]) {
+    ["Qwen Code", "qwen.svg"], ["Muse Code", "meta.svg"], ["Claude Code", "../models/claude.svg"]]) {
     assert.equal(assetOf(harnessMark("custom-id", label)(16).props.src), asset, label);
   }
   assert.equal(harnessMark("unknown-agent", "Unknown")(16).type, "svg", "unknown brands keep an honest neutral fallback");
