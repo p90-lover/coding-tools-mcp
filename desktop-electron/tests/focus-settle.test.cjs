@@ -5,15 +5,25 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { EventEmitter } = require("node:events");
-const { FOCUS_SETTLE_MS, waitForFocus } = require("../electron/focus-settle.cjs");
+const { FOCUS_LATE_MS, FOCUS_SETTLE_MS, FOCUS_SLICE_MS, FOCUS_WAIT_MAX_MS, waitForFocus } = require("../electron/focus-settle.cjs");
 
 function fakeTimers() {
   const timers = [];
+  let at = 0;
   return {
     timers,
-    setTimer: (callback, ms) => { const timer = { callback, ms, cleared: false }; timers.push(timer); return timer; },
+    now: () => at,
+    setTimer: (callback, ms) => { const timer = { callback, ms, due: at + ms, cleared: false }; timers.push(timer); return timer; },
     clearTimer: (timer) => { if (timer) timer.cleared = true; },
-    fire: () => { for (const timer of timers) if (!timer.cleared) { timer.cleared = true; timer.callback(); } },
+    /** Runs the pending slice `late` ms after it was due (main held for that long); false when none is left. */
+    fire: (late = 0) => {
+      const timer = timers.find((item) => !item.cleared);
+      if (!timer) return false;
+      timer.cleared = true;
+      at = timer.due + late;
+      timer.callback();
+      return true;
+    },
   };
 }
 
@@ -46,12 +56,50 @@ test("with no focus event in time, the check answers as it is then", async () =>
   const window = new EventEmitter();
   const clock = fakeTimers();
   const waiting = waitForFocus({ focused: () => false, emitters: [window], ...clock });
-  assert.equal(clock.timers[0].ms, FOCUS_SETTLE_MS);
   assert.ok(FOCUS_SETTLE_MS <= 2_000, "a refused send is not held long");
-  clock.fire();
+  let slices = 0;
+  while (clock.fire()) slices += 1;
+  assert.equal(slices, FOCUS_SETTLE_MS / FOCUS_SLICE_MS, "main free for the whole wait: it ends after FOCUS_SETTLE_MS");
   assert.equal(await waiting, false);
   assert.equal(window.listenerCount("focus"), 0);
   window.emit("focus"); // a late event changes nothing
+});
+
+// 2026-11-11 07:19:36Z, right after the 0.8.110 relaunch: main was held past the whole 2 s, the
+// overdue timer ran before the focus event queued behind the stall, and the send was refused.
+test("a main stall during the wait does not use it up: the focus event behind the stall still lands", async () => {
+  const window = new EventEmitter();
+  const state = { focused: false };
+  const clock = fakeTimers();
+  const waiting = waitForFocus({ focused: () => state.focused, emitters: [window], ...clock });
+  let settled = false;
+  void waiting.then(() => { settled = true; });
+  clock.fire(5_000); // main held 5 s: this slice is late and does not count
+  clock.fire(FOCUS_LATE_MS + 1);
+  await Promise.resolve();
+  assert.equal(settled, false, "still waiting after a 5 s stall");
+  state.focused = true; window.emit("focus"); // dispatched once main is free
+  assert.equal(await waiting, true);
+  assert.equal(window.listenerCount("focus"), 0);
+});
+
+test("a main that stays held still gets an answer within FOCUS_WAIT_MAX_MS", async () => {
+  const window = new EventEmitter();
+  const clock = fakeTimers();
+  const waiting = waitForFocus({ focused: () => false, emitters: [window], ...clock });
+  while (clock.fire(1_000)) { /* every slice a second late */ }
+  assert.equal(await waiting, false);
+  assert.ok(clock.now() >= FOCUS_WAIT_MAX_MS && clock.now() < FOCUS_WAIT_MAX_MS + 1_200, `answered at ${clock.now()} ms`);
+  assert.equal(window.listenerCount("focus"), 0);
+});
+
+test("a slice late by no more than FOCUS_LATE_MS still counts", async () => {
+  const clock = fakeTimers();
+  const waiting = waitForFocus({ focused: () => false, emitters: [new EventEmitter()], ...clock });
+  let slices = 0;
+  while (clock.fire(FOCUS_LATE_MS)) slices += 1;
+  assert.equal(slices, FOCUS_SETTLE_MS / FOCUS_SLICE_MS);
+  assert.equal(await waiting, false);
 });
 
 test("chat sends and other app writes use the settled focus check; hidden and minimized windows are still refused at once", () => {
