@@ -69,6 +69,26 @@ test("a compaction that never finishes is stopped at its limit, so AO still star
   } finally { fixture.cleanup(); }
 });
 
+test("a write-ahead log holding a backlog is left to AO: this start does no maintenance", async () => {
+  // Seen 2026-11-11: with a 483 MB log, opening the database read all of it and the first write
+  // began copying all of it into the database; the maintenance hit its 90 s limit before AO started.
+  const fixture = mostlyEmpty();
+  try {
+    const wal = `${fixture.file}-wal`;
+    fs.writeFileSync(wal, Buffer.alloc(2 * MB));
+    const before = fs.statSync(fixture.file);
+    // A maintenance process would fail this test: none may start.
+    const result = await compactAoDatabase(fixture.dir, { ...small, walBacklogMaxBytes: 1 * MB, scriptSource: "process.exit(7)" });
+    assert.deepEqual(result, { action: "skipped", reason: "write-ahead log backlog", walBytes: 2 * MB });
+    const after = fs.statSync(fixture.file);
+    assert.equal(after.size, before.size);
+    assert.equal(after.mtimeMs, before.mtimeMs, "the database is not touched");
+    // A log within the limit is no reason to skip.
+    fs.writeFileSync(wal, Buffer.alloc(0));
+    assert.equal((await compactAoDatabase(fixture.dir, { ...small, walBacklogMaxBytes: 1 * MB })).action, "vacuum");
+  } finally { fixture.cleanup(); }
+});
+
 test("a compaction stopped mid-write lets go of the database before AO starts", async () => {
   // Review on #484: a worker thread could not be stopped inside a native SQLite call, so after the
   // timeout it still held the write lock and AO started against a locked database. The maintenance
