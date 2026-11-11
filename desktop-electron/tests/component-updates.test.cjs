@@ -8,6 +8,7 @@ const test = require("node:test");
 const {
   compareVersions,
   createManagedComponentController,
+  fetchFollowingRedirects,
   parseChecksums,
   updatedManifest,
 } = require("../electron/managed-components.cjs");
@@ -538,4 +539,101 @@ test("pruning keeps the active and bundled versions and moves the rest to Trash"
   assert.deepEqual(fs.readdirSync(path.join(dataRoot, "components", "cpa")).sort(), ["1.0.0", "1.2.0"]);
   assert.equal(fs.readdirSync(path.join(dataRoot, "Trash", "managed-components", "cpa")).length, 1);
   controller.dispose();
+});
+
+/** The launcher's network fetch: it hands every redirect back, as Electron's net.request does. */
+function launcherNetworkGitHub(github) {
+  const calls = [];
+  const releaseFetch = async (url, init = {}) => {
+    const href = String(url);
+    calls.push({ href, redirect: init.redirect });
+    if (href.startsWith("https://github.com/fixture/cpa/releases/download/")) {
+      return new Response(null, { status: 302, headers: { location: href.replace("https://github.com/", "https://objects.example.test/") } });
+    }
+    if (href.startsWith("https://objects.example.test/")) return github.fetchImpl(href.replace("https://objects.example.test/", "https://github.com/"));
+    return github.fetchImpl(href);
+  };
+  return { releaseFetch, calls };
+}
+
+test("CPA's GitHub checks and downloads go through releaseFetch, following its redirects; Node's fetch is left for health checks", async () => {
+  const github = fakeGitHub();
+  const launcher = launcherNetworkGitHub(github);
+  const nodeFetchCalls = [];
+  const manifestRoot = temporaryDirectory("coding-tools-cpa-release-fetch-manifests");
+  writeJson(path.join(manifestRoot, "cpa.json"), cpaManifest());
+  const bundleRoot = temporaryDirectory("coding-tools-cpa-release-fetch-bundle");
+  fs.mkdirSync(path.join(bundleRoot, "cpa"), { recursive: true });
+  fs.writeFileSync(path.join(bundleRoot, "cpa", assetName("1.0.0")), BUNDLED);
+  const dataRoot = temporaryDirectory("coding-tools-cpa-release-fetch-data");
+  const controller = createManagedComponentController({
+    manifestRoot, bundleRoot, dataRoot,
+    safeStorage: { isEncryptionAvailable: () => false },
+    fetchImpl: async (url) => { nodeFetchCalls.push(String(url)); return new Response("not found", { status: 404 }); },
+    releaseFetch: launcher.releaseFetch,
+    resolveRuntimeExecutable: () => process.execPath,
+  });
+  try {
+    await controller.installComponent("cpa");
+    const check = await controller.checkComponentUpdate("cpa");
+    assert.deepEqual([check.latest, check.available], ["1.2.0", true]);
+    const staged = await controller.installComponentUpdate("cpa");
+    assert.equal(staged.staged, true);
+    assert.deepEqual(fs.readFileSync(path.join(dataRoot, "components", "cpa", "1.2.0", assetName("1.2.0"))), LATEST);
+
+    assert.deepEqual(nodeFetchCalls, [], "a GitHub request went through Node's fetch on main");
+    assert.ok(launcher.calls.every((call) => call.redirect === "manual"), "the launcher fetch was asked to follow redirects itself");
+    const hops = launcher.calls.map((call) => call.href);
+    assert.ok(hops.includes("https://api.github.com/repos/fixture/cpa/releases/latest"));
+    assert.ok(hops.includes(`https://objects.example.test/fixture/cpa/releases/download/v1.2.0/${assetName("1.2.0")}`), "the asset redirect was not followed");
+    assert.ok(hops.includes("https://objects.example.test/fixture/cpa/releases/download/v1.2.0/checksums.txt"), "the checksums redirect was not followed");
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("following redirects stays on https and stops after five hops", async () => {
+  const visited = [];
+  const to = (location) => new Response(null, { status: 302, headers: { location } });
+  const chain = async (url) => {
+    visited.push(url);
+    if (url === "https://a.example.test/start") return to("/next");
+    if (url === "https://a.example.test/next") return to("https://b.example.test/file");
+    return new Response("ok");
+  };
+  assert.equal(await (await fetchFollowingRedirects(chain, "https://a.example.test/start")).text(), "ok");
+  assert.deepEqual(visited, ["https://a.example.test/start", "https://a.example.test/next", "https://b.example.test/file"]);
+
+  await assert.rejects(fetchFollowingRedirects(async () => to("http://a.example.test/plain"), "https://a.example.test/start"), /Refusing a redirect to http:/);
+  let hops = 0;
+  await assert.rejects(fetchFollowingRedirects(async () => { hops += 1; return to(`https://a.example.test/${hops}`); }, "https://a.example.test/0"), /Too many redirects/);
+  assert.equal(hops, 6, "it should give up after the first request plus five redirects");
+});
+
+test("main sends CPA, app plugin and Antigravity CLI GitHub fetches through the launcher network, keeping fetch's redirect contract", async () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const call = (factory) => {
+    const at = source.indexOf(`${factory}({`);
+    assert.ok(at > 0, `${factory} is not called in main.cjs`);
+    return source.slice(at, source.indexOf("});", at));
+  };
+  assert.match(call("createManagedExternalServicesController"), /releaseFetch: fetchRemoteOffMain,/);
+  assert.match(call("createAppPlugins"), /fetchImpl: fetchRemoteOffMain,/);
+  assert.match(call("createAntigravityCli"), /fetchImpl: fetchRemoteOffMain,/);
+
+  const start = source.indexOf("function fetchRemoteOffMain(");
+  const end = source.indexOf("\n}", start) + 2; // its closing brace: the first unindented "}"
+  assert.ok(start > 0 && end > start);
+  const native = [];
+  const fetchThroughLauncherNetwork = async (url, options) => {
+    native.push([url, options.redirect]);
+    return url.endsWith("/moved") ? new Response(null, { status: 301, headers: { location: "https://api.example.test/final" } }) : new Response("done");
+  };
+  const fetchRemoteOffMain = new Function("fetchThroughLauncherNetwork", "fetchFollowingRedirects", `${source.slice(start, end)}\nreturn fetchRemoteOffMain;`)(
+    fetchThroughLauncherNetwork, fetchFollowingRedirects);
+  assert.equal(await (await fetchRemoteOffMain("https://api.example.test/moved", { headers: {} })).text(), "done");
+  assert.deepEqual(native, [["https://api.example.test/moved", "manual"], ["https://api.example.test/final", "manual"]]);
+  native.length = 0;
+  assert.equal((await fetchRemoteOffMain("https://api.example.test/moved", { redirect: "manual" })).status, 301, "a caller asking for manual redirects must get the redirect back");
+  assert.deepEqual(native, [["https://api.example.test/moved", "manual"]]);
 });

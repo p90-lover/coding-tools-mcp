@@ -97,6 +97,7 @@ const {
 } = require("./provider-bootstrap.cjs");
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
+const { fetchFollowingRedirects } = require("./managed-components.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
@@ -538,6 +539,17 @@ function describeTimedPartition(partition) {
   return {};
 }
 
+// Remote fetches for Node-side services (CPA's release checks and downloads, app plugin and
+// Antigravity CLI updates) go through the launcher's network, so their sockets live in Chromium's
+// network service, never on main. On 2026-11-11 (0.8.108) a plugin update check's connect to
+// api.github.com, made from main by Node's own fetch, was held 88 s in the kernel and froze every
+// window. Node's fetch follows redirects unless asked for "manual"; this keeps that contract.
+function fetchRemoteOffMain(url, options = {}) {
+  return options.redirect === "manual"
+    ? fetchThroughLauncherNetwork(url, options)
+    : fetchFollowingRedirects(fetchThroughLauncherNetwork, url, options);
+}
+
 // Native fetches omit cookies by default. Explicit session reads use their registered account's
 // own cookie jar and bound proxy, answering proxy authentication without rerouting a live page.
 async function fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies = false } = {}) {
@@ -624,6 +636,10 @@ const BRIDGE_WATCHDOG_INTERVAL_MS = 60_000;
 // One missed health check is usually a stalled machine, not a dead bridge; restarting then kills
 // the Codex turns in flight. Restart only after this many misses in a row.
 const BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART = 2;
+// Two 2 s misses a minute apart can still be one disk stall: on 2026-11-11 a release build on the
+// shared hard disk held AO's writer 72 s, and the watchdog "restarted" a live bridge (10:34). Before
+// restarting a daemon that is running but slow to answer, it gets this long to answer once more.
+const BRIDGE_WATCHDOG_PATIENT_HEALTH_MS = 15_000;
 let bridgeWatchdogTimer = null;
 let bridgeWatchdogBusy = false;
 let bridgeWatchdogMisses = 0;
@@ -668,6 +684,15 @@ function startBridgeWatchdog(logger, stateStore) {
       if (bridgeWatchdogMisses < BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART) {
         logger.warn("runtime.watchdog_miss", miss);
         return;
+      }
+      if (check.failed === "daemon_health") {
+        const patientStarted = Date.now();
+        const patient = await runtimeSupervisor.ownedRuntimeCheck(config, { healthTimeoutMs: BRIDGE_WATCHDOG_PATIENT_HEALTH_MS });
+        if (patient.ready) {
+          bridgeWatchdogMisses = 0;
+          logger.warn("runtime.watchdog_slow", { ...miss, patientMs: Date.now() - patientStarted });
+          return;
+        }
       }
       bridgeWatchdogMisses = 0;
       logger.warn("runtime.watchdog_restart", miss);
@@ -4783,6 +4808,8 @@ async function start() {
     safeStorage,
     env: process.env,
     logger,
+    // CPA's GitHub release checks and downloads; its local health checks keep Node's fetch.
+    releaseFetch: fetchRemoteOffMain,
     // CPA (the local model proxy) is core: it outlives launcher restarts and backend updates.
     persistentComponents: IS_DEV_PROFILE ? [] : ["cpa"],
     publish: (value) => send("launcher:external-services-changed", value),
@@ -4813,6 +4840,7 @@ async function start() {
   appPluginsService = createAppPlugins({
     cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
     services: () => externalServicesController,
+    fetchImpl: fetchRemoteOffMain,
     // A plugin DLL loads when CPA starts.
     restartCpa: () => externalServicesController.restart("cpa"),
     antigravityCli: () => antigravityCliService,
@@ -5205,6 +5233,7 @@ async function start() {
     const antigravityCli = createAntigravityCli({
       toolsRoot: path.join(app.getPath("userData"), "tools"),
       confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
+      fetchImpl: fetchRemoteOffMain,
     });
     antigravityCliService = antigravityCli;
     antigravityAuthBrowser = createAntigravityAuthBrowser({
