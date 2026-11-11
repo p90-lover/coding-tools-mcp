@@ -2813,6 +2813,69 @@ test("with runReadFreshMs, the activity poll and its per-card checks share one r
   assert.equal(shared.reads.filter(entry => entry === "run-1").length, 3);
 });
 
+test("the run loop observes a simply-working AO turn every 1.5 s and reads its run at most every 2 s; a turn waiting on an answer keeps the 500 ms pace", async (t) => {
+  // 0.8.108 with nine working chats: every 500 ms pass of each chat's loop read its run from
+  // coding-tools-headless and its session and conversation tail from the AO daemon, 17 and 14
+  // reads a second, both services at ~16% of a core, while nothing changed for minutes.
+  const mission = { id: "run", workspace_id: "ws", project_id: "task", revision: 3, execution_mode: "single",
+    grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "worker", role: "worker", state: "running", parents: [],
+      route: { harness_id: "ao:claude-code", model: "cpa/test-model" }, receipt: { thread_id: "session", request_key: "key" } }] };
+  let observed = { status: "working", turnId: "turn", turnState: "running" };
+  const observations = [], reads = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    runReadFreshMs: 300,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async endpoint => {
+      if (endpoint === "/api/v1/ao/read") { reads.push(performance.now()); return { ok: true, runs: [mission], worker_capacity: { run: 1 } }; }
+      if (endpoint === "/api/v1/ao/harness/status") return { ok: true, status: { connected: false } };
+      return { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => { observations.push(performance.now()); return observed; } },
+    confirm: async () => true,
+  });
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const nextObservation = async (count, within = 4_000) => {
+    for (const end = performance.now() + within; observations.length < count && performance.now() < end;) await wait(10);
+    assert.ok(observations.length >= count, `observation ${count} came within ${within} ms`);
+  };
+  const statusSeenAt = async (ahead) => {
+    const real = Date.now();
+    t.mock.method(Date, "now", () => real + ahead);
+    try { await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "worker" }); }
+    finally { t.mock.restoreAll(); }
+  };
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await nextObservation(1);
+    const firstAt = observations[0];
+    await wait(2_300);
+    // At the old pace that was about five observations and five run reads.
+    assert.ok(observations.length <= 3, `a working turn was observed ${observations.length} times in 2.3 s`);
+    for (let index = 1; index < observations.length; index++) {
+      assert.ok(observations[index] - observations[index - 1] >= 1_400, "quiet observations are 1.5 s apart");
+    }
+    assert.ok(reads.filter(at => at >= firstAt).length <= 2, `the loop read its run ${reads.filter(at => at >= firstAt).length} times in 2.3 s`);
+    // The chat's approvals poll takes a quiet frame until the loop's next observation is due.
+    await nextObservation(observations.length + 1);
+    const before = observations.length;
+    await statusSeenAt(1_700);
+    assert.equal(observations.length, before, "a quiet frame 1.7 s old answers the approvals poll");
+    // A turn that waits on the person is observed on every pass again, and its frame is not reused.
+    observed = { status: "needs_input", turnId: "turn", turnState: "running", needsInput: true };
+    await nextObservation(observations.length + 1);
+    const switched = observations.length;
+    await nextObservation(switched + 2);
+    assert.ok(observations[switched + 1] - observations[switched - 1] < 2_800, "two passes, not two quiet waits");
+    const busy = observations.length;
+    await statusSeenAt(1_700);
+    assert.ok(observations.length > busy, "an answer-waiting frame 1.7 s old is read afresh");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("shared workflow reads keep 13 pending callers together and start freshness at completion", async (t) => {
   let clock = 1_000, reads = 0, release;
   t.mock.method(Date, "now", () => clock);
