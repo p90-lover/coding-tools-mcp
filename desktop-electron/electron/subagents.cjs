@@ -242,16 +242,38 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     try { text = await fs.promises.readFile(statePath, "utf8"); } catch (error) { failure = error; }
     if (!config) config = configFrom(() => { if (failure) throw failure; return text; });
   }
-  function save(input) {
+  // Saves run one after another, so the file always ends with the last one.
+  let writing = Promise.resolve();
+  let writes = 0;
+  function write(next) {
+    const run = writing.catch(() => {}).then(async () => {
+      // Written whole, then renamed over the old file, so a crash never leaves half a file. Off the
+      // main thread: writing it there held every window 0.5 s on the hard disk (0.8.108, 2026-11-10).
+      await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
+      const temporary = `${statePath}.tmp-${process.pid}-${now()}-${++writes}`;
+      try {
+        await fs.promises.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+        await fs.promises.rename(temporary, statePath);
+      } catch (error) {
+        await fs.promises.rm(temporary, { force: true }).catch(() => {});
+        throw error;
+      }
+    });
+    writing = run;
+    return run;
+  }
+  // The new settings apply at once. If the file cannot be written they are undone, unless a later
+  // save has replaced them, and the error reaches the caller.
+  async function save(input) {
     const next = cleanConfig(input);
-    if (statePath) {
-      // Written whole, then renamed over the old file, so a crash never leaves half a file.
-      fs.mkdirSync(path.dirname(statePath), { recursive: true });
-      const temporary = `${statePath}.tmp-${process.pid}-${now()}`;
-      fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-      fs.renameSync(temporary, statePath);
-    }
+    const previous = config;
     config = next;
+    if (!statePath) return next;
+    try { await write(next); }
+    catch (error) {
+      if (config === next) config = previous;
+      throw error;
+    }
     return next;
   }
 

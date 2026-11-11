@@ -18,7 +18,7 @@ const SYNC_CALL = /\b[A-Za-z]+Sync(?:\.native)?\s*\(/g;
 
 const ALLOWED = {
   "agent-orchestrator-accounting.cjs": 2, "agent-orchestrator-gateway.cjs": 4, "agent-orchestrator-upstream.cjs": 6,
-  "agent-orchestrator-workflow.cjs": 7, "agent-orchestrator-workspace.cjs": 1, "antigravity-cli.cjs": 11,
+  "agent-orchestrator-workflow.cjs": 7, "antigravity-cli.cjs": 11,
   "ao-db-maintenance.cjs": 3, "ao-dependency-links.cjs": 7, "app-handler-paths.cjs": 1, "app-plugins.cjs": 10, "app-update-worker.cjs": 50,
   "app-update.cjs": 19, "atomic-file.cjs": 11, "autostart.cjs": 2, "backend-bundle.cjs": 18, "browser-accounts.cjs": 1,
   // createBrowserAccountMcpSync (#1089) is a factory named for the account MCP sync, not a synchronous call:
@@ -44,7 +44,7 @@ const ALLOWED = {
   // Three run once at quit, as the app exits (spawnRelaunchGuard); the rest only in the guard, its own process under Bun.
   "relaunch-guard.cjs": 6,
   "rtk.cjs": 4, "runtime-command.cjs": 6, "runtime-install.cjs": 24,
-  "runtime-supervisor.cjs": 18, "runtime.cjs": 39, "smoke-exit.cjs": 1, "subagents.cjs": 4, "update-worker.cjs": 26,
+  "runtime-supervisor.cjs": 18, "runtime.cjs": 39, "smoke-exit.cjs": 1, "subagents.cjs": 1, "update-worker.cjs": 26,
   "update.cjs": 20, "upstream-tools.cjs": 3, "window-state.cjs": 1,
 };
 
