@@ -948,3 +948,12 @@ test("settings expose an opt-in existing MCP auto-connect without provisioning c
     /autoConnectExistingMcpBody:\s*"After Codex reaches the ready bridge, verify and connect the saved MCP harness\. This never creates a connector, tunnel, or key\."/,
   );
 });
+
+test("the sidebar's attention dot pulses a few times, not forever", () => {
+  // A dot for a state that lasts days (setup not finished) pulsed for as long as it showed: the
+  // compositor drew a frame at every refresh, and the GPU process sat at ~15% CPU (2026-11-11).
+  const rule = stylesSource.match(/\.action-dot\.is-pulse\s*\{([^}]*)\}/);
+  assert.ok(rule, ".action-dot.is-pulse rule");
+  assert.match(rule[1], /animation:\s*statePulse\s+[\d.]+s\s+[a-z-]+\s+[1-5];/);
+  assert.doesNotMatch(rule[1], /infinite/);
+});

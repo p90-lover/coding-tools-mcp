@@ -849,6 +849,7 @@ function memoryUpdate(faults = {}) {
   const dependencies = { "original-fs": io, "node:fs": io, "node:path": path, "node:crypto": require("node:crypto"), "node:zlib": require("node:zlib"),
     "node:child_process": { spawn: (file, args) => { launches.push({ file, args }); return { on() {}, once() {}, unref() {} }; }, spawnSync: () => ({ status: 1, stdout: "" }) },
     "./update.cjs": {},
+    "./off-thread-run.cjs": { spawnOffThread: async (file, args) => { launches.push({ file, args }); return { pid: 4300, on() {}, once() {}, unref() {} }; } },
   };
   const context = module => ({ module, __dirname: path.dirname(workerPath), Buffer, Date: Clock, process: fakeProcess,
     require: name => { assert.ok(Object.hasOwn(dependencies, name), `unexpected fixture dependency ${name}`); return dependencies[name]; },
@@ -1028,3 +1029,43 @@ for (const state of ["swapping", "restoring"]) {
     assert.equal(f.read("resources/app.asar.old-1000"), "v1");
   });
 }
+
+// The update worker starts from the spawn worker thread. Windows' CreateProcess holds the thread that
+// calls it while the antivirus checks the new process: on 2026-11-11 that held the app's main thread
+// 12.7 s right after Update was clicked. A spawn() made on this thread fails the test, including the
+// fallback spawnOffThread takes when given an option its worker cannot receive.
+test("Update starts its workers off the app's main thread, detached, with the worker's environment", async () => {
+  const childProcess = require("node:child_process");
+  const original = childProcess.spawn;
+  const fresh = ["../electron/app-update.cjs", "../electron/update.cjs", "../electron/off-thread-run.cjs"].map((rel) => require.resolve(rel));
+  const forget = () => { for (const id of fresh) delete require.cache[id]; };
+  let onMain = 0;
+  childProcess.spawn = (...args) => { onMain += 1; return original(...args); };
+  forget();
+  const { startUpdateWorker } = require("../electron/app-update.cjs");
+  const { updateDependenciesForTests } = require("../electron/update.cjs");
+  const { resetSpawnWorker } = require("../electron/off-thread-run.cjs");
+  const root = tempRoot();
+  const wrote = (name) => path.join(root, name);
+  const script = (name) => `require("node:fs").writeFileSync(${JSON.stringify(wrote(name))}, String(process.env.ELECTRON_RUN_AS_NODE))`;
+  const until = async (file) => {
+    for (const started = Date.now(); !fs.existsSync(file); await new Promise((resolve) => setTimeout(resolve, 50))) {
+      if (Date.now() - started > 15_000) throw new Error(`${path.basename(file)} was never written`);
+    }
+    return fs.readFileSync(file, "utf8");
+  };
+  try {
+    const child = await startUpdateWorker(process.execPath, ["-e", script("app.txt")]);
+    assert.ok(Number.isInteger(child.pid) && child.pid > 0, "the worker reports the started pid");
+    assert.equal(await until(wrote("app.txt")), "1", "the worker runs as Node");
+    // The installer update (update.cjs) starts its worker the same way: [worker, job] here are -e and a script.
+    const installer = await updateDependenciesForTests().spawnWorker(process.execPath, "-e", script("installer.txt"));
+    assert.ok(Number.isInteger(installer.pid) && installer.pid > 0, "the installer worker reports the started pid");
+    await until(wrote("installer.txt"));
+    assert.equal(onMain, 0, "no process was started from this thread");
+  } finally {
+    childProcess.spawn = original;
+    resetSpawnWorker();
+    forget();
+  }
+});

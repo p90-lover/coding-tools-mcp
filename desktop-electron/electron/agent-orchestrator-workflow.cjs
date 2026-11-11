@@ -1071,6 +1071,26 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return checked(result);
   }
 
+  // The board's revision counts every write in the workspace, by any chat. A send that read it just
+  // before another chat wrote was refused "Workflow revision changed; read before retrying. Nothing
+  // was saved." (two sends at 13:19 local on 2026-11-11, seconds after a queue went out). Such a
+  // refusal saved nothing, so `work` (a board read and the edit made from it) runs again, a few
+  // times, before the refusal reaches the person. The refused write already dropped the cached
+  // reads (requestHeadless), so the next read is fresh. Run creation does the same (BOARD_RACE).
+  const BOARD_WRITE_RACE = /^Workflow revision changed\b/;
+  const BOARD_WRITE_ATTEMPTS = 4;
+  async function withBoardRetry(work) {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await work();
+      } catch (error) {
+        if (attempt >= BOARD_WRITE_ATTEMPTS || !BOARD_WRITE_RACE.test(String(error?.message ?? ""))) throw error;
+        logger?.warn?.("ao.board_write_race", { attempt });
+        await new Promise((resolve) => setTimer(resolve, 100 * attempt));
+      }
+    }
+  }
+
   async function board({ workspaceId, taskId } = {}) {
     const id = clean(workspaceId, 128), task = taskId ? clean(taskId, 128) : "";
     return sharedWorkflowRead(JSON.stringify(["board", id, task]), async () => {
@@ -5592,13 +5612,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (response.ok) name = String((await response.json())?.choices?.[0]?.message?.content ?? "");
     } catch { /* CPA unavailable: fall back to the message itself. */ }
     name = name.replace(/["'`*#]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || fallbackChatTitle(message);
-    whenTaskIdle(workspaceId, taskId, async () => {
+    whenTaskIdle(workspaceId, taskId, () => withBoardRetry(async () => {
       const detail = await board({ workspaceId, taskId });
       // Only a chat still using the default name is renamed; a name the user chose wins.
       if (!detail.task || detail.task.title !== CHAT_TASK_TITLE || name === CHAT_TASK_TITLE) return;
       await write(workspaceId, { expected_revision: detail.revision,
         change: { operation: "edit", id: taskId, title: clean(name, 240), description: detail.task.description } });
-    });
+    }));
   }
 
   // A team run's grant covers its cards' task title and description. Renaming a new team chat
@@ -6150,13 +6170,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try { chatQueue.delivered(id, task, { message: text, runId: run.id, ...(objective ? { goal: objective } : {}) }); } catch { /* best effort */ }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
     // `messages`: how many messages the chat had when the steer went in; it belongs under the last.
-    const note = async (messages) => {
+    const note = (messages) => withBoardRetry(async () => {
       const detail = await board({ workspaceId: id, taskId: task });
       const description = chatDescriptionWithSteer(detail.task?.description || "", messages, `↳ Steer (${stamp} UTC): ${text}`);
       if (detail.task && utf8Bytes(description) <= BOARD_TEXT_BYTES) {
         await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
       }
-    };
+    });
     // The steer itself was delivered; the transcript note is best-effort, and a team's waits for
     // its run to settle (see whenTaskIdle). It is written after replying: waiting for its board
     // read and write held the chat's composer for seconds after the agent already had the message.
@@ -6321,67 +6341,71 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (/still running/.test(error?.message)) throw new Error("This chat is still running; wait for it to finish or stop it first");
         throw error;
       }
-      let detail = await board({ workspaceId: id, taskId: task });
-      checkCurrent();
-      if (!detail.task) throw new Error("This chat's task no longer exists");
-      let rewoundDescription = null;
+      // Refused only because another chat wrote the board first: nothing was saved, so the edit is
+      // read and made again (withBoardRetry).
       let discarded = [];
-      if (rewind) {
-        const before = String(detail.task.description || "");
-        if (before !== rewind.description) throw new Error("The chat changed before rewind; reload it and try again");
-        const marker = /\n\nFollow-up \(([^)]+) UTC\):\n/g;
-        const marks = [...before.matchAll(marker)];
-        const bodies = before.split(new RegExp(marker.source)).filter((_, index) => index % 2 === 0);
-        if (!bodies[0].trim() || rewind.index >= bodies.length) throw new Error("That message is no longer in this chat; reload it");
-        const selected = bodies[rewind.index].split(/\n\n↳ Steer \(([^)]+) UTC\): /)[0].trim();
-        if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
-        const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
-        const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
-        if (roots.length !== bodies.length) throw new Error("This chat's messages are still synchronizing; reload before rewind");
-        const hidden = new Set(roots.slice(rewind.index).map(run => run.id));
-        for (let size = -1; size !== hidden.size;) {
-          size = hidden.size;
-          for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
-        }
-        discarded = [...hidden];
-        const rewound = rewind.index === 0 ? "" : `\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
-        const kept = rewind.index === 0 ? "" : before.slice(0, marks[rewind.index - 1].index);
-        // The messages kept ahead of the rewound one roll over as a send's would, when they and it
-        // no longer fit ("This rewind exceeds the chat size limit" left the message unsendable).
-        rewoundDescription = rewind.index === 0 ? text
-          : utf8Bytes(kept + rewound) <= BOARD_TEXT_BYTES ? `${kept}${rewound}`
-            : `${rolledRecord(kept, utf8Bytes(rewound), new Date(now()))}${rewound}`;
-        rewindBefore = chatEdits.get(id, task);
-      }
-      const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-      const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
-      let description = rewoundDescription ?? extended();
-      if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
-        // This is bounded task-record storage, not the agent's token context. Only roll it over
-        // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
-        // nor strand a chat. Native /compact and model-token auto-compaction are independent.
-        // The rollover always makes room for a message within CHAT_MESSAGE_BYTES (compactChat).
-        const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
-        try {
-          await compactChat({ workspaceId: id, taskId: task, reserve });
-        } catch (error) {
-          throw new Error(`Couldn't make room in this chat's record: ${String(error?.message || error).slice(0, 200)}`);
-        }
-        detail = await board({ workspaceId: id, taskId: task });
+      await withBoardRetry(async () => {
+        let detail = await board({ workspaceId: id, taskId: task });
+        checkCurrent();
         if (!detail.task) throw new Error("This chat's task no longer exists");
-        description = extended();
-      }
-      // Unreachable by construction (the property test in chat-record-rollover.test.cjs); kept so a
-      // future change to the budget fails loudly here rather than at the board.
-      if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
-        logger?.error?.("ao.record_over_budget", { bytes: utf8Bytes(description), message: utf8Bytes(text), rewind: Boolean(rewind) });
-        throw new Error("This chat's record couldn't hold the message. Start a new chat and send it there.");
-      }
-      const saidBefore = String(detail.task.description || "");
-      checkCurrent();
-      await write(id, { expected_revision: detail.revision,
-        change: { operation: "edit", id: task, title: detail.task.title, description } });
-      followUp = { before: saidBefore, description };
+        let rewoundDescription = null;
+        if (rewind) {
+          const before = String(detail.task.description || "");
+          if (before !== rewind.description) throw new Error("The chat changed before rewind; reload it and try again");
+          const marker = /\n\nFollow-up \(([^)]+) UTC\):\n/g;
+          const marks = [...before.matchAll(marker)];
+          const bodies = before.split(new RegExp(marker.source)).filter((_, index) => index % 2 === 0);
+          if (!bodies[0].trim() || rewind.index >= bodies.length) throw new Error("That message is no longer in this chat; reload it");
+          const selected = bodies[rewind.index].split(/\n\n↳ Steer \(([^)]+) UTC\): /)[0].trim();
+          if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
+          const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
+          const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
+          if (roots.length !== bodies.length) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+          const hidden = new Set(roots.slice(rewind.index).map(run => run.id));
+          for (let size = -1; size !== hidden.size;) {
+            size = hidden.size;
+            for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
+          }
+          discarded = [...hidden];
+          const rewound = rewind.index === 0 ? "" : `\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
+          const kept = rewind.index === 0 ? "" : before.slice(0, marks[rewind.index - 1].index);
+          // The messages kept ahead of the rewound one roll over as a send's would, when they and it
+          // no longer fit ("This rewind exceeds the chat size limit" left the message unsendable).
+          rewoundDescription = rewind.index === 0 ? text
+            : utf8Bytes(kept + rewound) <= BOARD_TEXT_BYTES ? `${kept}${rewound}`
+              : `${rolledRecord(kept, utf8Bytes(rewound), new Date(now()))}${rewound}`;
+          rewindBefore = chatEdits.get(id, task);
+        }
+        const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
+        const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
+        let description = rewoundDescription ?? extended();
+        if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
+          // This is bounded task-record storage, not the agent's token context. Only roll it over
+          // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
+          // nor strand a chat. Native /compact and model-token auto-compaction are independent.
+          // The rollover always makes room for a message within CHAT_MESSAGE_BYTES (compactChat).
+          const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
+          try {
+            await compactChat({ workspaceId: id, taskId: task, reserve });
+          } catch (error) {
+            throw new Error(`Couldn't make room in this chat's record: ${String(error?.message || error).slice(0, 200)}`);
+          }
+          detail = await board({ workspaceId: id, taskId: task });
+          if (!detail.task) throw new Error("This chat's task no longer exists");
+          description = extended();
+        }
+        // Unreachable by construction (the property test in chat-record-rollover.test.cjs); kept so a
+        // future change to the budget fails loudly here rather than at the board.
+        if (utf8Bytes(description) > BOARD_TEXT_BYTES) {
+          logger?.error?.("ao.record_over_budget", { bytes: utf8Bytes(description), message: utf8Bytes(text), rewind: Boolean(rewind) });
+          throw new Error("This chat's record couldn't hold the message. Start a new chat and send it there.");
+        }
+        const saidBefore = String(detail.task.description || "");
+        checkCurrent();
+        await write(id, { expected_revision: detail.revision,
+          change: { operation: "edit", id: task, title: detail.task.title, description } });
+        followUp = { before: saidBefore, description };
+      });
       if (rewind) {
         try { chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
@@ -6391,13 +6415,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
       }
     } else {
-      const before = await board({ workspaceId: id });
-      const known = new Set(before.tasks.map((entry) => entry.id));
       const startTitle = clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240);
       defaultTitled = startTitle === CHAT_TASK_TITLE;
-      await write(id, { expected_revision: before.revision, change: {
-        operation: "create", title: startTitle, description: text,
-      } });
+      let known;
+      await withBoardRetry(async () => {
+        const before = await board({ workspaceId: id });
+        known = new Set(before.tasks.map((entry) => entry.id));
+        await write(id, { expected_revision: before.revision, change: {
+          operation: "create", title: startTitle, description: text,
+        } });
+      });
       const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
       if (added.length !== 1) throw new Error("Couldn't find the new chat's task. Refresh the board.");
       task = added[0].id;

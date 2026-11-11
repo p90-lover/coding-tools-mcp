@@ -13,6 +13,7 @@ const asarFs = require("node:fs");
 const path = require("node:path");
 const zlib = require("node:zlib");
 const { spawn } = require("node:child_process");
+const { spawnOffThread } = require("./off-thread-run.cjs");
 
 // The proxy variables as the app started. Global Routing sets them in this process (the built-in
 // gateway's URL carries its local token); the relaunched app must start from the originals, not
@@ -305,12 +306,32 @@ async function waitForUpdateApply(installRoot, { now = Date.now, sleep = (ms) =>
   }
 }
 
-/** Starts app-update-worker.cjs under this executable as Node, detached from the app. */
+const workerSpawnOptions = () => ({
+  detached: true, stdio: "ignore", windowsHide: true,
+  env: { ...launchEnvironment(), ELECTRON_RUN_AS_NODE: "1", ELECTRON_NO_ASAR: "1" },
+});
+
+/**
+ * Starts app-update-worker.cjs under this executable as Node, detached from the app. Startup's
+ * recovery hand-off uses this: it answers at once, and the app exits right after.
+ */
 function spawnWorkerProcess(runtime, args) {
-  const env = { ...launchEnvironment(), ELECTRON_RUN_AS_NODE: "1", ELECTRON_NO_ASAR: "1" };
-  const child = spawn(runtime, args, { detached: true, stdio: "ignore", windowsHide: true, env });
+  const child = spawn(runtime, args, workerSpawnOptions());
   // A refused start (antivirus, Smart App Control) is reported by the caller from the missing
   // pid; the 'error' event that follows on the next tick must not be uncaught.
+  child.once("error", () => undefined);
+  return child;
+}
+
+/**
+ * The same start from the spawn worker thread (off-thread-run.cjs), for Update: Windows'
+ * CreateProcess holds the thread that calls it while the antivirus checks the new process, and on
+ * the busy hard disk that held the app's main thread 12.7 s right after Update was clicked
+ * (2026-11-11 06:41Z, "main_blocked 12684ms spawn Coding Tools.exe"). The options must stay ones
+ * the worker can receive, or spawnOffThread quietly starts it here instead.
+ */
+async function startUpdateWorker(runtime, args) {
+  const child = await spawnOffThread(runtime, args, workerSpawnOptions());
   child.once("error", () => undefined);
   return child;
 }
@@ -449,7 +470,7 @@ function createAppUpdateController({
   const deps = {
     fetchRelease: async () => JSON.parse(await downloadText(RELEASE_API_URL)),
     downloadText, downloadFile, hash: hashFile,
-    spawnWorker: (runtime, worker, job) => spawnWorkerProcess(runtime, [worker, job]),
+    spawnWorker: (runtime, worker, job) => startUpdateWorker(runtime, [worker, job]),
     ...dependencies,
   };
   let state = { status: usable ? "idle" : "disabled", kind: "app" };
@@ -595,7 +616,7 @@ function createAppUpdateController({
       let child = null;
       try {
         staged = await stage(available);
-        child = deps.spawnWorker(executablePath, staged.workerPath, staged.jobPath);
+        child = await deps.spawnWorker(executablePath, staged.workerPath, staged.jobPath);
         if (!Number.isInteger(child?.pid) || child.pid <= 0) throw new Error("The update worker did not start");
         child.unref?.();
         logger?.info("launcher.app_update_worker_started", { pid: child.pid, version: available.version });
@@ -773,6 +794,7 @@ module.exports = {
   platformTag,
   safeInstallPath,
   selectAppRelease,
+  startUpdateWorker,
   sweepUpdateLeftovers,
   waitForUpdateApply,
 };
