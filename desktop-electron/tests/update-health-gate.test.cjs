@@ -254,3 +254,35 @@ test("update rollback never forces a busy or unknown quit refusal or repeats an 
     assert.equal(fixture.calls.filter(call => call === "handoff").length, 1, outcome);
   }
 });
+
+// A backend update restarted Agent Orchestrator the moment it arrived, and AO fails every running
+// turn when it stops.
+test("a backend update waits for running chats, for a while, and for an AO that cannot say", async () => {
+  const { waitForIdleChats } = require("../electron/update-health-gate.cjs");
+  let clock = 0;
+  const sleeps = [];
+  const sleep = async (ms) => { sleeps.push(ms); clock += ms; };
+  const now = () => clock;
+  assert.equal(await waitForIdleChats({ working: async () => false, now, sleep }), "idle");
+  assert.deepEqual(sleeps, [], "an idle app is not held up");
+
+  const answers = [true, true, new Error("AO session activity could not be confirmed"), false];
+  let told = 0;
+  const result = await waitForIdleChats({
+    working: async () => { const next = answers.shift(); if (next instanceof Error) throw next; return next; },
+    now, sleep, pollMs: 15_000, onWait: () => { told += 1; },
+  });
+  assert.equal(result, "idle");
+  assert.deepEqual(sleeps, [15_000, 15_000, 15_000], "it asks again every 15 s, and an AO that cannot answer counts as busy");
+  assert.equal(told, 1, "the wait is announced once");
+
+  clock = 0; sleeps.length = 0;
+  assert.equal(await waitForIdleChats({ working: async () => true, now, sleep, waitMs: 60_000, pollMs: 15_000 }), "timeout");
+  assert.equal(sleeps.length, 4, "a chat that never ends does not hold the update for ever");
+
+  const main = require("node:fs").readFileSync(require("node:path").join(__dirname, "../electron/main.cjs"), "utf8");
+  const wait = main.indexOf("await waitForIdleChats({");
+  const restart = main.indexOf('await backendControl.restart("backend-update")');
+  assert.ok(wait > 0 && restart > wait, "the backend update waits before it restarts the backend");
+  assert.match(main, /snapshot\(\)\.state === "ready"\s+&& await agentOrchestratorUpstream\.harness\.anySessionWorking\(\{ start: false \}\)/);
+});

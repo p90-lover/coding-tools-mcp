@@ -99,4 +99,31 @@ function createUpdateHealthGate({
   };
 }
 
-module.exports = { createUpdateHealthGate, HEALTH_POLL_MS, UPDATE_HEALTH_MINUTES };
+// How long a backend update waits for running chats before it restarts the backend anyway.
+const CHAT_WAIT_MS = 30 * 60_000;
+const CHAT_WAIT_POLL_MS = 15_000;
+
+/**
+ * Resolves once no chat is working, or after `waitMs`: "idle" or "timeout".
+ *
+ * A backend update restarts Agent Orchestrator, and AO fails every running turn when it stops
+ * ("controller ended before the turn completed"). The update used to restart it the moment the new
+ * backend arrived, whatever the chats were doing. `working()` answers whether an agent is mid-turn;
+ * when it throws, that is not known, and the update waits as it does for a working chat.
+ * `onWait(waitedMs)` is told once, when the first wait begins.
+ */
+async function waitForIdleChats({ working, waitMs = CHAT_WAIT_MS, pollMs = CHAT_WAIT_POLL_MS, now = Date.now,
+  sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms).unref?.(); }), onWait = null } = {}) {
+  const startedAt = now();
+  let told = false;
+  for (;;) {
+    let busy = true;
+    try { busy = Boolean(await working()); } catch {}
+    if (!busy) return "idle";
+    if (now() - startedAt >= waitMs) return "timeout";
+    if (!told) { told = true; try { onWait?.(now() - startedAt); } catch {} }
+    await sleep(pollMs);
+  }
+}
+
+module.exports = { createUpdateHealthGate, waitForIdleChats, CHAT_WAIT_MS, HEALTH_POLL_MS, UPDATE_HEALTH_MINUTES };
