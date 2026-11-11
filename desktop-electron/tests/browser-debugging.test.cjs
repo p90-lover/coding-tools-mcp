@@ -118,6 +118,10 @@ function startupFixture(gotLock = true) {
     findFreePort: async () => 42424,
     session: { defaultSession: { setCertificateVerifyProc: () => {} } },
     caDistrust: { verifyCertificate: () => {} },
+    // system-drive.cjs has its own tests; here nothing is redirected, so startup makes no folder
+    // and schedules no cleanup.
+    systemDriveRedirect: { env: {}, tempDir: null, rtkDir: null },
+    systemDrive: { pruneTemp: async () => {} },
     // renderer-accessibility.cjs has its own tests; here it is one more launch switch.
     rendererAccessibilityLaunch: null,
     applyRendererAccessibilitySwitch: (application) => {
