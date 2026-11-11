@@ -1530,7 +1530,9 @@ function chatWorld({ runs = [], tasks = [] } = {}) {
       if (args.change.operation === "create") state.tasks.push({ id: `task-${state.tasks.length + 1}`, title: args.change.title, description: args.change.description, state: "backlog", clauses: [] });
       if (args.change.operation === "edit") { state.edits.push(args.change); Object.assign(state.tasks.find((task) => task.id === args.change.id), { title: args.change.title, description: args.change.description }); }
       state.revision += 1;
-      return { operation: { state: "completed", result: { ok: true } } };
+      // As the service answers a write: the board's revision and the task it made or changed.
+      const touched = args.change.operation === "create" ? state.tasks.at(-1) : state.tasks.find((task) => task.id === args.change.id);
+      return { operation: { state: "completed", result: { ok: true, revision: state.revision, workspace_id: "ws-1", task: structuredClone(touched ?? null) } } };
     }
     if (endpoint === "/api/v1/ao/read") {
       const pending = body.run_id ? [{ id: body.run_id, workspace_id: "ws-1", revision: 1, nodes: [{ id: "lead", state: "pending", route: { model: "chatgpt-web/high" } }] }] : state.runs;
@@ -12990,4 +12992,38 @@ test("a rewind in a busy project reads the chat's own runs, not only the project
   assert.ok(chatReads.includes("task-1"), "the send read the chat's own runs");
   assert.deepEqual(Array.from(aoChat.chatMessagesFromDescription(world.tasks[0].description), item => item.text),
     ["first ask", "second ask"]);
+});
+
+
+// 2026-11-06 to 11-11: one project past 100 tasks refused every new chat, "Couldn't find the new
+// chat's task. Refresh the board.", and each try left an empty task behind: the send looked for its
+// task in board reads that held the project's oldest 100.
+test("a new chat starts in a project past 100 tasks, and a project read lists every task once", async () => {
+  const tasks = Array.from({ length: 300 }, (_, index) => ({ id: `old-${index}`, title: `Old ${index}`, description: "",
+    state: index % 2 ? "archived" : "backlog", clauses: [] }));
+  const world = chatWorld({ tasks });
+  const pages = [];
+  // As the service lists a project (board_sync::view): oldest first, at most 100 a page, an offset up to 256.
+  const requestHeadless = async (endpoint, body, ...rest) => {
+    const response = await world.requestHeadless(endpoint, body, ...rest);
+    if (endpoint !== "/api/v1/tools/call" || body.tool !== "workflow_list" || body.arguments.task_id) return response;
+    const { offset = 0, limit = 50 } = body.arguments;
+    assert.ok(limit <= 100 && offset <= 256, `a page the service accepts (offset ${offset}, limit ${limit})`);
+    pages.push(offset);
+    const all = response.operation.result.tasks, next = offset + limit;
+    return { operation: { ...response.operation, result: { ...response.operation.result,
+      tasks: all.slice(offset, next), total: all.length, next_offset: next < all.length ? next : null } } };
+  };
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless,
+    findCodexExecutable: () => process.execPath, resolveHarness: async () => { throw new Error("offline test"); } });
+  const sent = await workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the provider manager", deferStart: true });
+  assert.equal(sent.taskId, "task-301");
+  assert.ok(sent.runId, "the new chat's run starts");
+  assert.equal(world.tasks.length, 301, "one task made, none left behind");
+  assert.equal(world.updates.at(-1).task_id, "task-301");
+  pages.length = 0;
+  const listed = await workflow.call("board", { workspaceId: "ws-1" });
+  assert.deepEqual(listed.tasks.map((entry) => entry.id), world.tasks.map((entry) => entry.id), "every task, once, in the board's order");
+  assert.deepEqual(pages, [0, 100, 200, 256], "the last page starts at the service's largest offset");
+  assert.equal(listed.revision, world.revision);
 });
