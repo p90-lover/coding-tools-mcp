@@ -2349,7 +2349,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             checkStartup();
             const ready = await response.json();
             checkStartup();
-            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") { state = "ready"; failedStarts = 0; return snapshot(); }
+            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") {
+              state = "ready"; failedStarts = 0;
+              // How long every start really took, not only the slow ones: the wait limit above is
+              // a ceiling, and this is what says how low it can safely go on this machine.
+              logger.info?.("ao.started", { readyMs: Date.now() - startedAt });
+              return snapshot();
+            }
           } catch { checkStartup(); }
           await new Promise((resolve) => setTimeout(resolve, 200));
           checkStartup();

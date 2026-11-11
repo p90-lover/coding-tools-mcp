@@ -637,6 +637,9 @@ test("a daemon still running at the limit is waited for, not killed and started 
   assert.equal((await controller.start()).state, "ready");
   assert.ok(Date.now() - begun >= 600, "it got ready four limits late");
   assert.equal(harness.children.length, 1, "the same daemon, never a second one");
+  const started = harness.infos.filter(([event]) => event === "ao.started");
+  assert.equal(started.length, 1, "every start records how long it took to get ready");
+  assert.ok(started[0][1].readyMs >= 600 && started[0][1].readyMs < 5000, `readyMs ${started[0][1].readyMs}`);
   assert.ok(harness.warnings.some(([event]) => event === "ao.start_waiting"), "the wait past the limit is logged");
   assert.ok(probes > 1);
 });
