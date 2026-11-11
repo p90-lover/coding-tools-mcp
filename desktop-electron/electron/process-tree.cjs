@@ -1,5 +1,5 @@
 const path = require("node:path");
-const { execFile, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 
 const DETACH_OWNED_CHILD = process.platform !== "win32";
 
@@ -68,14 +68,16 @@ function terminateOwnedProcessTree(child, signal = "SIGTERM") {
   }
 }
 
+// taskkill starts from a worker (runOffThread). Started here with execFile, Windows' load of
+// taskkill.exe held the main process (every window) 88.5 s on the busy machine while a process tree
+// was stopped (2026-11-11 08:33:11Z, launcher.main_blocked: spawn taskkill.exe < runTaskkillAsync).
+// Required here, not at the top: off-thread-run.cjs is loaded by modules this one serves.
 function runTaskkillAsync(taskkill, args) {
-  return new Promise((resolve) => {
-    execFile(taskkill, args, { windowsHide: true, timeout: 10_000 }, (error) => {
-      // execFile reports a non-zero exit as an error with a numeric code; a spawn failure has none.
-      if (!error) resolve({ status: 0 });
-      else if (typeof error.code === "number") resolve({ status: error.code });
-      else resolve({ error, status: null });
-    });
+  const { runOffThread } = require("./off-thread-run.cjs");
+  return runOffThread({ file: taskkill, args, timeoutMs: 10_000, maxBytes: 64 * 1024 }).then((result) => {
+    if (result.error) return { error: new Error(result.error), status: null };
+    if (result.timedOut) return { error: new Error("taskkill timed out"), status: null };
+    return { status: result.code };
   });
 }
 
