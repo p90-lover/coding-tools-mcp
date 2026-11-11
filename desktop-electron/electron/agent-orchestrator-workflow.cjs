@@ -4469,7 +4469,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // read whole, a chat whose requests it kept denying) it decides itself, allow or deny.
     const judges = chatPreferences.get().modelJudges;
     // What this request's screening concluded; judged ones are not screened again (rescreen).
-    const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
+    const keepAdvice = (value) => approverAdvice.set(approval.approval_id, chatPreferences.get().modelJudges ? { ...value, judged: true } : value);
     // An answer that may not have reached AO goes again as it was decided (resendDue), unreviewed.
     // One not due (the judge turned off since) is left alone: a new review could send a different
     // answer to a request that may already have one.
@@ -4519,13 +4519,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal, verifyCurrent }).catch(() => null);
       check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
-      // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
-      // person's: the request sat on the card though the switch was on.
-      else if (judges) advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
       else advice = { ...advice, unresolved: true };
     }
     await verifyCurrent();
     check();
+    // The preference may change while the model or the owner check is in flight.
+    const judgesNow = chatPreferences.get().modelJudges;
+    if (advice.action === "ask" && advice.reviewed && judgesNow) {
+      advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
+    }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
       reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
       if (reviewDenials.size > 500) reviewDenials.delete(reviewDenials.keys().next().value);
@@ -4542,7 +4544,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // "Let the model judge" leaves nothing to the person: a reviewer that never answered denies,
       // in doubt. The agent hears that the request was not judged, so it tries again rather than
       // giving up on it: told "try a safer way", agents dropped harmless steps for good.
-      advice = judges
+      advice = judgesNow
         ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
