@@ -1277,8 +1277,13 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     window.addEventListener("coding-tools:ao:teams-changed", changed);
     return () => window.removeEventListener("coding-tools:ao:teams-changed", changed);
   }, [workspaceId, setError]);
+  const takeChatHere = (id: string, taskId: string) => {
+    if (!pageRegistry || pageRegistry.releaseChat(pageNumber, id, taskId)) return true;
+    setError("This chat could not be opened on this page.");
+    return false;
+  };
   const selectChat = (taskId: string, next: "chat" | "overview" = "chat") => {
-    if (pageRegistry?.reveal(pageNumber, workspaceId, taskId)) return;
+    if (!takeChatHere(workspaceId, taskId)) return;
     composerIntent.current++;
     // A chat chosen here wins over another project's chat still loading to open (selectChatIn).
     switchTarget.current = ""; pendingSelect.current = null;
@@ -2024,6 +2029,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         ? newChatPlace(splitPanes, maxColumns, { workspaceId, taskId: chatTaskId ?? "" }, id) !== null
         : splitHasRoom(splitPanes, maxColumns, chatTaskId ?? ""),
       wake: () => setPageOpenAsked((count) => count + 1),
+      release: (id) => { if (id === "main" && !splitPanes.length) startNewChat(); else closeSplitPane(id); },
     });
   }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, splitPanes]);
   useEffect(() => {
@@ -2045,7 +2051,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
    * (a new column while one fits, then a free bottom row, else in place of the last chat).
    */
   const openInSplit = (id: string, taskId: string, at?: SplitDropTarget | PanePos | null) => {
-    if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
+    if (!takeChatHere(id, taskId)) return;
     const open = paneShowing(id, taskId);
     setView("chat"); setSheet("");
     // An open chat dragged from the sidebar to another place moves there and its old pane closes;
@@ -2228,7 +2234,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   }, [focusedPane, composerFocusAsked]);
   /** A chat chosen in the sidebar: its pane if it is open, else the focused pane shows it. */
   const showChat = (id: string, taskId: string) => {
-    if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
+    if (!takeChatHere(id, taskId)) return;
     const open = paneShowing(id, taskId);
     if (open) { setFocusedPane(open); if (open === "main") selectChat(taskId); else setView("chat"); return; }
     if (focusedSplit) {
@@ -2499,7 +2505,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const pendingSelect = useRef<{ workspaceId: string; taskId: string } | null>(null);
   const switchTarget = useRef("");
   const selectChatIn = (id: string, taskId: string) => {
-    if (pageRegistry?.reveal(pageNumber, id, taskId)) return;
+    if (!takeChatHere(id, taskId)) return;
     composerIntent.current++;
     // A cached row of the project just switched to (its runs not read yet) waits like another
     // project's: selecting it now set a chat with no run, and the load then picked another chat's run.
