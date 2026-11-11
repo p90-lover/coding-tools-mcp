@@ -66,9 +66,44 @@ test("the watch shows Restart Codex while a Codex goes around the bridge, and cl
   assert.equal(restart, true, "another Codex's list does not prove the Codex app restarted");
   cache = at("2026-11-09T01:45:00Z", true, "0.163.0");
   await watch.check();
-  assert.equal(restart, false, "that Codex version now lists WebGPT: it restarted");
+  assert.equal(restart, true, "nor does a list of the same version: two Codex processes can share one");
+  cache = at("2026-11-09T02:22:19Z", true, "0.163.0");
+  await watch.check();
+  assert.equal(restart, false, "45 minutes with no list around the bridge: it restarted");
+  assert.deepEqual(logs.at(-1), ["codex.model_cache_through_bridge", { clientVersion: "0.163.0" }]);
   routed = false;
   cache = at("2026-11-09T01:50:00Z", false);
   await watch.check();
   assert.equal(restart, false, "without the route there is nothing to restart for");
+});
+
+// 2026-11-12: the Codex app (running since 11-08) and the app's own Codex servers, both 0.164.0, took
+// turns writing the cache all night, and the notice switched off and on 35 times in three hours.
+test("Restart Codex stays up while a Codex keeps going around the bridge, and clears after a quiet spell even on a newer version", async () => {
+  let cache = null, restart = false;
+  const changes = [];
+  const watch = watchCodexModelCache({
+    codexHome: "home", routed: () => true, bridgeServedAt: async () => Date.parse("2026-11-11T19:00:00Z"),
+    restartRequired: () => restart, setRestartRequired: (value) => { restart = value; changes.push(value); },
+    read: async () => cache, setInterval: () => ({}), clearInterval: () => {},
+  });
+  const at = (iso, webModels, clientVersion = "0.164.0") => ({ fetchedAt: Date.parse(iso), modifiedAt: Date.parse(iso), webModels, clientVersion });
+  // The live order from Activity: each list around the bridge, then one through it from the app's own Codex.
+  const night = [["19:08:30", false], ["19:13:00", true], ["19:16:36", false], ["19:27:00", true], ["19:34:52", false],
+    ["19:45:00", true], ["19:48:31", false], ["19:54:00", true], ["19:57:36", false], ["20:03:00", true], ["20:07:45", false],
+    ["20:12:00", true], ["20:16:53", false], ["20:39:00", true], ["20:39:41", false]];
+  for (const [time, web] of night) {
+    cache = at(`2026-11-11T${time}Z`, web);
+    await watch.check();
+    assert.equal(restart, true, `still up after the list ${web ? "through" : "around"} the bridge at ${time}`);
+  }
+  assert.deepEqual(changes, [true], "raised once and never switched off in between");
+  // The Codex app is restarted and comes back as a newer version; every list now goes through the bridge.
+  cache = at("2026-11-11T21:00:00Z", true, "0.165.0");
+  await watch.check();
+  assert.equal(restart, true, "20 minutes is not yet quiet");
+  cache = at("2026-11-11T21:25:00Z", true, "0.165.0");
+  await watch.check();
+  assert.equal(restart, false, "45 minutes with every list through the bridge clears it, though the version changed");
+  assert.deepEqual(changes, [true, false]);
 });
