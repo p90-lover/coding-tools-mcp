@@ -2132,7 +2132,8 @@ class RuntimeSupervisor {
   }
 
   // The same check, saying which part failed: the launcher watchdog logs it with each miss.
-  async ownedRuntimeCheck(config) {
+  // healthTimeoutMs: how long the daemon gets to answer (the watchdog's confirming probe waits longer).
+  async ownedRuntimeCheck(config, { healthTimeoutMs = 2_000 } = {}) {
     const verdict = (failed) => ({ ready: !failed, ...(failed ? { failed } : {}) });
     const tunnelVerdict = async () => {
       if (!this.tunnel) return verdict("tunnel_missing");
@@ -2144,7 +2145,7 @@ class RuntimeSupervisor {
     const daemon = this.daemon;
     if (!daemon || !Number.isInteger(daemon.pid)) return verdict("daemon_missing");
     if (daemon.exitCode !== null || daemon.signalCode !== null) return verdict("daemon_exited");
-    if (!await this.proxyHealth(config, 2_000, daemon.pid, true)) return verdict("daemon_health");
+    if (!await this.proxyHealth(config, healthTimeoutMs, daemon.pid, true)) return verdict("daemon_health");
     return config.mode !== "full" ? verdict(null) : tunnelVerdict();
   }
 

@@ -649,6 +649,10 @@ const BRIDGE_WATCHDOG_INTERVAL_MS = 60_000;
 // One missed health check is usually a stalled machine, not a dead bridge; restarting then kills
 // the Codex turns in flight. Restart only after this many misses in a row.
 const BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART = 2;
+// Two 2 s misses a minute apart can still be one disk stall: on 2026-11-11 a release build on the
+// shared hard disk held AO's writer 72 s, and the watchdog "restarted" a live bridge (10:34). Before
+// restarting a daemon that is running but slow to answer, it gets this long to answer once more.
+const BRIDGE_WATCHDOG_PATIENT_HEALTH_MS = 15_000;
 let bridgeWatchdogTimer = null;
 let bridgeWatchdogBusy = false;
 let bridgeWatchdogMisses = 0;
@@ -693,6 +697,15 @@ function startBridgeWatchdog(logger, stateStore) {
       if (bridgeWatchdogMisses < BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART) {
         logger.warn("runtime.watchdog_miss", miss);
         return;
+      }
+      if (check.failed === "daemon_health") {
+        const patientStarted = Date.now();
+        const patient = await runtimeSupervisor.ownedRuntimeCheck(config, { healthTimeoutMs: BRIDGE_WATCHDOG_PATIENT_HEALTH_MS });
+        if (patient.ready) {
+          bridgeWatchdogMisses = 0;
+          logger.warn("runtime.watchdog_slow", { ...miss, patientMs: Date.now() - patientStarted });
+          return;
+        }
       }
       bridgeWatchdogMisses = 0;
       logger.warn("runtime.watchdog_restart", miss);

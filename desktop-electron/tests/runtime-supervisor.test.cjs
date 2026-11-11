@@ -2102,6 +2102,81 @@ test("the owned-runtime check says which part failed, for the launcher watchdog'
   assert.deepEqual(await supervisor.ownedRuntimeCheck({ mode: "browser-only" }), { ready: true });
 });
 
+test("the owned-runtime check gives the daemon 2 s by default and the watchdog's confirming probe longer", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  const timeouts = [];
+  supervisor.daemon = { pid: 123_456_785, exitCode: null, signalCode: null };
+  supervisor.proxyHealth = async (_config, timeoutMs, pid, requireAccepting) => {
+    timeouts.push([timeoutMs, pid, requireAccepting]);
+    return true;
+  };
+  await supervisor.ownedRuntimeCheck({ mode: "browser-only" });
+  await supervisor.ownedRuntimeCheck({ mode: "browser-only" }, { healthTimeoutMs: 15_000 });
+  assert.deepEqual(timeouts, [[2_000, 123_456_785, true], [15_000, 123_456_785, true]]);
+});
+
+test("the launcher watchdog restarts a slow daemon only after it also fails a patient health check", async (t) => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const start = source.indexOf("const BRIDGE_WATCHDOG_INTERVAL_MS");
+  const end = source.indexOf("function stopBridgeWatchdog(", start);
+  assert.ok(start > 0 && end > start);
+  const watchdog = (verdicts) => {
+    const logged = [];
+    const checks = [];
+    let restarts = 0;
+    let tick = null;
+    const supervisor = {
+      readConfigAsync: async () => ({ mode: "full" }),
+      ownedRuntimeCheck: async (_config, options = {}) => {
+        checks.push(options.healthTimeoutMs ?? 2_000);
+        return verdicts(options.healthTimeoutMs ?? 2_000);
+      },
+      startIfConfigured: async () => { restarts += 1; return { status: "ready" }; },
+    };
+    const startBridgeWatchdog = new Function(
+      "IS_DEV_PROFILE", "quitting", "shutdownInProgress", "runtimeSupervisor", "runtimeHost",
+      "watchdogExternalBackoff", "scheduleCodexBridgeAutoConnect", "setInterval",
+      `${source.slice(start, end)}\nreturn startBridgeWatchdog;`,
+    )(false, false, false, supervisor, { currentOperation: () => null }, () => 60_000, () => {},
+      (fn) => { tick = fn; return { unref() {} }; });
+    const logger = { warn: (event, detail) => logged.push([event, detail]), info: (event, detail) => logged.push([event, detail]) };
+    startBridgeWatchdog(logger, {});
+    return { tick: () => tick(), logged, checks, restarts: () => restarts };
+  };
+
+  await t.test("a daemon that answers within the patient wait is left running", async () => {
+    const run = watchdog((timeoutMs) => (timeoutMs >= 15_000 ? { ready: true } : { ready: false, failed: "daemon_health" }));
+    await run.tick();
+    await run.tick();
+    assert.equal(run.restarts(), 0);
+    assert.deepEqual(run.checks, [2_000, 2_000, 15_000]);
+    assert.deepEqual(run.logged.map(([event]) => event), ["runtime.watchdog_miss", "runtime.watchdog_slow"]);
+    await run.tick();
+    assert.equal(run.logged.at(-1)[1].misses, 1, "the slow-but-alive verdict did not reset the miss count");
+  });
+  await t.test("a daemon that fails the patient check too is restarted", async () => {
+    const run = watchdog(() => ({ ready: false, failed: "daemon_health" }));
+    await run.tick();
+    await run.tick();
+    assert.equal(run.restarts(), 1);
+    assert.deepEqual(run.checks, [2_000, 2_000, 15_000]);
+    assert.ok(run.logged.some(([event]) => event === "runtime.watchdog_restart"));
+  });
+  await t.test("a tunnel failure restarts without the patient check", async () => {
+    const run = watchdog(() => ({ ready: false, failed: "tunnel_health" }));
+    await run.tick();
+    await run.tick();
+    assert.equal(run.restarts(), 1);
+    assert.deepEqual(run.checks, [2_000, 2_000]);
+  });
+});
+
 test("failed initial health checks stop their child without scheduling crash recovery", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-startup-cleanup-"));
   const childPath = path.join(root, "child.cjs");
