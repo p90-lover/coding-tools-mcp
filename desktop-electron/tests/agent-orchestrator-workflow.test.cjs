@@ -12840,3 +12840,71 @@ test("a run creation refused for another reason is not retried", async () => {
     assert.equal(attempts, 1);
   } finally { workflow.dispose(); }
 });
+
+// Another chat's write between a send's board read and its write was refused by the board ("Workflow
+// revision changed; read before retrying. Nothing was saved."), and the person's message failed (two
+// sends at 13:19 local on 2026-11-11). The refusal saves nothing, so the send reads again and writes.
+function revisionRaceWorld({ conflicts = 1, tasks = [{ id: "task-1", title: "Fix dots", description: "fix the email dots", state: "backlog", clauses: [] }] } = {}) {
+  const world = chatWorld({ tasks });
+  let left = conflicts;
+  world.writes = 0;
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/tools/call" && body.tool === "workflow_update") {
+      world.writes += 1;
+      if (left > 0) {
+        left -= 1;
+        world.revision += 1; // what another chat's write did to the workspace's board
+        return { operation: { state: "completed", result: { ok: false, error: { code: "WORKFLOW_REJECTED",
+          message: "Workflow revision changed; read before retrying. Nothing was saved." } } } };
+      }
+    }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => "C:/Codex/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+  });
+  return { world, workflow };
+}
+
+test("a send whose board write lost a race with another chat reads the board again and is saved once", async () => {
+  const followUp = revisionRaceWorld({ conflicts: 2 });
+  const sent = await followUp.workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "and the other dots" });
+  assert.equal(sent.taskId, "task-1");
+  assert.equal(followUp.world.writes, 3);
+  assert.equal(followUp.world.tasks[0].description.match(/Follow-up \(/g)?.length, 1);
+  assert.match(followUp.world.tasks[0].description, /^fix the email dots\n\nFollow-up \(.* UTC\):\nand the other dots$/);
+
+  const fresh = revisionRaceWorld({ tasks: [] });
+  const created = await fresh.workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the email dots" });
+  assert.equal(created.taskId, "task-1");
+  assert.equal(fresh.world.writes, 2);
+  assert.deepEqual(fresh.world.tasks.map((task) => [task.title, task.description]), [["New task", "fix the email dots"]]);
+});
+
+test("a send still losing the board race after its retries reports the refusal and saves nothing", async () => {
+  const { world, workflow } = revisionRaceWorld({ conflicts: 99 });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "and the other dots" }),
+    /Workflow revision changed; read before retrying\. Nothing was saved\./);
+  assert.equal(world.writes, 4);
+  assert.equal(world.tasks[0].description, "fix the email dots");
+  assert.deepEqual(world.updates, []);
+});
+
+test("a send's other board refusals are not retried", async () => {
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Fix dots", description: "fix the email dots", state: "backlog", clauses: [] }] });
+  let writes = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/tools/call" && body.tool === "workflow_update") {
+        writes += 1;
+        return { operation: { state: "completed", result: { ok: false, error: { code: "WORKFLOW_REJECTED", message: "Task is not in this listener's approved workspace" } } } };
+      }
+      return world.requestHeadless(endpoint, body, options);
+    },
+    findCodexExecutable: () => "C:/Codex/codex.exe",
+    resolveHarness: async () => { throw new Error("stop before the background loop"); },
+  });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "and the other dots" }), /approved workspace/);
+  assert.equal(writes, 1);
+});
