@@ -1096,16 +1096,49 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
   }
 
+  // The task list comes a page at a time: 100 tasks, oldest first, with `next_offset` when there
+  // are more. Only the first page was ever read. A project's 101st task (archived chats count) was
+  // therefore never listed: its chat was missing from the chat list, and starting it failed with
+  // "Couldn't find the new chat's task" because the new task is always the last one (seen live
+  // 2026-11-11, a project with exactly 100 listed). Every page is read now. A page from another
+  // revision means the board changed between pages (a task may have moved across the boundary), so
+  // the read starts over, a few times; the list is complete or says that it is not.
+  const BOARD_PAGE = 100;
+  const BOARD_LIST_ATTEMPTS = 3;
+  // Far past any real board; a service that pages without end must not hold a read for ever.
+  const BOARD_LIST_MAX_PAGES = 200;
   async function board({ workspaceId, taskId } = {}) {
     const id = clean(workspaceId, 128), task = taskId ? clean(taskId, 128) : "";
     return sharedWorkflowRead(JSON.stringify(["board", id, task]), async () => {
-      const result = checked(await tool(id, "workflow_list", {
-        ...(task ? { task_id: task } : {}),
-        // Archived and deleted tasks stay listed; the chat list filters them by their lifecycle.
-        limit: 100, include_archived: true,
+      // Archived and deleted tasks stay listed; the chat list filters them by their lifecycle.
+      const page = async (offset) => checked(await tool(id, "workflow_list", {
+        ...(task ? { task_id: task } : {}), ...(offset ? { offset } : {}),
+        limit: BOARD_PAGE, include_archived: true,
       }));
-      return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks ?? [],
-        task: result.task ?? null, workspaceId: result.workspace_id };
+      let result, tasks, truncated;
+      for (let attempt = 1; ; attempt++) {
+        result = await page(0);
+        tasks = [...(result.tasks ?? [])];
+        truncated = false;
+        let next = task ? null : result.next_offset, moved = false;
+        for (let pages = 1; Number.isInteger(next) && next > 0; pages++) {
+          if (pages >= BOARD_LIST_MAX_PAGES) { truncated = true; break; }
+          let more;
+          // An older service refuses an offset past its limit: the list stops there, and says so.
+          try { more = await page(next); } catch (error) {
+            truncated = true;
+            logger?.warn?.("ao.board_list_truncated", { listed: tasks.length, total: result.total ?? null, message: publicText(error?.message || error, 160) });
+            break;
+          }
+          if (more.revision !== result.revision) { moved = true; break; }
+          const got = more.tasks ?? [];
+          tasks.push(...got);
+          next = got.length && Number.isInteger(more.next_offset) && more.next_offset > next ? more.next_offset : null;
+        }
+        if (!moved || attempt >= BOARD_LIST_ATTEMPTS) break;
+      }
+      return { ok: true, revision: result.revision, steps: result.steps, tasks,
+        task: result.task ?? null, workspaceId: result.workspace_id, ...(truncated ? { truncated: true } : {}) };
     });
   }
 
@@ -6431,17 +6464,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else {
       const startTitle = clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240);
       defaultTitled = startTitle === CHAT_TASK_TITLE;
-      let known;
+      // The write answers with the task it created. The chat used to find its task by listing the
+      // board before and after and taking the one new entry, which failed once the project had 100
+      // tasks (the list's first page ended before the new one) and whenever another chat started in
+      // the same project at the same moment (two new entries). The list is the fallback only for a
+      // service that answers without the task.
+      let known, created;
       await withBoardRetry(async () => {
         const before = await board({ workspaceId: id });
         known = new Set(before.tasks.map((entry) => entry.id));
-        await write(id, { expected_revision: before.revision, change: {
+        created = await write(id, { expected_revision: before.revision, change: {
           operation: "create", title: startTitle, description: text,
         } });
       });
-      const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
-      if (added.length !== 1) throw new Error("Couldn't find the new chat's task. Refresh the board.");
-      task = added[0].id;
+      const createdId = typeof created?.task?.id === "string" && !known.has(created.task.id) ? created.task.id : "";
+      if (createdId) task = createdId;
+      else {
+        const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
+        if (added.length !== 1) throw new Error("Couldn't find the new chat's task. Refresh the board.");
+        task = added[0].id;
+      }
     }
 
     let runId, createdRun;
