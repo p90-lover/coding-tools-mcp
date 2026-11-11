@@ -23,8 +23,10 @@ const PERMISSIONS = new Set(["auto", "full"]);
 const LIMITS = Object.freeze({ maxConcurrent: [1, 100], maxPerChat: [1, 100], timeoutMinutes: [1, 240] });
 const DEFAULT_SETTINGS = Object.freeze({
   enabled: true, maxConcurrent: 3, maxPerChat: 3, timeoutMinutes: 30, permission: "auto", releaseWhenDone: true, defaultRoute: null,
+  allowedProviders: null,
 });
 const MAX_AGENTS = 24;
+const MAX_PROVIDERS = 64;
 const MAX_TASK = 16_000;
 const MAX_INSTRUCTIONS = 8_000;
 const MAX_REPORT = 24_000;
@@ -130,6 +132,44 @@ function cleanRoute(route) {
   return clean;
 }
 
+/**
+ * Who serves a model, named as the Subagents page's provider switches name it (SubagentsSurface
+ * modelProvider): for a "cpa/" model the upstream CPA reports (antigravity, codex, cline-pass…), else
+ * its id's own prefix; for an agent's own model (Codex's, on its ChatGPT sign-in) that agent
+ * ("ao:codex"). A CPA model its catalog lists with neither is "cpa" (the page's "Other"); one the
+ * catalog does not list, or any while the catalog cannot be read, with no prefix is null: who serves
+ * it cannot be told.
+ */
+function providerOf(model, harness, capabilities, listed) {
+  if (!model.startsWith("cpa/")) return harness || null;
+  const id = model.slice(4);
+  const reported = typeof capabilities?.provider === "string" ? capabilities.provider.trim().toLowerCase() : "";
+  const prefix = id.includes("/") ? id.slice(0, id.indexOf("/")).toLowerCase() : "";
+  return reported || prefix || (listed ? "cpa" : null);
+}
+
+/**
+ * The providers subagents may use (the page's switches), so a quota the user keeps for their own
+ * chats is not spent by subagents: null allows every provider, ones that appear later too.
+ */
+function cleanProviders(value) {
+  if (value === null || value === undefined) return null;
+  if (!Array.isArray(value)) throw new Error("Allowed providers must be a list");
+  const keys = value.map((item) => text(item, 64).toLowerCase()).filter((item) => /^[a-z0-9][a-z0-9:._-]*$/.test(item));
+  return [...new Set(keys)].slice(0, MAX_PROVIDERS);
+}
+
+/**
+ * Whether a subagent may run on a model `provider` serves, under the saved `allowed` list
+ * (settings.allowedProviders). `allowed` is null when the user allows every provider; `provider` is
+ * null when who serves the model cannot be told (providerOf). With a list, an unknown provider is
+ * refused: the user turned providers off to keep their quota, and a guess could spend it.
+ */
+function providerAllowed(allowed, provider) {
+  if (!allowed) return true;
+  return provider !== null && provider !== undefined && allowed.includes(provider);
+}
+
 /** The settings and subagents as saved, made whole and valid; throws for input that is not. */
 function cleanConfig(input) {
   const settings = input?.settings && typeof input.settings === "object" ? input.settings : {};
@@ -141,6 +181,7 @@ function cleanConfig(input) {
     permission: PERMISSIONS.has(settings.permission) ? settings.permission : DEFAULT_SETTINGS.permission,
     releaseWhenDone: settings.releaseWhenDone !== false,
     defaultRoute: cleanRoute(settings.defaultRoute ?? null),
+    allowedProviders: cleanProviders(settings.allowedProviders),
   };
   const list = Array.isArray(input?.agents) ? input.agents : [];
   if (list.length > MAX_AGENTS) throw new Error(`At most ${MAX_AGENTS} subagents`);
@@ -492,6 +533,14 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   /** Claude Code's model catalog as the model pickers read it, or null when it cannot be read. */
   const catalogFor = (workspaceId) => Promise.resolve().then(() => models?.(workspaceId) ?? null).catch(() => null);
 
+  /** Who serves a route's model (providerOf); a CPA model's provider is read from Claude Code's catalog, which lists them all. */
+  async function providerFor(workspaceId, route) {
+    if (!route.model.startsWith("cpa/")) return providerOf(route.model, route.harness_id, null, true);
+    const catalog = await catalogFor(workspaceId);
+    const listed = Array.isArray(catalog?.models) && catalog.models.includes(route.model);
+    return providerOf(route.model, route.harness_id, catalog?.capabilities?.[route.model], listed);
+  }
+
   /**
    * The route a subagent runs on: its saved one, or, when the chat agent picked a model, effort or
    * context window, Claude Code with those (the harness is never the chat agent's to pick). A pick
@@ -577,10 +626,22 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     // A route its provider refuses (Claude Code on an Antigravity model) fails here, with the
     // reason, instead of minutes of "quota exhausted" retries. Asked once the launch holds its slot
     // and a parent stop can wait for it; a check that cannot answer lets the launch go ahead.
-    const refusal = await Promise.resolve().then(() => routeRefusal(route)).catch(() => null);
+    // Who serves the model is asked alongside, only when the user turned some providers off: a saved
+    // route and a picked model both stop here, so a provider kept off never spends its quota.
+    const allowed = settings.allowedProviders ?? null;
+    const [refusal, provider] = await Promise.all([
+      Promise.resolve().then(() => routeRefusal(route)).catch(() => null),
+      allowed ? providerFor(workspaceId, route).catch(() => null) : null,
+    ]);
     // A stop during the check wins over its answer: nothing started, so the stop did not fail.
     if ((stopGenerations.get(parent) ?? 0) !== generation) {
       throw Object.assign(new Error("The chat stopped its subagents before this one started"), { cancelledByStop: true });
+    }
+    if (!providerAllowed(allowed, provider)) {
+      const model = route.model.replace(/^cpa\//, "");
+      throw new Error(provider
+        ? `"${agent.name}" would run on ${model}, served by ${provider}, a provider the user turned off for subagents (Subagents page). Pick a model subagent_models lists, or ask the user to turn ${provider} on.`
+        : `"${agent.name}" would run on ${model}, and who serves it cannot be told right now (CPA's model list is unreadable) while the user allows only some providers. Try again shortly.`);
     }
     if (refusal) throw new Error(`"${agent.name}" cannot run on its model: ${refusal}. The user can give it another model on the Subagents page.`);
     const permissions = settings.permission === "full"
@@ -793,18 +854,27 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     };
   }
 
-  /** The models a chat agent may pick for a subagent: Claude Code's catalog, with efforts and windows. */
+  /**
+   * The models a chat agent may pick for a subagent: Claude Code's catalog, with efforts and windows,
+   * less the models of providers the user turned off (each listed one names its provider).
+   */
   async function modelList(workspaceId) {
     const catalog = await catalogFor(workspaceId);
     if (!Array.isArray(catalog?.models)) throw new Error("Claude Code's model list cannot be read right now; try again shortly");
-    const list = catalog.models.slice(0, MAX_MODELS_LISTED).map((id) => {
+    const allowed = read().settings.allowedProviders ?? null;
+    const providers = new Map(catalog.models.map((id) => [id, providerOf(id, PICKED_HARNESS, catalog.capabilities?.[id], true)]));
+    const offered = catalog.models.filter((id) => providerAllowed(allowed, providers.get(id)));
+    const list = offered.slice(0, MAX_MODELS_LISTED).map((id) => {
       const capabilities = catalog.capabilities?.[id] ?? {};
-      return { id: id.replace(/^cpa\//, ""), ...(Array.isArray(capabilities.efforts) && capabilities.efforts.length ? { efforts: capabilities.efforts } : {}),
+      const provider = providers.get(id);
+      return { id: id.replace(/^cpa\//, ""), ...(provider && provider !== "cpa" ? { provider } : {}),
+        ...(Array.isArray(capabilities.efforts) && capabilities.efforts.length ? { efforts: capabilities.efforts } : {}),
         ...(capabilities.contextWindow ? { context_window: { min: capabilities.contextWindow.min, max: capabilities.contextWindow.max } } : {}),
         ...(capabilities.contextLimit ? { context_limit: capabilities.contextLimit } : {}) };
     });
     return { harness: "Claude Code (picked models always run on it)", models: list,
-      ...(catalog.models.length > MAX_MODELS_LISTED ? { more: catalog.models.length - MAX_MODELS_LISTED } : {}), ...(catalog.stale ? { stale: true } : {}) };
+      ...(allowed ? { allowed_providers: allowed } : {}),
+      ...(offered.length > MAX_MODELS_LISTED ? { more: offered.length - MAX_MODELS_LISTED } : {}), ...(catalog.stale ? { stale: true } : {}) };
   }
 
   /** One subagent tool call from the chat session `parent` (an AO session id) in `workspaceId`. */
@@ -876,4 +946,4 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   });
 }
 
-module.exports = { createSubagents, cleanConfig, SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS, STARTERS };
+module.exports = { createSubagents, cleanConfig, providerOf, providerAllowed, SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS, STARTERS };

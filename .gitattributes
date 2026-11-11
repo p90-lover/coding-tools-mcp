@@ -10,3 +10,7 @@ desktop-electron/vendor/unified-agent-tools/** -text
 
 # The vendored upstream pin is verified by its SHA-256 manifest; keep its exact bytes on every OS.
 vendor/codex-chatgpt-web-*/** -text
+
+# Brand marks copied byte for byte from each product's own site (SOURCES.md lists each file's URL and
+# SHA-256, and harness-picker.test.cjs checks them); core.autocrlf must not rewrite their line endings.
+desktop-electron/src/assets/harness/brand/** -text

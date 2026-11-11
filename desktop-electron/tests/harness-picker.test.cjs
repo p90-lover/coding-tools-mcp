@@ -11,32 +11,51 @@ function logos() {
   }).outputText, { exports, require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : { __esModule: true, default: name } });
   return exports;
 }
-// Every harness shows the mark AO's own AgentAvatar shows for it (assets/harness/ao).
+// Every harness shows the icon its own product site or repository shows (paths under assets/harness;
+// see SOURCES.md): brand/ holds files copied byte for byte from the product, ao/ the Agent
+// Orchestrator avatars that are the product's own icon, and Kimi, Qwen and Muse (Meta) share their
+// maker's mark with the model lists.
+const assets = path.resolve(root, "../assets/harness");
 const harnesses = {
-  "claude-code": "claude-code.svg", codex: "codex.svg", "codex-native": "codex.svg", agy: "agy.png", antigravity: "agy.png", opencode: "opencode.svg",
-  "opencode-v2": "opencode.svg", aider: "aider.png", amp: "amp.svg", auggie: "auggie.svg", autohand: "autohand.svg", cline: "cline.svg", continue: "continue.png",
-  crush: "crush.png", cursor: "cursor.svg", deepseek: "deepseek-harness.svg", "deepseek-harness": "deepseek-harness.svg", devin: "devin.png", droid: "droid.png",
-  fx: "fx.svg", gemini: "gemini.svg", "gemini-cli": "gemini.svg", copilot: "copilot.svg", goose: "goose.svg", grok: "grok.png", kilocode: "kilocode.svg",
-  kimi: "kimi.png", kimchi: "kimchi.svg", kiro: "kiro.png", "mimo-code": "mimo-code.svg", muse: "muse.png", omp: "omp.png", pi: "pi.png",
-  "prime-agent": "prime-agent.png", qwen: "qwen.png", "unreal-agent": "unreal-agent.png", vibe: "vibe.png",
+  "claude-code": "brand/claude-code.png", codex: "ao/codex.svg", "codex-native": "ao/codex.svg", agy: "ao/agy.png", antigravity: "ao/agy.png",
+  opencode: "brand/opencode.png", "opencode-v2": "brand/opencode.png", aider: "ao/aider.png", amp: "brand/amp.svg", auggie: "ao/auggie.svg",
+  autohand: "ao/autohand.svg", cline: "brand/cline.svg", continue: "ao/continue.png", crush: "ao/crush.png", cursor: "brand/cursor.svg",
+  deepseek: "ao/deepseek-harness.svg", "deepseek-harness": "ao/deepseek-harness.svg", devin: "ao/devin.png", droid: "ao/droid.png", fx: "ao/fx.svg",
+  gemini: "brand/gemini-cli.svg", "gemini-cli": "brand/gemini-cli.svg", copilot: "ao/copilot.svg", goose: "ao/goose.svg", grok: "brand/grok-build.png",
+  kilocode: "brand/kilocode.svg", kimi: "kimi.svg", kimchi: "ao/kimchi.svg", kiro: "ao/kiro.png", "mimo-code": "ao/mimo-code.svg", muse: "meta.svg",
+  omp: "ao/omp.png", pi: "brand/pi.svg", "prime-agent": "ao/prime-agent.png", qwen: "qwen.svg", "unreal-agent": "ao/unreal-agent.png", vibe: "ao/vibe.png",
 };
+const assetOf = (src) => path.relative(assets, path.resolve(root, src)).split(path.sep).join("/");
 // A logo's bytes, with an SVG's line endings read as LF: core.autocrlf checks a text SVG out with
 // CRLF in the app's checkout but kept the AO submodule's copy LF, and 0.8.100's release build
 // failed on codex.svg though the two differ by nothing else. Images are compared byte for byte.
 const logoBytes = (file) => (file.endsWith(".svg") ? Buffer.from(fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n")) : fs.readFileSync(file));
-test("every harness shows AO's own mark for it, never another brand's", () => {
+test("every harness shows its own product's icon, never another brand's", () => {
   const { harnessMark } = logos();
   for (const [id, asset] of Object.entries(harnesses)) {
-    const src = harnessMark(`ao:${id}`, "Localized label")(18).props.src;
-    assert.equal(path.dirname(src), "../assets/harness/ao", `${id} uses AO's agent logo`);
-    const ao = path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/assets/agents", asset);
+    assert.equal(assetOf(harnessMark(`ao:${id}`, "Localized label")(18).props.src), asset, id);
+    if (!asset.startsWith("ao/")) continue;
     // AO's file unmodified where the AO checkout is present (CI may not check the submodule out).
-    if (fs.existsSync(ao)) assert.ok(logoBytes(ao).equals(logoBytes(path.resolve(root, src))), `${asset} is AO's file unmodified`);
+    const ao = path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/assets/agents", path.basename(asset));
+    if (fs.existsSync(ao)) assert.ok(logoBytes(ao).equals(logoBytes(path.join(assets, asset))), `${asset} is AO's file unmodified`);
   }
-  // The marks that were wrong: the Claude app's starburst, OpenAI's knot, Earendil's avatar, Unreal Engine.
-  for (const [id, wrong] of [["claude-code", "claude-code.png"], ["codex", "openai.png"], ["pi", "earendil.png"], ["unreal-agent", "unreal.svg"]]) {
-    assert.notEqual(path.basename(harnessMark(`ao:${id}`, id)(16).props.src), wrong, id);
+  // The marks the user saw as wrong (2026-11-10), and the ones before them.
+  for (const [id, wrong] of [["claude-code", "ao/claude-code.svg"], ["claude-code", "claude-code.png"], ["qwen", "ao/qwen.png"], ["kimi", "ao/kimi.png"],
+    ["grok", "ao/grok.png"], ["gemini", "gemini.svg"], ["muse", "ao/muse.png"], ["pi", "ao/pi.png"], ["amp", "ao/amp.svg"], ["codex", "openai.png"],
+    ["unreal-agent", "unreal.svg"]]) {
+    assert.notEqual(assetOf(harnessMark(`ao:${id}`, id)(16).props.src), wrong, id);
   }
+});
+test("brand/ marks are the product's files byte for byte, as SOURCES.md records them", () => {
+  const sources = fs.readFileSync(path.join(assets, "SOURCES.md"), "utf8");
+  const recorded = new Map([...sources.matchAll(/`brand\/([^`]+)`[^\n]*?SHA-256 `([0-9a-f]{64})`/g)].map(m => [m[1], m[2]]));
+  const files = fs.readdirSync(path.join(assets, "brand"));
+  assert.deepEqual([...recorded.keys()].sort(), files.sort(), "every brand/ file is listed with its source and hash");
+  for (const file of files) {
+    const hash = require("node:crypto").createHash("sha256").update(fs.readFileSync(path.join(assets, "brand", file))).digest("hex");
+    assert.equal(hash, recorded.get(file), `brand/${file} is unchanged from its source (no line-ending rewrite)`);
+  }
+  assert.match(fs.readFileSync(path.resolve(__dirname, "../../.gitattributes"), "utf8"), /^desktop-electron\/src\/assets\/harness\/brand\/\*\* -text\r?$/m);
 });
 test("every known harness has its bundled brand image, including missing agents", () => {
   const { harnessMark } = logos();
@@ -44,24 +63,28 @@ test("every known harness has its bundled brand image, including missing agents"
     for (const key of [id, `ao:${id}`, `AO:${id.toUpperCase()}`]) {
       const mark = harnessMark(key, "Localized label")(18);
       assert.equal(mark.type, "img", `${key} must not fall back to a fake/lettered logo`);
-      assert.equal(path.basename(mark.props.src), asset, key);
-      assert.ok(fs.statSync(path.resolve(root, mark.props.src)).size > 0, `bundled asset exists: ${asset}`);
+      assert.equal(assetOf(mark.props.src), asset, key);
+      assert.ok(fs.statSync(path.join(assets, asset)).size > 0, `bundled asset exists: ${asset}`);
       assert.equal(mark.props.draggable, false);
     }
   }
 });
 test("display-name aliases identify known brands without guessing an unknown harness", () => {
   const { harnessMark } = logos();
-  for (const [label, asset] of [["Gemini CLI", "gemini.svg"], ["DeepSeek", "deepseek-harness.svg"], ["Prime Agent", "prime-agent.png"], ["Kilo Code", "kilocode.svg"], ["GitHub Copilot", "copilot.svg"], ["Unreal Agent", "unreal-agent.png"]]) {
-    assert.equal(path.basename(harnessMark("custom-id", label)(16).props.src), asset, label);
+  for (const [label, asset] of [["Gemini CLI", "brand/gemini-cli.svg"], ["DeepSeek", "ao/deepseek-harness.svg"], ["Prime Agent", "ao/prime-agent.png"],
+    ["Kilo Code", "brand/kilocode.svg"], ["GitHub Copilot", "ao/copilot.svg"], ["Unreal Agent", "ao/unreal-agent.png"], ["Grok Build", "brand/grok-build.png"],
+    ["Qwen Code", "qwen.svg"], ["Muse Code", "meta.svg"], ["Claude Code", "brand/claude-code.png"]]) {
+    assert.equal(assetOf(harnessMark("custom-id", label)(16).props.src), asset, label);
   }
   assert.equal(harnessMark("unknown-agent", "Unknown")(16).type, "svg", "unknown brands keep an honest neutral fallback");
 });
-test("dark-theme contrast preserves mixed-colour Kimi and monochrome Prime Agent", () => {
+test("dark-theme contrast: Kimi's black K keeps a backing, black glyphs invert", () => {
   const { harnessMark } = logos();
   assert.match(harnessMark("ao:kimi", "Kimi")(16).props.className, /is-backed/);
   assert.doesNotMatch(harnessMark("ao:kimi", "Kimi")(16).props.className, /is-mono/);
-  assert.match(harnessMark("ao:prime-agent", "Prime Agent")(16).props.className, /is-mono/);
+  for (const id of ["prime-agent", "cline", "grok"]) assert.match(harnessMark(`ao:${id}`, id)(16).props.className, /is-mono/, id);
+  // Tiles and colour marks keep their own colours.
+  for (const id of ["claude-code", "opencode", "pi", "amp", "kilocode", "cursor", "gemini"]) assert.doesNotMatch(harnessMark(`ao:${id}`, id)(16).props.className, /is-mono/, id);
 });
 test("missing installation status never strips brand color or fades the image", () => {
   const css = fs.readFileSync(path.join(root, "agent-orchestrator.css"), "utf8");

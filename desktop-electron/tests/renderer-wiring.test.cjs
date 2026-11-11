@@ -330,11 +330,12 @@ test("Register IPC trusts only the launcher frame and permits hidden detach", as
   assert.throws(() => handlers.get("launcher:register-bounds")(event, { x: NaN, y: 0, width: 1, height: 1 }), /finite/);
 });
 
-test("minimized AO status polls require the trusted main frame and preserve focused writes", () => {
+test("minimized AO status polls require the trusted main frame and preserve focused writes", async () => {
   const vm = require("node:vm"), ts = require("typescript");
   const file = ts.createSourceFile("main.cjs", electronMain, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const functions = file.statements.filter(ts.isFunctionDeclaration);
   const guard = functions.find(node => node.name?.text === "assertFocusedMainWindow");
+  const settled = functions.find(node => node.name?.text === "assertFocusedMainWindowSettled");
   let registration;
   const visit = node => {
     if (ts.isCallExpression(node) && node.expression.getText(file) === "handle"
@@ -343,8 +344,9 @@ test("minimized AO status polls require the trusted main frame and preserve focu
   };
   visit(functions.find(node => node.name?.text === "registerIpc"));
   assert.ok(registration);
+  assert.ok(settled, "app calls go through the settled focus check");
   let visible = false, minimized = true, focused = false, destroyed = false;
-  const mainFrame = {}, calls = [], handlers = new Map();
+  const mainFrame = {}, calls = [], handlers = new Map(), waits = [];
   const sender = { mainFrame, isFocused: () => focused, getZoomFactor: () => 1 };
   const mainWindow = { isDestroyed: () => destroyed, isVisible: () => visible,
     isMinimized: () => minimized, isFocused: () => focused };
@@ -352,28 +354,34 @@ test("minimized AO status polls require the trusted main frame and preserve focu
     isReadOnly: (_module, operation) => ["run_status", "subagents_runs", "models"].includes(operation),
     call: (module, operation) => { calls.push([module, operation]); return { ok: true }; },
   };
-  vm.runInNewContext(guard.getText(file) + "\n" + registration, {
+  vm.runInNewContext(guard.getText(file) + "\n" + settled.getText(file) + "\n" + registration, {
     mainWindow, BrowserWindow: { fromWebContents: value => value === sender ? mainWindow : {} },
     appsHost, handle: (channel, handler) => handlers.set(channel, handler),
+    // focus-settle.cjs has its own tests; here a wait records itself and answers at once.
+    waitForFocus: async ({ focused: check }) => { waits.push(check()); return check(); },
   });
   const call = handlers.get("coding-tools:apps:call"), event = { sender, senderFrame: mainFrame };
+  const refused = (...args) => assert.rejects(async () => call(...args));
   for (const operation of ["run_status", "subagents_runs"]) {
-    assert.equal(call(event, { moduleId: "agent-orchestrator", operation }).ok, true);
-    assert.throws(() => call({ sender, senderFrame: {} }, { moduleId: "agent-orchestrator", operation }));
-    assert.throws(() => call({ sender: { mainFrame }, senderFrame: mainFrame }, { moduleId: "agent-orchestrator", operation }));
+    assert.equal((await call(event, { moduleId: "agent-orchestrator", operation })).ok, true);
+    await refused({ sender, senderFrame: {} }, { moduleId: "agent-orchestrator", operation });
+    await refused({ sender: { mainFrame }, senderFrame: mainFrame }, { moduleId: "agent-orchestrator", operation });
   }
   assert.equal(calls.length, 2);
   for (const operation of ["chat_send", "start_run", "subagents_stop", "models", "chat_preview_show"]) {
-    assert.throws(() => call(event, { moduleId: "agent-orchestrator", operation }));
+    await refused(event, { moduleId: "agent-orchestrator", operation });
   }
-  assert.throws(() => call(event, { moduleId: "other", operation: "run_status" }));
+  await refused(event, { moduleId: "other", operation: "run_status" });
   destroyed = true;
-  assert.throws(() => call(event, { moduleId: "agent-orchestrator", operation: "run_status" }));
+  await refused(event, { moduleId: "agent-orchestrator", operation: "run_status" });
+  assert.deepEqual(waits, [], "a minimized or destroyed window is refused without waiting for focus");
   destroyed = false; visible = true; minimized = false;
-  assert.throws(() => call(event, { moduleId: "agent-orchestrator", operation: "chat_send" }), /focused/);
+  await assert.rejects(async () => call(event, { moduleId: "agent-orchestrator", operation: "chat_send" }), /focused/);
+  assert.deepEqual(waits, [false], "a shown window that is not focused waits once for focus, then refuses");
   focused = true;
-  assert.equal(call(event, { moduleId: "agent-orchestrator", operation: "chat_send" }).ok, true);
+  assert.equal((await call(event, { moduleId: "agent-orchestrator", operation: "chat_send" })).ok, true);
   assert.equal(calls.length, 3, "only accepted reads and the genuinely focused send reach the host");
+  assert.equal(waits.length, 1, "a focused send does not wait");
 });
 
 test("Register native page detaches for launcher reload and crash without stopping its service", async () => {

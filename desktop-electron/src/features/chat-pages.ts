@@ -184,7 +184,7 @@ export function chatPageLayout(latest: { current: ChatPagePreferences }, fail: (
 /** A chat ("" a new one) to start on another page because its own page had no screen for it. */
 export type PageOpen = PageSelection & { maxColumns: number; tried: number[]; newScreen?: boolean };
 type PageChat = PageSelection & { paneId: string };
-type PageRoom = { room?: (maxColumns: number, workspaceId: string, newScreen?: boolean) => boolean; wake?: () => void };
+type PageRoom = { room?: (maxColumns: number, workspaceId: string, newScreen?: boolean) => boolean; wake?: () => void; release?: (paneId: string) => void };
 /**
  * One displayed owner for a chat across all pages, including their split panes. With `layout` a
  * full page hands a chat on to another (`openElsewhere`), which takes it once it has loaded.
@@ -208,6 +208,16 @@ export function createChatPageRegistry(selectPage: (page: number) => void,
       return () => { if (pages.get(page) === entry) pages.delete(page); };
     },
     has(from: number, workspaceId: string, taskId: string) { return Boolean(owner(from, workspaceId, taskId)); },
+    /** An explicit split moves the chat, unlike selection which reveals its existing page. */
+    releaseChat(from: number, workspaceId: string, taskId: string) {
+      const found = owner(from, workspaceId, taskId);
+      if (!found) return true;
+      if (!found.entry.release) return false;
+      found.entry.release(found.chat.paneId);
+      // The receiving pane may restore before the source page renders its new selection.
+      found.entry.chats = found.entry.chats.filter((chat) => chat !== found.chat);
+      return true;
+    },
     reveal(from: number, workspaceId: string, taskId: string) {
       const found = owner(from, workspaceId, taskId);
       if (!found) return false;

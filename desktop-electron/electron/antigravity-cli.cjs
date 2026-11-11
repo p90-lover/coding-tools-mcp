@@ -65,14 +65,7 @@ function platformAsset(manifest, platform, arch) {
   return { ...asset, url: `https://github.com/${manifest.repository}/releases/download/${manifest.version}/${asset.fileName}` };
 }
 
-/** Reject absolute paths, parent traversal and link entries before anything is extracted. */
-function validateArchive(archive, run = spawnSync) {
-  const list = (args) => {
-    const result = run(tarBinary(), args, { encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
-    if (result.error || result.status !== 0) throw new Error("Antigravity CLI archive could not be read");
-    return String(result.stdout || "").split(/\r?\n/u).filter(Boolean);
-  };
-  const entries = list(["-tf", archive]);
+function checkEntryNames(entries) {
   if (!entries.length) throw new Error("Antigravity CLI archive is empty");
   for (const entry of entries) {
     const normalized = entry.replaceAll("\\", "/");
@@ -80,9 +73,45 @@ function validateArchive(archive, run = spawnSync) {
       throw new Error("Antigravity CLI archive contains an unsafe path");
     }
   }
-  for (const line of list(["-tvf", archive])) {
+}
+
+function checkEntryTypes(lines) {
+  for (const line of lines) {
     if (["l", "h"].includes(line.trimStart()[0])) throw new Error("Antigravity CLI archive contains a link entry");
   }
+}
+
+const listingLines = (result) => {
+  if (result.error || result.status !== 0) throw new Error("Antigravity CLI archive could not be read");
+  return String(result.stdout || "").split(/\r?\n/u).filter(Boolean);
+};
+
+/** Reject absolute paths, parent traversal and link entries before anything is extracted. */
+function validateArchive(archive, run = spawnSync) {
+  const list = (args) => listingLines(run(tarBinary(), args, { encoding: "utf8", windowsHide: true, maxBuffer: 16 * 1024 * 1024 }));
+  checkEntryNames(list(["-tf", archive]));
+  checkEntryTypes(list(["-tvf", archive]));
+}
+
+/** validateArchive with tar run as a child the caller doesn't wait on: `run(args)` resolves { status, stdout, error }. */
+async function validateArchiveAsync(archive, run) {
+  checkEntryNames(listingLines(await run(["-tf", archive])));
+  checkEntryTypes(listingLines(await run(["-tvf", archive])));
+}
+
+async function findExecutableAsync(root) {
+  const found = [];
+  const visit = async (directory, depth) => {
+    for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
+      const candidate = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory() && depth < 3) await visit(candidate, depth + 1);
+      else if (entry.isFile() && EXECUTABLE_NAMES.has(entry.name.toLowerCase())) found.push(candidate);
+    }
+  };
+  await visit(root, 0);
+  if (found.length !== 1) throw new Error(`Antigravity CLI archive must contain one executable; found ${found.length}`);
+  return found[0];
 }
 
 function findExecutable(root) {
@@ -153,7 +182,7 @@ function shimProxyEnvironment(proxyEnvironment = {}) {
 function createAntigravityCli({
   toolsRoot, confirm, getWorkspaces, logger = console,
   platform = process.platform, arch = process.arch, fetchImpl = fetch,
-  spawnImpl = spawn, spawnSyncImpl = spawnSync, manifestPath = MANIFEST_PATH, now = () => Date.now(),
+  spawnImpl = spawn, manifestPath = MANIFEST_PATH, now = () => Date.now(),
 }) {
   if (!toolsRoot || !path.isAbsolute(toolsRoot)) throw new Error("Antigravity CLI tools root must be absolute");
   const manifest = loadManifest(manifestPath);
@@ -187,10 +216,6 @@ function createAntigravityCli({
       if (found) return found;
     }
     return null;
-  }
-
-  function previousVersions(keep = installed()?.version ?? manifest.version) {
-    return versionDirs().filter(version => version !== keep);
   }
 
   /** The status from what is on disk: the newest complete install, every version folder, the shim. */
@@ -277,54 +302,82 @@ function createAntigravityCli({
     fs.renameSync(`${shimPath}.tmp`, shimPath);
   }
 
+  async function writeShimAsync(executable) {
+    await fs.promises.mkdir(binDir, { recursive: true, mode: 0o700 });
+    await fs.promises.writeFile(`${shimPath}.tmp`, shimBody(executable, platform), { mode: 0o755 });
+    await fs.promises.rename(`${shimPath}.tmp`, shimPath);
+  }
+
   /**
    * Previous builds move to Trash; nothing the user installed is deleted. A build an agent is still
    * running can't be moved on Windows: it stays until the next install, and the newest one is used.
    */
-  function toTrash(source, name) {
+  async function toTrash(source, name) {
     const trash = path.join(toolsRoot, "Trash", "antigravity-cli", name);
-    fs.mkdirSync(path.dirname(trash), { recursive: true });
-    fs.renameSync(source, trash);
+    await fs.promises.mkdir(path.dirname(trash), { recursive: true });
+    await fs.promises.rename(source, trash);
   }
 
-  function retirePrevious(keep) {
-    for (const version of previousVersions(keep)) {
+  async function retirePrevious(keep) {
+    for (const version of (await versionDirsAsync()).filter((name) => name !== keep)) {
       try {
-        toTrash(path.join(root, version), `${version}-${now()}`);
+        await toTrash(path.join(root, version), `${version}-${now()}`);
       } catch (error) {
         logger.warn?.("antigravity_cli.retire_failed", { version, message: String(error?.message || error) });
       }
     }
   }
 
+  // tar as a child the main thread doesn't wait on. The install ran it with spawnSync and wrote its
+  // files synchronously, and an update held every window (Activity 2026-11-10 05:50Z: 1.1 s, then a
+  // 2.9 s stall, in writeFileSync CODING_TOOLS_TOOL.json < updateAntigravity).
+  function runTar(args) {
+    return new Promise((resolve) => {
+      let stdout = "";
+      let child;
+      try {
+        child = spawnImpl(tarBinary(platform), args, { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+      } catch (error) { resolve({ error }); return; }
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk) => {
+        stdout += chunk;
+        if (stdout.length > 16 * 1024 * 1024) { child.kill(); resolve({ error: new Error("tar listing too large") }); }
+      });
+      child.on("error", (error) => resolve({ error }));
+      child.on("close", (status) => resolve({ status, stdout }));
+    });
+  }
+
   /** Downloads, checks and unpacks `target`'s build into <root>/<version>, then points the shim at it. */
   function installManifest(target, asset) {
+    if (installing) return installing;
     installing = (async () => {
       const staging = path.join(root, `.staging-${target.version}-${now()}`);
       const archive = path.join(root, `.download-${asset.fileName}`);
-      fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
       try {
+        // Every step is off the main thread: the download, tar's listing and extraction, and the writes.
+        await fs.promises.mkdir(staging, { recursive: true, mode: 0o700 });
         await download(asset, archive);
-        validateArchive(archive, spawnSyncImpl);
-        const extracted = spawnSyncImpl(tarBinary(platform), ["-xf", archive, "-C", staging], { windowsHide: true, encoding: "utf8" });
+        await validateArchiveAsync(archive, runTar);
+        const extracted = await runTar(["-xf", archive, "-C", staging]);
         if (extracted.error || extracted.status !== 0) throw new Error("Antigravity CLI archive could not be extracted");
-        const executable = findExecutable(staging);
-        if (platform !== "win32") fs.chmodSync(executable, 0o755);
+        const executable = await findExecutableAsync(staging);
+        if (platform !== "win32") await fs.promises.chmod(executable, 0o755);
         const relative = path.relative(staging, executable);
-        fs.writeFileSync(markerPath(staging), `${JSON.stringify({ id: target.id, version: target.version,
+        await fs.promises.writeFile(markerPath(staging), `${JSON.stringify({ id: target.id, version: target.version,
           executable: relative, sha256: asset.sha256, installedAt: new Date(now()).toISOString() }, null, 2)}\n`);
         const home = path.join(root, target.version);
-        if (fs.existsSync(home)) toTrash(home, `${target.version}-incomplete-${now()}`);
-        fs.renameSync(staging, home);
-        writeShim(path.join(home, relative));
+        if (await fs.promises.access(home).then(() => true, () => false)) await toTrash(home, `${target.version}-incomplete-${now()}`);
+        await fs.promises.rename(staging, home);
+        await writeShimAsync(path.join(home, relative));
         // After the switch: a failed move of the old build leaves the new one in use.
-        retirePrevious(target.version);
+        await retirePrevious(target.version);
         logger.info?.("antigravity_cli.installed", { version: target.version });
-        return status();
+        return await statusAsync();
       } finally {
         installing = null;
         // The verified archive is no longer needed; the staging folder is only left behind on failure.
-        try { fs.rmSync(archive, { force: true }); } catch {}
+        await fs.promises.rm(archive, { force: true }).catch(() => {});
       }
     })();
     return installing;
@@ -333,8 +386,8 @@ function createAntigravityCli({
   async function install() {
     if (installing) return installing;
     const asset = platformAsset(manifest, platform, arch);
-    const current = installed();
-    if (current && compareVersion(current.version, manifest.version) >= 0) return status();
+    const current = await installedAsync(await versionDirsAsync());
+    if (current && compareVersion(current.version, manifest.version) >= 0) return statusAsync();
     if (!await confirm({
       message: `Install ${manifest.name} ${manifest.version}?`,
       detail: `Source: ${asset.url}\nFile: ${asset.fileName} (${(asset.size / 1048576).toFixed(1)} MB)\nSHA-256: ${asset.sha256}\n\nIt's installed for Coding Tools only, and agents run it as "${manifest.command}". You sign in from the CLI.`,
@@ -349,9 +402,9 @@ function createAntigravityCli({
   async function update(target) {
     if (installing) throw new Error("The Antigravity CLI is already being installed");
     checkManifest(target);
-    const current = installed();
+    const current = await installedAsync(await versionDirsAsync());
     if (!current) throw new Error("Install the Antigravity CLI first");
-    if (compareVersion(target.version, current.version) <= 0) return status();
+    if (compareVersion(target.version, current.version) <= 0) return statusAsync();
     const asset = platformAsset(target, platform, arch);
     if (asset.size > MAX_ARCHIVE_BYTES) throw new Error("Antigravity CLI release is larger than the CLI can be");
     return installManifest(target, asset);
@@ -375,7 +428,7 @@ function createAntigravityCli({
     const target = (await installedAsync(await versionDirsAsync()))?.executable;
     if (!target) return null;
     const shim = await fs.promises.readFile(shimPath, "utf8").catch(() => null);
-    if (shim !== shimBody(target, platform)) writeShim(target);
+    if (shim !== shimBody(target, platform)) await writeShimAsync(target);
     return binDir;
   }
 

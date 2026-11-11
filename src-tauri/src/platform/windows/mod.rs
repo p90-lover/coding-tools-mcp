@@ -2,7 +2,9 @@ mod net;
 mod paths;
 pub(crate) mod process;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use crate::error::{AppError, AppResult};
 use crate::platform::paths as shared_paths;
@@ -10,7 +12,14 @@ use crate::platform::Platform;
 
 pub struct WindowsPlatform;
 
-fn configured_state_dir(value: Option<std::ffi::OsString>) -> AppResult<Option<PathBuf>> {
+/// The configured state folder alone (the tests' view of configured_state_root).
+#[cfg(test)]
+fn configured_state_dir(value: Option<OsString>) -> AppResult<Option<PathBuf>> {
+    Ok(configured_state_root(value)?.map(|(directory, _)| directory))
+}
+
+/// The configured state folder and whether it resolved (see resolve_state_root).
+fn configured_state_root(value: Option<OsString>) -> AppResult<Option<(PathBuf, bool)>> {
     match value {
         None => Ok(None),
         Some(value) => {
@@ -20,18 +29,65 @@ fn configured_state_dir(value: Option<std::ffi::OsString>) -> AppResult<Option<P
                     "CODING_TOOLS_STATE_DIR must be an absolute directory".into(),
                 ));
             }
-            Ok(Some(canonical_state_dir(directory)?))
+            Ok(Some(resolve_state_root(directory)?))
         }
     }
 }
 
+/// The folder alone (the tests' view of resolve_state_root).
+#[cfg(test)]
+fn canonical_state_dir(directory: PathBuf) -> AppResult<PathBuf> {
+    resolve_state_root(directory).map(|(directory, _)| directory)
+}
+
 // Exclusive file creation through a Windows junction can report ERROR_FILE_EXISTS
 // for a nonexistent child. Resolve existing state roots before deriving write paths.
-fn canonical_state_dir(directory: PathBuf) -> AppResult<PathBuf> {
+/// The folder by its final path and `true`, or, while it does not exist yet, as given and `false`.
+fn resolve_state_root(directory: PathBuf) -> AppResult<(PathBuf, bool)> {
     match directory.canonicalize() {
-        Ok(directory) => Ok(directory),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(directory),
+        Ok(directory) => Ok((directory, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((directory, false)),
         Err(error) => Err(error.into()),
+    }
+}
+
+/// The state folder as resolved for a CODING_TOOLS_STATE_DIR value (None: the default).
+type StateRootMemo = Mutex<Option<(Option<OsString>, PathBuf)>>;
+
+/// Resolving the state folder is a canonicalize through the user's AppData junction: 17 file-system
+/// calls on the user's machine (2026-11-10). The data store asked for it twice on every refresh and
+/// coding-tools-headless refreshes several times per request, so a chat's run read cost about 240
+/// such calls. A folder that resolved keeps its final path for the life of the process.
+static STATE_ROOT: StateRootMemo = Mutex::new(None);
+
+/// `resolve`'s folder for `configured`, remembered in `memo` once it resolved. One that does not
+/// exist yet is resolved again on the next call, so it is never kept in its unresolved form after
+/// it is created; an error is never kept.
+fn remembered_state_root(
+    memo: &StateRootMemo,
+    configured: Option<OsString>,
+    resolve: impl FnOnce(Option<OsString>) -> AppResult<(PathBuf, bool)>,
+) -> AppResult<PathBuf> {
+    {
+        let known = memo.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((key, directory)) = known.as_ref() {
+            if *key == configured {
+                return Ok(directory.clone());
+            }
+        }
+    }
+    let (directory, resolved) = resolve(configured.clone())?;
+    if resolved {
+        *memo.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((configured, directory.clone()));
+    }
+    Ok(directory)
+}
+
+fn state_root(configured: Option<OsString>) -> AppResult<(PathBuf, bool)> {
+    match configured_state_root(configured)? {
+        Some(root) => Ok(root),
+        None => resolve_state_root(paths::roaming_app_data()?.join("coding-tools-mcp-desktop")),
     }
 }
 
@@ -41,10 +97,11 @@ impl Platform for WindowsPlatform {
     }
 
     fn app_config_dir(&self) -> AppResult<PathBuf> {
-        if let Some(directory) = configured_state_dir(std::env::var_os("CODING_TOOLS_STATE_DIR"))? {
-            return Ok(directory);
-        }
-        canonical_state_dir(paths::roaming_app_data()?.join("coding-tools-mcp-desktop"))
+        remembered_state_root(
+            &STATE_ROOT,
+            std::env::var_os("CODING_TOOLS_STATE_DIR"),
+            state_root,
+        )
     }
 
     fn find_pid_listening_on_port(&self, port: u16) -> AppResult<Option<u32>> {
@@ -155,6 +212,63 @@ mod state_directory_tests {
             Some(root.clone())
         );
         assert!(!root.exists());
+    }
+
+    /// A resolver that counts its calls and answers G:\final\<value, or "default">.
+    fn counted(
+        calls: &std::cell::Cell<usize>,
+        resolved: bool,
+    ) -> impl FnOnce(Option<OsString>) -> AppResult<(PathBuf, bool)> + '_ {
+        move |configured| {
+            calls.set(calls.get() + 1);
+            let name = configured.unwrap_or_else(|| OsString::from("default"));
+            Ok((PathBuf::from(r"G:\final").join(name), resolved))
+        }
+    }
+
+    #[test]
+    fn a_resolved_state_root_is_remembered_per_configured_value_and_an_unresolved_one_is_not() {
+        let memo: StateRootMemo = Mutex::new(None);
+        let calls = std::cell::Cell::new(0);
+        // Not there yet: asked again every time, so it is not kept unresolved once it is created.
+        for _ in 0..2 {
+            assert_eq!(
+                remembered_state_root(&memo, None, counted(&calls, false)).unwrap(),
+                PathBuf::from(r"G:\final\default")
+            );
+        }
+        assert_eq!(calls.get(), 2);
+        // Resolved: asked once, then served from the memo.
+        for _ in 0..3 {
+            assert_eq!(
+                remembered_state_root(&memo, None, counted(&calls, true)).unwrap(),
+                PathBuf::from(r"G:\final\default")
+            );
+        }
+        assert_eq!(calls.get(), 3);
+        // Another CODING_TOOLS_STATE_DIR value is resolved for itself, and replaces the memo.
+        assert_eq!(
+            remembered_state_root(&memo, Some("other".into()), counted(&calls, true)).unwrap(),
+            PathBuf::from(r"G:\final\other")
+        );
+        assert_eq!(calls.get(), 4);
+        assert_eq!(
+            remembered_state_root(&memo, Some("other".into()), counted(&calls, true)).unwrap(),
+            PathBuf::from(r"G:\final\other")
+        );
+        assert_eq!(calls.get(), 4);
+        // An error is returned as it is and never kept.
+        let failing = |_: Option<OsString>| -> AppResult<(PathBuf, bool)> {
+            Err(AppError::Message(
+                "CODING_TOOLS_STATE_DIR must be an absolute directory".into(),
+            ))
+        };
+        assert!(remembered_state_root(&memo, Some("relative".into()), failing).is_err());
+        assert_eq!(
+            remembered_state_root(&memo, Some("other".into()), counted(&calls, true)).unwrap(),
+            PathBuf::from(r"G:\final\other")
+        );
+        assert_eq!(calls.get(), 4);
     }
 
     #[test]

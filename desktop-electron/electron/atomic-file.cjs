@@ -172,8 +172,14 @@ function writePrivateFileAtomicAsync(filePath, content, { mode = 0o600, protectD
   return write;
 }
 
+/** Whether a writePrivateFileAtomicAsync to this file is still in flight. */
+function asyncWritePending(filePath) {
+  return pendingAsyncWrites.has(filePath);
+}
+
 module.exports = {
   WINDOWS_RENAME_RETRY_DELAYS_MS,
+  asyncWritePending,
   renameAtomicFile,
   renameAtomicFileAsync,
   writePrivateFileAtomic,

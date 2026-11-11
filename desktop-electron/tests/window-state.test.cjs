@@ -79,6 +79,99 @@ test("closing the window to the tray saves off the main thread; only quitting sa
   }
 });
 
+function trackedWindow(bounds) {
+  const { EventEmitter } = require("node:events");
+  return Object.assign(new EventEmitter(), {
+    isDestroyed: () => false, isMaximized: () => false, isFullScreen: () => false,
+    getBounds: () => ({ ...bounds.current }), getNormalBounds: () => ({ ...bounds.current }),
+  });
+}
+
+test("quitting saves once and leaves no temp file behind", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-window-quit-"));
+  const file = path.join(root, "window-state.json");
+  const bounds = { current: { x: 30, y: 40, width: 1000, height: 700 } };
+  const window = trackedWindow(bounds);
+  const errors = [];
+  const { writeFile } = fs.promises;
+  let asyncWrites = 0;
+  try {
+    trackWindowState(window, file, (error) => errors.push(error), { quitting: () => true });
+    fs.promises.writeFile = function (target, ...rest) { if (String(target).startsWith(file)) asyncWrites += 1; return writeFile.call(this, target, ...rest); };
+    window.emit("close");
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).bounds, bounds.current, "the position is on disk before the app exits");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    // The app exits right after close: a second save then would be cut off with its temp file left.
+    assert.equal(asyncWrites, 0, "nothing else is written after the quitting save");
+    assert.deepEqual(fs.readdirSync(root).filter((name) => name.includes(".tmp-")), []);
+    assert.deepEqual(errors, []);
+  } finally {
+    fs.promises.writeFile = writeFile;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a save still in flight when the app quits cannot land last", async () => {
+  const { asyncWritePending } = require("../electron/atomic-file.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-window-inflight-"));
+  const file = path.join(root, "window-state.json");
+  const bounds = { current: { x: 10, y: 10, width: 1000, height: 700 } };
+  const window = trackedWindow(bounds);
+  const errors = [];
+  const { rename } = fs.promises;
+  try {
+    trackWindowState(window, file, (error) => errors.push(error), { quitting: () => true });
+    // The drag's save is held at its rename, so it is still in flight at the quit.
+    fs.promises.rename = async function (from, to, ...rest) {
+      if (String(to) === file) await new Promise((resolve) => setTimeout(resolve, 300));
+      return rename.call(this, from, to, ...rest);
+    };
+    window.emit("move");
+    for (const stop = Date.now() + 5_000; !asyncWritePending(file) && Date.now() < stop;) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(asyncWritePending(file), true, "the drag's save is in flight");
+    bounds.current = { x: 90, y: 100, width: 1200, height: 760 };
+    window.emit("close");
+    for (const stop = Date.now() + 5_000; asyncWritePending(file) && Date.now() < stop;) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).bounds, bounds.current, "the older save did not land last");
+    assert.deepEqual(errors, []);
+  } finally {
+    fs.promises.rename = rename;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("temp files left by earlier quits are removed off the main thread; a recent one stays", async () => {
+  const { removeStaleTemporaries } = require("../electron/window-state.cjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-window-stale-"));
+  const file = path.join(root, "window-state.json");
+  const hourAgo = new Date(Date.now() - 60 * 60_000);
+  const make = (name, old) => {
+    fs.writeFileSync(path.join(root, name), "{}");
+    if (old) fs.utimesSync(path.join(root, name), hourAgo, hourAgo);
+  };
+  make("window-state.json", true);
+  make("window-state.json.tmp-13984-1792972638233-257", true);
+  make("window-state.json.tmp-47952-1793052284643-46", true);
+  make("window-state.json.tmp-51316-1794270355291-21", false);
+  make("launcher-state.json.tmp-1-1-1", true);
+  const { readdirSync, rmSync, unlinkSync } = fs;
+  let syncCalls = 0;
+  try {
+    Object.assign(fs, {
+      readdirSync: (...args) => { syncCalls += 1; return readdirSync(...args); },
+      rmSync: (...args) => { syncCalls += 1; return rmSync(...args); },
+      unlinkSync: (...args) => { syncCalls += 1; return unlinkSync(...args); },
+    });
+    assert.equal(await removeStaleTemporaries(file), 2);
+  } finally { Object.assign(fs, { readdirSync, rmSync, unlinkSync }); }
+  try {
+    assert.equal(syncCalls, 0);
+    assert.deepEqual(fs.readdirSync(root).sort(), [
+      "launcher-state.json.tmp-1-1-1", "window-state.json", "window-state.json.tmp-51316-1794270355291-21",
+    ], "only this file's old temp files go");
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 const displays = [{ workArea: { x: 0, y: 0, width: 1512, height: 982 } }];
 
 test("window state preserves visible bounds and desktop modes", () => {

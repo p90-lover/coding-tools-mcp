@@ -566,14 +566,25 @@ fn lock_data_file() -> AppResult<DataFileLock> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = data_file_path()?.with_extension("lock");
-    std::fs::create_dir_all(path.parent().expect("data file parent"))?;
     // Keep the OS lock on a stable sidecar: saving replaces the JSON file itself.
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
+    let open = || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+    };
+    // The folder is made only when the sidecar cannot be opened for want of it. Every refresh
+    // takes this lock, and making the folder first each time cost 11 file-system calls of the
+    // ~57 a refresh made on the user's hard disk (2026-11-10), for a folder that was always there.
+    let file = match open() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(path.parent().expect("data file parent"))?;
+            open()?
+        }
+        opened => opened?,
+    };
     fs2::FileExt::lock_exclusive(&file)?;
     Ok(DataFileLock {
         _file: file,

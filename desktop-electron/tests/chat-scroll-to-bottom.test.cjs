@@ -29,6 +29,14 @@ test("the bottom control is accessible only while visible and supports the worki
   assert.doesNotMatch(render({}), /cx-scroll-working/);
 });
 
+test("the working dots only move while the control shows", () => {
+  const css = fs.readFileSync(path.resolve(__dirname, "../src/features/codex-chat.css"), "utf8");
+  assert.match(css, /\.cx-scroll-working > span \{[^}]*animation: cx-scroll-dot-wave 1\.2s ease-in-out infinite;/);
+  // At the bottom of a working chat the control is faded out but still mounted: its dots stand still.
+  assert.match(css, /\.cx-to-bottom:not\(\.is-visible\) \.cx-scroll-working > span \{ animation: none; \}/);
+  assert.match(render({ show: false, working: true }), /class="cx-to-bottom is-working"[\s\S]*cx-scroll-working/);
+});
+
 test("it rises above the approval dock and otherwise keeps its CSS place", () => {
   assert.doesNotMatch(render({}), /style=/);
   assert.doesNotMatch(render({ lift: 0 }), /style=/);
