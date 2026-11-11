@@ -3704,6 +3704,43 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
 });
 
+// The user (2026-11-11), looking at a window menu that topped out at 872k: "it should up 1m context
+// window". CPA's 872,000 for GPT-6, GPT-5.6 and Claude Fable 5 is their 1M window less the reply's
+// 128K reserve, so the menu and the launch check go up to 1M; a blank card still starts at 872K.
+test("a model CPA reports at a 1M window's input budget may be set up to 1M; other limits stay as reported", async () => {
+  const catalog = { data: [
+    { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
+    { id: "gpt-5.5", context_window: 272000, max_context_window: 400000 },
+  ] };
+  async function launch(model, contextWindow) {
+    let launched, failure = null;
+    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: `cpa/${model}`,
+      permission_profile: ":ao-default", ...(contextWindow ? { context_window: contextWindow } : {}) };
+    const mission = { id: "run", workspace_id: "ws", revision: 1, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+    const workflow = createAgentOrchestratorWorkflow({
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+        : endpoint.endsWith("/reserve") ? { ok: true, request_key: "key", prompt: "direct task" } : { ok: true, run: mission },
+      aoHarness: { spawn: async input => { launched = input; return "session"; } },
+      confirm: async () => true,
+    });
+    await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" }).catch(error => { failure = error; });
+    return { launched, failure, models: await workflow.call("models", { harness: "ao:claude-code" }) };
+  }
+  const luna = await launch("gpt-6-luna", 1_000_000);
+  const capability = luna.models.capabilities["cpa/gpt-6-luna"];
+  assert.equal(capability.contextLimit, 872000, "the reported limit is kept as it is");
+  assert.equal(capability.contextWindow.max, 1_000_000, "the menu goes up to the 1M window");
+  assert.equal(luna.launched?.contextWindow, 1_000_000, `a card set to 1M launches with it (${luna.failure?.message ?? "no failure"})`);
+  assert.equal((await launch("gpt-6-luna")).launched.contextWindow, 872000, "a blank card still starts at the reported 872K");
+  const past = await launch("gpt-6-luna", 1_100_000);
+  assert.equal(past.launched, undefined, "past 1M is refused");
+  const gpt5 = await launch("gpt-5.5", 1_000_000);
+  assert.equal(gpt5.models.capabilities["cpa/gpt-5.5"].contextWindow.max, 400000, "a limit well short of 1M is not raised");
+  assert.equal(gpt5.launched, undefined, "so 1M is refused there");
+});
+
 test("an agent's own models take CPA's real window for the same model, and a no-longer-listed model says so at launch", async () => {
   const catalog = { data: [{ id: "gpt-6-luna", context_window: 272000, max_context_window: 872000, supported_reasoning_levels: ["low", "high"] }] };
   const route = { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/gone-model",

@@ -439,13 +439,16 @@ export function AgentOrchestratorComposerControls({
         </div>}
       </ChipMenu>}
       {/* WebGPT's window is the Codex bridge's (ChatGPT's own limit): shown, locked. */}
-      <ChipMenu heading="Context window" popupClass="ao-tuning-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context || Boolean(fixed)}
+      {/* A slim, see-through column of sizes, as the model menu: no title, no notes (the user: "remove
+          all useless text", "context window are useless text too"). The range is the custom field's
+          tooltip; the chip's own tooltip says what the window is. */}
+      <ChipMenu heading="Context window" showHeading={false} popupClass="ao-tuning-popup ao-context-popup" ariaLabel={`Context window: ${windowLabel}`} disabled={busy || !context || Boolean(fixed)}
         title={fixed ? capability?.contextReason || "WebGPT's window is the Codex bridge's" : !context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
         label={<span>{windowLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Context windows">
           {[...new Set([...presets, ...(fullLimit ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}
             picked={(route.context_window || startWindow) === tokens} disabled={busy}
-            onPick={() => { setWindow(tokens); close(); }}>{contextText(tokens)}{tokens === fullLimit ? <small>full model limit</small> : null}</Option>)}
+            onPick={() => { setWindow(tokens); close(); }}>{contextText(tokens)}</Option>)}
           {/* Not a <form>: this menu sits inside the chat box's form, and a nested form's submit
               reached the chat box's onSubmit too, so Set could send the typed message. */}
           <div className="ao-context-custom" onKeyDown={event => {
@@ -453,15 +456,15 @@ export function AgentOrchestratorComposerControls({
             event.preventDefault(); event.stopPropagation();
             event.currentTarget.querySelector<HTMLButtonElement>("button")?.click();
           }}>
-            <input type="text" inputMode="numeric" aria-label="Custom context window" placeholder="Other size, e.g. 300k" value={contextDraft}
+            <input type="text" inputMode="numeric" aria-label="Custom context window" placeholder="Custom" value={contextDraft}
+              title={context ? `${contextText(context.min)}–${context.max ? contextText(context.max) : "no limit"}` : undefined}
               aria-invalid={Boolean(contextDraft.trim()) && !inRange(parseTokens(contextDraft) ?? Number.NaN)} onChange={event => setContextDraft(event.target.value)} />
-            <button type="button" className="ao-popover-apply" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)} onClick={() => {
+            <button type="button" className="ao-popover-apply" aria-label="Set" title="Set" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)} onClick={() => {
               const tokens = parseTokens(contextDraft);
               if (tokens === null || !inRange(tokens)) return;
               setWindow(tokens); setContextDraft(""); close();
-            }}>Set</button>
+            }}><Icon name="check" width="14" height="14" /></button>
           </div>
-          {context ? <p className="ao-popup-muted">{contextText(context.min)}–{context.max ? contextText(context.max) : "no limit"}. Applies from the next turn.</p> : null}
         </div>}
       </ChipMenu>
     </> : <ChipMenu heading="Orchestrator / Team" popupClass="ao-team-popup" ariaLabel="Choose saved team" disabled={busy}
