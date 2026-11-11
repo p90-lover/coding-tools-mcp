@@ -40,4 +40,23 @@ async function readChatGptAuthSession(fetchSession, origin, timeoutMs) {
   } finally { clearTimeout(timer); }
 }
 
-module.exports = { readChatGptAuthSession };
+// Which ChatGPT login a session is: /api/auth/session's user id and email. A browser can hold more
+// than one ChatGPT login at once (ChatGPT's account switcher), and a copied cookie jar may open as
+// another of them than the one its page showed, so a copied sign-in is checked against these.
+const SESSION_USER_ID = /^user-[A-Za-z0-9_-]{1,120}$/;
+function normalizeSessionUser(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const id = typeof value.id === "string" && SESSION_USER_ID.test(value.id) ? value.id : null;
+  const email = typeof value.email === "string" && value.email.length <= 200 && /^[^\s@]+@[^\s@]+$/.test(value.email)
+    ? value.email : null;
+  return id || email ? { id, email } : null;
+}
+
+/** Whether two session users are the same login: by id when both have one, else by email. */
+function sameSessionUser(a, b) {
+  if (!a || !b) return false;
+  if (a.id && b.id) return a.id === b.id;
+  return Boolean(a.email && b.email && a.email.toLowerCase() === b.email.toLowerCase());
+}
+
+module.exports = { readChatGptAuthSession, normalizeSessionUser, sameSessionUser };

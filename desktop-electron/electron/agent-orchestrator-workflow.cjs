@@ -268,6 +268,15 @@ function refusedReason(error) {
   const text = String(error || "").replace(/^[\s\S]*?API Error: (\d{3})\s*/i, "$1: ").replace(/Upstream request failed:\s*/i, "");
   return text.replace(/\s+/g, " ").trim().slice(0, 200);
 }
+/**
+ * The app refused the launch itself, before any agent started (aoLaunchArgs): the card's saved
+ * route is one its agent can't run, so every attempt fails the same way in about a second. Seen
+ * 2026-11-10: a Pi chat carrying Claude Code's "Approve for me" was refused ("This adapter cannot
+ * honor the saved permission tuple") and "Retry automatically" spent all eight attempts on it.
+ */
+// One distinctive phrase of each refusal aoLaunchArgs throws, not "Launch failed:" as a whole: a
+// launch that timed out is what "Retry automatically" is for.
+const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
 
 const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
@@ -275,6 +284,13 @@ const REVIEW_SCRIPT_BYTES = 4000;
 const REVIEW_SCRIPT_LOOKUPS = 6;
 // The excerpts only help the reviewer, so a slow disk does not hold the review up past this.
 const REVIEW_SCRIPT_BUDGET_MS = 2_000;
+// The run loop passes every 500 ms. A turn it found simply working is observed again only after
+// this long: its end, a tool request or a question shows up at most this much later. Anything
+// else (an approval, a question, a start, a queued message) keeps the 500 ms pace.
+const QUIET_OBSERVE_MS = 1_500;
+// How old a shared run read the run loop takes (the app's runReadFreshMs is 300 ms). Writes through
+// requestHeadless drop shared reads, so only a change made outside this app waits this long.
+const RUN_LOOP_READ_FRESH_MS = 2_000;
 /**
  * The local scripts a tool request runs, read for the command reviewer. It saw only the command
  * line, so "run start-nova.ps1" came back "ask" every time and the person had to answer. Only
@@ -412,12 +428,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const token = { live: true };
     try { return await personTurn.run(token, work); } finally { token.live = false; }
   }
-  function sharedWorkflowRead(key, load) {
+  // `freshMs` lets a caller take an older read than runReadFreshMs: the run loop's own reads
+  // (RUN_LOOP_READ_FRESH_MS). Every write through requestHeadless still drops them all.
+  function sharedWorkflowRead(key, load, freshMs = runReadFreshMs) {
     if (!(runReadFreshMs > 0)) return load();
+    const fresh = Math.max(runReadFreshMs, Number.isFinite(freshMs) ? freshMs : 0);
     const known = runReads.get(key);
     // A person's send reads afresh rather than wait on a background read still queued behind the
     // polls (as Stop does, readForStop); a settled read that is still fresh serves it too.
-    if (known && (known.pending ? !forPerson() : Date.now() - known.at < runReadFreshMs)) return known.read;
+    if (known && (known.pending ? !forPerson() : Date.now() - known.at < fresh)) return known.read;
     const entry = { at: 0, pending: true, read: load() };
     runReads.set(key, entry);
     entry.read.then(() => {
@@ -1813,6 +1832,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // request or requests already answered hold.
   const nothingToAnswer = observed => answeredOnly(observed)
     || (!observed?.approvals?.length && (!observed?.needsInput || orphanedRequest(observed)));
+  // The card's AO turn id lives only in memory until its turn ends: expectedTurns has it for a
+  // follow-up or a warm start, and the receipt gets it with the result. A cold start had none, nor
+  // did any card still running when the app restarted, and the stall stop needs it, so it never
+  // ended their turns. Seen live 2026-11-10: AO lost five chats' agents while their hosts lived on,
+  // the turns read "running" for 3.5 hours, and a message queued in one went only when the person
+  // pressed Restart. The session's turn AO took after the card was reserved is the card's own: the
+  // chat sends one message at a time, so one taken before belongs to an earlier message. AO stamps
+  // whole seconds, hence the second's slack.
+  const TURN_CLOCK_SLACK_MS = 1_000;
+  function ownedTurn(ownership, node, observed) {
+    if (ownership.turnId) return ownership;
+    const reserved = Number(node.receipt?.started_at_ms);
+    const mine = typeof observed?.turnId === "string" && observed.turnId && reserved > 0
+      && Number.isFinite(observed.turnRequestedAt) && observed.turnRequestedAt >= reserved - TURN_CLOCK_SLACK_MS;
+    return mine ? { ...ownership, turnId: observed.turnId } : ownership;
+  }
   /**
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
@@ -1927,11 +1962,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const pending = aoPending(node, session, observed);
       // `pending` is observed.approvals for this card: none, or only ones already answered.
       const stopped = nothingToAnswer(observed)
-        && (await stopStalledLaunch(session, observed, ownership) || await stopStalledTurn(session, observed, ownership));
+        && (await stopStalledLaunch(session, observed, ownership) || await stopStalledTurn(session, observed, ownedTurn(ownership, node, observed)));
       if (!stopped) wakeQueueOnAgentReady(workspaceId, mission, node, observed);
-      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node });
+      // A turn that is simply working: its agent is up, nothing asks for an answer, and the chat has
+      // nothing queued behind it. The run loop observes such a session less often (QUIET_OBSERVE_MS).
+      const taskId = mission?.project_id;
+      const quiet = !stopped && observed.turnState === "running" && observed.provisioning !== true
+        && !observed.needsInput && !observed.agentGone && !observed.exited && !pending.length
+        && !(taskId && chatQueue.list(workspaceId, taskId).length);
+      pendingFrames.set(nodeKey(workspaceId, runId, node.id), { at: Date.now(), pending, mission, node, quiet });
       if (pendingFrames.size > 500) pendingFrames.delete(pendingFrames.keys().next().value);
-      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session };
+      return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session, ...(quiet ? { quiet: true } : {}) };
     }
     const completed = observed.turnState === "completed";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
@@ -1947,8 +1988,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return { ...result, pending_approvals: [] };
   }
 
-  async function savedNode(workspaceId, runId, nodeId) {
-    const saved = await runs({ workspaceId, runId });
+  async function savedNode(workspaceId, runId, nodeId, { freshMs } = {}) {
+    const saved = await runs({ workspaceId, runId }, { freshMs });
     const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
   }
@@ -1956,7 +1997,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Callers only read what comes back (none changes a run in place), so one response is shared.
   // `taskId` reads one chat's runs: the project's read holds only its newest 100, shared by all of
   // its chats, so a busy project's other chats opened with few or none of their replies.
-  function runs({ workspaceId, runId, taskId } = {}) {
+  // `freshMs` (internal callers only, never the IPC arguments) accepts an older shared read.
+  function runs({ workspaceId, runId, taskId } = {}, { freshMs } = {}) {
     const id = clean(workspaceId, 128), run = runId ? clean(runId, 80) : "", task = !run && taskId ? clean(taskId, 128) : "";
     const key = JSON.stringify(task ? [id, run, task] : [id, run]);
     return sharedWorkflowRead(key, async () => {
@@ -1965,7 +2007,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         throw new Error("AO run read failed");
       }
       return response;
-    });
+    }, freshMs);
   }
 
   // ---- Chats past the project read's newest 100 runs ----
@@ -2151,7 +2193,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // run loop's latest frame while it is fresh instead of asking AO again.
       const key = nodeKey(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
       const frame = pendingFrames.get(key);
-      if (frame && Date.now() - frame.at < 1500) {
+      // A quiet frame is the loop's latest word until its next observation is due (QUIET_OBSERVE_MS
+      // and one pass): asking AO again in between would bring back the reads it spared.
+      if (frame && Date.now() - frame.at < (frame.quiet ? QUIET_OBSERVE_MS + 500 : 1500)) {
         return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending, frame.mission ? frame : null) } };
       }
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
@@ -2716,8 +2760,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return response;
   }
 
-  async function observe({ workspaceId, runId, nodeId } = {}, stillCurrent = () => true) {
-    const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80));
+  async function observe({ workspaceId, runId, nodeId } = {}, stillCurrent = () => true, { readFreshMs } = {}) {
+    const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80), { freshMs: readFreshMs });
     if (!stillCurrent()) return { ok: true, cancelled: true };
     if (externalAgent(found.node)) {
       const result = await observeExternal(workspaceId, runId, found.node, found.mission);
@@ -4774,6 +4818,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
     if (REQUEST_REFUSED.test(error)) return { detail: `The provider refused this request (${refusedReason(error)}). Change that, or choose another model, since retrying won't fix it.` };
+    if (ROUTE_REFUSED.test(error)) return { detail: "This chat can't start on its agent as it is set up. Change the model or permissions and send a follow-up, since retrying won't fix it." };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
@@ -4797,7 +4842,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
     const error = String(node?.receipt?.error || "");
-    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error)
+    return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error) && !ROUTE_REFUSED.test(error)
       && !pickedModelSince(mission) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   /**
@@ -5043,12 +5088,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const pause = () => new Promise(resolve => setTimeout(resolve, 500));
     const observing = new Map();
     const nodeAttention = new Map(); // running node id -> its last observed attention (or null)
+    // Running node id -> when it may be observed again, after an observation that found it quiet.
+    const quietUntil = new Map();
+    // The loop's own run reads may be RUN_LOOP_READ_FRESH_MS old: any write through requestHeadless
+    // drops them, so what the app changes is read on the next pass all the same.
+    const loopRead = { freshMs: RUN_LOOP_READ_FRESH_MS };
     state.driving = true;
     state.settled = false;
     try {
       for (;;) {
         if (state.stopped) { reportRun(workspaceId, runId, state, null); return; }
-        let saved = await runs({ workspaceId, runId });
+        let saved = await runs({ workspaceId, runId }, loopRead);
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed orchestrator doesn't report worker capacity. Update the runtime.");
@@ -5102,10 +5152,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (state.stopped) return;
         const active = mission.nodes.filter(node => node.state === "running");
         for (const [id] of observing) if (!active.some(node => node.id === id)) observing.delete(id);
+        for (const [id] of quietUntil) if (!active.some(node => node.id === id)) quietUntil.delete(id);
         for (const node of active) {
           if (observing.has(node.id)) continue;
+          // Observed quiet a moment ago: each observation is a session read and a conversation tail
+          // from the AO daemon, and a run read from coding-tools-headless. Nine working chats made
+          // 14 session reads and 17 run reads a second at this loop's pace (2026-11-10, 0.8.108),
+          // the AO daemon and headless at ~16% of a core each, all for turns that were just working.
+          if ((quietUntil.get(node.id) ?? 0) > performance.now()) continue;
           const pending = { done: false };
-          pending.promise = observe({ workspaceId, runId, nodeId: node.id })
+          pending.promise = observe({ workspaceId, runId, nodeId: node.id }, undefined, { readFreshMs: RUN_LOOP_READ_FRESH_MS })
             .then(result => { pending.result = result; }, error => { pending.error = error; })
             .finally(() => { pending.done = true; });
           observing.set(node.id, pending);
@@ -5124,6 +5180,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const result = observed[index];
           nodeAttention.set(node.id, result.pending_approvals?.length ? { kind: "pending_approval", node, pending: result.pending_approvals }
             : result.needs_input ? { kind: "needs_input" } : null);
+          if (result.quiet === true) quietUntil.set(node.id, performance.now() + QUIET_OBSERVE_MS);
+          else quietUntil.delete(node.id);
         }
         for (const id of [...nodeAttention.keys()]) if (!active.some(node => node.id === id)) nodeAttention.delete(id);
         const marks = [...nodeAttention.values()].filter(Boolean);
@@ -5154,7 +5212,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const helped = mission.paused || mission.cancelled ? null : await recoverHeld(workspaceId, mission, state);
         if (helped?.detail) state.detail = helped.detail;
         if (helped?.changed || completed.length) {
-          saved = await runs({ workspaceId, runId });
+          saved = await runs({ workspaceId, runId }, loopRead);
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
           // A retry needs a turn: a grant that is gone, or spent (a single chat's one turn was the
@@ -5932,6 +5990,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     mine.then(forget, forget);
     return mine;
   }
+  /** The chat's newest run and the card its messages reach: a single chat's one card, a team's orchestrator. */
+  function chatAgentCard(saved, task) {
+    const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
+    const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
+      && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
+    return { run, card };
+  }
+  /**
+   * Ends a turn whose agent is gone (`waiting`, its card's observation, reads agentGone). The turn
+   * may still read running, held by a request nobody can answer (orphanedRequest): nothing settled
+   * it, and a message waited behind it for good (seen live 2026-11-02, "yes keep going" queued for
+   * an hour). Asked to restart, or once it has been silent as long as a stuck turn, its host is shut
+   * down so the turn settles and the message goes in; a host still being reattached right after AO
+   * restarts is left alone. True once the shutdown went through.
+   */
+  async function releaseOrphanedTurn(id, run, card, waiting, { restart = false, queued = false } = {}) {
+    const silent = Number.isFinite(waiting.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
+    if (TERMINAL_TURNS.has(waiting.turnState) || !(restart === true || silent > STEER_STALL_MS)) return false;
+    try {
+      const released = await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true, releaseAgent: true });
+      if (released === false) return false;
+      logger?.info?.("ao.steer_released_orphaned_turn", { idleSeconds: Math.round(silent / 1000), asked: restart === true, ...(queued ? { queued: true } : {}) });
+      return true;
+    } catch (error) {
+      logger?.warn?.("ao.steer_release_failed", { message: publicText(error?.message || error, 200) });
+      return false;
+    }
+  }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
   async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
@@ -5941,11 +6027,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!text.trim()) throw new Error("Type a message to steer the agent");
     // A steer that cannot go in now is sent as the next turn: it must fit a chat message as well.
     if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
-    const saved = await runs({ workspaceId: id });
-    const run = saved.runs.filter(entry => entry.project_id === task && !entry.cancelled).at(-1);
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
-    const card = run?.nodes.find(node => node.state === "running" && (externalAgent(node) || node.route?.harness_id === "codex-native")
-      && node.receipt?.thread_id && (run.execution_mode === "single" || node.role === "planner"));
+    const { run, card } = chatAgentCard(await runs({ workspaceId: id }), task);
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
     // This turn already took the same message moments ago: it is not handed over (or noted) again,
     // unless the agent has asked a question since that what was typed answers (below).
@@ -5994,20 +6077,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // steer and nothing to stop. Steering it failed with "the agent controller for this session is
     // not running"; the message goes as the chat's next turn, which starts the agent again.
     if (waiting?.agentGone === true) {
-      // Its turn may still read running, held by a request nobody can answer (orphanedRequest): then
-      // nothing settled it and the message waited behind it for good (seen live 2026-11-02, "yes keep
-      // going" queued for an hour). Asked to restart, or once it has been silent as long as a stuck
-      // turn, its host is shut down so the turn settles and the message goes in; a host still being
-      // reattached right after AO restarts is left alone.
-      const silent = Number.isFinite(waiting.lastActivityAt) ? now() - waiting.lastActivityAt : 0;
-      if (!TERMINAL_TURNS.has(waiting.turnState) && (restart === true || silent > STEER_STALL_MS)) {
-        try {
-          await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, run.id), escalate: true, releaseAgent: true });
-          logger?.info?.("ao.steer_released_orphaned_turn", { idleSeconds: Math.round(silent / 1000), asked: restart === true });
-        } catch (error) {
-          logger?.warn?.("ao.steer_release_failed", { message: publicText(error?.message || error, 200) });
-        }
-      }
+      await releaseOrphanedTurn(id, run, card, waiting, { restart });
       return { ok: true, steered: false, waiting: true, restarted: true,
         reason: "The agent's process had stopped. Your message starts its next turn." };
     }
@@ -7538,6 +7608,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // and chatSteer checks the agent again before sending; the per-chat draining lock prevents duplicates.
     armQueue(workspaceId, taskId, 1, true, true);
   }
+  // After its chat's turn was found over (or ended here), the next look comes this soon.
+  const QUEUE_FREED_MS = 5_000;
+  /**
+   * A plain queued message waits for its chat's turn to end, and a turn whose agent AO had lost
+   * never ended: a steer released it (chatSteer), a message waiting for the turn's end did not.
+   * Seen live 2026-11-10: a message queued for 3.5 hours behind such a turn went only when the
+   * person pressed Restart. Its agent gone and the turn silent as long as a stuck one, its host is
+   * shut down as a steer's would be (releaseOrphanedTurn). A turn that is over, on a run no loop of
+   * this app session drives (after a restart with "Retry automatically" off), is then recorded
+   * (observe), which frees the chat. True when the turn is over or was ended.
+   */
+  async function unblockQueuedChat(workspaceId, taskId, saved) {
+    const { run, card } = chatAgentCard(saved, taskId);
+    if (!card || !externalAgent(card)) return false;
+    const thread = card.receipt.thread_id;
+    const waiting = await Promise.resolve().then(() => harnessService().observe?.(thread, expectedTurns.get(thread))).catch(() => null);
+    if (!waiting) return false;
+    const released = waiting.agentGone === true && await releaseOrphanedTurn(workspaceId, run, card, waiting, { queued: true });
+    const over = released || TERMINAL_TURNS.has(waiting.turnState) || waiting.exited === true;
+    const live = backgroundRuns.get(runKey(workspaceId, run.id));
+    if (over && !(live && (live.starting || live.driving || live.status === "running"))) {
+      await observe({ workspaceId, runId: run.id, nodeId: card.id }).catch(() => null);
+    }
+    return over;
+  }
   /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
   function queuedSelection(item, latest) {
     const picked = item.selection;
@@ -7576,7 +7671,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!next) return;
       const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
-        if (!next.steer) { armQueue(workspaceId, taskId, QUEUE_RETRY_MS); return; }
+        if (!next.steer) {
+          const freed = await unblockQueuedChat(workspaceId, taskId, saved).catch(() => false);
+          if (!wakeupsDisposed) armQueue(workspaceId, taskId, freed ? QUEUE_FREED_MS : QUEUE_RETRY_MS);
+          return;
+        }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
         const result = await chatSteer({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}) })
           .catch(error => ({ steered: false, waiting: true, error }));
@@ -8909,7 +9008,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "subagents_config": return { ok: true, available: Boolean(subagents), ...(subagents ? subagents.config() : {}) };
       case "subagents_save": {
         if (!subagents) throw new Error("Subagents are unavailable");
-        return { ok: true, ...subagents.save({ settings: args.settings, agents: args.agents }) };
+        return { ok: true, ...(await subagents.save({ settings: args.settings, agents: args.agents })) };
       }
       case "subagents_runs": return { ok: true, runs: subagents ? subagents.runs() : [] };
       case "subagent_transcript": return subagentTranscript(args);
@@ -9062,4 +9161,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

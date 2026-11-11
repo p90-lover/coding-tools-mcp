@@ -1544,8 +1544,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const sessionTools = sessionActivities
         .filter(item => ["running", "pending"].includes(item.status) && ["command", "file_change", "mcp_tool"].includes(item.activityKind))
         .map(item => { const stated = Number(item.detail?.input?.timeout); return Number.isFinite(stated) && stated > 0 ? { timeoutMs: Math.min(stated, 24 * 3600_000) } : {}; });
+      // When AO took the turn's request (whole seconds): a card whose turn id the app never learned
+      // (a cold start, any card after the app restarted) knows its turn as one requested after it.
+      const requestedAt = Date.parse(turn?.requestedAt ?? "");
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
+        ...(Number.isFinite(requestedAt) ? { turnRequestedAt: requestedAt } : {}),
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
         ...(sessionStamps.length ? { sessionActivityAt: Math.max(...sessionStamps) } : {}),
         sessionTools,

@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createSubagents, cleanConfig, SUBAGENT_TOOLS, STARTERS } = require("../electron/subagents.cjs");
+const { createSubagents, cleanConfig, providerOf, providerAllowed, SUBAGENT_TOOLS, STARTERS } = require("../electron/subagents.cjs");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
 const ROUTE = { harness_id: "ao:claude-code", model: "cpa/test-model" };
@@ -36,9 +36,13 @@ function world({ settings = {}, agents = null, now = () => 1_000_000, aoUp = () 
     ...(models ? { models } : {}), ...(teams ? { teams: () => teams } : {}),
     logger: { info() {}, warn() {} }, now, ...(setTimer ? { setTimer } : {}), ...(routeRefusal ? { routeRefusal } : {}),
   });
-  service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
-  return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, steered, sent, observedTurns, dir,
-    cleanup: () => { service.dispose(); fs.rmSync(dir, { recursive: true, force: true }); } };
+  // The settings apply at once; `ready` is the file written.
+  const ready = service.save({ settings: { defaultRoute: ROUTE, ...settings }, agents: agents ?? STARTERS });
+  return { service, harness, sessions, spawned, resolved, inputs, interrupted, released, steered, sent, observedTurns, dir, ready,
+    cleanup: () => {
+      service.dispose();
+      return ready.catch(() => {}).then(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
+    } };
 }
 
 test("stopping a parent exits only its own children even with releaseWhenDone disabled", async () => {
@@ -168,9 +172,10 @@ test("a parent stop traverses completed children and reports a descendant exit r
   } finally { w.cleanup(); }
 });
 
-test("the saved settings and subagents are validated and kept", () => {
+test("the saved settings and subagents are validated and kept", async () => {
   const w = world();
   try {
+    await w.ready;
     const saved = JSON.parse(fs.readFileSync(path.join(w.dir, "subagents.json"), "utf8"));
     assert.deepEqual(saved.agents.map((agent) => agent.id), ["explorer", "implementer", "reviewer"], "the starters until the user changes them");
     assert.equal(saved.settings.maxConcurrent, 3);
@@ -193,6 +198,7 @@ test("a subagent preserves the model's none effort when saved and launched", asy
   const w = world({ settings: { defaultRoute: route } });
   try {
     assert.deepEqual(w.service.config().settings.defaultRoute, route);
+    await w.ready;
     const saved = JSON.parse(fs.readFileSync(path.join(w.dir, "subagents.json"), "utf8"));
     assert.equal(saved.settings.defaultRoute.effort, "none");
     const started = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read the source" });
@@ -499,7 +505,7 @@ test("a subagent with no model, a disabled one, or subagents turned off cannot s
   try {
     assert.match((await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "solo", task: "x" })).content[0].text, /has no model/);
     assert.match((await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "off", task: "x" })).content[0].text, /No enabled subagent/);
-    w.service.save({ settings: { enabled: false, defaultRoute: ROUTE }, agents: [{ name: "Solo" }] });
+    await w.service.save({ settings: { enabled: false, defaultRoute: ROUTE }, agents: [{ name: "Solo" }] });
     assert.equal(w.service.enabled(), false);
     assert.match((await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "solo", task: "x" })).content[0].text, /turned off/);
     assert.equal(w.spawned.length, 0);
@@ -757,6 +763,60 @@ test("a chat agent picks a subagent's model, effort and window, and it always ru
   } finally { w.cleanup(); }
 });
 
+test("the allowed providers are saved clean; none saved allows every one", () => {
+  assert.equal(cleanConfig({}).settings.allowedProviders, null);
+  assert.deepEqual(cleanConfig({ settings: { allowedProviders: ["Antigravity", "antigravity", "not a key!", "ao:codex", 7] } }).settings.allowedProviders,
+    ["antigravity", "ao:codex"]);
+  assert.throws(() => cleanConfig({ settings: { allowedProviders: "antigravity" } }), /must be a list/);
+  assert.equal(providerOf("cpa/gemini-3.8-flash", "ao:claude-code", { provider: "Antigravity" }, true), "antigravity");
+  assert.equal(providerOf("cpa/cline-pass/deepseek-v4.1-flash", "ao:claude-code", undefined, false), "cline-pass");
+  assert.equal(providerOf("cpa/glm-5", "ao:claude-code", {}, true), "cpa", "listed with no provider: the page's Other");
+  assert.equal(providerOf("cpa/glm-5", "ao:claude-code", undefined, false), null, "not listed: cannot be told");
+  assert.equal(providerOf("gpt-6", "ao:codex", undefined, true), "ao:codex", "an agent's own model is its own account");
+});
+
+test("subagents use only the providers the user allows: the model list, a picked model and a saved one", async () => {
+  // Asked 2026-11-10: "i dont want to use on some provider to cost my limit too much".
+  const catalog = { ok: true, harness: "ao:claude-code", models: ["cpa/glm-5", "cpa/gemini-3.8-flash", "cpa/cline-pass/deepseek-v4.1-flash"],
+    capabilities: { "cpa/glm-5": { efforts: [], provider: "zhipu" }, "cpa/gemini-3.8-flash": { efforts: ["high"], provider: "antigravity" }, "cpa/cline-pass/deepseek-v4.1-flash": { efforts: [] } } };
+  const w = world({ settings: { allowedProviders: ["antigravity", "ao:codex"], defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5" } }, models: async () => catalog });
+  try {
+    const listed = parse(await w.service.call("chat-1", "ws-1", "subagent_models", {}));
+    assert.deepEqual(listed.models.map((model) => [model.id, model.provider]), [["gemini-3.8-flash", "antigravity"]], "only allowed providers' models, each naming its provider");
+    assert.deepEqual(listed.allowed_providers, ["antigravity", "ao:codex"]);
+    const saved = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" });
+    assert.equal(saved.isError, true);
+    assert.match(saved.content[0].text, /"Explorer" would run on glm-5, served by zhipu, a provider the user turned off for subagents/);
+    const picked = await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it", model: "cline-pass/deepseek-v4.1-flash" });
+    assert.match(picked.content[0].text, /served by cline-pass/, "a chat agent's own pick is held to the same list");
+    assert.deepEqual(w.spawned, [], "nothing started on a provider that is off");
+    assert.equal(parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it", model: "gemini-3.8-flash" })).model, "gemini-3.8-flash");
+    // Awaited: a save may write its file after it returns, and the test's folder goes at cleanup.
+    await w.service.save({ settings: { ...w.service.config().settings, defaultRoute: { harness_id: "ao:codex", model: "gpt-6" } }, agents: STARTERS });
+    assert.equal((await w.service.call("chat-2", "ws-1", "subagent_start", { agent: "reviewer", task: "Review it" })).isError, false, "Codex's own account is allowed");
+    assert.equal(w.spawned.length, 2);
+  } finally { w.cleanup(); }
+});
+
+test("with only some providers allowed, a model whose provider cannot be told is refused, not guessed", async () => {
+  assert.equal(providerAllowed(null, null), true, "no list: every provider, known or not");
+  assert.equal(providerAllowed([], "antigravity"), false, "every provider off");
+  assert.equal(providerAllowed(["antigravity"], null), false);
+  const down = world({ settings: { allowedProviders: ["antigravity"], defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5" } },
+    models: async () => { throw new Error("CPA down"); } });
+  try {
+    const refused = await down.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" });
+    assert.equal(refused.isError, true);
+    assert.match(refused.content[0].text, /who serves it cannot be told right now/);
+    assert.deepEqual(down.spawned, []);
+  } finally { down.cleanup(); }
+  // Without a list the same unreadable catalog leaves the launch alone, as before.
+  const open = world({ settings: { defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5" } }, models: async () => { throw new Error("CPA down"); } });
+  try {
+    assert.equal((await open.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" })).isError, false);
+  } finally { open.cleanup(); }
+});
+
 test("an effort or window alone keeps a saved Claude Code route's model; an unreadable catalog leaves the launch to check", async () => {
   const w = world({ settings: { defaultRoute: { harness_id: "ao:claude-code", model: "cpa/glm-5", effort: "low" } }, models: async () => { throw new Error("CPA down"); } });
   try {
@@ -943,6 +1003,7 @@ test("preload reads the saved agents off the main thread; a save made while it r
   let syncReads = 0;
   const again = fresh();
   try {
+    await w.ready;
     await again.preload();
     fs.readFileSync = (...args) => { syncReads += 1; return readFileSync(...args); };
     try {
@@ -954,12 +1015,49 @@ test("preload reads the saved agents off the main thread; a save made while it r
     const racing = fresh();
     try {
       const loading = racing.preload();
-      racing.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+      const saving = racing.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
       await loading;
       assert.equal(racing.config().agents.length, STARTERS.length, "the save is kept");
+      await saving;
     } finally { racing.dispose(); }
   } finally {
     again.dispose();
-    w.cleanup();
+    await w.cleanup();
+  }
+});
+
+test("saving the subagents makes no synchronous disk call, and quick saves land in order", async () => {
+  const w = world({ agents: STARTERS.slice(0, 1) });
+  const statePath = path.join(w.dir, "subagents.json");
+  const names = ["mkdirSync", "writeFileSync", "renameSync", "openSync", "readFileSync"];
+  const original = Object.fromEntries(names.map((name) => [name, fs[name]]));
+  const syncCalls = [];
+  try {
+    await w.ready;
+    try {
+      for (const name of names) fs[name] = (...args) => { syncCalls.push(name); return original[name](...args); };
+      const first = w.service.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS.slice(0, 1) });
+      const second = w.service.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+      assert.equal(w.service.config().agents.length, STARTERS.length, "the last save applies at once");
+      await Promise.all([first, second]);
+    } finally { Object.assign(fs, original); }
+    assert.deepEqual(syncCalls, [], "a save never holds Electron main on the disk");
+    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).agents.length, STARTERS.length, "the file ends with the last save");
+    assert.deepEqual(fs.readdirSync(w.dir).filter((name) => name.includes(".tmp-")), [], "no temporary file is left");
+  } finally { await w.cleanup(); }
+});
+
+test("a save the disk refuses is undone and reported", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-"));
+  const blocker = path.join(dir, "not-a-folder");
+  fs.writeFileSync(blocker, "");
+  const service = createSubagents({ statePath: path.join(blocker, "subagents.json"), launchArgs: () => ({}), harness: () => null, logger: { info() {}, warn() {} } });
+  try {
+    const before = service.config().agents.length;
+    await assert.rejects(service.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS.slice(0, 1) }));
+    assert.equal(service.config().agents.length, before, "the refused save is undone");
+  } finally {
+    service.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -1,36 +1,33 @@
 import type { ReactElement } from "react";
 import agyLogo from "../assets/harness/ao/agy.png";
 import aiderLogo from "../assets/harness/ao/aider.png";
-import ampLogo from "../assets/harness/ao/amp.svg";
 import auggieLogo from "../assets/harness/ao/auggie.svg";
 import autohandLogo from "../assets/harness/ao/autohand.svg";
-import claudeCodeLogo from "../assets/harness/ao/claude-code.svg";
-import clineLogo from "../assets/harness/ao/cline.svg";
 import codexLogo from "../assets/harness/ao/codex.svg";
 import continueLogo from "../assets/harness/ao/continue.png";
 import copilotLogo from "../assets/harness/ao/copilot.svg";
 import crushLogo from "../assets/harness/ao/crush.png";
-import cursorLogo from "../assets/harness/ao/cursor.svg";
 import deepseekHarnessLogo from "../assets/harness/ao/deepseek-harness.svg";
 import devinLogo from "../assets/harness/ao/devin.png";
 import droidLogo from "../assets/harness/ao/droid.png";
 import fxLogo from "../assets/harness/ao/fx.svg";
-import geminiCliLogo from "../assets/harness/ao/gemini.svg";
 import gooseLogo from "../assets/harness/ao/goose.svg";
-import grokCliLogo from "../assets/harness/ao/grok.png";
-import kilocodeLogo from "../assets/harness/ao/kilocode.svg";
 import kimchiLogo from "../assets/harness/ao/kimchi.svg";
-import kimiCliLogo from "../assets/harness/ao/kimi.png";
 import kiroLogo from "../assets/harness/ao/kiro.png";
 import mimoCodeLogo from "../assets/harness/ao/mimo-code.svg";
-import museLogo from "../assets/harness/ao/muse.png";
 import ompLogo from "../assets/harness/ao/omp.png";
-import opencodeLogo from "../assets/harness/ao/opencode.svg";
-import piLogo from "../assets/harness/ao/pi.png";
 import primeAgentLogo from "../assets/harness/ao/prime-agent.png";
-import qwenCodeLogo from "../assets/harness/ao/qwen.png";
 import unrealAgentLogo from "../assets/harness/ao/unreal-agent.png";
 import vibeLogo from "../assets/harness/ao/vibe.png";
+import ampLogo from "../assets/harness/brand/amp.svg";
+import claudeCodeLogo from "../assets/harness/brand/claude-code.png";
+import clineLogo from "../assets/harness/brand/cline.svg";
+import cursorLogo from "../assets/harness/brand/cursor.svg";
+import geminiCliLogo from "../assets/harness/brand/gemini-cli.svg";
+import grokBuildLogo from "../assets/harness/brand/grok-build.png";
+import kilocodeLogo from "../assets/harness/brand/kilocode.svg";
+import opencodeLogo from "../assets/harness/brand/opencode.png";
+import piLogo from "../assets/harness/brand/pi.svg";
 import geminiLogo from "../assets/harness/gemini.svg";
 import kimiLogo from "../assets/harness/kimi.svg";
 import metaLogo from "../assets/harness/meta.svg";
@@ -44,12 +41,18 @@ import minimaxLogo from "../assets/models/minimax.svg";
 import stepfunLogo from "../assets/models/stepfun.svg";
 import zhipuLogo from "../assets/models/zhipu.svg";
 
-// The mark beside each harness is the one Agent Orchestrator itself shows for that agent (its
-// AgentAvatar logos, copied unmodified into assets/harness/ao from the pinned AO frontend), so a
-// harness reads the same here as in AO. Before, the picker mixed sources and showed the wrong
-// brands: the Claude app's starburst for Claude Code, OpenAI's knot for Codex, Earendil's GitHub
-// avatar for Pi and Unreal Engine's logo for AO's own Unreal Agent. An agent AO has no mark for
-// gets a lettered badge, as in AO.
+// The mark beside each harness is the icon that product's own site or repository shows for it.
+// - brand/: copied byte for byte from the product (Claude Code's docs, cursor.com, kilo.ai,
+//   cline.bot, opencode.ai, ampcode.com, pi.dev, Grok Build's README), or LobeHub's copy of
+//   Gemini CLI's mark. SOURCES.md lists each file's URL and SHA-256.
+// - ao/: Agent Orchestrator's own AgentAvatar files (unmodified), kept only where they are the
+//   product's own icon. Unreal Agent is AO's own harness.
+// - Kimi Code, Qwen Code and Muse Code (Meta's) share their maker's mark with the model lists.
+// AO's copies were wrong for these, and the user saw them: Claude Code showed the pixel mascot,
+// Qwen Code showed Alibaba Cloud, Kimi showed Moonshot's ball, Grok Build showed a stray "xI",
+// Gemini CLI showed the Gemini model's sparkle, Amp showed its retired chevrons, and opencode,
+// Cline, Cursor and Kilo Code showed faded grey outlines.
+// An agent with no known mark gets a lettered badge.
 
 type Mark = (size: number) => ReactElement;
 
@@ -61,16 +64,17 @@ function image(src: string, mono = false, backed = false): Mark {
 const openaiMark = image(openaiLogo, true);
 const gemini = image(geminiLogo);
 
-// Harness id (without "ao:") → its mark, keyed as AO's AgentAvatar keys them.
-const AO_MARKS: Record<string, Mark> = {
+// Harness id (without "ao:") → its mark, keyed as AO's AgentAvatar keys them. Cline's robot and
+// Grok Build's SpaceXAI symbol are black glyphs (mono); Kimi's black K keeps a light backing.
+const MARKS: Record<string, Mark> = {
   "claude-code": image(claudeCodeLogo), codex: image(codexLogo), agy: image(agyLogo), opencode: image(opencodeLogo),
   "opencode-v2": image(opencodeLogo), aider: image(aiderLogo), amp: image(ampLogo), auggie: image(auggieLogo),
-  autohand: image(autohandLogo), cline: image(clineLogo), continue: image(continueLogo), copilot: image(copilotLogo),
+  autohand: image(autohandLogo), cline: image(clineLogo, true), continue: image(continueLogo), copilot: image(copilotLogo),
   crush: image(crushLogo), cursor: image(cursorLogo), "deepseek-harness": image(deepseekHarnessLogo), devin: image(devinLogo),
   droid: image(droidLogo), fx: image(fxLogo, false, true), gemini: image(geminiCliLogo), goose: image(gooseLogo),
-  grok: image(grokCliLogo, true), kilocode: image(kilocodeLogo), kimchi: image(kimchiLogo, false, true),
-  kimi: image(kimiCliLogo, false, true), kiro: image(kiroLogo), "mimo-code": image(mimoCodeLogo, true), muse: image(museLogo),
-  omp: image(ompLogo), pi: image(piLogo), "prime-agent": image(primeAgentLogo, true), qwen: image(qwenCodeLogo),
+  grok: image(grokBuildLogo, true), kilocode: image(kilocodeLogo), kimchi: image(kimchiLogo, false, true),
+  kimi: image(kimiLogo, false, true), kiro: image(kiroLogo), "mimo-code": image(mimoCodeLogo, true), muse: image(metaLogo),
+  omp: image(ompLogo), pi: image(piLogo), "prime-agent": image(primeAgentLogo, true), qwen: image(qwenLogo),
   "unreal-agent": image(unrealAgentLogo), vibe: image(vibeLogo),
 };
 // Other names a harness goes by: Native Codex and Antigravity's long id, and the display names a
@@ -81,7 +85,7 @@ const ALIASES: Record<string, string> = {
   "prime agent": "prime-agent", "qwen code": "qwen", "unreal agent": "unreal-agent", "mistral vibe": "vibe", "mimo code": "mimo-code",
   "claude code": "claude-code", "opencode 2": "opencode-v2",
 };
-const known = (name: string) => AO_MARKS[ALIASES[name] ?? name];
+const known = (name: string) => MARKS[ALIASES[name] ?? name];
 
 /** A neutral badge with the harness's initial, for agents without a known mark. */
 function badge(label: string): Mark {
@@ -105,7 +109,7 @@ export function HarnessLogo({ harnessId, label, size = 16 }: { harnessId: string
 }
 
 /**
- * A model-list group's mark: the agent's, as AO shows it (Antigravity, Claude Code, Native Codex),
+ * A model-list group's mark: the agent's, as the harness list shows it (Antigravity, Claude Code, Native Codex),
  * else the maker's (OpenAI and WebGPT, Claude, Zhipu); none rather than a lettered badge for a
  * group no brand fits.
  */

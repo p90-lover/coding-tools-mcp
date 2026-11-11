@@ -1236,6 +1236,10 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-scroll-working > span { width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: .7; animation: cx-scroll-dot-wave 1.2s ease-in-out infinite; }
 .cx-scroll-working > span:nth-child(2) { animation-delay: .15s; }
 .cx-scroll-working > span:nth-child(3) { animation-delay: .3s; }
+/* Hidden (faded to opacity 0 at the bottom of the thread), the dots stay still: they kept animating
+   in every working chat, 18 invisible animations with six chats running on a 30,000-node page while
+   the machine was saturated (2026-11-10 07:17Z). They start again when the button shows. */
+.cx-to-bottom:not(.is-visible) .cx-scroll-working > span { animation: none; }
 .cx-to-bottom.is-working .cx-scroll-arrow { display: none; }
 .cx-to-bottom:is(:hover, :focus-visible) .cx-scroll-working { display: none; }
 .cx-to-bottom.is-working:is(:hover, :focus-visible) .cx-scroll-arrow { display: block; }

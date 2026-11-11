@@ -247,7 +247,9 @@ function within(promise, ms) {
 // No task store, checkout or model process is created by this binding.
 function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, missionCall, readAccounting,
   realpath = fs.promises.realpath, platform = process.platform,
-  isRepositoryRoot = async directory => fs.existsSync(path.join(directory, ".git")),
+  // Asked on every chat launch. A synchronous check held every window 1.3 s on the busy hard disk
+  // (0.8.108, 2026-11-10), so it never blocks Electron main.
+  isRepositoryRoot = directory => fs.promises.access(path.join(directory, ".git")).then(() => true, () => false),
   recordDefaultBranch = recordLocalDefaultBranch,
   // Before AO starts a session, brings the project's links to installed dependencies up to date.
   syncProject = null,
@@ -288,8 +290,9 @@ function createAoWorkspaceBoard({ listWorkspaces, listProjects, createProject, m
     // the plain drive path, so it is never handed the long-path prefix.
     const folder = platform === "win32" ? item.path.replace(/^\\\\\?\\/, "") : item.path;
     // Before AO starts a session in a local-only repository, give it a default branch.
-    if (register && await isRepositoryRoot(folder)) await recordDefaultBranch(folder);
-    if (!project && register && await isRepositoryRoot(folder)) {
+    const repository = register && await isRepositoryRoot(folder);
+    if (repository) await recordDefaultBranch(folder);
+    if (!project && repository) {
       project = await createProject({ path: folder });
       if (!project || await canonical(project.path) !== root) throw new Error("AO project registration changed the workspace scope");
     }

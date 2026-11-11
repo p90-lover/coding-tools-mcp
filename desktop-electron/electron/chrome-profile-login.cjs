@@ -5,6 +5,7 @@ const path = require("node:path");
 const { randomBytes, generateKeyPair, createHash, sign, privateDecrypt, createDecipheriv, constants, timingSafeEqual } = require("node:crypto");
 const { promisify } = require("node:util");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
+const { normalizeSessionUser } = require("./chatgpt-auth-session.cjs");
 
 const EXTENSION_ID = "kcolhpapmkdnjjcepadadoajhikfokgn";
 const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
@@ -73,6 +74,17 @@ function validCapture(body) {
   const state = { cookies: body.cookies, origins: [] };
   validatePasskeyLoginState(state);
   return state;
+}
+
+/**
+ * The ChatGPT login Chrome's page was signed in as when it sent the capture (connector 1.1+), or
+ * null from an older connector. The app checks the imported session opens as this same login.
+ */
+function captureUser(body) {
+  if (body?.user === undefined || body.user === null) return null;
+  const user = normalizeSessionUser(body.user);
+  if (!user) throw new Error("Invalid Chrome sign-in capture");
+  return user;
 }
 
 function pairingCode(publicKey, challenge) {
@@ -154,10 +166,11 @@ async function createChromeProfileCapture({ identity, onPhase = () => {}, timeou
     let bytes = 0; const chunks = [];
     for await (const chunk of request) { bytes += chunk.length; if (bytes > MAX_BODY_BYTES) { send(response, 413, { error: "Capture is too large" }); request.resume(); return; } chunks.push(chunk); }
     const challenge = `1\n${token}\n${server.address().port}\n${expiresAt}\n`;
-    const storageState = validCapture(decryptCapture(JSON.parse(Buffer.concat(chunks).toString("utf8")), identity, challenge));
+    const body = decryptCapture(JSON.parse(Buffer.concat(chunks).toString("utf8")), identity, challenge);
+    const storageState = validCapture(body), expectedUser = captureUser(body);
     if (finished || consumed || Date.now() >= expiresAt) return send(response, 409, { error: "Capture no longer current" });
     consumed = true; onPhase("verifying");
-    captureResolve({ storageState, source: "approved-chrome-profile-connector",
+    captureResolve({ storageState, expectedUser, source: "approved-chrome-profile-connector",
       assertCurrent: () => { if (finished || Date.now() >= expiresAt) throw new Error("The Chrome profile connection is no longer current"); },
       // BrowserHost completes this only after its existing fresh authentication and inspection.
       complete: verified => finish(verified),
@@ -172,4 +185,4 @@ async function createChromeProfileCapture({ identity, onPhase = () => {}, timeou
   return { result, url: `http://${host}/connect#${token}`, code: pairingCode(identity.publicKey, `1\n${token}\n${server.address().port}\n${expiresAt}\n`), cancel: () => finish(false, true), fail: () => finish(false, false, "Could not open Chrome. Check its executable and reconnect the profile.") };
 }
 
-module.exports = { EXTENSION_ID, EXTENSION_ORIGIN, CONNECTOR_FILES, prepareChromeConnector, chromeConnectorIdentity, validCapture, createChromeProfileCapture };
+module.exports = { EXTENSION_ID, EXTENSION_ORIGIN, CONNECTOR_FILES, prepareChromeConnector, chromeConnectorIdentity, validCapture, captureUser, createChromeProfileCapture };

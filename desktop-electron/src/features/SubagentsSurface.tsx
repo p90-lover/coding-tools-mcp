@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { JsonObject } from "../api/contracts";
 import { listAllWorkspaces, moduleCall, watchHarnesses } from "./AgentOrchestratorSurface";
-import { AGENT_DEFAULT_MODEL, DEFAULT_WORKER_HARNESS, NATIVE_HARNESS, modelShortLabel, pickerModels, prettyModelName, rememberCpaProviders, workerRoute,
+import { AGENT_DEFAULT_MODEL, DEFAULT_WORKER_HARNESS, NATIVE_HARNESS, modelShortLabel, pickerModels, prettyModelName, providerName, rememberCpaProviders, workerRoute,
   type AoHarness, type AoModelCapabilities, type AoModelCatalog, type AoModelLoader, type AoRoute } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./subagents.css";
@@ -12,6 +12,8 @@ export type Subagent = { id: string; name: string; enabled: boolean; description
 export type SubagentSettings = {
   enabled: boolean; maxConcurrent: number; maxPerChat: number; timeoutMinutes: number;
   permission: "auto" | "full"; releaseWhenDone: boolean; defaultRoute: SubagentRoute | null;
+  /** The providers subagents may use (modelProvider's keys); null allows all of them, ones that appear later too. */
+  allowedProviders?: string[] | null;
 };
 export type SubagentConfig = { settings: SubagentSettings; agents: Subagent[] };
 export type SubagentRun = { subagent_id: string; agent: string; name: string; state: string; task: string; elapsed_seconds: number; report?: string; error?: string };
@@ -31,7 +33,7 @@ export function subagentRoute(route: AoRoute): SubagentRoute {
  * refuses Claude Code's requests), so with Claude Code as the page's agent Gemini 3.8 Flash was
  * missing and the saved default showed "no longer listed".
  */
-export type ModelChoice = { model: string; harnesses: string[]; capabilities: Record<string, AoModelCapabilities | undefined> };
+export type ModelChoice = { model: string; provider: string; harnesses: string[]; capabilities: Record<string, AoModelCapabilities | undefined> };
 /** The agents a subagent runs on (subagents.cjs), in the order a model shared by several picks them. */
 const AGENT_ORDER = [DEFAULT_WORKER_HARNESS, "ao:codex", "ao:opencode"];
 const AGENT_NAMES: Record<string, string> = { [DEFAULT_WORKER_HARNESS]: "Claude Code", "ao:codex": "Codex", "ao:opencode": "opencode" };
@@ -41,14 +43,56 @@ export function modelChoices(catalogs: ReadonlyArray<{ harness: string; catalog:
   for (const { harness, catalog } of [...catalogs].sort((a, b) => agentRank(a.harness) - agentRank(b.harness))) {
     for (const model of catalog.models) {
       if (!model || model === AGENT_DEFAULT_MODEL) continue;
-      const choice = byModel.get(model) ?? { model, harnesses: [], capabilities: {} };
+      const choice = byModel.get(model) ?? { model, provider: "", harnesses: [], capabilities: {} };
       choice.harnesses.push(harness);
       choice.capabilities[harness] = catalog.capabilities?.[model];
       byModel.set(model, choice);
     }
   }
-  return [...byModel.values()];
+  return [...byModel.values()].map(choice => ({ ...choice, provider: modelProvider(choice.model, choice.harnesses, choice.capabilities) }));
 }
+
+/**
+ * Who serves a model, the key the provider switches save (subagents.cjs providerOf names it the
+ * same way, and refuses a launch on a provider that is off): for a CPA model the upstream CPA
+ * reports (antigravity, codex, cline-pass…), else its id's own prefix, else "cpa"; an agent's own
+ * model (Codex's, on its ChatGPT sign-in) is that agent's ("ao:codex"), never CPA's "codex".
+ */
+export function modelProvider(model: string, harnesses: readonly string[], capabilities: Record<string, AoModelCapabilities | undefined> = {}): string {
+  if (!model.startsWith("cpa/")) return harnesses[0] ?? "";
+  const reported = Object.values(capabilities).map(item => item?.provider?.trim().toLowerCase()).find(Boolean);
+  const id = model.slice(4);
+  return reported || (id.includes("/") ? id.slice(0, id.indexOf("/")).toLowerCase() : "cpa");
+}
+export function providerLabel(provider: string): string {
+  if (provider === "cpa") return "Other";
+  if (provider.startsWith("ao:")) return `${AGENT_NAMES[provider] ?? provider.slice(3)} (own account)`;
+  return providerName(provider);
+}
+export type ProviderChoice = { key: string; label: string; models: number };
+/** The providers the page's models come from, by name, each with how many models it serves. */
+export function providerChoices(choices: readonly ModelChoice[]): ProviderChoice[] {
+  const counts = new Map<string, number>();
+  for (const choice of choices) counts.set(choice.provider, (counts.get(choice.provider) ?? 0) + 1);
+  return [...counts.entries()].map(([key, models]) => ({ key, label: providerLabel(key), models }))
+    .sort((a, b) => Number(a.key === "cpa") - Number(b.key === "cpa") || a.label.localeCompare(b.label));
+}
+export const providerOn = (allowed: readonly string[] | null | undefined, key: string) => !allowed || allowed.includes(key);
+/**
+ * The allowed list once a provider's switch is flipped. Turning one off keeps every other provider
+ * the page lists, so one that shows up later starts off; turning the last one back on clears the
+ * list (null), which allows every provider again, new ones too.
+ */
+export function toggleProvider(allowed: readonly string[] | null | undefined, key: string, on: boolean, known: readonly string[]): string[] | null {
+  const current = allowed ?? known;
+  const next = on ? [...new Set([...current, key])] : current.filter(item => item !== key);
+  return known.every(item => next.includes(item)) ? null : next;
+}
+/** A saved route's provider: its model's, as listed, else read off the route itself. */
+const routeProvider = (route: SubagentRoute, choices: readonly ModelChoice[] | null) =>
+  choices?.find(choice => choice.model === route.model)?.provider ?? modelProvider(route.model, [route.harness_id]);
+// "cpa/gemini-cli/gemini-3.8-flash" and "cpa/gemini-3.8-flash" are one model from two providers.
+const baseModel = (model: string) => model.slice(model.lastIndexOf("/") + 1).toLowerCase();
 /** The route a picked model runs on: the agent it is on when that one runs it, else the first that does. */
 export function routeForModel(model: string, choices: readonly ModelChoice[], current?: string): SubagentRoute | null {
   const choice = choices.find(item => item.model === model);
@@ -111,38 +155,46 @@ function NumberField({ value, min, max, label, unit, onChange }: { value: number
     onChange={event => onChange(Math.max(min, Math.min(max, Number(event.target.value) || min)))} />{unit ? <small>{unit}</small> : null}</span>;
 }
 const modelName = (model: string) => model.startsWith("cpa/") ? modelShortLabel(model).name : prettyModelName(model);
-/**
- * The list's groups: a CPA model by who serves it ("Gemini", "Claude", "DeepSeek"; "CPA" is all of
- * them, so it goes), an agent's own model by that agent ("Codex"), so CPA's GPT-6 Luna and Codex's
- * own no longer read as the same model twice.
- */
-function modelGroups(choices: readonly ModelChoice[]): Array<[string, ModelChoice[]]> {
-  const groups = new Map<string, ModelChoice[]>();
-  for (const choice of choices) {
-    const group = choice.model.startsWith("cpa/") ? modelShortLabel(choice.model).group.replace(/ · CPA$/, "").replace(/^CPA$/, "") || "Other"
-      : AGENT_NAMES[choice.harnesses[0]] ?? choice.harnesses[0].replace(/^ao:/, "");
-    groups.set(group, [...groups.get(group) ?? [], choice]);
-  }
-  return [...groups.entries()];
-}
 
-/** A model, and its effort when that model offers one. `fallback` is the "Default" option a subagent can keep. */
-function ModelPicker({ label, route, choices, fallback, onChange }: {
-  label: string; route: SubagentRoute | null; choices: ModelChoice[] | null; fallback?: string; onChange: (route: SubagentRoute | null) => void;
+/**
+ * Who serves it (a provider the user allows), then one of that provider's models, then its effort
+ * when the model offers one. `fallback` is the "Default" option a subagent can keep; `like` is the
+ * model a newly picked provider starts on when it serves one of the same name (the default's).
+ */
+function ModelPicker({ label, route, choices, allowed, fallback, like = null, onChange }: {
+  label: string; route: SubagentRoute | null; choices: ModelChoice[] | null; allowed: string[] | null; fallback?: string;
+  like?: SubagentRoute | null; onChange: (route: SubagentRoute | null) => void;
 }) {
-  const groups = useMemo(() => modelGroups(choices ?? []), [choices]);
-  const listed = Boolean(route && choices?.some(choice => choice.model === route.model));
-  const efforts = route ? choices?.find(choice => choice.model === route.model)?.capabilities[route.harness_id]?.efforts ?? [] : [];
+  const known = useMemo(() => providerChoices(choices ?? []), [choices]);
+  const providers = known.filter(item => providerOn(allowed, item.key));
+  const current = route ? choices?.find(choice => choice.model === route.model) : undefined;
+  const provider = route ? routeProvider(route, choices) : "";
+  const models = (choices ?? []).filter(choice => choice.provider === provider);
+  const efforts = route ? current?.capabilities[route.harness_id]?.efforts ?? [] : [];
+  // A provider that also serves the model already chosen (Gemini 3.8 Flash on Antigravity or on
+  // Gemini CLI) keeps it, and its effort where offered; otherwise its first model.
+  const pickProvider = (key: string) => {
+    if (!key) { onChange(null); return; }
+    const offered = (choices ?? []).filter(choice => choice.provider === key);
+    const seed = route ?? like;
+    const next = (seed ? offered.find(choice => baseModel(choice.model) === baseModel(seed.model)) : undefined) ?? offered[0];
+    const moved = next ? routeForModel(next.model, choices ?? [], route?.harness_id) : null;
+    const effort = route?.effort;
+    onChange(moved && effort && next?.capabilities[moved.harness_id]?.efforts?.includes(effort) ? { ...moved, effort } : moved);
+  };
+  const shown = providers.some(item => item.key === provider);
   return <span className="sa-model">
-    <select className="sa-select" aria-label={label} value={route?.model ?? ""} disabled={choices === null}
-      onChange={event => onChange(event.target.value ? routeForModel(event.target.value, choices ?? [], route?.harness_id) : null)}>
-      {fallback !== undefined ? <option value="">{fallback}</option> : !route ? <option value="" disabled>Choose a model</option> : null}
-      {choices === null && route ? <option value={route.model}>{modelName(route.model)}</option> : null}
-      {choices !== null && route && !listed ? <option value={route.model}>{modelName(route.model)} (not available)</option> : null}
-      {groups.map(([group, items]) => <optgroup key={group} label={group}>
-        {items.map(choice => <option key={choice.model} value={choice.model}>{modelName(choice.model)}</option>)}
-      </optgroup>)}
+    <select className="sa-select is-provider" aria-label={`${label} provider`} value={provider} disabled={choices === null}
+      onChange={event => pickProvider(event.target.value)}>
+      {fallback !== undefined ? <option value="">{fallback}</option> : !route ? <option value="" disabled>Choose a provider</option> : null}
+      {route && !shown ? <option value={provider}>{providerLabel(provider)}{choices === null ? "" : known.some(item => item.key === provider) ? " (off)" : " (not available)"}</option> : null}
+      {providers.map(item => <option key={item.key} value={item.key}>{item.label}</option>)}
     </select>
+    {route ? <select className="sa-select" aria-label={label} value={route.model} disabled={choices === null}
+      onChange={event => onChange(routeForModel(event.target.value, choices ?? [], route.harness_id))}>
+      {!current ? <option value={route.model}>{modelName(route.model)}{choices === null ? "" : " (not available)"}</option> : null}
+      {models.map(choice => <option key={choice.model} value={choice.model}>{modelName(choice.model)}</option>)}
+    </select> : null}
     {route && efforts.length ? <select className="sa-select is-effort" aria-label={`${label} effort`} value={route.effort ?? ""}
       onChange={event => { const next = { ...route }; if (event.target.value) next.effort = event.target.value; else delete next.effort; onChange(next); }}>
       <option value="">Default effort</option>
@@ -280,6 +332,13 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
   if (!draft) return <div className="subagents-page ao-workflow"><p className="sa-empty is-page">Loading…</p></div>;
   const { settings, agents } = draft;
   const missingModel = agents.some(agent => agent.enabled && !agent.route) && !settings.defaultRoute;
+  const allowed = settings.allowedProviders ?? null;
+  const providers = providerChoices(choices ?? []);
+  // A saved model whose provider was turned off: subagents.cjs refuses to start it.
+  const providerOff = choices !== null && Boolean(allowed) && [settings.defaultRoute, ...agents.filter(agent => agent.enabled).map(agent => agent.route)]
+    .some(route => route && !providerOn(allowed, routeProvider(route, choices)));
+  const defaultName = settings.defaultRoute
+    ? `Default · ${providerLabel(routeProvider(settings.defaultRoute, choices))} · ${modelName(settings.defaultRoute.model)}` : "Default";
 
   return <div className="subagents-page ao-workflow">
     <div className="subagents-scroll">
@@ -288,10 +347,11 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
         <Switch label="Let chat agents start subagents" checked={settings.enabled} onChange={enabled => setSettings({ enabled })} />
       </header>
       {missingModel ? <p className="sa-warning" role="alert">Choose a default model, or one for each subagent.</p> : null}
+      {providerOff ? <p className="sa-warning" role="alert">A model below is from a provider that's off. Subagents on it won't start until you pick another.</p> : null}
 
       <div className={`sa-panel${settings.enabled ? "" : " is-off"}`} aria-label="Settings">
         <Row label="Default model">
-          <ModelPicker label="Default model" route={settings.defaultRoute} choices={choices} onChange={defaultRoute => setSettings({ defaultRoute })} />
+          <ModelPicker label="Default model" route={settings.defaultRoute} choices={choices} allowed={allowed} onChange={defaultRoute => setSettings({ defaultRoute })} />
         </Row>
         <Row label="Running at once">
           <NumberField label="Running at once" min={1} max={100} value={settings.maxConcurrent} onChange={maxConcurrent => setSettings({ maxConcurrent })} />
@@ -312,6 +372,21 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
           <Switch label="Release agents when done" checked={settings.releaseWhenDone} onChange={releaseWhenDone => setSettings({ releaseWhenDone })} />
         </Row>
       </div>
+
+      {providers.length ? <section className="sa-section" aria-label="Providers">
+        <div className="sa-section-head">
+          <h2>Providers</h2>
+          <span className="sa-muted">{allowed ? `${providers.filter(item => providerOn(allowed, item.key)).length} of ${providers.length} on` : "All on"}</span>
+        </div>
+        <p className="sa-hint">Subagents use only the providers that are on, including models a chat agent picks itself.</p>
+        <div className={`sa-panel${settings.enabled ? "" : " is-off"}`}>
+          {providers.map(item => <Row key={item.key} label={item.label}>
+            <span className="sa-muted">{item.models} {item.models === 1 ? "model" : "models"}</span>
+            <Switch label={`Use ${item.label}`} checked={providerOn(allowed, item.key)}
+              onChange={on => setSettings({ allowedProviders: toggleProvider(allowed, item.key, on, providers.map(provider => provider.key)) })} />
+          </Row>)}
+        </div>
+      </section> : null}
 
       <section className="sa-section" aria-label="Subagents">
         <div className="sa-section-head">
@@ -334,9 +409,8 @@ export function SubagentsSurface({ active = true, setError }: { active?: boolean
             <label className="sa-label">Instructions
               <textarea className="sa-text" rows={4} maxLength={8000} value={agent.instructions} placeholder="How it works and what it reports"
                 onChange={event => setAgent(index, { instructions: event.target.value })} /></label>
-            <ModelPicker label={`${agent.name} model`} route={agent.route} choices={choices}
-              fallback={settings.defaultRoute ? `Default · ${modelName(settings.defaultRoute.model)}` : "Default"}
-              onChange={route => setAgent(index, { route })} />
+            <ModelPicker label={`${agent.name} model`} route={agent.route} choices={choices} allowed={allowed}
+              fallback={defaultName} like={settings.defaultRoute} onChange={route => setAgent(index, { route })} />
           </article>)}
         </div>
       </section>

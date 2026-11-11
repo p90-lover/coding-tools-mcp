@@ -88,3 +88,34 @@ test("AO board rejects unknown, ambiguous, or unregistered scopes", async () => 
   await assert.rejects(bridge.bind("workspace-a"), /multiple/);
   assert.equal(calls.length, 0);
 });
+
+test("a chat launch's check for a git repository never holds Electron main", async () => {
+  const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
+  const repository = fs.mkdtempSync(path.join(os.tmpdir(), "ao-workspace-"));
+  const plain = fs.mkdtempSync(path.join(os.tmpdir(), "ao-workspace-"));
+  fs.mkdirSync(path.join(repository, ".git"));
+  const created = [], branches = [];
+  const bridge = createAoWorkspaceBoard({
+    platform: process.platform, realpath: async value => value,
+    recordDefaultBranch: async folder => { branches.push(folder); },
+    listWorkspaces: async () => [{ id: "repo", path: repository }, { id: "plain", path: plain }],
+    listProjects: async () => [],
+    createProject: async body => { created.push(body.path); return { id: `p-${created.length}`, path: body.path }; },
+    missionCall: async () => ({ ok: true }),
+  });
+  const existsSync = fs.existsSync, statSync = fs.statSync, accessSync = fs.accessSync;
+  let syncChecks = 0;
+  fs.existsSync = (...args) => { syncChecks += 1; return existsSync(...args); };
+  fs.statSync = (...args) => { syncChecks += 1; return statSync(...args); };
+  fs.accessSync = (...args) => { syncChecks += 1; return accessSync(...args); };
+  try {
+    assert.deepEqual(await bridge.bind("repo"), { workspaceId: "repo", projectId: "p-1" });
+    assert.deepEqual(await bridge.bind("plain"), { workspaceId: "plain", projectId: null });
+  } finally {
+    Object.assign(fs, { existsSync, statSync, accessSync });
+    for (const folder of [repository, plain]) fs.rmSync(folder, { recursive: true, force: true });
+  }
+  assert.equal(syncChecks, 0, "the .git check ran on Electron main");
+  assert.deepEqual(created, [repository], "only the repository is registered in AO");
+  assert.deepEqual(branches, [repository], "only the repository is given a default branch");
+});

@@ -186,6 +186,20 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
     has: (id) => state.accounts.some((entry) => entry.id === id),
     /** The account that owns a partition (its id), or null. */
     accountIdOfPartition: (partition) => accountOfPartition(partition)?.id ?? null,
+    /**
+     * Another account (not the one owning `partition`) already signed in to this ChatGPT login,
+     * matched by user id or by email: { id, label, email }, or null. A copied Chrome sign-in that
+     * is another card's login would make a second card for the same login under the wrong name.
+     */
+    otherAccountWithLogin(partition, user) {
+      const email = typeof user?.email === "string" ? user.email.toLowerCase() : null;
+      const userId = typeof user?.id === "string" ? user.id : null;
+      if (!email && !userId) return null;
+      const owner = accountOfPartition(partition)?.id ?? null;
+      const other = state.accounts.find((entry) => entry.id !== owner
+        && ((email && entry.email?.toLowerCase() === email) || (userId && entry.plan?.userId === userId)));
+      return other ? { id: other.id, label: other.label, email: other.email } : null;
+    },
     /** Adds an account (not yet active); returns its id. */
     add() {
       assertWritable();

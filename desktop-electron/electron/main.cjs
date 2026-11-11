@@ -147,6 +147,7 @@ const {
   readWindowState,
   trackWindowState,
 } = require("./window-state.cjs");
+const { waitForFocus } = require("./focus-settle.cjs");
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 const LAUNCHER_SMOKE_TEST = process.argv.includes("--launcher-smoke-test");
@@ -1507,7 +1508,12 @@ function recordBrowserWorkspaceContext(partition, context) {
 }
 
 async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore }) {
-  if (browserHost !== host) return;
+  if (browserHost !== host || !browserAccounts.has(accountId)) return;
+  // A copied Chrome sign-in is this account's only once the host confirms its login: a refused
+  // one (Chrome's other ChatGPT login, another card's) must leave no email or MCP setup behind.
+  const verifying = host.signInVerificationFor?.(browserAccounts.partitionOf(accountId));
+  if (verifying && !(await verifying)) return;
+  if (browserHost !== host || !browserAccounts.has(accountId)) return;
   void automaticAccountMcp?.sync();
   try {
     // The account's own partition: the host may already show another account.
@@ -2061,6 +2067,18 @@ function assertFocusedMainWindow(event, write = false, backgroundRead = false) {
       ? "Click into the Coding Tools window and try again: this action runs only from the focused app window"
       : "Open the Coding Tools window (not minimized) to do this");
   }
+}
+
+// assertFocusedMainWindow for a write whose window is shown but not marked focused yet: a focus
+// event still waiting on the main thread (after a stall) gets a moment to land (focus-settle.cjs).
+// A hidden or minimized window, another window, or no focus event in time is refused as before.
+async function assertFocusedMainWindowSettled(event, write = false, backgroundRead = false) {
+  const valid = () => { try { assertFocusedMainWindow(event, write, backgroundRead); return true; } catch { return false; } };
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (write && !valid() && window && window === mainWindow && !window.isDestroyed() && window.isVisible() && !window.isMinimized()) {
+    await waitForFocus({ focused: valid, emitters: [window, event.sender] });
+  }
+  assertFocusedMainWindow(event, write, backgroundRead);
 }
 
 function launcherSnapshotPayload(stateStore, logger) {
@@ -2844,7 +2862,7 @@ function registerIpc({ logger, stateStore }) {
     if (!appsHost) throw new Error("Apps host is unavailable");
     return appsHost.catalog();
   });
-  handle("coding-tools:apps:call", (event, input = {}) => {
+  handle("coding-tools:apps:call", async (event, input = {}) => {
     if (!appsHost) throw new Error("Apps host is unavailable");
     // The chat surface's own background calls run on load, on a timer or when a chat opens, often
     // while focus sits in an embedded view or another app; refused there, they only filled the
@@ -2857,7 +2875,8 @@ function registerIpc({ logger, stateStore }) {
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
     const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
       && ["run_status", "subagents_runs"].includes(input.operation);
-    assertFocusedMainWindow(event, !passiveAoLayout && !readOnly, backgroundRead);
+    // A send typed into the window right after a stall is not refused for a focus event still on its way.
+    await assertFocusedMainWindowSettled(event, !passiveAoLayout && !readOnly, backgroundRead);
     // A chat's preview is drawn at the pane's CSS bounds, scaled by the page's own zoom.
     if (input.moduleId === "agent-orchestrator" && input.operation === "chat_preview_show") {
       input = { ...input, arguments: { ...(input.arguments || {}), zoom: event.sender.getZoomFactor() } };
@@ -5653,6 +5672,7 @@ async function start() {
       // The approved extension connects the current Chrome profile. App-side fresh verification
       // still uses this account's routed partition; ordinary Chrome's routing is never changed.
       loginWithPasskey: () => runtimeHost.captureCurrentChromeLogin({ safeStorage }),
+      signInConflict: (partition, user) => browserAccounts.otherAccountWithLogin(partition, user)?.label ?? null,
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,
       publishState: (state) => {
