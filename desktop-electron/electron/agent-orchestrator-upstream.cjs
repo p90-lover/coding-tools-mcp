@@ -133,6 +133,9 @@ const AO_READY_PATIENCE = 10;
 // After a start that failed, how long before AO is started again; doubled per failure in a row.
 const AO_START_COOLDOWN_MS = 5_000;
 const AO_START_COOLDOWN_MAX_MS = 5 * 60_000;
+// A chat's agent that failed to start for a passing reason is resumed this many times, each after
+// its pause (ms) since AO answered the resume before it.
+const PROVISION_RESUME_WAITS_MS = [0, 5_000, 20_000];
 // To profile AO's CPU on a user's machine: a one-line "pprof-addr" file in AO's data folder holding
 // a loopback host:port turns on AO's pprof listener (AO_PPROF_ADDR) at its next start. Without it AO
 // starts as before; the app clears AO_* from its own environment, so this is the only switch.
@@ -262,7 +265,7 @@ function chatHostProcesses(dataRoot) {
 
 function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, fileTools = null, cpaQuota = null, cpaUsage = null, logger = console,
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS, readyHardMs = readyLimitMs * AO_READY_PATIENCE,
-  startCooldownMs = AO_START_COOLDOWN_MS }) {
+  startCooldownMs = AO_START_COOLDOWN_MS, provisionResumeWaitsMs = PROVISION_RESUME_WAITS_MS }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1100,14 +1103,20 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   }
   /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
   const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
-  // Sessions whose failed background start was resumed once: id -> { resumed: Promise<boolean>,
-  // after: the observe() read count when AO answered the resume }.
+  // Sessions whose failed background start was resumed: id -> { tries, resumed: Promise<boolean>,
+  // after: the observe() read count when AO answered the resume, answeredAt: when it did }.
+  //
+  // One resume, at once, was the whole recovery. On 2026-11-12, seconds after an app update, a
+  // start failed "persistent ACP host: agent requires authentication" while the gateway restarted,
+  // its one resume failed the same way three seconds later, and the chat stayed failed although
+  // every start from ten seconds on worked. A start that fails again is now resumed again after a
+  // pause (provisionResumeWaitsMs), and the card waits meanwhile instead of failing.
   const provisionRetried = new Map();
   // A session the app ended on purpose (kill, or a Stop while its agent was starting) is never
   // resumed: cancelling a background start leaves AO's reason "context canceled", which reads as
   // transient, and the resume would have brought back an agent whose card had moved on.
   const endedOnPurpose = (id) => {
-    provisionRetried.set(id, { after: Infinity, resumed: Promise.resolve(false) });
+    provisionRetried.set(id, { tries: Infinity, after: Infinity, answeredAt: 0, resumed: Promise.resolve(false) });
     if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.keys().next().value);
   };
   let observeReads = 0;
@@ -1476,20 +1485,26 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // otherwise the turn fails with AO's reason.
       if (session?.session?.provisionState === "failed") {
         const reason = String(session.session.provisionError || "The agent could not start").slice(0, 500);
+        const waiting = { status, turnId: turn?.id, turnState: "queued", needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
         let retry = provisionRetried.get(id);
-        if (!retry && TRANSIENT_CHAT_START.test(reason)) {
-          retry = { after: Infinity };
-          retry.resumed = internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).then(() => true, () => false)
-            .then((resumed) => { retry.after = observeReads; return resumed; });
-          provisionRetried.set(id, retry);
+        // This read is of a start that failed after the last resume was answered: the next one is due.
+        const failedAgain = retry && retry.tries < provisionResumeWaitsMs.length && retry.after !== Infinity && read > retry.after;
+        if (TRANSIENT_CHAT_START.test(reason) && (!retry || failedAgain)) {
+          const tries = retry?.tries ?? 0;
+          // The pause is counted from AO's answer to the resume before, and the card waits it out.
+          if (Date.now() < (retry?.answeredAt ?? 0) + provisionResumeWaitsMs[tries]) return waiting;
+          const next = { tries: tries + 1, after: Infinity, answeredAt: Infinity };
+          next.resumed = internalApi("POST", `/api/v1/sessions/${sessionId(id)}/resume-agent`, {}).then(() => true, () => false)
+            .then((resumed) => { next.after = observeReads; next.answeredAt = Date.now(); return resumed; });
+          logger.info?.("ao.start_resumed", { session: String(id).slice(0, 128), try: next.tries, of: provisionResumeWaitsMs.length, reason: reason.slice(0, 200) });
+          provisionRetried.set(id, retry = next);
           if (provisionRetried.size > 500) provisionRetried.delete(provisionRetried.keys().next().value);
         }
         // The run loop and the chat's activity poll observe the same card: a read taken before AO
         // answered the resume saw the failure being resumed, not the resumed start failing again,
-        // and failed the card while its agent was coming up.
-        if (retry && read <= retry.after && await retry.resumed) {
-          return { status, turnId: turn?.id, turnState: "queued", needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
-        }
+        // and failed the card while its agent was coming up. A resume AO refused is not the last
+        // word either while tries remain.
+        if (retry && read <= retry.after && (await retry.resumed || retry.tries < provisionResumeWaitsMs.length)) return waiting;
         return { status, turnId: turn?.id, turnState: "failed", error: `The agent could not start: ${reason}`,
           needsInput: false, exited: false, answer: "", liveOutput: "", timeline, approvals: [] };
       }

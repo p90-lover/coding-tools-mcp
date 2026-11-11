@@ -276,6 +276,8 @@ function createHarness(hooks = {}) {
     logger: { warn: (...entry) => warnings.push(entry), info: (...entry) => infos.push(entry) },
     readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs, readyHardMs: hooks.readyHardMs,
     startCooldownMs: hooks.startCooldownMs ?? 0,
+    // One resume, as before, unless a test asks for the pauses.
+    provisionResumeWaitsMs: hooks.provisionResumeWaitsMs ?? [0],
   });
   return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files, probes };
 }
@@ -1054,6 +1056,78 @@ test("a chat started in the background whose agent failed to come up is resumed 
     const other = await h.controller.harness.observe("s2");
     assert.equal(other.turnState, "failed");
     assert.equal(resumed.length, 1, "a failure that is not about time is not retried");
+  } finally { await h.controller.stop(); }
+});
+
+// 2026-11-12, seconds after an app update: a start failed "agent requires authentication" while the
+// gateway restarted, its one immediate resume failed the same way, and the chat stayed failed
+// although every start from ten seconds on worked.
+test("a start that fails again is resumed again after a pause, and the card waits instead of failing", async () => {
+  const resumed = [];
+  let state = "failed";
+  const reason = "spawn s1: chat controller: chat driver unavailable: persistent ACP host: agent requires authentication";
+  const h = createHarness({
+    provisionResumeWaitsMs: [0, 120, 240],
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "working", provisionState: state, ...(state === "failed" ? { provisionError: reason } : {}) } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      // The gateway is back for the third resume.
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumed.push(Date.now()); if (resumed.length === 3) state = "ready"; return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    const observe = async () => (await h.controller.harness.observe("s1")).turnState;
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 1, "the first resume is immediate");
+    // It failed again at once: the card waits out the pause, and no resume is sent inside it.
+    assert.equal(await observe(), "queued");
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 2, "the second resume after its pause");
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 2);
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 3);
+    assert.ok(resumed[1] - resumed[0] >= 110 && resumed[2] - resumed[1] >= 230, `pauses kept: ${resumed[1] - resumed[0]} ms, ${resumed[2] - resumed[1]} ms`);
+    assert.notEqual(await observe(), "failed", "the agent came up on the third resume");
+    assert.deepEqual(h.infos.filter(([event]) => event === "ao.start_resumed").map(([, detail]) => detail.try), [1, 2, 3]);
+  } finally { await h.controller.stop(); }
+});
+
+test("a start that keeps failing fails for good after its last resume, with AO's reason", async () => {
+  const resumed = [];
+  const h = createHarness({
+    provisionResumeWaitsMs: [0, 20, 20],
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "working", provisionState: "failed", provisionError: "persistent ACP host: agent requires authentication" } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumed.push(1); return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    let last;
+    for (let round = 0; round < 12 && last?.turnState !== "failed"; round++) {
+      last = await h.controller.harness.observe("s1");
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.equal(last.turnState, "failed");
+    assert.match(last.error, /could not start: persistent ACP host: agent requires authentication/);
+    assert.equal(resumed.length, 3, "three resumes, then no more");
+    assert.equal((await h.controller.harness.observe("s1")).turnState, "failed");
+    assert.equal(resumed.length, 3);
   } finally { await h.controller.stop(); }
 });
 
