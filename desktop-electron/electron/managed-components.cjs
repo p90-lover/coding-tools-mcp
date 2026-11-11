@@ -7,7 +7,7 @@ const path = require("node:path");
 const { Readable } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { spawnSync } = require("node:child_process");
-const { spawnOffThread } = require("./off-thread-run.cjs");
+const { runOffThread, spawnOffThread } = require("./off-thread-run.cjs");
 const { EventEmitter } = require("node:events");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { readStateFile, writeStateFile } = require("./durable-state.cjs");
@@ -41,6 +41,26 @@ class PersistedComponentProcess extends EventEmitter {
     clearInterval(this.timer);
   }
 }
+
+/**
+ * When the process holding `pid` was created (ms since the epoch), or null when that cannot be
+ * told (not Windows, no such process, or PowerShell did not answer). Asked from a worker thread:
+ * PowerShell's start must not hold the app's main thread.
+ */
+async function windowsProcessStartedAt(pid) {
+  if (process.platform !== "win32" || !Number.isInteger(pid) || pid < 1) return null;
+  const powershell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const query = `$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if ($p) { $p.CreationDate.ToUniversalTime().ToString('o') }`;
+  const result = await runOffThread({ file: powershell, args: ["-NoProfile", "-NonInteractive", "-Command", query], timeoutMs: 20_000, maxBytes: 4096 });
+  if (result.error || result.timedOut || result.code !== 0) return null;
+  const at = Date.parse(String(result.stdout || "").trim());
+  return Number.isFinite(at) ? at : null;
+}
+
+// A saved process record names the component only while its pid belongs to the process started
+// then: Windows hands a freed pid to the next new process. A process created after the record was
+// written cannot be that one. Slack covers clock rounding only; the record is written after spawn.
+const PID_REUSE_SLACK_MS = 2_000;
 
 const COMPONENT_IDS = Object.freeze(["cpa"]);
 const COMPONENT_ID_SET = new Set(COMPONENT_IDS);
@@ -537,6 +557,7 @@ function createManagedComponentController({
   fetchImpl = globalThis.fetch,
   spawnProcess = spawnOffThread,
   terminateProcessTree = terminateOwnedProcessTree,
+  processStartedAt = windowsProcessStartedAt,
   spawnSyncProcess = spawnSync,
   resolveRuntimeExecutable = () => process.execPath,
   resolveCrossUseEnvironment = null,
@@ -1937,6 +1958,25 @@ function createManagedComponentController({
     try { fs.rmSync(persistedRecordPath(id), { force: true }); } catch {}
   }
 
+  /**
+   * Whether the process a saved record names is still running: its pid is in use by a process
+   * created no later than the record. On 2026-11-11 CPA's saved pid belonged to an unrelated
+   * PowerShell started 9 h after CPA had gone; every start then failed with "saved process
+   * verification is unresolved", and without that flag a start would have ended that process's
+   * tree as a stale CPA. A record without a start time, or a creation time that cannot be read,
+   * is trusted as before.
+   */
+  async function savedProcessRunning(record) {
+    if (!processRunning(record?.pid)) return false;
+    const recorded = Date.parse(record.startedAt);
+    if (!Number.isFinite(recorded)) return true;
+    let created = null;
+    try { created = await processStartedAt(record.pid); } catch { /* unknown: trusted */ }
+    if (!Number.isFinite(created) || created <= recorded + PID_REUSE_SLACK_MS) return true;
+    logger?.warn?.("managed-component.saved_pid_reused", { pid: record.pid, recordedAt: record.startedAt, createdAt: new Date(created).toISOString() });
+    return false;
+  }
+
   /** A terminal owned handle may clear only the exact process record it published or adopted. */
   function clearProcessRecord(id, child) {
     const expected = child?.managedRecord;
@@ -1990,7 +2030,7 @@ function createManagedComponentController({
     if (attention && JSON.stringify(attention.record) !== recordJson) {
       throw new Error(id + " stop needs attention: saved process verification is unresolved");
     }
-    if (!processRunning(record.pid)) {
+    if (!(await savedProcessRunning(record))) {
       if (!recordMatches()) {
         lifecycle.attention ||= { record };
         throw new Error(id + " stop needs attention: its saved process record changed");
@@ -2014,7 +2054,7 @@ function createManagedComponentController({
         throw new Error(id + " stop needs attention: its saved process record changed");
       }
       if (!healthy) return false;
-      if (!processRunning(record.pid)) {
+      if (!(await savedProcessRunning(record))) {
         if (!recordMatches()) {
           lifecycle.attention ||= verification;
           throw new Error(id + " stop needs attention: its saved process record changed");
@@ -2091,7 +2131,7 @@ function createManagedComponentController({
     const attention = lifecycle.attention;
     if (attention) {
       // A retry must not convert the failed verification into permission to kill that pid.
-      if (processRunning(attention.record.pid) || (record
+      if ((await savedProcessRunning(attention.record)) || (record
         && JSON.stringify(record) !== JSON.stringify(attention.record))) {
         throw new Error(id + " stop needs attention: saved process verification is unresolved");
       }
@@ -2102,7 +2142,7 @@ function createManagedComponentController({
       if (lifecycle.attention === attention) lifecycle.attention = null;
       return;
     }
-    if (!record || !processRunning(record.pid)) {
+    if (!record || !(await savedProcessRunning(record))) {
       const current = readPersistedRecord(id);
       if (JSON.stringify(current) !== JSON.stringify(record)) {
         lifecycle.attention ||= { record: current || record };
@@ -2564,4 +2604,5 @@ module.exports = {
   defaultBundledRoots,
   loadManagedManifest,
   verifySha256,
+  windowsProcessStartedAt,
 };

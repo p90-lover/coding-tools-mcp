@@ -2,10 +2,10 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn, spawnSync } = require("node:child_process");
+const { spawnSync } = require("node:child_process");
 const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
-const { getOffThread } = require("./off-thread-run.cjs");
+const { getOffThread, spawnOffThread } = require("./off-thread-run.cjs");
 
 const REPOSITORY = "p90-lover/coding-tools-mcp";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases?per_page=20`;
@@ -366,12 +366,17 @@ function defaultDependencies() {
       if (fs.statSync(source, { throwIfNoEntry: false })?.isFile()) return source;
       throw new Error("Packaged Linux AppImage runner is missing");
     },
-    spawnWorker(runtimeExecutable, workerPath, jobPath) {
-      return spawn(runtimeExecutable, [workerPath, jobPath], {
+    // From the spawn worker thread, as app-update.cjs's startUpdateWorker: CreateProcess holds the
+    // thread that calls it, and here that was the app's main thread. A refused start is reported
+    // from the missing pid; its 'error' event must not be uncaught.
+    async spawnWorker(runtimeExecutable, workerPath, jobPath) {
+      const child = await spawnOffThread(runtimeExecutable, [workerPath, jobPath], {
         detached: true,
         stdio: "ignore",
         windowsHide: true,
       });
+      child.once("error", () => undefined);
+      return child;
     },
   };
 }
@@ -515,7 +520,7 @@ function createUpdateController({
         });
         const jobPath = path.join(tempRoot, "job.json");
         fs.writeFileSync(jobPath, `${JSON.stringify(job)}\n`, { mode: 0o600 });
-        const child = deps.spawnWorker(runtimeExecutable, workerPath, jobPath);
+        const child = await deps.spawnWorker(runtimeExecutable, workerPath, jobPath);
         if (!Number.isInteger(child?.pid) || child.pid <= 0) throw new Error("The update worker did not start");
         child.unref?.();
         logger?.info("launcher.update_worker_started", { pid: child.pid, version: available.version });
@@ -556,6 +561,7 @@ module.exports = {
   useNodeUpdateTransportForTests,
   setUpdateSleepForTests: (fn) => { sleep = fn; },
   setUpdateIdleMsForTests: (ms) => { REQUEST_IDLE_MS = ms; },
+  updateDependenciesForTests: defaultDependencies,
   DEFAULT_UPDATE_CHECK_INTERVAL_MS,
   RELEASE_API_URL,
   downloadFile,
