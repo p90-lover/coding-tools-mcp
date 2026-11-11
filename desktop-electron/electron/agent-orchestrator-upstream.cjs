@@ -1602,6 +1602,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // then started a fresh one with a summary of the chat (seen live 2026-10-28: a follow-up after a
         // finished chat sat on "reconnecting to the chat's agent" for minutes). It is retried instead.
         const busy = error => error?.status === 503 && error?.code === "SERVICE_UNAVAILABLE";
+        // AO checks an agent's sign-in before starting it (Claude Code: the provider's model list, or
+        // the CLI's own status). A refused sign-in refuses a fresh agent the same way, so stopping
+        // this one and starting fresh only threw away what the chat knew. Seen live 2026-11-12: for
+        // half an hour every Claude Code start was refused "agent requires authentication"; 18 chats
+        // gave up their agents, and each fresh start was refused too. AO names it
+        // CHAT_DRIVER_UNAVAILABLE when the chat driver is what reports it.
+        const signInRefused = error => ["AGENT_AUTH_REQUIRED", "CHAT_AUTH_REQUIRED"].includes(error?.code)
+          || (error?.code === "CHAT_DRIVER_UNAVAILABLE" && /requires authentication|not authenticated/i.test(String(error?.message ?? "")));
         const patiently = async call => {
           for (const wait of [500, 1000, 2000, 4000, 8000, null]) {
             try { return await call(); }
@@ -1665,6 +1673,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           } catch (error) {
             if (["SESSION_NOT_RESTORABLE", "SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error.code)) {
               return refuse("restore_refused", session, { code: error.code, message: String(error?.message ?? "").slice(0, 200) });
+            }
+            // The message fails with the reason; the agent is left as it is for a retry.
+            if (signInRefused(error)) {
+              logger?.warn?.("ao.restore_sign_in_refused", { session: key, code: error.code ?? null });
+              throw Object.assign(new Error("The agent's sign-in was refused, so it was not started again. The chat keeps its agent: retry once the sign-in works."),
+                { code: "AO_AGENT_SIGN_IN_REFUSED", cause: error });
             }
             if (error.status !== 409 || error.code !== "AGENT_RESUME_IN_PROGRESS") throw uncertain(error);
           }

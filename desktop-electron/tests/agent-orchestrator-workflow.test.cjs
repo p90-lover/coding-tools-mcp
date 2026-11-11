@@ -11115,6 +11115,35 @@ test("restoration uncertainty: a replacement requires confirmed shutdown", async
   });
 });
 
+test("a refused sign-in fails the follow-up and keeps the chat's agent: no stop, no fresh agent", async () => {
+  // Seen live 2026-11-12: AO refused every Claude Code start for half an hour; 18 chats gave up their
+  // agents and lost what they knew, and each fresh start was refused the same way.
+  const route = { harness_id: "ao:claude-code", model: "fixture" };
+  const refused = Object.assign(new Error("The agent's sign-in was refused, so it was not started again."), { code: "AO_AGENT_SIGN_IN_REFUSED" });
+  const calls = [], submitted = [];
+  const continuation = { session: "existing", text: "follow-up" };
+  const workflow = workflowInternals({
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "follow-up" };
+      if (endpoint.endsWith("/submitted")) submitted.push(body);
+      return { ok: true, run: {} };
+    },
+    aoHarness: { continuable: async () => { throw refused; },
+      exitAgent: async id => { calls.push(`exit ${id}`); return { ok: true }; },
+      send: async () => { calls.push("send"); return { turnId: "next" }; },
+      spawn: async () => { calls.push("spawn"); return "replacement"; } },
+  });
+  try {
+    workflow.continuations.set("new", continuation);
+    await assert.rejects(workflow.dispatchExternal("ws", "new", { id: "next", role: "planner", route }, 1, true, true),
+      error => error === refused);
+    assert.deepEqual(calls, [], "the agent is neither stopped nor replaced, and nothing receives the message");
+    assert.deepEqual(submitted, [{ workspace_id: "ws", run_id: "new", node_id: "next", request_key: "k", error: refused.message }],
+      "the step fails with the reason");
+    assert.equal(workflow.continuations.get("new"), continuation, "a retry continues the same agent");
+  } finally { workflow.dispose(); }
+});
+
 test("restoration uncertainty: a replacement waits for shutdown acknowledgement", async () => {
   const route = { harness_id: "ao:claude-code", model: "fixture" };
   const uncertainty = Object.assign(new Error("restore pending"), { code: "AO_SESSION_RESTORE_UNCONFIRMED" });
