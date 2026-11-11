@@ -104,6 +104,24 @@ async function readCpaConfigProxyUrl(configPath) {
   } catch { return null; }
 }
 
+/**
+ * The proxy route a start runs on: the one last read off the main thread (`cached`, { value } or
+ * { error }) while that read is `current`, else `readFromDisk()`.
+ *
+ * Every start read provider-network.json synchronously, so a process never started on an old
+ * route. On a busy hard disk that one read froze the main process for 46.5 s (0.8.110, 2026-11-11,
+ * while CPA's recovery kept restarting it): no IPC was answered, every chat call timed out
+ * ("Headless request timed out") and the window looked dead. The read is only as fresh as the
+ * controller's own copy, which is read again whenever the settings files change. So a start uses
+ * that copy, and reads the disk itself only when the copy may be behind: never read, a read under
+ * way or due, or the folder's watch not in place.
+ */
+function routeForStart(cached, current, readFromDisk) {
+  if (!current || !cached) return readFromDisk();
+  if (cached.error) throw cached.error;
+  return cached.value;
+}
+
 function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage, resolveRoute = resolveCpaProxyRoute) {
   if (!MANAGED_PROXY_COMPONENTS.has(componentId)) return {};
   const route = resolveRoute(dataRoot, safeStorage, componentId);
@@ -225,6 +243,8 @@ function createManagedExternalServicesController({
         } catch { close(); }
       },
       close,
+      /** Whether changes to the folder's files are being reported. */
+      watching: () => Boolean(watcher),
     };
   }
   const diskWatches = [
@@ -266,7 +286,10 @@ function createManagedExternalServicesController({
     resolveRuntimeExecutable,
     resolveCrossUseEnvironment: (componentId) => {
       const extra = peerEnvironmentFor(componentId, crossUseSecrets());
-      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage));
+      // The route comes from the last off-thread read while it is current (routeForStart).
+      const current = diskState.read && !diskRead && !refreshTimer && diskWatches[0].watching();
+      Object.assign(extra, resolveManagedProxyEnvironment(componentId, dataRoot, options.safeStorage,
+        (root, storage, id) => routeForStart(diskState.routes.get(id), current, () => resolveCpaProxyRoute(root, storage, id))));
       return extra;
     },
     publish: publishCombined,
@@ -716,4 +739,5 @@ module.exports = {
   createManagedExternalServicesController,
   resolveCpaProxyRoute,
   resolveManagedProxyEnvironment,
+  routeForStart,
 };

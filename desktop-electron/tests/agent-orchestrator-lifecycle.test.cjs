@@ -274,7 +274,8 @@ function createHarness(hooks = {}) {
     openAuth: hooks.openAuth,
     agentTools: hooks.agentTools, fileTools: hooks.fileTools,
     logger: { warn: (...entry) => warnings.push(entry), info: (...entry) => infos.push(entry) },
-    readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs,
+    readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs, readyHardMs: hooks.readyHardMs,
+    startCooldownMs: hooks.startCooldownMs ?? 0,
   });
   return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files, probes };
 }
@@ -424,9 +425,10 @@ test("a daemon still starting after 30 s is waited for, not killed and started a
   assert.ok(harness.warnings[0][1].waitedMs >= 30_000);
 });
 
-test("a start after one that timed out gets longer, and a ready start resets the limit", async (context) => {
+test("a start that needs minutes gets them on its first try, with the real limits", async (context) => {
   // Seen 2026-10-24 after a reboot: AO's first cleanup read a cold HDD for over a minute, every
-  // start was killed at 90 s, and each new one began that work again, so AO stayed down.
+  // start was killed at 90 s, and each new one began that work again, so AO stayed down. Doubling
+  // the limit per timeout (90, 180, 360 s) still took five starts and 28 minutes on 2026-11-11.
   let clock = Date.now();
   let readyAfterMs = Infinity;
   let startedAt = clock;
@@ -439,19 +441,15 @@ test("a start after one that timed out gets longer, and a ready start resets the
   context.after(async () => { await controller.stop(); });
   const attempt = async () => { startedAt = clock; try { await controller.start(); return { ready: true, ms: clock - startedAt }; } catch { return { ready: false, ms: clock - startedAt }; } };
 
-  const first = await attempt();
-  assert.equal(first.ready, false);
-  assert.ok(first.ms >= 90_000 && first.ms < 180_000, `first start gave up at ${first.ms} ms`);
-  const second = await attempt();
-  assert.equal(second.ready, false);
-  assert.ok(second.ms >= 180_000 && second.ms < 270_000, `second start waited twice as long: ${second.ms} ms`);
-  readyAfterMs = 300_000; // a start that needs 5 minutes now gets them
-  const third = await attempt();
-  assert.equal(third.ready, true, `third start waited up to four times the limit: ${third.ms} ms`);
+  readyAfterMs = 300_000; // 4.5 to 5 minutes, as on 2026-11-11
+  const slow = await attempt();
+  assert.equal(slow.ready, true, `a start that needs 5 minutes is waited for: ${slow.ms} ms`);
+  assert.equal(harness.children.length, 1, "by the one daemon it began with");
   await controller.stop();
   readyAfterMs = Infinity;
-  const afterReady = await attempt();
-  assert.ok(afterReady.ms < 180_000, `a ready start resets the limit: ${afterReady.ms} ms`);
+  const never = await attempt();
+  assert.equal(never.ready, false);
+  assert.ok(never.ms >= 900_000 && never.ms < 990_000, `one that never gets ready is ended at ten limits: ${never.ms} ms`);
 });
 
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
@@ -625,8 +623,44 @@ test("a pprof-addr file with a loopback address turns on AO's profiler; anything
   assert.equal(await started("127.0.0.1:6061; rm -rf /"), undefined, "only a bare host:port");
 });
 
+// 0.8.110, 2026-11-11: AO needed 4.5 minutes to get ready, was killed at 90, 180, 360 and 360 s,
+// and came up on its fifth start 28 minutes later. Each kill threw the startup work away.
+test("a daemon still running at the limit is waited for, not killed and started again", async (context) => {
+  let probes = 0;
+  const begun = Date.now();
+  const harness = createHarness({ readySlowMs: 20, readyLimitMs: 150, readyHardMs: 5000,
+    readyFetch: () => { probes += 1; if (Date.now() - begun < 600) throw new Error("ECONNREFUSED"); } });
+  const { controller } = harness;
+  context.after(() => controller.stop());
+  assert.equal((await controller.start()).state, "ready");
+  assert.ok(Date.now() - begun >= 600, "it got ready four limits late");
+  assert.equal(harness.children.length, 1, "the same daemon, never a second one");
+  assert.ok(harness.warnings.some(([event]) => event === "ao.start_waiting"), "the wait past the limit is logged");
+  assert.ok(probes > 1);
+});
+
+test("a start that failed is not repeated at once: the next waits, longer each time, and a stop clears it", async (context) => {
+  const harness = createHarness({ readySlowMs: 20, readyLimitMs: 60, readyHardMs: 60, startCooldownMs: 400,
+    readyFetch: () => { throw new Error("ECONNREFUSED"); } });
+  const { controller } = harness;
+  context.after(() => controller.stop());
+  await assert.rejects(controller.start(), /timed out getting ready/);
+  assert.equal(harness.children.length, 1);
+  // Every AO call starts a failed AO again; a dozen polling chats did so at once.
+  for (let call = 0; call < 5; call++) await assert.rejects(controller.start(), /timed out getting ready[^]*starting again in \d+ s/);
+  assert.equal(harness.children.length, 1, "no new daemon inside the pause");
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  await assert.rejects(controller.start(), /timed out getting ready/);
+  assert.equal(harness.children.length, 2, "one more start after the pause");
+  const pauses = harness.warnings.filter(([event]) => event === "ao.start_failed").map(([, detail]) => detail.nextStartInMs);
+  assert.deepEqual(pauses, [400, 800], "the pause doubles");
+  await controller.stop();
+  await assert.rejects(controller.start(), /timed out getting ready/);
+  assert.equal(harness.children.length, 3, "after a stop the start is immediate");
+});
+
 test("a daemon that never listens fails at the limit", async (context) => {
-  const harness = createHarness({ readySlowMs: 20, readyLimitMs: 300, readyFetch: () => { throw new Error("ECONNREFUSED"); } });
+  const harness = createHarness({ readySlowMs: 20, readyLimitMs: 300, readyHardMs: 300, readyFetch: () => { throw new Error("ECONNREFUSED"); } });
   const { controller } = harness;
   context.after(() => controller.stop());
   await assert.rejects(controller.start(), /Agent Orchestrator timed out getting ready/);

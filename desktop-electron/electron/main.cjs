@@ -82,7 +82,7 @@ const {
   pendingAppliedUpdate, recentUpdateFailure, sweepUpdateLeftovers, waitForUpdateApply,
 } = require("./app-update.cjs");
 const { consumeRelaunchNote, spawnRelaunchGuard } = require("./relaunch-guard.cjs");
-const { createUpdateHealthGate } = require("./update-health-gate.cjs");
+const { createUpdateHealthGate, waitForIdleChats } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { createAppPlugins } = require("./app-plugins.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
@@ -5506,6 +5506,17 @@ async function start() {
     },
   };
   backendBundles.watchIncoming(async (manifest) => {
+    // The restart ends every running AO turn, so it waits for the chats (waitForIdleChats). An AO
+    // that is not running has no turn to end.
+    const waited = await waitForIdleChats({
+      working: async () => agentOrchestratorUpstream?.snapshot().state === "ready"
+        && await agentOrchestratorUpstream.harness.anySessionWorking({ start: false }),
+      onWait: () => {
+        logger.info("backend.update_waiting_for_chats", { id: manifest.id });
+        publishOperation({ name: "backend-update", status: "running", message: `Backend ${manifest.id} is installed once the running chats finish` });
+      },
+    });
+    if (waited === "timeout") logger.warn("backend.update_chat_wait_timed_out", { id: manifest.id });
     publishOperation({ name: "backend-update", status: "running", message: `Installing backend ${manifest.id}` });
     await backendControl.restart("backend-update");
     publishOperation({ name: "backend-update", status: "completed", message: `Backend ${manifest.id} is live. The app, Codex bridge, MCP and CPA kept running.` });

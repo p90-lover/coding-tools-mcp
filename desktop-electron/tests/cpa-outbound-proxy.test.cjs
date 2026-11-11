@@ -323,3 +323,24 @@ test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets
   assert.equal(process.env.HTTPS_PROXY, undefined);
   assert.equal(process.env.NODE_USE_ENV_PROXY, undefined);
 });
+
+// 0.8.110, 2026-11-11: each start read provider-network.json synchronously, and one such read froze
+// the main process for 46.5 s on a busy disk while CPA was being restarted.
+test("a start uses the route read off the main thread, and reads the disk only when that may be behind", () => {
+  const { routeForStart } = require("../electron/managed-external-services.cjs");
+  const route = { profileId: "owned", url: "http://127.0.0.1:17891/" };
+  let reads = 0;
+  const fromDisk = () => { reads += 1; return { profileId: "disk", url: "http://127.0.0.1:1/" }; };
+  assert.equal(routeForStart({ value: route }, true, fromDisk), route);
+  assert.equal(reads, 0, "a current copy is used without touching the disk");
+  // What the read refused (no proxy selected, a broken file) is what the start refuses.
+  assert.throws(() => routeForStart({ error: new Error("The saved proxy settings are invalid, so CPA didn't start") }, true, fromDisk), /invalid/);
+  assert.equal(reads, 0);
+  // Never read, a read under way or due, or no watch on the folder: the disk decides, as before.
+  assert.equal(routeForStart({ value: route }, false, fromDisk).profileId, "disk");
+  assert.equal(routeForStart(undefined, true, fromDisk).profileId, "disk");
+  assert.equal(reads, 2);
+  const source = fs.readFileSync(path.join(__dirname, "../electron/managed-external-services.cjs"), "utf8");
+  assert.match(source, /const current = diskState\.read && !diskRead && !refreshTimer && diskWatches\[0\]\.watching\(\);/);
+  assert.match(source, /routeForStart\(diskState\.routes\.get\(id\), current, \(\) => resolveCpaProxyRoute\(root, storage, id\)\)/);
+});
