@@ -84,6 +84,38 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 - A silent install (`/S /D=H:\Apps\Coding Tools`) copies the old install to `%TEMP%` as a rollback: set `TEMP`/`TMP` to a folder on H: (outside the install folder) before running it.
 - Keep scratch, backups and Trash out of `H:\Apps\Coding Tools`: every update copies that whole folder.
 
+## Disk space: write once, clean up after yourself
+
+G: and H: are one shared hard disk. It holds the project, every worktree, the build caches and the running app's own data. When it fills, the app breaks, not just your build: on 2026-11-11 G: reached 0 bytes during a release readback, and chat messages failed to send ("os error 112") until space was freed. Each run below is from this repository's history.
+
+- **Check free space before heavy work, and stop when it is short.** `df -B1M /g` before a build (needs at least 3 GB), a full test suite or a cargo build. If space is short, clean up first. Never start one that would fill the disk.
+- **Moving to Trash on the same drive frees nothing.** The build scripts move the previous output into `aiTemp/Trash/<date>-*` (about 1.4 GB per packaging run). Once the build it belongs to is verified or published, delete those folders, the `aiTemp/work/electron-package-win/builder-output-*` folders and old `desktop-electron/artifacts`. Check `git ls-files aiTemp/Trash` first: some Trash folders are tracked fixtures and stay.
+- **Don't copy what you can stream or point at.**
+  - Check a published release by streaming each asset into the hash (`gh release download <tag> --pattern <file> -O - | sha256sum`), not by downloading a second copy.
+  - Don't copy installers into an extra staging folder, and don't keep backups of old builds or of the installed app. The GitHub release is the backup.
+- **Worktrees:**
+  - Reuse one worktree per task, including its follow-ups. Don't make a new worktree and branch for every fix.
+  - Link `node_modules` by junction instead of installing a copy.
+  - Remove your worktree once its PR has merged. Never `git worktree remove --force` one that holds junctions: git deletes through them into the shared `node_modules`. Unlink the junctions first (`cmd /c dir /AL /S /B <worktree>` lists them), then delete, then `git worktree prune`.
+  - Subagent worktrees under `.claude/worktrees/` count too.
+- **Caches go in one shared place.**
+  - Go: `GOCACHE`, `GOMODCACHE` and `GOTMPDIR` under `G:\coding-tools-build-cache\{gocache,gomod,gotmp}`.
+  - Cargo: reuse the checkout's `target`; don't create ad-hoc `CARGO_TARGET_DIR` folders. One headless debug build in `G:\aiTemp\cargo-headless` wrote 7.4 GB in a day, and nothing ever used it again.
+  - After a cargo test run, `target/debug/incremental` can go.
+- **Scratch belongs to a task.**
+  - Keep a task's scratch in one folder (`G:\aiTemp\<task>`). Delete it when the task has shipped, except files a script or test still reads: grep for the path first.
+  - Daemons don't log to files; keep their output in memory or in the pipe.
+  - Test runs leave fixtures under the worktree's `aiTemp/`; delete them after the run.
+- **One heavy disk job at a time.** A build, a full test suite, a cargo build, a bulk delete and a recursive `du` or `grep` over G: each slow the others many times over. They also freeze the running app, whose data is on the same disk: a 0.8.42 package step took 2 h 08 min next to a `du`, and 46 min alone.
+  - Bound every scan with `timeout` and a narrow path.
+  - Never walk `G:\AppData` or a whole worktree tree while the app is busy.
+  - Run deletes in the background.
+- **In the app's own code, don't write what hasn't changed.**
+  - Compare before rewriting a file, and debounce state that changes often.
+  - Batch streaming writes, and never flush synchronously on Electron main.
+  - Prune what grows: old runtime versions, per-account browser data after the account is removed, and stray `*.tmp-*` files from interrupted atomic writes.
+  - A rewrite that keeps the same bytes still costs a flushed write and, on main, a frozen window.
+
 ## Delivery: every change ships as a release
 
 Every agent working in this repository follows this: Claude Code, Codex, opencode and Coding Tools' own chat agents. A task with file changes is not done until its change is merged and released.
@@ -125,7 +157,7 @@ GitHub sometimes stops running workflows for this repository at the account leve
    Then check what the workflow checks: `Coding.Tools_<ver>_win_x64_portable.zip`, `_update.json`, `*.ctpack` and `SHA256SUMS.txt` exist; delete `*.blockmap`; append the `.exe` hash to `SHA256SUMS.txt`; and `sha256sum -c SHA256SUMS.txt` passes.
 6. **Publish by hand, draft first.** The in-app updater skips drafts.
    - `gh release create v<ver> --target <merged commit> --draft --title "Coding Tools v<ver>" --notes-file docs/releases/v<ver>.md <artifacts>/*`
-   - Download it back with `gh release download` and run `sha256sum -c SHA256SUMS.txt` on the copies.
+   - Read it back without a second copy on disk: stream each asset with `gh release download v<ver> --pattern <file> -O - | sha256sum` and compare it with `SHA256SUMS.txt`.
    - Only then run `gh release edit v<ver> --draft=false --latest`.
 7. **Clean up.** Delete the build's dated `aiTemp/Trash` folders in `ct-build`. Tell the user the release was built and tested locally, not by CI.
 
