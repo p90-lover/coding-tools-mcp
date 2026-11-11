@@ -542,11 +542,40 @@ test("reads of a running card reuse a recent live answer from its chat host inst
 });
 
 test("every operation the renderer calls is one the AO module accepts (the chat's commands included)", () => {
+  // Every way the renderer reaches the module counts: literal calls, and each helper that takes the
+  // operation first and passes it on, in its own file or a file that imports it. Only moduleCall was
+  // read before, so the subagent panel's own helper (paneCall "subagent_transcript") was never
+  // checked and failed every time in the app: "agent-orchestrator module does not expose
+  // subagent_transcript" (2026-11-11 08:08:59Z).
   const features = path.resolve(__dirname, "../src/features");
-  const called = new Set();
-  for (const file of fs.readdirSync(features).filter(name => /\.tsx?$/.test(name))) {
-    for (const match of fs.readFileSync(path.join(features, file), "utf8").matchAll(/moduleCall\("([a-z_]+)"/g)) called.add(match[1]);
+  const files = new Map(fs.readdirSync(features).filter(name => /\.tsx?$/.test(name))
+    .map(name => [name, fs.readFileSync(path.join(features, name), "utf8")]));
+  const helpersOf = new Map(), exportedOf = new Map();
+  for (const [file, text] of files) {
+    if (!/moduleId: "agent-orchestrator",\s*operation[,\s]/.test(text)) continue;
+    helpersOf.set(file, new Set());
+    exportedOf.set(file, new Set());
+    for (const match of text.matchAll(/(export\s+)?(?:async\s+)?(?:function\s+(\w+)\s*\(|const\s+(\w+)\s*=\s*(?:async\s*)?\()operation\b/g)) {
+      helpersOf.get(file).add(match[2] || match[3]);
+      if (match[1]) exportedOf.get(file).add(match[2] || match[3]);
+    }
   }
+  const called = new Set();
+  const helpersSeen = new Set();
+  for (const [file, text] of files) {
+    const helpers = new Set(helpersOf.get(file));
+    for (const [source, names] of exportedOf) {
+      const imported = text.match(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"\\./${source.replace(/\.tsx?$/, "")}"`));
+      if (imported) for (const name of names) if (new RegExp(`\\b${name}\\b`).test(imported[1])) helpers.add(name);
+    }
+    for (const match of text.matchAll(/moduleId: "agent-orchestrator",\s*operation: "([a-z_]+)"/g)) called.add(match[1]);
+    for (const match of text.matchAll(/\b(\w+)\(\s*"([a-z_]+)"/g)) {
+      if (helpers.has(match[1])) { called.add(match[2]); helpersSeen.add(match[1]); }
+    }
+  }
+  for (const helper of ["moduleCall", "paneCall", "chatCall", "callUpstream"]) assert.ok(helpersSeen.has(helper), `${helper}'s calls are read`);
+  for (const operation of ["subagent_transcript", "chat_context", "cpa_usage", "chat_auto_retry"]) assert.ok(called.has(operation), `${operation} is called`);
+  assert.equal(handler.isReadOnly("subagent_transcript"), true, "a read: it needs no focused window");
   for (const operation of ["chat_send", "chat_goal", "chat_loop", "chat_queue", "compact_chat", "chat_diff", "chat_delete_message", "runs"]) assert.ok(called.has(operation), `${operation} is called`);
   const unknown = [...called].filter(operation => !handler.operations.includes(operation));
   assert.deepEqual(unknown, [], "an operation missing here fails in the app as \"Unknown Agent Orchestrator operation\"");
