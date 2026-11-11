@@ -196,6 +196,19 @@ installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
   persist: process.env.CODING_TOOLS_PERSIST_LOGS === "1",
 });
+// Temporary files and rtk's history stay off the system drive (system-drive.cjs). Set before anything
+// starts, so the update worker and installer, AO and its agents, CPA and the bridge all inherit them.
+// The folder must exist first: Chromium's helper processes read TEMP as they start (a startup-only
+// sync call). If it can't be made, the inherited temporary folder stays.
+const systemDrive = require("./system-drive.cjs");
+const systemDriveRedirect = systemDrive.systemDriveRedirects({ env: process.env, dataRoot: launcherUserData });
+try {
+  if (systemDriveRedirect.tempDir) fs.mkdirSync(systemDriveRedirect.tempDir, { recursive: true });
+  Object.assign(process.env, systemDriveRedirect.env);
+} catch {
+  const { TEMP, TMP, TMPDIR, ...others } = systemDriveRedirect.env;
+  Object.assign(process.env, others);
+}
 
 let mainWindow = null;
 // Certificate authorities the app no longer trusts (ca-distrust.cjs: the leaked eMudhra/emSign CA
@@ -4574,6 +4587,12 @@ async function start() {
         sweepUpdateLeftovers(path.dirname(process.execPath));
       } catch { /* best-effort cleanup */ }
     });
+  }
+  // system-drive.cjs: rtk's history folder, and temporary files nothing has touched for a week cleared
+  // once startup has settled (asynchronous; files in use are skipped).
+  if (systemDriveRedirect.rtkDir) void fs.promises.mkdir(systemDriveRedirect.rtkDir, { recursive: true }).catch(() => {});
+  if (systemDriveRedirect.tempDir) {
+    setTimeout(() => { void systemDrive.pruneTemp(systemDriveRedirect.tempDir).catch(() => {}); }, 120_000).unref?.();
   }
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"), {

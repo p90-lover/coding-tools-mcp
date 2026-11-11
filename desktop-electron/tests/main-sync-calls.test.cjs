@@ -34,7 +34,10 @@ const ALLOWED = {
   "codex-thread-accounts.cjs": 2, "codex-thread-stats.cjs": 1, "computer-control.cjs": 4, "cpa-antigravity-reauth.cjs": 4,
   "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 45, "durable-state.cjs": 5, "external-services.cjs": 27,
   "extra-tunnels.cjs": 5, "gpt-browser.cjs": 1, "gui-update.cjs": 12, "headless-host.cjs": 11, "in-use-files.cjs": 4,
-  "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1, "main.cjs": 24,
+  "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1,
+  // +1: the off-system-drive temporary folder is made once at startup, before any window or child
+  // exists (system-drive.cjs): Chromium's helpers read TEMP as they start.
+  "main.cjs": 25,
   "managed-components.cjs": 48, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9,
