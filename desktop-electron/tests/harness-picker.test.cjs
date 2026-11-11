@@ -73,8 +73,9 @@ test("every known harness has its bundled brand image, including missing agents"
 test("display-name aliases identify known brands without guessing an unknown harness", () => {
   const { harnessMark } = logos();
   for (const [label, asset] of [["Gemini CLI", "brand/gemini-cli.svg"], ["DeepSeek", "ao/deepseek-harness.svg"], ["Prime Agent", "ao/prime-agent.png"],
+    ["Native Codex", "openai.png"],
     ["Kilo Code", "brand/kilocode.svg"], ["GitHub Copilot", "ao/copilot.svg"], ["Unreal Agent", "ao/unreal-agent.png"], ["Grok Build", "brand/grok-build.png"],
-    ["Qwen Code", "qwen.svg"], ["Muse Code", "meta.svg"], ["Claude Code", "brand/claude-code.png"], ["Native Codex", "openai.png"]]) {
+    ["Qwen Code", "qwen.svg"], ["Muse Code", "meta.svg"], ["Claude Code", "brand/claude-code.png"]]) {
     assert.equal(assetOf(harnessMark("custom-id", label)(16).props.src), asset, label);
   }
   assert.equal(harnessMark("unknown-agent", "Unknown")(16).type, "svg", "unknown brands keep an honest neutral fallback");

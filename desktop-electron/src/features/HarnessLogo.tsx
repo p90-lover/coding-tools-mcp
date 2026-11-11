@@ -48,9 +48,6 @@ import zhipuLogo from "../assets/models/zhipu.svg";
 // - ao/: Agent Orchestrator's own AgentAvatar files (unmodified), kept only where they are the
 //   product's own icon. Unreal Agent is AO's own harness.
 // - Kimi Code, Qwen Code and Muse Code (Meta's) share their maker's mark with the model lists.
-// - Native Codex runs Codex through ChatGPT, so it shows ChatGPT's mark (the user, 2026-11-11: "replace
-//   the codex logo to chatgpt on native codex"), as GPT and WebGPT do in the model lists. AO's own
-//   Codex CLI harness keeps Codex's.
 // AO's copies were wrong for these, and the user saw them: Claude Code showed the pixel mascot,
 // Qwen Code showed Alibaba Cloud, Kimi showed Moonshot's ball, Grok Build showed a stray "xI",
 // Gemini CLI showed the Gemini model's sparkle, Amp showed its retired chevrons, and opencode,
@@ -67,11 +64,10 @@ function image(src: string, mono = false, backed = false): Mark {
 const openaiMark = image(openaiLogo, true);
 const gemini = image(geminiLogo);
 
-// Harness id (without "ao:") → its mark, keyed as AO's AgentAvatar keys them. Cline's robot,
-// Grok Build's SpaceXAI symbol and ChatGPT's knot are black glyphs (mono); Kimi's black K keeps a
-// light backing.
+// Harness id (without "ao:") → its mark, keyed as AO's AgentAvatar keys them. Cline's robot and
+// Grok Build's SpaceXAI symbol are black glyphs (mono); Kimi's black K keeps a light backing.
 const MARKS: Record<string, Mark> = {
-  "claude-code": image(claudeCodeLogo), codex: image(codexLogo), "codex-native": openaiMark, agy: image(agyLogo), opencode: image(opencodeLogo),
+  "claude-code": image(claudeCodeLogo), codex: image(codexLogo), agy: image(agyLogo), opencode: image(opencodeLogo),
   "opencode-v2": image(opencodeLogo), aider: image(aiderLogo), amp: image(ampLogo), auggie: image(auggieLogo),
   autohand: image(autohandLogo), cline: image(clineLogo, true), continue: image(continueLogo), copilot: image(copilotLogo),
   crush: image(crushLogo), cursor: image(cursorLogo), "deepseek-harness": image(deepseekHarnessLogo), devin: image(devinLogo),
@@ -80,6 +76,10 @@ const MARKS: Record<string, Mark> = {
   kimi: image(kimiLogo, false, true), kiro: image(kiroLogo), "mimo-code": image(mimoCodeLogo, true), muse: image(metaLogo),
   omp: image(ompLogo), pi: image(piLogo), "prime-agent": image(primeAgentLogo, true), qwen: image(qwenLogo),
   "unreal-agent": image(unrealAgentLogo), vibe: image(vibeLogo),
+  // Native Codex runs Codex through ChatGPT, so it shows ChatGPT's black knot (mono), as GPT and WebGPT
+  // do in the model lists (the user, 2026-11-11: "replace the codex logo to chatgpt on native codex").
+  // AO's own Codex CLI harness keeps Codex's mark.
+  "codex-native": openaiMark,
 };
 // Other names a harness goes by: Antigravity's long id, and the display names a custom id may carry
 // ("Native Codex", "Gemini CLI", "Kilo Code").
