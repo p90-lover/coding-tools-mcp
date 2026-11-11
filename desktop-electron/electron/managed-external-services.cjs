@@ -260,6 +260,7 @@ function createManagedExternalServicesController({
     env: options.env,
     logger: options.logger,
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    ...(options.releaseFetch ? { releaseFetch: options.releaseFetch } : {}),
     spawnProcess: options.spawnProcess,
     terminateProcessTree: options.terminateProcessTree,
     persistentComponents: options.persistentComponents,

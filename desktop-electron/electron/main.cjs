@@ -97,6 +97,7 @@ const {
 } = require("./provider-bootstrap.cjs");
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
+const { fetchFollowingRedirects } = require("./managed-components.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
@@ -549,6 +550,17 @@ function describeTimedPartition(partition) {
     return { group: "GPT Browser", account: entry?.email || entry?.label || gptAccount };
   }
   return {};
+}
+
+// Remote fetches for Node-side services (CPA's release checks and downloads, app plugin and
+// Antigravity CLI updates) go through the launcher's network, so their sockets live in Chromium's
+// network service, never on main. On 2026-11-11 (0.8.108) a plugin update check's connect to
+// api.github.com, made from main by Node's own fetch, was held 88 s in the kernel and froze every
+// window. Node's fetch follows redirects unless asked for "manual"; this keeps that contract.
+function fetchRemoteOffMain(url, options = {}) {
+  return options.redirect === "manual"
+    ? fetchThroughLauncherNetwork(url, options)
+    : fetchFollowingRedirects(fetchThroughLauncherNetwork, url, options);
 }
 
 // Native fetches omit cookies by default. Explicit session reads use their registered account's
@@ -4802,6 +4814,8 @@ async function start() {
     safeStorage,
     env: process.env,
     logger,
+    // CPA's GitHub release checks and downloads; its local health checks keep Node's fetch.
+    releaseFetch: fetchRemoteOffMain,
     // CPA (the local model proxy) is core: it outlives launcher restarts and backend updates.
     persistentComponents: IS_DEV_PROFILE ? [] : ["cpa"],
     publish: (value) => send("launcher:external-services-changed", value),
@@ -4832,6 +4846,7 @@ async function start() {
   appPluginsService = createAppPlugins({
     cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
     services: () => externalServicesController,
+    fetchImpl: fetchRemoteOffMain,
     // A plugin DLL loads when CPA starts.
     restartCpa: () => externalServicesController.restart("cpa"),
     antigravityCli: () => antigravityCliService,
@@ -5227,6 +5242,7 @@ async function start() {
     const antigravityCli = createAntigravityCli({
       toolsRoot: path.join(app.getPath("userData"), "tools"),
       confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
+      fetchImpl: fetchRemoteOffMain,
     });
     antigravityCliService = antigravityCli;
     antigravityAuthBrowser = createAntigravityAuthBrowser({

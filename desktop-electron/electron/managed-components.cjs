@@ -85,6 +85,8 @@ const RELEASE_VERSION = /^\d+\.\d+\.\d+$/;
 const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const MAX_CHECKSUMS_BYTES = 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+const MAX_RELEASE_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const DEFAULT_DOWNLOAD_ATTEMPTS = 4;
 const DEFAULT_DOWNLOAD_RETRY_BASE_MS = 250;
 const MAX_DOWNLOAD_RETRY_DELAY_MS = 5_000;
@@ -284,6 +286,24 @@ function parseChecksums(text) {
     if (match) checksums.set(match[2], match[1].toLowerCase());
   }
   return checksums;
+}
+
+/**
+ * Fetches `url`, following redirects here rather than in the fetch: the launcher's network fetch
+ * hands each redirect back (GitHub sends every release asset to another host). A redirect may
+ * not leave https, because the checksums that vouch for a download come over this same path.
+ */
+async function fetchFollowingRedirects(fetcher, url, init = {}) {
+  let current = new URL(String(url));
+  for (let hop = 0; hop <= MAX_RELEASE_REDIRECTS; hop += 1) {
+    const response = await fetcher(current.toString(), { ...init, redirect: "manual" });
+    const location = REDIRECT_STATUSES.has(response.status) ? response.headers?.get?.("location") : null;
+    if (!location) return response;
+    try { await response.body?.cancel?.(); } catch {}
+    current = new URL(location, current);
+    if (current.protocol !== "https:") throw new Error(`Refusing a redirect to ${current.protocol}//${current.host}`);
+  }
+  throw new Error(`Too many redirects from ${new URL(String(url)).pathname}`);
 }
 
 /**
@@ -535,6 +555,10 @@ function createManagedComponentController({
   safeStorage = null,
   logger = null,
   fetchImpl = globalThis.fetch,
+  // GitHub release checks and downloads (default: fetchImpl). main passes the launcher's network,
+  // whose sockets live in Chromium's network service: on 2026-11-11 a connect to api.github.com
+  // made from main by Node's own fetch was held 88 s in the kernel, and every window froze with it.
+  releaseFetch = null,
   spawnProcess = spawnOffThread,
   terminateProcessTree = terminateOwnedProcessTree,
   spawnSyncProcess = spawnSync,
@@ -551,6 +575,7 @@ function createManagedComponentController({
 } = {}) {
   if (!dataRoot || !path.isAbsolute(dataRoot)) throw new Error("Managed component data root must be absolute");
   const downloadFetch = typeof fetchImpl === "function" ? fetchImpl : null;
+  const releaseFetcher = typeof releaseFetch === "function" ? releaseFetch : downloadFetch;
 
   // The manifests this build ships; `manifests` holds the active ones, which an installed update replaces.
   const bundledManifests = new Map(COMPONENT_IDS.map((id) => [id, loadManagedManifest(id, manifestRoot)]));
@@ -1424,10 +1449,10 @@ function createManagedComponentController({
       const partialPath = `${destination}.attempt-${attempt}-${crypto.randomUUID()}.partial`;
       let response = null;
       try {
-        if (typeof downloadFetch !== "function") {
+        if (typeof releaseFetcher !== "function") {
           throw new Error(`${manifest.name} bundled archive is missing from this Coding Tools build`);
         }
-        response = await downloadFetch(url, { redirect: "follow" });
+        response = await fetchFollowingRedirects(releaseFetcher, url);
         if (!response.ok || !response.body) {
           const error = new Error(`Download failed: HTTP ${response.status}`);
           error.status = response.status;
@@ -1727,9 +1752,8 @@ function createManagedComponentController({
   }
 
   async function fetchFromGitHub(url, accept) {
-    if (!downloadFetch) throw new Error("Update checks need network access");
-    const response = await downloadFetch(url, {
-      redirect: "follow",
+    if (!releaseFetcher) throw new Error("Update checks need network access");
+    const response = await fetchFollowingRedirects(releaseFetcher, url, {
       headers: { Accept: accept, "User-Agent": "Coding-Tools" },
       signal: AbortSignal.timeout(20_000),
     });
@@ -2556,6 +2580,7 @@ module.exports = {
   INSTALL_STATES,
   assertSafeManifest,
   compareVersions,
+  fetchFollowingRedirects,
   parseChecksums,
   updatedManifest,
   bundledSourceHome,
