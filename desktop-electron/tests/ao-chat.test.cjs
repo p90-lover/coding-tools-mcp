@@ -1735,7 +1735,7 @@ test("late chat creation never overwrites another project, another chat, or an u
     const send = rendererCallback("AgentOrchestratorSurface.tsx", "sendChat", {
       busy: "", workspaceId: "a", selection, mounted, boardWorkspace: { current: "a" }, board: { tasks: [] },
       composerMode: "single", singleRoute: { model: "fixture" }, savedTeams: [], composerTeamId: "",
-      run: async (_name, action) => action(), aoChatExecution: () => ({}), executableArg: () => ({}),
+      chatRun: async (_task, action) => action(), aoChatExecution: () => ({}), executableArg: () => ({}),
       moduleCall: async () => started.promise, rememberChatRoute() {}, startNotice: () => "",
       loadBoard: async () => stage === "refresh" ? refreshed.promise : undefined, loadMissions: async () => {},
       setMissions: set("missions"), setBoard: set("board"), setPendingChat: set("pendingChat"),
@@ -1755,6 +1755,33 @@ test("late chat creation never overwrites another project, another chat, or an u
     assert.deepEqual(state.board.tasks, [{ id: "task-b" }], stage);
     assert.deepEqual(state.missions, [{ id: "run-b", workspace_id: "b" }], stage);
   }
+});
+
+test("sendChat bypasses unrelated surface work but rejects a duplicate while its chat owns the send", async () => {
+  const pending = delayedReply(), calls = [];
+  const chatBusyIds = { current: new Set(["other-chat"]) };
+  const chatRun = rendererCallback("AgentOrchestratorSurface.tsx", "chatRun", { chatBusyIds, setChatBusy() {}, setError() {} });
+  const send = rendererCallback("AgentOrchestratorSurface.tsx", "sendChat", {
+    busy: "refresh", workspaceId: "ws", selection: { current: { workspaceId: "ws", taskId: "mine" } }, mounted: { current: true },
+    boardWorkspace: { current: "ws" }, board: { tasks: [{ id: "mine" }] }, chatRun,
+    composerMode: "single", singleRoute: { model: "fixture" }, savedTeams: [], composerTeamId: "",
+    aoChatExecution: () => ({}), executableArg: () => ({}),
+    moduleCall: (operation, args) => { calls.push({ operation, args }); return pending.promise; },
+    startNotice: () => "", loadBoard: async () => {}, loadMissions: async () => {},
+    setMissions() {}, setBoard() {}, setPendingChat() {}, setChatTaskId() {}, setSelectedRunId() {}, setChatNotices() {}, setAutoStatus() {}, setError() {},
+    sendRefusedForNow: () => false,
+  });
+  const sending = send({ taskId: "mine", message: "no refresh wait" });
+  assert.equal(calls.length, 1, "an unrelated action never delays the chat_send call");
+  assert.equal(calls[0].operation, "chat_send");
+  assert.equal(calls[0].args.deferStart, true, "run startup still happens behind normal backend authorization");
+  await assert.rejects(send({ taskId: "mine", message: "duplicate" }), /still updating/);
+  assert.equal(calls.length, 1, "the synchronous per-chat guard prevents a duplicate dispatch");
+  pending.resolve({ ok: true, taskId: "mine", runId: "mine-run", status: "starting" });
+  await sending;
+  await new Promise(setImmediate);
+  assert.equal(chatBusyIds.current.has("mine"), false);
+  assert.equal(chatBusyIds.current.has("other-chat"), true, "another chat's ownership is not released");
 });
 
 function outgoingSend() {

@@ -1813,11 +1813,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   });
 
   const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string; rewind?: { index: number; description: string } }) => new Promise<void>((resolve, reject) => {
-    // run() skips its action while another one is in flight; never leave the chat waiting on it.
-    if (busy) { reject(new Error("Another action is still running")); return; }
     const owner = selection.current;
     const current = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.taskId === owner.taskId;
-    void run("chat", async () => {
+    void chatRun(input.taskId || "new-chat", async () => {
       try {
         if (!workspaceId) throw new Error("Add a project first");
         // A follow-up must go to a task of the open project; anything else is a stale selection.
@@ -1873,7 +1871,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         if (input.taskId && sendRefusedForNow(cause)) return;
         throw cause;
       }
-    });
+    }).catch(reject);
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
   // not wait behind another action, and it changes no run state the surface tracks.
@@ -3094,7 +3092,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} queue={chatQueue} commands={chatCommands}
+                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && composerMode === "team" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>

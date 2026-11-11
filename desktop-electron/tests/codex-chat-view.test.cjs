@@ -881,6 +881,27 @@ test("Enter is never refused while another action holds the surface: the message
   assert.match(text(walk(view.render()).find((element) => element.props?.["aria-label"] === "Queued messages")), /keep going/);
 });
 
+test("an idle chat sends immediately during an unrelated surface action and keeps its optimistic bubble until acceptance", async () => {
+  for (const taskId of ["", "idle-send"]) {
+    const accepted = delayedReply(), sends = [];
+    const { props } = base({ selectedTaskId: taskId, projectId: "ws", busy: true, sendBusy: false,
+      runs: taskId ? [run("idle-run", taskId, [node("p", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })] : [],
+      send: async input => { sends.push(input); await accepted.promise; } });
+    const view = mount(props);
+    const textarea = () => walk(view.render()).find(element => element.type === "textarea");
+    textarea().props.onChange({ target: { value: "send without waiting for refresh" } });
+    walk(view.render()).find(element => element.type === "form").props.onSubmit({ preventDefault() {} });
+    assert.equal(sends.length, 1, "Send reaches the backend before the unrelated action or its acceptance promise settles");
+    assert.equal(textarea().props.value, "", "the draft clears immediately");
+    const pending = view.render();
+    assert.match(text(pending), /send without waiting for refresh/, "the pending message is visible before backend acknowledgement");
+    assert.equal(walk(pending).some(element => element.props?.["aria-label"] === "Queued messages"), false, "an idle chat does not enter the background queue");
+    accepted.reject(new Error("send unavailable"));
+    await new Promise(setImmediate);
+    assert.equal(textarea().props.value, "send without waiting for refresh", "a refused send restores its draft rather than claiming acceptance");
+  }
+});
+
 test("a queued message waits in Claude Code's queued bar: 1 message queued, its text greyed, Send now, Edit and Remove", async () => {
   const { props, calls } = base({ selectedTaskId: "t-bar", working: true,
     runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],

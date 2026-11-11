@@ -1160,7 +1160,7 @@ function useFarTurns(scroller: { current: HTMLElement | null }, column: { curren
 }
 
 export function AgentOrchestratorChat({
-  runs, tasks, selectedTaskId, busy, loadDescription, send, openStructure,
+  runs, tasks, selectedTaskId, busy, sendBusy = busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
@@ -1191,6 +1191,8 @@ export function AgentOrchestratorChat({
   /** "" for a new, unsent chat. */
   selectedTaskId: string;
   busy: boolean;
+  /** Only work owned by this chat blocks Send; unrelated surface actions keep their own controls busy. */
+  sendBusy?: boolean;
   /** The chat's latest run is being driven right now (not just left pending). */
   working?: boolean;
   loadDescription: (taskId: string) => Promise<string>;
@@ -1746,15 +1748,9 @@ export function AgentOrchestratorChat({
   // A steer goes straight to the agent and a queued message waits here: neither takes the surface's
   // one-action lock (busy), which an approval or a refresh holds often while a chat runs. Waiting on
   // it kept the Stop button in place of Steer while the user typed.
-  // A message typed while the previous one is still being sent waits in the queue, as Claude Code
-  // queues one typed during a response. Enter did nothing at all then, so a quick second message
-  // looked dropped.
-  // Also a steer typed while the last message is still being sent, and a message typed while the
-  // surface's one-action lock is held (a refresh, an approval): Enter did nothing for 2-5 s after a
-  // send ("it will stop then freeze"), as the new run turned the chat steerable before the send
-  // returned. The composer never refuses, as in Claude Code: it waits in the queued-message bar and
-  // goes (steered or sent) the moment the send or the lock is done.
-  const queueWhileSending = Boolean(selectedTaskId) && (sending || (busy && !steering));
+  // A previous send or a same-chat mutation owns the next turn until it settles. Other chats and
+  // surface actions do not own this turn; only the chat-scoped Send guard queues it here.
+  const queueWhileSending = Boolean(selectedTaskId) && (sending || (sendBusy && !steering));
   const canSend = !attaching && !(deciding && !selectedTaskId) && (!sending || queueWhileSending)
     && Boolean(draft.trim() || attachments.length || annotations.length) && (accepts || steering || queueing || queueWhileSending);
   const slash = chatSlashMatches(draft, { chat: Boolean(selectedTaskId), run: Boolean(latest), open: runOpen })
@@ -2037,7 +2033,7 @@ export function AgentOrchestratorChat({
    * can be steered (a goal too, as its first round), and otherwise queues it for when the current turn finishes.
    */
   const dispatch = async (what: string, message: string, goal: string | undefined, typed: string): Promise<"sent" | "queued" | false> => {
-    if (busy || sending) { say(what, "Another action is running. Try again in a moment."); return false; }
+    if (sendBusy || sending) { say(what, "Another action is running. Try again in a moment."); return false; }
     if (accepts || steering) return await deliver(message, goal) ? "sent" : false;
     // Queued as Claude Code queues a command: it joins the queued messages above the composer, as
     // typed. The "Queued. It's sent when this turn finishes" card is gone.
