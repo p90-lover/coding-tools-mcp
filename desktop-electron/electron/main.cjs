@@ -96,7 +96,7 @@ const {
   stopProxyBridgeNova,
 } = require("./provider-bootstrap.cjs");
 
-const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
+const { createManagedExternalServicesController, resolveManagedProxyEnvironmentAsync } = require("./managed-external-services.cjs");
 const { fetchFollowingRedirects } = require("./managed-components.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
@@ -4977,9 +4977,10 @@ async function start() {
     if (!Array.isArray(catalog.workspaces)) throw new Error("Workspace catalog is unavailable");
     return catalog.workspaces;
   };
-  // The Antigravity CLI always runs through the app's global network proxy (fail closed).
-  const antigravityProxyEnvironment = () => {
-    const env = resolveManagedProxyEnvironment("antigravity-cli", path.join(app.getPath("userData"), "integrations"), safeStorage);
+  // The Antigravity CLI always runs through the app's global network proxy (fail closed). Its saved
+  // settings are read off main (resolveManagedProxyEnvironmentAsync); every caller awaits this.
+  const antigravityProxyEnvironment = async () => {
+    const env = await resolveManagedProxyEnvironmentAsync("antigravity-cli", path.join(app.getPath("userData"), "integrations"), safeStorage);
     const allowed = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY"];
     return Object.fromEntries(allowed.filter(key => typeof env[key] === "string" && env[key]).map(key => [key, env[key]]));
   };
@@ -5275,13 +5276,13 @@ async function start() {
       switch (operation) {
         case "status": {
           let proxy;
-          try { proxy = { configured: Boolean(antigravityProxyEnvironment().HTTPS_PROXY) }; }
+          try { proxy = { configured: Boolean((await antigravityProxyEnvironment()).HTTPS_PROXY) }; }
           catch (error) { proxy = { configured: false, error: String(error?.message || error).slice(0, 200) }; }
           return { ...(await antigravityCli.statusAsync()), proxy, cpa: await antigravityReauth.status() };
         }
         case "install": return antigravityCli.install();
         case "terminal_open": {
-          const env = antigravityProxyEnvironment();
+          const env = await antigravityProxyEnvironment();
           if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
             executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
@@ -5322,7 +5323,7 @@ async function start() {
         // the daemon's PATH and Claude's hook are fixed for its whole run.
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
-        try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
+        try { env = shimProxyEnvironment(await antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
         // session's own settings, on each Codex app-server's command line and in each OpenCode
         // chat's inline config (empty: off). ready() above wrote the plugin's file.

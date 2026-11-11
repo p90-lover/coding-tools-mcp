@@ -141,6 +141,21 @@ function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage, reso
   return environment;
 }
 
+/**
+ * resolveManagedProxyEnvironment with the saved proxy settings and their key read by fs.promises
+ * first (readCpaProxyRoutes), so main only parses and decrypts. Read synchronously,
+ * provider-network.json held main (every window) 946 ms on the busy hard disk while the Antigravity
+ * CLI's proxy environment was built for Agent Orchestrator (2026-11-11 07:58:38Z, launcher.main_blocked).
+ */
+async function resolveManagedProxyEnvironmentAsync(componentId, dataRoot, safeStorage) {
+  if (!MANAGED_PROXY_COMPONENTS.has(componentId)) return {};
+  const entry = (await readCpaProxyRoutes(dataRoot, safeStorage, [componentId])).get(componentId);
+  return resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage, () => {
+    if (entry.error) throw entry.error;
+    return entry.value;
+  });
+}
+
 function createManagedExternalServicesController({
   dataRoot,
   manifestRoot = path.join(__dirname, "..", "vendor", "managed-components"),
@@ -737,6 +752,7 @@ function createManagedExternalServicesController({
 }
 
 module.exports = {
+  resolveManagedProxyEnvironmentAsync,
   createManagedExternalServicesController,
   resolveCpaProxyRoute,
   resolveManagedProxyEnvironment,
