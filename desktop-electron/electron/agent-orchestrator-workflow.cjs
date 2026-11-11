@@ -1096,15 +1096,32 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
   }
 
+  // The service lists a project's tasks oldest first, at most 100 a page, from an offset of at most
+  // 256 (board_sync::view, tools/workflow.rs). A project read takes every page: with the first alone,
+  // a project past 100 tasks lost its newest ones, and from 2026-11-06 one project refused every new
+  // chat, "Couldn't find the new chat's task" (a send no longer looks for its task here). Past 356
+  // tasks the newest are still missing from this read until the service takes a larger offset.
+  const BOARD_PAGE = 100, BOARD_LAST_OFFSET = 256;
   async function board({ workspaceId, taskId } = {}) {
     const id = clean(workspaceId, 128), task = taskId ? clean(taskId, 128) : "";
+    const read = async (offset) => checked(await tool(id, "workflow_list", {
+      ...(task ? { task_id: task } : {}),
+      // Archived and deleted tasks stay listed; the chat list filters them by their lifecycle.
+      limit: BOARD_PAGE, include_archived: true, ...(offset ? { offset } : {}),
+    }));
     return sharedWorkflowRead(JSON.stringify(["board", id, task]), async () => {
-      const result = checked(await tool(id, "workflow_list", {
-        ...(task ? { task_id: task } : {}),
-        // Archived and deleted tasks stay listed; the chat list filters them by their lifecycle.
-        limit: 100, include_archived: true,
-      }));
-      return { ok: true, revision: result.revision, steps: result.steps, tasks: result.tasks ?? [],
+      const result = await read(0);
+      const tasks = [...(result.tasks ?? [])];
+      // A chat's read pages its evidence, not tasks. The last page can start inside the one before
+      // it (the offset limit), so a task already listed is not listed again.
+      const listed = new Set(tasks.map((entry) => entry?.id));
+      for (let offset = 0, next = result.next_offset; !task && Number.isSafeInteger(next) && next > offset && offset < BOARD_LAST_OFFSET;) {
+        offset = Math.min(next, BOARD_LAST_OFFSET);
+        const page = await read(offset);
+        for (const entry of page.tasks ?? []) if (!listed.has(entry?.id)) { listed.add(entry?.id); tasks.push(entry); }
+        next = page.next_offset;
+      }
+      return { ok: true, revision: result.revision, steps: result.steps, tasks,
         task: result.task ?? null, workspaceId: result.workspace_id };
     });
   }
@@ -2042,6 +2059,28 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       return response;
     }, freshMs);
+  }
+
+  // A send's view of the project: its read (the newest 100 runs of all its chats) with the chat's own
+  // runs, and its lifecycle, from the chat's read. With the project read alone a busy project's older
+  // chat was short of its early runs, so a rewind there never matched its messages to runs ("This
+  // chat's messages are still synchronizing; reload before rewind", 2026-11-11 10:34:28Z) however often
+  // it was reloaded, and a background continuation found no parent turn ("A newer turn superseded
+  // this background continuation"). Without a chat, or when the chat's read fails, the project read
+  // is used as before.
+  async function runsForSend(workspaceId, taskId) {
+    const project = await runs({ workspaceId });
+    const task = typeof taskId === "string" ? clean(taskId, 128) : "";
+    if (!task) return project;
+    let own;
+    try { own = await runs({ workspaceId, taskId: task }); } catch { return project; }
+    if (!Array.isArray(own?.runs)) return project;
+    const lifecycle = Array.isArray(own.task_lifecycle) ? own.task_lifecycle.filter(item => item?.task_id === task) : [];
+    return {
+      ...project,
+      runs: [...project.runs.filter(run => run.project_id !== task), ...own.runs.filter(run => run.project_id === task)],
+      ...(lifecycle.length ? { task_lifecycle: [...(project.task_lifecycle ?? []).filter(item => item?.task_id !== task), ...lifecycle] } : {}),
+    };
   }
 
   // ---- Chats past the project read's newest 100 runs ----
@@ -6301,7 +6340,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Rolling the record over cannot make room for one message over the budget by itself.
     if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const selectedExecutable = codexExecutable(executable);
-    const saved = await runs({ workspaceId: id });
+    const saved = await runsForSend(id, taskId);
     checkCurrent();
     if (afterRunId !== undefined) {
       const parent = saved.runs.filter(run => run.project_id === taskId).at(-1);
@@ -6395,8 +6434,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
           const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
           const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
-          if (roots.length !== bodies.length) throw new Error("This chat's messages are still synchronizing; reload before rewind");
-          const hidden = new Set(roots.slice(rewind.index).map(run => run.id));
+          // Paired as the chat shows them (ao-chat.ts chatTurns), so the message picked is the one whose
+          // reply goes. A compacted chat keeps every run but one summary in place of its earlier
+          // messages: its oldest runs answer messages it no longer has, and they stay. Counted equal,
+          // every compacted chat (22 of 160 on 2026-11-11, goal chats above all) refused each rewind,
+          // "still synchronizing", however often it was reloaded. Fewer runs than messages stays
+          // refused: the chat shows that by the minute, and a rewind must not guess.
+          const summarized = roots.length - bodies.length;
+          if (summarized < 0) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+          const hidden = new Set(roots.slice(summarized + rewind.index).map(run => run.id));
           for (let size = -1; size !== hidden.size;) {
             size = hidden.size;
             for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
@@ -6452,17 +6498,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else {
       const startTitle = clean(title && String(title).trim() ? title : executionMode === "single" ? fallbackChatTitle(naming) : CHAT_TASK_TITLE, 240);
       defaultTitled = startTitle === CHAT_TASK_TITLE;
-      let known;
+      let created;
       await withBoardRetry(async () => {
         const before = await board({ workspaceId: id });
-        known = new Set(before.tasks.map((entry) => entry.id));
-        await write(id, { expected_revision: before.revision, change: {
+        created = await write(id, { expected_revision: before.revision, change: {
           operation: "create", title: startTitle, description: text,
         } });
       });
-      const added = (await board({ workspaceId: id })).tasks.filter((entry) => !known.has(entry.id));
-      if (added.length !== 1) throw new Error("Couldn't find the new chat's task. Refresh the board.");
-      task = added[0].id;
+      // The service answers a create with the task it made (board_sync::apply_scoped). The send used
+      // to find it as the one task a second board read had that the first had not; the reads held a
+      // project's oldest 100 tasks, so past 100 every new chat was refused and left an empty task
+      // (12 in one project on 2026-11-11), and another chat made at the same moment refused both.
+      task = typeof created?.task?.id === "string" ? created.task.id : "";
+      if (!task) throw new Error("Couldn't find the new chat's task. Refresh the board.");
     }
 
     let runId, createdRun;
