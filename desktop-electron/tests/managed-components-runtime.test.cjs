@@ -1724,8 +1724,11 @@ test("a saved CPA pid whose process is as old as the record is still stopped and
 
 test("the creation time of a running process is read on Windows, and is null for a pid not in use", { skip: process.platform !== "win32" }, async () => {
   const { windowsProcessStartedAt } = require("../electron/managed-components.cjs");
-  const before = Date.now();
+  // This test process's own start, as Node counts it. Not "the last few minutes": in the full suite on
+  // the busy disk this file had been running for more than ten when this test came (2026-11-11).
+  const started = Date.now() - process.uptime() * 1000;
   const at = await windowsProcessStartedAt(process.pid);
-  assert.ok(Number.isFinite(at) && at <= before && at > before - 10 * 60_000, `this test's own start time (${at})`);
+  assert.ok(Number.isFinite(at) && at <= started + 1_000 && at > started - 60_000,
+    `this test's own start time (${at}, Node started ${Math.round(started)})`);
   assert.equal(await windowsProcessStartedAt(0), null);
 });
