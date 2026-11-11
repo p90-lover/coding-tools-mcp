@@ -17,14 +17,14 @@ One fact drives most of it: AO has **one database writer** on a **slow, nearly f
 
 ## Phase 2: AO keeps chats alive through a slow moment
 
-| # | Problem (file) | Fix |
-|---|---|---|
-| 7 | A chat stops projecting after 3 store errors 20 ms apart, so one 5 s busy timeout detaches a live chat (`service/chat/controller.go`) | Retry busy and deadline errors with backoff before detaching |
-| 8 | A chat whose 30 s recovery budget ran out is neither exited nor live: "unavailable" for good, because the fallback reuses the expired context (`session_manager/manager.go`) | Fresh short context for the fallback; retry failed recoveries with backoff |
-| 9 | A 1 s handshake to an existing chat host is final (`persistenthost/host.go`) | 5 to 10 s, retried |
-| 10 | One store error in the boot reconcile marks every session "unavailable" for the daemon's whole run (`manager.go`, `status_readiness.go`) | Retry the reconcile; track failure per session |
-| 11 | Queued turns are sent only when an event happens; a failed read leaves them queued forever (`controller.go`) | Periodic re-drain for conversations with queued turns; a deadline on SendTurn |
-| 12 | A panic in any background goroutine ends the daemon | A `safeGo` helper that recovers, logs and restarts the loop |
+| # | Problem (file) | Fix | State |
+|---|---|---|---|
+| 7 | A chat stops projecting after 3 store errors 20 ms apart, so one 5 s busy timeout detaches a live chat (`service/chat/controller.go`) | Retry busy and deadline errors with backoff before detaching | AO#30 open: ten tries over about a minute |
+| 8 | A chat whose 30 s recovery budget ran out is neither exited nor live: "unavailable" for good, because the fallback reuses the expired context (`session_manager/manager.go`) | Fresh short context for the fallback; retry failed recoveries with backoff | Tried and dropped: a test of it passes on main too, so the cause is not shown. Needs a live "unavailable" chat to trace |
+| 9 | A 1 s handshake to an existing chat host is final (`persistenthost/host.go`) | 5 to 10 s, retried | Tried and dropped: two tests pin "a silent host holds recovery up at most 2 s". Needs a measured late hello first |
+| 10 | One store error in the boot reconcile marks every session "unavailable" for the daemon's whole run (`manager.go`, `status_readiness.go`) | Retry the reconcile; track failure per session | Not started |
+| 11 | Queued turns are sent only when an event happens; a failed read leaves them queued forever (`controller.go`) | Periodic re-drain for conversations with queued turns; a deadline on SendTurn | Not started |
+| 12 | A panic in any background goroutine ends the daemon | A `safeGo` helper that recovers, logs and restarts the loop | Not started |
 
 ## Phase 3: AO starts fast and answers honestly
 
