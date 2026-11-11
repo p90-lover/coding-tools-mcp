@@ -5086,6 +5086,9 @@ async function start() {
       computerControlService = computerControl;
       app.on("will-quit", () => computerControl.dispose());
       chatAgentTools = createChatAgentTools({
+        generateImage: backendBundles.requireModule(backend, "chat-images.cjs").createChatImageGenerator({
+          connection: () => externalServicesController.cpaConnection(),
+        }),
         previews: chatPreviews,
         sandbox: chatSandbox,
         computerControl,
