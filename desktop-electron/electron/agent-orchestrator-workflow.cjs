@@ -6413,8 +6413,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
           const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
           const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
-          if (roots.length !== bodies.length) throw new Error("This chat's messages are still synchronizing; reload before rewind");
-          const hidden = new Set(roots.slice(rewind.index).map(run => run.id));
+          // Paired as the chat shows them (ao-chat.ts chatTurns), so the message picked is the one whose
+          // reply goes. A compacted chat keeps every run but one summary in place of its earlier
+          // messages: its oldest runs answer messages it no longer has, and they stay. Counted equal,
+          // every compacted chat (22 of 160 on 2026-11-11, goal chats above all) refused each rewind,
+          // "still synchronizing", however often it was reloaded. Fewer runs than messages stays
+          // refused: the chat shows that by the minute, and a rewind must not guess.
+          const summarized = roots.length - bodies.length;
+          if (summarized < 0) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+          const hidden = new Set(roots.slice(summarized + rewind.index).map(run => run.id));
           for (let size = -1; size !== hidden.size;) {
             size = hidden.size;
             for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);

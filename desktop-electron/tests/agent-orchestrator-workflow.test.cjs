@@ -13027,3 +13027,34 @@ test("a new chat starts in a project past 100 tasks, and a project read lists ev
   assert.deepEqual(pages, [0, 100, 200, 256], "the last page starts at the service's largest offset");
   assert.equal(listed.revision, world.revision);
 });
+
+
+// 2026-11-11: 22 of 160 chats had more runs than messages, compacted ones above all (a goal chat: 1,223
+// runs, 3 messages). Each rewind there was refused "still synchronizing; reload before rewind".
+test("a rewind in a compacted chat hides from the reply the chat shows under that message, and keeps the summarized ones", async () => {
+  const description = "Summary of the earlier conversation (compacted 2026-10-10 09:00 UTC):\nwe fixed the login form"
+    + "\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask\n\nFollow-up (2026-10-10 11:00 UTC):\nthird ask";
+  const done = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { thread_id: `session-${id}`, answer: `answer ${id}` } }] });
+  const ids = ["old-1", "old-2", "old-3", "r-summary", "r-second", "r-third"];
+  for (const index of [1, 2]) {
+    const world = chatWorld({ tasks: [{ id: "task-1", title: "Goal", description }], runs: ids.map(done) });
+    const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+      findCodexExecutable: () => process.execPath, resolveHarness: async () => { throw new Error("offline test"); } });
+    const turn = aoChat.chatTurns((await workflow.call("runs", { workspaceId: "ws-1" })).runs, description)
+      .find((entry) => entry.messageIndex === index);
+    const message = ["", "second ask", "third ask"][index];
+    const result = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message,
+      rewind: { index, description }, deferStart: true });
+    assert.ok(result.runId, "the rewound message starts a run");
+    const kept = (await workflow.call("runs", { workspaceId: "ws-1" })).runs.map((run) => run.id);
+    assert.deepEqual(kept, ids.slice(0, ids.indexOf(turn.runId)), `message ${index}: from the reply the chat showed under it, and nothing older`);
+    assert.match(world.tasks[0].description, /^Summary of the earlier conversation/);
+  }
+  // Fewer runs than messages is still refused: which message lacks its run is not certain.
+  const short = chatWorld({ tasks: [{ id: "task-1", title: "Goal", description }], runs: ["r-summary", "r-second"].map(done) });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: short.requestHeadless, findCodexExecutable: () => process.execPath });
+  await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask",
+    rewind: { index: 1, description } }), /still synchronizing/);
+  assert.equal(short.tasks[0].description, description);
+});
