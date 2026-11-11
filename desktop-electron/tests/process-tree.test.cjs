@@ -35,3 +35,32 @@ test("an owned Windows process tree is ended without blocking the main thread", 
     for (const pid of [parent.pid, grandchild]) { try { if (processRunning(pid)) process.kill(pid); } catch {} }
   }
 });
+
+
+// 2026-11-11 08:33:11Z: execFile("taskkill.exe") held the main process 88.5 s on the busy machine.
+test("the async tree kill starts taskkill from a worker, never from the calling thread", {
+  skip: process.platform !== "win32",
+}, async () => {
+  const childProcess = require("node:child_process");
+  const parent = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore", windowsHide: true });
+  await new Promise((resolve) => parent.once("spawn", resolve));
+  const modules = ["../electron/process-tree.cjs", "../electron/off-thread-run.cjs"].map((name) => require.resolve(name));
+  const saved = modules.map((file) => require.cache[file]);
+  const originals = { execFile: childProcess.execFile, spawn: childProcess.spawn, spawnSync: childProcess.spawnSync };
+  const here = [];
+  for (const name of Object.keys(originals)) {
+    childProcess[name] = (file, ...rest) => { here.push(`${name} ${file}`); return originals[name](file, ...rest); };
+  }
+  try {
+    for (const file of modules) delete require.cache[file];
+    const fresh = require("../electron/process-tree.cjs");
+    await fresh.terminateOwnedProcessTreeAsync(parent);
+    await new Promise((resolve) => (parent.exitCode !== null || parent.signalCode !== null ? resolve() : parent.once("exit", resolve)));
+    assert.equal(processRunning(parent.pid), false);
+    assert.deepEqual(here.filter((call) => /taskkill/i.test(call)), [], "taskkill was not started on this thread");
+  } finally {
+    Object.assign(childProcess, originals);
+    modules.forEach((file, index) => { if (saved[index]) require.cache[file] = saved[index]; else delete require.cache[file]; });
+    try { if (processRunning(parent.pid)) process.kill(parent.pid); } catch {}
+  }
+});
