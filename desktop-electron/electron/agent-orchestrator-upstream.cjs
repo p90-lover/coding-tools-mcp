@@ -128,6 +128,11 @@ const WORKSPACE_MODES = new Set(["worktree", "shared", "folder"]);
 const AGENT_RECHECK_MS = 60_000;
 // How long a started AO daemon that is still running may take to answer /readyz (see start).
 const AO_READY_TIMEOUT_MS = 90_000;
+// A daemon still running at that limit is waited for this many limits longer before it is ended.
+const AO_READY_PATIENCE = 10;
+// After a start that failed, how long before AO is started again; doubled per failure in a row.
+const AO_START_COOLDOWN_MS = 5_000;
+const AO_START_COOLDOWN_MAX_MS = 5 * 60_000;
 // To profile AO's CPU on a user's machine: a one-line "pprof-addr" file in AO's data folder holding
 // a loopback host:port turns on AO's pprof listener (AO_PPROF_ADDR) at its next start. Without it AO
 // starts as before; the app clears AO_* from its own environment, so this is the only switch.
@@ -256,7 +261,8 @@ function chatHostProcesses(dataRoot) {
 }
 
 function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, fileTools = null, cpaQuota = null, cpaUsage = null, logger = console,
-  readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS }) {
+  readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS, readyHardMs = readyLimitMs * AO_READY_PATIENCE,
+  startCooldownMs = AO_START_COOLDOWN_MS }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -277,7 +283,16 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // four times the limit): on 2026-10-24, after a reboot, AO's first database cleanup read a cold
   // HDD for over a minute while it started. Every start was killed at 90 s, which threw that work
   // away, and the next start began it again, so AO stayed down (five starts in eight minutes).
-  let readyTimeouts = 0;
+  //
+  // Doubling was not enough: after the 0.8.110 update (2026-11-11) AO needed about 4.5 minutes to
+  // get ready on a 483 MB write-ahead log, was killed at 90, 180, 360 and 360 s, and came up on its
+  // fifth start 28 minutes later. Killing a daemon that is still running only makes the next start
+  // repeat its work, so one that is alive at the limit is now waited for up to readyHardMs, and
+  // ended only then. Starts that failed in a row are counted for the pause before the next one:
+  // every AO call starts a failed AO again, and with a dozen chats polling that was at once.
+  let failedStarts = 0;
+  let failedStartAt = 0;
+  const startCooldown = () => Math.min(AO_START_COOLDOWN_MAX_MS, startCooldownMs * 2 ** Math.max(0, failedStarts - 1));
   /**
    * AO's recent meaningful output (no debug lines or quick polls, see ao-daemon-log.cjs), in memory
    * only. AO's output never goes to disk: logs/ao-daemon.log took about 65 MB a day, nearly all of
@@ -2094,6 +2109,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   async function stop() {
     if (stopping) return stopping;
     lifecycleGeneration += 1;
+    // A stop is the person's (or the app's) own restart: the next start is not held back.
+    failedStarts = 0;
     if (readingsTimer) { clearTimeout(readingsTimer); readingsTimer = null; }
     const pendingReadings = persistReadings();
     hide();
@@ -2189,6 +2206,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (stopping) await stopping;
     if (state === "ready") return snapshot();
     if (starting) return starting;
+    // A start that just failed is not repeated at once by the next caller (see failedStarts).
+    const cooling = failedStarts > 0 ? failedStartAt + startCooldown() - Date.now() : 0;
+    if (cooling > 0 && state === "error") {
+      throw new Error(`${error || "Agent Orchestrator did not start"} (starting again in ${Math.ceil(cooling / 1000)} s)`);
+    }
     const startupGeneration = ++lifecycleGeneration;
     function checkStartup() {
       if (startupGeneration !== lifecycleGeneration) throw new Error("AO startup was cancelled");
@@ -2293,25 +2315,30 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
         // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
         const startedAt = Date.now();
-        const limitMs = readyLimitMs * 2 ** Math.min(readyTimeouts, 2);
+        const limitMs = Math.max(readyLimitMs, readyHardMs);
         let slowLogged = false;
+        let patientLogged = false;
         while (Date.now() - startedAt < limitMs) {
           checkStartup();
+          // Past the old limit and still running (checkStartup threw otherwise): waited for, not ended.
+          if (!patientLogged && Date.now() - startedAt >= readyLimitMs) {
+            patientLogged = true;
+            logger.warn?.("ao.start_waiting", { waitedMs: Date.now() - startedAt, untilMs: limitMs, output: logTail.slice(-300) });
+          }
           if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
             slowLogged = true;
             logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
           }
           try {
-            const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(1000) });
+            const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(3000) });
             checkStartup();
             const ready = await response.json();
             checkStartup();
-            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") { state = "ready"; readyTimeouts = 0; return snapshot(); }
+            if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") { state = "ready"; failedStarts = 0; return snapshot(); }
           } catch { checkStartup(); }
           await new Promise((resolve) => setTimeout(resolve, 200));
           checkStartup();
         }
-        readyTimeouts += 1;
         // "timed out" keeps TRANSIENT_CHAT_START treating it as a start to retry, not a failure.
         throw new Error(`Agent Orchestrator timed out getting ready. ${logTail.slice(-1500)}`);
       } catch (cause) {
@@ -2319,7 +2346,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         await cleanup();
         if (startupGeneration === lifecycleGeneration) {
           state = "error"; error = cause.message;
-          logger.warn?.("ao.start_failed", { message: error });
+          failedStarts += 1; failedStartAt = Date.now();
+          logger.warn?.("ao.start_failed", { message: error, failedStarts, nextStartInMs: startCooldown() });
         }
         throw cause;
       } finally { starting = null; }
