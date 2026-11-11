@@ -13,7 +13,7 @@ const {
   STAGE_DIRECTORY, sweepUpdateLeftovers, commitAppliedUpdate, handOffUpdateRecovery, pendingAppliedUpdate, readJournal, waitForUpdateApply,
   AUTO_INSTALL_FAILURE_LIMIT,
 } = require("../electron/app-update.cjs");
-const { createJournal, recordResult, rollBack, rollForward, swapIn, sweep, writeJsonDurable } = require("../electron/app-update-worker.cjs");
+const { createJournal, recordResult, renameWithRetry, rollBack, rollForward, swapIn, sweep, writeJsonDurable } = require("../electron/app-update-worker.cjs");
 const { waitForPackagedRuntimeSource } = require("../electron/runtime-install.cjs");
 const { buildAppUpdate, packFor } = require("../scripts/package-app-update.cjs");
 
@@ -197,6 +197,31 @@ test("a failed swap puts every file back", async () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a file held open is retried for up to two minutes before the swap gives up", async () => {
+  // 2026-11-11: app.asar stayed held past twelve tries over 16.5 s after the app had closed, and
+  // 0.8.110 rolled back. Simulated time: a hold that clears after 30 s now goes through.
+  const busy = (code = "EBUSY") => Object.assign(new Error(`${code}: resource busy or locked`), { code });
+  const clock = () => {
+    let at = 0;
+    const pauses = [];
+    return { wait: async (ms) => { pauses.push(ms); at += ms; }, pauses, at: () => at };
+  };
+  const clears = clock();
+  let calls = 0;
+  await renameWithRetry("a", "b", { wait: clears.wait, rename: () => { calls += 1; if (clears.at() < 30_000) throw busy(); } });
+  assert.ok(clears.at() >= 30_000 && clears.at() < 33_000, `went through once the hold cleared (${clears.at()} ms)`);
+  assert.ok(Math.max(...clears.pauses) <= 2_000, "pauses never exceed 2 s");
+  assert.ok(calls > 12, "more than the old twelve tries");
+
+  const held = clock();
+  await assert.rejects(renameWithRetry("a", "b", { wait: held.wait, rename: () => { throw busy("EPERM"); } }), /EPERM/);
+  assert.equal(held.at(), 120_000, "a file never released fails once two minutes of pauses are spent, not before");
+
+  const missing = clock();
+  await assert.rejects(renameWithRetry("a", "b", { wait: missing.wait, rename: () => { throw busy("ENOENT"); } }), /ENOENT/);
+  assert.equal(missing.pauses.length, 0, "any other error fails at once");
 });
 
 const sha = (content) => createHash("sha256").update(content).digest("hex");

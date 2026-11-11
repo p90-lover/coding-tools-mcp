@@ -261,11 +261,16 @@ function quotaResets(error) {
  * Global in your workspace's Privacy settings" was retried eight times a round, round after round,
  * and the chat counted over a thousand refused requests), so nothing retries it and a goal pauses on
  * it. A 429 (a model cooling down) and a 5xx are not refusals: a later retry gets through those.
+ * A refusal can also come with no status: Claude Code prints "API Error: <message>" for an error
+ * the provider sends inside the reply stream (seen 2026-11-11: "API Error: Complexity 'xhigh' is not
+ * supported for this image model." was retried eight times). Its own words say so then; a status-less
+ * error without them ("Connection error.", "Request timed out.") is still left to the retries.
  */
-const REQUEST_REFUSED = /API Error: (?:400|404|422)\b/i;
+const REQUEST_REFUSED = /API Error: (?:400|404|422)\b|API Error:(?!\s*\d{3}\b)[^\n]{0,300}?\b(?:not supported|unsupported|invalid_request_error)\b/i;
 /** The provider's own reason from a refused request ("400: This Go model requires …"), for a note. */
 function refusedReason(error) {
-  const text = String(error || "").replace(/^[\s\S]*?API Error: (\d{3})\s*/i, "$1: ").replace(/Upstream request failed:\s*/i, "");
+  const text = String(error || "").replace(/^[\s\S]*?API Error: (\d{3})\s*/i, "$1: ").replace(/^[\s\S]*?API Error:\s*/i, "")
+    .replace(/Upstream request failed:\s*/i, "");
   return text.replace(/\s+/g, " ").trim().slice(0, 200);
 }
 /**
