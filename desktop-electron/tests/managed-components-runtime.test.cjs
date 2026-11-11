@@ -133,6 +133,9 @@ function controllerFixture({ fetchImpl, allowNetworkInstall = true, createContro
       return child;
     },
     terminateProcessTree: (child, signal = "SIGTERM") => child.kill(signal),
+    // `now` below is a fixed September clock, so a real process's creation time would read as
+    // pid reuse: unknown unless a test says otherwise.
+    processStartedAt: async () => null,
     resolveRuntimeExecutable: () => process.execPath,
     now: (() => {
       let tick = 0;
@@ -1669,4 +1672,63 @@ test("a persistent CPA from an older version is stopped and replaced instead of 
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.notEqual(stale.exitCode === null && stale.signalCode === null, true, "the old CPA is stopped");
   assert.equal(spawned, 1, "the current version is started");
+});
+
+// Windows hands a freed pid to the next new process. On 2026-11-11 CPA's saved pid belonged to an
+// unrelated PowerShell started 9 h after CPA had gone, and every CPA start failed with "saved process
+// verification is unresolved"; without that flag a start would have ended that process's tree.
+test("a saved CPA pid now held by a process created after the record is left alone, and CPA starts fresh", async (t) => {
+  const { spawn } = require("node:child_process");
+  const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { if (unrelated.exitCode === null) unrelated.kill(); });
+  const warnings = [];
+  let spawned = 0, asked = 0;
+  const { controller, dataRoot } = controllerFixture({
+    persistentComponents: ["cpa"],
+    healthProbe: async () => false,
+    logger: { info() {}, debug() {}, warn: (event, detail) => warnings.push({ event, detail }) },
+    processStartedAt: async (pid) => { asked += 1; return pid === unrelated.pid ? Date.parse("2026-11-11T06:54:34.000Z") : null; },
+    spawnProcess: () => { spawned += 1; const child = mockChild(9200); child.unref = () => {}; return child; },
+  });
+  t.after(() => controller.dispose());
+  const recordPath = path.join(dataRoot, "state", "cpa.process.json");
+  // An older version, so a record naming a live CPA would be stopped and replaced.
+  writeJson(recordPath, { pid: unrelated.pid, version: "0.9.0", startedAt: "2026-11-11T05:22:30.267Z" });
+  await controller.startComponent("cpa");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(unrelated.exitCode === null && unrelated.signalCode === null, true, "the process that reused the pid is not stopped");
+  assert.equal(spawned, 1, "CPA is started");
+  assert.ok(asked >= 1, "the pid's creation time was checked");
+  assert.notEqual(JSON.parse(fs.readFileSync(recordPath, "utf8")).pid, unrelated.pid, "the stale record is replaced");
+  assert.ok(warnings.some((w) => w.event === "managed-component.saved_pid_reused" && w.detail.pid === unrelated.pid));
+});
+
+test("a saved CPA pid whose process is as old as the record is still stopped and replaced", async (t) => {
+  const { spawn } = require("node:child_process");
+  const stale = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  t.after(() => { if (stale.exitCode === null) stale.kill(); });
+  let spawned = 0;
+  const { controller, dataRoot } = controllerFixture({
+    persistentComponents: ["cpa"],
+    healthProbe: async () => true,
+    processStartedAt: async (pid) => (pid === stale.pid ? Date.parse("2026-11-11T05:22:29.900Z") : null),
+    spawnProcess: () => { spawned += 1; const child = mockChild(9300); child.unref = () => {}; return child; },
+  });
+  t.after(() => controller.dispose());
+  writeJson(path.join(dataRoot, "state", "cpa.process.json"), { pid: stale.pid, version: "0.9.0", startedAt: "2026-11-11T05:22:30.267Z" });
+  await controller.startComponent("cpa");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.notEqual(stale.exitCode === null && stale.signalCode === null, true, "the old CPA is stopped");
+  assert.equal(spawned, 1, "the current version is started");
+});
+
+test("the creation time of a running process is read on Windows, and is null for a pid not in use", { skip: process.platform !== "win32" }, async () => {
+  const { windowsProcessStartedAt } = require("../electron/managed-components.cjs");
+  // This test process's own start, as Node counts it. Not "the last few minutes": in the full suite on
+  // the busy disk this file had been running for more than ten when this test came (2026-11-11).
+  const started = Date.now() - process.uptime() * 1000;
+  const at = await windowsProcessStartedAt(process.pid);
+  assert.ok(Number.isFinite(at) && at <= started + 1_000 && at > started - 60_000,
+    `this test's own start time (${at}, Node started ${Math.round(started)})`);
+  assert.equal(await windowsProcessStartedAt(0), null);
 });
