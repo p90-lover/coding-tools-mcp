@@ -63,6 +63,7 @@ const path = require("node:path");
 const { PREVIEW_TOOL_DEFS, PREVIEW_TOOLS, visualizeReference, visualizeFragmentError } = require("./chat-preview.cjs");
 const { SUBAGENT_TOOL_DEFS, SUBAGENT_TOOLS } = require("./subagents.cjs");
 const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.cjs");
+const { IMAGE_TOOL_DEFS } = require("./chat-images.cjs");
 const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
 const { createCommandWatches, WATCH_TOOL_DEFS, WATCH_TOOLS } = require("./chat-command-watches.cjs");
 const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs");
@@ -98,7 +99,7 @@ const AGENT_TOOLS = new Set([
   "read_file", "list_dir", "list_files", "search_text", "grep_text",
   "apply_patch", "patch_check",
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
-  "view_image", "image_info", "compare_images", "ocr_image",
+  "view_image", "image_info", "compare_images", "ocr_image", "generate_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
   "redact_message", "move_chat",
@@ -1328,6 +1329,7 @@ function createChatAgentTools({
   appProcesses = null,
   // view_app's capture (({ maxWidth }) => { base64, mimeType, width, height }); without it the tool is not offered.
   captureApp = null,
+  generateImage = null,
   // chat_list / chat_read (chat-history.cjs): the app's other chats, read-only; without it they are not offered.
   chatHistory = null,
   // The goal tools' service ({ call({ workspaceId, session, action, ... }) }); without it they are not offered.
@@ -1637,12 +1639,12 @@ function createChatAgentTools({
       ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
-      ...(captureApp ? VIEW_APP_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : [])];
+      ...(captureApp ? VIEW_APP_DEFS : []), ...(generateImage ? IMAGE_TOOL_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "computer_guide" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
+        && tool?.name !== "view_app" && tool?.name !== "generate_image" && tool?.name !== "computer_guide" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
         && tool?.name !== "list_commands" && !WATCH_TOOLS.has(tool?.name)), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
@@ -2317,6 +2319,19 @@ function createChatAgentTools({
     } catch (error) {
       if (error instanceof ScopeError) return failedCall(error.message);
       throw error;
+    }
+    if (name === "generate_image") {
+      if (!generateImage) return failedCall("Unknown tool: generate_image");
+      const stopped = unavailable(entry, name, signal);
+      if (stopped) return stopped;
+      try {
+        const image = await generateImage(args, { signal });
+        return { content: [{ type: "image", data: image.data, mimeType: image.mimeType },
+          { type: "text", text: `Generated an image (requested model: ${image.model}). The image request used no chat reasoning effort or complexity. No file was saved.` }] };
+      } catch (error) {
+        return failedCall(errorMessage(error), { code: "IMAGE_GENERATION_FAILED", execution_status: error.executionStatus ?? "unknown",
+          safe_to_retry: false, next_action: "Do not repeat this request automatically. Check the image model and account allowance; an interrupted request may already have generated an image." });
+      }
     }
     if (WATCH_TOOLS.has(name)) return commandWatchCall(entry, name, args);
     if (name === "list_commands") {

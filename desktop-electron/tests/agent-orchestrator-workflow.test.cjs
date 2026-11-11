@@ -3704,6 +3704,43 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
 });
 
+// The user (2026-11-11), looking at a window menu that topped out at 872k: "it should up 1m context
+// window". CPA's 872,000 for GPT-6, GPT-5.6 and Claude Fable 5 is their 1M window less the reply's
+// 128K reserve, so the menu and the launch check go up to 1M; a blank card still starts at 872K.
+test("a model CPA reports at a 1M window's input budget may be set up to 1M; other limits stay as reported", async () => {
+  const catalog = { data: [
+    { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
+    { id: "gpt-5.5", context_window: 272000, max_context_window: 400000 },
+  ] };
+  async function launch(model, contextWindow) {
+    let launched, failure = null;
+    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: `cpa/${model}`,
+      permission_profile: ":ao-default", ...(contextWindow ? { context_window: contextWindow } : {}) };
+    const mission = { id: "run", workspace_id: "ws", revision: 1, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+    const workflow = createAgentOrchestratorWorkflow({
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+      requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } }
+        : endpoint.endsWith("/reserve") ? { ok: true, request_key: "key", prompt: "direct task" } : { ok: true, run: mission },
+      aoHarness: { spawn: async input => { launched = input; return "session"; } },
+      confirm: async () => true,
+    });
+    await workflow.call("advance", { workspaceId: "ws", runId: "run", executable: "C:/codex.exe" }).catch(error => { failure = error; });
+    return { launched, failure, models: await workflow.call("models", { harness: "ao:claude-code" }) };
+  }
+  const luna = await launch("gpt-6-luna", 1_000_000);
+  const capability = luna.models.capabilities["cpa/gpt-6-luna"];
+  assert.equal(capability.contextLimit, 872000, "the reported limit is kept as it is");
+  assert.equal(capability.contextWindow.max, 1_000_000, "the menu goes up to the 1M window");
+  assert.equal(luna.launched?.contextWindow, 1_000_000, `a card set to 1M launches with it (${luna.failure?.message ?? "no failure"})`);
+  assert.equal((await launch("gpt-6-luna")).launched.contextWindow, 872000, "a blank card still starts at the reported 872K");
+  const past = await launch("gpt-6-luna", 1_100_000);
+  assert.equal(past.launched, undefined, "past 1M is refused");
+  const gpt5 = await launch("gpt-5.5", 1_000_000);
+  assert.equal(gpt5.models.capabilities["cpa/gpt-5.5"].contextWindow.max, 400000, "a limit well short of 1M is not raised");
+  assert.equal(gpt5.launched, undefined, "so 1M is refused there");
+});
+
 test("an agent's own models take CPA's real window for the same model, and a no-longer-listed model says so at launch", async () => {
   const catalog = { data: [{ id: "gpt-6-luna", context_window: 272000, max_context_window: 872000, supported_reasoning_levels: ["low", "high"] }] };
   const route = { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/gone-model",
@@ -5290,11 +5327,20 @@ test("a goal round the provider refused (400) pauses the goal with the provider'
     assert.equal(timers.length, 0, "no next round is scheduled");
     assert.equal(world.updates.length, before, "and nothing is retried");
   }
-  const { REQUEST_REFUSED } = require("../electron/agent-orchestrator-workflow.cjs");
-  for (const refused of [error, "API Error: 404 model not found", "API Error: 422 Unprocessable Entity"]) assert.equal(REQUEST_REFUSED.test(refused), true, refused);
-  // A cooling model, an outage or a spent quota is not a refusal of the request.
+  const { REQUEST_REFUSED, refusedReason } = require("../electron/agent-orchestrator-workflow.cjs");
+  // A refusal sent inside the reply stream has no status (2026-11-11, retried eight times).
+  const streamed = "API Error: Complexity 'xhigh' is not supported for this image model.";
+  for (const refused of [error, "API Error: 404 model not found", "API Error: 422 Unprocessable Entity", streamed,
+    "API Error: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"bad image\"}}", "API Error: Unsupported parameter: 'reasoning'"]) {
+    assert.equal(REQUEST_REFUSED.test(refused), true, refused);
+  }
+  assert.equal(refusedReason(streamed), "Complexity 'xhigh' is not supported for this image model.");
+  assert.equal(refusedReason(error), "400: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it.");
+  // A cooling model, an outage, a spent quota or a dropped connection is not a refusal of the request.
   for (const other of ["API Error: 429 all credentials for model glm-5.3 are cooling down", "API Error: 502 Error 429: You have reached your monthly Clinepass limit",
-    "API Error: 500 upstream", "upstream 500 from the model", "read line 400 of the log", "HTTP 400"]) assert.equal(REQUEST_REFUSED.test(other), false, other);
+    "API Error: 500 upstream", "upstream 500 from the model", "read line 400 of the log", "HTTP 400",
+    "API Error: Connection error.", "API Error: Request timed out.", "API Error: terminated", "API Error: 503 model not supported in this region right now",
+    "the tool said this flag is not supported"]) assert.equal(REQUEST_REFUSED.test(other), false, other);
 });
 
 test("a goal round that failed on a model the person has since moved the goal off starts the next round on the pick at once", async () => {
@@ -10687,7 +10733,14 @@ test("\"Retry automatically\" retries a failed step by itself once its pause is 
     for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   }
 });
-test("\"Retry automatically\" leaves a request the provider refused (400) for the person, with the provider's reason", async () => {
+for (const [label, refusal, reason] of [
+  ["400", "API Error: 400 Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it.",
+    /^The provider refused this request \(400: This Go model requires Global regions\. .*\)\. Change that, or choose another model, since retrying won't fix it\.$/],
+  // Sent inside the reply stream, with no status (2026-11-11: attempts 1-8 failed the same way).
+  ["no status", "API Error: Complexity 'xhigh' is not supported for this image model.",
+    /^The provider refused this request \(Complexity 'xhigh' is not supported for this image model\.\)\. Change that, or choose another model, since retrying won't fix it\.$/],
+])
+test(`"Retry automatically" leaves a request the provider refused (${label}) for the person, with the provider's reason`, async () => {
   // OpenCode Go's region refusal was retried eight times a round (2026-10-29); each try got the same 400.
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/opencode-go/deepseek-v4.1-flash" };
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
@@ -10714,14 +10767,13 @@ test("\"Retry automatically\" leaves a request the provider refused (400) for th
   const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
   try {
     await new Promise(resolve => setTimeout(resolve, 100));
-    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt,
-      error: "API Error: 400 Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it." } };
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: refusal } };
     let detail = "";
     for (let tries = 0; tries < 100 && !/provider refused/.test(detail); tries++) {
       await new Promise(resolve => setTimeout(resolve, 20));
       detail = String((await status()).detail ?? "");
     }
-    assert.match(detail, /^The provider refused this request \(400: This Go model requires Global regions\. .*\)\. Change that, or choose another model, since retrying won't fix it\.$/);
+    assert.match(detail, reason);
     clock += 60 * 60_000;
     await new Promise(resolve => setTimeout(resolve, 300));
     assert.deepEqual(controls, [], "never retried, however long it waits");

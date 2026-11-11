@@ -44,6 +44,7 @@ const SPECS = Object.freeze({
   subagents_save: { readOnly: false, description: "Save the Subagents page's settings and subagents." },
   subagents_runs: { readOnly: true, description: "List the subagents chat agents started: state, task, elapsed time and report." },
   subagents_stop: { readOnly: false, description: "Stop one running subagent for the user." },
+  subagent_transcript: { readOnly: true, description: "Read one subagent's work (thinking, tool calls and messages) for the chat's side panel." },
   harnesses: { readOnly: true, description: "List worker harnesses: Native Codex plus installed upstream AO agents." },
   runs: { readOnly: true, description: "Read durable AO mission graphs in one workspace." },
   update_run: { readOnly: false, description: "Create, edit, or cancel a revisioned AO mission without repeating the caller's confirmation." },

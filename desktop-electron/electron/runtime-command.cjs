@@ -1,11 +1,18 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+// A packaged app's bridge version, by package.json path. Every runtime start and recovery asked for
+// it, and each ask checked and read the file on Electron main: existsSync alone held every window
+// 419 ms on the busy hard disk (2026-11-10 14:57Z, 0.8.108). The installed runtime is only ever
+// filled from this app's own resources, so the version at a path can't change while the app runs.
+const packagedVersions = new Map();
+
 function runtimeReleaseVersion({ app, sourceRoot, installedRuntimeRoot, runtimeRootProvider }) {
   const root = runtimeRootProvider?.() || installedRuntimeRoot;
   const packagePath = app.isPackaged
     ? root && path.join(root, "app", "package.json")
     : sourceRoot && path.join(sourceRoot, "package.json");
+  if (app.isPackaged && packagedVersions.has(packagePath)) return packagedVersions.get(packagePath);
   if (!packagePath || !fs.existsSync(packagePath)) {
     if (app.isPackaged) throw new Error("Bundled bridge package metadata is missing");
     return app.getVersion();
@@ -14,6 +21,8 @@ function runtimeReleaseVersion({ app, sourceRoot, installedRuntimeRoot, runtimeR
   if (metadata.name !== "codex-chatgpt-web" || typeof metadata.version !== "string" || !metadata.version.trim()) {
     throw new Error("Bundled bridge package metadata is invalid");
   }
+  // Only a good answer is kept: a missing or invalid file is checked again next time.
+  if (app.isPackaged) packagedVersions.set(packagePath, metadata.version);
   return metadata.version;
 }
 

@@ -96,7 +96,8 @@ const {
   stopProxyBridgeNova,
 } = require("./provider-bootstrap.cjs");
 
-const { createManagedExternalServicesController, resolveManagedProxyEnvironment } = require("./managed-external-services.cjs");
+const { createManagedExternalServicesController, resolveManagedProxyEnvironmentAsync } = require("./managed-external-services.cjs");
+const { fetchFollowingRedirects } = require("./managed-components.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
@@ -195,6 +196,19 @@ installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
   persist: process.env.CODING_TOOLS_PERSIST_LOGS === "1",
 });
+// Temporary files and rtk's history stay off the system drive (system-drive.cjs). Set before anything
+// starts, so the update worker and installer, AO and its agents, CPA and the bridge all inherit them.
+// The folder must exist first: Chromium's helper processes read TEMP as they start (a startup-only
+// sync call). If it can't be made, the inherited temporary folder stays.
+const systemDrive = require("./system-drive.cjs");
+const systemDriveRedirect = systemDrive.systemDriveRedirects({ env: process.env, dataRoot: launcherUserData });
+try {
+  if (systemDriveRedirect.tempDir) fs.mkdirSync(systemDriveRedirect.tempDir, { recursive: true });
+  Object.assign(process.env, systemDriveRedirect.env);
+} catch {
+  const { TEMP, TMP, TMPDIR, ...others } = systemDriveRedirect.env;
+  Object.assign(process.env, others);
+}
 
 let mainWindow = null;
 // Certificate authorities the app no longer trusts (ca-distrust.cjs: the leaked eMudhra/emSign CA
@@ -538,6 +552,17 @@ function describeTimedPartition(partition) {
   return {};
 }
 
+// Remote fetches for Node-side services (CPA's release checks and downloads, app plugin and
+// Antigravity CLI updates) go through the launcher's network, so their sockets live in Chromium's
+// network service, never on main. On 2026-11-11 (0.8.108) a plugin update check's connect to
+// api.github.com, made from main by Node's own fetch, was held 88 s in the kernel and froze every
+// window. Node's fetch follows redirects unless asked for "manual"; this keeps that contract.
+function fetchRemoteOffMain(url, options = {}) {
+  return options.redirect === "manual"
+    ? fetchThroughLauncherNetwork(url, options)
+    : fetchFollowingRedirects(fetchThroughLauncherNetwork, url, options);
+}
+
 // Native fetches omit cookies by default. Explicit session reads use their registered account's
 // own cookie jar and bound proxy, answering proxy authentication without rerouting a live page.
 async function fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies = false } = {}) {
@@ -624,6 +649,10 @@ const BRIDGE_WATCHDOG_INTERVAL_MS = 60_000;
 // One missed health check is usually a stalled machine, not a dead bridge; restarting then kills
 // the Codex turns in flight. Restart only after this many misses in a row.
 const BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART = 2;
+// Two 2 s misses a minute apart can still be one disk stall: on 2026-11-11 a release build on the
+// shared hard disk held AO's writer 72 s, and the watchdog "restarted" a live bridge (10:34). Before
+// restarting a daemon that is running but slow to answer, it gets this long to answer once more.
+const BRIDGE_WATCHDOG_PATIENT_HEALTH_MS = 15_000;
 let bridgeWatchdogTimer = null;
 let bridgeWatchdogBusy = false;
 let bridgeWatchdogMisses = 0;
@@ -668,6 +697,15 @@ function startBridgeWatchdog(logger, stateStore) {
       if (bridgeWatchdogMisses < BRIDGE_WATCHDOG_MISSES_BEFORE_RESTART) {
         logger.warn("runtime.watchdog_miss", miss);
         return;
+      }
+      if (check.failed === "daemon_health") {
+        const patientStarted = Date.now();
+        const patient = await runtimeSupervisor.ownedRuntimeCheck(config, { healthTimeoutMs: BRIDGE_WATCHDOG_PATIENT_HEALTH_MS });
+        if (patient.ready) {
+          bridgeWatchdogMisses = 0;
+          logger.warn("runtime.watchdog_slow", { ...miss, patientMs: Date.now() - patientStarted });
+          return;
+        }
       }
       bridgeWatchdogMisses = 0;
       logger.warn("runtime.watchdog_restart", miss);
@@ -4550,6 +4588,12 @@ async function start() {
       } catch { /* best-effort cleanup */ }
     });
   }
+  // system-drive.cjs: rtk's history folder, and temporary files nothing has touched for a week cleared
+  // once startup has settled (asynchronous; files in use are skipped).
+  if (systemDriveRedirect.rtkDir) void fs.promises.mkdir(systemDriveRedirect.rtkDir, { recursive: true }).catch(() => {});
+  if (systemDriveRedirect.tempDir) {
+    setTimeout(() => { void systemDrive.pruneTemp(systemDriveRedirect.tempDir).catch(() => {}); }, 120_000).unref?.();
+  }
 
   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"), {
     onError: (error) => {
@@ -4783,6 +4827,8 @@ async function start() {
     safeStorage,
     env: process.env,
     logger,
+    // CPA's GitHub release checks and downloads; its local health checks keep Node's fetch.
+    releaseFetch: fetchRemoteOffMain,
     // CPA (the local model proxy) is core: it outlives launcher restarts and backend updates.
     persistentComponents: IS_DEV_PROFILE ? [] : ["cpa"],
     publish: (value) => send("launcher:external-services-changed", value),
@@ -4813,6 +4859,7 @@ async function start() {
   appPluginsService = createAppPlugins({
     cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
     services: () => externalServicesController,
+    fetchImpl: fetchRemoteOffMain,
     // A plugin DLL loads when CPA starts.
     restartCpa: () => externalServicesController.restart("cpa"),
     antigravityCli: () => antigravityCliService,
@@ -4930,9 +4977,10 @@ async function start() {
     if (!Array.isArray(catalog.workspaces)) throw new Error("Workspace catalog is unavailable");
     return catalog.workspaces;
   };
-  // The Antigravity CLI always runs through the app's global network proxy (fail closed).
-  const antigravityProxyEnvironment = () => {
-    const env = resolveManagedProxyEnvironment("antigravity-cli", path.join(app.getPath("userData"), "integrations"), safeStorage);
+  // The Antigravity CLI always runs through the app's global network proxy (fail closed). Its saved
+  // settings are read off main (resolveManagedProxyEnvironmentAsync); every caller awaits this.
+  const antigravityProxyEnvironment = async () => {
+    const env = await resolveManagedProxyEnvironmentAsync("antigravity-cli", path.join(app.getPath("userData"), "integrations"), safeStorage);
     const allowed = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy", "NODE_USE_ENV_PROXY"];
     return Object.fromEntries(allowed.filter(key => typeof env[key] === "string" && env[key]).map(key => [key, env[key]]));
   };
@@ -5067,6 +5115,9 @@ async function start() {
       computerControlService = computerControl;
       app.on("will-quit", () => computerControl.dispose());
       chatAgentTools = createChatAgentTools({
+        generateImage: backendBundles.requireModule(backend, "chat-images.cjs").createChatImageGenerator({
+          connection: () => externalServicesController.cpaConnection(),
+        }),
         previews: chatPreviews,
         sandbox: chatSandbox,
         computerControl,
@@ -5205,6 +5256,7 @@ async function start() {
     const antigravityCli = createAntigravityCli({
       toolsRoot: path.join(app.getPath("userData"), "tools"),
       confirm: confirmAoAction, getWorkspaces: listHeadlessWorkspaces, logger,
+      fetchImpl: fetchRemoteOffMain,
     });
     antigravityCliService = antigravityCli;
     antigravityAuthBrowser = createAntigravityAuthBrowser({
@@ -5224,13 +5276,13 @@ async function start() {
       switch (operation) {
         case "status": {
           let proxy;
-          try { proxy = { configured: Boolean(antigravityProxyEnvironment().HTTPS_PROXY) }; }
+          try { proxy = { configured: Boolean((await antigravityProxyEnvironment()).HTTPS_PROXY) }; }
           catch (error) { proxy = { configured: false, error: String(error?.message || error).slice(0, 200) }; }
           return { ...(await antigravityCli.statusAsync()), proxy, cpa: await antigravityReauth.status() };
         }
         case "install": return antigravityCli.install();
         case "terminal_open": {
-          const env = antigravityProxyEnvironment();
+          const env = await antigravityProxyEnvironment();
           if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
             executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
@@ -5271,7 +5323,7 @@ async function start() {
         // the daemon's PATH and Claude's hook are fixed for its whole run.
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
-        try { env = shimProxyEnvironment(antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
+        try { env = shimProxyEnvironment(await antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
         // session's own settings, on each Codex app-server's command line and in each OpenCode
         // chat's inline config (empty: off). ready() above wrote the plugin's file.

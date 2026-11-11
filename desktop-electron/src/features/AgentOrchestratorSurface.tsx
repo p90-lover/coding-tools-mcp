@@ -363,16 +363,24 @@ async function workspaceMode(workspaceId: string, mode?: WorkspaceMode): Promise
 }
 
 /**
+ * The pause before asking for the harness list again: growing to 10 s over the first three minutes,
+ * then every 30 s for as long as AO takes. It used to stop after those three minutes, but a cold AO
+ * start on the shared hard disk took 25 (2026-11-11: a 3.4 GB ao.db), so the chat's harness list kept
+ * only Native Codex until the page happened to reload.
+ */
+export const harnessRetryMs = (attempt: number) => attempt < 20 ? Math.min(2000 * attempt, 10_000) : 30_000;
+
+/**
  * Reads the harness list, and while AO is still starting (the list then holds only Native Codex,
- * with a notice) asks again with a growing pause for about three minutes, so Claude Code, Codex and
- * the other AO harnesses appear once AO is up instead of staying missing until a reload.
+ * with a notice) asks again (harnessRetryMs) until it answers, so Claude Code, Codex and the other
+ * AO harnesses appear once AO is up instead of staying missing until a reload.
  * Returns a function that stops asking.
  */
 export function watchHarnesses(update: (harnesses: AoHarness[], notice: string) => void): () => void {
   let live = true;
   void (async () => {
-    for (let attempt = 0; live && attempt < 20; attempt++) {
-      if (attempt) await new Promise(resolve => setTimeout(resolve, Math.min(2000 * attempt, 10_000)));
+    for (let attempt = 0; live; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, harnessRetryMs(attempt)));
       if (!live) return;
       const result = await moduleCall("harnesses")
         .catch(cause => ({ harnesses: [], notice: cause instanceof Error ? cause.message : String(cause) } as Record<string, unknown>));

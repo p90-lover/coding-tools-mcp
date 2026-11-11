@@ -21,7 +21,12 @@ const { spawn, spawnSync } = require("node:child_process");
 // here is one slow to close. The worker used to give up after five minutes, and the app, gone soon
 // after, was started by nobody. It is waited for this long.
 const PARENT_WAIT_MS = 30 * 60_000;
-const RENAME_ATTEMPTS = 12;
+// How long a file held open (EBUSY/EPERM/EACCES) is retried before the update rolls back. Twelve
+// tries over 16.5 s were not enough: on 2026-11-11 the app's main process had exited, yet app.asar
+// stayed held past them on a busy hard disk (its child processes still closing, or a scan), and
+// 0.8.110 rolled back and waited for the next try. The app is closed meanwhile either way.
+const RENAME_WAIT_MS = 2 * 60_000;
+const RENAME_PAUSE_MAX_MS = 2_000;
 const JOURNAL = "journal.json";
 const MARKER = "applying.json";
 const LAST_RESULT = "last-result.json";
@@ -55,15 +60,23 @@ async function waitForParent(pid, timeoutMs = PARENT_WAIT_MS) {
   return true;
 }
 
-/** Renames, retrying while a scanner or a closing process briefly holds the file. */
-async function renameWithRetry(from, to) {
+/**
+ * Renames, retrying while a scanner or a closing process holds the file, until the pauses add up to
+ * `waitMs`: quickly at first, then every RENAME_PAUSE_MAX_MS. Counted from the pauses, not a clock,
+ * so the budget ends even where time does not move. Any other error, or one left at the end, is
+ * thrown.
+ */
+async function renameWithRetry(from, to, { waitMs = RENAME_WAIT_MS, rename = fs.renameSync, wait = sleep } = {}) {
+  let waited = 0;
   for (let attempt = 1; ; attempt += 1) {
     try {
-      fs.renameSync(from, to);
+      rename(from, to);
       return;
     } catch (error) {
-      if (attempt >= RENAME_ATTEMPTS || !["EBUSY", "EPERM", "EACCES"].includes(error?.code)) throw error;
-      await sleep(250 * attempt);
+      if (!["EBUSY", "EPERM", "EACCES"].includes(error?.code) || waited >= waitMs) throw error;
+      const pause = Math.min(250 * attempt, RENAME_PAUSE_MAX_MS, waitMs - waited);
+      await wait(pause);
+      waited += pause;
     }
   }
 }

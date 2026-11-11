@@ -14,10 +14,10 @@ function logos() {
 // Every harness shows the icon its own product site or repository shows (paths under assets/harness;
 // see SOURCES.md): brand/ holds files copied byte for byte from the product, ao/ the Agent
 // Orchestrator avatars that are the product's own icon, and Kimi, Qwen and Muse (Meta) share their
-// maker's mark with the model lists.
+// maker's mark with the model lists. Native Codex runs through ChatGPT and shows ChatGPT's mark.
 const assets = path.resolve(root, "../assets/harness");
 const harnesses = {
-  "claude-code": "brand/claude-code.png", codex: "ao/codex.svg", "codex-native": "ao/codex.svg", agy: "ao/agy.png", antigravity: "ao/agy.png",
+  "claude-code": "../models/claude.svg", codex: "ao/codex.svg", "codex-native": "openai.png", agy: "ao/agy.png", antigravity: "ao/agy.png",
   opencode: "brand/opencode.png", "opencode-v2": "brand/opencode.png", aider: "ao/aider.png", amp: "brand/amp.svg", auggie: "ao/auggie.svg",
   autohand: "ao/autohand.svg", cline: "brand/cline.svg", continue: "ao/continue.png", crush: "ao/crush.png", cursor: "brand/cursor.svg",
   deepseek: "ao/deepseek-harness.svg", "deepseek-harness": "ao/deepseek-harness.svg", devin: "ao/devin.png", droid: "ao/droid.png", fx: "ao/fx.svg",
@@ -39,9 +39,11 @@ test("every harness shows its own product's icon, never another brand's", () => 
     const ao = path.resolve(__dirname, "../../module/agent-orchestrator/frontend/src/renderer/assets/agents", path.basename(asset));
     if (fs.existsSync(ao)) assert.ok(logoBytes(ao).equals(logoBytes(path.join(assets, asset))), `${asset} is AO's file unmodified`);
   }
-  // The marks the user saw as wrong (2026-11-10), and the ones before them.
-  for (const [id, wrong] of [["claude-code", "ao/claude-code.svg"], ["claude-code", "claude-code.png"], ["qwen", "ao/qwen.png"], ["kimi", "ao/kimi.png"],
+  // The marks the user saw as wrong (2026-11-10), and the ones before them. 2026-11-11: Claude Code's
+  // docs icon drew its spark on a dark tile ("the claude one background is black").
+  for (const [id, wrong] of [["claude-code", "ao/claude-code.svg"], ["claude-code", "claude-code.png"], ["claude-code", "brand/claude-code.png"], ["qwen", "ao/qwen.png"], ["kimi", "ao/kimi.png"],
     ["grok", "ao/grok.png"], ["gemini", "gemini.svg"], ["muse", "ao/muse.png"], ["pi", "ao/pi.png"], ["amp", "ao/amp.svg"], ["codex", "openai.png"],
+    ["codex-native", "ao/codex.svg"],
     ["unreal-agent", "unreal.svg"]]) {
     assert.notEqual(assetOf(harnessMark(`ao:${id}`, id)(16).props.src), wrong, id);
   }
@@ -72,8 +74,9 @@ test("every known harness has its bundled brand image, including missing agents"
 test("display-name aliases identify known brands without guessing an unknown harness", () => {
   const { harnessMark } = logos();
   for (const [label, asset] of [["Gemini CLI", "brand/gemini-cli.svg"], ["DeepSeek", "ao/deepseek-harness.svg"], ["Prime Agent", "ao/prime-agent.png"],
+    ["Native Codex", "openai.png"],
     ["Kilo Code", "brand/kilocode.svg"], ["GitHub Copilot", "ao/copilot.svg"], ["Unreal Agent", "ao/unreal-agent.png"], ["Grok Build", "brand/grok-build.png"],
-    ["Qwen Code", "qwen.svg"], ["Muse Code", "meta.svg"], ["Claude Code", "brand/claude-code.png"]]) {
+    ["Qwen Code", "qwen.svg"], ["Muse Code", "meta.svg"], ["Claude Code", "../models/claude.svg"]]) {
     assert.equal(assetOf(harnessMark("custom-id", label)(16).props.src), asset, label);
   }
   assert.equal(harnessMark("unknown-agent", "Unknown")(16).type, "svg", "unknown brands keep an honest neutral fallback");
@@ -82,7 +85,7 @@ test("dark-theme contrast: Kimi's black K keeps a backing, black glyphs invert",
   const { harnessMark } = logos();
   assert.match(harnessMark("ao:kimi", "Kimi")(16).props.className, /is-backed/);
   assert.doesNotMatch(harnessMark("ao:kimi", "Kimi")(16).props.className, /is-mono/);
-  for (const id of ["prime-agent", "cline", "grok"]) assert.match(harnessMark(`ao:${id}`, id)(16).props.className, /is-mono/, id);
+  for (const id of ["prime-agent", "cline", "grok", "codex-native"]) assert.match(harnessMark(`ao:${id}`, id)(16).props.className, /is-mono/, id);
   // Tiles and colour marks keep their own colours.
   for (const id of ["claude-code", "opencode", "pi", "amp", "kilocode", "cursor", "gemini"]) assert.doesNotMatch(harnessMark(`ao:${id}`, id)(16).props.className, /is-mono/, id);
 });
