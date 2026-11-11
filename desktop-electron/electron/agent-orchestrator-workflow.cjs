@@ -5121,6 +5121,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function driveRun(workspaceId, runId, executable, state) {
     const pause = () => new Promise(resolve => setTimeout(resolve, 500));
     const observing = new Map();
+    const observationState = new Map();
     const nodeAttention = new Map(); // running node id -> its last observed attention (or null)
     // Running node id -> when it may be observed again, after an observation that found it quiet.
     const quietUntil = new Map();
@@ -5187,8 +5188,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const active = mission.nodes.filter(node => node.state === "running");
         for (const [id] of observing) if (!active.some(node => node.id === id)) observing.delete(id);
         for (const [id] of quietUntil) if (!active.some(node => node.id === id)) quietUntil.delete(id);
+        for (const [id] of observationState) if (!active.some(node => node.id === id)) observationState.delete(id);
         for (const node of active) {
-          if (observing.has(node.id)) continue;
+          const attempt = JSON.stringify([node.receipt?.thread_id, node.receipt?.request_key || node.request_key, node.receipt?.turn_id]);
+          let retry = observationState.get(node.id);
+          if (retry?.attempt !== attempt) {
+            retry = { attempt, failures: 0, retryAt: 0 };
+            observationState.set(node.id, retry);
+            observing.delete(node.id);
+            nodeAttention.delete(node.id);
+            quietUntil.delete(node.id);
+          }
+          if (observing.has(node.id) || retry.retryAt > performance.now()) continue;
           // Observed quiet a moment ago: each observation is a session read and a conversation tail
           // from the AO daemon, and a run read from coding-tools-headless. Nine working chats made
           // 14 session reads and 17 run reads a second at this loop's pace (2026-11-10, 0.8.108),
@@ -5201,10 +5212,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           observing.set(node.id, pending);
         }
         const completed = active.filter(node => observing.get(node.id)?.done);
-        const observed = completed.map(node => observing.get(node.id).result || {});
+        const observed = completed.map(node => observing.get(node.id).result);
         for (const node of completed) {
           const pending = observing.get(node.id);
-          if (pending.error) state.detail = publicText(pending.error?.message || pending.error, 500);
+          const retry = observationState.get(node.id);
+          if (pending.error) {
+            state.detail = publicText(pending.error?.message || pending.error, 500);
+            retry.failures = Math.min(retry.failures + 1, 5);
+            retry.retryAt = performance.now() + Math.min(1_000 * 2 ** (retry.failures - 1), 15_000);
+          } else {
+            retry.failures = 0;
+            retry.retryAt = 0;
+          }
           observing.delete(node.id);
         }
         // A node keeps its last observed attention until its next observation lands: observations
@@ -5212,6 +5231,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // run as needing attention, then not, every other tick (thousands of reopened incidents).
         for (const [index, node] of completed.entries()) {
           const result = observed[index];
+          // A failed read says nothing about whether the last request was answered.
+          if (!result) continue;
           nodeAttention.set(node.id, result.pending_approvals?.length ? { kind: "pending_approval", node, pending: result.pending_approvals }
             : result.needs_input ? { kind: "needs_input" } : null);
           if (result.quiet === true) quietUntil.set(node.id, performance.now() + QUIET_OBSERVE_MS);
