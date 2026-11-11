@@ -3,6 +3,7 @@ const test=require("node:test"),assert=require("node:assert/strict"),fs=require(
 const {createChromeProfileCapture,EXTENSION_ID,EXTENSION_ORIGIN}=require("../electron/chrome-profile-login.cjs");
 const keys=crypto.generateKeyPairSync("rsa",{modulusLength:2048,publicKeyEncoding:{type:"spki",format:"der"},privateKeyEncoding:{type:"pkcs8",format:"pem"}});
 const identity={publicKey:keys.publicKey.toString("base64"),privateKey:keys.privateKey};
+const FIXTURE_USER={id:"user-Fixture0000000000000001",email:"fixture@example.test"};
 const wait=async condition=>{const deadline=Date.now()+10000;while(Date.now()<deadline){if(condition())return;await new Promise(resolve=>setTimeout(resolve,10));}throw Error("Extension fixture did not settle");};
 function worker({trusted,authenticated=true,cookieState,helloTransform}={}){
  const session={},local=trusted?{trustedAppKey:trusted}:{},listeners={},calls={cookies:[],tabs:[],captures:0,checks:0};
@@ -12,7 +13,8 @@ function worker({trusted,authenticated=true,cookieState,helloTransform}={}){
  let tabs=[{id:7,url:"https://chatgpt.com/",active:true}];
  const chrome={runtime:{id:EXTENSION_ID,getURL:name=>`${EXTENSION_ORIGIN}/${name}`,onMessageExternal:event("external"),onMessage:event("internal")},storage:{session:storage(session),local:storage(local)},
   cookies:{onChanged:event("cookies"),getAll:async query=>{calls.cookies.push(query.domain);return cookieState?.(query.domain)??[cookie(`.${query.domain}`)];}},
-  scripting:{executeScript:async options=>{calls.checks++;assert.equal(options.target.tabId,7);assert(options.func.toString().includes("/api/auth/session"));assert(!options.func.toString().includes("accessToken"));return[{result:authenticated}];}},
+  // A signed-in tab answers with its session's ChatGPT login; `authenticated` may give another.
+  scripting:{executeScript:async options=>{calls.checks++;assert.equal(options.target.tabId,7);assert(options.func.toString().includes("/api/auth/session"));assert(!options.func.toString().includes("accessToken"));return[{result:authenticated===true?FIXTURE_USER:authenticated}];}},
   tabs:{onUpdated:event("tabs"),query:async query=>{assert.deepEqual(Array.from(query.url),["https://chatgpt.com/*"]);return tabs;},create:async value=>{calls.tabs.push(value.url);return{id:9,...value};}}};
  const fetcher=async(url,options)=>{if(new URL(url).pathname==="/capture"){calls.captures++;assert(!options.body.includes('fixture-only'));assert(!options.body.includes('excluded'));}const response=await fetch(url,{...options,headers:{...options.headers,Origin:EXTENSION_ORIGIN}});if(helloTransform&&new URL(url).pathname==="/hello"){const body=helloTransform(await response.json());return{ok:response.ok,status:response.status,url:response.url,text:async()=>JSON.stringify(body)};}return response;};
  const context={chrome,fetch:fetcher,crypto:crypto.webcrypto,URL,TextEncoder,Uint8Array,atob,btoa,Date,queueMicrotask,setTimeout:(fn,ms)=>setTimeout(fn,Math.min(ms,1)),clearTimeout};
@@ -31,6 +33,13 @@ test("a paired current profile verifies automatically without a Continue or clos
  const c=await connection(t),w=worker({trusted:identity.publicKey});await w.begin(c.message,c.sender);const transfer=await c.value.result;
  assert.equal(w.calls.captures,1);await w.check();assert.equal(w.calls.captures,1);transfer.complete(true);await wait(()=>w.session.pairing.status.startsWith("Session sent"));
  assert.equal(w.calls.tabs.length,0,"existing ChatGPT tabs stay in use");
+ assert.deepEqual(transfer.expectedUser,FIXTURE_USER,"the app learns which ChatGPT login Chrome's page was signed in as");
+});
+test("a session without a ChatGPT user id never exports cookies, and a malformed email is not sent",async t=>{
+ const c=await connection(t),w=worker({trusted:identity.publicKey,authenticated:{id:"not-a-user",email:"x@example.test"}});await w.begin(c.message,c.sender);await wait(()=>w.calls.checks>0);
+ await w.check();assert.deepEqual(w.calls.cookies,[]);assert.equal(w.calls.captures,0);
+ const d=await connection(t),v=worker({trusted:identity.publicKey,authenticated:{id:FIXTURE_USER.id,email:"no at sign"}});await v.begin(d.message,d.sender);
+ const transfer=await d.value.result;assert.deepEqual(transfer.expectedUser,{id:FIXTURE_USER.id,email:null});transfer.complete(true);
 });
 test("a page without a positive session check never exports cookies",async t=>{
  const c=await connection(t),w=worker({trusted:identity.publicKey,authenticated:false});await w.begin(c.message,c.sender);await wait(()=>w.calls.checks>0);assert.deepEqual(w.calls.cookies,[]);assert.equal(w.calls.captures,0);

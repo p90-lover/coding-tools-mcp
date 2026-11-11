@@ -5,7 +5,7 @@ const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = re
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { conversationPatchScript } = require("./chatgpt-conversation-actions.cjs");
 const { blockChatGptTelemetry } = require("./chatgpt-telemetry-block.cjs");
-const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
+const { readChatGptAuthSession, normalizeSessionUser, sameSessionUser } = require("./chatgpt-auth-session.cjs");
 const { runBrowserPageScript } = require("./browser-page-script.cjs");
 const {
   runBrowserHelperOperation,
@@ -298,8 +298,21 @@ function javaScriptLiteral(value) {
 function combinedError(primary, label, secondary) {
   const first = primary instanceof Error ? primary.message : String(primary);
   const second = secondary instanceof Error ? secondary.message : String(secondary);
-  return new Error(`${first}; ${label}: ${second}`);
+  const error = new Error(`${first}; ${label}: ${second}`);
+  if (primary?.code === SIGN_IN_IDENTITY) error.code = SIGN_IN_IDENTITY;
+  return error;
 }
+
+// A copied sign-in that opened as the wrong ChatGPT login. Its message names logins only (never
+// cookie values), so it reaches the person instead of the generic Chrome-import failure.
+const SIGN_IN_IDENTITY = "CHATGPT_SIGN_IN_IDENTITY";
+function signInIdentityError(message) {
+  const error = new Error(message);
+  error.code = SIGN_IN_IDENTITY;
+  return error;
+}
+const loginName = (user) => user?.email ?? "another ChatGPT login";
+const MULTIPLE_LOGINS_ADVICE = (user) => `ChatGPT in Chrome is probably signed in to more than one account. Log out of ${loginName(user)} in Chrome's ChatGPT account menu, or use a Chrome profile signed in only to the account you want, then connect again.`;
 
 function visibleElementScript(selector) {
   return `Array.from(document.querySelectorAll(${JSON.stringify(selector)})).find((element) => {
@@ -698,6 +711,9 @@ class BrowserHost {
     // whether its ChatGPT connector bound in a Codex turn ({ bound } or { error }).
     onSessionInspected = null,
     onConnectorObserved = null,
+    // (partition, { id, email }) => the name of another account already signed in to that
+    // ChatGPT login, or null: a copied sign-in that is another card's login is not this account's.
+    signInConflict = null,
   }) {
     if (typeof getConnectorName !== "function") {
       throw new Error("Browser host connector-name resolver is unavailable");
@@ -714,6 +730,7 @@ class BrowserHost {
     this.helper = helper;
     this.logger = logger;
     this.loginWithPasskey = loginWithPasskey;
+    this.signInConflict = signInConflict;
     // The profile's partition or one of its browser-tab accounts' (profile.cjs); nothing else.
     const resolvedPartition = partition ?? browserPartitionForLauncherProfile(profile);
     if (!isBrowserAccountPartition(profile, resolvedPartition)) {
@@ -3924,12 +3941,20 @@ class BrowserHost {
     let sessionMutated = false;
     let sessionDiscarded = false;
     let state;
+    // Until the imported session is confirmed as this account's login, whatever signs in on this
+    // partition is not yet this account's (main waits on it before recording an email or plan).
+    let settleSignIn = () => {};
+    const pendingSignIn = { partition: this.partition, verified: new Promise((resolve) => { settleSignIn = resolve; }) };
     try {
       transfer.assertCurrent?.();
       state = validatePasskeyLoginState(transfer.storageState);
       const contents = this.view?.webContents;
       if (!contents || contents.isDestroyed()) throw new Error("Owned ChatGPT browser session is unavailable");
+      // Chrome's page already said which login it was: another card's is refused untouched.
+      const expected = normalizeSessionUser(transfer.expectedUser);
+      if (expected) this.assertSignInIdentity(expected, null);
       sessionMutated = true;
+      this.pendingSignIn = pendingSignIn;
       await this.clearOwnedSessionForPasskey();
       transfer.assertCurrent?.();
       for (const cookie of state.cookies) {
@@ -3953,6 +3978,13 @@ class BrowserHost {
       transfer.assertCurrent?.();
       result = await this.waitForAuthenticated(60_000, () => { transfer.assertCurrent?.(); return false; });
       transfer.assertCurrent?.();
+      // Signed in is not enough: the session must be the login Chrome showed, and not another
+      // card's (a cookie jar with two ChatGPT logins opened as the other one).
+      const actual = await this.readSessionUser();
+      transfer.assertCurrent?.();
+      this.assertSignInIdentity(actual, normalizeSessionUser(transfer.expectedUser),
+        { required: transfer.source === "approved-chrome-profile-connector" });
+      settleSignIn(true);
       await this.runSessionInspection(false);
       transfer.assertCurrent?.();
       this.activateHomeSurface();
@@ -3961,6 +3993,8 @@ class BrowserHost {
     } catch (caught) {
       error = caught;
     }
+    settleSignIn(!error);
+    if (this.pendingSignIn === pendingSignIn) this.pendingSignIn = null;
 
     if (error && sessionMutated) {
       try {
@@ -3988,12 +4022,55 @@ class BrowserHost {
     if (error) {
       transfer.complete?.(false);
       // Never expose imported cookie values through a low-level cookie/import exception.
+      if (error.code === SIGN_IN_IDENTITY) throw error;
       if (transfer.source === "approved-chrome-profile-connector") throw new Error("Chrome profile session verification failed. Check the selected account and its network route in Coding Tools, then reconnect your Chrome profile.");
       throw error;
     }
     if (!result?.authenticated) { transfer.complete?.(false); throw new Error("Passkey sign-in completed without an authenticated Launcher session"); }
     transfer.complete?.(true);
     return this.snapshot();
+  }
+
+  /** While a copied sign-in on `partition` is unconfirmed: a promise of whether it was accepted. */
+  signInVerificationFor(partition) {
+    return this.pendingSignIn?.partition === partition ? this.pendingSignIn.verified : null;
+  }
+
+  /** The ChatGPT login ({ id, email }) the shown page's session is, from ChatGPT's own endpoint. */
+  async readSessionUser() {
+    const contents = this.view?.webContents;
+    if (!contents || contents.isDestroyed()) return null;
+    const value = await runBrowserPageScript(contents, `(async () => {
+      if (location.origin !== ${JSON.stringify(CHATGPT_ORIGIN)}) return null;
+      const controller = new AbortController(), timer = setTimeout(() => controller.abort(), ${CHATGPT_AUTH_SESSION_TIMEOUT_MS});
+      try {
+        const response = await fetch("/api/auth/session", { credentials: "include", cache: "no-store", redirect: "error",
+          headers: { accept: "application/json" }, signal: controller.signal });
+        if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return null;
+        const user = (await response.json())?.user;
+        return user && typeof user === "object" ? { id: user.id, email: user.email } : null;
+      } catch { return null; } finally { clearTimeout(timer); }
+    })()`).catch(() => null);
+    return normalizeSessionUser(value);
+  }
+
+  /**
+   * Refuses a copied sign-in that is not the login it should be: unknown when it must be known
+   * (`required`), another login than the one Chrome's page showed (`expected`), or a login another
+   * account already holds (signInConflict).
+   */
+  assertSignInIdentity(actual, expected, { required = false } = {}) {
+    if (!actual) {
+      if (required) throw signInIdentityError("Coding Tools could not confirm which ChatGPT account the Chrome sign-in opened as, so nothing was added. Connect again.");
+      return;
+    }
+    if (expected && !sameSessionUser(expected, actual)) {
+      throw signInIdentityError(`Chrome showed ${loginName(expected)}, but its copied session opened as ${loginName(actual)}, so nothing was added. ${MULTIPLE_LOGINS_ADVICE(actual)}`);
+    }
+    const holder = this.signInConflict?.(this.partition, actual);
+    if (holder) {
+      throw signInIdentityError(`This Chrome sign-in is ${loginName(actual)}, which is already the account "${holder}", so nothing was added. ${MULTIPLE_LOGINS_ADVICE(actual)}`);
+    }
   }
 
   async logout() {

@@ -52,7 +52,9 @@ async function begin(message, sender) {
   return { ok: true, approvalRequired: !trusted };
 }
 
-async function signedIn(tabId) {
+// The ChatGPT login this tab's session is ({ id, email }), or null. Chrome can hold two ChatGPT
+// logins at once; the app checks the copied session opens as this same one.
+async function signedInUser(tabId) {
   const results = await chrome.scripting.executeScript({ target: { tabId }, func: async () => {
     if (location.origin !== "https://chatgpt.com") return false;
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 5000);
@@ -60,10 +62,14 @@ async function signedIn(tabId) {
       const response = await fetch("/api/auth/session", { credentials: "include", cache: "no-store", redirect: "error", signal: controller.signal });
       if (!response.ok || !response.headers.get("content-type")?.includes("application/json")) return false;
       const session = await response.json();
-      return typeof session?.user?.id === "string" && session.user.id.length > 0 && (!session.expires || Date.parse(session.expires) > Date.now());
+      if (typeof session?.user?.id !== "string" || !session.user.id.length || (session.expires && !(Date.parse(session.expires) > Date.now()))) return false;
+      return { id: session.user.id, email: typeof session.user.email === "string" ? session.user.email : null };
     } catch { return false; } finally { clearTimeout(timeout); }
   } });
-  return results.some(result => result.result === true);
+  const found = results.find(result => typeof result.result?.id === "string" && /^user-[A-Za-z0-9_-]{1,120}$/.test(result.result.id));
+  if (!found) return null;
+  const email = found.result.email;
+  return { id: found.result.id, email: typeof email === "string" && email.length <= 200 && /^[^\s@]+@[^\s@]+$/.test(email) ? email : null };
 }
 async function check() {
   if (checking) { queued = true; return; }
@@ -77,9 +83,9 @@ async function check() {
     let tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*"] });
     tabs = tabs.sort((a, b) => Number(b.active) - Number(a.active));
     if (!tabs.length) return; // The existing login tab may be on its identity provider; never open a tab per cookie event.
-    let ready = false;
-    for (const tab of tabs) { if (Number.isInteger(tab.id) && await signedIn(tab.id)) { ready = true; break; } }
-    if (!ready) { if (generation === revision) await update({ status: "Waiting for a verified ChatGPT session in this profile" }, pair.token); return; }
+    let user = null;
+    for (const tab of tabs) { if (Number.isInteger(tab.id) && (user = await signedInUser(tab.id))) break; }
+    if (!user) { if (generation === revision) await update({ status: "Waiting for a verified ChatGPT session in this profile" }, pair.token); return; }
     const current = await pairing();
     if (generation !== revision || !current || current.token !== pair.token || !current.approved || current.sent || current.expiresAt <= Date.now()) return;
     await verifyProof(pair, await request(pair, "/hello"));
@@ -94,7 +100,7 @@ async function check() {
     // Mark before submission: an uncertain delivery is not permission to replay a credential import.
     await update({ sent: true, status: "Coding Tools is independently verifying this sign-in" }, pair.token);
     if (generation !== revision) return;
-    const encrypted = await encryptedCapture(pair, { version: 1, origin: "https://chatgpt.com", sessionAuthenticated: true, cookies });
+    const encrypted = await encryptedCapture(pair, { version: 1, origin: "https://chatgpt.com", sessionAuthenticated: true, user, cookies });
     if (generation !== revision) return;
     const result = await request(pair, "/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encrypted) });
     const latest = await pairing();

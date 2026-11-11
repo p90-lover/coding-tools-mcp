@@ -1508,7 +1508,12 @@ function recordBrowserWorkspaceContext(partition, context) {
 }
 
 async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore }) {
-  if (browserHost !== host) return;
+  if (browserHost !== host || !browserAccounts.has(accountId)) return;
+  // A copied Chrome sign-in is this account's only once the host confirms its login: a refused
+  // one (Chrome's other ChatGPT login, another card's) must leave no email or MCP setup behind.
+  const verifying = host.signInVerificationFor?.(browserAccounts.partitionOf(accountId));
+  if (verifying && !(await verifying)) return;
+  if (browserHost !== host || !browserAccounts.has(accountId)) return;
   void automaticAccountMcp?.sync();
   try {
     // The account's own partition: the host may already show another account.
@@ -5667,6 +5672,7 @@ async function start() {
       // The approved extension connects the current Chrome profile. App-side fresh verification
       // still uses this account's routed partition; ordinary Chrome's routing is never changed.
       loginWithPasskey: () => runtimeHost.captureCurrentChromeLogin({ safeStorage }),
+      signInConflict: (partition, user) => browserAccounts.otherAccountWithLogin(partition, user)?.label ?? null,
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,
       publishState: (state) => {
