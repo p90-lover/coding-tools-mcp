@@ -16,8 +16,12 @@ function fixture(t) {
   // Match the user-owned Codex home ACL; copied checkouts may inherit only Modify.
   if (process.platform === "win32") {
     const { execFileSync } = require("node:child_process");
-    const account = execFileSync("whoami.exe", [], { windowsHide: true, encoding: "utf8" }).trim();
-    execFileSync("icacls.exe", [root, "/grant:r", `${account}:(OI)(CI)F`], { windowsHide: true, stdio: "pipe" });
+    // Windows' own whoami and icacls. Started from Git Bash, PATH found Git's whoami, which prints the
+    // bare user name; on a computer of the same name icacls took that for the computer's account
+    // domain, the user kept only Modify, and Keysmith failed "[Errno 5] ... Access is denied".
+    const system32 = path.join(process.env.SystemRoot || "C:\\Windows", "System32");
+    const account = execFileSync(path.join(system32, "whoami.exe"), [], { windowsHide: true, encoding: "utf8" }).trim();
+    execFileSync(path.join(system32, "icacls.exe"), [root, "/grant:r", `${account}:(OI)(CI)F`], { windowsHide: true, stdio: "pipe" });
   }
   const codexDir = path.join(root, "codex");
   fs.mkdirSync(codexDir);
@@ -247,7 +251,7 @@ test("isolated Keysmith status, apply, and uninstall preserve hooks and unrelate
   const applied = await keysmith.apply({ instructionFile, confirmed: true, expectedFileSha256: preview.fileSha256 });
   assert.equal(applied.ok, true, applied.stderr || applied.stdout);
   const installed = await keysmith.status();
-  assert.equal(installed.installed, true);
+  assert.equal(installed.installed, true, JSON.stringify(installed));
   assert.equal(installed.state, "active");
   assert.equal(installed.managedByCodingTools, true);
   assert.match(installed.stdout, /Config activation:\s+active/);

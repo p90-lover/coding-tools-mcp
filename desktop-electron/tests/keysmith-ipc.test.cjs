@@ -112,8 +112,12 @@ test("one click installs bundled instructions and verifies ownership without a f
   t.after(() => fs.rmSync(codexDir, { recursive: true, force: true }));
   if (process.platform === "win32") {
     const { execFileSync } = require("node:child_process");
-    const account = execFileSync("whoami.exe", [], { windowsHide: true, encoding: "utf8" }).trim();
-    execFileSync("icacls.exe", [codexDir, "/grant:r", `${account}:(OI)(CI)F`], { windowsHide: true, stdio: "pipe" });
+    // Windows' own whoami and icacls. Started from Git Bash, PATH found Git's whoami, which prints the
+    // bare user name; on a computer of the same name icacls took that for the computer's account
+    // domain, the user kept only Modify, and Keysmith failed "[Errno 5] ... Access is denied".
+    const system32 = path.join(process.env.SystemRoot || "C:\\Windows", "System32");
+    const account = execFileSync(path.join(system32, "whoami.exe"), [], { windowsHide: true, encoding: "utf8" }).trim();
+    execFileSync(path.join(system32, "icacls.exe"), [codexDir, "/grant:r", `${account}:(OI)(CI)F`], { windowsHide: true, stdio: "pipe" });
   }
   fs.writeFileSync(path.join(codexDir, "config.toml"), 'model = "gpt-6-sol"\n');
   const originalHooks = '{"hooks":{"user_owned":true}}\n';
@@ -139,7 +143,7 @@ test("one click installs bundled instructions and verifies ownership without a f
   assert.equal(typeof install, "function");
   await assert.rejects(async () => install({ sender: "other" }), /main window/);
   const result = await install({ sender: "main" });
-  assert.equal(result.ok, true);
+  assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.state, "active");
   assert.equal(result.managedByCodingTools, true);
   assert.equal(fs.readFileSync(path.join(codexDir, "hooks.json"), "utf8"), originalHooks);
