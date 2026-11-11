@@ -6223,11 +6223,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * reply showed under the message before its own. A run that was made after all (the request
    * timed out, then went through) keeps the message, and so does a chat changed since.
    */
-  async function withdrawFollowUp(id, task, known, { before: description, description: written }) {
-    if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
-    const detail = await board({ workspaceId: id, taskId: task });
-    if (!detail.task || String(detail.task.description || "") !== written) return;
-    await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+  async function withdrawFollowUp(id, task, known, { before: description, description: written }, retries = 3) {
+    if (autoRetryDisposed) return;
+    try {
+      runReads.delete(JSON.stringify([id, ""]));
+      if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task || String(detail.task.description || "") !== written) return;
+      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+    } catch (error) {
+      // A second service failure during cleanup must not leave a run-less message "Sending" forever.
+      // Each retry checks for a late run and an unchanged description before removing anything.
+      if (!autoRetryDisposed && retries > 0) {
+        const timer = setTimer(() => {
+          autoRetryTimers.delete(timer);
+          void withdrawFollowUp(id, task, known, { before: description, description: written }, retries - 1).catch(() => undefined);
+        }, 2_000 * (4 - retries));
+        timer?.unref?.();
+        autoRetryTimers.add(timer);
+      }
+      logger?.warn?.("ao.follow_up_cleanup_failed", { taskId: task, retries, error: publicText(error?.message || error, 200) });
+      throw error;
+    }
   }
 
   async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}) {
@@ -6380,14 +6397,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("This chat's record couldn't hold the message. Start a new chat and send it there.");
       }
       const saidBefore = String(detail.task.description || "");
-      checkCurrent();
+      checkCurrent(false, true);
       await write(id, { expected_revision: detail.revision,
         change: { operation: "edit", id: task, title: detail.task.title, description } });
       followUp = { before: saidBefore, description };
       if (rewind) {
         try { chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
-          await withdrawFollowUp(id, task, runsBefore, followUp);
+          await withdrawFollowUp(id, task, runsBefore, followUp, 0);
           chatEdits.restore(id, task, rewindBefore);
           throw error;
         }
@@ -6409,7 +6426,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try {
       ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent));
     } catch (error) {
-      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp, rewind ? 0 : 3).catch(() => undefined);
       if (rewind && followUp) {
         const detail = await board({ workspaceId: id, taskId: task });
         if (detail.task?.description === followUp.before) chatEdits.restore(id, task, rewindBefore);
@@ -7375,11 +7392,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         "Continue that pending next step now. Read the command's output and verify the actual result before reporting success. "
           + "A watch deadline or observation failure is not command success or proof it stopped. Do not replay the command merely because its outcome is unknown. "
           + "If more waiting is needed, register watch_command or schedule_wakeup and check that registration succeeded; a promise alone schedules nothing."].join("\n\n");
-      attempted = true;
-      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, () => {
+      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, (accepting = false, writing = false) => {
         if (!current()) throw new Error("This command watch was cancelled");
+        if (accepting || writing) attempted = true;
       });
-      if (result?.ok === false || !result?.runId) { settleCommandWatch(ticket, "failed"); return; }
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The command continuation was not accepted");
       const previousRunId = ticket.runId;
       for (const other of commandWatchTickets.values()) {
         if (other.workspaceId === workspaceId && other.taskId === taskId && other.runId === previousRunId) other.runId = result.runId;
@@ -7456,7 +7473,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (wakeupsDisposed || !wakeup || wakeup.id !== id || waking.has(key)) return;
     if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
     const current = () => !wakeupsDisposed && wakeups.get(workspaceId, taskId) === wakeup && wakeup.id === id;
-    let consumed = false;
+    let consumed = false, attempted = false;
     waking.add(key);
     try {
       const saved = await runs({ workspaceId });
@@ -7468,15 +7485,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const loop = wakeup.loop ? loops.get(workspaceId, taskId) : null;
       const loopOver = wakeup.loop && (!loop || loop.minutes !== null || now() >= loop.expiresAt);
       if (loopOver && loop) loops.clear(workspaceId, taskId, loop.id);
-      const action = loopOver ? "drop" : wakeupAction(wakeup, {
+      const stopped = latest?.cancelled || latest?.paused || backgroundRuns.get(runKey(workspaceId, latest?.id))?.stopped
+        || sessionStops.has(wakeup.session);
+      const action = loopOver || stopped ? "drop" : wakeupAction(wakeup, {
         active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
         latestRunId: latest?.id ?? null, working: chatWorking(workspaceId, taskId, saved.runs),
       });
       // It fires when that turn settles (wakeupAfterRun), or at the next look should the settle be missed.
       if (action === "wait") { wakeups.update(workspaceId, taskId, { due: true }); armWakeup(workspaceId, taskId, WAKE_RETRY_MS); return; }
-      consumed = true;
-      wakeups.clear(workspaceId, taskId, id);
-      wakeFailures.delete(id);
+      if (action !== "send" || loop) {
+        consumed = true;
+        wakeups.clear(workspaceId, taskId, id);
+        wakeFailures.delete(id);
+      }
       if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
       if (loop) {
         // The loop's round is the loop's own (runLoop): kept due, with the agent's note, until it starts,
@@ -7486,11 +7507,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await runLoop(workspaceId, taskId, loop.id);
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
-      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
+      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true,
+        afterRunId: latest.id }, (accepting = false, writing = false) => {
+        if (!current() || wakeup.dueAt > now()) throw new Error("This wake-up was cancelled, replaced or postponed");
+        if (accepting || writing) attempted = true;
+      });
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The wake-up was not accepted");
+      consumed = true;
+      wakeups.clear(workspaceId, taskId, id);
+      wakeFailures.delete(id);
+      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: true });
     } catch (error) {
       if (!consumed && !current()) { wakeFailures.delete(id); return; }
       if (!consumed && wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
+      // A message write or run creation may have committed despite a lost reply. Only read-only
+      // preflight failures are safe to retry without duplicating a message or its work.
+      if (attempted) {
+        consumed = true;
+        wakeups.clear(workspaceId, taskId, id);
+      }
       const failures = (wakeFailures.get(id) ?? 0) + 1;
       wakeFailures.set(id, failures);
       logger?.warn?.("ao.wakeup.failed", { workspaceId, taskId, failures, error: String(error?.message || error).slice(0, 200) });
