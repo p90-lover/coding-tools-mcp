@@ -64,6 +64,35 @@ test("an unverified root missing bun or cli.js still fails with the same message
   assert.equal(countingExistsSync(() => assert.throws(() => runtimeInvocation({ app, installedRuntimeRoot: root, args: [] }))), 1);
 });
 
+test("a packaged app reads the bridge version once per runtime root; a missing or invalid file is not remembered", (t) => {
+  const { runtimeReleaseVersion } = freshModule();
+  const root = runtimeRoot();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const packageJson = path.join(root, "app", "package.json");
+  const reads = (run) => {
+    const readFileSync = fs.readFileSync;
+    let count = 0;
+    fs.readFileSync = (...args) => { count += 1; return readFileSync(...args); };
+    try { return { calls: countingExistsSync(run), reads: count }; } finally { fs.readFileSync = readFileSync; }
+  };
+  // Missing, then invalid: both fail every time, as before.
+  assert.throws(() => runtimeReleaseVersion({ app, installedRuntimeRoot: root }), /metadata is missing/);
+  fs.writeFileSync(packageJson, JSON.stringify({ name: "other", version: "1.0.0" }));
+  assert.throws(() => runtimeReleaseVersion({ app, installedRuntimeRoot: root }), /metadata is invalid/);
+  fs.writeFileSync(packageJson, JSON.stringify({ name: "codex-chatgpt-web", version: "5.0.6" }));
+  let version;
+  assert.deepEqual(reads(() => { version = runtimeReleaseVersion({ app, installedRuntimeRoot: root }); }), { calls: 1, reads: 1 });
+  assert.equal(version, "5.0.6");
+  // Every later runtime start or recovery: no disk call at all.
+  assert.deepEqual(reads(() => { version = runtimeReleaseVersion({ app, runtimeRootProvider: () => root }); }), { calls: 0, reads: 0 });
+  assert.equal(version, "5.0.6");
+  // A development run reads its source package.json every time, so an edit there still counts.
+  const dev = { isPackaged: false, getVersion: () => "0.0.0" };
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ name: "codex-chatgpt-web", version: "5.0.7" }));
+  assert.equal(runtimeReleaseVersion({ app: dev, sourceRoot: root }), "5.0.7");
+  assert.deepEqual(reads(() => runtimeReleaseVersion({ app: dev, sourceRoot: root })), { calls: 1, reads: 1 });
+});
+
 test("main marks the launch root and every reinstalled root as checked", () => {
   const source = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
   assert.match(source, /installedRuntimeRoot = ensurePackagedRuntime\(\{[\s\S]{0,200}?\}\);[\s\S]{0,200}?markRuntimeRootChecked\(installedRuntimeRoot\);/);
