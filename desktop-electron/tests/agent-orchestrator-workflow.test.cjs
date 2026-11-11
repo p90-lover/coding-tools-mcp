@@ -11859,6 +11859,65 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
   listed.workflow.dispose();
 });
 
+// Seen live 2026-11-10: AO lost five chats' agents while their hosts lived on, and the turns read
+// "running" for 3.5 hours with "Retry automatically" on. Their cards had no turn id: a cold start
+// learns it only when the turn ends, and the app had restarted since (expectedTurns is memory). The
+// stall stop needs one, so it never ran. The turn AO took after the card was reserved is the card's.
+test("the stall stop ends a hung turn whose id the app never learned, when AO took that turn after the card was reserved", async () => {
+  const clockAt = 2_000_000_000_000, reservedAt = clockAt - 4 * 3_600_000;
+  const stallWorld = ({ requestedAt, gone = true, autoRetry = false }) => {
+    const calls = [];
+    const node = { id: "w", role: "planner", task_id: "t", parents: [], state: "running",
+      route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: null, started_at_ms: reservedAt } };
+    const hung = () => ({ turnId: "turn-1", turnState: "running", lastActivityAt: clockAt - 3.5 * 3_600_000, approvals: [],
+      ...(requestedAt === undefined ? {} : { turnRequestedAt: requestedAt }),
+      ...(gone ? { status: "needs_input", needsInput: true, agentGone: true, timeline: [{ kind: "approval", status: "pending" }] }
+        : { status: "working", timeline: [] }) });
+    const workflow = createAgentOrchestratorWorkflow({
+      now: () => clockAt, setTimer: (resolve, ms) => setTimeout(resolve, ms === 250 ? 0 : ms),
+      requestHeadless: async (endpoint) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+        throw new Error(`Unexpected AO endpoint ${endpoint}`);
+      },
+      aoHarness: {
+        observe: async (_session, expected) => { calls.push(["observe", expected ?? null]); return hung(); },
+        // AO has no controller for a gone agent; a working one takes the interrupt and never settles.
+        interrupt: async (session) => { calls.push(["interrupt", session]); if (gone) throw new Error("CHAT_CONTROLLER_NOT_READY"); },
+        exitAgent: async (session) => { calls.push(["exit", session]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    return { calls, stops: () => calls.filter(([what]) => what !== "observe"),
+      look: async () => {
+        if (autoRetry) await workflow.call("chat_auto_retry", { enabled: true });
+        try { await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" }); } finally { workflow.dispose(); }
+      } };
+  };
+
+  const orphaned = stallWorld({ requestedAt: reservedAt + 19_000 });
+  await orphaned.look();
+  assert.deepEqual(orphaned.calls[0], ["observe", null], "nothing names the card's turn: AO's latest is read");
+  assert.deepEqual(orphaned.stops(), [["interrupt", "sess-1"], ["exit", "sess-1"]],
+    "the orphaned request is released (Retry off), as one whose turn id was known is");
+
+  const hung = stallWorld({ requestedAt: reservedAt + 19_000, gone: false, autoRetry: true });
+  await hung.look();
+  assert.deepEqual(hung.stops(), [["interrupt", "sess-1"], ["exit", "sess-1"]], "a hung working turn is stopped with Retry on");
+
+  // AO stamps whole seconds: a turn taken in the second the card was reserved can read up to 999 ms earlier.
+  const sameSecond = stallWorld({ requestedAt: reservedAt - 999 });
+  await sameSecond.look();
+  assert.deepEqual(sameSecond.stops(), [["interrupt", "sess-1"], ["exit", "sess-1"]]);
+
+  for (const [requestedAt, why] of [[reservedAt - 60_000, "a turn AO took before the card was reserved is an earlier message's"],
+    [undefined, "a turn whose request time is unknown proves nothing"]]) {
+    const other = stallWorld({ requestedAt });
+    await other.look();
+    assert.deepEqual(other.stops(), [], why);
+  }
+});
+
 test("a held worker whose unspent grant names another build of the agent's program is started on a fresh grant", async () => {
   // Activity log 2026-10-24 08:31: start_run refused "AO running turn has no matching background
   // grant": Claude Code (or the app) had updated since the grant, so nothing could start on it.
@@ -12147,6 +12206,45 @@ test("a queued message refused for now goes back to the front and is tried again
   assert.deepEqual((await queue()).map((item) => item.message), ["then lint"], "steered in, so it left the queue");
   assert.equal(world.updates.length, 0, "the plain message still waits for the turn");
   workflow.dispose();
+});
+
+// Seen live 2026-11-10: AO lost a chat's agent while its host lived on, so its turn read "running",
+// waiting on a request nobody could answer. A message queued to go after that turn (a steer into a
+// gone agent is queued that way) waited 3.5 hours, until the person pressed Restart: only a steer
+// released such a turn, and no run loop of this app session drove the chat to settle it.
+test("a plain message queued behind a turn whose agent AO lost releases that turn once it is silent past a stall, then goes", async () => {
+  const exited = [], terminal = [];
+  const { world, workflow, advance, queue } = queueChat({ readActualRuns: true, aoHarness: {
+    observe: async () => exited.length
+      ? { turnId: "turn-1", turnState: "interrupted", status: "ready", needsInput: false, exited: false, agentGone: true, timeline: [], approvals: [] }
+      : { turnId: "turn-1", turnState: "running", status: "needs_input", needsInput: true, agentGone: true, lastActivityAt: 1_000_000,
+        timeline: [{ kind: "approval", status: "pending" }], approvals: [] },
+    interrupt: async () => { throw new Error("CHAT_CONTROLLER_NOT_READY: the agent controller for this session is not running"); },
+    exitAgent: async (id) => { exited.push(id); return { ok: true }; },
+  } });
+  const request = world.requestHeadless;
+  world.requestHeadless = async (endpoint, body, ...rest) => {
+    if (endpoint === "/api/v1/ao/external/terminal") {
+      terminal.push(body);
+      world.runs[0].nodes[0].state = "held";
+      return { ok: true, run: world.runs[0] };
+    }
+    return request(endpoint, body, ...rest);
+  };
+  try {
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "and deploy", steer: false } });
+    await goalSettle();
+    for (let minute = 1; minute <= 10; minute++) await advance(60_000);
+    assert.deepEqual(exited, [], "ten quiet minutes are not a stall: a host being reattached is left alone");
+    assert.equal(world.edits.length, 0, "not sent while the turn reads running");
+    await advance(60_000);
+    assert.deepEqual(exited, ["sess-1"], "silent past a stall, its host is shut down, as a steer's would be");
+    assert.equal(terminal.length, 1, "no loop drives the run, so the turn's end is recorded here");
+    assert.equal(terminal[0].completed, false);
+    await advance(5_000);
+    assert.match(world.edits.at(-1)?.description ?? "", /and deploy$/, "the message goes as the chat's next turn");
+    assert.deepEqual(await queue(), []);
+  } finally { workflow.dispose(); }
 });
 
 test("a follow-up queued during launch is steered as soon as its agent is observed ready", async (t) => {
