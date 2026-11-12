@@ -726,6 +726,11 @@ function startBridgeWatchdog(logger, stateStore) {
         bridgeWatchdogQuietUntil = 0;
         return;
       }
+      // A tunnel that could not be observed (no health URL, inventory too slow on a saturated disk)
+      // is no evidence it is down: the tunnel monitor skips such a round, and so does the watchdog,
+      // neither counting it nor clearing misses. Counted, it restarted the whole runtime three
+      // times on 2026-11-12 (14:37, 15:04, 16:27), each dropping the bridge.
+      if (check.failed === "tunnel_unobserved") return;
       if (Date.now() < bridgeWatchdogQuietUntil) return;
       bridgeWatchdogMisses += 1;
       // Which part failed and how long the check took: a slow daemon_health on a stalled machine
@@ -3977,7 +3982,7 @@ function registerIpc({ logger, stateStore }) {
     let config = assertCurrent();
     let health = await supervisor.ownedRuntimeCheck(config);
     assertCurrent();
-    const primaryFailures = ["tunnel_missing", "tunnel_health"];
+    const primaryFailures = ["tunnel_missing", "tunnel_health", "tunnel_unobserved"];
     if (runtimeStartups !== startups || !extraTunnels.config || host.managedRuntimeUpgradeRequired()
       || (!health.ready && !primaryFailures.includes(health.failed))) {
       if (runtimeStartups === startups) {
