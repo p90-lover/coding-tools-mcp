@@ -1180,9 +1180,14 @@ function chatStep(run: ChatRun, node: ChatNode, options: ChatOptions, now: numbe
     const reviewing = /^the reviewer (is checking|allowed|denied)/i.test(textOf(live?.activity));
     step.working = { ...working, ...(asking && !reviewing ? { activity: "waiting for approval" } : live?.activity ? { activity: textOf(live.activity) } : {}),
       ...(timeline.length ? { timeline } : {}), ...(typeof live?.turn_started === "boolean" ? { taken: live.turn_started } : {}) };
-    // A retried card's new attempt starts empty; until it writes, its earlier reply stays readable.
+    // A retried card's new attempt starts empty; until it shows anything, its earlier reply stays
+    // readable. Only until then: the reply is drawn after the card's live work, so a new attempt
+    // that was thinking and calling tools showed the old attempt's failure ("Earlier attempt: MCP
+    // server … failed to start") below its own work, as if it were the newest message (seen
+    // 2026-11-12). Once the new attempt shows work, the earlier one is listed with the card's other
+    // attempts above it (earlierRounds).
     const earlier = copiesEarlier ? latestHistoryAnswer(node) : undefined;
-    if (!step.text && earlier && !timeline.some((item) => item.kind === "message")) {
+    if (!step.text && earlier && !timeline.length) {
       step.text = `${earlierLabel(node)}\n\n${earlier}`;
     }
   } else if (!step.text && node.state !== "finished" && copiesEarlier) {
