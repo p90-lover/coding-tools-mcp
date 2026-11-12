@@ -291,6 +291,21 @@ test("auto-update is kept per item and installs only the items that have it on, 
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(context.root, "app-plugins.json"), "utf8")).autoUpdate, {});
 });
 
+test("auto-update switches flipped at once are both saved, with no staging file left behind", async () => {
+  const good = Buffer.from("provider manager 0.2.2");
+  const releases = { "p90-lover/cpa_provider_manager": [release("v0.2.2", [{ id: 7, name: "cpa-provider-manager-v0.2.2.dll", size: good.length, digest: `sha256:${sha(good)}` }])] };
+  const context = setup({ releases, files: { "cpa-provider-manager-v0.2.1.dll": "old" }, assets: { 7: good } });
+  // Two clicks before the first save finishes: they used to share one staging file (ENOENT on the
+  // second rename) and both start from the same old settings, so one change was lost.
+  await Promise.all([
+    context.plugins.setAutoUpdate("cpa", true),
+    context.plugins.setAutoUpdate("cpa-plugin:cpa-provider-manager", true),
+  ]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(context.root, "app-plugins.json"), "utf8")).autoUpdate,
+    { cpa: true, "cpa-plugin:cpa-provider-manager": true });
+  assert.deepEqual(fs.readdirSync(context.root).filter((name) => name.endsWith(".tmp")), []);
+});
+
 test("a plugin update downloads the DLL, checks GitHub's SHA-256, keeps the old one in Trash and restarts CPA", async () => {
   const dll = Buffer.from("provider manager 0.2.2");
   const context = setup({
