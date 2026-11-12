@@ -125,3 +125,34 @@ test("every window click handler waits for a late focus event too, not only chat
   const settled = main.match(/await assertFocusedMainWindowSettled\(event, true\)/g) ?? [];
   assert.ok(settled.length >= 70, `the write handlers use the settled check (${settled.length})`);
 });
+
+// 2026-11-12 08:19:05Z: an Approve on an agent's request passed the settled IPC check, then was
+// refused by the confirmation's own focus check after the agent call spanned a 46.5 s stall.
+test("an answer to an agent's request waits for a late focus event; a minimized window is refused at once", async () => {
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  const source = main.slice(main.indexOf("const mainWindowFocusSettled = "), main.indexOf("const confirmRecoverable = "));
+  assert.doesNotMatch(source, /!mainWindow\.isFocused\(\)\) \{/, "no confirmation keeps the plain focus check");
+  const window = Object.assign(new EventEmitter(), {
+    focused: false, minimized: false,
+    isDestroyed: () => false, isVisible: () => true,
+    isMinimized() { return this.minimized; }, isFocused() { return this.focused; },
+  });
+  const shown = [];
+  const dialog = { showMessageBox: async (_parent, options) => { shown.push(options.message); return { response: 1, checkboxChecked: false }; } };
+  const { confirmAoAction, confirmToolRequest } = new Function("mainWindow", "waitForFocus", "dialog", "stateStore", "logger",
+    `${source}\nreturn { confirmAoAction, confirmToolRequest };`,
+  )(window, waitForFocus, dialog, { read: () => ({}), update() {} }, { info() {} });
+
+  const answered = confirmToolRequest({ message: "Run a command?", detail: "" });
+  setTimeout(() => { window.focused = true; window.emit("focus"); }, 50);
+  assert.equal(await answered, true);
+  assert.deepEqual(shown, ["Run a command?"]);
+
+  window.focused = false;
+  window.minimized = true;
+  const started = Date.now();
+  await assert.rejects(confirmAoAction({ message: "Change the workflow?", detail: "" }), /focused Coding Tools window to approve workflow changes/);
+  assert.ok(Date.now() - started < FOCUS_SLICE_MS, "a minimized window is not waited for");
+  assert.deepEqual(shown, ["Run a command?"], "no dialog without focus");
+  assert.equal(window.listenerCount("focus"), 0);
+});

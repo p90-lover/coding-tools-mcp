@@ -4966,10 +4966,21 @@ async function start() {
     },
   });
   if (!LAUNCHER_SMOKE_TEST) mcpEventMonitor.start();
+  // These confirmations check focus again after the agent call that the click started, and that
+  // call can span a main stall: a focus event queued behind it lands late. (2026-11-12 08:19:05Z: an
+  // Approve was refused right after a 46.5 s stall, though its IPC check had passed.) They wait for
+  // it as assertFocusedMainWindowSettled does; a hidden or minimized window is still refused at once.
+  const mainWindowFocusSettled = async () => {
+    const focused = () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused());
+    if (!focused() && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()) {
+      await waitForFocus({ focused, emitters: [mainWindow] });
+    }
+    return focused();
+  };
   // `signal` closes the dialog unanswered (a chat agent's prompt "Approve for me" answers itself
   // after 20 seconds).
   const confirmAoAction = async ({ message, detail, signal }) => {
-    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+    if (!(await mainWindowFocusSettled())) {
       throw new Error("Use the focused Coding Tools window to approve workflow changes");
     }
     const answer = await dialog.showMessageBox(mainWindow, {
@@ -4987,7 +4998,7 @@ async function start() {
   // dialog, which offers "Don't ask again". Either way the answer must come from the visible,
   // focused window, so it is still the person's click.
   const confirmToolRequest = async ({ message, detail }) => {
-    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+    if (!(await mainWindowFocusSettled())) {
       throw new Error("Use the focused Coding Tools window to answer the agent's request");
     }
     if (stateStore.read().confirmAgentToolRequests === false) return true;
