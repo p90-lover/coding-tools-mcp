@@ -252,7 +252,9 @@ const QUOTA_EXHAUSTED = /insufficient_quota|usage_limit_reached|quota[^\n]{0,40}
 /** " (it resets in 5d 8h)" from a quota error, for a note (empty when it says nothing). */
 function quotaResets(error) {
   const when = /resets? (in [0-9][0-9dhms ]*[dhms]|at [^.\n]{1,40})/i.exec(String(error || ""))?.[1];
-  return when ? ` (it resets ${when.trim()})` : "";
+  if (when) return ` (it resets ${when.trim()})`;
+  const retryAt = /retry after (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2}))/i.exec(String(error || ""))?.[1];
+  return retryAt && Number.isFinite(Date.parse(retryAt)) ? ` (retry after ${retryAt})` : "";
 }
 /**
  * The provider refused the request itself (Claude Code's "API Error: 400 …", or 404 / 422): a region
@@ -1900,6 +1902,49 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       && Number.isFinite(observed.turnRequestedAt) && observed.turnRequestedAt >= reserved - TURN_CLOCK_SLACK_MS;
     return mine ? { ...ownership, turnId: observed.turnId } : ownership;
   }
+  const quotaFailures = new Map();
+  function exhaustedProviderQuota(observed) {
+    const text = observed?.providerFailure;
+    if (observed?.turnState !== "running" || typeof text !== "string" || !nothingToAnswer(observed)
+      || observed.sessionTools?.length) return "";
+    // A per-minute quota is temporary throttling, not a spent account balance.
+    return /insufficient_quota|usage_limit_reached|all (?:eligible )?[^\n]{0,80}accounts[^\n]{0,100}exhaust[^\n]{0,80}quota|exceeded your current quota|(?:monthly|daily)[^\n]{0,40}(?:quota|limit)[^\n]{0,30}(?:exceed|exhaust|reached)|reached your monthly[^\n]{0,40}limit/i.test(text) ? text : "";
+  }
+  async function stopQuotaExhaustedTurn(session, observed, ownership, node) {
+    const owned = ownedTurn(ownership, node, observed);
+    const { workspaceId, runId, nodeId, turnId, requestKey } = owned;
+    let failure = exhaustedProviderQuota(observed);
+    if (!failure || !turnId || !requestKey || observed.turnId !== turnId
+      || (expectedTurns.has(session) && expectedTurns.get(session) !== turnId)) return null;
+    const currentAttempt = async () => {
+      runReads.delete(JSON.stringify([workspaceId, runId]));
+      const latest = await savedNode(workspaceId, runId, nodeId).catch(() => null);
+      return latest?.mission && !latest.mission.cancelled && latest.node?.state === "running"
+        && latest.node.receipt?.thread_id === session && (latest.node.receipt?.request_key || latest.node.request_key) === requestKey
+        && (!latest.node.receipt?.turn_id || latest.node.receipt.turn_id === turnId)
+        && (!expectedTurns.has(session) || expectedTurns.get(session) === turnId);
+    };
+    if (!await currentAttempt()) return null;
+    const stillExhausted = current => {
+      const currentFailure = exhaustedProviderQuota(current);
+      if (!currentFailure) return false;
+      failure = currentFailure;
+      return true;
+    };
+    try {
+      if (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId, isStalled: stillExhausted }) === false) return null;
+      const settled = await harnessService().observe(session, turnId);
+      if (settled?.turnId !== turnId || !(TERMINAL_TURNS.has(settled.turnState) || settled.exited) || !await currentAttempt()) return null;
+      if (settled.turnState !== "completed") {
+        quotaFailures.set(nodeKey(workspaceId, runId, nodeId), { turnId, requestKey, failure });
+        if (quotaFailures.size > 200) quotaFailures.delete(quotaFailures.keys().next().value);
+      }
+      return settled;
+    } catch (error) {
+      logger?.warn?.("ao.quota_stop_failed", { message: publicText(error?.message || error, 200) });
+      return null;
+    }
+  }
   /**
    * With "Retry automatically" on, stops a hung turn so the step is retried; nothing else ever
    * ended it (no failure, so no retry), and the chat said "checking" or "launching" for hours.
@@ -2002,11 +2047,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
     const ownership = { workspaceId, runId, nodeId: node.id,
       turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
-    const observed = await harnessService().observe(session, ownership.turnId);
+    let observed = await harnessService().observe(session, ownership.turnId);
     // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
     // the chat's work, never a fresh launch the watchdog may end.
     if (observed?.provisioning !== true) freshLaunches.delete(session);
-    const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
+    let terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
+    if (!terminal) {
+      const settled = await stopQuotaExhaustedTurn(session, observed, ownership, node);
+      if (settled) { observed = settled; terminal = true; }
+    }
     // Its start is over (the agent is up, or the start ended): the next cold start may begin.
     if (observed?.provisioning !== true || terminal) releaseColdStartOf(session);
     if (!terminal) {
@@ -2027,16 +2076,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session, ...(quiet ? { quiet: true } : {}) };
     }
     const completed = observed.turnState === "completed";
+    const quotaKey = nodeKey(workspaceId, runId, node.id);
+    const savedQuota = quotaFailures.get(quotaKey);
+    const quotaFailure = savedQuota?.turnId === observed.turnId && savedQuota.requestKey === ownership.requestKey ? savedQuota.failure : "";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
       workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
       ...(observed.answer ? { answer: observed.answer } : {}),
       completed,
       // A start the launch watchdog ended says so, not AO's "Session start was cancelled".
-      ...(!completed ? { failure: (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
+      ...(!completed ? { failure: quotaFailure || (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
         || observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
     if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
+    quotaFailures.delete(quotaKey);
     return { ...result, pending_approvals: [] };
   }
 

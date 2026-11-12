@@ -971,6 +971,28 @@ test("a provider retry says why it retries, such as a rate limit", async () => {
     [["system", "Retrying Claude, attempt 2 of 10. API error 429. Trying again in 1s."]]);
 });
 
+test("only a running provider failure in the owned turn is exposed to retry control", async () => {
+  const failure = "API Error 500 quota exceeded: All eligible Codex accounts have exhausted their reported quota; retry after 2026-11-13T09:29:43.000Z";
+  let turnState = "running", activityStatus = "running", activityTurn = "t", event = "provider.failure";
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
+      turns: [{ id: "t", state: turnState }],
+      messages: [{ id: "m", turnId: "t", sequence: 1, role: "assistant", text: failure }],
+      activities: [{ id: "r", turnId: activityTurn, sequence: 2, activityKind: "system", status: activityStatus,
+        summary: "Retrying Claude", detail: { event, text: failure } }],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  assert.equal((await upstream.observe("s", "t")).providerFailure, failure);
+  activityStatus = "completed";
+  assert.equal((await upstream.observe("s", "t")).providerFailure, undefined, "a recovered retry is not active");
+  activityStatus = "running"; activityTurn = "old";
+  assert.equal((await upstream.observe("s", "t")).providerFailure, undefined, "no error from another turn");
+  activityTurn = "t"; event = "steer";
+  assert.equal((await upstream.observe("s", "t")).providerFailure, undefined, "quoted error text is not a provider failure");
+  event = "provider.failure"; turnState = "completed";
+  assert.equal((await upstream.observe("s", "t")).providerFailure, undefined, "an ended turn cannot trigger an interrupt");
+});
+
 test("a turn that only retries its model request shows no new sign of life, so a message can restart it", async () => {
   // Claude Code stuck on 503s: a "Retrying Claude, attempt n of 10" notice every few seconds and
   // nothing else. Each notice refreshed lastActivityAt, so chat_steer never saw the hang.

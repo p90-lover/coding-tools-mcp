@@ -1566,9 +1566,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // Stop hit "the agent controller for this session is not running". The snapshot says so
       // itself (controller "stopped" while nothing is provisioning): the turn is over.
       const agentGone = conversation?.controller === "stopped" && session?.session?.provisionState !== "provisioning";
-      const lastFailure = (Array.isArray(conversation?.activities) ? conversation.activities : [])
+      const failureActivity = (Array.isArray(conversation?.activities) ? conversation.activities : [])
         .filter(item => item.turnId === turn?.id && item.activityKind === "system" && item.detail?.event === "provider.failure"
-          && typeof item.detail.text === "string" && item.detail.text.trim()).at(-1)?.detail.text.trim();
+          && typeof item.detail.text === "string" && item.detail.text.trim()).at(-1);
+      const lastFailure = failureActivity?.detail.text.trim();
       // A stopped controller alone is not proof: AO drops every controller when it shuts down (an
       // app quit or update), while the chat hosts keep their agents and turns going for the next AO
       // to reattach. Seen live 2026-10-31: three cards read "stopped mid-turn" at a quit and were
@@ -1619,6 +1620,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const requestedAt = Date.parse(turn?.requestedAt ?? "");
       return {
         status, turnId: turn?.id, turnState: turn?.state, error: turn?.errorMessage,
+        ...(turn?.state === "running" && failureActivity?.status === "running"
+          ? { providerFailure: utf8Prefix(lastFailure, 4096) } : {}),
         ...(Number.isFinite(requestedAt) ? { turnRequestedAt: requestedAt } : {}),
         ...(stamps.length ? { lastActivityAt: Math.max(...stamps) } : {}),
         ...(sessionStamps.length ? { sessionActivityAt: Math.max(...sessionStamps) } : {}),
