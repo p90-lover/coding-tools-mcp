@@ -532,9 +532,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Messages waiting for their chat's turn, and steers waiting to be read (chat-queue.cjs).
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
-  const chatEdits = createChatEditStore({ file: chatEditsFile });
+  const chatEdits = createChatEditStore({ file: chatEditsFile, logger });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
-  const archive = createChatArchiveStore({ file: archiveFile, now });
+  const archive = createChatArchiveStore({ file: archiveFile, now, logger });
   // Points per model from finished Team rounds, for the model picker (model-scores.cjs).
   const modelScores = createModelScoreStore({ file: modelScoresFile, logger });
   /** After a message was deleted the agent's session still remembers it, so the chat's next turn must not continue it. */
@@ -6812,10 +6812,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       });
       clock.mark("write");
       if (rewind) {
-        try { chatEdits.deleteMessage(id, task, discarded); }
+        // The rewind stands only once its hidden replies are saved: unsaved, they came back on restart.
+        try { await chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
           await withdrawFollowUp(id, task, runsBefore, followUp);
-          chatEdits.restore(id, task, rewindBefore);
+          await chatEdits.restore(id, task, rewindBefore).catch(() => undefined);
           throw error;
         }
       }
@@ -8805,12 +8806,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
       const before = chatEdits.get(id, task);
       try {
-        chatEdits.deleteMessage(id, task, hidden);
+        // Saved (off the main thread) before the message leaves the task: a hide that cannot be
+        // saved fails the delete instead of the message coming back on restart.
+        await chatEdits.deleteMessage(id, task, hidden);
         await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
       } catch (error) {
         // Restore changes memory before persisting. A second persistence failure must not
         // replace the original error or leave this failed delete hidden in memory.
-        try { chatEdits.restore(id, task, before); } catch {}
+        await chatEdits.restore(id, task, before).catch(() => undefined);
         throw error;
       }
       return { ok: true, taskId: task, index, runIds: hidden };
@@ -9629,7 +9632,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const schedulesSaved = () => schedules.saved();
   /** Resolves once every wake-up and /loop change so far is on disk (saved off the main thread too). */
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  /** Resolves once every deleted-message and archive change so far is on disk (saved off the main thread too). */
+  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved()]);
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
