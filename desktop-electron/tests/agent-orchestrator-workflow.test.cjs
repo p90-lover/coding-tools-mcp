@@ -9639,9 +9639,10 @@ test("delete persistence failures restore message visibility and preserve the or
     const description = "A\n\nFollow-up (2026-10-10 10:00 UTC):\nB\n\nFollow-up (2026-10-10 11:00 UTC):\nC";
     const world = chatWorld({ tasks: [{ id: "task-1", title: "Persistence", description, state: "in_progress", clauses: [] }],
       runs: ["r1", "r2", "r3"].map(id => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] })) });
-    const mkdir = fs.mkdirSync, persistenceErrors = [];
-    t.mock.method(fs, "mkdirSync", function (...args) {
-      try { return mkdir.apply(this, args); } catch (error) { if (path.resolve(String(args[0])) === parent) persistenceErrors.push(error); throw error; }
+    // The store saves off the main thread (fs.promises), and the delete waits for that save.
+    const mkdir = fs.promises.mkdir, persistenceErrors = [];
+    t.mock.method(fs.promises, "mkdir", async function (...args) {
+      try { return await mkdir.apply(this, args); } catch (error) { if (path.resolve(String(args[0])) === parent) persistenceErrors.push(error); throw error; }
     });
     const original = new Error("Board write failed before rollback persistence");
     let failWrite = phase === "rollback";
