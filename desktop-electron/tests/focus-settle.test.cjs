@@ -111,3 +111,17 @@ test("chat sends and other app writes use the settled focus check; hidden and mi
   assert.match(settled, /write && !valid\(\) && window && window === mainWindow && !window\.isDestroyed\(\) && window\.isVisible\(\) && !window\.isMinimized\(\)/);
   assert.match(settled, /\r?\n  assertFocusedMainWindow\(event, write, backgroundRead\);\r?\n\}/, "the same check decides in the end");
 });
+
+test("every window click handler waits for a late focus event too, not only chat sends", () => {
+  // 2026-11-12 07:57:49Z: an App plugins Update click was refused ("Click into the Coding Tools window")
+  // because its handler used the unsettled check while main caught up after a stall.
+  const main = fs.readFileSync(path.join(__dirname, "..", "electron", "main.cjs"), "utf8");
+  const plain = [...main.matchAll(/assertFocusedMainWindow\(event, true\)/g)].map((match) => {
+    const before = main.slice(0, match.index);
+    return before.slice(before.lastIndexOf('handle("') + 8).split('"')[0];
+  });
+  // The reconnect asks again after its long checks (still the person's click when it acts): that one stays plain.
+  assert.deepEqual(plain, ["launcher:mcp-tunnel-reconnect"]);
+  const settled = main.match(/await assertFocusedMainWindowSettled\(event, true\)/g) ?? [];
+  assert.ok(settled.length >= 70, `the write handlers use the settled check (${settled.length})`);
+});
