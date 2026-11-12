@@ -1203,3 +1203,32 @@ test("a turn its chat or the user stopped is not resumed, and recovery gives up 
     assert.match(last.error, /after 3 tries to resume it/);
   } finally { w.cleanup(); }
 });
+
+// #1252 shows each subagent's harness and effort; the runs saved for a restart (#1249) left both out,
+// so a subagent brought back by a restart lost "· High" and its harness from its header.
+test("a subagent's harness and effort come back with it after a restart", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-fields-"));
+  const harness = {
+    spawn: async () => "sub-1", observe: async () => ({ turnId: "t1", turnState: "running", approvals: [] }),
+    continuable: async () => true, send: async () => ({ turnId: "t2" }), resolveApproval: async () => {}, resolveInput: async () => {},
+    interrupt: async () => {}, exitAgent: async () => ({ ok: true }),
+  };
+  const make = () => createSubagents({ statePath: path.join(dir, "subagents.json"), harness: () => harness, logger: { info() {}, warn() {} },
+    launchArgs: () => ({ workspace_id: "ws-1" }), now: () => 1_000_000 });
+  try {
+    const before = make();
+    await before.save({ settings: { defaultRoute: { ...ROUTE, effort: "high" } }, agents: STARTERS });
+    await before.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read it" });
+    for (let tries = 0; tries < 100 && !fs.existsSync(path.join(dir, "subagent-runs.json")); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    const shown = before.runs()[0];
+    before.dispose();
+    assert.equal(shown.harness, ROUTE.harness_id);
+    assert.equal(shown.effort, "high");
+    const after = make();
+    await after.preload();
+    const back = after.runs()[0];
+    after.dispose();
+    assert.equal(back.harness, shown.harness, "its harness");
+    assert.equal(back.effort, shown.effort, "its effort");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
