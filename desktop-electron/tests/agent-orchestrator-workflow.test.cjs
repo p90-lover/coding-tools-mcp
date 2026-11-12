@@ -10929,6 +10929,48 @@ test(`"Retry automatically" leaves a request the provider refused (${label}) for
     for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   }
 });
+for (const [label, error, seconds] of [
+  ["a start that never took its message", "Launch failed: The agent did not take its first message, so its start was stopped; the step is retried on another agent.", 2],
+  ["a follow-up AO started no turn for", "AO did not start a turn for the follow-up", 2],
+  ["a provider's 529", "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}", 10],
+  ["an agent that died on 429s", "The agent's process stopped mid-turn after: API error 429. Trying again in 30s.. Retry or send a message to continue.", 10],
+  ["a launch that failed upstream", "Launch failed: CPA answered 503 Service Unavailable", 10],
+])
+test(`"Retry automatically" waits less before retrying a failure that never reached the provider (${label})`, async () => {
+  // Local start failures have no cooldown to wait out: [2 s, 5 s, 15 s, 30 s], then the usual tail.
+  // A provider's error always keeps [10 s, 20 s, 30 s, 60 s, ...] (#650: ~40 upstream calls per attempt).
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => 1_000_000,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/Retrying automatically in/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, new RegExp(`Retrying automatically in ${seconds}s \\(attempt 1 of 8\\)`));
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    workflow.dispose();
+  }
+});
 for (const [label, error, fails] of [
   ["its version probe failed", "spawn: chat driver incompatible: read Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)", true],
   ["its handshake timed out", "spawn s-1: chat controller: chat driver incompatible: ACP initialize: {\"code\":-32603,\"message\":\"Internal error\",\"data\":{\"error\":\"context deadline exceeded\"}}", false],

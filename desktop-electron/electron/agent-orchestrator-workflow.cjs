@@ -4928,7 +4928,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // about 34 minutes in all before the step waits for the person.
   const AUTO_RETRY_PAUSES_MS = [10_000, 20_000, 30_000, 60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
   const AUTO_RETRY_LIMIT = AUTO_RETRY_PAUSES_MS.length;
-  const autoRetryPause = attempt => AUTO_RETRY_PAUSES_MS[Math.min(Math.max(attempt, 1), AUTO_RETRY_LIMIT) - 1];
+  // A failure that never reached the model's provider (the agent did not start, or did not take
+  // the message) has no cooldown to wait out: its first tries come sooner, then the same tail. A
+  // provider's error (429, 5xx, "API Error", a lost connection) always keeps the full pauses: CPA's
+  // own retries times Claude Code's come to about 40 upstream calls per attempt (#650).
+  const LOCAL_RETRY_PAUSES_MS = [2_000, 5_000, 15_000, 30_000, ...AUTO_RETRY_PAUSES_MS.slice(4)];
+  const LOCAL_START_FAILURE = /did not take its first message|did not start within|The agent could not start|AO did not start a turn|CHAT_CONTROLLER_NOT_READY|Couldn't confirm the agent was restored|restoration could not be confirmed|Launch failed:/i;
+  const PROVIDER_FAILURE = /API Error|\b(?:429|5\d\d)\b|rate[ -]?limit|overloaded|Retrying Claude|upstream/i;
+  const localFailure = error => LOCAL_START_FAILURE.test(error) && !PROVIDER_FAILURE.test(error) && !NETWORK_OUTAGE.test(error);
+  const autoRetryPause = (attempt, local = false) => (local ? LOCAL_RETRY_PAUSES_MS : AUTO_RETRY_PAUSES_MS)[Math.min(Math.max(attempt, 1), AUTO_RETRY_LIMIT) - 1];
   const countdown = ms => ms >= 120_000 ? `${Math.ceil(ms / 60_000)} min` : `${Math.ceil(ms / 1000)}s`;
   const autoRetrySeen = new Map(); // `${runId}:${nodeId}:${attempt}` -> when this failure was first seen
   // Runs whose automatic retry the person ended by changing the chat's setup in the composer
@@ -4971,7 +4979,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       autoRetrySeen.set(key, now());
       if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
     }
-    const wait = autoRetryPause(attempt) - (now() - autoRetrySeen.get(key));
+    const wait = autoRetryPause(attempt, localFailure(error)) - (now() - autoRetrySeen.get(key));
     // `waiting`: the run must keep going until the pause is over (driveRun), or nothing retries it.
     if (wait > 0) return { waiting: true, detail: `Retrying automatically in ${countdown(wait)} (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
     autoRetrySeen.delete(key);
@@ -5535,10 +5543,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     void (async () => {
       const failed = await mission();
       if (!current() || !autoRetryAllowed(failed)) return;
-      // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second.
+      // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second
+      // (2 s and 5 s for a failure that never reached the provider).
       const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
       const attempt = (held?.history?.length ?? 0) + 1;
-      later(autoRetryPause(attempt), () => {
+      later(autoRetryPause(attempt, localFailure(String(held?.receipt?.error || ""))), () => {
         void (async () => {
           const latest = await mission();
           if (!current() || !autoRetryAllowed(latest)) return;
