@@ -83,7 +83,7 @@ function petTimers({ jitter = 0, refresh = 0, late = 0 } = {}) {
     clamp: (value, low, high) => Math.max(low, Math.min(high, value)),
     el: ref({ style: { set transform(value) { paints.push(now); } } }), body: ref(null), lot: ref(null),
     composer: ref({ getBoundingClientRect: () => ({ left: 0, top: 600 }), clientLeft: 0, clientTop: 0 }),
-    boxNow: ref({ width: 600, height: 90, room: false }), moodNow: ref("idle"), asleepNow: ref(false), pointer: ref({ x: 300, y: 400 }),
+    boxNow: ref({ width: 600, height: 90, room: false }), moodNow: ref("idle"), asleepNow: ref(false), pointer: ref({ x: 300, y: 400 }), dizzy: ref(false),
     petFlight: { set() {} },
     setSpace() {}, setRiding() {}, setJob() {}, setFace() {}, setAirborne() {}, setFed() {}, setBubble() {}, setFoot() {},
     setPose(pose) { poses.push(typeof pose === "function" ? "update" : JSON.parse(JSON.stringify(pose))); },
@@ -379,7 +379,12 @@ test("its cottage stands beside the box, never above its top edge, and the rooms
   assert.match(petSource, /left: box\.width - box\.edge \+ COTTAGE_GAP, top: box\.height - box\.edge - COTTAGE_H/, "its floor level with the box's bottom");
   assert.match(petSource, /x: current\.width - current\.edge \+ COTTAGE_GAP \+ DOOR_X, y: current\.height - current\.edge/, "and Clawd's doorstep on it");
   assert.match(petSource, /const room = height >= COTTAGE_H\s*&& /, "only beside a box at least as tall as it");
-  assert.match(petSource, /const houseAt: "beside" \| "yard" \| null = box\?\.room \? "beside" : yard \? "yard" : null;/, "else the yard, else none");
+  assert.match(petSource, /const houseAt: "beside" \| "yard" \| null = split\s*\? \(yard \? "yard" : box\?\.room \? "beside" : null\)\s*: box\?\.room \? "beside" : yard \? "yard" : null;/,
+    "in split view the yard above Settings first; outside it beside the box, else the yard, else none");
+  // In split view the room beside the box is measured inside its own pane: measured against the split
+  // grid, a pane's padding counted as room and the cottage stood over the next column (2026-11-12).
+  assert.match(petSource, /let clip: HTMLElement \| null = split\?\.pane \?\? parent\.parentElement;/);
+  assert.match(petSource, /while \(!split && clip && getComputedStyle\(clip\)\.overflowX === "visible"\)/);
   assert.match(petSource, /\{peek && houseAt && typeof document !== "undefined"/, "the rooms only in the peek");
   assert.match(petPart("goHome", "goOut"), /if \(!step \|\| !current\) \{ if \(nap\) napHere\(\); return; \}/, "no cottage: it naps on its box");
   // Drawn on <body>, outside the chat's theme, the peek and Clawd's bubble over the page take the chat's
@@ -506,4 +511,78 @@ test("every way out of the house is through its door; only the rooms you watch a
   assert.match(moodEffect, /else if \(activity\.current === "travel"\) flyBack\(\);/, "a trip cut short ends back on its box");
   const calledOver = petSource.slice(petSource.indexOf("// Split view: another pane's chat calls it over"), petSource.indexOf("const full ="));
   assert.match(calledOver, /goOut\(event\.pane\)/);
+});
+
+// Clawd.tsx, as written (its React imports from the app's own React).
+const clawdModule = (() => {
+  const exports = {};
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/Clawd.tsx"), "utf8");
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX } }).outputText,
+    { exports, Math, require: (name) => require(name) });
+  return exports;
+})();
+
+test("walking, Clawd is turned toward where it goes on the CLI's turn frames, one foot up each stride", () => {
+  // The user (2026-11-12): "fix all clawd animation". It slid sideways facing us, only its eyes turned.
+  // Arrays made in the module's sandbox are copied into this realm before comparing.
+  const feetRow = (pose) => [...clawdModule.clawdCells(pose)].filter((cell) => cell.row === 2).map((cell) => cell.col).sort((a, b) => a - b);
+  assert.deepEqual(feetRow({ facing: "right-30" }), [2, 3, 6, 7], "standing turned: both feet down");
+  assert.deepEqual(feetRow({ facing: "right-30", step: "left" }), [2, 3], "one foot down mid-stride");
+  assert.deepEqual(feetRow({ facing: "right-30", step: "right" }), [6, 7], "then the other");
+  assert.deepEqual([...clawdModule.footRun(Array.from("  ▝   "), "left")], [0, 6], "a single foot is never lifted away");
+  // The walk's frame comes from restFrame: turned toward where it walks, its step from the gait.
+  assert.match(petSource, /if \(pose\.stride && pose\.walking && pose\.look !== 0 && job === "none" && !asleep\) \{\s*return \{ pose: \{ facing: pose\.look < 0 \? WALK_FACING\.left : WALK_FACING\.right, step: step \? "left" : "right" \}/);
+  assert.match(petPart("walkTo", "land"), /setPose\(\{ \.\.\.REST, walking: true, look: way, stride: true \}\)/);
+  assert.deepEqual({ ...motion.WALK_FACING }, { left: "left-30", right: "right-30" });
+});
+
+test("turning round, its body comes round through the CLI's turn frames, ending turned the new way", () => {
+  assert.deepEqual([...motion.turnFacings(-1)], ["right-30", "right-12", "left-12", "left-30"]);
+  assert.deepEqual([...motion.turnFacings(1)], ["left-30", "left-12", "right-12", "right-30"]);
+  const walk = petPart("walkTo", "land");
+  assert.match(walk, /turnFacings\(way\)\.forEach\(\(side, index\) => later\(\(TURN_MS \* index\) \/ 4, \(\) => setFace\(\{ pose: \{ facing: side \}, offset: 0 \}\)\)\)/);
+  assert.match(walk, /later\(TURN_MS, go\)/);
+  assert.match(walk, /const go = \(\) => \{\s*setFace\(null\);/, "the turn frame gives way to its walk");
+});
+
+test("its own extra animations start where it stands, never slide in its clipped box, and end at rest", () => {
+  for (const name of ["wave", "stretch", "yawn", "dance", "dizzy", "sad", "peer"]) {
+    const frames = clawdModule.ANIMATIONS[name];
+    assert(frames?.length >= 8, `${name} has frames`);
+    assert(frames.every((frame) => (frame.x ?? 0) === 0), `${name} never moves sideways: its box clips`);
+    assert(frames.every((frame) => frame.offset >= 0), `${name} never rises out of its box`);
+    const end = frames.at(-1);
+    assert.deepEqual({ pose: end.pose, offset: end.offset }, { pose: "default", offset: 0 }, `${name} ends standing at rest`);
+  }
+  assert.deepEqual([...clawdModule.PLAYFUL], ["wave", "stretch", "dance"]);
+  for (const name of clawdModule.PLAYFUL) assert(!clawdModule.ENTRANCES.includes(name), "the CLI's entrance picks stay the CLI's");
+});
+
+test("cut off mid-stride on its box, it stands at rest where it is instead of hovering a bob up", () => {
+  const pet = petTimers();
+  pet.stand(100);
+  pet.walkTo(500, 52);
+  pet.advance(1400);
+  assert(pet.state().moving, "still walking");
+  pet.cancelPlans();
+  const after = pet.state();
+  assert.deepEqual(after.shape, { sx: 1, sy: 1, bob: 0, shrink: 1, fade: 1 }, "nothing left squashed or bobbing");
+  assert(after.feet.x > 100 && after.feet.x < 500, "it stops where it was");
+  assert.equal(after.moving, false);
+  pet.cleanup();
+});
+
+test("Clawd reacts to you: waves, comes over, dances when petted, hops when you send, nudges about a waiting request", () => {
+  const pointer = petSource.slice(petSource.indexOf("// It watches the pointer when it comes near"), petSource.indexOf("// While it rides:"));
+  assert.match(pointer, /linger = window\.setTimeout\(rested, LINGER_MS\)/, "it notices when the pointer comes to rest");
+  assert.match(pointer, /if \(now - lastWave < WAVE_EVERY\) return;[\s\S]{0,160}play\("wave"\)/, "a wave, now and then");
+  assert.match(pointer, /if \(now - lastVisit < VISIT_EVERY \|\| Math\.random\(\) >= 0\.35\) return;/, "a visit, now and then");
+  assert.match(pointer, /walkTo\(restNear\(x - frame\.left \+ side \* WIDTH \* 0\.75\)/, "stopping beside the pointer, never on the chat");
+  assert.match(pointer, /if \(Math\.abs\(dx\) > SHAKE\) \{ dizzy\.current = true;/);
+  assert.match(petPart("leave", "board"), /if \(dizzy\.current\) \{ dizzy\.current = false; play\("dizzy"\);/, "dizzy once it lands");
+  assert.match(pointer, /if \(text\(\) \|\| asleepNow\.current \|\| activity\.current !== "box" \|\| playingNow\.current\) return;\s*play\("jump"\);/, "a hop once the box empties after Enter");
+  assert.match(petSource, /if \(pets\.current\.length >= PET_STREAK\) \{\s*pets\.current = \[\];\s*play\("dance"\)/);
+  assert.match(petSource, /if \(mood !== "ask" \|\| still\) return undefined;[\s\S]{0,300}if \(\+\+nudges >= NUDGES\) window\.clearInterval\(timer\);/, "a few nudges, then it stops");
+  assert.match(petSource, /if \(mood === "error"\) \{ play\("sad"\);/);
+  assert.match(petPart("goHome", "goOut"), /if \(nap && !still\) \{\s*play\("yawn"\);/, "bedtime starts with a yawn");
 });
