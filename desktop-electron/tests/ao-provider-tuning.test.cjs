@@ -311,6 +311,8 @@ test("upstream spawn preserves context and the effort on Chat/TUI fallback, the 
     // spawn records each session's launch window for the context meter (chat_context launchedWindow).
     rememberLaunchWindow: () => {},
     chatTools: async () => null,
+    // A CPA chat first checks that AO holds CPA's current key (#1231): it does here.
+    syncGatewayKey: async () => "current",
 
     // The person's own MCP servers (Plugins > MCPs): none here.
 
@@ -356,6 +358,7 @@ test("Claude Code through CPA starts on the model id CPA lists to Claude clients
     Buffer, projectFor: async () => "project", forgetProject: () => {}, agentId: id => id, sessionId: id => id,
     utf8Prefix: text => text, TUI_RESULT_INSTRUCTION: "Write fixture result", TRANSIENT_CHAT_START: /timed out/i,
     CHAT_RETRY_PAUSE_MS: 0, setTimeout, rememberLaunchWindow: () => {}, chatTools: async () => null,
+    syncGatewayKey: async () => "current",
     userServers: () => [], gptFileServer: async () => null,
     internalApi: async (verb, endpoint, body) => {
       if (verb === "GET") return { chatHarnesses: ["claude-code", "codex"] };
