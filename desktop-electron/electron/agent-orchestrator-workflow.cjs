@@ -196,6 +196,39 @@ const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
+ * A read served stale while it revalidates: `get(key, args)` answers at once with the last value
+ * `keep` accepted while it is younger than `staleMs`, and reads again in the background once it is
+ * older than `freshMs`; with nothing kept (or kept too long) it waits for `read(args)`. One read per
+ * key at a time. A read that fails, or a value `keep` refuses, is never kept.
+ */
+function staleWhileRevalidate({ read, now = Date.now, freshMs, staleMs, keep = () => true, limit = 50 }) {
+  const entries = new Map(); // key -> { value, at, pending }
+  const reread = (key, args, entry) => {
+    entry.pending ??= Promise.resolve().then(() => read(args)).then((value) => {
+      if (keep(value)) { entry.value = value; entry.at = now(); }
+      return value;
+    }).finally(() => { entry.pending = null; });
+    return entry.pending;
+  };
+  return {
+    get(key, args) {
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = { value: undefined, at: 0, pending: null };
+        entries.set(key, entry);
+        if (entries.size > limit) entries.delete(entries.keys().next().value);
+      }
+      const age = now() - entry.at;
+      if (entry.value !== undefined && age < staleMs) {
+        if (age >= freshMs) void reread(key, args, entry).catch(() => undefined);
+        return Promise.resolve(entry.value);
+      }
+      return reread(key, args, entry);
+    },
+  };
+}
+
+/**
  * The effort a CPA model with none picked starts on when it lists efforts but no "auto" (the
  * composer's startEffort): sent without one, CPA had nothing to serve DeepSeek V4.1 Flash
  * (None/Low/High/Max). Medium, else High, else the lowest real one by rank (catalogs keep the
@@ -581,7 +614,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function defaultContextWindow(workspaceId, node) {
     if (node.route.context_window != null) return null;
     try {
-      const catalog = await models({ harness: node.route.harness_id, workspaceId });
+      const catalog = await launchModels({ harness: node.route.harness_id, workspaceId });
       const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
       const capability = catalog.capabilities?.[node.route.model] ?? catalog.capabilities?.[baseModel];
       const setting = capability?.contextWindow, limit = capability?.contextLimit;
@@ -597,7 +630,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function defaultEffort(workspaceId, node) {
     if (node.route.effort || !node.route.model.startsWith(CPA_MODEL_PREFIX)) return null;
     try {
-      const catalog = await models({ harness: node.route.harness_id, workspaceId });
+      const catalog = await launchModels({ harness: node.route.harness_id, workspaceId });
       const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
       return startEffort(node.route.model, (catalog.capabilities?.[node.route.model] ?? catalog.capabilities?.[baseModel])?.efforts);
     } catch { return null; }
@@ -1333,6 +1366,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return value;
   }
 
+  // The catalog a launch is checked against (a send's model check, a launch's effort and window
+  // check, a blank card's default effort and window): served stale while it revalidates. Each such
+  // read waited out a refresh once the minute's cache ran out, 3-25 s on a busy machine before the
+  // agent even began (2026-11-12). A check the stale list fails is made again on a fresh read, so
+  // only an agreeing answer is ever served stale. The model menus still read models() directly.
+  const LAUNCH_CATALOG_STALE_MS = 30 * 60_000;
+  // Revalidated after a minute, as the catalogs' own caches (CPA_CATALOG_TTL_MS, declared below).
+  const launchCatalogs = staleWhileRevalidate({ read: args => models(args), now, freshMs: 60_000, staleMs: LAUNCH_CATALOG_STALE_MS,
+    keep: catalog => Array.isArray(catalog?.models) && catalog.models.length > 0 && !catalog.stale && Boolean(catalog.capabilities) });
+  const launchModels = (args = {}) => launchCatalogs.get(JSON.stringify([args.harness ?? null, args.workspaceId ?? null]), args);
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
@@ -1644,7 +1687,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // with the reason, which the chat shows and Retry clears.
       const checkRoute = async () => {
         if (continuing || !(node.route.effort || node.route.context_window != null)) return;
-        const catalog = await models({ harness: node.route.harness_id, workspaceId });
+        // Judged on the launch catalog (served stale while it revalidates); only a refusal waits for
+        // a fresh read, so a list that changed since is never the reason a launch is refused.
+        try { return await judgeRoute(await launchModels({ harness: node.route.harness_id, workspaceId })); }
+        catch { return judgeRoute(await models({ harness: node.route.harness_id, workspaceId })); }
+      };
+      const judgeRoute = async (catalog) => {
         const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
         const capability = catalog.capabilities[node.route.model] ?? catalog.capabilities[baseModel];
         // A model the harness no longer lists has no known efforts or window: say that, rather
@@ -2278,7 +2326,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A CPA model is judged by CPA's own list: an agent's catalog falls back to the agent's models
     // when CPA cannot be read, which would make every CPA model look gone.
     const viaCpa = route.model.startsWith(CPA_MODEL_PREFIX);
-    const catalog = await (viaCpa ? models() : models({ harness: route.harness_id, workspaceId })).catch(() => null);
+    const args = viaCpa ? {} : { harness: route.harness_id, workspaceId };
+    // The launch catalog (served stale while it revalidates) answers a listed model at once; one it
+    // does not list is looked up again on a fresh read before the send is refused.
+    let catalog = await launchModels(args).catch(() => null);
+    const has = list => Array.isArray(list?.models) && list.models.some(id => [route.model, base].includes(viaCpa ? `${CPA_MODEL_PREFIX}${id}` : id));
+    if (has(catalog)) return null;
+    catalog = await models(args).catch(() => null);
     const listed = Array.isArray(catalog?.models) ? catalog.models.map(id => viaCpa ? `${CPA_MODEL_PREFIX}${id}` : id) : [];
     // Only the remembered list (CPA could not be read) is no verdict either.
     if (!listed.length || catalog.stale) return null;
@@ -9456,4 +9510,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

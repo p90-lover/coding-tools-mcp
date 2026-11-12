@@ -10971,6 +10971,41 @@ test(`"Retry automatically" waits less before retrying a failure that never reac
     workflow.dispose();
   }
 });
+test("a launch's catalog is served stale while it revalidates, and never a refused or failed read", async () => {
+  // 2026-11-12: a launch's model, effort and window checks waited 3-25 s for the catalog once its
+  // minute's cache ran out. They now take the last good list at once and refresh behind it.
+  const { staleWhileRevalidate } = require("../electron/agent-orchestrator-workflow.cjs");
+  let clock = 0, reads = 0, answer = { models: ["a"] }, gate = null;
+  const cache = staleWhileRevalidate({ now: () => clock, freshMs: 60_000, staleMs: 30 * 60_000,
+    keep: value => Array.isArray(value?.models) && value.models.length > 0,
+    read: async () => { reads += 1; if (gate) await gate.promise; if (answer instanceof Error) throw answer; return answer; } });
+  const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+  assert.deepEqual(await cache.get("k"), { models: ["a"] }, "the first read is waited for");
+  clock += 30_000;
+  assert.deepEqual(await cache.get("k"), { models: ["a"] });
+  assert.equal(reads, 1, "fresh: no read");
+  // Past the minute: answered at once with the kept list, while one read refreshes it.
+  answer = { models: ["a", "b"] }; gate = deferred(); clock += 60_000;
+  const started = Date.now();
+  assert.deepEqual(await cache.get("k"), { models: ["a"] }, "stale, at once");
+  assert.ok(Date.now() - started < 50);
+  await cache.get("k"); await cache.get("k");
+  assert.equal(reads, 2, "one refresh at a time");
+  gate.resolve(); gate = null;
+  await new Promise(setImmediate);
+  assert.deepEqual(await cache.get("k"), { models: ["a", "b"] }, "the refreshed list from then on");
+  // A failed or refused read is never kept: the last good list stays.
+  clock += 61_000; answer = new Error("CPA is down");
+  assert.deepEqual(await cache.get("k"), { models: ["a", "b"] });
+  await new Promise(setImmediate);
+  clock += 61_000; answer = { models: [] };
+  assert.deepEqual(await cache.get("k"), { models: ["a", "b"] });
+  await new Promise(setImmediate);
+  // Too old to serve: the read is waited for again.
+  clock += 31 * 60_000; answer = { models: ["c"] };
+  assert.deepEqual(await cache.get("k"), { models: ["c"] });
+});
+
 test("a run loop backed off after headless timed out starts again as soon as headless answers", async () => {
   // 2026-11-12: a 3.5-minute headless hang left 10 chats' loops on backoffs of up to 60 s each,
   // so they came back 15-55 s after headless did.
