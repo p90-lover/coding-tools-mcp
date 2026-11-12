@@ -645,6 +645,33 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
   </ol>;
 }
 
+const AGENT_CONVERSATION_POLL_MS = 2000;
+
+/**
+ * One team agent's conversation, opened from its card on the Team graph as Claude Code and Codex
+ * open a teammate or subagent: what it was asked, its thinking, tool calls and replies (its turn's
+ * timeline, the chat's own renderer), read again every two seconds while it works.
+ */
+export function AgentConversation({ runId, nodeId, live, loadWork }: { runId: string; nodeId: string; live: boolean; loadWork: LoadWork }) {
+  const [items, setItems] = useState<ChatLiveItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    const read = () => void loadWork(runId, nodeId).then(
+      (next) => { if (current) { setItems(next); setError(null); } },
+      (cause: unknown) => { if (current) setError(cause instanceof Error ? cause.message : String(cause)); });
+    read();
+    const timer = live ? window.setInterval(read, AGENT_CONVERSATION_POLL_MS) : 0;
+    return () => { current = false; if (timer) window.clearInterval(timer); };
+  }, [runId, nodeId, live, loadWork]);
+  return <div className="cx-agent-conversation">
+    {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
+    {items === null ? <p className="cx-workbench-empty">Reading its conversation…</p>
+      : items.length ? <LiveTimeline items={items} live={live} finished={!live} expanded />
+        : <p className="cx-workbench-empty">{live ? "It hasn't done anything yet." : "Its conversation could not be read back."}</p>}
+  </div>;
+}
+
 /**
  * Each card's work (step key → its turn's timeline), kept for the app's lifetime: the live timeline
  * is copied in while the card works, so its thinking and tool calls stay when the answer lands, and
