@@ -522,8 +522,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     run.recoveries = tries + 1;
     try {
       const sent = await service.send(run.id, RECOVER_NOTE, `subagent:${run.id}:recover:${run.recoveries}`);
+      // A resumed turn gets the whole time limit again, as a follow-up does (check).
       Object.assign(run, { turnId: sent?.turnId ?? run.turnId, state: "starting", released: false, misses: 0, recovering: null,
-        turns: (run.turns ?? 1) + 1 });
+        turns: (run.turns ?? 1) + 1, turnStartedAt: now() });
       logger?.info?.("subagents.recovered", { agent: run.agentId, try: run.recoveries });
       persist();
       return true;
@@ -537,8 +538,13 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   async function check(run) {
     if (!ACTIVE.has(run.state)) return;
     const service = harness();
-    // A follow-up turn gets the whole time limit again.
-    if (!run.stopping && now() - (run.turnStartedAt ?? run.startedAt) > read().settings.timeoutMinutes * 60_000) {
+    // A follow-up turn gets the whole time limit again. The clock stops while a subagent the app's
+    // restart brought back has not been read yet, and while one cut short waits to resume: it read
+    // from the start of the turn the restart cut short, so one 25 minutes into the default 30 was
+    // stopped as timed out on its first check after a 10-minute update, before it could resume
+    // (2026-11-13). A team is not resumed (recover), so its clock runs on.
+    const resuming = run.kind !== "team" && (run.restored || run.recoverAt);
+    if (!run.stopping && !resuming && now() - (run.turnStartedAt ?? run.startedAt) > read().settings.timeoutMinutes * 60_000) {
       run.stopState = "timed_out";
       run.error = `Stopped after ${read().settings.timeoutMinutes} minutes (the Subagents page's time limit); awaiting confirmed settlement`;
       await stop(run.id).catch(() => undefined);
@@ -569,7 +575,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       if (settled(observed)) await stop(run.id).catch(() => undefined);
       return;
     }
-    run.misses = 0;
+    // Read since the restart: a turn still under way keeps its time limit from here on.
+    Object.assign(run, { misses: 0, restored: false });
     const state = observed?.turnState;
     if (run.state === "starting" && state && state !== "queued") run.state = "running";
     if (observed?.exited && !TERMINAL_TURN.has(state)) {

@@ -1114,6 +1114,71 @@ test("a subagent still working when the app restarts comes back with it, and its
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+/** A subagent started, then the app restarted `awayMs` later; the second service is the app after its restart. */
+async function restartedSubagent(awayMs, afterRestart) {
+  const dir = fs.mkdtempSync(path.join(__dirname, "..", "..", "subagents-restart-"));
+  const sessions = new Map();
+  const sent = [];
+  let clock = 1_000_000;
+  const harness = {
+    spawn: async () => { sessions.set("sub-1", { turnState: "running", approvals: [] }); return "sub-1"; },
+    observe: async (id) => ({ turnId: sent.length ? "t2" : "t1", ...sessions.get(id) }),
+    continuable: async () => true,
+    send: async (id, text) => { sent.push([id, text]); sessions.set(id, { turnState: "running", approvals: [] }); return { turnId: "t2" }; },
+    resolveApproval: async () => {}, resolveInput: async () => {}, exitAgent: async () => ({ ok: true }),
+    interrupt: async (id) => { sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] }); },
+  };
+  const make = () => createSubagents({ statePath: path.join(dir, "subagents.json"), harness: () => harness, logger: { info() {}, warn() {} },
+    launchArgs: () => ({ workspace_id: "ws-1" }), now: () => clock });
+  let after = null;
+  try {
+    const before = make();
+    await before.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+    const { subagent_id: id } = parse(await before.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read it" }));
+    for (let tries = 0; tries < 100 && !fs.existsSync(path.join(dir, "subagent-runs.json")); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    before.dispose();
+    clock += awayMs;
+    after = make();
+    await after.preload();
+    const result = async () => parse(await after.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    await afterRestart({ id, sessions, sent, result, wait: (ms) => { clock += ms; } });
+  } finally {
+    after?.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 2026-11-13: the time limit counted from the start of the turn the restart cut short, and it is
+// checked before the turn is read. A subagent 25 minutes into the default 30 when the app updated,
+// back 10 minutes later, was stopped as timed out instead of resumed.
+test("a subagent cut short by an app restart is resumed, not timed out, and its resumed turn gets the whole time limit", async () => {
+  await restartedSubagent(35 * 60_000, async ({ id, sessions, sent, result, wait }) => {
+    sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [], error: "The agent's process ended before it finished (the app restarted); retry this card." });
+    let seen = await result();
+    assert.doesNotMatch(seen.error ?? "", /Stopped after/, "the minutes the app was closed do not count");
+    assert.match(seen.recovering ?? "", /app restarted/, "it waits to resume");
+    wait(6_000);
+    seen = await result();
+    assert.equal(sent.length, 1, "resumed in the same session");
+    wait(29 * 60_000);
+    seen = await result();
+    assert.doesNotMatch(seen.error ?? "", /Stopped after/, "29 minutes into its resumed turn it is within the limit");
+    assert.equal(seen.state, "running");
+    wait(2 * 60_000);
+    seen = await result();
+    assert.match(seen.error ?? "", /Stopped after 30 minutes/, "the limit still applies to the resumed turn");
+  });
+});
+
+test("a subagent whose agent kept working through the restart still has its time limit", async () => {
+  await restartedSubagent(35 * 60_000, async ({ sent, result }) => {
+    let seen = await result();
+    seen = await result();
+    assert.equal(sent.length, 0, "nothing was cut short: nothing to resume");
+    assert.match(seen.error ?? "", /Stopped after 30 minutes/, "35 minutes of a running turn is over the limit");
+  });
+});
+
 test("a turn its chat or the user stopped is not resumed, and recovery gives up after its tries", async () => {
   let clock = 1_000_000;
   const w = world({ now: () => clock });
