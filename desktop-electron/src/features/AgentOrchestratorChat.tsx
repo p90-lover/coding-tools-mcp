@@ -1941,7 +1941,11 @@ export function AgentOrchestratorChat({
       // it. The surface shows no error for a refusal for now, so the chat says why. Any other failure
       // after the message left the composer gives it back too (recoverMessage).
       const forNow = fromComposer && Boolean(selectedTaskId && sendRefusedForNow(error));
-      if ((steerNow || forNow) && !restored && here() && !composing.current.draft.trim() && !composing.current.attachments.length) {
+      // Only a draft with something in it is restored: a /goal's composer was cleared before deliver ran,
+      // so its owner can hold an empty draft, and the composed text must then come back through
+      // recoverMessage instead of an empty "restore" that marks it handled.
+      if ((steerNow || forNow) && !restored && (owner.draft.trim() || owner.attachments.length) && here()
+        && !composing.current.draft.trim() && !composing.current.attachments.length) {
         setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
         restored = true;
         if (forNow) say("Message", `Couldn't send or queue the message: ${refusalText(error)}`);
