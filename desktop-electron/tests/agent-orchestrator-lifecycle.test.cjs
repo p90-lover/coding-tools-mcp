@@ -276,6 +276,11 @@ function createHarness(hooks = {}) {
     logger: { warn: (...entry) => warnings.push(entry), info: (...entry) => infos.push(entry) },
     readySlowMs: hooks.readySlowMs, readyLimitMs: hooks.readyLimitMs, readyHardMs: hooks.readyHardMs,
     startCooldownMs: hooks.startCooldownMs ?? 0,
+    // One resume, as before, unless a test asks for the pauses.
+    provisionResumeWaitsMs: hooks.provisionResumeWaitsMs ?? [0],
+    ...(hooks.gatewayKey ? { gatewayKey: hooks.gatewayKey } : {}),
+    ...(hooks.extraEnv ? { extraEnv: hooks.extraEnv } : {}),
+    gatewayKeyChecksMs: hooks.gatewayKeyChecksMs ?? [],
   });
   return { controller, children, gateways, reservations, views, requests, events, warnings, infos, parent, opened, daemonReads, files, probes };
 }
@@ -635,6 +640,9 @@ test("a daemon still running at the limit is waited for, not killed and started 
   assert.equal((await controller.start()).state, "ready");
   assert.ok(Date.now() - begun >= 600, "it got ready four limits late");
   assert.equal(harness.children.length, 1, "the same daemon, never a second one");
+  const started = harness.infos.filter(([event]) => event === "ao.started");
+  assert.equal(started.length, 1, "every start records how long it took to get ready");
+  assert.ok(started[0][1].readyMs >= 600 && started[0][1].readyMs < 5000, `readyMs ${started[0][1].readyMs}`);
   assert.ok(harness.warnings.some(([event]) => event === "ao.start_waiting"), "the wait past the limit is logged");
   assert.ok(probes > 1);
 });
@@ -1057,6 +1065,78 @@ test("a chat started in the background whose agent failed to come up is resumed 
   } finally { await h.controller.stop(); }
 });
 
+// 2026-11-12, seconds after an app update: a start failed "agent requires authentication" while the
+// gateway restarted, its one immediate resume failed the same way, and the chat stayed failed
+// although every start from ten seconds on worked.
+test("a start that fails again is resumed again after a pause, and the card waits instead of failing", async () => {
+  const resumed = [];
+  let state = "failed";
+  const reason = "spawn s1: chat controller: chat driver unavailable: persistent ACP host: agent requires authentication";
+  const h = createHarness({
+    provisionResumeWaitsMs: [0, 120, 240],
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "working", provisionState: state, ...(state === "failed" ? { provisionError: reason } : {}) } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      // The gateway is back for the third resume.
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumed.push(Date.now()); if (resumed.length === 3) state = "ready"; return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    const observe = async () => (await h.controller.harness.observe("s1")).turnState;
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 1, "the first resume is immediate");
+    // It failed again at once: the card waits out the pause, and no resume is sent inside it.
+    assert.equal(await observe(), "queued");
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 1);
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 2, "the second resume after its pause");
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 2);
+    await new Promise((resolve) => setTimeout(resolve, 260));
+    assert.equal(await observe(), "queued");
+    assert.equal(resumed.length, 3);
+    assert.ok(resumed[1] - resumed[0] >= 110 && resumed[2] - resumed[1] >= 230, `pauses kept: ${resumed[1] - resumed[0]} ms, ${resumed[2] - resumed[1]} ms`);
+    assert.notEqual(await observe(), "failed", "the agent came up on the third resume");
+    assert.deepEqual(h.infos.filter(([event]) => event === "ao.start_resumed").map(([, detail]) => detail.try), [1, 2, 3]);
+  } finally { await h.controller.stop(); }
+});
+
+test("a start that keeps failing fails for good after its last resume, with AO's reason", async () => {
+  const resumed = [];
+  const h = createHarness({
+    provisionResumeWaitsMs: [0, 20, 20],
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    api: async (endpoint) => {
+      if (/^\/api\/v1\/sessions\/[^/]+$/.test(endpoint.pathname)) {
+        return { session: { id: "s1", mode: "chat", status: "working", provisionState: "failed", provisionError: "persistent ACP host: agent requires authentication" } };
+      }
+      if (endpoint.pathname.endsWith("/conversation")) return { turns: [{ id: "t1", state: "queued" }], messages: [], activities: [] };
+      if (endpoint.pathname.endsWith("/resume-agent")) { resumed.push(1); return { ok: true }; }
+    },
+  });
+  try {
+    await h.controller.start();
+    let last;
+    for (let round = 0; round < 12 && last?.turnState !== "failed"; round++) {
+      last = await h.controller.harness.observe("s1");
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.equal(last.turnState, "failed");
+    assert.match(last.error, /could not start: persistent ACP host: agent requires authentication/);
+    assert.equal(resumed.length, 3, "three resumes, then no more");
+    assert.equal((await h.controller.harness.observe("s1")).turnState, "failed");
+    assert.equal(resumed.length, 3);
+  } finally { await h.controller.stop(); }
+});
+
 test("a chat whose agent is still starting says so, and one the app ended meanwhile is never resumed", async () => {
   // Cancelling a background start leaves AO's reason "context canceled", which reads as transient:
   // the resume brought back an agent whose card the launch watchdog had already moved on.
@@ -1173,4 +1253,91 @@ test("stopping a chat whose agent is still starting cancels the start, so its qu
     await h.controller.harness.interrupt("s1");
     assert.deepEqual(posted, ["/api/v1/sessions/s1/conversation/interrupt"], "a running agent's turn is only interrupted");
   } finally { await h.controller.stop(); }
+});
+
+// 2026-11-12: AO started at 01:40:34, CPA's configuration was written at 01:43:22. AO reads CPA's
+// key from its own environment, so it ran without one, and every CPA chat from 07:11 until the app
+// was closed failed "persistent ACP host: agent requires authentication".
+function gatewayKeyWorld({ working = false, checks = [] } = {}) {
+  const world = { envKey: "", cpaKey: "key-one", working, launches: [] };
+  world.h = createHarness({
+    getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
+    workspaceBoard: { bind: async () => ({ projectId: "project-fixture" }) },
+    extraEnv: async () => (world.envKey ? { CODING_TOOLS_CPA_KEY: world.envKey } : {}),
+    gatewayKey: async () => world.cpaKey,
+    gatewayKeyChecksMs: checks,
+    api: async (endpoint, options) => {
+      if (endpoint.pathname === "/api/v1/settings") return { chatHarnesses: ["claude-code"] };
+      if (endpoint.pathname === "/api/v1/sessions" && options?.method === "POST") {
+        world.launches.push(JSON.parse(options.body));
+        return { session: { id: `session-${world.launches.length}` } };
+      }
+      if (endpoint.pathname === "/api/v1/sessions") {
+        return { sessions: world.working ? [{ id: "busy", status: "working", isTerminated: false }] : [] };
+      }
+    },
+  });
+  world.spawnCpa = () => world.h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "m", prompt: "hi",
+    gateway: { provider: "cpa", model: "gpt-6.1-sol" } });
+  world.keyOf = (index) => world.h.children[index].options.env.CODING_TOOLS_CPA_KEY;
+  return world;
+}
+
+test("AO started without CPA's key is started again with it before a CPA chat, when no agent is mid-turn", async () => {
+  const world = gatewayKeyWorld();
+  try {
+    await world.h.controller.start();
+    assert.equal(world.keyOf(0), undefined, "CPA had no key to give when AO started");
+    world.envKey = "key-one"; // CPA is up now: a new AO start gets its key
+    await world.spawnCpa();
+    assert.equal(world.h.children.length, 2, "AO was started again");
+    assert.equal(world.keyOf(1), "key-one");
+    assert.equal(world.launches.length, 1, "and the chat was launched on the AO that holds the key");
+    assert.ok(world.h.warnings.some(([event, detail]) => event === "ao.restart_for_gateway_key" && detail.had === false));
+    await world.spawnCpa();
+    assert.equal(world.h.children.length, 2, "an AO that holds the current key is left alone");
+    // CPA is re-keyed: the same check replaces an older key.
+    world.cpaKey = "key-two"; world.envKey = "key-two";
+    await world.spawnCpa();
+    assert.equal(world.h.children.length, 3);
+    assert.equal(world.keyOf(2), "key-two");
+  } finally { await world.h.controller.stop(); }
+});
+
+test("with an agent mid-turn AO is not restarted for the key: the CPA chat says why, other chats start", async () => {
+  const world = gatewayKeyWorld({ working: true });
+  try {
+    await world.h.controller.start();
+    world.envKey = "key-one";
+    await assert.rejects(world.spawnCpa(), /without CPA's current key[^]*once no agent is mid-turn/);
+    assert.equal(world.h.children.length, 1, "a restart would end the running turn");
+    assert.equal(world.launches.length, 0, "the chat is not launched on the agent's own sign-in");
+    await world.h.controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "m", prompt: "hi" });
+    assert.equal(world.launches.length, 1, "a chat that does not use CPA is unaffected");
+    world.working = false;
+    await world.spawnCpa();
+    assert.equal(world.h.children.length, 2, "once idle, the next CPA chat brings the key in");
+    assert.equal(world.launches.length, 2);
+  } finally { await world.h.controller.stop(); }
+});
+
+test("AO is not restarted when CPA has no key to give, and picks the key up on its own after it started", async () => {
+  const none = gatewayKeyWorld();
+  try {
+    none.cpaKey = null;
+    await none.h.controller.start();
+    await none.spawnCpa();
+    assert.equal(none.h.children.length, 1, "nothing to bring in");
+    assert.equal(none.launches.length, 1);
+  } finally { await none.h.controller.stop(); }
+  // Nobody is chatting (the night of 2026-11-12): the checks after a start bring the key in anyway.
+  const quiet = gatewayKeyWorld({ checks: [40] });
+  try {
+    await quiet.h.controller.start();
+    quiet.envKey = "key-one";
+    for (let waited = 0; waited < 3000 && quiet.h.children.length < 2; waited += 20) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(quiet.h.children.length, 2, "started again by the check, with no chat asking");
+    assert.equal(quiet.keyOf(1), "key-one");
+    assert.equal(quiet.launches.length, 0);
+  } finally { await quiet.h.controller.stop(); }
 });
