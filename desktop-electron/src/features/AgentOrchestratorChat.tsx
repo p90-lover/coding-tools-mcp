@@ -14,7 +14,8 @@ import { ChatMarkdown } from "./ChatMarkdown";
 import { goalMissionStart, openedThought, stepDuration, stepFamily, stepFamilyCounts, stepFamilyNoun, transcriptCompletion, transcriptParts, transcriptSummary, transcriptTone, type StepFamily } from "./chat-transcript";
 import { onMissionWork, readMissionWork } from "./chat-view-settings";
 import { ComputerControlCard, chatComputerRequests, useComputerRequests } from "./ComputerControlCard";
-import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useWorkbenchAutoOpen, type ChangesTarget, type WorkbenchTab } from "./ChatWorkbench";
+import { ChatWorkbench, chatProcessRows, navigatePreview, useChatProcesses, useChatSubagents, useChatSummaryFacts, useWorkbenchAutoOpen, type ChangesTarget, type WorkbenchTab } from "./ChatWorkbench";
+import { ChangesMeta, PullRequestGlyph, SubagentStack, SummaryList, SummaryRow, SummarySection, pullRequestState, subagentsMeta } from "./chat-summary-panel";
 import { ChatBranchBar } from "./ChatBranchBar";
 import { AnnotationTray, SelectionAnnotator, SentAnnotations, type DraftAnnotation } from "./ChatAnnotations";
 import { ChatContextMeter } from "./ChatContextMeter";
@@ -31,7 +32,7 @@ import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
-  chatAgentSessions, chatAgentSummary, chatApprovalMode, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
+  chatAgentSessions, chatAgentSummary, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
   chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, workGroupRows, workSegmentSteps, type ChatLiveSegment, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
@@ -1366,7 +1367,7 @@ export function AgentOrchestratorChat({
     if (!detailsOpen || !button) { setDetails(null); return; }
     const place = () => {
       const box = button.getBoundingClientRect();
-      setDetails({ left: Math.max(8, Math.min(box.right - 300, window.innerWidth - 308)), top: box.bottom + 6 });
+      setDetails({ left: Math.max(8, Math.min(box.right - 320, window.innerWidth - 328)), top: box.bottom + 6 });
     };
     place();
     const observer = new ResizeObserver(place);
@@ -1511,11 +1512,14 @@ export function AgentOrchestratorChat({
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
   const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
-  // A subagent starting opens the panel on its Subagents tab, as Codex's panel shows a thread's
-  // subagents; a Preview, Terminal or diff the person has open stays (the line above the chat box says it).
-  const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : [],
-    () => setWorkbench((open) => (open === null || open === "overview" || open === "new" ? "subagents" : open)));
+  // A subagent starting never opens the side panel: the line above the chat box says it works, and
+  // the chat details and the Subagents tab list it, a click from its work.
+  const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : []);
   const subagentLine = useMemo(() => (subagents.some(subagentActive) ? subagentsSummary(subagents) : null), [subagents]);
+  // The details' "Changes +12 −3" and "PR #42" rows (Codex's summary): read as it opens, and again
+  // when a turn ends or the chat's state changes, from the lead agent's worktree.
+  const summaryFacts = useChatSummaryFacts(selectedTaskId ? agentSessionIds[0] : undefined, projectId, detailsOpen,
+    `${turns.length}:${chat?.status ?? ""}:${latest?.id ?? ""}`);
   const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
     <LiveTimeline items={items} live={live} finished={!live} reply={reply} joinedReply />, []);
   // The details panel's Outputs and Sources, and each reply head's changed files: the cards' work
@@ -2845,78 +2849,85 @@ export function AgentOrchestratorChat({
         </header>
         {details ? (() => {
           const nodes = latest?.nodes ?? [];
-          const lead = nodes.find((node) => node.role === "planner") ?? nodes[0];
           const agents = chatAgentSummary(nodes);
           const { outputs = [], sources = [] } = detailLinks ?? {};
+          const pullRequest = summaryFacts.pullRequest;
           // A file opens the worktree's files, a page on this machine the agent's preview, a web page
           // the browser; an MCP server only names what was called.
           const linkRow = (link: ChatDetailLink) => {
             const icon = link.kind === "file" ? <ChatGlyph name="edit" size={15} /> : link.kind === "image" ? <ChatGlyph name="spark" size={15} />
               : <Icon name={link.kind === "page" ? "globe" : link.kind === "tool" ? "mcp" : "external"} width="15" height="15" />;
-            const body = <>{icon}<span>{link.kind === "image" ? `Generated image · ${link.label}` : link.label}</span></>;
-            if (link.kind === "link") return <a key={link.key} className="cx-details-row" href={link.title} target="_blank" rel="noreferrer noopener" title={link.title}>{body}</a>;
-            if (link.kind === "tool") return <p key={link.key} className="cx-details-row is-static" title={link.title}>{body}</p>;
-            return <button key={link.key} type="button" className="cx-details-row" title={link.title} onClick={() => {
+            const label = link.kind === "image" ? `Generated image · ${link.label}` : link.label;
+            if (link.kind === "link") return <SummaryRow key={link.key} icon={icon} label={label} title={link.title} href={link.title} />;
+            if (link.kind === "tool") return <SummaryRow key={link.key} icon={icon} label={label} title={link.title} />;
+            return <SummaryRow key={link.key} icon={icon} label={label} title={link.title} onClick={() => {
               if (link.kind === "page" && agentSessionIds[0]) { navigatePreview(agentSessionIds[0], link.title); setWorkbench("preview"); }
               else if (link.kind !== "page") setWorkbench("files");
-            }}>{body}</button>;
+            }} />;
           };
+          // Codex's ⋯ beside the project: where the chat's work can be seen, a click away.
+          const projectMenu = (box: DOMRect) => setMenu({ x: Math.max(8, box.right - 220), y: box.bottom + 4, label: "Project actions", items: [
+            { label: "Show changes", icon: "edit", run: () => setWorkbench("changes") },
+            { label: "Show files", icon: "folder", run: () => setWorkbench("files") },
+            { label: "Open terminal", icon: "monitor", run: () => setWorkbench("terminal") },
+            ...(branch ? [{ label: "Copy branch name", icon: "copy" as const, run: () => { void navigator.clipboard?.writeText(branch).catch(() => undefined); } }] : []),
+            { kind: "separator" as const },
+            { label: "Show side panel", icon: "section", run: () => setWorkbench("overview") },
+          ] });
           return <FloatingLayer className="cx-details" role="complementary" style={{ left: details.left, top: details.top, maxHeight: `calc(100vh - ${details.top + 12}px)` }}>
             <div aria-label="Chat details">
-              <div className="cx-details-head"><strong>{projectName || "Project"}</strong>{branch ? <small>{branch}</small> : null}</div>
-              <button type="button" className="cx-details-row" disabled={!commands || !latest}
-                onClick={() => { void runCommand("diff", "", false); }}>
-                <ChatGlyph name="edit" size={15} /><span>Changes</span></button>
-              <p className="cx-details-label">Agents</p>
-              {latest ? <button type="button" className="cx-details-row" title="Open the cards"
-                onClick={() => { if (structure) setShowStructure(true); else openStructure(latest.id); }}>
-                <span className="cx-details-dots" aria-hidden="true">{agents.dots.slice(0, 8).map((state, index) =>
-                  <span key={index} className={`cx-details-dot is-${state}`} />)}</span><span>{agents.text}</span></button>
-                : <p className="cx-details-empty">No agents yet. They start with your first message.</p>}
+              <SummarySection className="cx-sum-project">
+                <div className="cx-sum-project-row">
+                  <span className="cx-sum-project-text"><strong title={projectName}>{projectName || "Project"}</strong>{branch ? <small title={branch}>{branch}</small> : null}</span>
+                  <button type="button" className="cx-sum-action" aria-label="Project actions" title="Project actions" aria-haspopup="menu"
+                    onClick={(event) => projectMenu(event.currentTarget.getBoundingClientRect())}><ChatGlyph name="more" size={16} /></button>
+                </div>
+              </SummarySection>
+              <SummarySection>
+                <SummaryRow icon={<ChatGlyph name="edit" size={15} />} label="Changes" meta={<ChangesMeta changes={summaryFacts.changes} />}
+                  title="Show the changes" onClick={() => setWorkbench("changes")} />
+                {pullRequest ? <SummaryRow icon={<PullRequestGlyph />} label={`PR #${pullRequest.number}`} meta={pullRequestState(pullRequest.state)}
+                  title={`${pullRequest.title}\nOpen pull request in browser`} href={pullRequest.url} /> : null}
+                {subagents.length ? <SummaryRow className="has-stack" icon={<SubagentStack subagents={subagents} />} label="Subagents"
+                  meta={subagentsMeta(subagents)} title="Open subagents" onClick={() => setWorkbench("subagents")} /> : null}
+                {latest ? <SummaryRow className="has-stack" icon={<span className="cx-details-dots">{agents.dots.slice(0, 4).map((state, index) =>
+                  <span key={index} className={`cx-details-dot is-${state}`} />)}</span>} label="Agents" meta={agents.text}
+                  title="Open the cards" onClick={() => { if (structure) setShowStructure(true); else openStructure(latest.id); }} /> : null}
+                {/* /schedule: when the chat continues by itself. A click shows it; right-click deletes it. */}
+                {commands?.schedule ? (() => {
+                  const schedule = commands.schedule;
+                  const menuFor = (x: number, y: number) => setMenu({ x, y, label: "Schedule", items: [
+                    { label: "Show schedule", icon: "schedule", run: () => void runCommand("schedule", "", false) },
+                    { kind: "separator" },
+                    { label: "Delete schedule", icon: "delete", danger: true, run: () => void runCommand("clearschedule", "", false) },
+                  ] });
+                  return <SummaryRow icon={<ChatGlyph name="schedule" size={15} />} label={scheduleLabel(schedule)} meta={scheduleWhen(schedule.dueAt)}
+                    aria-haspopup="menu" title={`Sends "${schedule.message}" ${scheduleWhen(schedule.dueAt)}${schedule.note ? `\n${schedule.note}` : ""}\nRight-click to delete`}
+                    onClick={() => void runCommand("schedule", "", false)}
+                    onContextMenu={(event) => { event.preventDefault(); menuFor(event.clientX, event.clientY); }}
+                    onKeyDown={(event) => {
+                      // The keyboard's context menu (Shift+F10, the menu key) opens the same menu.
+                      if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
+                        event.preventDefault();
+                        const box = event.currentTarget.getBoundingClientRect();
+                        menuFor(box.left + 12, box.bottom);
+                      }
+                    }} />;
+                })() : null}
+              </SummarySection>
               {/* Apps and terminals: a lit green dot while one runs, a red one once it is offline. A
                   click shows it (the Preview or the Terminal), which no longer opens by itself. */}
-              <p className="cx-details-label">Processes</p>
-              {processRows.length ? processRows.map((row) => <button key={row.key} type="button" className="cx-details-row cx-process-row"
-                title={`${row.title}
-${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWorkbench(row.kind === "app" ? "preview" : "terminal")}>
-                <span className={`cx-process-dot ${row.running ? "is-running" : "is-offline"}`} role="img" aria-label={row.running ? "Running" : "Offline"} />
-                <Icon name={row.kind === "app" ? "globe" : "logs"} width="14" height="14" />
-                <span>{row.label}</span><small>{row.running ? "Running" : "Offline"}</small></button>)
-                : <p className="cx-details-empty">Apps and terminals the agents start show here.</p>}
-              {/* /schedule: when the chat continues by itself. A click shows it; right-click deletes it. */}
-              <p className="cx-details-label">Schedule</p>
-              {commands?.schedule ? (() => {
-                const schedule = commands.schedule;
-                const menuFor = (x: number, y: number) => setMenu({ x, y, label: "Schedule", items: [
-                  { label: "Show schedule", icon: "schedule", run: () => void runCommand("schedule", "", false) },
-                  { kind: "separator" },
-                  { label: "Delete schedule", icon: "delete", danger: true, run: () => void runCommand("clearschedule", "", false) },
-                ] });
-                return <button type="button" className="cx-details-row cx-schedule-row" aria-haspopup="menu"
-                  title={`Sends "${schedule.message}" ${scheduleWhen(schedule.dueAt)}${schedule.note ? `\n${schedule.note}` : ""}\nRight-click to delete`}
-                  onClick={() => void runCommand("schedule", "", false)}
-                  onContextMenu={(event) => { event.preventDefault(); menuFor(event.clientX, event.clientY); }}
-                  onKeyDown={(event) => {
-                    // The keyboard's context menu (Shift+F10, the menu key) opens the same menu.
-                    if (event.key === "ContextMenu" || (event.key === "F10" && event.shiftKey)) {
-                      event.preventDefault();
-                      const box = event.currentTarget.getBoundingClientRect();
-                      menuFor(box.left + 12, box.bottom);
-                    }
-                  }}>
-                  <ChatGlyph name="schedule" size={15} /><span>{scheduleLabel(schedule)}</span><small>{scheduleWhen(schedule.dueAt)}</small></button>;
-              })() : <p className="cx-details-empty">Type /schedule 5h to have this chat continue by itself later.</p>}
-              <p className="cx-details-label">Setup</p>
-              {lead ? <>
-                <p className="cx-details-line">{describeNode?.(lead) || lead.route?.model || "Model not set"}</p>
-                <p className="cx-details-line">Approvals: {chatApprovalMode(lead.route as { approval_policy?: string; approvals_reviewer?: string } | undefined)}</p>
-              </> : <p className="cx-details-empty">Chosen when you send.</p>}
-              <p className="cx-details-label">Outputs</p>
-              {outputs.length ? outputs.slice(0, DETAILS_LIST_LIMIT).map(linkRow)
-                : <p className="cx-details-empty">Files, images and local pages the agents make show here.</p>}
-              <p className="cx-details-label">Sources</p>
-              {sources.length ? sources.slice(0, DETAILS_LIST_LIMIT).map(linkRow)
-                : <p className="cx-details-empty">Web pages and MCP servers the agents use show here.</p>}
+              {processRows.length ? <SummarySection title="Background tasks">
+                {processRows.map((row) => <SummaryRow key={row.key} className="cx-process-row" title={`${row.title}\n${row.running ? "Running" : "Offline"} · click to show`}
+                  icon={<span className={`cx-process-dot ${row.running ? "is-running" : "is-offline"}`} role="img" aria-label={row.running ? "Running" : "Offline"} />}
+                  label={row.label} meta={row.running ? "Running" : "Offline"} onClick={() => setWorkbench(row.kind === "app" ? "preview" : "terminal")} />)}
+              </SummarySection> : null}
+              {outputs.length ? <SummarySection title="Outputs">
+                <SummaryList items={outputs.slice(0, DETAILS_LIST_LIMIT)} render={linkRow} />
+              </SummarySection> : null}
+              <SummarySection title="Sources">
+                <SummaryList items={sources.slice(0, DETAILS_LIST_LIMIT)} render={linkRow} empty="Web pages and MCP servers the agents use show here." />
+              </SummarySection>
             </div>
           </FloatingLayer>;
         })() : null}

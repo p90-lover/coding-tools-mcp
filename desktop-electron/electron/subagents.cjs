@@ -347,7 +347,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   const view = (run) => ({
     subagent_id: run.id, ...(run.kind === "team" ? { team: run.agentId } : { agent: run.agentId }), name: run.agentName,
-    ...(run.model ? { model: run.model } : {}), state: run.state, task: run.task.slice(0, 200),
+    ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}), state: run.state, task: run.task.slice(0, 200),
     elapsed_seconds: Math.round(((run.endedAt ?? now()) - run.startedAt) / 1000), ...(run.turns > 1 ? { turns: run.turns } : {}),
     ...(run.report ? { report: run.report } : {}), ...(run.error ? { error: run.error } : {}), ...(run.stopping ? { stopping: true } : {}),
     // Cut short and coming back (recover): why, and how many tries so far.
@@ -767,7 +767,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const service = harness();
     if (!service) throw new Error("Agent Orchestrator is not running");
     const id = await service.spawn({ ...args, prompt, plain: true, subagent: true });
+    // The effort it runs at is the one AO was given (launchArgs fits it to the model's levels), which
+    // the chat's subagent view shows beside the model, as Codex's does.
+    const effort = args.effort ?? route.effort ?? null;
     const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, model: route.model.replace(/^cpa\//, ""), task: brief,
+      ...(typeof effort === "string" && effort ? { effort } : {}), harness: route.harness_id,
       startedAt: now(), endedAt: null, state: "starting", report: "", error: "", turns: 1 };
     remember(run);
     await stopIfParentStopped(run, parent, generation);
@@ -1053,7 +1057,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     save,
     // `parent` (the chat agent's AO session) lets a chat show the subagents its own agents started.
     runs: () => [...runs.values()].sort((a, b) => b.startedAt - a.startedAt).map((run) => ({ ...view(run), workspace_id: run.workspaceId,
-      parent: run.parent, started_at: run.startedAt })),
+      parent: run.parent, started_at: run.startedAt, ...(run.endedAt ? { ended_at: run.endedAt } : {}), ...(run.harness ? { harness: run.harness } : {}) })),
     stop: (id) => stop(id).then(view),
     stopParent,
     dispose() { if (poller) clearTimer(poller); poller = null; },

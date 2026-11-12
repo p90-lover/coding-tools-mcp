@@ -565,7 +565,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
       : name === "./ChatReplyHead" ? replyHead
       : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
-      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
       : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: text => text }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
@@ -2327,7 +2327,7 @@ function childPoll(file, selector, options = {}) {
     POLL_MS: 4000, QUOTA_POLL_MS: 60000, DETAIL_POLL_MS: 10000, PROCESSES_POLL_MS: 4000, SUBAGENTS_POLL_MS: 3000,
     OVERVIEW_POLL_MS: 5000, SUBAGENT_WORK_POLL_MS: 2000, PREVIEW_POLL_MS: 1500, COMMANDS_POLL_MS: 2000, OUTPUT_POLL_MS: 1000,
     button: { current: { addEventListener: (_event, fn) => clicks.add(fn), removeEventListener: (_event, fn) => clicks.delete(fn) } },
-    seen: { current: null }, polled: { current: new Set() }, openNow: { current: false }, onOpenNow: { current: noop }, onStartedNow: { current: noop },
+    seen: { current: null }, polled: { current: new Set() }, openNow: { current: false }, onOpenNow: { current: noop },
     startsNewChat: () => true, chatSubagents: chat.chatSubagents, subagentActive: chat.subagentActive, isLive: () => true,
     selected: "command", selectedAgentShell: false, offsets: { current: {} }, pinned: { current: false }, shownRequest: { current: "" },
     plain: value => value, TAIL_BYTES: 1024, MAX_OUTPUT_CHARS: 10000,
@@ -2361,7 +2361,7 @@ test("chat child refreshes skip hidden surfaces, minimized windows and hidden pa
     ["ChatTurnStats.tsx", "effect:const [first, ...rest]", ["chat_turn_stats"]],
     ["ChatWorkbench.tsx", "effect:!wanted", ["chat_processes"]],
     ["ChatWorkbench.tsx", "effect:setLivePage(null)", ["chat_preview_state", "chat_processes"]],
-    ["ChatWorkbench.tsx", "effect:seen.current = null", ["subagents_runs"]],
+    ["ChatWorkbench.tsx", "effect:setRuns([])", ["subagents_runs"]],
     ["ChatWorkbench.tsx", "effect:countChanges", ["chat_context", "chat_changes", "chat_processes"]],
     ["ChatWorkbench.tsx", "effect:readCpaUsage(range)", ["usage:24h"]],
     ["ChatWorkbench.tsx", "effect:subagent_transcript", ["subagent_transcript"]],
