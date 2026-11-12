@@ -3267,6 +3267,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (saved?.ok !== true || !Array.isArray(saved.runs)) throw new Error("AO run read failed");
       return saved;
     };
+    // The project-wide read (its schedule, and which newer run took over a session) goes on beside
+    // the run's own read and the control call: after them, it added up to 30 s to every Stop. Taken
+    // before the cancellation, it shows the same schedule, sessions and runs that one would.
+    const allRunsRead = action === "stop" ? readForStop(true).catch(() => null) : null;
     const beforeStop = action === "stop" ? await readForStop().catch(() => null) : null;
     const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
       .filter(node => externalAgent(node) && node.receipt?.thread_id)
@@ -3313,12 +3317,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     if (action === "stop") {
-      const saved = await readForStop(true).catch(() => null);
+      const saved = await allRunsRead;
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
-      if (life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)) {
-        await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
-          .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }));
-      }
+      // The chat's schedule is cancelled while its agents are stopped, not before.
+      const unscheduled = life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)
+        ? cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
+          .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }))
+        : null;
       // Cancellation preserves receipts; capture their exact attempt before sending any shutdown.
       if (!beforeStop && (result.run.nodes ?? []).some(node => externalAgent(node) && node.receipt?.thread_id)) {
         throw new Error("Owned session snapshot is unavailable; shutdown is unconfirmed");
@@ -3327,8 +3332,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const position = saved?.runs.findIndex(entry => entry.id === run && entry.workspace_id === id) ?? -1;
       if (stopTargets.length && position < 0) throw new Error("Owned session ownership view is unavailable; shutdown is unconfirmed");
       const newer = position >= 0 ? saved.runs.slice(position + 1) : [];
+      // The run's cards as the control call left them: the project read is taken beside that call,
+      // so a receipt AO replaced meanwhile shows only in its answer.
+      const after = result.run?.id === run && Array.isArray(result.run.nodes) && result.run.nodes.length ? result.run : saved.runs[position];
       for (const target of stopTargets) {
-        const node = saved.runs[position].nodes?.find(node => node.id === target.nodeId);
+        const node = after.nodes?.find(node => node.id === target.nodeId);
         if (node?.receipt?.thread_id !== target.sessionId || (node.receipt.request_key ?? node.request_key) !== target.requestKey) {
           throw new Error("Owned session identity changed while stopping; refresh before retrying");
         }
@@ -3339,6 +3347,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       const stopped = await Promise.allSettled([...sessions].map(([session, target]) =>
         stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: true, completed: target.completed })));
+      await unscheduled;
       const failure = stopped.find(result => result.status === "rejected");
       if (failure) {
         const message = "Agent stop could not be confirmed: " + publicText(failure.reason?.message || failure.reason, 200);
@@ -8758,8 +8767,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   const STOP_SETTLE_MS = 15_000;
   const STOP_SETTLE_POLL_MS = 250;
-  /** How long a Stop that ends the agent waits for its interrupt before shutting the agent down. */
-  const STOP_RELEASE_SETTLE_MS = 3_000;
+  /**
+   * How long a Stop that ends the agent waits for its interrupt before shutting the agent down. The
+   * agent is shut down either way, so the wait only lets a turn that settles at once record itself
+   * as interrupted; 3 s of it was most of a Stop's time on a healthy machine (2026-11-12).
+   */
+  const STOP_RELEASE_SETTLE_MS = 1_000;
   // Stops an agent without waiting on a stop or start AO is already carrying out for it: that agent
   // goes to the service's exit worker (releaseAgent), which leaves its card once AO reports it gone.
   // Waiting failed Stop ("Agent stop could not be confirmed: The agent is already exiting") and the

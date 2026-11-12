@@ -8035,6 +8035,31 @@ test("a steer into a chat whose agent process stopped goes as its next turn at o
   assert.deepEqual(interrupted, [], "a gone agent is not interrupted");
 });
 
+test("Stop reads the project beside its control call, not after it", async () => {
+  // 2026-11-12: Stop's steps ran in a row; its project-wide read (for the chat's schedule and newer
+  // runs) came only after the control call, adding up to 30 s.
+  const task = { id: "task-1", title: "Ship", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ id: "one", state: "running" }] }] });
+  const steps = [];
+  const workflow = createAgentOrchestratorWorkflow({ findCodexExecutable: () => "C:/c.exe",
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint === "/api/v1/ao/control") {
+        steps.push("control asked");
+        await new Promise(resolve => setTimeout(resolve, 30));
+        steps.push("control answered");
+        return { ok: true, run: { id: "r1", workspace_id: "ws-1", project_id: "task-1", cancelled: true, nodes: [{ id: "one", state: "cancelled" }] } };
+      }
+      if (endpoint === "/api/v1/ao/read") steps.push(body.run_id ? "read run" : "read project");
+      return world.requestHeadless(endpoint, body, options);
+    } });
+  try {
+    await workflow.call("control_run", { workspaceId: "ws-1", runId: "r1", action: "stop" });
+    assert.ok(steps.indexOf("read project") >= 0 && steps.indexOf("read project") < steps.indexOf("control answered"),
+      `the project read goes beside the control call: ${steps.join(", ")}`);
+    assert.equal(steps.filter(step => step === "read project").length, 1, "and only once");
+  } finally { workflow.dispose(); }
+});
+
 test("Stop on a chat whose agent process stopped finishes at once instead of waiting for its turn row to settle", async () => {
   const route = { harness_id: "ao:claude-code", model: "cline-pass/mimo-v2.6-pro" };
   const task = { id: "task-1", title: "Play Ero", description: "first ask", state: "in_progress", clauses: [] };
@@ -10368,9 +10393,10 @@ test("team Stop and graph replacement require observed settlement after an inter
       : workflow.call("update_run", { workspaceId: "ws", change: { operation: "graph", run_id: "run", expected_revision: 3, change: { operation: "set_parents", node_id: "one", parents: [] } } }); };
     try {
       if (action === "stop") {
-        // Stop ends the agent: after 3 s (12 checks) unsettled, its host's confirmed shutdown is the proof.
+        // Stop ends the agent: after 1 s (4 checks) unsettled, its host's confirmed shutdown is the proof
+        // (it waited 3 s, most of a Stop's time on a healthy machine, 2026-11-12).
         assert.equal((await invoke()).ok, true, "a confirmed agent shutdown stops what the interrupt did not");
-        assert.equal(reads, 13, "one exited-host preflight plus 3 s of settlement checks");
+        assert.equal(reads, 5, "one exited-host preflight plus 1 s of settlement checks");
       } else {
         await assert.rejects(invoke(), /still working|settlement.*unconfirmed/i, "ACK alone is insufficient");
         // 60 settlement checks: 15 s at 250 ms (it was 8, 2 s, which gave up on interrupts that land later).
@@ -11807,9 +11833,12 @@ test("Stop disables the local driver before a queued receipt snapshot can return
   const started = new Promise(resolve => { snapshotStarted = resolve; });
   const state = { stopped: false, status: "running" };
   const workflow = workflowInternals({
-    requestHeadless: async endpoint => {
+    requestHeadless: async (endpoint, body, options) => {
       if (endpoint.endsWith("/read")) {
-        if (++reads === 1) { snapshotStarted(); await snapshot; }
+        // Stop's own reads (its run's receipts and, beside them, the project's) are held; any other
+        // read is the driver's.
+        if (options?.admissionControl === true) { snapshotStarted(); await snapshot; }
+        else reads += 1;
         return { ok: true, runs: [structuredClone(mission)], worker_capacity: { run: 1 } };
       }
       if (endpoint.endsWith("/reserve")) return { ok: true, request_key: "k", prompt: "next card" };
@@ -11826,7 +11855,7 @@ test("Stop disables the local driver before a queued receipt snapshot can return
     await workflow.driveRun("ws", "run", process.execPath, state);
     assert.equal(dispatched, 0, "the driver must not dispatch another card while Stop's receipt read is queued");
     assert.equal(state.stopped, true);
-    assert.equal(reads, 1, "the stopped driver must not start another read");
+    assert.equal(reads, 0, "the stopped driver must not start another read");
   } finally {
     state.stopped = true;
     releaseSnapshot();
