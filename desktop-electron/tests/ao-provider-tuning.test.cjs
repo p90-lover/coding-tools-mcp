@@ -450,7 +450,7 @@ test("a chat host that was only slow to start is retried as chat, not turned int
   const visit = node => { if (ts.isMethodDeclaration(node) && node.name.getText(ast) === "spawn") method = node; ts.forEachChild(node, visit); };
   visit(ast);
   const transient = source.match(/const TRANSIENT_CHAT_START = (\/.*\/i);/)[1];
-  const run = async (failures) => {
+  const run = async (failures, agent = "claude-code", approvalMode = undefined) => {
     const modes = [];
     const spawn = vm.runInNewContext("({" + method.getText(ast) + "}).spawn", {
       Buffer, projectFor: async () => "project", forgetProject: () => {}, agentId: id => id, sessionId: id => id, utf8Prefix: text => text,
@@ -463,22 +463,39 @@ test("a chat host that was only slow to start is retried as chat, not turned int
       userServers: () => [],
       gptFileServer: async () => null,
       internalApi: async (verb, _endpoint, body) => {
-        if (verb === "GET") return { chatHarnesses: ["claude-code"] };
+        if (verb === "GET") return { chatHarnesses: ["claude-code", "codex"] };
         modes.push(body.mode);
         const failure = failures.shift();
         if (failure) throw Error(failure);
         return { session: { id: "session-" + modes.length } };
       },
     });
-    const outcome = await spawn({ workspaceId: "ws", agent: "claude-code", model: "cpa/m", prompt: "task" }).catch(error => "error: " + error.message);
+    const outcome = await spawn({ workspaceId: "ws", agent, model: "cpa/m", prompt: "task", ...(approvalMode ? { approvalMode } : {}) })
+      .catch(error => "error: " + error.message);
     return { modes, outcome };
   };
   const slow = await run(["persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)"]);
   assert.deepEqual(slow.modes, ["chat", "chat"], "a slow start is retried as chat");
   assert.equal(slow.outcome, "session-2");
-  const stillSlow = await run(["persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)", "persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)"]);
-  assert.deepEqual(stillSlow.modes, ["chat", "chat"], "never silently becomes a terminal session");
+  const slowTwice = await run(["persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)", "persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)"]);
+  assert.deepEqual(slowTwice.modes, ["chat", "chat", "chat"], "a second retry, after a longer pause");
+  assert.equal(slowTwice.outcome, "session-3");
+  const stillSlow = await run(Array(3).fill("persistent ACP host: startup timed out (CHAT_DRIVER_UNAVAILABLE)"));
+  assert.deepEqual(stillSlow.modes, ["chat", "chat", "chat"], "never silently becomes a terminal session");
   assert.match(stillSlow.outcome, /^error: .*persistent ACP host/, "the card is held with the real reason");
   const missing = await run(["AO ACP runtime is not installed (CHAT_DRIVER_UNAVAILABLE)"]);
   assert.deepEqual(missing.modes, ["chat", "tui"], "without a chat runtime the agent still runs in its terminal");
+  // 2026-11-12, machine out of memory: AO's `codex --version` exited 1 and the chat failed for good as
+  // "incompatible", a Codex workspace's chat included (it never retried).
+  const versionRead = "spawn: chat driver incompatible: read Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)";
+  const codex = await run([versionRead], "codex", "auto");
+  assert.deepEqual(codex.modes, ["chat", "chat"], "a version check that could not run is retried as chat");
+  assert.equal(codex.outcome, "session-2");
+  const claudeRead = await run(["spawn: chat driver unavailable: read Claude version: signal: killed (CHAT_DRIVER_UNAVAILABLE)"]);
+  assert.deepEqual(claudeRead.modes, ["chat", "chat"], "any agent's version read, either code");
+  const tooOld = await run(["spawn: chat driver incompatible: Codex 0.120.0 is older than AO's tested minimum 0.146.0 (CHAT_DRIVER_INCOMPATIBLE)"], "codex", "auto");
+  assert.deepEqual(tooOld.modes, ["chat"], "a version AO read and found too old is not retried");
+  assert.match(tooOld.outcome, /^error: .*older than/);
+  const tooOldClaude = await run(["spawn: chat driver incompatible: ACP initialize: unsupported protocol (CHAT_DRIVER_INCOMPATIBLE)"]);
+  assert.deepEqual(tooOldClaude.modes, ["chat"], "an incompatible agent never becomes a terminal session either");
 });

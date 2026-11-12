@@ -1110,8 +1110,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         };
       });
   }
-  /** A chat start that failed only for time (the persistent host's startup window, a deadline). */
-  const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled/i;
+  /**
+   * A chat start that failed only for time (the persistent host's startup window, a deadline), or
+   * because the agent's version check could not run. AO runs `<agent> --version` before a launch and
+   * called any failure of it "incompatible": with the machine out of memory on 2026-11-12, "read
+   * Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)" failed a chat whose Codex was fine. A
+   * version AO did read and found too old says "older than", and stays a failure.
+   */
+  const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled|read [\w.-]+ version/i;
   // Sessions whose failed background start was resumed: id -> { tries, resumed: Promise<boolean>,
   // after: the observe() read count when AO answered the resume, answeredAt: when it did }.
   //
@@ -1452,16 +1458,24 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       } catch (error) {
         // The project may be gone or changed in AO; the next start binds the workspace again.
         forgetProject(workspaceId);
+        const why = String(error?.message);
+        if (!chat || warm || !/CHAT_DRIVER_(UNAVAILABLE|INCOMPATIBLE)/.test(why)) throw error;
+        if (TRANSIENT_CHAT_START.test(why)) {
+          // A chat host that was merely slow to start, or whose version check could not run (a busy
+          // machine), is retried as chat, whatever the agent: a terminal session cannot show
+          // progress, take approvals or be steered. Twice, the second after a longer pause: one quick
+          // retry landed in the same busy moment. A third failure is reported.
+          for (let attempt = 1; ; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, CHAT_RETRY_PAUSE_MS * (attempt === 1 ? 1 : 5)));
+            try { data = await launch("chat"); break; } catch (again) {
+              if (attempt >= 2 || !TRANSIENT_CHAT_START.test(String(again?.message))) throw again;
+            }
+          }
         // Chat mode needs AO's packaged ACP runtime (Claude's chat driver). Without it the agent
-        // still runs in its own terminal and hands back a result file.
-        if (!chat || codexWorkspace || !/CHAT_DRIVER_UNAVAILABLE/.test(String(error?.message))) throw error;
-        if (warm) throw error;
-        if (TRANSIENT_CHAT_START.test(String(error?.message))) {
-          // A chat host that was merely slow to start (a busy machine) is retried as chat: a terminal
-          // session cannot show progress, take approvals or be steered. A second failure is reported.
-          await new Promise((resolve) => setTimeout(resolve, CHAT_RETRY_PAUSE_MS));
-          data = await launch("chat");
-        } else data = await launch("tui");
+        // still runs in its own terminal and hands back a result file. Not a Codex workspace's agent,
+        // and not one AO found incompatible.
+        } else if (!codexWorkspace && /CHAT_DRIVER_UNAVAILABLE/.test(why)) data = await launch("tui");
+        else throw error;
       }
       const created = sessionId(data?.session?.id);
       rememberLaunchWindow(created, contextWindow);
