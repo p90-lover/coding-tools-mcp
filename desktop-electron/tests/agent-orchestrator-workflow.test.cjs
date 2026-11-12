@@ -1611,9 +1611,10 @@ test("a follow-up makes fewer headless round trips in a row before its run start
   // behind headless's admission queue (0.3-1 s healthy, 5-60 s under load).
   const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
-  const steps = [];
+  const steps = [], timings = [];
   let reading = 0, overlap = 0;
   const workflow = createAgentOrchestratorWorkflow({ findCodexExecutable: () => "C:/c.exe",
+    logger: { info: (event, fields) => { if (event === "ao.send_timing") timings.push(fields); }, warn() {} },
     requestHeadless: async (endpoint, body, options) => {
       const label = endpoint === "/api/v1/tools/call" ? `${body.tool}${body.arguments?.change ? `:${body.arguments.change.operation}` : ""}`
         : endpoint === "/api/v1/ao/read" ? (body.run_id ? "read run" : body.task_id ? "read chat" : "read project")
@@ -1639,6 +1640,12 @@ test("a follow-up makes fewer headless round trips in a row before its run start
     assert.ok(edit >= 0 && create > edit);
     assert.deepEqual(steps.slice(edit + 1, create), [], "the run is made on the revision the message's write left: no board read between");
     assert.deepEqual(steps.slice(create + 1, steps.indexOf("resolve harness")), [], "the start takes the run it was given, not a read of it");
+    // ao.send_timing says where the send waited (memory-only, like the launcher's other logs).
+    assert.equal(timings.length, 1);
+    const [timing] = timings;
+    for (const step of ["readsMs", "modelCheckMs", "retireMs", "writeMs", "createMs", "totalMs"]) assert.ok(Number.isFinite(timing[step]), `${step} is timed`);
+    assert.equal(timing.ok, true);
+    assert.equal(timing.followUp, true);
   } finally { workflow.dispose(); }
 });
 
@@ -6816,6 +6823,49 @@ test("the reviewer is told the agent's workspace folder, so a path inside it is 
   assert.deepEqual(unknown.resolved, ["yes"]);
 });
 
+test("each review logs the ms of its steps and how it ended (ao.review_timing)", async () => {
+  // 848 reviews in 100 minutes (2026-11-12), and nothing said where one waited: the catalog, the
+  // request's context and scripts, or the model.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "dir", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
+    toolInput: JSON.stringify({ cmd: 'cmd /c dir /b "G:\\Projects\\app\\docs"' }), summary: "exec_command", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], timings = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    logger: { info: (event, fields) => { if (event === "ao.review_timing") timings.push(fields); }, warn() {} },
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"inside the workspace"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved, ["yes"]);
+    const timing = timings.find(entry => entry.outcome === "allow");
+    assert.ok(timing, "the review was timed");
+    for (const step of ["catalogMs", "contextMs", "scriptsMs", "verifyMs", "modelMs", "totalMs"]) assert.ok(Number.isFinite(timing[step]), `${step} is timed`);
+    assert.ok(timing.modelMs >= 15, "the model's own wait shows as its step");
+    assert.equal(timing.tool, "mcp__coding-tools__exec_command");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("the reviewer sees what the worker did in its turn before a request, and a refused request is reviewed again on new evidence", async () => {
   // Seen live 2026-10-22: the agent listed the backend's processes (uvicorn 31332, 65572), then asked
   // to `taskkill /PID 31332 /T /F`; the reviewer denied it for "not enough context to verify that PID
@@ -8047,8 +8097,9 @@ test("Stop reads the project beside its control call, not after it", async () =>
   // runs) came only after the control call, adding up to 30 s.
   const task = { id: "task-1", title: "Ship", description: "first ask", state: "in_progress", clauses: [] };
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", workspace_id: "ws-1", project_id: "task-1", cancelled: false, nodes: [{ id: "one", state: "running" }] }] });
-  const steps = [];
+  const steps = [], timings = [];
   const workflow = createAgentOrchestratorWorkflow({ findCodexExecutable: () => "C:/c.exe",
+    logger: { info: (event, fields) => { if (event === "ao.stop_timing") timings.push(fields); }, warn() {} },
     requestHeadless: async (endpoint, body, options) => {
       if (endpoint === "/api/v1/ao/control") {
         steps.push("control asked");
@@ -8064,6 +8115,11 @@ test("Stop reads the project beside its control call, not after it", async () =>
     assert.ok(steps.indexOf("read project") >= 0 && steps.indexOf("read project") < steps.indexOf("control answered"),
       `the project read goes beside the control call: ${steps.join(", ")}`);
     assert.equal(steps.filter(step => step === "read project").length, 1, "and only once");
+    // ao.stop_timing says where the Stop waited.
+    assert.equal(timings.length, 1);
+    for (const step of ["runReadMs", "controlMs", "projectReadMs", "agentsMs", "totalMs"]) assert.ok(Number.isFinite(timings[0][step]), `${step} is timed`);
+    assert.ok(timings[0].controlMs >= 25, "the control call's own wait shows as its step");
+    assert.equal(timings[0].ok, true);
   } finally { workflow.dispose(); }
 });
 

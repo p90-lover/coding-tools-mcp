@@ -196,6 +196,21 @@ const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
+ * The ms each awaited step of one action took, for its timing log (memory only, like every launcher
+ * log): `mark(name)` closes the step that ran since the last mark as `<name>Ms` (a name marked again
+ * adds up), and `fields(extra)` gives them with `totalMs`.
+ */
+function stepClock(now = Date.now) {
+  const started = now();
+  let last = started;
+  const steps = {};
+  return {
+    mark(name) { const at = now(); steps[`${name}Ms`] = (steps[`${name}Ms`] ?? 0) + (at - last); last = at; },
+    fields(extra = {}) { return { ...steps, totalMs: now() - started, ...extra }; },
+  };
+}
+
+/**
  * A read served stale while it revalidates: `get(key, args)` answers at once with the last value
  * `keep` accepted while it is younger than `staleMs`, and reads again in the background once it is
  * older than `freshMs`; with nothing kept (or kept too long) it waits for `read(args)`. One read per
@@ -3249,7 +3264,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, status, driven: false };
   }
 
-  async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
+  /**
+   * A Stop is timed: `ao.stop_timing` gives the ms of each awaited step (the run's read, the control
+   * call, the project read beside them, the agents' interrupt and shutdown), so a slow Stop says where.
+   */
+  async function controlRun(input = {}) {
+    if (input?.action !== "stop") return controlSteps(input);
+    const clock = stepClock(now);
+    let ok = false;
+    try {
+      const result = await controlSteps(input, clock);
+      ok = true;
+      return result;
+    } finally { logger?.info?.("ao.stop_timing", clock.fields({ ok })); }
+  }
+  async function controlSteps({ workspaceId, runId, action, executable, nodeId } = {}, clock = stepClock(now)) {
     if (!["pause", "resume", "stop", "retry", "retry_auto", "review_failures"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
     const clearCompactions = action === "stop" ? pendingCompactionStop(id, run) : null;
@@ -3272,7 +3301,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // before the cancellation, it shows the same schedule, sessions and runs that one would.
     const allRunsRead = action === "stop" ? readForStop(true).catch(() => null) : null;
     const beforeStop = action === "stop" ? await readForStop().catch(() => null) : null;
-    const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
+    clock.mark("runRead");
+    const stopTargets =(beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
       .filter(node => externalAgent(node) && node.receipt?.thread_id)
       .map(node => ({ nodeId: node.id, sessionId: node.receipt.thread_id,
         requestKey: node.receipt.request_key ?? node.request_key, turnId: node.receipt.turn_id,
@@ -3293,6 +3323,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
       result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
     }
+    clock.mark("control");
     if (action === "stop") releaseNativePreviews(id, run);
     // A retried single-model chat continues its agent's own session, which already holds the
     // conversation and what it read and ran: launching a fresh one began the task again from
@@ -3318,6 +3349,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     if (action === "stop") {
       const saved = await allRunsRead;
+      clock.mark("projectRead");
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
       // The chat's schedule is cancelled while its agents are stopped, not before.
       const unscheduled = life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)
@@ -3347,6 +3379,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       const stopped = await Promise.allSettled([...sessions].map(([session, target]) =>
         stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: true, completed: target.completed })));
+      clock.mark("agents");
       await unscheduled;
       const failure = stopped.find(result => result.status === "rejected");
       if (failure) {
@@ -4249,11 +4282,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. `partial`: the
    *  request was too long to show whole, and "Let the model judge" has the reviewer judge it anyway. */
-  async function askApprover({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }) {
+  /**
+   * One review, timed: `ao.review_timing` gives the ms of each awaited step (the catalog, the
+   * request's context, script excerpts, the repository check, the model calls) and how it ended, so
+   * a slow approval can be told apart from a slow model (848 reviews in 100 minutes, 2026-11-12).
+   */
+  async function askApprover(input) {
+    const clock = stepClock(now);
+    let outcome = "failed";
+    try {
+      const result = await askApproverSteps(input, clock);
+      outcome = clock.cached ? "cached" : String(result?.action ?? "none");
+      return result;
+    } finally {
+      logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
+    }
+  }
+  async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
+    clock.mark("catalog");
     check();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
     // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
@@ -4274,8 +4324,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return [model, effort];
     }));
     const [folder, task, evidence] = await Promise.all([requestFolder(approval, mission), requestTask(mission), requestEvidence(approval)]);
+    clock.mark("context");
     check();
     const scripts = await reviewScriptExcerpts(approval, folder);
+    clock.mark("scripts");
     check();
     const request = describeRequest(approval);
     const publication = gitPushRequest(approval.command) ?? gitPushRequest(approval.toolInput);
@@ -4306,6 +4358,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return null;
       };
       const settled = await checked();
+      clock.mark("repository");
       check();
       if (settled) return settled;
     }
@@ -4350,11 +4403,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // what the turn showed then is reviewed again on what it shows now.
     const verdictKey = createHash("sha256").update(instructions).update(prompt).update(JSON.stringify(reviewEfforts)).digest("hex");
     await verifyCurrent();
+    clock.mark("verify");
     check();
     const known = reviewVerdicts.get(verdictKey);
     if (known && now() - known.at < REVIEW_CACHE_MS && (known.action === "allow" || !evidence)) {
       logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
         folder: Boolean(folder), reason: publicText(known.reason, 200) });
+      clock.cached = true;
       return { action: known.action, reason: known.reason };
     }
     let failure = null;
@@ -4385,6 +4440,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
+        clock.mark("model");
         await verifyCurrent();
         check();
         reviewerAnswered(model);
@@ -4396,6 +4452,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (reviewVerdicts.size > 200) reviewVerdicts.delete(reviewVerdicts.keys().next().value);
         return { action: decision.action, reason };
       } catch (error) {
+        clock.mark("model");
         check();
         await verifyCurrent();
         check();
@@ -6556,12 +6613,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}) {
+  /**
+   * A chat's send, timed: `ao.send_timing` gives the ms of each awaited step (the reads, the model
+   * check, retiring the last run, the message's write, the run's creation and its start), so a slow
+   * send says where it waited. Before, only the launch after it was timed (ao.launch_timing).
+   */
+  async function startChatSend(input = {}, checkCurrent = () => {}, options = {}) {
+    const clock = stepClock(now);
+    let ok = false;
+    try {
+      const result = await sendSteps(input, checkCurrent, options, clock);
+      ok = result?.ok !== false;
+      return result;
+    } finally {
+      logger?.info?.("ao.send_timing", clock.fields({ ok, followUp: typeof input?.taskId === "string" && Boolean(input.taskId.trim()),
+        deferred: input?.deferStart === true }));
+    }
+  }
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
       const progress = await compactSession({ workspaceId: id, taskId, status: true });
       if (progress.status !== "completed") throw new Error("This chat is still running its context compaction");
+      clock.mark("compaction");
     }
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -6575,6 +6650,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const selectedExecutable = codexExecutable(executable);
     const saved = await runsForSend(id, taskId);
+    clock.mark("reads");
     checkCurrent();
     if (afterRunId !== undefined) {
       const parent = saved.runs.filter(run => run.project_id === taskId).at(-1);
@@ -6619,6 +6695,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (unlisted) return { ok: false, reason: unlisted };
       }
     }
+    clock.mark("modelCheck");
 
     checkCurrent();
     let task;
@@ -6651,6 +6728,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (/still running/.test(error?.message)) throw new Error("This chat is still running; wait for it to finish or stop it first");
         throw error;
       }
+      clock.mark("retire");
       // Refused only because another chat wrote the board first: nothing was saved, so the edit is
       // read and made again (withBoardRetry).
       let discarded = [];
@@ -6724,6 +6802,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         boardRevision = written?.revision;
         followUp = { before: saidBefore, description };
       });
+      clock.mark("write");
       if (rewind) {
         try { chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
@@ -6743,6 +6822,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         } });
         boardRevision = created?.revision;
       });
+      clock.mark("write");
       // The service answers a create with the task it made (board_sync::apply_scoped). The send used
       // to find it as the one task a second board read had that the first had not; the reads held a
       // project's oldest 100 tasks, so past 100 every new chat was refused and left an empty task
@@ -6754,6 +6834,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let runId, createdRun;
     try {
       ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
+      clock.mark("create");
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
       if (rewind && followUp) {
@@ -6786,6 +6867,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
       const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable }, { known: createdRun });
+      clock.mark("start");
       if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
