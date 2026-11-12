@@ -634,6 +634,7 @@ function createManagedComponentController({
   // Whether dispose() left persistent components running (a keep-running quit).
   let keptPersistent = false;
   const persistentIds = new Set(Array.isArray(persistentComponents) ? persistentComponents : []);
+  const oldLogsRemoved = new Set();
   // Install state remembered per version folder (see sourceState), and whether this build bundles
   // each version's runtime, which cannot change while it runs.
   const sourceStates = new Map();
@@ -1965,21 +1966,71 @@ function createManagedComponentController({
     return path.join(stateRoot, `${id}.process.json`);
   }
 
-  /** Removes the output log (and its rotation) an older build kept for a persistent component. */
-  function removeOldPersistedLogs(id) {
+  /** Removes the output log (and its rotation) an older build kept for a persistent component, once per launcher. */
+  async function removeOldPersistedLogs(id) {
+    if (oldLogsRemoved.has(id)) return;
+    oldLogsRemoved.add(id);
     const logPath = path.join(stateRoot, `${id}.process.log`);
-    for (const file of [logPath, `${logPath}.1`]) {
-      try { fs.rmSync(file, { force: true }); } catch {}
-    }
+    await Promise.all([logPath, `${logPath}.1`].map((file) => fs.promises.rm(file, { force: true }).catch(() => {})));
   }
 
-  function readPersistedRecord(id) {
-    const record = readJson(persistedRecordPath(id));
+  // The saved process record (`<id>.process.json`) is read, written and removed off the main thread.
+  // Done synchronously, a CPA refresh on the busy hard disk held every window 17.6 s writing it and
+  // 3.5 s reading it (0.8.113, 2026-11-12 08:19). Each component's record changes run one at a time
+  // in the order asked for, and every read waits for the changes asked before it: a Stop or a child's
+  // exit can never remove the record before a start's write lands and so leave a record naming a pid
+  // that has gone (the 2026-11-11 "saved process verification is unresolved" outage). Each read goes
+  // to the disk, as before, so a record another writer changed is still noticed where it was.
+  const recordQueues = new Map();
+
+  function queueRecordChange(id, change) {
+    const result = (recordQueues.get(id) || Promise.resolve()).then(change);
+    const settled = result.then(() => {}, () => {});
+    recordQueues.set(id, settled);
+    settled.then(() => { if (recordQueues.get(id) === settled) recordQueues.delete(id); });
+    return result;
+  }
+
+  async function readRecordFile(id) {
+    let record = null;
+    try { record = JSON.parse(await fs.promises.readFile(persistedRecordPath(id), "utf8")); } catch {}
     return record && Number.isInteger(record.pid) && record.pid > 0 ? record : null;
   }
 
-  function clearPersistedRecord(id) {
-    try { fs.rmSync(persistedRecordPath(id), { force: true }); } catch {}
+  /** The saved record as it is on disk once every record change asked for before has landed. */
+  function readPersistedRecord(id) {
+    return queueRecordChange(id, () => readRecordFile(id));
+  }
+
+  function writePersistedRecord(id, record) {
+    return queueRecordChange(id, () => writePrivateFileAtomicAsync(persistedRecordPath(id), JSON.stringify(record) + "\n"));
+  }
+
+  /**
+   * Reads the saved record and, in the same step, removes it when `decide(current)` says so: no other
+   * record change can come between the check and the removal, as when both were synchronous.
+   */
+  function settlePersistedRecord(id, decide) {
+    return queueRecordChange(id, async () => {
+      const current = await readRecordFile(id);
+      const decision = decide(current);
+      if (decision.remove) await fs.promises.rm(persistedRecordPath(id), { force: true }).catch(() => {});
+      return decision;
+    });
+  }
+
+  /** Removes the saved record only while it is still `expected` (none expected: nothing is removed). */
+  function clearPersistedRecordIf(id, expected) {
+    const expectedJson = JSON.stringify(expected);
+    return settlePersistedRecord(id, (current) => {
+      const matches = JSON.stringify(current) === expectedJson;
+      return { matches, current, remove: matches && Boolean(expected) };
+    });
+  }
+
+  /** Resolves once every record change asked for so far has landed or failed; quit waits for this. */
+  async function processRecordsSaved() {
+    while (recordQueues.size) await Promise.all([...recordQueues.values()]);
   }
 
   /**
@@ -2001,18 +2052,25 @@ function createManagedComponentController({
     return false;
   }
 
-  /** A terminal owned handle may clear only the exact process record it published or adopted. */
+  /**
+   * A terminal owned handle may clear only the exact process record it published or adopted. Exit
+   * handlers leave the returned promise; it never rejects, and later record reads wait for it.
+   */
   function clearProcessRecord(id, child) {
     const expected = child?.managedRecord;
-    if (!expected || (child.exitCode === null && child.signalCode === null)) return false;
-    const current = readPersistedRecord(id);
-    const same = JSON.stringify(current) === JSON.stringify(expected);
-    const lifecycle = componentLifecycles.get(id);
-    if (same) clearPersistedRecord(id);
-    else if (current && !lifecycle.attention) lifecycle.attention = { record: expected };
-    if (lifecycle.attention && JSON.stringify(lifecycle.attention.record) === JSON.stringify(expected)
-      && (same || !current)) lifecycle.attention = null;
-    return same;
+    if (!expected || (child.exitCode === null && child.signalCode === null)) return Promise.resolve(false);
+    const expectedJson = JSON.stringify(expected);
+    return settlePersistedRecord(id, (current) => {
+      const same = JSON.stringify(current) === expectedJson;
+      const lifecycle = componentLifecycles.get(id);
+      if (!same && current && !lifecycle.attention) lifecycle.attention = { record: expected };
+      if (lifecycle.attention && JSON.stringify(lifecycle.attention.record) === expectedJson
+        && (same || !current)) lifecycle.attention = null;
+      return { remove: same, same };
+    }).then(({ same }) => same, (error) => {
+      logger?.warn?.("managed-component.record_clear_failed", { componentId: id, message: error instanceof Error ? error.message : String(error) });
+      return false;
+    });
   }
 
   async function probeHealth(id) {
@@ -2046,20 +2104,20 @@ function createManagedComponentController({
     if (!persistentIds.has(manifest.id)) return false;
     const id = manifest.id;
     const lifecycle = componentLifecycles.get(id);
+    const record = await readPersistedRecord(id);
+    // As of the read: record changes queued before it (an exit's clear) may have set or settled it.
     const attention = lifecycle.attention;
-    const record = readPersistedRecord(id);
     if (!record) return false;
     const recordJson = JSON.stringify(record);
-    const recordMatches = () => JSON.stringify(readPersistedRecord(id)) === recordJson;
+    const recordMatches = async () => JSON.stringify(await readPersistedRecord(id)) === recordJson;
     if (attention && JSON.stringify(attention.record) !== recordJson) {
       throw new Error(id + " stop needs attention: saved process verification is unresolved");
     }
     if (!(await savedProcessRunning(record))) {
-      if (!recordMatches()) {
+      if (!(await clearPersistedRecordIf(id, record)).matches) {
         lifecycle.attention ||= { record };
         throw new Error(id + " stop needs attention: its saved process record changed");
       }
-      clearPersistedRecord(id);
       if (lifecycle.attention === attention) lifecycle.attention = null;
       return false;
     }
@@ -2073,17 +2131,18 @@ function createManagedComponentController({
     try {
       const healthy = await probeHealth(id);
       checkComponentStart(owner);
-      if (!recordMatches()) {
+      const matched = await recordMatches();
+      checkComponentStart(owner);
+      if (!matched) {
         lifecycle.attention ||= verification;
         throw new Error(id + " stop needs attention: its saved process record changed");
       }
       if (!healthy) return false;
       if (!(await savedProcessRunning(record))) {
-        if (!recordMatches()) {
+        if (!(await clearPersistedRecordIf(id, record)).matches) {
           lifecycle.attention ||= verification;
           throw new Error(id + " stop needs attention: its saved process record changed");
         }
-        clearPersistedRecord(id);
         if (lifecycle.attention === attention) lifecycle.attention = null;
         throw new Error(id + " stopped while it was being adopted");
       }
@@ -2103,12 +2162,14 @@ function createManagedComponentController({
           setOperation(id, { state: "error", step: null, error: primaryId + " exited (" + (code ?? signal ?? "unknown") + ")" });
         } else emit();
       });
-      const checkAdoption = () => {
+      // The record is read first, so the synchronous checks below hold as of the moment this returns.
+      const checkAdoption = async () => {
+        const matches = await recordMatches();
         checkComponentStart(owner);
         if (active.get(primaryId) !== handle || handle.exitCode !== null || handle.signalCode !== null) {
           throw new Error(id + " stopped while it was being adopted");
         }
-        if (!recordMatches()) {
+        if (!matches) {
           lifecycle.attention ||= verification;
           throw new Error(id + " stop needs attention: its saved process record changed");
         }
@@ -2116,15 +2177,15 @@ function createManagedComponentController({
       for (const adoptEntry of manifest.launch.adopt || []) {
         try { await runCommand(adoptEntry, launchContext(manifest), adoptEntry.timeoutMs); }
         catch (error) {
-          checkAdoption();
+          await checkAdoption();
           logger?.warn?.("managed-component.adopt-step-failed", {
             componentId: id, step: adoptEntry.id,
             message: error instanceof Error ? error.message : String(error),
           });
         }
-        checkAdoption();
+        await checkAdoption();
       }
-      checkAdoption();
+      await checkAdoption();
       if (lifecycle.attention === attention) lifecycle.attention = null;
       owner.adopting = null;
       logger?.info?.("managed-component.adopted", { componentId: id, pid: record.pid, version: record.version });
@@ -2151,7 +2212,7 @@ function createManagedComponentController({
     if (!persistentIds.has(manifest.id)) return;
     const id = manifest.id;
     const lifecycle = componentLifecycles.get(id);
-    const record = readPersistedRecord(id);
+    const record = await readPersistedRecord(id);
     const attention = lifecycle.attention;
     if (attention) {
       // A retry must not convert the failed verification into permission to kill that pid.
@@ -2159,20 +2220,18 @@ function createManagedComponentController({
         && JSON.stringify(record) !== JSON.stringify(attention.record))) {
         throw new Error(id + " stop needs attention: saved process verification is unresolved");
       }
-      if (JSON.stringify(readPersistedRecord(id)) !== JSON.stringify(record)) {
+      if (!(await clearPersistedRecordIf(id, record)).matches) {
         throw new Error(id + " stop needs attention: its saved process record changed");
       }
-      if (record) clearPersistedRecord(id);
       if (lifecycle.attention === attention) lifecycle.attention = null;
       return;
     }
     if (!record || !(await savedProcessRunning(record))) {
-      const current = readPersistedRecord(id);
-      if (JSON.stringify(current) !== JSON.stringify(record)) {
+      const { matches, current } = await clearPersistedRecordIf(id, record);
+      if (!matches) {
         lifecycle.attention ||= { record: current || record };
         throw new Error(id + " stop needs attention: its saved process record changed");
       }
-      if (record) clearPersistedRecord(id);
       return;
     }
     const handle = new PersistedComponentProcess(record.pid);
@@ -2253,9 +2312,13 @@ function createManagedComponentController({
     const manifest = manifestFor(id);
     const source = await refreshSourceState(manifest);
     checkComponentStart(owner);
-    if (persistentIds.has(id) && readPersistedRecord(id)?.version !== manifest.version) {
-      await stopStalePersistedComponent(manifest, owner);
+    if (persistentIds.has(id)) {
+      const saved = await readPersistedRecord(id);
       checkComponentStart(owner);
+      if (saved?.version !== manifest.version) {
+        await stopStalePersistedComponent(manifest, owner);
+        checkComponentStart(owner);
+      }
     }
     if (source.state !== "installed") {
       await installComponent(id, { repair: source.state === "repair-required" || source.state === "error" });
@@ -2286,9 +2349,10 @@ function createManagedComponentController({
         }
         const spec = commandSpec(processEntry, context);
         const persistent = isPersistentProcess(manifest, processEntry);
-        if (persistent) removeOldPersistedLogs(id);
+        if (persistent) await removeOldPersistedLogs(id);
         const lifecycle = componentLifecycles.get(id);
-        const previousRecord = persistent ? readPersistedRecord(id) : null;
+        const previousRecord = persistent ? await readPersistedRecord(id) : null;
+        checkComponentStart(owner);
         if (previousRecord) {
           lifecycle.attention ||= { record: previousRecord };
           throw new Error(id + " stop needs attention: its saved process record changed before start");
@@ -2301,8 +2365,9 @@ function createManagedComponentController({
           child = await spawnProcess(spec.executable, spec.args, persistent
             ? { ...spec.options, detached: true, stdio: "ignore" } : spec.options);
           try {
+            // Read before the check: a Stop during the read must still retire this late child.
+            const currentRecord = persistent ? await readPersistedRecord(id) : null;
             checkComponentStart(owner, persistent);
-            const currentRecord = persistent ? readPersistedRecord(id) : null;
             if (JSON.stringify(currentRecord) !== JSON.stringify(previousRecord)) {
               lifecycle.attention ||= { record: currentRecord || previousRecord };
               throw new Error(id + " stop needs attention: its saved process record changed during start");
@@ -2315,13 +2380,15 @@ function createManagedComponentController({
           lifecycle.pending.delete(pending);
         }
         active.set(processEntry.id, child);
+        let recordSaved = null;
         if (persistent && Number.isInteger(child.pid)) {
           const record = {
             pid: child.pid, version: manifest.version, startedAt: now(),
             ...(dependencyFingerprint ? { dependencyFingerprint } : {}),
           };
-          writePrivateFileAtomic(persistedRecordPath(id), JSON.stringify(record) + "\n");
+          // Owned before the write lands: an exit or Stop meanwhile queues its clear after the write.
           child.managedRecord = record;
+          recordSaved = writePersistedRecord(id, record);
         }
         attachProcessLogging(manifest, processEntry, child);
         child.once?.("error", (error) => {
@@ -2343,6 +2410,14 @@ function createManagedComponentController({
             setOperation(id, { state: "error", step: null, error: processEntry.id + " exited (" + (code ?? signal ?? "unknown") + ")" });
           } else emit();
         });
+        if (recordSaved) {
+          // A resolved start has its record on disk, as when the write was synchronous.
+          await recordSaved;
+          checkComponentStart(owner, persistent);
+          if (child.exitCode !== null || child.signalCode !== null) {
+            throw new Error(processEntry.id + " exited (" + (child.exitCode ?? child.signalCode) + ") while it was starting");
+          }
+        }
       }
       checkComponentStart(owner, owner.persistentSpawn);
       setOperation(id, { state: "installed", step: null, error: null });
@@ -2377,7 +2452,7 @@ function createManagedComponentController({
       if (child.exitCode === null && child.signalCode === null) throw new Error(id + " cleanup has not confirmed process exit");
       lifecycle.retiring.delete(child);
       if (active.get(processId) === child) active.delete(processId);
-      clearProcessRecord(id, child);
+      await clearProcessRecord(id, child);
     } catch (error) {
       setOperation(id, { state: "error", step: null, error: "Couldn't stop " + processId + ": " + (error instanceof Error ? error.message : String(error)) });
       throw error;
@@ -2424,7 +2499,7 @@ function createManagedComponentController({
     const lifecycle = componentLifecycles.get(id);
     const active = processes.get(id) || new Map();
     const children = new Set([...active.values(), ...lifecycle.retiring]);
-    const record = readPersistedRecord(id);
+    const record = await readPersistedRecord(id);
     if (lifecycle.start?.verification) lifecycle.attention ||= lifecycle.start.verification;
     if (record && ![...children].some((child) =>
       child?.managedRecord && JSON.stringify(child.managedRecord) === JSON.stringify(record))) {
@@ -2435,8 +2510,8 @@ function createManagedComponentController({
       await stopChild(child);
       if (child && child.exitCode === null && child.signalCode === null) throw new Error(id + " cleanup has not confirmed process exit");
       lifecycle.retiring.delete(child);
-      clearProcessRecord(id, child);
       for (const [processId, current] of active) if (current === child) active.delete(processId);
+      await clearProcessRecord(id, child);
     }
     if (processes.get(id) === active && active.size === 0) processes.delete(id);
     if (lifecycle.attention) {
@@ -2610,6 +2685,7 @@ function createManagedComponentController({
     runtimeConfiguration,
     runtimeSecrets,
     healthHeaders,
+    processRecordsSaved,
     dispose,
   });
 }
