@@ -265,8 +265,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   // restart of the app forgot them: their sessions were left interrupted, and the chat that started
   // one could no longer read it ("No such subagent in this chat").
   const runsPath = statePath ? path.join(path.dirname(statePath), "subagent-runs.json") : null;
-  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "task", "startedAt", "endedAt",
-    "state", "report", "error", "turns", "turnId", "turnStartedAt", "recoveries", "released"];
+  // A field the views show must be here too, or a restart drops it (effort and harness did, 2026-11-13).
+  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "effort", "harness", "task",
+    "startedAt", "endedAt", "state", "report", "error", "turns", "turnId", "turnStartedAt", "recoveries", "released"];
   let runsSaving = Promise.resolve();
   let runsQueued = false;
   /** Saves the runs soon, once for a burst of changes, off the main thread. */
