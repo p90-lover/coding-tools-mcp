@@ -136,6 +136,11 @@ const AO_START_COOLDOWN_MAX_MS = 5 * 60_000;
 // A chat's agent that failed to start for a passing reason is resumed this many times, each after
 // its pause (ms) since AO answered the resume before it.
 const PROVISION_RESUME_WAITS_MS = [0, 5_000, 20_000];
+// After AO gets ready, when it is checked for running without CPA's current key (see syncGatewayKey).
+const GATEWAY_KEY_CHECKS_MS = [30_000, 120_000, 300_000, 900_000];
+const GATEWAY_KEY_BUSY = "Agent Orchestrator is running without CPA's current key (CPA was not ready when it started, or its key "
+  + "changed), so this chat cannot use a CPA model yet. It loads the key by itself once no agent is mid-turn; "
+  + "Settings can refresh Agent Orchestrator now.";
 // To profile AO's CPU on a user's machine: a one-line "pprof-addr" file in AO's data folder holding
 // a loopback host:port turns on AO's pprof listener (AO_PPROF_ADDR) at its next start. Without it AO
 // starts as before; the app clears AO_* from its own environment, so this is the only switch.
@@ -265,7 +270,8 @@ function chatHostProcesses(dataRoot) {
 
 function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, fileTools = null, cpaQuota = null, cpaUsage = null, logger = console,
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS, readyHardMs = readyLimitMs * AO_READY_PATIENCE,
-  startCooldownMs = AO_START_COOLDOWN_MS, provisionResumeWaitsMs = PROVISION_RESUME_WAITS_MS }) {
+  startCooldownMs = AO_START_COOLDOWN_MS, provisionResumeWaitsMs = PROVISION_RESUME_WAITS_MS,
+  gatewayKey = async () => null, gatewayKeyChecksMs = GATEWAY_KEY_CHECKS_MS }) {
   let child = null;
   let gateway = null;
   let view = null;
@@ -1240,6 +1246,34 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let readingsLoad = null;
   let readingsSaved = "";
   let readingsTimer = null;
+  // AO reads CPA's key from its own environment, which is fixed when the app starts it. Started
+  // while CPA was being installed or updated (no key yet), or before CPA was re-keyed, AO launched
+  // every CPA chat on the agent's own sign-in for as long as it ran: "persistent ACP host: agent
+  // requires authentication" for every new chat from 07:11 on 2026-11-12 (AO had started at 01:40:34
+  // and CPA's configuration was written at 01:43:22), until the app was closed. The app now knows
+  // which key AO was started with, and when CPA's differs it starts AO again with the right one,
+  // as soon as no agent is mid-turn: a restart ends running turns, and chat hosts outlive it.
+  let daemonGatewayKey = "";
+  let gatewayKeySync = null;
+  let gatewayKeyTimers = [];
+  const clearGatewayKeyTimers = () => { for (const timer of gatewayKeyTimers) clearTimeout(timer); gatewayKeyTimers = []; };
+  /** "current", "restarted", "busy" (an agent is mid-turn, or the restart did not take), or "unknown" (CPA has no key to give). */
+  function syncGatewayKey() {
+    if (gatewayKeySync) return gatewayKeySync;
+    gatewayKeySync = (async () => {
+      let want = "";
+      try { want = String(await gatewayKey() ?? "").trim(); } catch { return "unknown"; }
+      if (!want || state !== "ready") return "unknown";
+      if (want === daemonGatewayKey) return "current";
+      let working = true;
+      try { working = await harness.anySessionWorking({ start: false }); } catch { /* not known: as if working */ }
+      if (working) return "busy";
+      logger.warn?.("ao.restart_for_gateway_key", { had: Boolean(daemonGatewayKey) });
+      try { await stop(); await start(); } catch { return "busy"; }
+      return daemonGatewayKey === want ? "restarted" : "busy";
+    })().finally(() => { gatewayKeySync = null; });
+    return gatewayKeySync;
+  }
   let readingsWrite = Promise.resolve();
   const readingsFile = () => path.join(dataRoot, "coding-tools-context-readings.json");
   const readings = () => {
@@ -1355,6 +1389,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     },
     async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false, subagent = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
+      // A CPA chat needs AO to hold CPA's current key (syncGatewayKey). Before anything of this AO
+      // is read: the sync may start AO again.
+      if (gateway?.provider === "cpa" && typeof gateway.model === "string" && await syncGatewayKey() === "busy") throw new Error(GATEWAY_KEY_BUSY);
       const projectId = await projectFor(workspaceId);
       const settings = await internalApi("GET", "/api/v1/settings");
       // Chat-capable agents return their answer as a conversation turn. Every other
@@ -2126,6 +2163,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     lifecycleGeneration += 1;
     // A stop is the person's (or the app's) own restart: the next start is not held back.
     failedStarts = 0;
+    clearGatewayKeyTimers();
     if (readingsTimer) { clearTimeout(readingsTimer); readingsTimer = null; }
     const pendingReadings = persistReadings();
     hide();
@@ -2271,6 +2309,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Tool-scoped values (e.g. the agy proxy) live only in the daemon's memory.
         // It may wait briefly (rtk's automatic install), so the start is checked again after it.
         Object.assign(environment, await extraEnv());
+        daemonGatewayKey = String(environment.CODING_TOOLS_CPA_KEY ?? "").trim();
         checkStartup();
         const toolBin = await extraPath();
         checkStartup();
@@ -2353,7 +2392,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
               state = "ready"; failedStarts = 0;
               // How long every start really took, not only the slow ones: the wait limit above is
               // a ceiling, and this is what says how low it can safely go on this machine.
-              logger.info?.("ao.started", { readyMs: Date.now() - startedAt });
+              logger.info?.("ao.started", { readyMs: Date.now() - startedAt, gatewayKey: Boolean(daemonGatewayKey) });
+              // CPA may get its key after AO started (an install or update still under way).
+              clearGatewayKeyTimers();
+              gatewayKeyTimers = gatewayKeyChecksMs.map((delay) => {
+                const timer = setTimeout(() => { void syncGatewayKey().catch(() => {}); }, delay);
+                timer.unref?.();
+                return timer;
+              });
               return snapshot();
             }
           } catch { checkStartup(); }

@@ -5338,6 +5338,11 @@ async function start() {
         try { cpaKey = externalServicesController?.cpaConnection()?.proxyApiKey; } catch { /* CPA not running */ }
         return typeof cpaKey === "string" && cpaKey ? { ...env, CODING_TOOLS_CPA_KEY: cpaKey } : env;
       },
+      // CPA's key as it is now, for AO to be started again with when it runs without it or with
+      // an older one (syncGatewayKey). Null while CPA has none to give.
+      gatewayKey: async () => {
+        try { return externalServicesController?.cpaConnection()?.proxyApiKey ?? null; } catch { return null; }
+      },
       missionCall: (operation, args) => agentOrchestratorWorkflow.call(operation, args),
       openAuth: (url) => antigravityAuthBrowser(url),
       agentTools: chatAgentTools,
