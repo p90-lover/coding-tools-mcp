@@ -493,6 +493,9 @@ test("a chat host that was only slow to start is retried as chat, not turned int
   assert.equal(codex.outcome, "session-2");
   const claudeRead = await run(["spawn: chat driver unavailable: read Claude version: signal: killed (CHAT_DRIVER_UNAVAILABLE)"]);
   assert.deepEqual(claudeRead.modes, ["chat", "chat"], "any agent's version read, either code");
+  const spaced = await run(["spawn: chat driver incompatible: read Qwen Code version: context deadline exceeded (CHAT_DRIVER_INCOMPATIBLE)",
+    "spawn: chat driver incompatible: read Cursor Agent version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)"]);
+  assert.deepEqual(spaced.modes, ["chat", "chat", "chat"], "an agent name with a space is still its version read");
   const tooOld = await run(["spawn: chat driver incompatible: Codex 0.120.0 is older than AO's tested minimum 0.146.0 (CHAT_DRIVER_INCOMPATIBLE)"], "codex", "auto");
   assert.deepEqual(tooOld.modes, ["chat"], "a version AO read and found too old is not retried");
   assert.match(tooOld.outcome, /^error: .*older than/);

@@ -1114,10 +1114,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * A chat start that failed only for time (the persistent host's startup window, a deadline), or
    * because the agent's version check could not run. AO runs `<agent> --version` before a launch and
    * called any failure of it "incompatible": with the machine out of memory on 2026-11-12, "read
-   * Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)" failed a chat whose Codex was fine. A
-   * version AO did read and found too old says "older than", and stays a failure.
+   * Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)" failed a chat whose Codex was fine. Every
+   * AO driver words it "read <agent> version: <why>" ("read Qwen Code version", "read Cursor Agent
+   * version"). A version AO did read and found too old says "older than", and stays a failure.
    */
-  const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled|read [\w.-]+ version/i;
+  const TRANSIENT_CHAT_START = /persistent (ACP )?host|timed out|timeout|deadline exceeded|context canceled|read [\w. -]{1,40} version:/i;
   // Sessions whose failed background start was resumed: id -> { tries, resumed: Promise<boolean>,
   // after: the observe() read count when AO answered the resume, answeredAt: when it did }.
   //
