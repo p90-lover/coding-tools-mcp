@@ -3,6 +3,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+// main.cjs's write handlers first wait a moment for a late focus event (assertFocusedMainWindowSettled):
+// in a sandbox that is its own focus check.
+const settledFocus = (context) => Object.assign(context, { assertFocusedMainWindowSettled: context.assertFocusedMainWindowSettled
+  ?? (async (...args) => context.assertFocusedMainWindow(...args)) });
 const { createBrowserAccountMcpSync } = require("../electron/browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("../electron/chatgpt-auth-session.cjs");
 
@@ -184,7 +188,7 @@ test("main's account Connect holds the automatic sync, waits for the browser, an
     connectAccountMcp: async id => { order.push(`connect ${id}`); if (id === "bad") throw new Error("busy"); return { connected: true }; },
     handle: (channel, fn) => { assert.equal(channel, "launcher:mcp-create-connector"); handler = fn; },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   assert.deepEqual(await handler({}, "one"), { connected: true });
   assert.deepEqual(order, ["focus", "hold", "wait 60000", "connect one", "release"]);
   order.length = 0;
@@ -359,7 +363,7 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
     connectAccountMcp: async (id, current) => { mode = "MCP connector creation"; current(); connections.push(id); mode = null; return { connected: true }; },
     setInterval: fn => { callbacks.timer = fn; return { unref() {} }; }, clearInterval() {},
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   await context.automaticAccountMcp.sync();
   assert.equal(coreReads, 0, "no background reads or setup before genuine app focus");
   focused = true;
@@ -398,7 +402,7 @@ test("launcher transport pins owned session reads to the bound proxy and keeps n
       session: { fromPartition: partition => ({ partition }) }, electronNet: {},
       fetchNativeWithProxyAuth: async options => { requests.push(options); return { status: 200 }; },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     await context.fetchThroughLauncherNetwork(mode === "native" ? "https://github.com/update" : "https://chatgpt.com/api/auth/session", { method: "GET" },
       mode === "native" ? undefined : { partition: "persist:selected", useSessionCookies: true });
     assert.equal(requests.length, 1);

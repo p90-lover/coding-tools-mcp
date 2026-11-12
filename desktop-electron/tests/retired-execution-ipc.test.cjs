@@ -5,6 +5,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
+// main.cjs's write handlers first wait a moment for a late focus event (assertFocusedMainWindowSettled):
+// in a sandbox that is its own focus check.
+const settledFocus = (context) => Object.assign(context, { assertFocusedMainWindowSettled: context.assertFocusedMainWindowSettled
+  ?? (async (...args) => context.assertFocusedMainWindow(...args)) });
 const ts = require("typescript");
 
 const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
@@ -21,7 +25,7 @@ visit(file);
 
 function handler(channel, context) {
   assert.ok(handlers.has(channel), channel);
-  return vm.runInNewContext(`(${handlers.get(channel)})`, context);
+  return vm.runInNewContext(`(${handlers.get(channel)})`, settledFocus(context));
 }
 
 test("retired legacy execution mutations stop at IPC admission", async () => {
@@ -77,7 +81,7 @@ test("retired upstream-act refuses before controller configuration", async () =>
     actUpstream: () => { calls.push("transport"); return {}; },
   });
   for (const toolId of ["paseo", "anneal", "codex-router", "commandcode-proxy"]) {
-    assert.throws(() => act({}, { toolId, op: "start" }), /retired/i);
+    await assert.rejects(act({}, { toolId, op: "start" }), /retired/i);
   }
   assert.deepEqual(calls, []);
   for (const channel of ["coding-tools:tools:call", "coding-tools:native-codex:status", "coding-tools:apps:call"]) {

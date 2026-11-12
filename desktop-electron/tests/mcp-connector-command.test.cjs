@@ -3,6 +3,10 @@ const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+// main.cjs's write handlers first wait a moment for a late focus event (assertFocusedMainWindowSettled):
+// in a sandbox that is its own focus check.
+const settledFocus = (context) => Object.assign(context, { assertFocusedMainWindowSettled: context.assertFocusedMainWindowSettled
+  ?? (async (...args) => context.assertFocusedMainWindow(...args)) });
 const { EventEmitter } = require("node:events");
 const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 
@@ -90,7 +94,7 @@ function reconnectFixture(options = {}) {
     applyReadyRuntimeAfterBridge: () => { state.coreSetupComplete = true; }, send() {},
     publishOperation: operation => { context.lastOperation = operation; if (operation.status === "failed") world.failure = operation.message; },
     delay: () => new Promise(() => {}), STARTUP_AUTH_WAIT_MS: 20_000 };
-  vm.runInNewContext(`${startup}\n${handlerSource}`, context);
+  vm.runInNewContext(`${startup}\n${handlerSource}`, settledFocus(context));
   return { context, world, events, manager, state, tunnel, host, release,
     run: (id = tunnel.id) => handler({}, id),
     startPending: () => context.trackRuntimeStartup(context.startManagedRuntime({ logger, stateStore,
@@ -258,7 +262,7 @@ test("the real main action uses the current account-switch state before creating
     stateStore: { update: value => value }, publishOperation() {}, send() {}, logger: {},
     startCatalogVerificationMonitor() {}, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   await run();
   assert.equal(created, 1);
   await run("tunnel-settings");
@@ -329,7 +333,7 @@ test("the real main action selects the captured account's tunnel and waits for r
       stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: {},
       startCatalogVerificationMonitor: () => { monitors++; }, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     if (scenario.switches || scenario.staysUnready || scenario.switchesDuringSetup || scenario.switchesDuringBinding) {
       await assert.rejects(run(), scenario.staysUnready ? /ready/ : /switch|account/);
       assert.equal(created.length, scenario.switchesDuringSetup || scenario.switchesDuringBinding ? 1 : 0, "changed or unready accounts cannot proceed");
@@ -381,7 +385,7 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
       return { created: true, href: "/plugins/proven", binding };
     },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   await action({}, tunnel.id);
   assert.equal(focused, 1);
   assert.deepEqual(recorded, [[tunnel.id, "/plugins/proven", binding]]);
@@ -457,7 +461,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
       app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
       recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {}, automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
     else await assert.rejects(handler({}, "account-2"));
     const saving = scenario.saveSwitch || scenario.saveActive || scenario.saveBusy || scenario.saveRuntime || scenario.saveRetarget || scenario.saveRemap;
@@ -535,7 +539,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
       app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
       recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: value => operations.push(value), automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
     else await assert.rejects(handler({}, "account-2"));
     assert.equal(created.length, scenario.completes || scenario.creates ? 1 : 0);
@@ -591,7 +595,7 @@ test("extra tunnel Platform settings open only the registered account partition 
       stateStore: { update: mutate("save launcher") }, createConfiguredConnector: mutate("create connector"),
       openConfiguredTunnelSettings: async options => { opened.push(options); return { opened: true, name: "Coding Tools" }; },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     const input = Object.hasOwn(scenario, "input") ? scenario.input : "b41a6986";
     if (scenario.opens) {
       assert.equal((await action(event, input)).opened, true);
@@ -670,7 +674,7 @@ test("the real hidden tunnel-add action consumes only successful stable account 
       stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: {},
       startCatalogVerificationMonitor() {}, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     const fails = scenario.mismatch || scenario.fails || scenario.switches || scenario.replaces || scenario.oversized || scenario.malformed;
     if (fails) await assert.rejects(run("add-tunnel"));
     else assert.equal((await run("add-tunnel")).added, true);
@@ -716,7 +720,7 @@ test("real hidden startup defers maximized/fullscreen restoration and tracking u
     startHidden: true, showMainWindow: () => window.show(), trackWindowState: () => { tracking++; },
     windowStatePath: "unused", windowStateSnapshot: () => ({}), send() {}, logger: { warn() {} }, quitting: false,
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   window.emit("ready-to-show");
   assert.equal(visible, false, "restoring a maximized window must not expose background startup");
   assert.equal(tracking, 0, "hidden shutdown must preserve the saved layout");
@@ -737,7 +741,7 @@ test("real second-instance CLI dispatch returns before showing or recovering the
     mainWindow: { isDestroyed: () => false, webContents: { isCrashed: () => true } },
     loadRenderer: async () => { recovered++; }, showMainWindow: () => { shown++; },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   handler({}, ["app", "--create-mcp-connector"]);
   assert.equal(dispatched, 1);
   assert.equal(shown, 0);
