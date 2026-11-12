@@ -74,6 +74,29 @@ const SERVER_NAME = "coding-tools";
 const PROTOCOL_VERSIONS = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
 const MAX_BODY_BYTES = 1024 * 1024;
 const TOOL_CALL_TIMEOUT_MS = 120_000;
+// The chat summary's pull request row: one `gh pr view` per worktree at most every 2 minutes,
+// given up after 10 s (gh may wait on the network or a proxy).
+const PULL_REQUEST_CACHE_MS = 120_000;
+const PULL_REQUEST_TIMEOUT_MS = 10_000;
+
+/** Runs the GitHub CLI in a folder and resolves with what it prints (rejects on a non-zero exit). */
+function runGhCommand({ cwd, args, timeoutMs }) {
+  return new Promise((resolve, reject) => {
+    require("node:child_process").execFile("gh", args, { cwd, timeout: timeoutMs, windowsHide: true, encoding: "utf8", maxBuffer: 256 * 1024 },
+      (error, stdout) => (error ? reject(error) : resolve(stdout)));
+  });
+}
+
+/** `gh pr view --json …` output as the summary's pull request, or null when it names none. */
+function pullRequestFrom(text) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return null; }
+  if (!Number.isInteger(parsed?.number) || parsed.number <= 0 || typeof parsed.url !== "string" || !/^https:\/\/[^\s]+$/.test(parsed.url)) return null;
+  const state = parsed.isDraft === true ? "draft" : String(parsed.state ?? "").toLowerCase();
+  return { number: parsed.number, url: parsed.url, title: String(parsed.title ?? "").slice(0, 300),
+    state: ["open", "draft", "merged", "closed"].includes(state) ? state : "open" };
+}
+
 // Agents whose AO chat driver takes an HTTP MCP server: Claude Code and opencode over ACP,
 // Codex through app-server's mcp_servers config. Other ACP agents may lack the HTTP
 // capability, which would fail the whole session, so they launch without these tools.
@@ -1363,6 +1386,8 @@ function createChatAgentTools({
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
   statePath = null,
   worktreesRoot = null,
+  // The chat summary's pull request lookup (({ cwd, args, timeoutMs }) => stdout); null leaves the row out.
+  runGh = runGhCommand,
   logger = console, version = "1", now = Date.now,
   // How long the user must have had a prompt open for an approval to count (see MIN_ANSWER_MS),
   // on a monotonic clock.
@@ -1376,6 +1401,7 @@ function createChatAgentTools({
   const guides = createComputerGuides({ notesDir: computerGuidesDir, logger });
   const sessions = new Map(); // key -> session entry (see mint)
   const paneEntries = new Map(); // AO session -> retained command owner, independent of credentials
+  const pullRequestReads = new Map(); // worktree path -> { at, read }: the summary's last `gh pr view` there
   const commandWatches = createCommandWatches({ now });
   const canWatch = entry => typeof commandEvents?.register === "function" && !entry.subagent && !entry.previewOnly;
   let server = null;
@@ -3258,6 +3284,23 @@ function createChatAgentTools({
         entries: Array.isArray(status?.entries) ? status.entries.slice(0, 500) : [],
         diff: typeof diff?.diff === "string" ? diff.diff : "", truncated: diff?.truncated === true,
       };
+    },
+    /** The pull request on the session's branch, for the chat summary's "PR #N" row (Codex's): `gh pr
+     *  view` in its worktree, shared by every reader for 2 minutes. null when the branch has none, gh is
+     *  missing or signed out, or it does not answer in 10 s; the summary then leaves the row out. */
+    async pullRequest({ sessionId, workspaceId } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const root = await rootOf(entry);
+      if (typeof runGh !== "function" || typeof root?.path !== "string") return { ok: true, pullRequest: null };
+      const cached = pullRequestReads.get(root.path);
+      if (cached && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
+      const read = Promise.resolve()
+        .then(() => runGh({ cwd: root.path, args: ["pr", "view", "--json", "number,title,url,state,isDraft"], timeoutMs: PULL_REQUEST_TIMEOUT_MS }))
+        .then(pullRequestFrom, () => null);
+      pullRequestReads.set(root.path, { at: now(), read });
+      if (pullRequestReads.size > 64) pullRequestReads.delete(pullRequestReads.keys().next().value);
+      return { ok: true, pullRequest: await read };
     },
     /** One folder of the session's worktree for the Files tab (`path` relative to its root). */
     async files({ sessionId, workspaceId, path: folder = "." } = {}) {

@@ -6,6 +6,7 @@ import { Caret, Icon } from "../icons";
 import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensShort, type ChatAgentSession, type ChatLiveItem, type ChatSubagent } from "./ao-chat";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { SubagentHeader, SubagentList, workedFor } from "./chat-subagents";
+import type { ChatPullRequest } from "./chat-summary-panel";
 import { petFlight, petOverlaps } from "./chat-pet-stage";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
 import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
@@ -135,6 +136,51 @@ export function useChatProcesses(sessionIds: string[], wanted: boolean, workspac
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, wanted, workspaceId, hidden]);
   return commands;
+}
+
+/** The lines a unified diff adds and removes; its file headers (`--- a/x`, `+++ b/x`) are not lines. */
+export function diffLineCounts(diff: string): { additions: number; deletions: number } {
+  let additions = 0, deletions = 0, inHunk = false;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("diff --git ")) inHunk = false;
+    else if (line.startsWith("@@")) inHunk = true;
+    else if (inHunk && line.startsWith("+")) additions += 1;
+    else if (inHunk && line.startsWith("-")) deletions += 1;
+  }
+  return { additions, deletions };
+}
+
+export type ChatSummaryFacts = {
+  changes: { additions: number; deletions: number; files: number } | null;
+  pullRequest: ChatPullRequest | null;
+};
+const NO_FACTS: ChatSummaryFacts = { changes: null, pullRequest: null };
+
+/**
+ * The chat summary's Changes and pull request rows (Codex's "Changes +12 −3" and "PR #42"): the
+ * worktree's diff and its branch's pull request, read when the summary opens and again when
+ * `refreshKey` changes (a turn ended), never on a timer: a git diff walks the whole worktree, and the
+ * Overview's 5 s git status kept a busy hard disk walking it.
+ */
+export function useChatSummaryFacts(sessionId: string | undefined, workspaceId: string | undefined, open: boolean, refreshKey: string): ChatSummaryFacts {
+  const [facts, setFacts] = useState<ChatSummaryFacts & { for?: string }>(NO_FACTS);
+  useEffect(() => {
+    if (!open || !sessionId) return undefined;
+    let live = true;
+    const scope: JsonObject = { sessionId, ...(workspaceId ? { workspaceId } : {}) };
+    // Another chat's rows never show under this one while its own are read.
+    setFacts((current) => (current.for === sessionId ? current : { ...NO_FACTS, for: sessionId }));
+    void paneCall("chat_changes", scope).then((result) => {
+      if (!live) return;
+      const changes = { ...diffLineCounts(typeof result.diff === "string" ? result.diff : ""), files: Array.isArray(result.entries) ? result.entries.length : 0 };
+      setFacts((current) => ({ ...current, for: sessionId, changes }));
+    }).catch(() => undefined);
+    void paneCall("chat_pull_request", scope).then((result) => {
+      if (live) setFacts((current) => ({ ...current, for: sessionId, pullRequest: (result.pullRequest as ChatPullRequest | null | undefined) ?? null }));
+    }).catch(() => undefined);
+    return () => { live = false; };
+  }, [open, sessionId, workspaceId, refreshKey]);
+  return open && sessionId && facts.for === sessionId ? facts : NO_FACTS;
 }
 
 /**

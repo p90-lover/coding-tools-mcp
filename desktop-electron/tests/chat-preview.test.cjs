@@ -737,7 +737,7 @@ function post(url, body, headers) {
   });
 }
 
-function server({ confirm = async () => true, preview = () => true, results = {} } = {}) {
+function server({ confirm = async () => true, preview = () => true, results = {}, runGh = null } = {}) {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "chat-preview-"));
   const root = path.join(base, "worktrees", "p1");
   fs.mkdirSync(root, { recursive: true });
@@ -758,7 +758,7 @@ function server({ confirm = async () => true, preview = () => true, results = {}
   const headless = [];
   const confirmations = [];
   const tools = createChatAgentTools({
-    previews: fakePreviews, previewEnabled: preview, terminalEnabled: () => true, minAnswerMs: 0, logger: { info() {}, warn() {} },
+    previews: fakePreviews, previewEnabled: preview, terminalEnabled: () => true, minAnswerMs: 0, logger: { info() {}, warn() {} }, runGh,
     confirm: async (request) => { confirmations.push(request); return confirm(request); },
     sessionWorkspace: async () => ({ root }),
     requestHeadless: async (endpoint, body) => {
@@ -962,6 +962,33 @@ test("a session set to Approve for me runs routine commands through the app's te
     { authorization: plain.servers[0].headers.Authorization });
   assert.equal(env.confirmations.length, before + 2, "without Approve for me every command asks");
 });
+test("the chat details' PR row asks gh in the agent's worktree, once per 2 minutes, and shows nothing when gh can't say", async (t) => {
+  // The user, 2026-11-12: "remake the session details panel to exact codex one" (Codex's "PR #N" row).
+  const runs = [];
+  let reply = JSON.stringify({ number: 1252, title: "Quiet tabs", url: "https://github.com/o/r/pull/1252", state: "OPEN", isDraft: true });
+  const env = server({ runGh: async (call) => { runs.push(call); if (reply instanceof Error) throw reply; return reply; } });
+  t.after(env.cleanup);
+  await leased(env.tools);
+  const first = await env.tools.pullRequest({ sessionId: "ao-1" });
+  assert.deepEqual(first.pullRequest, { number: 1252, url: "https://github.com/o/r/pull/1252", title: "Quiet tabs", state: "draft" });
+  assert.equal(path.resolve(runs[0].cwd), path.resolve(env.root), "in the session's own worktree");
+  assert.deepEqual(runs[0].args, ["pr", "view", "--json", "number,title,url,state,isDraft"]);
+  assert.ok(runs[0].timeoutMs <= 10_000, "never waits long on the network");
+  const [again, alongside] = await Promise.all([env.tools.pullRequest({ sessionId: "ao-1" }), env.tools.pullRequest({ sessionId: "ao-1" })]);
+  assert.equal(runs.length, 1, "every reader within 2 minutes shares the one gh run");
+  assert.deepEqual([again.pullRequest.number, alongside.pullRequest.number], [1252, 1252]);
+  await assert.rejects(env.tools.pullRequest({ sessionId: "ao-404" }), /session has ended/);
+
+  for (const [answer, why] of [[new Error("no pull requests found for branch \"x\""), "a branch without one"],
+    [JSON.stringify({ number: 7, url: "javascript:alert(1)", state: "OPEN" }), "an address that is not a web page"],
+    ["gh: To get started with GitHub CLI, please run: gh auth login", "gh signed out"]]) {
+    reply = answer;
+    const fresh = server({ runGh: async () => { if (reply instanceof Error) throw reply; return reply; } });
+    await leased(fresh.tools);
+    try { assert.equal((await fresh.tools.pullRequest({ sessionId: "ao-1" })).pullRequest, null, why); } finally { await fresh.cleanup(); }
+  }
+});
+
 test("the side panel reads the agent's worktree: its changes, folders and files, and opens the user's own terminal there", async (t) => {
   const env = server({ results: {
     git_status: { ok: true, branch: "ao/reg-machine-31", entries: [{ path: "api/new.py", index_status: "?", worktree_status: "?" }] },

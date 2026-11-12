@@ -67,7 +67,7 @@ const uiImports = { "./ao-chat": chat, "./chat-transcript": load("chat-transcrip
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
-  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] },
+  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu, "./chat-list-settings": load("chat-list-settings.ts") }) };
 const ui = load("AgentOrchestratorChat.tsx", uiImports);
@@ -958,6 +958,54 @@ test("a subagent's page is headed like Codex's: back, its avatar, its job, and t
     run: { subagent_id: "s1", name: "Explorer", task: "Find the gate", state: "running", elapsed_seconds: 3, model: "cpa/gpt-6.1-sol", effort: "xhigh" },
     onBack: () => {}, trailing: React.createElement("button", { className: "cx-subagent-stop" }, "Stop") }));
   assert.match(html, /aria-label="Back to subagents".*class="cx-sa-avatar".*class="cx-sa-head-label"[^>]*>Find the gate<.*class="cx-sa-head-model"[^>]*>GPT-6.1 Sol · Extra High<.*>Stop</);
+});
+
+test("the chat details read as Codex's pinned summary: Changes +N −M, the PR, the subagents' avatars, lists of five then View all", () => {
+  // The user, 2026-11-12: "remake the session details panel to exact codex one".
+  const view = load("chat-subagents.tsx", { "./ao-chat": chat, "./AgentOrchestratorRoleEditor": roles });
+  const summary = load("chat-summary-panel.tsx", { "./ao-chat": chat, "./chat-subagents": view });
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat, "./ChatMarkdown": markdown,
+    "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility, "./chat-subagents": view });
+  // A removed line that starts with dashes, or an added one with pluses, is still a line; file headers are not.
+  const diff = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n--- dashes\n+new\n+++ pluses\n same\n"
+    + "diff --git a/y b/y\nnew file mode 100644\n--- /dev/null\n+++ b/y\n@@ -0,0 +1 @@\n+y\n";
+  assert.deepEqual({ ...workbench.diffLineCounts(diff) }, { additions: 3, deletions: 2 });
+  assert.deepEqual({ ...workbench.diffLineCounts("") }, { additions: 0, deletions: 0 });
+
+  const render = (type, props) => renderToStaticMarkup(React.createElement(type, props));
+  const changes = (value) => render(summary.SummaryRow, { icon: "i", label: "Changes", meta: React.createElement(summary.ChangesMeta, { changes: value }), onClick: () => {} });
+  assert.match(changes({ additions: 12, deletions: 3, files: 2 }),
+    /^<button type="button" class="cx-sum-row"><span class="cx-sum-icon" aria-hidden="true">i<\/span><span class="cx-sum-label">Changes<\/span><span class="cx-sum-meta"><span class="cx-sum-diff"><span class="is-add">\+12<\/span><span class="is-del">−3<\/span>/,
+    "an icon, the label, and +/− on the right");
+  assert.match(changes({ additions: 0, deletions: 0, files: 1 }), /cx-sum-meta">1 file</, "only new files: how many");
+  assert.match(changes({ additions: 0, deletions: 0, files: 0 }), /cx-sum-meta">None</);
+  assert.match(changes(null), /cx-sum-pending">…</, "still reading");
+  assert.match(render(summary.SummaryRow, { icon: "i", label: "PR #42", meta: summary.pullRequestState("merged"), href: "https://github.com/o/r/pull/42" }),
+    /^<a class="cx-sum-row" href="https:\/\/github.com\/o\/r\/pull\/42" target="_blank" rel="noreferrer noopener">.*PR #42<.*cx-sum-meta">Merged</, "a PR opens in the browser");
+  assert.equal(summary.pullRequestState("draft"), "Draft");
+  assert.equal(summary.pullRequestState("unknown"), "Open");
+  assert.match(render(summary.SummaryRow, { icon: "i", label: "context7" }), /^<div class="cx-sum-row is-static">/, "an MCP server only names what was called");
+
+  const runs = Array.from({ length: 6 }, (_, index) => ({ subagent_id: `s${index}`, name: "Explorer", task: "t", state: index ? "completed" : "running", elapsed_seconds: 1 }));
+  assert.equal(render(summary.SubagentStack, { subagents: runs }).match(/class="cx-sa-avatar"/g).length, 4, "four avatars at most, as Codex shows");
+  assert.equal(summary.subagentsMeta(runs), "1 working");
+  assert.equal(summary.subagentsMeta(runs.slice(1)), "5 done");
+
+  const items = Array.from({ length: 7 }, (_, index) => `item ${index}`);
+  const list = render(summary.SummaryList, { items, render: (item) => React.createElement("p", { key: item }, item) });
+  assert.equal(list.match(/<p>item/g).length, 5, "five, then");
+  assert.match(list, /<button type="button" class="cx-sum-more" aria-expanded="false">View all<\/button>$/);
+  assert.equal(render(summary.SummaryList, { items: [], render: () => null, empty: "Web pages show here." }), '<p class="cx-sum-empty">Web pages show here.</p>');
+  assert.equal(render(summary.SummaryList, { items: [], render: () => null }), "", "a section with nothing to list is left out");
+  const section = render(summary.SummarySection, { title: "Sources", children: "x" });
+  assert.equal(section, '<section class="cx-sum-section"><h3 class="cx-sum-heading"><span>Sources</span></h3>x</section>');
+
+  // The chat reads them only while the details are open, never on a timer, and stops at nothing else.
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  assert.match(source, /useChatSummaryFacts\(selectedTaskId \? agentSessionIds\[0\] : undefined, projectId, detailsOpen,/);
+  assert.doesNotMatch(source, /cx-details-label|Approvals: \{chatApprovalMode/, "the old list of labels and the Setup lines are gone");
+  const hook = fs.readFileSync(path.resolve(__dirname, "../src/features/ChatWorkbench.tsx"), "utf8").split("export function useChatSummaryFacts")[1].split(/\r?\n\}\r?\n/)[0];
+  assert.doesNotMatch(hook, /setInterval|startWorkbenchPoll/, "a git diff walks the worktree: never on a timer");
 });
 
 test("the Terminal pane opens for a server or the project's app launcher, never for a one-off tool call", () => {
