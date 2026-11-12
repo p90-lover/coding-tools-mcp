@@ -8831,8 +8831,38 @@ test("a cold launch whose agent never takes its message is ended after four minu
     await wait(() => world.killed.length > 0);
     assert.deepEqual(world.killed, ["agent-1"], "the start that hung is ended");
     await wait(() => world.failures.length > 0);
-    assert.match(world.failures[0], /did not start within 4 minutes/, "the card says why, not AO's \"context canceled\"");
-    assert.ok(world.logged.some(([event, detail]) => event === "ao.launch_stalled" && detail.waitedSeconds >= 240));
+    assert.match(world.failures[0], /did not take its first message/, "the card says why, not AO's \"context canceled\"");
+    assert.ok(world.logged.some(([event, detail]) => event === "ao.launch_stalled" && detail.waitedSeconds >= 240 && detail.stage === "start"));
+  } finally { world.workflow.dispose(); }
+});
+
+test("a cold launch whose agent is up but never gets its first message is ended 90 s after its controller came up", async () => {
+  // 2026-11-12: 3 of 9 cold starts hung after AO's controller_start, in the prompt's delivery
+  // (queue_drain, milliseconds when healthy), and waited out the whole 4-minute bound.
+  let controllerUp = false;
+  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => world?.killed.includes(id)
+    ? { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" }
+    : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
+      lastActivityAt: at, timeline: [], approvals: [] } });
+  const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  try {
+    await world.workflow.call("chat_auto_retry", { enabled: true });
+    await world.workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: world.route });
+    await wait(() => world.spawned.length > 0);
+    // A slow controller start (48 s seen live) is still within the 4-minute bound.
+    world.advance(50_000);
+    await wait(() => false, 30);
+    controllerUp = true;
+    await wait(() => false, 30); // seen up from here
+    world.advance(60_000);
+    await wait(() => false, 30);
+    assert.deepEqual(world.killed, [], "a minute after its controller came up it is not ended yet");
+    world.advance(31_000);
+    await wait(() => world.killed.length > 0);
+    assert.deepEqual(world.killed, ["agent-1"], "ended long before the 4-minute bound");
+    await wait(() => world.failures.length > 0);
+    assert.match(world.failures[0], /did not take its first message/);
+    assert.ok(world.logged.some(([event, detail]) => event === "ao.launch_stalled" && detail.stage === "queue_drain" && detail.waitedSeconds < 240));
   } finally { world.workflow.dispose(); }
 });
 

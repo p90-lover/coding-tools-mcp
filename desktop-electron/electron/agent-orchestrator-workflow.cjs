@@ -1975,11 +1975,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Only sessions this app session spawned for a launch qualify: they hold nothing but the queued
   // message, while a continued chat's session holds its agent's work and is never ended here.
   const LAUNCH_STALL_MS = 4 * 60_000;
-  const LAUNCH_STALL_FAILURE = `The agent did not start within ${LAUNCH_STALL_MS / 60_000} minutes, so its start was stopped; the step is retried on another agent.`;
+  // The stage after the agent's controller is up (AO's controller_start): AO only hands the queued
+  // opening prompt to it (queue_drain), milliseconds when healthy. 3 of 9 cold starts (2026-11-12)
+  // hung there until the 4-minute bound above; this long after the controller came up with the
+  // prompt still undelivered, the start is ended. LAUNCH_STALL_MS stays the outer bound.
+  const LAUNCH_DRAIN_STALL_MS = 90_000;
+  const LAUNCH_STALL_FAILURE = "The agent did not take its first message, so its start was stopped; the step is retried on another agent.";
+  const launchControllerUp = new Map(); // fresh launch's AO session -> when its controller was first seen up
   async function stopStalledLaunch(session, observed, ownership) {
     const launchedAt = freshLaunches.get(session);
     if (!chatPreferences.get().autoRetry || launchedAt === undefined || stalledLaunches.has(session)
-      || observed?.provisioning !== true || observed.turnState !== "queued" || now() - launchedAt <= LAUNCH_STALL_MS) return false;
+      || observed?.provisioning !== true || observed.turnState !== "queued") return false;
+    if (observed.controllerUp === true && !launchControllerUp.has(session)) {
+      launchControllerUp.set(session, now());
+      if (launchControllerUp.size > 200) launchControllerUp.delete(launchControllerUp.keys().next().value);
+    }
+    const upAt = launchControllerUp.get(session);
+    const drainStalled = upAt !== undefined && now() - upAt > LAUNCH_DRAIN_STALL_MS;
+    if (!drainStalled && now() - launchedAt <= LAUNCH_STALL_MS) return false;
     const { workspaceId, runId, nodeId, requestKey } = ownership;
     const latest = await savedNode(workspaceId, runId, nodeId).catch(() => null);
     if (latest?.mission?.cancelled || latest?.node?.state !== "running" || latest.node.receipt?.thread_id !== session
@@ -1993,7 +2006,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return false;
     }
     releaseColdStartOf(session);
-    logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node) });
+    logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node),
+      stage: drainStalled ? "queue_drain" : "start", ...(upAt !== undefined ? { sinceControllerSeconds: Math.round((now() - upAt) / 1000) } : {}) });
     return true;
   }
 
@@ -2028,7 +2042,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const observed = await harnessService().observe(session, ownership.turnId);
     // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
     // the chat's work, never a fresh launch the watchdog may end.
-    if (observed?.provisioning !== true) freshLaunches.delete(session);
+    if (observed?.provisioning !== true) { freshLaunches.delete(session); launchControllerUp.delete(session); }
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     // Its start is over (the agent is up, or the start ended): the next cold start may begin.
     if (observed?.provisioning !== true || terminal) releaseColdStartOf(session);
