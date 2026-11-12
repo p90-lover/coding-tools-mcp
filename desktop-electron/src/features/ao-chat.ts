@@ -67,7 +67,9 @@ export function chatAgentSessions(runs: { nodes: ChatNode[]; execution_mode?: st
 /** A subagent one of the chat's agents started (subagents.cjs, `subagents_runs`). */
 export type ChatSubagent = {
   subagent_id: string; agent: string; name: string; state: string; task: string; elapsed_seconds: number;
-  parent?: string; started_at?: number; report?: string; error?: string; stopping?: boolean;
+  parent?: string; started_at?: number; ended_at?: number; report?: string; error?: string; stopping?: boolean;
+  /** The model it runs (CPA's prefix dropped), the effort AO was given, and its harness ("ao:claude-code"). */
+  model?: string; effort?: string; harness?: string;
 };
 const SUBAGENT_ACTIVE = new Set(["starting", "running"]);
 export const subagentActive = (run: Pick<ChatSubagent, "state">) => SUBAGENT_ACTIVE.has(run.state);

@@ -907,7 +907,7 @@ test("a chat shows the subagents its own agents started, as Codex's panel does: 
   // Seen live: an agent's subagent_start showed only as the call; nothing said a subagent was working.
   const run = (id, parent, state, extra = {}) => ({ subagent_id: id, agent: "explorer", name: "Explorer", state, task: `Find the autoplay gate ${id}`,
     elapsed_seconds: 75, parent, started_at: Number(id.slice(1)), ...extra });
-  const all = [run("s1", "ao-1", "completed", { report: "Found it" }), run("s2", "ao-other", "running"), run("s3", "ao-1", "running"),
+  const all = [run("s1", "ao-1", "completed", { report: "Found it", ended_at: Date.now() - 5 * 60_000 }), run("s2", "ao-other", "running"), run("s3", "ao-1", "running"),
     run("s4", "ao-2", "starting", { name: "Reviewer" })];
   const own = chat.chatSubagents(all, ["ao-1", "ao-2"]);
   assert.deepEqual(own.map((item) => item.subagent_id), ["s4", "s3", "s1"], "another chat's are left out; working ones first, newest first");
@@ -917,15 +917,47 @@ test("a chat shows the subagents its own agents started, as Codex's panel does: 
   assert.equal(chat.subagentsSummary([own[2]]), "1 subagent finished");
   assert.equal(chat.subagentsSummary([]), null);
 
+  const subagentsView = load("chat-subagents.tsx", { "./ao-chat": chat, "./AgentOrchestratorRoleEditor": roles });
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
-    "./ChatMarkdown": markdown, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
+    "./ChatMarkdown": markdown, "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility,
+    "./chat-subagents": subagentsView });
   const props = { sessions: [{ id: "ao-1", label: "Claude Code" }], onTab: () => {}, onClose: () => {}, workspaceId: "ws", subagents: own };
   const overview = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, { ...props, tab: "overview" }));
   assert.match(overview, /<h4>Subagents<small>2 working<\/small>/, "the Overview lists them");
   const tab = renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, { ...props, tab: "subagents" }));
   assert.match(tab, />Subagents<\/button>/, "a Subagents tab");
-  assert.match(tab, /class="is-starting".*Reviewer · Find the autoplay gate s4.*Starting · 1m/, "each with its state and how long it has run");
-  assert.match(tab, /class="is-completed".*Done · 1m/);
+  // The user, 2026-11-12: "make the subagent panel preview exact the same as codex": "Active · N" and
+  // "Done · N", each row an avatar, the job, and on the right how long it has worked or when it ended.
+  assert.match(tab, /<span>Active · 2<\/span>.*<span>Done · 1<\/span>/, "Codex's two sections, with counts");
+  assert.match(tab, /class="cx-sa-row has-preview is-starting".*class="cx-sa-avatar".*Find the autoplay gate s4<\/span><span class="cx-sa-row-trailing">1m<\/span>.*Reviewer<\/span>/,
+    "an active one: its job, how long it has worked, and who works on it");
+  assert.match(tab, /class="cx-sa-row is-completed".*Find the autoplay gate s1<\/span><span class="cx-sa-row-trailing">5m ago<\/span>/, "a finished one: when it ended");
+  const none = renderToStaticMarkup(React.createElement(subagentsView.SubagentList, { subagents: [own[2]], onSelect: () => {} }));
+  assert.match(none, /Active · 0.*No active subagents.*Done · 1/, "Codex's empty line when nothing works");
+  const many = Array.from({ length: 13 }, (_, index) => run(`d${index}`, "ao-1", "completed", { ended_at: Date.now() }));
+  assert.match(renderToStaticMarkup(React.createElement(subagentsView.SubagentList, { subagents: many, onSelect: () => {} })), />Show 3 more<\/button>/,
+    "ten finished ones, then Show 3 more");
+});
+
+test("a subagent's page is headed like Codex's: back, its avatar, its job, and the model and effort it runs on", () => {
+  // The user, 2026-11-12: "inside its subagent chat sessions preview panel ... its missing model name effort".
+  const view = load("chat-subagents.tsx", { "./ao-chat": chat, "./AgentOrchestratorRoleEditor": roles });
+  assert.equal(view.subagentModelLine({ model: "cpa/gpt-6.1-sol", effort: "xhigh" }), "GPT-6.1 Sol · Extra High", "Codex's own effort words");
+  assert.equal(view.subagentModelLine({ model: "claude-opus-5-5", effort: "low" }), "Opus 5.5 · Light");
+  assert.equal(view.subagentModelLine({ model: "glm-5.3-flash" }), "GLM 5.3 Flash", "no effort, just the model");
+  assert.equal(view.subagentModelLine({}), "");
+  assert.equal(view.subagentJob({ name: "Explorer", task: "\n  Find the gate\nthen report" }), "Find the gate", "the task's first line");
+  assert.equal(view.subagentJob({ name: "Explorer", task: "" }), "Explorer");
+  assert.equal(view.subagentJob({ name: "Explorer", task: "y".repeat(90) }).length, 60);
+  assert.equal(view.workedFor(42), "42s");
+  assert.equal(view.workedFor(5400), "1h 30m");
+  assert.equal(view.endedAgo(0, 3 * 3600_000), "3h ago");
+  assert.equal(view.avatarIndex("s1"), view.avatarIndex("s1"), "one subagent keeps its avatar");
+  assert.ok(view.avatarIndex("anything") < 28);
+  const html = renderToStaticMarkup(React.createElement(view.SubagentHeader, {
+    run: { subagent_id: "s1", name: "Explorer", task: "Find the gate", state: "running", elapsed_seconds: 3, model: "cpa/gpt-6.1-sol", effort: "xhigh" },
+    onBack: () => {}, trailing: React.createElement("button", { className: "cx-subagent-stop" }, "Stop") }));
+  assert.match(html, /aria-label="Back to subagents".*class="cx-sa-avatar".*class="cx-sa-head-label"[^>]*>Find the gate<.*class="cx-sa-head-model"[^>]*>GPT-6.1 Sol · Extra High<.*>Stop</);
 });
 
 test("the Terminal pane opens for a server or the project's app launcher, never for a one-off tool call", () => {
@@ -962,19 +994,20 @@ test("the details' Processes list the app page and running commands green, ended
   ], "a one-off that ended is left out, and a server that runs again shows once");
 });
 
-test("an agent's new page brings the Preview pane forward, even over the Terminal its dev server opened", () => {
-  // Seen live: the agent started its dev server (the Terminal opened), then preview_open'd the page,
-  // and the panel stayed on the Terminal: the user never saw the browser.
+test("the side panel opens only when the agent is asked to show something (show_in_chat), never by itself", () => {
+  // The user, 2026-11-12: "make the tools stop opening tabs when like subagent used, tools call,
+  // terminal etc, only when i tell the model to open then it should open for me".
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null } });
-  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000"], false), "preview", "a closed panel opens on the page");
-  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "cmd:c1"], true), "preview", "an open one switches to it");
-  // The Terminal never pops up by itself: running commands are listed in the chat details' Processes.
-  assert.equal(workbench.autoOpenTab(["cmd:c1"], false), null, "a command leaves a closed panel closed");
-  assert.equal(workbench.autoOpenTab(["cmd:c1"], true), null, "and an open one as it is");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000"], false), null, "a page the agent loads leaves a closed panel closed");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "cmd:c1"], true), null, "and an open one as it is");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:null"], false), null, "as does a live panel or visualization it renders");
+  assert.equal(workbench.autoOpenTab(["cmd:c1"], false), null, "a command never opens it");
   assert.equal(workbench.autoOpenTab([], false), null);
-  assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], true), null, "not even on the agent's show_in_chat");
-  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal"], false), "preview", "its page still shows");
-  assert.equal(workbench.autoOpenTab(["show:show-3:preview"], true), "preview", "as does a preview it asks to show");
+  assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], false), "terminal", "show_in_chat on a command opens the Terminal");
+  assert.equal(workbench.autoOpenTab(["show:show-3:preview"], false), "preview", "and on its page the Preview");
+  assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal", "show:show-4:preview"], true), "preview",
+    "the newest request wins");
+  assert.equal(workbench.autoOpenTab(["show:show-5:window"], false), null, "a pane it does not know opens nothing");
   // Only a server process opens it: the agent's one-off commands (a status poll, a build, a test)
   // put the Terminal over the chat while it worked.
   const server = (cmd, extra = {}) => workbench.isServerProcess({ cmd, status: "running", ...extra });

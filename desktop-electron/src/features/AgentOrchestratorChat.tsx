@@ -1482,10 +1482,9 @@ export function AgentOrchestratorChat({
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
   const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
-  // A subagent starting opens the panel on its Subagents tab, as Codex's panel shows a thread's
-  // subagents; a Preview, Terminal or diff the person has open stays (the line above the chat box says it).
-  const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : [],
-    () => setWorkbench((open) => (open === null || open === "overview" || open === "new" ? "subagents" : open)));
+  // A subagent starting never opens the side panel: the line above the chat box says it works, and
+  // the chat details and the Subagents tab list it, a click from its work.
+  const subagents = useChatSubagents(selectedTaskId ? agentSessionIds : []);
   const subagentLine = useMemo(() => (subagents.some(subagentActive) ? subagentsSummary(subagents) : null), [subagents]);
   const renderSubagentWork = useMemo(() => (items: ChatLiveItem[], live: boolean, reply?: string) =>
     <LiveTimeline items={items} live={live} finished={!live} reply={reply} joinedReply />, []);
