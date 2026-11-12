@@ -2722,13 +2722,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return { ok: true, sessions: await withAgentShellCommands(app, ids, readConversation, logger) };
     }
     if (operation.startsWith("chat_process") || operation.startsWith("chat_preview_")
-      || ["chat_terminal_start", "chat_changes", "chat_files", "chat_file"].includes(operation)) {
+      || ["chat_terminal_start", "chat_changes", "chat_pull_request", "chat_files", "chat_file"].includes(operation)) {
       if (!agentTools?.processes) throw new Error("The chat agent tools are unavailable");
       const ids = Array.isArray(args.sessionIds) ? args.sessionIds.filter((id) => typeof id === "string").slice(0, 32) : [];
       const pathArgument = (value) => (typeof value === "string" && value.length <= 1024 && !value.includes("\0") ? value : ".");
       switch (operation) {
         case "chat_terminal_start": return agentTools.terminalStart({ sessionId: args.sessionId, workspaceId: args.workspaceId });
         case "chat_changes": return agentTools.changes({ sessionId: args.sessionId, workspaceId: args.workspaceId, summary: args.summary === true });
+        case "chat_pull_request": return agentTools.pullRequest({ sessionId: args.sessionId, workspaceId: args.workspaceId });
         case "chat_files": return agentTools.files({ sessionId: args.sessionId, workspaceId: args.workspaceId, path: pathArgument(args.path) });
         case "chat_file": {
           if (typeof args.path !== "string" || !args.path || args.path.length > 1024) throw new Error("Choose a file");
