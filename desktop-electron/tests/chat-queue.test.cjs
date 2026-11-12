@@ -41,6 +41,22 @@ test("a chat's queue keeps its order, takes a message at the front, and survives
   assert.deepEqual(createChatQueueStore({ file }).chats(), [], "an emptied queue leaves nothing behind");
 });
 
+test("a message being sent keeps its place and its mark across a restart; clearing the mark drops the field", async (t) => {
+  const file = tempFile(t);
+  const store = createChatQueueStore({ file });
+  const item = store.add("ws", "task", { what: "Message", message: "deploy it", sending: 5 });
+  assert.equal(item.sending, undefined, "a mark is the app's own, never taken from the chat view");
+  store.update("ws", "task", item.id, { sending: 123 });
+  await store.saved();
+  const reopened = createChatQueueStore({ file });
+  assert.equal(reopened.list("ws", "task")[0].sending, 123, "an app that quit mid-send still has the message");
+  const cleared = reopened.update("ws", "task", item.id, { sending: undefined, note: "AO is busy" });
+  assert.equal("sending" in cleared, false);
+  assert.equal(cleared.note, "AO is busy");
+  assert.equal("note" in reopened.update("ws", "task", item.id, { note: undefined }), false);
+  await reopened.saved();
+});
+
 test("a torn queue file is read back from its copy (power cut, failing disk)", async (t) => {
   const file = tempFile(t);
   const store = createChatQueueStore({ file });

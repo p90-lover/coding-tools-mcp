@@ -1917,7 +1917,8 @@ export function goalFeedback(text: string): { objective: string; reason: string 
  * The app keeps the queue (chat-queue.cjs): `id` is its item's, `steer` steers it into the working
  * agent rather than waiting for the turn, and `note` says why its last send failed.
  */
-export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string; id?: string; steer?: boolean; note?: string };
+// `note`: why the app's last try to send it failed; `sending`: when the app began sending it (chat-queue.cjs).
+export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string; id?: string; steer?: boolean; note?: string; sending?: number };
 /**
  * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
  * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.

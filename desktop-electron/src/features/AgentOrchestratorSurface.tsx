@@ -262,6 +262,23 @@ function startNotice(result: Record<string, unknown>): string {
 }
 /** The fields that decide how a route launches, in a fixed order (absent ones as null). */
 const routeIdentity = (route: AoRoute) => CHAT_ROUTE_FIELDS.map(name => (route as unknown as Record<string, unknown>)[name] ?? null);
+/**
+ * Whether `route` is the setup a single chat's step ran on: its saved route, or that route as the
+ * composer shows it when the chat opens (its permission choices applied, then fitted).
+ */
+function singleRouteMatches(route: AoRoute, mission: AoMission, card: AoMission["nodes"][number]): boolean {
+  const same = (other: AoRoute) => JSON.stringify(routeIdentity(other)) === JSON.stringify(routeIdentity(route));
+  if (same(card.route)) return true;
+  const intent = mission.team?.permission_selections?.[card.template_role_id || card.id];
+  const shown = { ...card.route };
+  if (intent?.permission_profile !== undefined) {
+    shown.native_permission_profile = intent.permission_profile;
+    if (shown.harness_id === NATIVE_HARNESS) shown.permission_profile = intent.permission_profile;
+  }
+  if (intent?.approval_policy !== undefined) shown.approval_policy = intent.approval_policy;
+  if (intent?.approvals_reviewer !== undefined) shown.approvals_reviewer = intent.approvals_reviewer;
+  return same(shown) || same(permissionsFitted(shown));
+}
 function lastChatRoute(): AoRoute | null {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(LAST_CHAT_ROUTE) || "null");
@@ -672,8 +689,17 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // composer fitting an opened chat's route to its model (`adjusted`) is that chat's, and keeping it
   // made a rewind or a new chat start on the old chat's model, effort and window.
   const composerIntent = useRef(0);
-  const pickComposerTeam = (id: string) => { composerIntent.current++; setComposerTeamId(id); };
-  const pickSingleRoute = (route: AoRoute, adjusted = false) => { composerIntent.current++; setSingleRoute(route); if (!adjusted) rememberChatRoute(route); };
+  // A pick the person makes (not the composer fitting a route, `adjusted`) ends a pending automatic
+  // retry of the open chat's failed step on another setup (endPendingRetry).
+  const pickComposerTeam = (id: string) => { composerIntent.current++; setComposerTeamId(id); if (composerMode === "team") endPendingRetry({ mode: "team" }); };
+  const pickSingleRoute = (route: AoRoute, adjusted = false) => {
+    composerIntent.current++; setSingleRoute(route);
+    if (!adjusted) { rememberChatRoute(route); if (composerMode === "single") endPendingRetry({ mode: "single", route }); }
+  };
+  const pickComposerMode = (mode: "single" | "team") => {
+    composerIntent.current++; setComposerMode(mode);
+    endPendingRetry(mode === "team" ? { mode } : { mode, route: singleRoute });
+  };
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -901,8 +927,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           return;
         }
         // Read only where it decides anything: a single chat with a failed step.
+        // Asked for this run: one whose retry the person ended by changing the chat's setup is not
+        // retried here either (chat_retry_cancel), or the old harness and model ran after all.
         const autoRetry = held && mission.execution_mode === "single"
-          ? await moduleCall("chat_auto_retry", {}).then((result) => result.autoRetry === true, () => false) : false;
+          ? await moduleCall("chat_auto_retry", { workspaceId, runId: mission.id }).then((result) => result.autoRetry === true, () => false) : false;
         let nodes = running;
         let still: AoMission | undefined = mission;
         for (;;) {
@@ -1471,6 +1499,21 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       setComposerTeamId(chatMission.team?.id || "");
     }
   }, [workspaceId, chatTaskId, chatMission]);
+  // "Retry automatically" relaunches a failed step on its saved route: a harness, model, effort or
+  // permission picked in the composer while the step waited out its retry pause was ignored, and the
+  // retry ran the old setup for up to half an hour (the user, 2026-11-12: "i switched harness model
+  // etc it doesnt allow to run on new config and stop the retry"). The person's pick, when it is not
+  // the failed step's setup, ends that retry (chat_retry_cancel); the next message, or Retry, runs on it.
+  const endPendingRetry = (pick: { mode: "single"; route: AoRoute } | { mode: "team" }) => {
+    const mission = chatMission, card = mission?.execution_mode === "single" ? mission.nodes[0] : undefined;
+    if (!workspaceId || !mission || !card || mission.cancelled || !mission.nodes.some((node) => node.state === "held")) return;
+    if (pick.mode === "single" && singleRouteMatches(pick.route, mission, card)) return;
+    const owner = workspaceId, runId = mission.id;
+    // A write, which the app takes only from its focused window (as the goal's route above).
+    const send = () => void moduleCall("chat_retry_cancel", { workspaceId: owner, runId }).catch(() => undefined);
+    if (document.hasFocus()) send();
+    else window.addEventListener("focus", send, { once: true });
+  };
   const permissionMission = composerMode === "single" ? chatMission?.execution_mode === "single" ? chatMission : undefined
     : chatMission?.execution_mode !== "single" && chatMission?.team?.id === selectedSetup?.id ? chatMission : undefined;
   const singleAttempt = permissionMission?.execution_mode === "single" ? permissionMission.nodes[0] : undefined;
@@ -1514,6 +1557,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       if (current()) {
         const route = { ...chosen.route };
         setSingleRoute(route); rememberChatRoute(route);
+        endPendingRetry({ mode: "single", route });
       }
       return "Applies from the next turn. A running turn keeps its permissions.";
     }
@@ -3107,7 +3151,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? shownApprovals : []}
-                composer={{ mode: composerMode, onModeChange: mode => { composerIntent.current++; setComposerMode(mode); }, route: singleRoute, onRouteChange: pickSingleRoute,
+                composer={{ mode: composerMode, onModeChange: pickComposerMode, route: singleRoute, onRouteChange: pickSingleRoute,
                   harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: pickComposerTeam }}
                 onOpenTeam={openTeam}
                 onOpenMissionBoard={() => { setSheet(""); setView("board"); }}

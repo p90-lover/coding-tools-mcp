@@ -3193,6 +3193,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // refuses the message still falls back to a fresh start (dispatchExternal).
     // The run is running again: a round its goal judged before is judged again when it settles.
     if (["retry", "retry_auto", "resume"].includes(action) && result.run) reopenGoalRound(id, result.run);
+    // A retry is a fresh attempt: "Retry automatically" covers its failures again.
+    if (action === "retry" || action === "retry_auto") autoRetryCancelled.delete(runKey(id, run));
     if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
       const card = result.run.nodes?.[0];
       const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
@@ -4884,9 +4886,32 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const autoRetryPause = attempt => AUTO_RETRY_PAUSES_MS[Math.min(Math.max(attempt, 1), AUTO_RETRY_LIMIT) - 1];
   const countdown = ms => ms >= 120_000 ? `${Math.ceil(ms / 60_000)} min` : `${Math.ceil(ms / 1000)}s`;
   const autoRetrySeen = new Map(); // `${runId}:${nodeId}:${attempt}` -> when this failure was first seen
+  // Runs whose automatic retry the person ended by changing the chat's setup in the composer
+  // (chat_retry_cancel): the retry relaunches the card's saved route, so it kept running the old
+  // harness and model for up to half an hour after they picked another (the user, 2026-11-12: "i
+  // switched harness model etc it doesnt allow to run on new config and stop the retry"). The step
+  // then waits for their message or Retry, which run on the pick. An explicit retry clears it.
+  const AUTO_RETRY_CANCELLED = "Automatic retry stopped: you changed this chat's model or settings. Send a message, or Retry, to run on the new setup.";
+  const autoRetryCancelled = new Set(); // runKey
+  const retryCancelled = (workspaceId, runId) => autoRetryCancelled.has(runKey(workspaceId, runId));
+  /** chat_retry_cancel: the composer's setup changed while the chat's failed step waited to be retried. */
+  async function cancelAutoRetry({ workspaceId, runId } = {}) {
+    const id = clean(workspaceId, 128), run = clean(runId, 80);
+    const mission = (await runs({ workspaceId: id, runId: run })).runs.find(entry => entry.id === run && entry.workspace_id === id);
+    if (!mission) throw new Error("AO run unavailable");
+    if (mission.cancelled || !mission.nodes.some(node => node.state === "held")) return { ok: true, cancelled: false };
+    autoRetryCancelled.add(runKey(id, run));
+    if (autoRetryCancelled.size > 200) autoRetryCancelled.delete(autoRetryCancelled.values().next().value);
+    // The countdown goes at once; the run's loop ends on its next pass (recoverHeld, autoRetryStep).
+    const live = backgroundRuns.get(runKey(id, run));
+    if (live && !live.stopped) { live.detail = AUTO_RETRY_CANCELLED; live.retryPause = false; }
+    logger?.info?.("ao.auto_retry_cancelled", { runId: run });
+    return { ok: true, cancelled: true, detail: AUTO_RETRY_CANCELLED };
+  }
   function autoRetryStep(mission, held) {
     const node = held.find(entry => entry.role !== "retry") ?? held[0];
     if (!node) return null;
+    if (retryCancelled(mission.workspace_id, mission.id)) return { detail: AUTO_RETRY_CANCELLED };
     const error = String(node.receipt?.error || "");
     if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
@@ -4913,6 +4938,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   function autoRetryAllowed(mission) {
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
+    if (retryCancelled(mission.workspace_id, mission.id)) return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
     const error = String(node?.receipt?.error || "");
@@ -4959,12 +4985,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { retry: true, attempt, name };
   }
   /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
-  async function chatAutoRetry({ enabled } = {}) {
+  async function chatAutoRetry({ enabled, workspaceId, runId } = {}) {
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
       await chatPreferences.set({ autoRetry: enabled });
     }
-    return { ok: true, autoRetry: chatPreferences.get().autoRetry };
+    // Asked about one run (the chat view's restart pickup): off for a run whose retry the person ended.
+    const ended = typeof workspaceId === "string" && typeof runId === "string" && retryCancelled(clean(workspaceId, 128), clean(runId, 80));
+    return { ok: true, autoRetry: chatPreferences.get().autoRetry && !ended };
   }
   /**
    * chat_model_judges: reads "Let the model judge", or sets it with `enabled`. The user: "if its
@@ -5037,7 +5065,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const picked = pickedModelSince(mission);
     if (picked) return { detail: `Moved to ${picked}; the goal's next round runs on it` };
     // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
-    const outage = chatPreferences.get().autoRetry
+    const outage = chatPreferences.get().autoRetry && !retryCancelled(workspaceId, mission.id)
       ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
         && !POOL_EXHAUSTED.test(String(node.receipt?.error || ""))) : null;
     const outageRetry = outage ? outageRetryStep(mission, outage) : null;
@@ -5172,6 +5200,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     state.settled = false;
     try {
       for (;;) {
+        // A person's message (or Retry on another model) took over a step that only waited out its
+        // automatic retry (retireOpenRuns): the run is retired by that send, with nothing to report.
+        if (state.superseded) return;
         if (state.stopped) { reportRun(workspaceId, runId, state, null); return; }
         let saved = await runs({ workspaceId, runId }, loopRead);
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
@@ -5306,6 +5337,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         const helped = mission.paused || mission.cancelled ? null : await recoverHeld(workspaceId, mission, state);
         if (helped?.detail) state.detail = helped.detail;
+        // Only waiting out a retry pause, with no card at work: a person's message or a Retry on
+        // another model may take the chat over now (retireOpenRuns). It used to be refused as
+        // "still running" for the whole pause, queued, and sent after the retry ran on the old setup.
+        state.retryPause = Boolean(helped?.waiting) && !mission.paused && !mission.cancelled
+          && !mission.nodes.some(node => ["running", "reserved"].includes(node.state));
         if (helped?.changed || completed.length) {
           saved = await runs({ workspaceId, runId }, loopRead);
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
@@ -5315,6 +5351,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           // was refused, and the loop ended with the step still "held" and "Retry automatically" on.
           if (helped?.retried && (!mission.grant || grantSpent(mission.grant))) {
             state.status = "held";
+            // Taken over by a person's message meanwhile: that send retires the run instead.
+            if (state.stopped) return;
             setTimeout(() => {
               void startRun({ workspaceId, runId, executable }).catch(error => logger?.warn?.("ao.retry_start_failed",
                 { message: publicText(error?.message || error, 200) }));
@@ -5419,7 +5457,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       state.settled = !chatPreferences.get().autoRetry;
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
       if (!state.stopped) scheduleAutoRetry(workspaceId, runId, executable, state);
-    } finally { state.driving = false; }
+    } finally { state.driving = false; state.retryPause = false; }
   }
   /**
    * A drive that ended on an error left its failed step held with nothing to retry it. With "Retry
@@ -5726,7 +5764,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // so an old task can always be continued or restarted.
   // How long a follow-up waits for a run whose cards have all stopped to finish winding down.
   const RUN_WIND_DOWN_MS = 10_000;
-  async function retireOpenRuns(id, task, runsOfWorkspace) {
+  async function retireOpenRuns(id, task, runsOfWorkspace, { supersedeRetry = false } = {}) {
     const openOf = (list) => list.filter((run) => run.project_id === task && !runSettled(run));
     const carding = (run) => (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
     const looping = (run) => {
@@ -5750,6 +5788,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     open = open.filter(run => !runSettled(run));
+    // The person's own message (or Retry on another model) takes over a failed step that only waits
+    // out "Retry automatically": its loop ends at its next pass and the run is retired below, so the
+    // new turn runs on what the composer has now. It waited for the loop, which kept driving through
+    // the whole pause (up to 15 minutes), was refused "still running", and went to the queue behind a
+    // retry on the old harness and model (the user, 2026-11-12).
+    if (supersedeRetry) {
+      for (const run of open) {
+        const live = backgroundRuns.get(runKey(id, run.id));
+        if (!live?.driving || !live.retryPause || live.stopped || carding(run)) continue;
+        live.superseded = true;
+        live.stopped = true;
+        live.retryPause = false;
+        live.status = "held";
+        live.detail = "Your message took over this step's automatic retry";
+        logger?.info?.("ao.auto_retry_superseded", { runId: run.id });
+      }
+    }
     // A run whose cards have all stopped can still have its loop winding down for a moment, as after
     // a steer that stopped a stalled turn: its message, queued for the next turn, was sent as soon as
     // the chat read free and refused twice within a second ("This chat is still running"). That loop
@@ -5818,7 +5873,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (generation !== recoveryGeneration) return { resumed };
         // Chats only, and only a chat's newest run: an older one gave way to the message after it.
         if (!run.project_id || saved.runs.filter(entry => entry.project_id === run.project_id).at(-1)?.id !== run.id) continue;
-        const resume = restartResume(run, now(), { autoRetry });
+        const resume = restartResume(run, now(), { autoRetry: autoRetry && !retryCancelled(workspaceId, run.id) });
         const live = backgroundRuns.get(runKey(workspaceId, run.id));
         if (!resume || (live && (live.starting || live.driving || live.status === "running"))) continue;
         // startRun resumes on the run's own grant only while a card is still running under it.
@@ -5931,7 +5986,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const missingModel = missingModelNotice(team);
       if (missingModel) return { ok: false, reason: missingModel };
     }
-    await retireOpenRuns(id, mission.project_id, saved.runs);
+    // Asked for by the person (Retry, or Restart, on what the composer has now): it takes over a
+    // pending automatic retry rather than wait for it to run the old setup.
+    await retireOpenRuns(id, mission.project_id, saved.runs, { supersedeRetry: true });
     const next = await createTeamRun(id, mission.project_id, team,
       single ? { executionMode: "single", singleRoute }
         : mission.team?.id ? { executionMode: "team" } : {});
@@ -6271,10 +6328,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // collided, both were retried, and the chat followed the newer one after it was stopped. The
   // later send now reads the runs after the earlier one has started, so it waits or is refused.
   const chatSends = new Map(); // [workspace, task] -> the send in progress
-  async function chatSend(input = {}, checkCurrent = () => {}) {
-    if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input, checkCurrent);
+  async function chatSend(input = {}, checkCurrent = () => {}, options = {}) {
+    if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input, checkCurrent, options);
     const key = JSON.stringify([input.workspaceId.trim(), input.taskId.trim()]);
-    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input, checkCurrent));
+    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input, checkCurrent, options));
     const settled = mine.then(() => undefined, () => undefined);
     chatSends.set(key, settled);
     try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
@@ -6287,7 +6344,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * use chat message to retrigger the chat"; the message ran one turn and the goal stayed stalled. A
    * goal the person paused stays paused. Refused, the goal stays as it was.
    */
-  async function personChatSend(input = {}) {
+  /** `supersedeRetry`: typed in the composer just now (chat_send), so it takes over a pending automatic retry. */
+  async function personChatSend(input = {}, { supersedeRetry = false } = {}) {
     const id = typeof input?.workspaceId === "string" ? input.workspaceId.trim() : "";
     const task = typeof input?.taskId === "string" ? input.taskId.trim() : "";
     const stalled = id && task && input.goal === undefined && goals.get(id, task)?.status === "stalled" ? goals.get(id, task) : null;
@@ -6298,7 +6356,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const still = goalGuard(id, task, stalled);
     try {
-      const result = await asPerson(() => chatSend(input));
+      const result = await asPerson(() => chatSend(input, undefined, { supersedeRetry }));
       if (still() && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalledNote });
       else if (still() && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
       // Sent while the goal waited out a pause (a failed round or check): this turn is its next round.
@@ -6323,7 +6381,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}) {
+  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -6411,7 +6469,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("Stop the chat before rewinding a message");
       }
       try {
-        await retireOpenRuns(id, task, saved.runs);
+        await retireOpenRuns(id, task, saved.runs, { supersedeRetry });
       } catch (error) {
         if (/still running/.test(error?.message)) throw new Error("This chat is still running; wait for it to finish or stop it first");
         throw error;
@@ -7744,6 +7802,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return over;
   }
+  /** Whether the chat's last message is queued `item`'s (its send went through before the app quit). */
+  async function queuedMessageInChat(workspaceId, taskId, item) {
+    const detail = await board({ workspaceId, taskId });
+    const said = String(detail.task?.description || "");
+    const text = item.goal ? goalMessage(cleanObjective(item.goal), 1) : boardText(String(item.message || ""));
+    // The last message, without the steers noted under it (chatDescriptionWithSteer).
+    const last = (said.split(/\n\nFollow-up \([^)]+ UTC\):\n/).at(-1) ?? "").split(/\n\n↳ Steer \(/)[0];
+    return Boolean(text.trim()) && last.trim() === text.trim();
+  }
   /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
   function queuedSelection(item, latest) {
     const picked = item.selection;
@@ -7804,12 +7871,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(tries, 2)], true);
         return;
       }
-      chatQueue.remove(workspaceId, taskId, [next.id]);
+      // A `sending` mark seen here is an earlier app session's, whose send never answered (this
+      // session's sends hold `draining`): it went if the chat already ends with it.
+      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next).catch(() => false)) {
+        chatQueue.remove(workspaceId, taskId, [next.id]);
+        logger?.info?.("ao.chat_queue.sent_before_restart", { workspaceId, taskId });
+        armQueue(workspaceId, taskId, QUEUE_FREED_MS);
+        return;
+      }
+      // It stays in the queue, marked as going, until the send answers. Removed first, a message
+      // whose send the app's quit or a crash cut short was gone without ever reaching the chat.
+      chatQueue.update(workspaceId, taskId, next.id, { sending: now() });
       steerTries.delete(next.id);
       try {
         const result = await personChatSend({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}),
           ...queuedSelection(next, latest), ...(next.executable ? { executable: next.executable } : {}), deferStart: true });
         if (result?.ok === false) throw new Error(String(result.reason || "The queued message could not be sent"));
+        chatQueue.remove(workspaceId, taskId, [next.id]);
         queueFailures.delete(next.id);
         logger?.info?.("ao.chat_queue.sent", { workspaceId, taskId, left: chatQueue.list(workspaceId, taskId).length });
       } catch (error) {
@@ -7818,8 +7896,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const busy = /still running/i.test(why);
         const failures = busy ? 0 : (queueFailures.get(next.id) ?? 0) + 1;
         if (failures) queueFailures.set(next.id, failures);
-        // Nothing is lost: it goes back to the front, saying why, and is tried again.
-        chatQueue.add(workspaceId, taskId, { ...next, note: failures ? publicText(why, 300) : undefined }, { front: true });
+        // Nothing is lost: it stays at the front, saying why (the chat's queued bar shows the note),
+        // and is tried again. One the person removed meanwhile stays removed.
+        chatQueue.update(workspaceId, taskId, next.id, { sending: undefined, note: failures ? publicText(why, 300) : undefined });
         logger?.warn?.("ao.chat_queue.send_failed", { workspaceId, taskId, failures, message: publicText(why, 200) });
         // After a few failures it waits for the next settled turn or the person's Send now.
         if (failures < QUEUE_SEND_TRIES) armQueue(workspaceId, taskId, QUEUE_RETRY_MS * Math.max(1, failures));
@@ -7869,7 +7948,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action === "update") {
       const text = typeof message === "string" ? message.slice(0, 8192) : "";
       if (!text.trim()) throw new Error("Type a message to queue");
-      const updated = chatQueue.update(id, task, clean(itemId, 80), { message: text });
+      // One already going out takes nothing more: what was joined to it would be lost with its send.
+      const target = clean(itemId, 80);
+      if (chatQueue.list(id, task).find(entry => entry.id === target)?.sending) return { ok: true, updated: false, queue: chatQueue.list(id, task) };
+      const updated = chatQueue.update(id, task, target, { message: text });
       return { ok: true, updated: Boolean(updated), queue: chatQueue.list(id, task) };
     }
     if (action === "add") {
@@ -9097,7 +9179,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function call(operation, args = {}) {
     switch (operation) {
-      case "chat_send": return personChatSend(args);
+      case "chat_send": return personChatSend(args, { supersedeRetry: true });
       case "chat_recover": return chatRecover(args);
       case "chat_steer": return asPerson(() => chatSteer(args));
       case "chat_prewarm": return chatPrewarm(args);
@@ -9148,6 +9230,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_loop": return chatLoop(args);
       case "chat_schedule": return chatSchedule(args);
       case "chat_auto_retry": return chatAutoRetry(args);
+      case "chat_retry_cancel": return cancelAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
       case "agent_instructions": return agentInstructionsCall(args);
       case "chat_question_timeout": return chatQuestionTimeout(args);

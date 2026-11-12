@@ -1785,7 +1785,7 @@ test("sendChat bypasses unrelated surface work but rejects a duplicate while its
 });
 
 function outgoingSend() {
-  const attachments = [], annotations = [], composing = { current: null }, state = { outgoing: null, draft: "" };
+  const attachments = [], annotations = [], composing = { current: null }, state = { outgoing: null, draft: "", recovered: [] };
   const set = key => next => { state[key] = typeof next === "function" ? next(state[key]) : next; };
   const scope = projectId => rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "", projectId, draftScope: "main" });
   return { state, composing, scope,
@@ -1800,6 +1800,8 @@ function outgoingSend() {
         setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
         setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
         setOutgoing: set("outgoing"), setAnnotations() {},
+        // A failed send the composer did not take back goes back to its own draft (recoverMessage).
+        recoverMessage: (cacheKey, text, error) => { state.recovered.push({ cacheKey, text, error: String(error?.message ?? error) }); },
       });
       return { ...reply, done: deliver(message) };
     },
@@ -1842,6 +1844,9 @@ test("overlapping deliver callbacks change only their own optimistic message", a
     const ui = outgoingSend(), first = ui.start("project-a", "A"), second = ui.start("project-b", "B"), ownB = ui.state.outgoing;
     first[outcome](outcome === "reject" ? new Error("A failed") : undefined); const completed = await first.done;
     if (outcome === "resolve") assert.equal(completed, true);
+    // A's failed send, made while B's composer was open, goes back to A's own draft with why (it was lost).
+    assert.deepEqual(ui.state.recovered.map(entry => ({ ...entry })), outcome === "reject"
+      ? [{ cacheKey: ui.scope("project-a"), text: "A", error: "A failed" }] : []);
     assert.equal(ui.state.outgoing, ownB); assert.equal(ui.state.outgoing.sent, false);
     second.resolve(); assert.equal(await second.done, true); assert.equal(ui.state.outgoing.message, "B"); assert.equal(ui.state.outgoing.sent, true);
   });
