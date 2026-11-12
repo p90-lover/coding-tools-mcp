@@ -311,6 +311,28 @@ export function moduleCall(operation: string, args: JsonObject = {}): Promise<Re
   return read;
 }
 
+// The folders a workspace's worktrees share or farm, for the approval cards' install note. One read
+// per workspace, shared by every mounted surface (hidden chat pages stay mounted), and kept for a
+// minute after it ends, whether it worked or failed. A failed read was asked again by each approval
+// poll: on 2026-11-12 it timed out under disk load, in twos and threes within the same millisecond.
+const DEPENDENCY_LINKS_KEPT_MS = 60_000;
+const dependencyLinkReads = new Map<string, { at: number; read: Promise<DependencyLinks | null> }>();
+export function readDependencyLinks(workspaceId: string): Promise<DependencyLinks | null> {
+  const known = dependencyLinkReads.get(workspaceId);
+  if (known && Date.now() - known.at < DEPENDENCY_LINKS_KEPT_MS) return known.read;
+  const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+  // Still running: `at` stays in the future, so every caller shares this read until it ends.
+  const entry = { at: Number.POSITIVE_INFINITY, read: Promise.resolve<DependencyLinks | null>(null) };
+  entry.read = moduleCall("dependency_link_info", { workspaceId })
+    .then((result): DependencyLinks | null => ({ shared: list(result.shared), farmed: list(result.farmed) }))
+    .catch(() => null)
+    .then((links) => { entry.at = Date.now(); return links; });
+  dependencyLinkReads.delete(workspaceId);
+  dependencyLinkReads.set(workspaceId, entry);
+  if (dependencyLinkReads.size > 32) dependencyLinkReads.delete(dependencyLinkReads.keys().next().value!);
+  return entry.read;
+}
+
 /** The local service had no room for the call: it was never sent, so nothing ran. */
 export function isCapacityError(cause: unknown): boolean {
   return /HEADLESS_CAPACITY|HEADLESS_QUEUE_FULL|launcher queue is full/.test(cause instanceof Error ? cause.message : String(cause));
@@ -701,16 +723,15 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const approvalScope = useRef({ workspaceId: "", runId: "" });
   const pendingApprovalsHere = approvalScope.current.workspaceId === workspaceId && approvalScope.current.runId === selectedRunId ? pendingApprovals : [];
   // Which folders this project's worktrees share or farm, for the install note on approval cards.
-  const [dependencyLinks, setDependencyLinks] = useState<{ workspaceId: string; at: number; links: DependencyLinks } | null>(null);
+  const [dependencyLinks, setDependencyLinks] = useState<{ workspaceId: string; links: DependencyLinks } | null>(null);
   const wantsDependencyLinks = Boolean(workspaceId) && pendingApprovalsHere.some((approval) => Boolean(approval.command));
   useEffect(() => {
     if (!wantsDependencyLinks) return;
-    if (dependencyLinks?.workspaceId === workspaceId && Date.now() - dependencyLinks.at < 60_000) return;
     let live = true;
-    void moduleCall("dependency_link_info", { workspaceId }).then((result) => {
-      const list = (value: unknown) => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-      if (live) setDependencyLinks({ workspaceId, at: Date.now(), links: { shared: list(result.shared), farmed: list(result.farmed) } });
-    }).catch(() => undefined);
+    // Kept for a minute and shared across surfaces (readDependencyLinks): asking on each poll is cheap.
+    void readDependencyLinks(workspaceId).then((links) => {
+      if (live && links) setDependencyLinks((current) => current?.workspaceId === workspaceId && current.links === links ? current : { workspaceId, links });
+    });
     return () => { live = false; };
   }, [wantsDependencyLinks, workspaceId, pendingApprovals.length]);
   // When each request was first seen (the poll runs every 3 s, so render time is close enough).
