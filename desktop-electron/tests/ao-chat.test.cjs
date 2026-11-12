@@ -1798,7 +1798,7 @@ function outgoingSend() {
       const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
         selectedTaskId: "", draft: message, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
         setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-        setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+        setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
         setOutgoing: set("outgoing"), setAnnotations() {},
         // A failed send the composer did not take back goes back to its own draft (recoverMessage).
         recoverMessage: (cacheKey, text, error) => { state.recovered.push({ cacheKey, text, error: String(error?.message ?? error) }); },
@@ -1872,7 +1872,7 @@ test("a message the local service had no room for waits in its chat's queue; a n
       // The composer's own copy follows what is typed, as the component's effect keeps it.
       setDraft: next => { state.draft = next; composing.current = { ...composing.current, draft: next }; },
       setOutgoing: next => { state.outgoing = typeof next === "function" ? next(state.outgoing) : next; },
-      setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {}, setAnnotations() {},
+      setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {}, setAnnotations() {},
     });
     const sent = await deliver("also add tests");
     assert.equal(state.outgoing, null, taskId);
@@ -1904,7 +1904,7 @@ test("send completion preserves the next chat's draft and edits typed during the
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
       setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
       // The message shows in the chat at once (setOutgoing) and leaves the composer before it is sent.
       setOutgoing() {}, setAnnotations() {},
     });
@@ -1923,7 +1923,7 @@ test("a pending new-chat send keeps its real API identity and leaves the next pr
   const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
     selectedTaskId: "", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
     setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: input => { calls.push(input); return reply.promise; },
-    setDraft: value => { state.draft = value; }, setTitle: value => { state.title = value; }, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+    setDraft: value => { state.draft = value; }, setTitle: value => { state.title = value; }, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
     setOutgoing() {}, setAnnotations() {},
   });
   const sending = deliver("sent text");
@@ -1979,7 +1979,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
       const reply = delayedReply();
       const result = rendererCallback("AgentOrchestratorChat.tsx", "deliver", { ...globals(), selectedTaskId: state.taskId,
         setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-        setTitle() {}, setAtBottom() {}, setCarried() {}, setOutgoing() {} })(state.draft);
+        setTitle() {}, setAtBottom() {}, followBottom() {}, setCarried() {}, setOutgoing() {} })(state.draft);
       return { finish: () => { reply.resolve(); return result; } };
     },
     async submit() {
