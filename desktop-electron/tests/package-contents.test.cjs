@@ -114,7 +114,8 @@ function createPackageFixture(label, mutate) {
   const pluginSource = path.join(repositoryRoot, "desktop-electron", "vendor", "bundled", "cpa-plugins");
   const pluginDestination = path.join(resourcesRoot, "app.asar.unpacked", "vendor", "bundled", "cpa-plugins");
   writeFile(path.join(pluginDestination, "BUNDLE.json"), JSON.stringify(plugins));
-  for (const asset of [plugins.platforms["win32/x64"], plugins.studio.platforms["win32/x64"]]) {
+  // One plugin, Provider Manager, with one asset for this platform.
+  for (const asset of [plugins.platforms["win32/x64"]]) {
     const target = path.join(pluginDestination, ...asset.path.split("/"));
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.copyFileSync(path.join(pluginSource, ...asset.path.split("/")), target);

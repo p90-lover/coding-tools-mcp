@@ -220,24 +220,31 @@ test("unsupported providers no longer report success after merely opening a webs
   assert.deepEqual(opened, []);
 });
 
-for (const [providerId, adapterId, route, cpaProvider] of [
-  ["commandcode-proxy", "commandcode-oauth", "commandcode-go-auth-url", "commandcode-go"],
-  ["commandcode-studio", "cpa-commandcode-studio", "commandcode-auth-url", "commandcode"],
+// CommandCode Go and CommandCode are Provider Manager account kinds: one login route told the kind,
+// and the new account is a provider-manager auth file whose kind Provider Manager names.
+for (const [providerId, adapterId, kind] of [
+  ["commandcode-proxy", "commandcode-oauth", "commandcode-go"],
+  ["commandcode-studio", "cpa-commandcode-studio", "commandcode"],
 ]) {
-  test(`${providerId} logs in through its CPA plugin and preserves the account`, async () => {
+  test(`${providerId} logs in through Provider Manager's ${kind} kind and preserves the account`, async () => {
     let listingReads = 0;
     const requests = [];
-    const fetchImpl = async (url) => {
+    const authName = `${kind}-user.json`;
+    const fetchImpl = async (url, options = {}) => {
       const parsed = new URL(url);
-      requests.push(parsed.pathname);
+      requests.push(`${parsed.pathname}${parsed.search}`);
+      assert.equal(options.headers?.Authorization, "Bearer management-secret");
       if (parsed.pathname === "/v0/management/auth-files") {
         listingReads += 1;
         return jsonResponse({ files: listingReads === 1 ? [] : [{
-          name: `${cpaProvider}-user.json`, provider: cpaProvider,
+          name: authName, provider: "provider-manager", type: "provider-manager",
           email: "user@example.test", status: "ready",
         }] });
       }
-      if (parsed.pathname === `/v0/management/${route}`) {
+      if (parsed.pathname === "/v0/management/cpa-provider-manager/api/kinds") {
+        return jsonResponse({ files: { [authName]: kind } });
+      }
+      if (parsed.pathname === "/v0/management/provider-manager-auth-url") {
         return jsonResponse({ status: "ok", state: "plugin-state", url: "https://login.example.test/commandcode" });
       }
       if (parsed.pathname === "/v0/management/get-auth-status") return jsonResponse({ status: "ok" });
@@ -251,10 +258,13 @@ for (const [providerId, adapterId, route, cpaProvider] of [
     const result = await controller.openProviderLogin(account.id);
     const connected = result.snapshot.accounts.find((candidate) => candidate.id === account.id);
     assert.deepEqual(opened, ["https://login.example.test/commandcode"]);
+    assert.equal(connected.status, "connected");
     assert.equal(connected.auth, "oauth");
     assert.equal(connected.credentialSource, "cpa");
     assert.equal(connected.loginAdapterId, providerId === "commandcode-proxy" ? "cpa-commandcode-go" : adapterId);
     assert.equal(connected.endpoint, "http://127.0.0.1:8317");
-    assert.ok(requests.includes(`/v0/management/${route}`));
+    assert.deepEqual(connected.models, ["test-model"]);
+    assert.equal(controller.store.accountSecret(account.id).cpaAuthName, authName);
+    assert.ok(requests.includes(`/v0/management/provider-manager-auth-url?kind=${kind}&is_webui=true`));
   });
 }

@@ -6,20 +6,24 @@ const CPA_ORIGIN = "http://127.0.0.1:8317";
 // Bundled CPA Helper plugin (web/app.js KEY_STORE): CPAMC shows its page in a
 // same-origin iframe and it sends this raw localStorage value as a Bearer token.
 const CPA_HELPER_KEY_STORE = "cpaHelper.managementKey";
-const CPA_HELPER_RESOURCE_PREFIX = "/v0/resource/plugins/cpa-helper/";
+// CPA loads one plugin, Provider Manager: CPA Helper, Cline Pass and Codex Auto Review are its parts.
+// Their pages are served from its resource folder, one subfolder each; their API routes kept the
+// former plugins' paths.
+const PROVIDER_MANAGER_RESOURCES = "/v0/resource/plugins/cpa-provider-manager/";
+const CPA_HELPER_RESOURCE_PREFIX = `${PROVIDER_MANAGER_RESOURCES}helper/`;
 const CPA_HELPER_API_PREFIX = "/v0/management/cpa-helper/";
-const CLINE_RESOURCE_PREFIX = "/v0/resource/plugins/cline-pass-switcher/";
+const CLINE_RESOURCE_PREFIX = `${PROVIDER_MANAGER_RESOURCES}cline/`;
 const CLINE_API_PREFIX = "/v0/management/cline-pass-switcher/";
 // The user's own Codex Auto Review plugin: its page signs in with the management key (kept only in
 // the page's memory) to list CPA's Codex accounts and save the one that serves codex-auto-review.
 // It gets its own plugin routes and a read-only account list, nothing else. The installed plugin
-// registers as "codex-review-account-selector"; the earlier name is kept for older builds. With
-// only the earlier name here, its page never got the key and asked the user to paste it.
-const AUTO_REVIEW_PLUGIN_IDS = ["codex-review-account-selector", "codex-auto-review"];
+// is Provider Manager's "autoreview" part, whose page is in its "review" folder and whose routes kept
+// the plugin's id, "codex-review-account-selector".
+const AUTO_REVIEW_PAGES = [[`${PROVIDER_MANAGER_RESOURCES}review/`, "codex-review-account-selector"]];
 const ACCOUNT_LIST_PATH = "/v0/management/auth-files";
-/** The Codex Auto Review plugin id whose page this path is, or null. */
+/** The Codex Auto Review route id whose page this path is, or null. */
 function autoReviewPluginOf(pathname) {
-  return AUTO_REVIEW_PLUGIN_IDS.find((id) => pathname.startsWith(`/v0/resource/plugins/${id}/`)) ?? null;
+  return AUTO_REVIEW_PAGES.find(([prefix]) => pathname.startsWith(prefix))?.[1] ?? null;
 }
 
 // localStorage entries seeded into the managed CPA origin. Values carry only the

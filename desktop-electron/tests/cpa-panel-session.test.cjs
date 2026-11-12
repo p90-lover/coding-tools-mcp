@@ -132,7 +132,7 @@ test("CPA Helper iframe under the managed panel gets the key only on its own API
   assert.equal(f.localStorage.getItem(CPA_HELPER_KEY_STORE), marker);
 
   const helper = {
-    url: `${ORIGIN}/v0/resource/plugins/cpa-helper/index.html#overview`,
+    url: `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/helper/index.html#overview`,
     top: f.mainFrame,
     parent: f.frame,
     isDestroyed: () => false,
@@ -151,6 +151,11 @@ test("CPA Helper iframe under the managed panel gets the key only on its own API
   }
   for (const frame of [
     { ...helper, url: `${ORIGIN}/v0/resource/plugins/other/index.html` },
+    // The retired CPA Helper plugin's own page, and Provider Manager's other parts' pages.
+    { ...helper, url: `${ORIGIN}/v0/resource/plugins/cpa-helper/index.html` },
+    { ...helper, url: `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/cline/index.html` },
+    { ...helper, url: `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/index.html` },
+    { ...helper, url: `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/helper-x/index.html` },
     { ...helper, parent: f.mainFrame },
     { ...helper, parent: { ...f.frame, url: `${ORIGIN}/other.html` } },
     { ...helper, parent: null },
@@ -261,16 +266,21 @@ test("Cline switcher frame gets the opaque marker exchange only for its own mana
   f.install();
   await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
   const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
-  const frame = { url: `${ORIGIN}/v0/resource/plugins/cline-pass-switcher/index.html`,
+  // Provider Manager's "cline" part serves the switcher's page; its API kept the plugin's routes.
+  const frame = { url: `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/cline/index.html`,
     top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
   const requestHeaders = { Authorization: `Bearer ${marker}` };
-  assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/cline-pass-switcher/api/accounts`, requestHeaders }), {
+  const clineApi = `${ORIGIN}/v0/management/cline-pass-switcher/api/accounts`;
+  assert.deepEqual(await f.request({ frame, url: clineApi, requestHeaders }), {
     requestHeaders: { Authorization: `Bearer ${SECRET}` },
   });
   for (const url of [`${ORIGIN}/v0/management/config`, `${ORIGIN}/v0/management/cpa-helper/usage`,
     `${ORIGIN}/v0/management/cline-pass-switcher-evil/api/accounts`]) {
     assert.deepEqual(await f.request({ frame, url, requestHeaders }), { requestHeaders });
   }
+  // The retired plugin's own page is no longer served, so it gets nothing.
+  const retired = { ...frame, url: `${ORIGIN}/v0/resource/plugins/cline-pass-switcher/index.html` };
+  assert.deepEqual(await f.request({ frame: retired, url: clineApi, requestHeaders }), { requestHeaders });
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
@@ -290,51 +300,61 @@ test("non-loopback origins are rejected and destroying the host removes the requ
   assert.deepEqual(f.calls.at(-1).filter, { urls: [`${ORIGIN}/v0/management/*`] });
 });
 
+// CPA Auto Review is Provider Manager's "autoreview" part: its page is in Provider Manager's "review"
+// folder, and its routes kept the plugin's id, codex-review-account-selector.
+const REVIEW_PAGE = `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/review/index.html`;
+
 test("Codex Auto Review's page gets the key on its own routes and a read-only account list, nothing else", async () => {
   const f = fixture();
   f.install();
   await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
   const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
-  const frame = { url: `${ORIGIN}/v0/resource/plugins/codex-auto-review/index.html`,
-    top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
+  const frame = { url: REVIEW_PAGE, top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
   const requestHeaders = { Authorization: `Bearer ${marker}` };
   const swapped = { requestHeaders: { Authorization: `Bearer ${SECRET}` } };
-  assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-auto-review/account`, method: "POST", requestHeaders }), swapped);
+  for (const [route, method] of [["settings", "GET"], ["settings", "PUT"], ["accounts", "GET"], ["all-accounts", "GET"], ["review-status", "GET"]]) {
+    assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-review-account-selector/${route}`, method, requestHeaders }),
+      swapped, `${method} ${route}`);
+  }
   assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }), swapped);
   for (const [url, method] of [[`${ORIGIN}/v0/management/auth-files`, "POST"], [`${ORIGIN}/v0/management/auth-files/download?name=a.json`, "GET"],
     [`${ORIGIN}/v0/management/config`, "GET"], [`${ORIGIN}/v0/management/cpa-helper/usage`, "GET"],
-    [`${ORIGIN}/v0/management/codex-auto-review-evil/x`, "GET"]]) {
+    [`${ORIGIN}/v0/management/cline-pass-switcher/api/accounts`, "GET"],
+    [`${ORIGIN}/v0/management/codex-review-account-selector-evil/x`, "GET"],
+    // The plugin's earlier name had routes of its own; Provider Manager serves none under it.
+    [`${ORIGIN}/v0/management/codex-auto-review/settings`, "GET"]]) {
     assert.deepEqual(await f.request({ frame, url, method, requestHeaders }), { requestHeaders }, `${method} ${url}`);
   }
   // Another plugin's page gets none of it.
   const other = { ...frame, url: `${ORIGIN}/v0/resource/plugins/other/index.html` };
   assert.deepEqual(await f.request({ frame: other, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }), { requestHeaders });
+  // Nor does a review page outside the managed panel.
+  const loose = { ...frame, parent: f.mainFrame };
+  assert.deepEqual(await f.request({ frame: loose, url: `${ORIGIN}/v0/management/codex-review-account-selector/settings`, method: "GET", requestHeaders }),
+    { requestHeaders });
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
-test("the installed plugin's own name gets the same sign-in, and neither name reaches the other's routes", async () => {
-  // Seen live: the plugin registers as codex-review-account-selector, the page never got the key,
-  // and the user was asked to paste the management key.
+test("the retired reviewer pages and look-alikes of the review page get no sign-in", async () => {
   const f = fixture();
   f.install();
   await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
   const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
-  const frame = { url: `${ORIGIN}/v0/resource/plugins/codex-review-account-selector/index.html`,
-    top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
   const requestHeaders = { Authorization: `Bearer ${marker}` };
-  const swapped = { requestHeaders: { Authorization: `Bearer ${SECRET}` } };
-  for (const [path, method] of [["settings", "GET"], ["settings", "PUT"], ["accounts", "GET"], ["all-accounts", "GET"], ["review-status", "GET"]]) {
-    assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-review-account-selector/${path}`, method, requestHeaders }),
-      swapped, `${method} ${path}`);
+  for (const page of [
+    // The former plugins' own pages: CPA no longer loads them.
+    `${ORIGIN}/v0/resource/plugins/codex-review-account-selector/index.html`,
+    `${ORIGIN}/v0/resource/plugins/codex-auto-review/index.html`,
+    // Look-alikes of Provider Manager's review folder.
+    `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/review-x/index.html`,
+    `${ORIGIN}/v0/resource/plugins/cpa-provider-manager-x/review/index.html`,
+    `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/index.html`,
+  ]) {
+    const frame = { url: page, top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
+    for (const url of [`${ORIGIN}/v0/management/codex-review-account-selector/settings`, `${ORIGIN}/v0/management/auth-files`]) {
+      assert.deepEqual(await f.request({ frame, url, method: "GET", requestHeaders }), { requestHeaders }, `${page} -> ${url}`);
+    }
   }
-  assert.deepEqual(await f.request({ frame, url: `${ORIGIN}/v0/management/codex-auto-review/settings`, method: "GET", requestHeaders }),
-    { requestHeaders }, "the other plugin name's routes");
-  const older = { ...frame, url: `${ORIGIN}/v0/resource/plugins/codex-auto-review/index.html` };
-  assert.deepEqual(await f.request({ frame: older, url: `${ORIGIN}/v0/management/codex-review-account-selector/settings`, method: "GET", requestHeaders }),
-    { requestHeaders });
-  const lookalike = { ...frame, url: `${ORIGIN}/v0/resource/plugins/codex-review-account-selector-x/index.html` };
-  assert.deepEqual(await f.request({ frame: lookalike, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }),
-    { requestHeaders }, "a look-alike plugin page");
 });
 
 // Just enough DOM for the quota page script: class lookups, insertion after the header, text.
@@ -733,7 +753,7 @@ test("the quota and card usage scripts run only in the managed panel frame", asy
   assert.match(f.frame.scripts.at(-2), /QuotaHeader-module__primaryAction/);
   assert.match(f.frame.scripts.at(-1), /cpm:usage:read/, "then the Auth Files cards' usage lines");
   const scripts = f.frame.scripts.length;
-  f.frame.url = `${ORIGIN}/v0/resource/plugins/cpa-helper/index.html`;
+  f.frame.url = `${ORIGIN}/v0/resource/plugins/cpa-provider-manager/helper/index.html`;
   await watch({}, false, 5, 9);
   await watch({}, true, 5, 9);
   assert.equal(f.frame.scripts.length, scripts);

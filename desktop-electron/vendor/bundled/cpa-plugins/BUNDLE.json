@@ -1,22 +1,15 @@
 {
   "schemaVersion": 1,
-  "id": "commandcode-go",
-  "version": "1.0.0-codingtools.3",
+  "id": "cpa-provider-manager",
+  "version": "0.6.0",
   "source": {
-    "repository": "https://github.com/sperictao/cpa-plugin-commandcode-go",
-    "commit": "444ee977daaa96e6fa6ef5155b14cac3a6f9cdc3",
+    "repository": "https://github.com/p90-lover/cpa_provider_manager",
+    "commit": "PROVIDER_MANAGER_COMMIT",
     "license": "MIT"
   },
-  "wireReference": {
-    "repository": "https://github.com/zahidhussaina2l/commandcode-proxy",
-    "commit": "c123a3ebe017415ef45e619600a1110198dea7f8"
-  },
   "changes": [
-    "CPA auth-provider browser login and auth-file support",
-    "CPA-selected credential per request",
-    "native CPA provider routing instead of authless model-router",
-    "a reasoning level in the model's CPA suffix (glm-5.3-flash(high)) becomes the request's reasoning_effort; it was dropped",
-    "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole (the Cline Pass plugin's texttools.go)"
+    "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
+    "Cline Pass, CommandCode Go, CommandCode and Grok accounts are provider-manager auth files with a kind; their models, logins and management routes are unchanged"
   ],
   "build": {
     "go": "1.27.3",
@@ -25,158 +18,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/commandcode-go-v1.0.0-codingtools.3.dll",
-      "sha256": "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343",
-      "size": 7707648
-    }
-  },
-  "studio": {
-    "id": "auth-commandcode",
-    "provider": "commandcode",
-    "version": "0.1.0-codingtools.2",
-    "source": {
-      "repository": "https://github.com/UNICKCHENG/cliproxyapi-plugins",
-      "commit": "7ead2c1df31472b9272910e733a94560dfa04815",
-      "license": "MIT"
-    },
-    "changes": [
-      "CPA browser login callback",
-      "Studio label",
-      "CPA 7.3.7 StatusCode host HTTP response",
-      "Rebuilt with Go 1.26.10 and updated dependencies: CVE-2026-111943 (crypto/x509 trusted distrusted intermediates, the leaked emSign CA keys)"
-    ],
-    "platforms": {
-      "win32/x64": {
-        "path": "windows/amd64/auth-commandcode-v0.1.0-codingtools.2.dll",
-        "sha256": "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31",
-        "size": 14867968
-      }
-    }
-  },
-  "helper": {
-    "id": "cpa-helper",
-    "version": "0.2.0",
-    "source": {
-      "repository": "https://github.com/p90-lover/cpa-helper-plugin",
-      "commit": "0b7178b8b46ededfd7cf67fd0bdb1df11a99a68f",
-      "license": "MIT",
-      "upstream": "https://github.com/walkingddd/CPA-Helper"
-    },
-    "changes": [
-      "Rewritten in std-only Rust as a CPA cdylib plugin (no Go/Python runtime)",
-      "Each Codex account's credit balance (exact, as chatgpt.com sends it) in /codex/accounts and the console's Credits column; credits pay for every request once a limit is reached",
-      "Native scheduler.pick prefers CPA-eligible Codex accounts with more remaining five-hour/weekly quota, without per-model route imports or inference replay",
-      "Confirmed exhausted quota windows are skipped until reset; account pins, provider/model eligibility, disabled state, priority tiers and CPA cooldowns remain binding",
-      "Bounded read-only background quota refresh and a nonblocking memory snapshot keep credential/network/disk work off request selection; quota_routing_enabled: false opts out"
-    ],
-    "build": {
-      "rust": "stable",
-      "mode": "cdylib"
-    },
-    "platforms": {
-      "win32/x64": {
-        "path": "windows/amd64/cpa-helper-v0.2.0.dll",
-        "sha256": "b7e780535ef0ceb998cfba94ed482a8a2a53957b5cc4d6f66c15ce03432769a3",
-        "size": 850432
-      }
-    }
-  },
-  "grok": {
-    "id": "grok-login-provider",
-    "provider": "grok",
-    "version": "0.1.0-codingtools.2",
-    "source": {
-      "repository": "https://github.com/chenyme/grok2api",
-      "commit": "7c889a960e2638341b4dae9a5c81af0e0f38c87f",
-      "license": "MIT",
-      "path": "desktop-electron/vendor/cpa-plugins/grok-login-provider"
-    },
-    "changes": [
-      "grok2api Build, Web and Console provider adapters behind the CPA v8 plugin ABI",
-      "xAI OAuth device login and SSO cookie login through a loopback page",
-      "Grok credential import detection for untyped auth files",
-      "grok2api anti-downgrade quality guard as a retryable CPA 503",
-      "SSO to Build conversion sends the consent+jwt with the accounts.x.ai Origin",
-      "Rebuilt with Go 1.26.10 and updated dependencies: CVE-2026-111943 (crypto/x509 trusted distrusted intermediates, the leaked emSign CA keys)"
-    ],
-    "build": {
-      "go": "1.26.10",
-      "cCompiler": "Zig 0.16.0",
-      "mode": "c-shared"
-    },
-    "platforms": {
-      "win32/x64": {
-        "path": "windows/amd64/grok-login-provider-v0.1.0-codingtools.2.dll",
-        "sha256": "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937",
-        "size": 24951296
-      }
-    }
-  },
-  "cline": {
-    "id": "cline-pass-switcher",
-    "provider": "cline",
-    "version": "0.1.0-codingtools.11",
-    "source": {
-      "repository": "https://github.com/munmunjaklin458-afk/cline-pass-switcher",
-      "commit": "02538a3137a08948a94f26f17dd4aeff8c029ed1",
-      "license": "MIT",
-      "path": "desktop-electron/vendor/cpa-plugins/cline-pass-switcher"
-    },
-    "changes": [
-      "Full pinned upstream switcher console behind authenticated CPA plugin routes",
-      "Native Cline auth/model/executor with OpenAI streaming and original account/upstream failover",
-      "Owned ephemeral-loopback managed runtime; selected outbound proxy; local-only account storage",
-      "DeepSeek V4.1 Flash native none/low/high/max efforts with suffix-to-body translation",
-      "Normalize embedded Windows JavaScript line endings before managed runtime patches",
-      "DeepSeek V4.1 Flash's dated builds (deepseek-v4.1-flash-1017) take the same none/low/high/max efforts",
-      "Streams are SSE-framed for cross-format requests (Claude /v1/messages, Responses) and raw for OpenAI Chat, by CPA's request_path; multiline JSON chunks are compacted (from #352)",
-      "Every other Cline Pass model takes OpenRouter's minimal/low/medium/high/xhigh/max efforts (suffix to body); none and ultra stay refused",
-      "A tool call a model writes as text (Qwen XML <tool_call><function=…><parameter=…>, or JSON in <tool_call>) to a tool the request offered becomes a real tool_calls entry, streamed or whole, so Claude Code runs it",
-      "A request's reasoning effort (body reasoning_effort, or a model(level) suffix, which wins) runs at the model's nearest level, a tie going up; auto or an unknown word sends none. A level the model lacked was a 400, retried by Claude Code until the launch looked stuck",
-      "A model Cline lists but no longer serves (its 502 \"model not found\") is a non-retryable 404: Claude Code retried the 502 for about four minutes before the chat failed",
-      "GET /api/usage-limits returns each enabled key's ClinePass usage windows (5-hour, weekly, monthly: percent used and reset time) from Cline's /users/me/plan/usage-limits, cached for a minute, for CPA's quota page; keys never leave the switcher",
-      "A streamed reply that has not started within 60 s is asked for once more, and two that never start are a retryable 504: one that never started took the switcher's whole 120 s attempt budget, and the chat sat quiet for two minutes after a tool call",
-      "A spent ClinePass window (Cline's \"Error 429: You have reached your weekly Clinepass limit\", passed on as 502) is a 429, so CPA puts the model on its quota cooldown and answers retries itself: as a 502, each of Claude Code's ten retries went to Cline four times (CPA's request-retry), the whole context each time",
-      "A managed runtime that exits on its own (stopped with the app's processes, crashed) is started again with the same configuration by the next request, at most every 30 s; CPA never resends an unchanged configuration, so every Cline model failed with connection refused (Upstream HTTP 500) until CPA restarted"
-    ],
-    "build": {
-      "go": "1.27.3",
-      "cCompiler": "Zig 0.16.0",
-      "mode": "c-shared"
-    },
-    "platforms": {
-      "win32/x64": {
-        "path": "windows/amd64/cline-pass-switcher-v0.1.0-codingtools.11.dll",
-        "sha256": "092b1683ef4307481041cf2ea3fdd7b2df8e50dca26d176e7462cef7f007839a",
-        "size": 7897088
-      }
-    }
-  },
-  "autoReview": {
-    "id": "codex-review-account-selector",
-    "name": "CPA Auto Review",
-    "version": "0.2.1-codingtools.1",
-    "source": {
-      "repository": "https://github.com/p90-lover/cpa_auto_review",
-      "commit": "5ca6362f1a147498d87b427d8f908cf66ab2a535",
-      "license": "MIT"
-    },
-    "changes": [
-      "Serves codex-auto-review (Codex's \"Approve for me\" reviewer and Coding Tools' command reviewer) on a chosen Codex account through CPA's native executor",
-      "Always attempts the selected CPA-enabled primary first, deferring transient model-specific eligibility to the pinned native request before walking up to 8 configured account/model fallbacks; a streamed review falls back only before its first chunk",
-      "Searchable CPA-enabled account menus preserve saved choices and show unsaved changes; bounded in-memory review status explains actual primary/fallback attempts without prompts, responses, raw errors or credentials"
-    ],
-    "build": {
-      "go": "1.27.3",
-      "cCompiler": "Zig 0.16.0",
-      "mode": "c-shared"
-    },
-    "platforms": {
-      "win32/x64": {
-        "path": "windows/amd64/codex-review-account-selector-v0.2.1-codingtools.1.dll",
-        "sha256": "c274670fba53a131b69b7246bffcae64114fbb24d89f580be0d5c49614746a62",
-        "size": 3384832
-      }
+      "path": "windows/amd64/cpa-provider-manager-v0.6.0.dll",
+      "sha256": "0e571d45bbaee84357afa79b93f7c741a4485efb27b4bed4d786d1dc9ad17be6",
+      "size": 8444928
     }
   }
 }

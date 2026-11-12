@@ -209,20 +209,39 @@ function yamlString(value) {
 
 // Every Go plugin is built with Go 1.26.10/1.27.3 or later: before them, crypto/x509 trusted chains
 // through distrusted intermediates (CVE-2026-111943, the leaked emSign CA keys).
+// CPA loads one plugin, Provider Manager (p90-lover/cpa_provider_manager). Everything the other
+// plugins did is a part of it: CPA Helper (usage, costs, Codex quota scheduler, keeper), CPA Auto
+// Review (codex-auto-review), and the Cline Pass, CommandCode Go, CommandCode and Grok accounts as
+// account kinds. CPA gives a plugin one auth identifier, so those accounts are provider-manager auth
+// files with a "kind" (migrateAuthFiles).
 const COMMANDCODE_PLUGINS = [
-  { id: "cline-pass-switcher", file: "cline-pass-switcher-v0.1.0-codingtools.11.dll", sha256: "092b1683ef4307481041cf2ea3fdd7b2df8e50dca26d176e7462cef7f007839a" },
-  { id: "commandcode-go", file: "commandcode-go-v1.0.0-codingtools.3.dll", sha256: "7b50bd0f2879101c06732e98b6fc1a30ae8afa29a5fd8f6016473f0eb74ff343" },
-  { id: "auth-commandcode", file: "auth-commandcode-v0.1.0-codingtools.2.dll", sha256: "0d24aa57f4415db4163ece11fa95ab785e7f061bee657894cef1e14b9dc9bf31" },
-  // CPA Helper (usage, costs, Codex keeper), rebuilt from walkingddd/CPA-Helper as a native plugin.
-  { id: "cpa-helper", file: "cpa-helper-v0.2.0.dll", sha256: "b7e780535ef0ceb998cfba94ed482a8a2a53957b5cc4d6f66c15ce03432769a3" },
-  // Grok Build/Web/Console provider built from chenyme/grok2api (vendor/cpa-plugins/grok-login-provider).
-  { id: "grok-login-provider", file: "grok-login-provider-v0.1.0-codingtools.2.dll", sha256: "9894157b26546b325e308b36fcb4fde6795b3ed813bc866e79ab78dfb0a39937" },
-  // CPA Auto Review (p90-lover/cpa_auto_review): serves codex-auto-review on a chosen Codex account and
-  // falls back to other accounts and models when that one is out of quota. It was installed by hand
-  // (0.1.0, one account, no fallback), so an update never brought the fallback version; an older copy
-  // under the same id is moved to Trash like the others.
-  { id: "codex-review-account-selector", file: "codex-review-account-selector-v0.2.1-codingtools.1.dll", sha256: "c274670fba53a131b69b7246bffcae64114fbb24d89f580be0d5c49614746a62" },
+  { id: "cpa-provider-manager", file: "cpa-provider-manager-v0.6.0.dll", sha256: "0e571d45bbaee84357afa79b93f7c741a4485efb27b4bed4d786d1dc9ad17be6" },
 ];
+
+// The plugins Provider Manager replaced. Their DLLs and config blocks are removed: a stale plugin
+// left loading would still claim its old provider id, and every id here sorts before
+// cpa-provider-manager, so CPA would hand it the accounts first.
+const RETIRED_PLUGINS = Object.freeze(["cline-pass-switcher", "commandcode-go", "auth-commandcode", "cpa-helper",
+  "grok-login-provider", "codex-review-account-selector", "codex-auto-review"]);
+
+// Each former plugin's part in Provider Manager: its config block becomes the part's section and
+// its data folder is imported once from legacy-data-dirs.
+const PROVIDER_MANAGER_PARTS = Object.freeze({
+  "cpa-helper": { part: "helper", data: "cpa-helper-data" },
+  "codex-review-account-selector": { part: "autoreview", data: "codex-review-account-selector-data" },
+  "cline-pass-switcher": { part: "cline", data: "cline-pass-switcher-data" },
+  "commandcode-go": { part: "commandcode-go" },
+  "auth-commandcode": { part: "commandcode" },
+  "grok-login-provider": { part: "grok" },
+});
+
+// Auth file types that became Provider Manager account kinds (the kind's name is its old type).
+const ACCOUNT_KINDS = Object.freeze(["cline", "commandcode-go", "commandcode", "grok"]);
+
+/** Provider Manager's private folder; each part keeps its state in a subfolder named after it. */
+function providerManagerDataDir(state) {
+  return path.join(state, "cpa-provider-manager-data");
+}
 
 /** Plugins updated from GitHub by App plugins (app-plugins.cjs), by id; {} when there are none. */
 function updatedPlugins(state) {
@@ -264,6 +283,16 @@ function installBundledCommandCodePlugin(state) {
 
   const directory = path.join(state, "plugins", "windows", "amd64");
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  // Regular files only: anything else under such a name stays, and must not make an empty Trash
+  // folder at every start.
+  const retired = fs.readdirSync(directory).filter((name) => RETIRED_PLUGINS.some((id) => (
+    name === `${id}.dll` || (name.startsWith(`${id}-v`) && name.endsWith(".dll"))))
+    && fs.lstatSync(path.join(directory, name)).isFile());
+  if (retired.length) {
+    const archive = path.join(state, "Trash", "plugins", `${Date.now()}-retired`);
+    fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
+    for (const name of retired) fs.renameSync(path.join(directory, name), path.join(archive, name));
+  }
   const updates = updatedPlugins(state);
   return sources.map((plugin) => {
     // A plugin updated from GitHub (Connections > App plugins) stays while it is newer than the
@@ -298,6 +327,65 @@ function installBundledCommandCodePlugin(state) {
   });
 }
 
+/** A former provider plugin's auth file as a Provider Manager account of that kind; others unchanged. */
+function stampAccountKind(file) {
+  if (!file || typeof file !== "object" || Array.isArray(file) || !ACCOUNT_KINDS.includes(file.type)) return file;
+  return { ...file, type: "provider-manager", kind: file.type, kindType: file.type };
+}
+
+/**
+ * Rewrites the auth files of the retired provider plugins as Provider Manager accounts
+ * (`type: grok` becomes `type: provider-manager, kind: grok, kindType: grok`); Provider Manager hands
+ * each kind its file back as it was. Each original goes to Trash first. Idempotent: a stamped file,
+ * a file of another type, or one that isn't JSON is left alone.
+ */
+function migrateAuthFiles(state) {
+  const authDirectory = path.join(state, "auth");
+  let names = [];
+  try { names = fs.readdirSync(authDirectory).filter((name) => name.toLowerCase().endsWith(".json")); } catch { return 0; }
+  let archive = null;
+  let moved = 0;
+  for (const name of names) {
+    const file = path.join(authDirectory, name);
+    let parsed;
+    try {
+      if (!fs.lstatSync(file).isFile()) continue;
+      parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch { continue; }
+    const stamped = stampAccountKind(parsed);
+    if (stamped === parsed) continue;
+    if (!archive) {
+      archive = path.join(state, "Trash", "auth", `${Date.now()}-provider-manager-kinds`);
+      fs.mkdirSync(archive, { recursive: true, mode: 0o700 });
+    }
+    fs.copyFileSync(file, path.join(archive, name));
+    writePrivateFileAtomic(file, `${JSON.stringify(stamped, null, 2)}\n`);
+    moved += 1;
+  }
+  return moved;
+}
+
+/**
+ * The plugin configs CPA gets: the saved ones without the retired plugins, and Provider Manager's
+ * block: its saved keys (sync-minutes, proxy-url, ...) under the managed ones. A managed section
+ * replaces the saved one whole, as a managed plugin block always did, so a removed setting (an
+ * outbound proxy) never lingers. A part nothing manages keeps its saved section, or starts from its
+ * former plugin's saved block without the keys that are Provider Manager's now.
+ */
+function mergePluginConfigs(savedConfigs, managedConfigs) {
+  const plain = (value) => (isPlainObject(value) ? value : {});
+  const saved = plain(savedConfigs);
+  const configs = Object.fromEntries(Object.entries(saved).filter(([id]) => !RETIRED_PLUGINS.includes(id)));
+  const managed = plain(managedConfigs["cpa-provider-manager"]);
+  const manager = { ...plain(saved["cpa-provider-manager"]), ...managed };
+  for (const [id, { part }] of Object.entries(PROVIDER_MANAGER_PARTS)) {
+    if (part in manager) continue;
+    const { enabled: _enabled, "data-dir": _dataDir, data_dir: _dataDirUnderscore, ...former } = plain(saved[id]);
+    if (Object.keys(former).length) manager[part] = former;
+  }
+  return { ...configs, ...managedConfigs, "cpa-provider-manager": manager };
+}
+
 function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
   let savedSource = "";
   try { savedSource = fs.readFileSync(path.join(state, "config.yaml"), "utf8"); }
@@ -330,8 +418,9 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   fs.mkdirSync(logDirectory, { recursive: true, mode: 0o700 });
   const clineAuth = path.join(authDirectory, "cline-pass-switcher.json");
   if (!fs.existsSync(clineAuth)) {
-    writePrivateFileAtomic(clineAuth, `${JSON.stringify({ type: "cline", switcher: true, label: "Cline Pass" })}\n`);
+    writePrivateFileAtomic(clineAuth, `${JSON.stringify(stampAccountKind({ type: "cline", switcher: true, label: "Cline Pass" }))}\n`);
   }
+  migrateAuthFiles(state);
   if (process.platform !== "win32") {
     fs.chmodSync(authDirectory, 0o700);
     fs.chmodSync(logDirectory, 0o700);
@@ -355,26 +444,19 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     "  enabled: true",
     `  dir: ${yamlString(pluginDirectory)}`,
     "  configs:",
-    "    commandcode-go:",
+    // CPA leaves a plugin without a configs entry unregistered. Each part reads its own section; a
+    // part's state lives in <data-dir>/<part>, imported once from its former plugin's folder.
+    "    cpa-provider-manager:",
     "      enabled: true",
-    "    auth-commandcode:",
-    "      enabled: true",
-    "    cpa-helper:",
-    "      enabled: true",
-    `      data_dir: ${yamlString(path.join(state, "cpa-helper-data"))}`,
-    "      keeper_enabled: false",
-    // CPA leaves a plugin without a configs entry unregistered.
-    "    cline-pass-switcher:",
-    "      enabled: true",
-    `      runtime-executable: ${yamlString(process.execPath)}`,
-    `      data-dir: ${yamlString(path.join(state, "cline-pass-switcher-data"))}`,
-    ...(outboundProxyUrl ? [`      proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
-    "    grok-login-provider:",
-    "      enabled: true",
-    // Its selection (account and fallback chain) lives in this private folder, never in config.
-    "    codex-review-account-selector:",
-    "      enabled: true",
-    `      data-dir: ${yamlString(path.join(state, "codex-review-account-selector-data"))}`,
+    `      data-dir: ${yamlString(providerManagerDataDir(state))}`,
+    "      legacy-data-dirs:",
+    ...Object.values(PROVIDER_MANAGER_PARTS).filter((entry) => entry.data)
+      .map((entry) => `        ${entry.part}: ${yamlString(path.join(state, entry.data))}`),
+    "      helper:",
+    "        keeper_enabled: false",
+    "      cline:",
+    `        runtime-executable: ${yamlString(process.execPath)}`,
+    ...(outboundProxyUrl ? [`        proxy-url: ${yamlString(outboundProxyUrl)}`] : []),
     // Ask OpenAI's Responses models for a reasoning summary. Claude Code never sends the
     // `thinking.display` that would make CPA request one, so its chats showed no reasoning; CPA
     // turns the summary into thinking blocks, which the agent then reports as reasoning. A default
@@ -417,7 +499,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   const merged = {
     ...managed, ...retained,
     plugins: { ...saved.plugins, ...managed.plugins,
-      configs: { ...saved.plugins?.configs, ...managed.plugins.configs } },
+      configs: mergePluginConfigs(saved.plugins?.configs, managed.plugins.configs) },
   };
   // In v8 api-keys is the upstream provider map; legacy arrays are client keys, now managed above.
   if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = saved["api-keys"];
@@ -610,13 +692,19 @@ if (require.main === module) {
 }
 
 function helperPricesPath(stateRoot) {
-  return path.join(requiredAbsolutePath(stateRoot, "CPA state root"), "cpa-helper-data", "prices.json");
+  return path.join(providerManagerDataDir(requiredAbsolutePath(stateRoot, "CPA state root")), "helper", "prices.json");
 }
 
 module.exports = {
+  ACCOUNT_KINDS,
+  RETIRED_PLUGINS,
   cpaOnPort,
   endStaleCpa,
   helperPricesPath,
+  mergePluginConfigs,
+  migrateAuthFiles,
+  providerManagerDataDir,
+  stampAccountKind,
   prepare,
   refreshConfiguration,
   run,

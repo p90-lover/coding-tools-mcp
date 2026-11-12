@@ -1,5 +1,7 @@
 "use strict";
 
+const { ACCOUNT_KINDS_PATH, withAccountKinds } = require("./cpa-account-kinds.cjs");
+
 const CPA_LOGIN_ADAPTERS = Object.freeze({
   "cpa-codex": Object.freeze({
     id: "cpa-codex",
@@ -22,13 +24,14 @@ const CPA_LOGIN_ADAPTERS = Object.freeze({
   "cpa-commandcode-go": Object.freeze({
     id: "cpa-commandcode-go",
     kind: "cpa_oauth",
-    route: "commandcode-go-auth-url",
+    // A Provider Manager account kind: its login is Provider Manager's, told which kind to sign in to.
+    route: "provider-manager-auth-url?kind=commandcode-go",
     providers: Object.freeze(["commandcode-go"]),
   }),
   "cpa-commandcode-studio": Object.freeze({
     id: "cpa-commandcode-studio",
     kind: "cpa_oauth",
-    route: "commandcode-auth-url",
+    route: "provider-manager-auth-url?kind=commandcode",
     providers: Object.freeze(["commandcode"]),
   }),
   "cpa-gemini": Object.freeze({
@@ -157,9 +160,9 @@ async function resolveAuthFile({
   if (boundAuthFileName) params.set("name", boundAuthFileName);
   if (boundAuthFileIndex) params.set("auth_index", boundAuthFileIndex);
   const query = params.toString();
-  const listing = await requestJson(
+  const listing = await withAccountKinds(await requestJson(
     `/v0/management/auth-files${query ? `?${query}` : ""}`,
-  );
+  ), () => requestJson(ACCOUNT_KINDS_PATH));
   const files = adapterFiles(listing, adapter);
   const selected = selectAuthFile({
     files,
@@ -222,10 +225,10 @@ async function startCpaAccountLogin({
     return { opened: false, mode: "import", state: null, ...resolved };
   }
 
-  const baselineListing = await request("/v0/management/auth-files");
+  const baselineListing = await withAccountKinds(await request("/v0/management/auth-files"), () => request(ACCOUNT_KINDS_PATH));
   const baselineIds = new Set(adapterFiles(baselineListing, adapter).map((entry) => entry.id));
   // Let initiation return its state even if cancelled, so the finally block can delete it.
-  const login = await requestJson(`/v0/management/${adapter.route}?is_webui=true`);
+  const login = await requestJson(`/v0/management/${adapter.route}${adapter.route.includes("?") ? "&" : "?"}is_webui=true`);
   const state = normalizedText(login?.state);
   const loginUrl = normalizedText(login?.url);
   let browser;

@@ -453,46 +453,59 @@ test("RTK installed without winget isn't upgraded with it, and a winget with not
   await assert.rejects(setup({ releases, rtk: stale.rtk }).plugins.update("rtk"), /winget didn't update rtk 1\.0\.1 .*No available upgrade found/);
 });
 
-test("CPA's start keeps a plugin updated from GitHub while it is newer than the bundled copy",
-  { skip: process.platform !== "win32" || process.arch !== "x64" }, () => {
-    const state = path.join(tempRoot("app-plugins-bundle"), "cpa");
-    const dir = path.join(state, "plugins", "windows", "amd64");
-    fs.mkdirSync(dir, { recursive: true });
-    const updated = "cpa-helper 0.3.0 from GitHub";
-    fs.writeFileSync(path.join(dir, "cpa-helper-v0.3.0.dll"), updated);
-    const record = (version, file, digest) => fs.writeFileSync(path.join(state, "plugin-updates.json"),
-      JSON.stringify({ schemaVersion: 1, plugins: { "cpa-helper": { version, file, sha256: digest } } }));
-    record("0.3.0", "cpa-helper-v0.3.0.dll", sha(updated));
-    const installed = installBundledCommandCodePlugin(state);
-    assert.ok(installed.includes(path.join(dir, "cpa-helper-v0.3.0.dll")));
-    assert.equal(fs.existsSync(path.join(dir, "cpa-helper-v0.2.0.dll")), false, "the bundled 0.2.0 isn't copied over it");
-    // A changed file is no longer the checked update: the bundled copy comes back.
-    fs.writeFileSync(path.join(dir, "cpa-helper-v0.3.0.dll"), "changed");
-    installBundledCommandCodePlugin(state);
-    assert.deepEqual(fs.readdirSync(dir).filter((name) => name.startsWith("cpa-helper-")), ["cpa-helper-v0.2.0.dll"]);
-  });
+// CPA loads one plugin, Provider Manager; its build is the one BUNDLE.json describes.
+const providerManager = () => {
+  const bundle = JSON.parse(fs.readFileSync(path.join(__dirname, "../vendor/bundled/cpa-plugins/BUNDLE.json"), "utf8"));
+  assert.equal(bundle.id, "cpa-provider-manager");
+  return { version: bundle.version, asset: bundle.platforms["win32/x64"], file: path.basename(bundle.platforms["win32/x64"].path) };
+};
 
-test("CPA's bundled quota scheduler replaces an older checked helper update with the pinned DLL",
+test("CPA's start keeps a plugin updated from GitHub while it is newer than the bundled copy",
   { skip: process.platform !== "win32" || process.arch !== "x64" }, (t) => {
-    const root = tempRoot("app-plugins-quota-scheduler");
+    const root = tempRoot("app-plugins-bundle");
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
     const state = path.join(root, "cpa");
     const dir = path.join(state, "plugins", "windows", "amd64");
     fs.mkdirSync(dir, { recursive: true });
-    const older = "cpa-helper 0.1.2 from GitHub";
-    fs.writeFileSync(path.join(dir, "cpa-helper-v0.1.2.dll"), older);
+    const bundled = providerManager();
+    // Newer than any bundled build.
+    const newer = "cpa-provider-manager-v99.0.0.dll";
+    const updated = "cpa-provider-manager 99.0.0 from GitHub";
+    fs.writeFileSync(path.join(dir, newer), updated);
+    fs.writeFileSync(path.join(state, "plugin-updates.json"), JSON.stringify({
+      schemaVersion: 1, plugins: { "cpa-provider-manager": { version: "99.0.0", file: newer, sha256: sha(updated) } },
+    }));
+    const installed = installBundledCommandCodePlugin(state);
+    assert.deepEqual(installed, [path.join(dir, newer)]);
+    assert.equal(fs.existsSync(path.join(dir, bundled.file)), false, `the bundled ${bundled.version} isn't copied over it`);
+    // A changed file is no longer the checked update: the bundled copy comes back.
+    fs.writeFileSync(path.join(dir, newer), "changed");
+    assert.deepEqual(installBundledCommandCodePlugin(state), [path.join(dir, bundled.file)]);
+    assert.deepEqual(fs.readdirSync(dir).filter((name) => name.startsWith("cpa-provider-manager-")), [bundled.file]);
+    assert.equal(sha(fs.readFileSync(path.join(dir, bundled.file))), bundled.asset.sha256);
+  });
+
+test("CPA's bundled Provider Manager replaces an older checked update with the pinned DLL",
+  { skip: process.platform !== "win32" || process.arch !== "x64" }, (t) => {
+    const root = tempRoot("app-plugins-provider-manager");
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const state = path.join(root, "cpa");
+    const dir = path.join(state, "plugins", "windows", "amd64");
+    fs.mkdirSync(dir, { recursive: true });
+    const older = "cpa-provider-manager 0.0.1 from GitHub";
+    fs.writeFileSync(path.join(dir, "cpa-provider-manager-v0.0.1.dll"), older);
     fs.writeFileSync(path.join(state, "plugin-updates.json"), JSON.stringify({
       schemaVersion: 1,
-      plugins: { "cpa-helper": { version: "0.1.2", file: "cpa-helper-v0.1.2.dll", sha256: sha(older) } },
+      plugins: { "cpa-provider-manager": { version: "0.0.1", file: "cpa-provider-manager-v0.0.1.dll", sha256: sha(older) } },
     }));
-    const helper = require("../vendor/bundled/cpa-plugins/BUNDLE.json").helper;
-    assert.equal(helper.version, "0.2.0");
-    assert.equal(helper.source.commit, "0b7178b8b46ededfd7cf67fd0bdb1df11a99a68f");
-    const asset = helper.platforms["win32/x64"];
+    const { asset, file } = providerManager();
     const installed = installBundledCommandCodePlugin(state);
-    const target = path.join(dir, path.basename(asset.path));
-    assert.ok(installed.includes(target));
+    const target = path.join(dir, file);
+    assert.deepEqual(installed, [target]);
     assert.equal(sha(fs.readFileSync(target)), asset.sha256);
     assert.equal(fs.statSync(target).size, asset.size);
-    assert.equal(fs.existsSync(path.join(dir, "cpa-helper-v0.1.2.dll")), false);
+    assert.equal(fs.existsSync(path.join(dir, "cpa-provider-manager-v0.0.1.dll")), false);
+    const trash = path.join(state, "Trash", "plugins");
+    assert.deepEqual(fs.readdirSync(trash).map((name) => fs.readdirSync(path.join(trash, name))), [["cpa-provider-manager-v0.0.1.dll"]],
+      "the older copy is kept in Trash");
   });

@@ -6,16 +6,21 @@ const os = require("node:os");
 const path = require("node:path");
 const { clineModelsRevision, syncClineMarker, watchCpaPluginModels } = require("../electron/cpa-plugin-models.cjs");
 
-function stateRoot({ models, marker = { type: "cline", switcher: true, label: "Cline Pass" } }) {
+// The switcher is Provider Manager's "cline" part: its state is in Provider Manager's folder, and the
+// bridge marker is a provider-manager auth file of kind "cline".
+const STAMPED = { type: "provider-manager", kind: "cline", kindType: "cline", switcher: true, label: "Cline Pass" };
+const clineData = (root) => path.join(root, "cpa-provider-manager-data", "cline");
+
+function stateRoot({ models, marker = STAMPED }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-plugin-models-"));
-  fs.mkdirSync(path.join(root, "cline-pass-switcher-data"), { recursive: true });
+  fs.mkdirSync(clineData(root), { recursive: true });
   fs.mkdirSync(path.join(root, "auth"), { recursive: true });
-  fs.writeFileSync(path.join(root, "cline-pass-switcher-data", "config.json"), JSON.stringify({ knownModels: models, perModel: {}, accounts: [{ key: "secret" }] }));
+  fs.writeFileSync(path.join(clineData(root), "config.json"), JSON.stringify({ knownModels: models, perModel: {}, accounts: [{ key: "secret" }] }));
   if (marker) fs.writeFileSync(path.join(root, "auth", "cline-pass-switcher.json"), JSON.stringify(marker));
   return root;
 }
 const markerOf = (root) => JSON.parse(fs.readFileSync(path.join(root, "auth", "cline-pass-switcher.json"), "utf8"));
-const configOf = (root) => path.join(root, "cline-pass-switcher-data", "config.json");
+const configOf = (root) => path.join(clineData(root), "config.json");
 
 test("the revision follows the model list, not its order or the switcher's other settings", () => {
   const one = clineModelsRevision({ knownModels: ["a", "b"], perModel: { c: {} }, accounts: [1] });
@@ -28,7 +33,7 @@ test("a model the switcher learns rewrites the bridge marker so CPA reloads it, 
   const root = stateRoot({ models: ["cline-pass/deepseek-v4-flash"] });
   assert.equal(await syncClineMarker(root), true, "the first sync stamps the marker");
   const first = markerOf(root);
-  assert.deepEqual({ ...first, modelsRevision: undefined }, { type: "cline", switcher: true, label: "Cline Pass", modelsRevision: undefined });
+  assert.deepEqual({ ...first, modelsRevision: undefined }, { ...STAMPED, modelsRevision: undefined });
   assert.equal(await syncClineMarker(root), false, "an unchanged list leaves the marker alone");
   fs.writeFileSync(configOf(root), JSON.stringify({ knownModels: ["cline-pass/deepseek-v4-flash", "cline-pass/deepseek-v4.1-flash"], perModel: {} }));
   assert.equal(await syncClineMarker(root), true);
@@ -43,7 +48,22 @@ test("a missing or foreign marker and a missing config are left alone", async ()
   const foreign = stateRoot({ models: ["x"], marker: { type: "codex", email: "a@b" } });
   assert.equal(await syncClineMarker(foreign), false);
   assert.deepEqual(markerOf(foreign), { type: "codex", email: "a@b" });
-  const disabled = stateRoot({ models: ["x"], marker: { type: "cline", switcher: true, disabled: true } });
+  // Another Provider Manager kind is not the switcher's marker, even with its flag.
+  const otherKind = { type: "provider-manager", kind: "grok", kindType: "grok", switcher: true };
+  const grok = stateRoot({ models: ["x"], marker: otherKind });
+  assert.equal(await syncClineMarker(grok), false);
+  assert.deepEqual(markerOf(grok), otherKind);
+  // A marker not yet stamped (before the auth files were migrated) still follows the models.
+  const unstamped = stateRoot({ models: ["x"], marker: { type: "cline", switcher: true, label: "Cline Pass" } });
+  assert.equal(await syncClineMarker(unstamped), true);
+  assert.equal(markerOf(unstamped).type, "cline");
+  // The switcher's former folder is no longer read.
+  const legacy = stateRoot({ models: ["x"] });
+  fs.mkdirSync(path.join(legacy, "cline-pass-switcher-data"));
+  fs.renameSync(configOf(legacy), path.join(legacy, "cline-pass-switcher-data", "config.json"));
+  assert.equal(await syncClineMarker(legacy), false);
+  assert.deepEqual(markerOf(legacy), STAMPED);
+  const disabled = stateRoot({ models: ["x"], marker: { ...STAMPED, disabled: true } });
   assert.equal(await syncClineMarker(disabled), true);
   assert.equal(markerOf(disabled).disabled, true, "the marker's own fields are kept");
   fs.rmSync(configOf(disabled));
@@ -71,10 +91,10 @@ test("with the catalog exposed, an upstream catalog refresh changes the revision
   assert.equal(clineModelsRevision(hidden, { catalog: ["x"] }), clineModelsRevision(hidden, { catalog: ["y"] }));
   const root = stateRoot({ models: ["a"] });
   fs.writeFileSync(configOf(root), JSON.stringify(exposed));
-  fs.writeFileSync(path.join(root, "cline-pass-switcher-data", "metadata.json"), JSON.stringify({ catalog: ["a", "b"] }));
+  fs.writeFileSync(path.join(clineData(root), "metadata.json"), JSON.stringify({ catalog: ["a", "b"] }));
   assert.equal(await syncClineMarker(root), true);
   assert.equal(await syncClineMarker(root), false);
-  fs.writeFileSync(path.join(root, "cline-pass-switcher-data", "metadata.json"), JSON.stringify({ catalog: ["a", "b", "c"] }));
+  fs.writeFileSync(path.join(clineData(root), "metadata.json"), JSON.stringify({ catalog: ["a", "b", "c"] }));
   assert.equal(await syncClineMarker(root), true, "the marker follows the catalog");
 });
 
