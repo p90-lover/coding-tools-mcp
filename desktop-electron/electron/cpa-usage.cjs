@@ -3,6 +3,7 @@ const { fetchOffThread } = require("./off-thread-run.cjs");
 
 const { MODEL_PRICES } = require("./cpa-model-prices.cjs");
 const { accountOf } = require("./cpa-quota.cjs");
+const { withAccountKinds } = require("./cpa-account-kinds.cjs");
 
 // Each CPA account's token use, request count and estimated cost, for the CPA accounts view and
 // the chat's context meter, with what is known of its quota (Codex: CPA Helper's 5-hour and weekly
@@ -416,7 +417,7 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
 
     const [modelListing, fileListing, codex, splits] = await Promise.all([
       optional(target, `/cpa-helper/rankings?${query({ group: "model" })}`),
-      optional(target, "/auth-files"),
+      optional(target, "/auth-files").then((listing) => withAccountKinds(listing, () => optional(target, "/cpa-provider-manager/api/kinds"))),
       quota?.read ? quota.read().catch(() => null) : null,
       mapLimited(authRows.slice(0, MAX_SPLIT_ACCOUNTS).filter((row) => row?.key), SPLIT_CONCURRENCY, async (row) => {
         const listing = await optional(target, `/cpa-helper/rankings?${query({ group: "model", auth: String(row.key) })}`);
@@ -443,7 +444,8 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
     // The chat meter's quota reader caps its account list. Cards need every account's cached window,
     // without triggering extra upstream quota refreshes.
     const [files, quotas] = await Promise.all([
-      optional(target, "/auth-files"), optional(target, "/cpa-helper/codex/accounts"),
+      optional(target, "/auth-files").then((listing) => withAccountKinds(listing, () => optional(target, "/cpa-provider-manager/api/kinds"))),
+      optional(target, "/cpa-helper/codex/accounts"),
     ]);
     if (!Array.isArray(files?.files)) return { ok: true, available: false, reason: "CPA accounts are unavailable" };
     const at = now();

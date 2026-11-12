@@ -88,25 +88,32 @@ test("CPA config follows the selected authenticated global profile", async () =>
   assert.match(config, /^  enabled: true$/m);
   assert.ok(config.includes(`  dir: ${JSON.stringify(pluginDirectory)}`));
   assert.equal(fs.statSync(pluginDirectory).isDirectory(), true);
-  assert.match(config, /^    commandcode-go:$/m);
-  assert.match(config, /^    auth-commandcode:$/m);
+  // CPA skips a plugin that has no configs entry: Provider Manager is listed, and it alone.
+  assert.match(config, /^    cpa-provider-manager:\r?\n      enabled: true$/m);
+  assert.deepEqual([...config.matchAll(/^ {4}([\w-]+):\r?$/gm)].map((match) => match[1]), ["cpa-provider-manager"]);
   // CPA Helper keeps its data under CPA's state, never in CPA's working directory.
-  assert.match(config, /^    cpa-helper:$/m);
-  assert.ok(config.includes(`      data_dir: ${JSON.stringify(path.join(root, "cpa", "cpa-helper-data"))}`));
-  assert.match(config, /^      keeper_enabled: false$/m);
-  // CPA skips a plugin that has no configs entry, so the Grok provider must be listed.
-  assert.match(config, /^    grok-login-provider:\r?\n      enabled: true$/m);
+  assert.ok(config.includes(`      data-dir: ${JSON.stringify(path.join(root, "cpa", "cpa-provider-manager-data"))}`));
+  assert.ok(config.includes(`        helper: ${JSON.stringify(path.join(root, "cpa", "cpa-helper-data"))}`));
+  assert.match(config, /^      helper:\r?\n        keeper_enabled: false$/m);
+  // The Cline Pass part reaches Cline through the same outbound route as CPA.
+  assert.match(config, /^        proxy-url: "http:\/\/account:p%40ss%3Aword@proxy\.example\.test:10000\/"$/m);
   if (process.platform === "win32" && process.arch === "x64") {
     const platformDir = path.join(pluginDirectory, "windows", "amd64");
     fs.mkdirSync(platformDir, { recursive: true });
     fs.writeFileSync(path.join(platformDir, "commandcode-go-v0.9.0.dll"), "old plugin");
     fs.writeFileSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll"), "old plugin");
     const installed = installBundledCommandCodePlugin(path.join(root, "cpa"));
-    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [7_897_088, 7_707_648, 14_867_968, 850_432, 24_951_296, 3_384_832]);
+    const bundle = JSON.parse(fs.readFileSync(path.join(__dirname, "../vendor/bundled/cpa-plugins/BUNDLE.json"), "utf8"));
+    assert.deepEqual(installed.map((file) => fs.statSync(file).size), [bundle.platforms["win32/x64"].size]);
     assert.equal(fs.existsSync(path.join(platformDir, "commandcode-go-v0.9.0.dll")), false);
     assert.equal(fs.existsSync(path.join(platformDir, "auth-commandcode-v0.0.1.dll")), false);
-    assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 2);
+    // Both retired plugins leave together, into one Trash folder.
+    const trash = fs.readdirSync(path.join(root, "cpa", "Trash", "plugins"));
+    assert.equal(trash.length, 1);
+    assert.deepEqual(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins", trash[0])).sort(),
+      ["auth-commandcode-v0.0.1.dll", "commandcode-go-v0.9.0.dll"]);
     assert.deepEqual(installBundledCommandCodePlugin(path.join(root, "cpa")), installed);
+    assert.equal(fs.readdirSync(path.join(root, "cpa", "Trash", "plugins")).length, 1, "a second start moves nothing");
   }
   assert.doesNotMatch(redactText(`Proxy failed: ${route.url}`), /account|p%40ss/);
 
@@ -132,7 +139,8 @@ test("CPA config follows the selected authenticated global profile", async () =>
   for (const componentId of ["paseo", "codex-router", "commandcode-proxy", "anneal"]) {
     assert.deepEqual(resolveManagedProxyEnvironment(componentId, path.join(root, "integrations"), safeStorage), {});
   }
-  assert.doesNotMatch(runtimeConfiguration(path.join(root, "cpa"), "m".repeat(36), "k".repeat(36), direct.url), /^proxy-url:/m);
+  // Direct: neither CPA nor the Cline Pass part has a route.
+  assert.doesNotMatch(runtimeConfiguration(path.join(root, "cpa"), "m".repeat(36), "k".repeat(36), direct.url), /^\s*proxy-url:/m);
 
   const savedFile = path.join(providers, "provider-network.json");
   const broken = JSON.parse(fs.readFileSync(savedFile, "utf8"));

@@ -79,10 +79,35 @@ const TOOL_CALL_TIMEOUT_MS = 120_000;
 const PULL_REQUEST_CACHE_MS = 120_000;
 const PULL_REQUEST_TIMEOUT_MS = 10_000;
 
-/** Runs the GitHub CLI in a folder and resolves with what it prints (rejects on a non-zero exit). */
-function runGhCommand({ cwd, args, timeoutMs }) {
+/**
+ * A program's absolute path from PATH's absolute folders, or null. Only .exe and .com on Windows:
+ * execFile runs no .cmd or .bat without a shell. A relative entry ("." or an empty one) is skipped,
+ * since it would mean the folder the program runs in.
+ */
+async function executableOnPath(name, { pathValue = process.env.PATH ?? "", platform = process.platform, stat = fs.promises.stat } = {}) {
+  const folders = String(pathValue).split(path.delimiter).map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+    .filter((entry) => entry && path.isAbsolute(entry));
+  for (const folder of folders) {
+    for (const extension of platform === "win32" ? [".exe", ".com"] : [""]) {
+      const candidate = path.join(folder, `${name}${extension}`);
+      try { if ((await stat(candidate)).isFile()) return candidate; } catch { /* not in this folder */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Runs the GitHub CLI in a folder and resolves with what it prints (rejects on a non-zero exit). It is
+ * found on PATH first: given a bare "gh" with a chat's worktree as cwd, Windows ran a gh.exe in that
+ * worktree before the one on PATH (libuv looks in the child's cwd first unless
+ * NoDefaultCurrentDirectoryInExePath is set), so an agent or a cloned repository could have the app
+ * run its own program outside the chat's sandbox, with no approval (2026-11-13).
+ */
+async function runGhCommand({ cwd, args, timeoutMs }) {
+  const gh = await executableOnPath("gh");
+  if (!gh) throw new Error("The GitHub CLI (gh) is not on PATH");
   return new Promise((resolve, reject) => {
-    require("node:child_process").execFile("gh", args, { cwd, timeout: timeoutMs, windowsHide: true, encoding: "utf8", maxBuffer: 256 * 1024 },
+    require("node:child_process").execFile(gh, args, { cwd, timeout: timeoutMs, windowsHide: true, encoding: "utf8", maxBuffer: 256 * 1024 },
       (error, stdout) => (error ? reject(error) : resolve(stdout)));
   });
 }
@@ -3384,6 +3409,8 @@ function createChatAgentTools({
 }
 
 module.exports = Object.freeze({
+  executableOnPath,
+  runGhCommand,
   moveTarget,
   AGENT_TOOLS,
   DESKTOP_TOOLS,

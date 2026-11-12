@@ -2020,6 +2020,17 @@ test("a running turn with no agent process behind it is over: interrupted, with 
   const coming = await starting.observe("s");
   assert.equal(coming.turnState, "running", "an agent still starting has no controller yet, and is not gone");
   assert.equal(coming.agentGone, undefined);
+  assert.equal(coming.controllerUp, undefined, "its controller is not up yet");
+  // AO's controller_start is over, only the opening prompt's delivery is left: the launch watchdog
+  // gives that stage its own, much shorter bound.
+  const draining = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation?limit=100&includePending=1")
+      ? { controller: "ready", turns: [{ id: "t", state: "queued" }], messages: [], activities: [] }
+      : { session: { id: "s", mode: "chat", status: "working", provisionState: "provisioning" } },
+  });
+  const up = await draining.observe("s");
+  assert.equal(up.provisioning, true);
+  assert.equal(up.controllerUp, true);
 });
 
 test("a running turn whose controller stopped while its chat host is still up keeps running", async () => {

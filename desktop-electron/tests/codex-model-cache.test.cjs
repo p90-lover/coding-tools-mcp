@@ -107,3 +107,51 @@ test("Restart Codex stays up while a Codex keeps going around the bridge, and cl
   assert.equal(restart, false, "45 minutes with every list through the bridge clears it, though the version changed");
   assert.deepEqual(changes, [true, false]);
 });
+
+// 2026-11-12: the notice is saved with the app's settings, but when a Codex last went around the bridge
+// is not. After an app restart the watch had seen no list around the bridge, so no list could clear the
+// notice, and it has no button: it stayed up after the Codex app was restarted.
+test("a Restart Codex notice from before the app restarted clears after a quiet spell counted from the watch's start", async () => {
+  const at = (iso, webModels) => ({ fetchedAt: Date.parse(iso), modifiedAt: Date.parse(iso), webModels, clientVersion: "0.164.0" });
+  const started = (lists) => {
+    const state = { restart: true, changes: [] };
+    let next = 0;
+    const watch = watchCodexModelCache({
+      codexHome: "home", routed: () => true, bridgeServedAt: async () => Date.parse("2026-11-12T13:50:00Z"),
+      restartRequired: () => state.restart, setRestartRequired: (value) => { state.restart = value; state.changes.push(value); },
+      read: async () => lists[next++], now: () => Date.parse("2026-11-12T14:00:00Z"), setInterval: () => ({}), clearInterval: () => {},
+    });
+    return { state, check: () => watch.check() };
+  };
+  // The Codex app was restarted while the app was closed: from now on every list goes through the bridge.
+  const restarted = started([at("2026-11-12T14:05:00Z", true), at("2026-11-12T14:46:00Z", true)]);
+  await restarted.check();
+  assert.equal(restarted.state.restart, true, "a Codex that went around the bridge may still run: 5 minutes is not yet quiet");
+  await restarted.check();
+  assert.equal(restarted.state.restart, false, "46 minutes from the start with every list through the bridge clears it");
+  assert.deepEqual(restarted.state.changes, [false]);
+  // The Codex app still goes around the bridge: the quiet spell counts from its latest list.
+  const still = started([at("2026-11-12T14:20:00Z", false), at("2026-11-12T14:50:00Z", true), at("2026-11-12T15:06:00Z", true)]);
+  await still.check();
+  await still.check();
+  assert.equal(still.state.restart, true, "30 minutes after a list around the bridge is not yet quiet");
+  await still.check();
+  assert.equal(still.state.restart, false);
+  assert.deepEqual(still.state.changes, [false], "never switched off and on again in between");
+});
+
+test("the watch leaves Restart Codex alone when no notice was up at its start", async () => {
+  let restart = false;
+  const changes = [];
+  const watch = watchCodexModelCache({
+    codexHome: "home", routed: () => true, bridgeServedAt: async () => Date.parse("2026-11-12T13:50:00Z"),
+    restartRequired: () => restart, setRestartRequired: (value) => { restart = value; changes.push(value); },
+    read: async () => ({ fetchedAt: Date.parse("2026-11-12T15:05:00Z"), modifiedAt: 1, webModels: true, clientVersion: "0.164.0" }),
+    now: () => Date.parse("2026-11-12T14:00:00Z"), setInterval: () => ({}), clearInterval: () => {},
+  });
+  // Raised later by a setup step (the catalog check clears that one), not by a list around the bridge.
+  restart = true;
+  await watch.check();
+  assert.equal(restart, true);
+  assert.deepEqual(changes, []);
+});
