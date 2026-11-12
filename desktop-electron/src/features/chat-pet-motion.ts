@@ -234,6 +234,17 @@ export function pickClear(spans: readonly Span[], x: number, random: () => numbe
   return spans.at(-1)!.right;
 }
 
+/** The CLI's turn frames Clawd walks in: its body turned a little toward where it goes. */
+export const WALK_FACING = { left: "left-30", right: "right-30" } as const;
+
+/**
+ * Turning round to face `way` (-1 left, 1 right) through the CLI's turn frames: its body comes round
+ * past the front, rather than its eyes flicking across while its body stays put.
+ */
+export function turnFacings(way: -1 | 1): ("left-30" | "left-12" | "right-12" | "right-30")[] {
+  return way < 0 ? ["right-30", "right-12", "left-12", "left-30"] : ["left-30", "left-12", "right-12", "right-30"];
+}
+
 /** Place work props on the inside of the chat box instead of clipping them at its edge. */
 export function petToolSide(x: number, width: number): "left" | "right" {
   return Number.isFinite(x) && Number.isFinite(width) && x < width / 2 ? "right" : "left";
