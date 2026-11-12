@@ -10971,6 +10971,42 @@ test(`"Retry automatically" waits less before retrying a failure that never reac
     workflow.dispose();
   }
 });
+test("an automatic retry's pause runs from when the step failed, not from when the loop saw it", async () => {
+  // 2026-11-12: retries fired 15, 23, 36 and 67 s after pauses of 10, 20, 30 and 60 s.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // It failed 6 s before the loop's read found it held.
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: "API Error: 500", finished_at_ms: clock - 6_000 } };
+    let detail = "";
+    for (let tries = 0; tries < 100 && !/Retrying automatically in/.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, /Retrying automatically in 4s \(attempt 1 of 8\)/, "10 s from the failure, 6 s of them already gone");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    workflow.dispose();
+  }
+});
 for (const [label, error, fails] of [
   ["its version probe failed", "spawn: chat driver incompatible: read Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)", true],
   ["its handshake timed out", "spawn s-1: chat controller: chat driver incompatible: ACP initialize: {\"code\":-32603,\"message\":\"Internal error\",\"data\":{\"error\":\"context deadline exceeded\"}}", false],

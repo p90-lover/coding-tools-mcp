@@ -4976,7 +4976,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
     if (!autoRetrySeen.has(key)) {
-      autoRetrySeen.set(key, now());
+      // The pause runs from when the step failed (its receipt says), not from when this loop first
+      // saw it: the 3-7 s between the two were added to every pause (2026-11-12). A time ahead of
+      // this clock, or none, counts from now.
+      const failedAt = Number(node.receipt?.finished_at_ms);
+      autoRetrySeen.set(key, Number.isFinite(failedAt) && failedAt > 0 ? Math.min(failedAt, now()) : now());
       if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
     }
     const wait = autoRetryPause(attempt, localFailure(error)) - (now() - autoRetrySeen.get(key));
@@ -5547,7 +5551,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // (2 s and 5 s for a failure that never reached the provider).
       const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
       const attempt = (held?.history?.length ?? 0) + 1;
-      later(autoRetryPause(attempt, localFailure(String(held?.receipt?.error || ""))), () => {
+      // Counted from when the step failed, as autoRetryStep counts it.
+      const failedAt = Number(held?.receipt?.finished_at_ms);
+      const since = Number.isFinite(failedAt) && failedAt > 0 ? Math.max(0, now() - Math.min(failedAt, now())) : 0;
+      later(Math.max(0, autoRetryPause(attempt, localFailure(String(held?.receipt?.error || ""))) - since), () => {
         void (async () => {
           const latest = await mission();
           if (!current() || !autoRetryAllowed(latest)) return;
