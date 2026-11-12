@@ -2114,6 +2114,9 @@ export function AgentOrchestratorChat({
   useEffect(() => { setDeleting(null); }, [selectedTaskId, projectId]);
   const deleteBlocked = runOpen || working ? "Stop the chat first to delete a message"
     : rewindPoints.length <= 1 ? "This is the chat's only message; archive or delete the chat instead" : "";
+  // Rewind sends the chosen message again, which the main process refuses while the chat works
+  // ("Stop the chat before rewinding a message", seen live 2026-11-12): it is offered as delete is.
+  const rewindBlocked = runOpen || working ? "Stop the chat first to rewind a message" : "";
   const notYet = "This message hasn't run yet. Delete it after its turn runs";
   const confirmDelete = async () => {
     const target = deleting;
@@ -2274,6 +2277,7 @@ export function AgentOrchestratorChat({
           break;
         case "rewind": {
           if (!thread?.rewind) break;
+          if (rewindBlocked) { say("Rewind", `${rewindBlocked}.`); break; }
           if (!rewindPoints.length) { say("Rewind", "No message to go back to yet."); break; }
           const pick = Number(arg);
           if (arg) {
@@ -2640,7 +2644,8 @@ export function AgentOrchestratorChat({
       <div className="cx-msg-foot"><SteerReader.Provider value={steerReader(lead)}><SteerReceiptMark receipt={turnReceipt(turn, items, live)} /></SteerReader.Provider>
       <MessageActions text={chatMessageReadable(turn.user.text)}>
         {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
-        {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
+        {thread?.rewind ? <button type="button" title={rewindBlocked || "Rewind and resend this message (files are unchanged)"} aria-label="Rewind to this message"
+          disabled={Boolean(rewindBlocked)} onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
         {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
           disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(deletion(turn))}><ChatGlyph name="delete" /></button> : null}
       </MessageActions></div>
@@ -2703,7 +2708,7 @@ export function AgentOrchestratorChat({
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
+  }), [turns, thread, deleteBlocked, rewindBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
     replyStyle, roundFolds, openRounds, drawStart, missionWork, goalStart, agentSessionIds, selectedTaskId]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>

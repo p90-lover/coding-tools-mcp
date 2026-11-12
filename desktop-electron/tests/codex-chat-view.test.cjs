@@ -788,7 +788,7 @@ test("a stuck turn without recovery capability or accepted identity reports reco
   });
 });
 
-test("while the agent works, /review, /init and a new goal steer it; /rewind goes back to a message", async () => {
+test("while the agent works, /review, /init and a new goal steer it; /rewind waits for the chat to stop, then goes back to a message", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const steered = [], rewound = [];
   const { props, calls } = base({ selectedTaskId: "t", working: true,
@@ -816,7 +816,20 @@ test("while the agent works, /review, /init and a new goal steer it; /rewind goe
   assert.doesNotMatch(text(card() ?? { props: {} }), /Queued/);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 
-  // /rewind lists the messages (newest first) and opens the chosen one to edit; a number picks directly.
+  // While it works, rewind is held as delete is: the main process refuses it ("Stop the chat before
+  // rewinding a message", seen live 2026-11-12), so /rewind says why and each Rewind button is off.
+  const rewindButtons = () => walk(view.render()).filter((element) => element.props?.["aria-label"] === "Rewind to this message");
+  type("/rewind"); await enter();
+  assert.match(text(card()), /Stop the chat first to rewind a message/);
+  type("/rewind 1"); await enter();
+  assert.deepEqual(rewound, [], "nothing is rewound while the chat works");
+  assert.ok(rewindButtons().length >= 1, "each message offers Rewind");
+  assert.ok(rewindButtons().every((button) => button.props.disabled === true && /Stop the chat first to rewind/.test(button.props.title)),
+    "and says why it is off");
+
+  // Once the turn has finished, /rewind lists the messages (newest first) and opens the chosen one; a number picks directly.
+  props.working = false;
+  props.runs = [run("r1", "t", [node("w", "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { answer: "done" } })], { execution_mode: "single" })];
   type("/rewind"); await enter();
   const items = walk(card()).filter((element) => element.type === "button" && /^\d+\. /.test(text(element)));
   assert.ok(items.length >= 1, "each message is a rewind point");
@@ -826,7 +839,7 @@ test("while the agent works, /review, /init and a new goal steer it; /rewind goe
   assert.deepEqual(rewound, [0, 0]);
   type("/rewind 99"); await enter();
   assert.match(text(card()), /Choose a message from 1 to \d+/);
-  assert.ok(walk(view.render()).some((element) => element.props?.["aria-label"] === "Rewind to this message"), "each message offers Rewind");
+  assert.ok(rewindButtons().length >= 1 && rewindButtons().every((button) => !button.props.disabled), "each message offers Rewind again");
 });
 
 test("a working WebGPT (Native Codex) chat steers its turn, as the Codex bridge does", async () => {
