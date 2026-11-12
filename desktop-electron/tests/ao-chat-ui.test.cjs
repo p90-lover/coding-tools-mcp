@@ -1136,7 +1136,9 @@ test("the pet is Claude Code's Clawd: the CLI's glyphs, poses and frame-by-frame
   // The CLI's animation lengths at 60 ms a frame, and a click picks only those that start in place.
   const lengths = Object.fromEntries(Object.entries(clawd.ANIMATIONS).map(([name, frames]) => [name, frames.length]));
   assert.deepEqual(lengths, { jump: 12, look: 11, celebrate: 15, skip: 14, spin: 10, peekaboo: 21, drop: 13, waddle: 19, peek: 20,
-    wink: 6, boop: 11, tap: 14, sneeze: 12, turn: 19, "coin-hop": 14 });
+    wink: 6, boop: 11, tap: 14, sneeze: 12, turn: 19, "coin-hop": 14,
+    // Its own extras (2026-11-12), built from the CLI's parts; the CLI's set above is unchanged.
+    wave: 11, stretch: 14, yawn: 15, dance: 21, dizzy: 15, sad: 17, peer: 16 });
   assert.equal(clawd.FRAME_MS, 60);
   assert.deepEqual(JSON.parse(JSON.stringify(clawd.CLICKABLE)), ["jump", "look", "spin", "peekaboo", "drop", "wink", "boop", "tap", "sneeze", "turn", "coin-hop"]);
   // The pet draws it in its 72×48 clipping box.
