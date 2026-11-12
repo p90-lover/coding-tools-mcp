@@ -7541,6 +7541,55 @@ test("a follow-up that cannot continue its agent says which session and why befo
   assert.ok(Number.isFinite(lost.timing.checkMs) && Number.isFinite(lost.timing.sendMs), "the check and the send are timed");
 });
 
+test("a follow-up its live agent does not take within 30 s stops that agent, then starts fresh", async () => {
+  // 2026-11-12: 2 of 6 continued sends waited AO's full 180 s POST default before the fresh
+  // fallback (308 s and 253 s in all). The send has its own 30 s bound now; one that ran out may
+  // still reach the agent, so that agent is stopped before the new one starts.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const order = [];
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map(), infos = [];
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask\n\nFollow-up: now run the tests" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    logger: { info: (event, fields) => infos.push([event, fields]), warn() {} },
+    aoHarness: {
+      continuable: async () => true,
+      send: async (id, text, key, options) => {
+        order.push(["send", id, options?.timeoutMs]);
+        throw Object.assign(new Error("The operation was aborted due to timeout"), { name: "TimeoutError" });
+      },
+      releaseAgent: async id => { order.push(["release", id]); return { ok: true }; },
+      spawn: async () => { order.push(["spawn"]); return "new-session"; },
+      observe: async (id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "done" }),
+    },
+  });
+  try {
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now run the tests", executionMode: "single", singleRoute: route });
+    for (let tries = 0; tries < 300 && !order.some(([step]) => step === "spawn"); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(order, [["send", "sess-1", 30_000], ["release", "sess-1"], ["spawn"]], "bounded, then the old agent stops before the new one starts");
+    assert.ok(infos.some(([event, fields]) => event === "ao.continued_send_timed_out" && fields.session === "sess-1" && fields.released === true));
+  } finally { workflow.dispose(); }
+});
+
 /** A chat_send whose launch continues sess-1 (`continues`) or starts fresh, with Settings › Instructions saved. */
 async function instructedLaunch(continues) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",

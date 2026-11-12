@@ -681,6 +681,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // instead. A healthy one takes it in about 1.6 s. Seen live: one ready for five minutes never
   // started the turn, and the send waited out AO's 180 s request timeout before the fresh start.
   const WARM_SEND_TIMEOUT_MS = 10_000;
+  // A follow-up sent into the chat's live agent (a continued session): AO takes it in about a
+  // second, eight or nine under disk load. Without a bound of its own it took the POST default of
+  // 180 s: 2 of 6 continuations waited all of it before the fresh fallback (308 s and 253 s in all,
+  // 2026-11-12). Past this, the agent is stopped and a fresh one starts with the chat so far.
+  const CONTINUED_SEND_TIMEOUT_MS = 30_000;
+  const SEND_TIMED_OUT = /TimeoutError|timed? ?out|aborted due to timeout/i;
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
@@ -1718,10 +1724,27 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
           const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
           const sendStarted = now();
-          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key)
-            .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
+          let sendTimedOut = false;
+          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key,
+            { timeoutMs: CONTINUED_SEND_TIMEOUT_MS })
+            .catch((error) => {
+              sendError = publicText(error?.message || error, 200);
+              sendTimedOut = SEND_TIMED_OUT.test(`${error?.name ?? ""} ${error?.cause?.name ?? ""} ${error?.message ?? error}`);
+              return null;
+            });
           sendMs = now() - sendStarted;
           if (sent?.turnId) givenInstructions(continued.session, standing.hash);
+          // A send that ran out of time may still reach the agent: it is stopped (its session,
+          // worktree and conversation stay) before the fresh agent starts, so the two never work on
+          // the message side by side.
+          if (!sent?.turnId && (sendTimedOut || sendMs >= CONTINUED_SEND_TIMEOUT_MS)) {
+            stage("stopping the chat's agent, which did not take the message in time");
+            const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId)).catch(() => null);
+            logger?.info?.("ao.continued_send_timed_out", { session: continued.session, sendMs, released: stopped?.ok === true || stopped?.exiting === true });
+            if (stopped?.ok !== true && stopped?.exiting !== true) {
+              throw new Error("The chat's agent did not take the message within 30 seconds and could not be stopped; retry the step.");
+            }
+          }
         }
         // A follow-up that should have continued the chat's session starts a fresh one: logged with
         // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
