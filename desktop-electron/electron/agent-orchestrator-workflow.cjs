@@ -3286,7 +3286,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return result;
     } finally { logger?.info?.("ao.stop_timing", clock.fields({ ok })); }
   }
-  async function controlSteps({ workspaceId, runId, action, executable, nodeId } = {}, clock = stepClock(now)) {
+  async function controlSteps({ workspaceId, runId, action, executable, nodeId, automatic = false } = {}, clock = stepClock(now)) {
     if (!["pause", "resume", "stop", "retry", "retry_auto", "review_failures"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
     const clearCompactions = action === "stop" ? pendingCompactionStop(id, run) : null;
@@ -3339,8 +3339,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // refuses the message still falls back to a fresh start (dispatchExternal).
     // The run is running again: a round its goal judged before is judged again when it settles.
     if (["retry", "retry_auto", "resume"].includes(action) && result.run) reopenGoalRound(id, result.run);
-    // A retry is a fresh attempt: "Retry automatically" covers its failures again.
-    if (action === "retry" || action === "retry_auto") autoRetryCancelled.delete(runKey(id, run));
+    // A person's retry is a fresh attempt: "Retry automatically" covers its failures again. The app's
+    // own retries (automatic) keep a cancel the person made meanwhile, such as a setup change made
+    // while that retry's control call was in flight.
+    if ((action === "retry" || action === "retry_auto") && !automatic) autoRetryCancelled.delete(runKey(id, run));
     if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
       const card = result.run.nodes?.[0];
       const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
@@ -3374,9 +3376,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const newer = position >= 0 ? saved.runs.slice(position + 1) : [];
       // The run's cards as the control call left them: the project read is taken beside that call,
       // so a receipt AO replaced meanwhile shows only in its answer.
-      const after = result.run?.id === run && Array.isArray(result.run.nodes) && result.run.nodes.length ? result.run : saved.runs[position];
+      const after = result.run?.id === run && Array.isArray(result.run.nodes) && result.run.nodes.length ? result.run : saved?.runs[position];
       for (const target of stopTargets) {
-        const node = after.nodes?.find(node => node.id === target.nodeId);
+        const node = after?.nodes?.find(node => node.id === target.nodeId);
         if (node?.receipt?.thread_id !== target.sessionId || (node.receipt.request_key ?? node.request_key) !== target.requestKey) {
           throw new Error("Owned session identity changed while stopping; refresh before retrying");
         }
@@ -5265,7 +5267,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // (workers a review set aside too), and retry_auto refuses a worker with two attempts already.
       // A single-model run has the one card, retried as its other recoveries retry it.
       const single = mission.execution_mode === "single";
-      await controlRun({ workspaceId, runId: mission.id, action: "retry", ...(single ? {} : { nodeId: outage.id }) });
+      await controlRun({ workspaceId, runId: mission.id, action: "retry", automatic: true, ...(single ? {} : { nodeId: outage.id }) });
       outageAttempts.set(`${mission.id}:${outage.id}`, outageRetry.attempt);
       if (outageAttempts.size > 500) outageAttempts.delete(outageAttempts.keys().next().value);
       logger?.info?.("ao.outage_retried", { attempt: outageRetry.attempt, role: outage.role });
@@ -5279,14 +5281,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!interrupted) {
         const auto = chatPreferences.get().autoRetry ? autoRetryStep(mission, held) : null;
         if (auto?.retry) {
-          await controlRun({ workspaceId, runId: mission.id, action: "retry" });
+          await controlRun({ workspaceId, runId: mission.id, action: "retry", automatic: true });
           logger?.info?.("ao.auto_retried", { attempt: auto.attempt });
           return { changed: true, retried: true, detail: `Retrying the failed step, attempt ${auto.attempt} of ${AUTO_RETRY_LIMIT}` };
         }
         if (auto?.detail) return { detail: auto.detail, ...(auto.waiting ? { waiting: true } : {}) };
         return { detail: "The model failed. Check the saved answer, then retry." };
       }
-      await controlRun({ workspaceId, runId: mission.id, action: "retry" });
+      await controlRun({ workspaceId, runId: mission.id, action: "retry", automatic: true });
       return { changed: true, retried: true, detail: "The app restarted during this step. The step continues." };
     }
     const workers = held.filter(node => node.role === "worker");
@@ -5323,7 +5325,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const attempt = node.receipt?.request_key || node.id;
       const prior = state.recoveryDecisions.get(request);
       if ((prior && prior !== attempt) || (retry.receipt?.started_at_ms && node.receipt?.started_at_ms > retry.receipt.started_at_ms)) {
-        await controlRun({ workspaceId, runId: mission.id, action: "retry", nodeId: retry.id });
+        await controlRun({ workspaceId, runId: mission.id, action: "retry", automatic: true, nodeId: retry.id });
         return { changed: true, detail: "The Retry role is checking the new failure" };
       }
       if (prior === attempt) return { detail: state.recoveryDetail || "Retry is waiting for your action" };
@@ -5349,7 +5351,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // retry_auto refuses a worker with two attempts already; one a restart interrupted is retried
       // on its own card instead, as a lost connection is.
       const action = node.role === "worker" && !restartInterrupted(node) ? "retry_auto" : "retry";
-      await controlRun({ workspaceId, runId: mission.id, action, ...(node.role === "worker" ? { nodeId: node.id } : {}) });
+      await controlRun({ workspaceId, runId: mission.id, action, automatic: true, ...(node.role === "worker" ? { nodeId: node.id } : {}) });
       return { changed: true, retried: true, detail: "Helper retried " + (node.settings?.name || node.role) + ": " + publicText(decision.reason, 300) };
     }
     if (workers.length && ["stop", "give_up"].includes(decision.action)) {
@@ -5636,7 +5638,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.warn?.("ao.drive_socket_retry", { attempt: state.socketRestarts, code: String(error?.code ?? error?.cause?.code ?? "") });
         // Tracked like the timeout retry above, so dispose() cancels it: a bare setTimeout drove the run
         // again into a service the closing app had already stopped.
-        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); });
+        // Not woken early by headless answering: a lost local connection (ports used up) is not cured by it.
+        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, false);
         return;
       }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
@@ -5661,9 +5664,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * answers again (wakeBackedOffDrives). A 3.5-minute headless hang left 10 chats' loops on their
    * own backoffs of up to 60 s each, so they came back 15-55 s after headless did (2026-11-12).
    */
-  function backOffDrive(workspaceId, runId, delay, restart) {
+  function backOffDrive(workspaceId, runId, delay, restart, wakeable = true) {
     const key = runKey(workspaceId, runId);
-    const entry = { restart, at: now() };
+    const entry = { restart, at: now(), wakeable };
     entry.timer = setTimer(() => {
       autoRetryTimers.delete(entry.timer);
       if (drivesBackedOff.get(key) === entry) drivesBackedOff.delete(key);
@@ -5682,7 +5685,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!drivesBackedOff.size || autoRetryDisposed) return;
     let index = 0;
     for (const [key, entry] of [...drivesBackedOff]) {
-      if (now() - entry.at < DRIVE_WAKE_MIN_MS) continue;
+      if (!entry.wakeable || now() - entry.at < DRIVE_WAKE_MIN_MS) continue;
       drivesBackedOff.delete(key);
       clearTimer(entry.timer);
       autoRetryTimers.delete(entry.timer);
@@ -5776,7 +5779,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (mission && !mission.cancelled && mission.nodes.some((node) => (node.state === "held" && (node.role !== "worker" || !mission.grant || spent))
           || (spent && mission.execution_mode === "single" && node.state === "failed"))
         && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
-        await controlRun({ workspaceId: id, runId: run, action: "retry" });
+        await controlRun({ workspaceId: id, runId: run, action: "retry", automatic: true });
         const again = await runs({ workspaceId: id, runId: run });
         mission = again.runs.find((entry) => entry.id === run && entry.workspace_id === id);
       }
@@ -5802,7 +5805,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // (2026-10-24 08:31). A card still running on the old program keeps the refusal.
       if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256
         && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
-        await controlRun({ workspaceId: id, runId: run, action: "retry" });
+        await controlRun({ workspaceId: id, runId: run, action: "retry", automatic: true });
         const again = await runs({ workspaceId: id, runId: run });
         mission = again.runs.find((entry) => entry.id === run && entry.workspace_id === id);
         if (!mission || mission.cancelled || mission.nodes.some((node) => ["running", "reserved", "held"].includes(node.state))) {
@@ -6116,7 +6119,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           && (run.nodes ?? []).some(node => node.state === "running");
         if (!onItsGrant && !autoRetry) { logger?.info?.("ao.restart_resume_waits", { workspaceId, runId: run.id, how: resume }); continue; }
         try {
-          if (resume === "retry") await controlRun({ workspaceId, runId: run.id, action: "retry" });
+          if (resume === "retry") await controlRun({ workspaceId, runId: run.id, action: "retry", automatic: true });
           await startRun({ workspaceId, runId: run.id });
           resumed += 1;
           logger?.info?.("ao.restart_resumed", { workspaceId, runId: run.id, how: resume });

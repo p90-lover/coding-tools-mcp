@@ -11206,6 +11206,49 @@ test("a run loop backed off after headless timed out starts again as soon as hea
     workflow.dispose();
   }
 });
+test("a run loop backed off after a lost local connection keeps its own pause when headless answers", async () => {
+  // Ports used up (EADDRINUSE) are not cured by headless answering: woken early, the loop spent its
+  // ten socket retries in about 15 s instead of about 7 minutes, then held (review of #1253).
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let clock = 1_000_000, loopReads = 0, dropped = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    setTimer: (callback, delay) => delay >= 1_000 ? { unref() {} } : setTimeout(callback, delay),
+    clearTimer: timer => clearTimeout(timer),
+    logger: { info() {}, warn() {} },
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read") && body?.run_id) {
+        loopReads += 1;
+        if (dropped) { const error = new Error("connect EADDRINUSE 127.0.0.1:7000"); error.code = "EADDRINUSE"; throw error; }
+      }
+      return endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [], quiet: true }) },
+    confirm: async () => true,
+  });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    dropped = true;
+    for (let tries = 0; tries < 200 && !/Lost a local connection/.test(String((await status()).detail ?? "")); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.match(String((await status()).detail), /Lost a local connection/, "the loop backed off");
+    const backedOff = loopReads;
+    clock += 1_500;
+    await workflow.call("runs", { workspaceId: "ws" });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(loopReads, backedOff, "headless answering does not wake it");
+  } finally {
+    dropped = false;
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
 test("an automatic retry's pause runs from when the step failed, not from when the loop saw it", async () => {
   // 2026-11-12: retries fired 15, 23, 36 and 67 s after pauses of 10, 20, 30 and 60 s.
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
