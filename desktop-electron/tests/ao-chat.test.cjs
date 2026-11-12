@@ -1307,6 +1307,15 @@ test("a retried card shows its earlier reply until the new attempt writes, and a
   const [writing] = plain(chat.chatTurns([run("r1", "t", [retried], { execution_mode: "single" })], "go",
     { now: 2, activity: { "r1:p": { output: "New reply so far" } } }));
   assert.equal(writing.steps[0].text, undefined, "the new attempt's own output replaces it");
+  assert.equal(turn.steps[0].earlier, undefined, "shown as the text, it is not listed twice");
+  // 2026-11-12: the new attempt thought and called tools, and the old attempt's failure stayed as the
+  // card's text, drawn below that work as if it were the newest message.
+  const working = { "r1:p": { activity: "thinking", timeline: [
+    { id: "a1", kind: "reasoning", status: "completed", text: "Reading CLI guidance" },
+    { id: "a2", kind: "tool", status: "running", label: "mcp__coding-tools__readmany", text: "" }] } };
+  const [busy] = plain(chat.chatTurns([run("r1", "t", [retried], { execution_mode: "single" })], "go", { now: 2, activity: working }));
+  assert.equal(busy.steps[0].text, undefined, "not drawn after the new attempt's work");
+  assert.deepEqual(busy.steps[0].earlier, [{ label: "Attempt 1", text: "First try's reply" }], "listed with the attempts above it");
   const held = node("p", "planner", "held", { receipt: { error: "Native turn returned no verifiable final answer", answer: "The reply" } });
   const turns = plain(chat.chatTurns([run("r1", "t", [held], { execution_mode: "single" })], "go"));
   assert.equal(turns[0].steps[0].text, "The reply");

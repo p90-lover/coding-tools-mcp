@@ -606,15 +606,35 @@ test("a timed-out subagent keeps its capacity and poller until AO confirms settl
   } finally { w.cleanup(); }
 });
 
-test("a subagent whose AO session ended mid-turn fails at once instead of running until its time limit", async () => {
+test("a subagent whose AO session ended mid-turn and cannot continue fails at once instead of running until its time limit", async () => {
   const w = world({ settings: { timeoutMinutes: 240 } });
+  w.harness.continuable = async () => false;
   try {
     const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
     // Killed in AO (or its agent died): AO reports the session exited while the turn it left still reads "running".
     w.sessions.set(id, { status: "terminated", exited: true, turnState: "running", approvals: [] });
-    const result = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
-    assert.equal(result.state, "failed");
-    assert.match(result.error, /session ended/);
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 });
+    assert.equal(w.service.runs()[0].recovering, "The subagent's session ended before it finished", "first it waits to resume");
+    assert.equal(w.service.runs()[0].state !== "failed", true);
+  } finally { w.cleanup(); }
+});
+
+test("a subagent cut short by an app restart is resumed in the same session, not failed", async () => {
+  let clock = 1_000_000;
+  const w = world({ now: () => clock });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    w.sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [],
+      error: "The agent's process ended before it finished (the app restarted); retry this card." });
+    let seen = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.notEqual(seen.state, "failed", "it waits to resume");
+    assert.match(seen.recovering, /app restarted/);
+    clock += 5_001;
+    seen = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(w.sent.length, 1, "a new turn in the same session");
+    assert.match(w.sent[0][1], /cut short by a problem outside your task/);
+    assert.equal(seen.state, "starting");
+    assert.equal(seen.recoveries, 1);
   } finally { w.cleanup(); }
 });
 
@@ -1060,4 +1080,61 @@ test("a save the disk refuses is undone and reported", async () => {
     service.dispose();
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a subagent still working when the app restarts comes back with it, and its chat can still read and resume it", async () => {
+  const dir = fs.mkdtempSync(path.join(__dirname, "..", "..", "subagents-restart-"));
+  const sessions = new Map();
+  const sent = [];
+  const harness = {
+    spawn: async () => { sessions.set("sub-1", { turnState: "running", approvals: [] }); return "sub-1"; },
+    observe: async (id) => ({ turnId: "t1", ...sessions.get(id) }),
+    continuable: async () => true,
+    send: async (id, text) => { sent.push([id, text]); sessions.set(id, { turnState: "queued", approvals: [] }); return { turnId: "t2" }; },
+    resolveApproval: async () => {}, resolveInput: async () => {}, interrupt: async () => {}, exitAgent: async () => ({ ok: true }),
+  };
+  const make = () => createSubagents({ statePath: path.join(dir, "subagents.json"), harness: () => harness, logger: { info() {}, warn() {} },
+    launchArgs: () => ({ workspace_id: "ws-1" }), now: () => 1_000_000 });
+  try {
+    const before = make();
+    await before.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+    const { subagent_id: id } = parse(await before.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read it" }));
+    for (let tries = 0; tries < 100 && !fs.existsSync(path.join(dir, "subagent-runs.json")); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    before.dispose();
+    // The app restarted: the agent's turn was interrupted, and a new service starts with nothing in memory.
+    sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [], error: "The agent's process ended before it finished (the app restarted); retry this card." });
+    const after = make();
+    await after.preload();
+    const status = parse(await after.call("chat-1", "ws-1", "subagent_status", {}));
+    assert.deepEqual(status.subagents.map((run) => run.subagent_id), [id], "its chat still finds it");
+    const seen = parse(await after.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.notEqual(seen.state, "failed", "it is resumed, not failed");
+    assert.match(seen.recovering ?? "", /app restarted/);
+    after.dispose();
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a turn its chat or the user stopped is not resumed, and recovery gives up after its tries", async () => {
+  let clock = 1_000_000;
+  const w = world({ now: () => clock });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    // A plain interruption (no reason from the app) is someone's Stop: it ends, as before.
+    w.sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] });
+    const stopped = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(stopped.state, "failed");
+    assert.equal(w.sent.length, 0);
+    const { subagent_id: other } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "y" }));
+    const crash = { turnState: "interrupted", status: "ready", approvals: [], agentGone: true, error: "The agent's process stopped mid-turn. Retry or send a message to continue." };
+    for (let round = 0; round < 8; round += 1) {
+      w.sessions.set(other, crash);
+      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 });
+      clock += 61_000;
+      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 });
+    }
+    const last = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 }));
+    assert.equal(w.sent.filter(([sid]) => sid === other).length, 3, "three tries");
+    assert.equal(last.state, "failed");
+    assert.match(last.error, /after 3 tries to resume it/);
+  } finally { w.cleanup(); }
 });
