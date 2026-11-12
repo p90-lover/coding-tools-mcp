@@ -904,6 +904,30 @@ test("a native fetch aborted before its response arrives fails instead of hangin
   assert.equal(requests[0].aborted, true, "the request itself is cancelled");
 });
 
+test("a native fetch hands Electron a string URL even when given a URL object", async () => {
+  const { EventEmitter } = require("node:events");
+  const { fetchNativeWithProxyAuth } = require("../electron/control-server.cjs");
+  const sent = [];
+  // Like Electron's net.request: anything but a string URL fails with "Invalid URL".
+  const electronNet = { request: (options) => {
+    sent.push(options);
+    const request = Object.assign(new EventEmitter(), { abort() {}, end() {
+      queueMicrotask(() => {
+        if (typeof options.url !== "string") request.emit("error", new TypeError("Invalid URL"));
+        else request.emit("redirect", 302, "GET", "https://release-assets.githubusercontent.com/asset", {});
+      });
+    } });
+    return request;
+  } };
+  // The app plugin download asks GitHub's API for an asset with a URL object and redirect: "manual".
+  const response = await fetchNativeWithProxyAuth({ electronNet, browserSession: {},
+    url: new URL("https://api.github.com/repos/owner/repo/releases/assets/7"),
+    options: { method: "GET", headers: { accept: "application/octet-stream" }, redirect: "manual" }, getProxyCredentials: () => null });
+  assert.equal(sent[0].url, "https://api.github.com/repos/owner/repo/releases/assets/7");
+  assert.equal(response.status, 302);
+  assert.equal(response.headers.get("location"), "https://release-assets.githubusercontent.com/asset");
+});
+
 test("owned session reads authenticate the proxy and include only their selected cookie jar", async () => {
   const { EventEmitter } = require("node:events");
   const { Readable } = require("node:stream");

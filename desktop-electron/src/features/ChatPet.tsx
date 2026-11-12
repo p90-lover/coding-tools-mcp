@@ -31,10 +31,10 @@ import { SurfaceHiddenContext } from "./page-visibility";
 import { chatPalette } from "./ChatMenu";
 import { findPetYard, petCall, petFlight, petStage } from "./chat-pet-stage";
 import { clearSpans, crouchAt, fallAt, fallPlan, flightAt, follow, gaitAt, impactOf, landAt, leapAt, leapPlan, leastCovered, nearestClear, petToolSide, pickClear,
-  walkAt, walkPlan, type Point, type Span } from "./chat-pet-motion";
+  turnFacings, walkAt, walkPlan, WALK_FACING, type Point, type Span } from "./chat-pet-motion";
 import { ENTRY, FLOOR_LINE, choreBeats, exitBeats, pickChore, type Chore, type HomeBeat, type HomeMemory } from "./chat-pet-home";
 import { COTTAGE_H, COTTAGE_W, Cottage, DOOR_SCALE, DOOR_X, HousePeek, P, PIXEL_H, PIXEL_W, rect, type HomeView } from "./chat-pet-house";
-import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, ROWS, pickOne, useClawdPlayer,
+import { CELL_H, CELL_W, CLICKABLE, COLS, ClawdFrame, ENTRANCES, PLAYFUL, ROWS, pickOne, useClawdPlayer,
   type AnimationName, type Arms as ClawdArms, type Eyes, type Feet, type Frame } from "./Clawd";
 
 /** Where it was left: how far along the box's top edge, as a share of its width. */
@@ -61,8 +61,8 @@ const SCURRY = 120;
 const BOB = 2;
 /** The frame clock's cap: no more than 60 paints a second, whatever the screen's rate. */
 const FPS = 60;
-/** Turning round to walk back the other way (ms). */
-const TURN_MS = 140;
+/** Turning round to walk back the other way (ms): four of the CLI's turn frames, near its 60 ms beat. */
+const TURN_MS = 200;
 /** The crouch before a leap, and the squash after a landing (ms). */
 const CROUCH_MS = 110;
 const LAND_MS = 320;
@@ -91,6 +91,17 @@ const RIDE_PLAYS: AnimationName[] = ["jump", "wink", "look", "boop", "tap"];
 /** How often it follows you into the pane you click into, and how long it takes to notice (ms). */
 const FOLLOW_CHANCE = 0.6;
 const FOLLOW_MS = 900;
+/** The pointer resting near it gets a wave (at most this often); resting over its box further
+ *  along, it now and then walks over to see (at most this often, after the pointer rests this long). */
+const WAVE_EVERY = 25_000;
+const VISIT_EVERY = 20_000;
+const LINGER_MS = 1_200;
+/** Petted this many times in PET_STREAK_MS: a happy dance. */
+const PET_STREAK = 3;
+const PET_STREAK_MS = 4_000;
+/** While a request waits on you, a nudge (tapping its feet, a hop, a wave) this often, at most this many. */
+const NUDGE_MS = 8_000;
+const NUDGES = 5;
 /** The entrance plays once per window, as the CLI plays one once per version. */
 let entrancePlayed = false;
 /** Claude Code's working spinner, cycled over Clawd's head while the agent works. */
@@ -107,12 +118,14 @@ const PETTED = ["Hehe", "More pets, please", "I like you", "*purr*"];
 const MUSINGS = ["Hmm…", "*looks around*", "What are we building?", "♪", "Nice code"];
 const RIDING = ["Wheee!", "Take me somewhere", "Faster!", "Hold on tight"];
 const FOLLOWING = ["Wait for me!", "Coming along", "Right behind you"];
+const SENT = ["Off it goes!", "Sent!", "On its way"];
 
 /** What Clawd is busy with: a prop beside it (or on its head) and how its arms move. At home it also
  *  stirs a pot (cook), eats a cookie (snack) and carries its plate to the table (serve). */
 export type Job = "none" | "laptop" | "search" | "build" | "carry" | "coffee" | "read" | "cook" | "snack" | "serve";
 type Arms = "down" | "left" | "right" | "both" | "reach";
-export type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean };
+/** `stride`: walking somewhere on its own feet (not kicking in the air, carried or riding). */
+export type Pose = { look: -1 | 0 | 1; arms: Arms; walking: boolean; sit: boolean; stride?: boolean };
 
 /**
  * The frame Clawd rests in between animations, built from the CLI's own parts: eyes turned where it
@@ -124,6 +137,12 @@ export function restFrame({ mood, asleep, step, pose, blink, job, toolSide }: { 
   // front-facing face that appears to ignore the computer beside it.
   if (job === "laptop" && !pose.walking && !asleep) {
     return { pose: { facing: toolSide === "left" ? "left-12" : "right-12" }, offset: pose.sit ? 1 : 0 };
+  }
+  // Walking somewhere, its body turns a little toward where it goes and it steps along on the CLI's
+  // turn frames, one foot up each stride. It slid sideways facing us, only its eyes turned (the
+  // user, 2026-11-12: "fix all clawd animation"). Carrying something it still faces us, arms up.
+  if (pose.stride && pose.walking && pose.look !== 0 && job === "none" && !asleep) {
+    return { pose: { facing: pose.look < 0 ? WALK_FACING.left : WALK_FACING.right, step: step ? "left" : "right" }, offset: 0 };
   }
   const eyes: Eyes = asleep || blink ? "closed"
     : job !== "none" && job !== "carry" && job !== "serve" ? toolSide
@@ -329,6 +348,12 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
   moodNow.current = mood;
   const [still] = useState(() => { try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; } });
   const clawd = useClawdPlayer(still);
+  // Whether one of its animations is playing now, for listeners set up once (they see this render's).
+  const playingNow = useRef(false);
+  playingNow.current = clawd.playing;
+  // Shaken off the pointer: dizzy once it lands. Recent pets, for a happy dance at PET_STREAK.
+  const dizzy = useRef(false);
+  const pets = useRef<number[]>([]);
   // The frame clock: the motion under way (null when nothing moves), its frame request and the wait
   // before it, when it last painted, the screen's refresh interval as measured, and whether the
   // pending frame was asked for straight away (so its gap measures that interval).
@@ -356,6 +381,13 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     plans.current = [];
     window.clearTimeout(wanderTimer.current);
     stopMotion();
+    // Cut off on its box mid-turn, mid-stride or mid-landing, it stands there at rest. A landing a
+    // new mood stopped left it squashed, a walk left it hovering a bob over the edge, and a turn
+    // left it showing a turning frame, until something else happened to reset them.
+    if (activity.current === "box") {
+      setFace(null);
+      if (feet.current.space === "box") { rest(); paint(); }
+    }
   };
   const say = (text: string, ms = 1800) => {
     setBubble(text);
@@ -463,9 +495,12 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     const parent = anchor.current?.parentElement;
     if (!parent) return undefined;
     composer.current = parent;
-    // The nearest surface around the box that clips what stands outside it (the chat's pane).
-    let clip: HTMLElement | null = parent.parentElement;
-    while (clip && getComputedStyle(clip).overflowX === "visible") clip = clip.parentElement;
+    // What the cottage must stay inside: in split view its own pane. The nearest clipping surface was
+    // the whole split grid there, so a pane's padding counted as room and the cottage stood in the
+    // gap over the next column (2026-11-12, ten panes). Outside split view, the nearest surface around
+    // the box that clips what stands outside it.
+    let clip: HTMLElement | null = split?.pane ?? parent.parentElement;
+    while (!split && clip && getComputedStyle(clip).overflowX === "visible") clip = clip.parentElement;
     const measure = () => {
       const width = parent.offsetWidth, height = parent.offsetHeight;
       if (width <= 0 || height <= 0) return;
@@ -502,8 +537,14 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     observer.observe(found);
     return () => observer.disconnect();
   }, []);
-  /** Where its cottage stands: beside the box when there is room, else in the yard, else nowhere. */
-  const houseAt: "beside" | "yard" | null = box?.room ? "beside" : yard ? "yard" : null;
+  /**
+   * Where its cottage stands. In split view: in the yard above Settings, one house for every pane,
+   * else beside its box only when that pane has room. Outside split view: beside the box when there
+   * is room, else in the yard. Nowhere when neither is there.
+   */
+  const houseAt: "beside" | "yard" | null = split
+    ? (yard ? "yard" : box?.room ? "beside" : null)
+    : box?.room ? "beside" : yard ? "yard" : null;
   const houseNow = useRef(houseAt);
   houseNow.current = houseAt;
   /** Its feet on the doorstep, in front of the cottage's door. */
@@ -572,7 +613,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     if (!plan.ms) { arrive?.(); return; }
     const way: -1 | 1 = to > from ? 1 : -1;
     const go = () => {
-      setPose({ ...REST, walking: true, look: way });
+      setFace(null);
+      setPose({ ...REST, walking: true, look: way, stride: true });
       timed(plan.ms, (t) => {
         const at = walkAt(plan, t * plan.ms);
         const width = boxNow.current?.width;
@@ -583,8 +625,15 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
         if (gait.left !== footNow.current) { footNow.current = gait.left; setFoot(gait.left); }
       }, () => { shape.current.bob = 0; setPose(REST); remember(); arrive?.(); });
     };
-    // Facing the other way, it turns round first rather than walking off backwards.
-    if (facing.current !== way && !still) { facing.current = way; setPose({ ...REST, look: way }); later(TURN_MS, go); return; }
+    // Facing the other way, it turns round first rather than walking off backwards: its body comes
+    // round through the CLI's turn frames, a quarter of the turn each.
+    if (facing.current !== way && !still) {
+      facing.current = way;
+      setPose({ ...REST, look: way });
+      turnFacings(way).forEach((side, index) => later((TURN_MS * index) / 4, () => setFace({ pose: { facing: side }, offset: 0 })));
+      later(TURN_MS, go);
+      return;
+    }
     facing.current = way;
     go();
   };
@@ -663,8 +712,14 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       later(5000 + Math.random() * 4000, () => setJob("none"));
       return;
     }
-    const choice = pick(["play", "play", "play", "sit", "muse", "coffee", "read", "rest"] as const);
+    // At either end of its box it often stops to peer out over the edge.
+    const current = boxNow.current;
+    const x = feet.current.x;
+    if (current && Number.isFinite(x) && (x < WIDTH * 1.25 || x > current.width - WIDTH * 1.25) && Math.random() < 0.45) { play("peer"); return; }
+    const choice = pick(["play", "play", "fun", "sit", "muse", "coffee", "read", "rest", "stretch"] as const);
     if (choice === "play") play(pickOne(CLICKABLE));
+    else if (choice === "fun") play(pickOne(PLAYFUL));
+    else if (choice === "stretch") play(moodNow.current === "idle" && Math.random() < 0.5 ? "yawn" : "stretch");
     else if (choice === "sit") { setPose({ ...REST, sit: true }); later(2600, () => setPose(REST)); }
     else if (choice === "coffee" || choice === "read") { setJob(choice); later(3500 + Math.random() * 2500, () => setJob("none")); }
     else if (choice === "muse" && moodNow.current === "idle") say(pick(MUSINGS), 1500);
@@ -816,7 +871,6 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     cancelPlans();
     setJob("none");
     if (asleepNow.current) { asleepNow.current = false; setAsleep(false); }
-    say(nap ? "Home time…" : "Coming!", 1300);
     activity.current = "travel";
     const comeIn = () => enterDoor(() => {
       visitLeft.current = nap ? 0 : VISIT_CHORES;
@@ -824,7 +878,17 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     });
     const speed = nap ? STROLL * 1.3 : SCURRY;
     // Beside the box: to its right end and a hop down. In the yard: to its left end, nearest the chat list, and a leap across.
-    walkTo(step.space === "box" ? current.width - WIDTH / 2 : WIDTH / 2, speed, () => leapTo(step, comeIn, { impact: step.space === "box" ? 0.35 : 0.45 }));
+    const setOff = () => walkTo(step.space === "box" ? current.width - WIDTH / 2 : WIDTH / 2, speed,
+      () => leapTo(step, comeIn, { impact: step.space === "box" ? 0.35 : 0.45 }));
+    // Bedtime starts with a yawn where it stands; a visit is straight off.
+    if (nap && !still) {
+      play("yawn");
+      say("*yawn*", 1100);
+      later(1300, () => { say("Home time…", 1300); setOff(); });
+    } else {
+      say(nap ? "Home time…" : "Coming!", 1300);
+      setOff();
+    }
   };
   /**
    * Out of its cottage (toward `toward`'s pane when another pane called it). Watched through the peek,
@@ -874,7 +938,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     sceneNow.current = beat;
     setScene(beat);
     const moving = beat.doing === "walk" || beat.doing === "climb" || beat.doing === "serve";
-    setPose({ ...REST, look: beat.look, walking: moving, arms: beat.doing === "climb" ? "both" : "down" });
+    setPose({ ...REST, look: beat.look, walking: moving, stride: beat.doing === "walk", arms: beat.doing === "climb" ? "both" : "down" });
     setJob(beat.doing === "cook" || beat.doing === "snack" || beat.doing === "serve" || beat.doing === "read" ? beat.doing : "none");
     if (beat.say) say(beat.say, Math.min(1800, beat.ms + 600));
     if (beat.float) float(beat.float, 26);
@@ -945,6 +1009,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     setAsleep(false);
     setPose(REST);
     say("Huh? I'm up.", 1500);
+    play("stretch");
     poke();
     cancelPlans();
     wander();
@@ -966,6 +1031,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       remember();
       poke();
       cancelPlans();
+      // Shaken off, it comes round from a dizzy spell. (Not "✦": rising stars read as fireworks, 2026-10-30.)
+      if (dizzy.current) { dizzy.current = false; play("dizzy"); float("💫", 28); }
       wander();
     }, { crouch: false, impact: 0.5 });
   };
@@ -1071,7 +1138,7 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     if (mood === "done") {
       setCheering(true);
       float("✓");
-      play("celebrate");
+      play(Math.random() < 0.5 ? "celebrate" : "dance");
       const timer = window.setTimeout(() => setCheering(false), CHEER_MS);
       wander();
       return () => { window.clearTimeout(timer); cancelPlans(); };
@@ -1084,11 +1151,23 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       if (Math.abs(spot - feet.current.x) > 4) walkTo(spot, SCURRY, () => { if (moodNow.current === "working") setJob("laptop"); });
       else setJob("laptop");
     });
-    if (mood === "error") { play("look"); say("Uh oh", 1600); }
+    if (mood === "error") { play("sad"); say("Uh oh", 1600); }
     if (mood === "ask") { say(LINES.ask, 2600); runToSend(); }
     wander();
     return cancelPlans;
   }, [mood]);
+  // A request waiting on you: by the send button it taps its feet, hops or waves now and then, a few
+  // times, so a request you missed still catches your eye without it pestering for ever.
+  useEffect(() => {
+    if (mood !== "ask" || still) return undefined;
+    let nudges = 0;
+    const timer = window.setInterval(() => {
+      if (busy() || motion.current || playingNow.current) return;
+      play(pickOne(["tap", "jump", "wave"] as const));
+      if (++nudges >= NUDGES) window.clearInterval(timer);
+    }, NUDGE_MS);
+    return () => window.clearInterval(timer);
+  }, [mood, still]);
 
   // Split view: another pane's chat calls it over (a request waiting on you, a finished turn, a
   // failure), and it now and then follows you into the pane you click into.
@@ -1150,27 +1229,65 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     return () => { window.clearTimeout(timer); setBlink(false); };
   }, [asleep, still]);
 
-  // It watches the pointer when it comes near, now and then leaps onto it, and perks up while you
-  // type in the box.
+  // It watches the pointer when it comes near, now and then leaps onto it, waves when it rests
+  // nearby, wanders over when it rests over its box further along, and perks up while you type in
+  // the box and when you send.
   useEffect(() => {
     if (still) return undefined;
     let timer = 0;
     let moved = 0;
+    let linger = 0;
+    let lastWave = 0;
+    let lastVisit = 0;
     const onMove = (event: PointerEvent) => {
       moved += event.clientX - pointer.current.x;
       pointer.current = { x: event.clientX, y: event.clientY };
+      window.clearTimeout(linger);
+      linger = window.setTimeout(rested, LINGER_MS);
       // Aboard, the frame clock follows the pointer and these checks only catch a shake. Otherwise it
       // only turns its head or starts a game, which ten checks a second cover.
       if (timer) return;
       timer = window.setTimeout(check, LOOK_EVERY_MS);
+    };
+    /** Where the pointer is from Clawd: its offset, and its distance from Clawd's middle. */
+    const fromPet = () => {
+      const { x, y } = pointer.current;
+      const at = toScreen(feet.current);
+      return { x, y, at, distance: Math.hypot(x - at.x, y - (at.y - FEET / 2)) };
+    };
+    // The pointer has come to rest while it is calm on its box: close by, a wave hello; over its box
+    // further along, now and then a walk over to see, stopping beside the pointer, facing it.
+    const rested = () => {
+      linger = 0;
+      if (activity.current !== "box" || asleepNow.current || drag.current || feet.current.space !== "box"
+        || motion.current || playingNow.current || !(moodNow.current === "idle" || moodNow.current === "done")) return;
+      const { x, y, at, distance } = fromPet();
+      const now = Date.now();
+      if (distance < NOTICE) {
+        if (now - lastWave < WAVE_EVERY) return;
+        lastWave = now;
+        setPose((current) => (current.walking ? current : { ...current, look: x < at.x ? -1 : 1 }));
+        play("wave");
+        return;
+      }
+      const frame = composer.current?.getBoundingClientRect();
+      if (!frame || x < frame.left || x > frame.right || y < frame.top - 140 || y > frame.bottom) return;
+      if (now - lastVisit < VISIT_EVERY || Math.random() >= 0.35) return;
+      lastVisit = now;
+      const side = x < at.x ? 1 : -1;
+      walkTo(restNear(x - frame.left + side * WIDTH * 0.75), STROLL * 1.5, () => {
+        const there = fromPet();
+        setPose({ ...REST, look: there.x < there.at.x ? -1 : 1 });
+        if (there.distance < NOTICE * 1.5) { lastWave = Date.now(); play("wave"); }
+      });
     };
     const check = () => {
       timer = 0;
       const dx = moved;
       moved = 0;
       if (activity.current === "ride") {
-        // Shaken hard, it lets go and jumps back to the box.
-        if (Math.abs(dx) > SHAKE) { say("Whoa!", 900); leave(); }
+        // Shaken hard, it lets go and jumps back to the box, dizzy.
+        if (Math.abs(dx) > SHAKE) { dizzy.current = true; say("Whoa!", 900); leave(); }
         return;
       }
       if (activity.current !== "box" || asleepNow.current || drag.current || feet.current.space !== "box") return;
@@ -1199,12 +1316,29 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       play("wink");
       poke();
     };
+    // Enter sends: once the box has emptied, it hops and sends a letter off. The chat clears the box
+    // itself, which fires no input event, so it is read again a moment after the key.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+      const field = event.target instanceof HTMLElement ? event.target : null;
+      const text = () => (field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement ? field.value : field?.textContent ?? "").trim();
+      if (!text()) return;
+      afterDecoration(250, () => {
+        if (text() || asleepNow.current || activity.current !== "box" || playingNow.current) return;
+        play("jump");
+        float("✉", 30);
+        if (Math.random() < 0.5) say(pick(SENT), 1100);
+      });
+    };
     window.addEventListener("pointermove", onMove);
     form?.addEventListener("input", onInput);
+    form?.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("pointermove", onMove);
       form?.removeEventListener("input", onInput);
+      form?.removeEventListener("keydown", onKey);
       if (timer) window.clearTimeout(timer);
+      window.clearTimeout(linger);
     };
   }, [still]);
 
@@ -1291,6 +1425,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       land(impact, () => {
         activity.current = "box";
         if (bounce) play("jump");
+        // A drop from near the top of the window: dizzy for a moment.
+        else if (impact >= 0.9) { play("dizzy"); float("💫", 28); }
         remember();
         poke();
         wander();
@@ -1367,10 +1503,19 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
         window.clearTimeout(clickTimer.current);
         clickTimer.current = window.setTimeout(() => {
           if (wake()) return;
-          // As in Claude Code: a click plays one of Clawd's animations.
-          play(pickOne(CLICKABLE)); float("♥"); float("♥");
-          say(pick(PETTED), 1400);
+          const now = Date.now();
+          pets.current = [...pets.current.filter((at) => now - at < PET_STREAK_MS), now];
           poke();
+          // Petted again and again: a happy dance and a shower of hearts.
+          if (pets.current.length >= PET_STREAK) {
+            pets.current = [];
+            play("dance"); float("♥", 8); float("♥", 30); float("♥", 52);
+            say("Best day ever!", 1500);
+            return;
+          }
+          // As in Claude Code: a click plays one of Clawd's animations (or one of its own extras).
+          play(pickOne(Math.random() < 0.25 ? PLAYFUL : CLICKABLE)); float("♥"); float("♥");
+          say(pick(PETTED), 1400);
         }, 220);
       }}
       onDoubleClick={() => {
