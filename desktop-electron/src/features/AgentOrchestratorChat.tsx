@@ -1523,11 +1523,19 @@ export function AgentOrchestratorChat({
   const column = useRef<HTMLDivElement>(null);
   // A click in the thread (opening "Worked", a group, a tool's output) grows it too, but that is the
   // user reading: the view stays on what they opened and following stops if it left the bottom.
-  // Only a person moving away ends following (wheel, touch, pointer, or scrolling up), so layout and
-  // scroll anchoring can't switch it off while an answer grows; the scroll handler below sets it.
+  // As in Codex, only a person moving the view up ends following: a wheel up, dragging the scrollbar,
+  // or a scroll that leaves the bottom upward. A click, a touch or a wheel down that moves nothing
+  // keeps it (a wheel down at the bottom fires no scroll event, so it used to stop following for
+  // good). Reaching the bottom again, a send or a new request re-arms it.
   const following = useRef(atBottom);
   const lastScrollTop = useRef(0);
   const clicked = useRef(false);
+  const followBottom = () => {
+    jumpingToBottom.current = false;
+    following.current = true;
+    setAtBottom(true);
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
+  };
   useEffect(() => { jumpingToBottom.current = false; following.current = true; lastScrollTop.current = 0; }, [selectedTaskId]);
   useEffect(() => {
     const box = scroller.current, content = column.current;
@@ -1610,8 +1618,7 @@ export function AgentOrchestratorChat({
   const requestKeys = approvals.map((approval) => `${approval.nodeId}\u0000${approval.approval_id}`).join("\u0001");
   useEffect(() => {
     if (!requestKeys) return;
-    setAtBottom(true);
-    scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
+    followBottom();
   }, [requestKeys]);
   // Each chat keeps its own unsent draft. A new composer belongs to its project and pane.
   const draftOwner = useRef(draftKey);
@@ -1841,7 +1848,9 @@ export function AgentOrchestratorChat({
       if (outgoingMessage) {
         setOutgoing(outgoingMessage);
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
-        setAtBottom(true);
+        // A send follows the thread again even when following had stopped while atBottom stayed true
+        // (setting an unchanged atBottom re-ran nothing, so the view stayed where it was).
+        followBottom();
       }
       if (!steered) {
         try {
@@ -1872,7 +1881,7 @@ export function AgentOrchestratorChat({
         setTitle("");
         if (!selectedTaskId) setCarried(null);
       }
-      if (here()) setAtBottom(true);
+      if (here()) followBottom();
       return true;
     } catch (error) {
       dropPending();
@@ -2839,9 +2848,17 @@ ${row.running ? "Running" : "Offline"} · click to show`} onClick={() => setWork
         })() : null}
 
         <div className="cx-scroll" ref={scroller}
-          onWheel={() => { jumpingToBottom.current = false; following.current = false; }}
-          onTouchStart={() => { jumpingToBottom.current = false; following.current = false; }}
-          onPointerDown={() => { jumpingToBottom.current = false; following.current = false; }}
+          onWheel={(event) => {
+            jumpingToBottom.current = false;
+            // Upward only, and before the scroll lands, so a growing answer can't pull the view back.
+            if (event.deltaY < 0) following.current = false;
+          }}
+          onTouchStart={() => { jumpingToBottom.current = false; }}
+          onPointerDown={(event) => {
+            jumpingToBottom.current = false;
+            // The scrollbar itself (the scroller is the target): a drag must not be pulled back down.
+            if (event.target === event.currentTarget) following.current = false;
+          }}
           onScroll={(event) => {
             const box = event.currentTarget, bottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 24;
             const movedUp = box.scrollTop < lastScrollTop.current - 1;
