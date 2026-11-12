@@ -60,11 +60,16 @@ const QUIET_MS = 45 * 60_000;
  * that went around lists the WebGPT models, whichever version wrote it (a restarted Codex may be
  * a newer one). One stat a minute; the file is read only when it changed.
  * `routed()`: whether the bridge route is installed. `bridgeServedAt()`: async, ms or NaN.
- * `restartRequired()` / `setRestartRequired(boolean)`: the shown notice.
+ * `restartRequired()` / `setRestartRequired(boolean)`: the shown notice. `now()`: ms.
  */
 function watchCodexModelCache({ codexHome, routed, bridgeServedAt, restartRequired, setRestartRequired, logger,
-  intervalMs = 60_000, quietMs = QUIET_MS, read = readCodexModelCache, setInterval: every = setInterval, clearInterval: stop = clearInterval }) {
-  let modifiedAt = null, skippedAt = null, busy = false;
+  intervalMs = 60_000, quietMs = QUIET_MS, read = readCodexModelCache, now = Date.now,
+  setInterval: every = setInterval, clearInterval: stop = clearInterval }) {
+  // The notice is saved with the app's settings; when a Codex last went around the bridge is not. One
+  // already up at the start (from before the app restarted) counts as a list around the bridge now:
+  // with none seen, no list could clear it, and the notice has no button (2026-11-12). One that a setup
+  // step raised is cleared by the catalog check first, once the bridge serves the models.
+  let modifiedAt = null, skippedAt = restartRequired() ? now() : null, busy = false;
   const check = async () => {
     if (busy || !routed()) return;
     busy = true;
