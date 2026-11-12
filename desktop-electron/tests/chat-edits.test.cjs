@@ -70,14 +70,14 @@ test("the only message, or one that is not there, is refused", () => {
   assert.throws(() => chatDescriptionWithout(description, 1.5), /no longer in this chat/);
 });
 
-test("the store hides deleted messages' runs per project, flags a fresh session, and survives a restart", () => {
+test("the store hides deleted messages' runs per project, flags a fresh session, and survives a restart", async () => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-edits-"));
   try {
     const file = path.join(folder, "integrations", "chat-edits.json");
     const store = createChatEditStore({ file });
     const runs = [{ id: "r1" }, { id: "r2" }, { id: "r3" }];
     assert.equal(store.visible("ws-1", runs), runs, "nothing deleted: the same list");
-    store.deleteMessage("ws-1", "task-1", ["r2"]);
+    await store.deleteMessage("ws-1", "task-1", ["r2"]);
     assert.deepEqual(store.visible("ws-1", runs).map(run => run.id), ["r1", "r3"]);
     assert.deepEqual(store.visible("ws-2", runs).map(run => run.id), ["r1", "r2", "r3"], "another project is untouched");
     assert.equal(store.fresh("ws-1", "task-1"), true);
@@ -86,6 +86,7 @@ test("the store hides deleted messages' runs per project, flags a fresh session,
     assert.deepEqual(reopened.visible("ws-1", runs).map(run => run.id), ["r1", "r3"]);
     assert.equal(reopened.fresh("ws-1", "task-1"), true);
     reopened.clearFresh("ws-1", "task-1");
+    await reopened.saved();
     assert.equal(createChatEditStore({ file }).fresh("ws-1", "task-1"), false);
     assert.deepEqual(createChatEditStore({ file }).visible("ws-1", runs).map(run => run.id), ["r1", "r3"], "the run stays hidden");
     // A delete whose task edit failed is put back as it was.
@@ -94,6 +95,37 @@ test("the store hides deleted messages' runs per project, flags a fresh session,
     reopened.restore("ws-1", "task-1", before);
     assert.deepEqual(reopened.visible("ws-1", runs).map(run => run.id), ["r1", "r3"]);
     assert.equal(reopened.fresh("ws-1", "task-1"), false);
+    await reopened.saved();
+    assert.deepEqual(createChatEditStore({ file }).get("ws-1", "task-1"), before, "the saves land in the order they were made");
+  } finally {
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a change is saved off the main thread, and a delete whose save fails says so", async (t) => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-edits-"));
+  try {
+    const file = path.join(folder, "integrations", "chat-edits.json");
+    const warnings = [];
+    const store = createChatEditStore({ file, logger: { warn: (event, detail) => warnings.push([event, detail.message]) } });
+    await store.deleteMessage("ws-1", "task-1", ["r1"]);
+    // The send after a delete clears `fresh`: that save held every window 470 ms on 2026-11-12.
+    for (const name of ["writeFileSync", "renameSync", "mkdirSync", "openSync", "fsyncSync"]) {
+      t.mock.method(fs, name, () => { throw new Error(`${name} on the main thread`); });
+    }
+    const cleared = store.clearFresh("ws-1", "task-1");
+    assert.equal(store.fresh("ws-1", "task-1"), false, "in memory at once");
+    await cleared;
+    t.mock.restoreAll();
+    assert.equal(JSON.parse(fs.readFileSync(file, "utf8"))["ws-1:task-1"].fresh, false);
+    assert.deepEqual(warnings, []);
+
+    // A save that cannot land rejects the change that asked for it, and is logged once.
+    fs.rmSync(path.dirname(file), { recursive: true, force: true });
+    fs.writeFileSync(path.dirname(file), "a file where the folder goes");
+    await assert.rejects(store.deleteMessage("ws-1", "task-1", ["r2"]), { code: "EEXIST" });
+    await store.saved();
+    assert.deepEqual(warnings.map(([event]) => event), ["chat_edits.not_saved"]);
   } finally {
     fs.rmSync(folder, { recursive: true, force: true });
   }

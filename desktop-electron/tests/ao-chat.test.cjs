@@ -1794,7 +1794,7 @@ test("sendChat bypasses unrelated surface work but rejects a duplicate while its
 });
 
 function outgoingSend() {
-  const attachments = [], annotations = [], composing = { current: null }, state = { outgoing: null, draft: "" };
+  const attachments = [], annotations = [], composing = { current: null }, state = { outgoing: null, draft: "", recovered: [] };
   const set = key => next => { state[key] = typeof next === "function" ? next(state[key]) : next; };
   const scope = projectId => rendererCallback("AgentOrchestratorChat.tsx", "draftKey", { selectedTaskId: "", projectId, draftScope: "main" });
   return { state, composing, scope,
@@ -1807,8 +1807,10 @@ function outgoingSend() {
       const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
         selectedTaskId: "", draft: message, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
         setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-        setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+        setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
         setOutgoing: set("outgoing"), setAnnotations() {},
+        // A failed send the composer did not take back goes back to its own draft (recoverMessage).
+        recoverMessage: (cacheKey, text, error) => { state.recovered.push({ cacheKey, text, error: String(error?.message ?? error) }); },
       });
       return { ...reply, done: deliver(message) };
     },
@@ -1851,6 +1853,9 @@ test("overlapping deliver callbacks change only their own optimistic message", a
     const ui = outgoingSend(), first = ui.start("project-a", "A"), second = ui.start("project-b", "B"), ownB = ui.state.outgoing;
     first[outcome](outcome === "reject" ? new Error("A failed") : undefined); const completed = await first.done;
     if (outcome === "resolve") assert.equal(completed, true);
+    // A's failed send, made while B's composer was open, goes back to A's own draft with why (it was lost).
+    assert.deepEqual(ui.state.recovered.map(entry => ({ ...entry })), outcome === "reject"
+      ? [{ cacheKey: ui.scope("project-a"), text: "A", error: "A failed" }] : []);
     assert.equal(ui.state.outgoing, ownB); assert.equal(ui.state.outgoing.sent, false);
     second.resolve(); assert.equal(await second.done, true); assert.equal(ui.state.outgoing.message, "B"); assert.equal(ui.state.outgoing.sent, true);
   });
@@ -1876,7 +1881,7 @@ test("a message the local service had no room for waits in its chat's queue; a n
       // The composer's own copy follows what is typed, as the component's effect keeps it.
       setDraft: next => { state.draft = next; composing.current = { ...composing.current, draft: next }; },
       setOutgoing: next => { state.outgoing = typeof next === "function" ? next(state.outgoing) : next; },
-      setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {}, setAnnotations() {},
+      setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {}, setAnnotations() {},
     });
     const sent = await deliver("also add tests");
     assert.equal(state.outgoing, null, taskId);
@@ -1908,7 +1913,7 @@ test("send completion preserves the next chat's draft and edits typed during the
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
       setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+      setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
       // The message shows in the chat at once (setOutgoing) and leaves the composer before it is sent.
       setOutgoing() {}, setAnnotations() {},
     });
@@ -1927,7 +1932,7 @@ test("a pending new-chat send keeps its real API identity and leaves the next pr
   const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
     selectedTaskId: "", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
     setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: input => { calls.push(input); return reply.promise; },
-    setDraft: value => { state.draft = value; }, setTitle: value => { state.title = value; }, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, setCarried() {},
+    setDraft: value => { state.draft = value; }, setTitle: value => { state.title = value; }, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
     setOutgoing() {}, setAnnotations() {},
   });
   const sending = deliver("sent text");
@@ -1949,7 +1954,9 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
   const alive = { current: true }, draftOwner = { current: key() }, draftRegistration = { current: null }, composing = { current: { taskId, cacheKey: key(), draft: state.draft, snapshot: maps.CHAT_DRAFTS.get(key())?.snapshot ?? { text: state.draft }, attachments: state.attachments, annotations: state.annotations, queuedRecovery: [] } };
   let defer = false, deferDraft = false, replayUpdaters = false, lateSetters = 0, releaseDraft;
   const set = key => next => { if (!alive.current) lateSetters++; const apply = () => { if (replayUpdaters && typeof next === "function") next(state[key]); state[key] = typeof next === "function" ? next(state[key]) : next; }; if (defer || (deferDraft && key !== "taskId")) waiting.push(apply); else apply(); };
-  const helpers = { draftEntry: rendererCallback("AgentOrchestratorChat.tsx", "draftEntry", maps), trimDraftEntry: rendererCallback("AgentOrchestratorChat.tsx", "trimDraftEntry", maps) };
+  const draftEntry = rendererCallback("AgentOrchestratorChat.tsx", "draftEntry", maps);
+  const giveBackToDraft = rendererCallback("AgentOrchestratorChat.tsx", "giveBackToDraft", { draftEntry, refusalText: rendererCallback("AgentOrchestratorChat.tsx", "refusalText", {}) });
+  const helpers = { draftEntry, trimDraftEntry: rendererCallback("AgentOrchestratorChat.tsx", "trimDraftEntry", maps), giveBackToDraft };
   const globals = () => ({ ...maps, ...helpers, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, attachments: state.attachments, annotations: state.annotations,
     setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachmentWork() {}, setAttachNote() {}, setCard: set("card") });
   releaseDraft = rendererCallback("AgentOrchestratorChat.tsx", "releaseDraft", globals());
@@ -1983,7 +1990,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
       const reply = delayedReply();
       const result = rendererCallback("AgentOrchestratorChat.tsx", "deliver", { ...globals(), selectedTaskId: state.taskId,
         setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
-        setTitle() {}, setAtBottom() {}, setCarried() {}, setOutgoing() {} })(state.draft);
+        setTitle() {}, setAtBottom() {}, followBottom() {}, setCarried() {}, setOutgoing() {} })(state.draft);
       return { finish: () => { reply.resolve(); return result; } };
     },
     async submit() {
@@ -2213,6 +2220,44 @@ test("a restart's resume waits for the window's focus, then starts only a chat n
     focus[0]();
     for (let i = 0; i < 5; i += 1) await new Promise(setImmediate);
     assert.deepEqual(calls, expected, picked ? "a chat picked up meanwhile is left alone" : "resumed once the person is back");
+  }
+});
+
+test("a resume whose start is refused for focus tries once more at the next focus, without retrying the step again", async () => {
+  // Seen live 2026-11-12 07:04: the retry passed, start_run 1.2 s later was refused ("Click into the
+  // Coding Tools window"), and the chat said "Pursuing goal" with nothing running.
+  const refused = new Error("Error invoking remote method 'coding-tools:apps:call': Error: Click into the Coding Tools window and try again: this action runs only from the focused app window");
+  const mission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "held", history: [], receipt: { error: "Launch failed: The operation was aborted due to timeout", started_at_ms: Date.now() - 3_600_000 } }] };
+  const cases = [
+    ["back in focus", { driven: false, status: "held" }, 1, ["control_run", "start_run", "run_status", "start_run"]],
+    ["picked up meanwhile", { driven: true, status: "running" }, 1, ["control_run", "start_run", "run_status"]],
+    ["refused again", { driven: false, status: "held" }, 2, ["control_run", "start_run", "run_status", "start_run"]],
+  ];
+  for (const [name, statusAfter, refusals, expected] of cases) {
+    const calls = [], focus = [];
+    let starts = 0, statuses = 0;
+    const context = {
+      workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+      selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
+      window: { addEventListener: (event, listener) => { if (event === "focus") focus.push(listener); } },
+      moduleCall: async (operation) => {
+        calls.push(operation);
+        if (operation === "run_status") return (statuses += 1) > 1 ? statusAfter : { driven: false, status: "held" };
+        if (operation === "chat_auto_retry") return { ok: true, autoRetry: true };
+        if (operation === "runs") return { runs: [mission] };
+        if (operation === "start_run" && (starts += 1) <= refusals) throw refused;
+        return { ok: true };
+      },
+      loadMissions: async () => {}, setTimeout,
+    };
+    rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context)();
+    for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+    assert.equal(focus.length, 1, `${name}: waits for the next focus`);
+    focus[0]();
+    for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+    assert.deepEqual(calls.slice(3), expected, name);
+    assert.equal(focus.length, 1, `${name}: one more try at most`);
   }
 });
 

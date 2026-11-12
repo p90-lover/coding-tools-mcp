@@ -71,6 +71,8 @@ const BACKEND_MODULES = Object.freeze([
   "codex-guardian-policy.cjs",
   "ao-context-breakdown.cjs",
   "cpa-antigravity-reauth.cjs",
+  // Relabels Provider Manager account kinds in CPA's auth-file listing (cpa-oauth-adapter, cpa-usage, the workflow).
+  "cpa-account-kinds.cjs",
   "cpa-oauth-adapter.cjs",
   "headless-host.cjs",
   // agent-orchestrator-upstream.cjs warms the AO daemon's program off the main thread (#702).

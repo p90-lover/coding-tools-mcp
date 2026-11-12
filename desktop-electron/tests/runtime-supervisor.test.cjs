@@ -2175,6 +2175,40 @@ test("the launcher watchdog restarts a slow daemon only after it also fails a pa
     assert.equal(run.restarts(), 1);
     assert.deepEqual(run.checks, [2_000, 2_000]);
   });
+  // 2026-11-12: on a saturated disk the tunnel's inventory probe timed out with no health URL known,
+  // and the watchdog restarted the whole runtime (14:37, 15:04, 16:27) though nothing showed it down.
+  await t.test("a tunnel that could not be observed is neither a miss nor a restart, and keeps earlier misses", async () => {
+    const verdicts = [{ ready: false, failed: "tunnel_health" }, { ready: false, failed: "tunnel_unobserved" },
+      { ready: false, failed: "tunnel_unobserved" }, { ready: false, failed: "tunnel_unobserved" }, { ready: false, failed: "tunnel_health" }];
+    const run = watchdog(() => verdicts.shift());
+    for (let i = 0; i < 4; i += 1) await run.tick();
+    assert.equal(run.restarts(), 0, "unobserved rounds restart nothing");
+    assert.deepEqual(run.logged.map(([event]) => event), ["runtime.watchdog_miss"], "and are not logged as misses");
+    await run.tick();
+    assert.equal(run.restarts(), 1, "a real failure after them is the second miss");
+  });
+});
+
+test("tunnel health is true, false, or null when the tunnel could not be observed", async () => {
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: os.tmpdir(),
+    coreHome: os.tmpdir(),
+    browserDescriptorPath: path.join(os.tmpdir(), "launcher.json"),
+  });
+  const observed = (health) => { supervisor.observeTunnelForMonitor = async () => health; };
+  observed({ ready: true, statusKnown: true });
+  assert.equal(await supervisor.tunnelHealth({}), true);
+  observed({ ready: false, statusKnown: true, detail: "Tunnel runtime stopped" });
+  assert.equal(await supervisor.tunnelHealth({}), false);
+  observed({ ready: false, statusKnown: false, detail: "local tunnel health URL is not known; local inventory: Local tunnel inventory probe timed out after 5000ms" });
+  assert.equal(await supervisor.tunnelHealth({}), null);
+  supervisor.daemon = { pid: 123_456_785, exitCode: null, signalCode: null };
+  supervisor.proxyHealth = async () => true;
+  supervisor.tunnel = { pid: 123_456_786, exitCode: null, signalCode: null };
+  assert.deepEqual(await supervisor.ownedRuntimeCheck({ mode: "full" }), { ready: false, failed: "tunnel_unobserved" });
+  assert.equal(await supervisor.ownedRuntimeReady({ mode: "full" }), false, "readiness still needs a ready tunnel");
 });
 
 test("failed initial health checks stop their child without scheduling crash recovery", async () => {

@@ -54,11 +54,21 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
     assert.equal(config["proxy-url"] ?? "", "", "a stale saved proxy cannot replace the managed route");
     assert.equal(config.plugins.enabled, true);
     assert.equal(config.plugins.dir, path.join(state, "plugins"));
-    assert.equal(config.plugins.configs["cline-pass-switcher"].enabled, true);
-    assert.equal(config.plugins.configs["cline-pass-switcher"]["data-dir"], path.join(state, "cline-pass-switcher-data"));
-    // CPA Auto Review is bundled now: its entry is owned, and its fallback chain stays in its own folder.
-    assert.deepEqual(config.plugins.configs["codex-review-account-selector"],
-      { enabled: true, "data-dir": path.join(state, "codex-review-account-selector-data") });
+    // CPA loads Provider Manager alone: the retired plugins' saved entries are gone (a disabled one
+    // can't come back either), and their folders are imported once into Provider Manager's.
+    assert.deepEqual(Object.keys(config.plugins.configs).sort(), ["cpa-provider-manager", "user-own-plugin"]);
+    assert.deepEqual(config.plugins.configs["cpa-provider-manager"], {
+      enabled: true,
+      "data-dir": path.join(state, "cpa-provider-manager-data"),
+      "legacy-data-dirs": {
+        helper: path.join(state, "cpa-helper-data"),
+        autoreview: path.join(state, "codex-review-account-selector-data"),
+        cline: path.join(state, "cline-pass-switcher-data"),
+      },
+      helper: { keeper_enabled: false },
+      // The saved "/old/cline" folder and enabled: false don't reach the managed Cline section.
+      cline: { "runtime-executable": process.execPath },
+    });
     assert.deepEqual(config.plugins.configs["user-own-plugin"], { enabled: true, strategy: "saved-user-setting" });
     assert.equal(config["disable-cooling"], true);
     assert.equal(config["request-retry"], 8);
