@@ -1160,7 +1160,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   const turns = { old: [{ state: "completed", completedAt: ago(90) }], recent: [{ state: "completed", completedAt: ago(10) }],
     typed: [{ state: "completed", completedAt: ago(90) }], warm: [] };
   const calls = [], resumeWaits = [];
-  let resumeOk = true, exitOk = true, resumeTimesOut = false, busyAnswers = 0, exitBusy = 0;
+  let resumeOk = true, exitOk = true, resumeTimesOut = false, busyAnswers = 0, exitBusy = 0, signInRefused = null;
   let status = "exited";
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
@@ -1173,6 +1173,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
         throw Object.assign(new Error("The service is momentarily unavailable, please retry."), { status: 503, code: "SERVICE_UNAVAILABLE" });
       }
       if (endpoint.endsWith("/resume-agent") && resumeTimesOut) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      if (endpoint.endsWith("/resume-agent") && signInRefused) throw Object.assign(new Error(signInRefused.message), { status: 409, code: signInRefused.code });
       if (endpoint === "/api/v1/sessions") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
@@ -1237,6 +1238,26 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
   exitOk = false;
   await assert.rejects(upstream.continuable("old"), error => error.code === "AO_SESSION_RESTORE_UNCONFIRMED",
     "one that cannot be stopped either may still come back, so no second agent is started beside it");
+  // Seen live 2026-11-12: AO refused every Claude Code start for half an hour ("agent requires
+  // authentication"); 18 chats stopped their agents and started fresh ones, which were refused too.
+  exitOk = true; resumeOk = true; status = "exited";
+  for (const refusal of [
+    { code: "CHAT_DRIVER_UNAVAILABLE", message: "resume agent old: resume chat: chat driver unavailable: persistent ACP host: agent requires authentication (CHAT_DRIVER_UNAVAILABLE)" },
+    { code: "AGENT_AUTH_REQUIRED", message: "The agent is installed but the project credential was rejected" },
+    { code: "CHAT_AUTH_REQUIRED", message: "The agent is installed but not authenticated" },
+  ]) {
+    signInRefused = refusal; calls.length = 0;
+    await assert.rejects(upstream.continuable("old"), error => error.code === "AO_AGENT_SIGN_IN_REFUSED" && error.cause?.code === refusal.code,
+      `${refusal.code}: a refused sign-in fails the message, since a fresh agent is refused the same way`);
+    assert.deepEqual(calls.filter(([method]) => method === "POST").map(([, endpoint]) => endpoint.split("/").at(-1)), ["resume-agent"],
+      `${refusal.code}: the agent is not stopped, so the chat keeps it for the retry`);
+  }
+  signInRefused = { code: "CHAT_DRIVER_UNAVAILABLE", message: "chat driver unavailable: persistent ACP host exited (CHAT_DRIVER_UNAVAILABLE)" };
+  calls.length = 0;
+  assert.equal(await upstream.continuable("old"), false, "any other unavailable driver is still stopped, tried again, then replaced");
+  assert.deepEqual(calls.filter(([method]) => method === "POST").map(([, endpoint]) => endpoint.split("/").at(-1)),
+    ["resume-agent", "exit-agent", "resume-agent", "exit-agent"]);
+  signInRefused = null;
 });
 
 test("a chat AO could not reconnect after a restart is resumed before a message, and released when left alone", async () => {

@@ -816,7 +816,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     for (;;) {
       while (sessionStops.has(session)) await sessionStops.get(session);
       const usable = await harnessService().continuable?.(session).catch(error => {
-        if (error?.code === "AO_SESSION_RESTORE_UNCONFIRMED") throw error;
+        // A refused sign-in fails the message too: a fresh agent would be refused the same way.
+        if (error?.code === "AO_SESSION_RESTORE_UNCONFIRMED" || error?.code === "AO_AGENT_SIGN_IN_REFUSED") throw error;
         return false;
       });
       // A Stop may have started during the readiness check and can still exit this host.
