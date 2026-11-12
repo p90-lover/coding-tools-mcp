@@ -9,6 +9,10 @@
 //
 // Samples stay in memory (MAX_SAMPLES per process, by pid: a renderer the watchdog recreated is a
 // new process with its own history). Nothing is written to disk but the log entries themselves.
+//
+// An entry names its process: the main process by where its memory is (mainBreakdown), any other by
+// what `describe(pid)` says it hosts (main.cjs: the window or page, describeRenderer). 2026-11-12's
+// "Tab 55892" entry took several process and DevTools probes to place as the main window.
 
 const SAMPLE_MS = 5 * 60_000;
 const MAX_SAMPLES = 36; // three hours
@@ -66,6 +70,50 @@ function mainBreakdown(memoryUsage) {
   }
 }
 
+// A page's origin, or its scheme where it has none (file:, data:, about:): never its path, query
+// or fragment, which can name a person, a chat or a token.
+function originOf(rawUrl) {
+  try {
+    const url = new URL(String(rawUrl));
+    return url.origin !== "null" ? url.origin : url.protocol;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The pages a renderer process hosts, for an entry about it. `contents()` lists the app's pages
+ * (webContents: getOSProcessId, getURL, isDestroyed) and `roleOf(page)` names a page's part of the
+ * app. One page: `{ role, origin }`. Several (Chromium shares a process between pages of one site
+ * and session): `{ pages, roles: { role: count }, origins }`. No page in the process (the GPU or a
+ * utility process): {}. Reads nothing but what each page already knows; never throws.
+ */
+function describeRenderer(pid, { contents, roleOf }) {
+  try {
+    const pages = [];
+    for (const page of contents?.() ?? []) {
+      try {
+        if (page.isDestroyed?.() || page.getOSProcessId() !== pid) continue;
+        let role = null;
+        try { role = roleOf?.(page); } catch { /* unnamed, below */ }
+        pages.push({ role: typeof role === "string" && role ? role.slice(0, 40) : "page", origin: originOf(page.getURL()) });
+      } catch { /* a page closing while it is read */ }
+    }
+    if (pages.length === 1) return pages[0].origin ? pages[0] : { role: pages[0].role };
+    if (!pages.length) return {};
+    const roles = {};
+    for (const { role } of pages) roles[role] = (roles[role] ?? 0) + 1;
+    const origins = [...new Set(pages.map((page) => page.origin).filter(Boolean))].slice(0, 5);
+    return { pages: pages.length, roles, ...(origins.length ? { origins } : {}) };
+  } catch {
+    return {};
+  }
+}
+
+// What `describe` may not overwrite in an entry, and how much of it is kept.
+const ENTRY_FIELDS = new Set(["kind", "pid", "fromMb", "toMb", "minutes", "mb", "totalMb", "main"]);
+const MAX_DESCRIBED_FIELDS = 6;
+
 /** The app's processes as `{ pid, kind, mb }`: Electron's (getAppMetrics, working set in KB) and the main process's JS heap. */
 function readProcesses({ appMetrics, memoryUsage = () => process.memoryUsage() }) {
   const processes = [];
@@ -81,15 +129,27 @@ function readProcesses({ appMetrics, memoryUsage = () => process.memoryUsage() }
 
 function createMemoryWatch({ appMetrics, memoryUsage = () => process.memoryUsage(), logger, notify, now = () => Date.now(),
   sampleMs = SAMPLE_MS, maxSamples = MAX_SAMPLES, highMb = HIGH_MB, repeatMs = REPEAT_MS, notifyAgainMs = NOTIFY_AGAIN_MS,
-  highLogMs = HIGH_LOG_MS, mainPid = process.pid,
+  highLogMs = HIGH_LOG_MS, mainPid = process.pid, describe = null,
   setRepeat = setInterval, clearRepeat = clearInterval, thresholds = {} } = {}) {
   const histories = new Map(); // `${kind}:${pid}` -> { kind, pid, samples: [{ at, mb }] }
   const logged = new Map();
   let notifiedAt = null;
   let highLoggedAt = null;
   let timer = null;
-  // An entry about the main process says where in it the memory is.
-  const where = (pid) => (pid === mainPid ? { main: mainBreakdown(memoryUsage) } : {});
+  // What another process hosts, by `describe` (only when an entry is written): a plain object's
+  // first few fields, none of the entry's own. A missing, failing or odd describe adds nothing.
+  const described = (pid) => {
+    if (typeof describe !== "function") return {};
+    try {
+      const fields = describe(pid);
+      if (!fields || typeof fields !== "object" || Array.isArray(fields)) return {};
+      return Object.fromEntries(Object.entries(fields).filter(([key]) => !ENTRY_FIELDS.has(key)).slice(0, MAX_DESCRIBED_FIELDS));
+    } catch {
+      return {};
+    }
+  };
+  // An entry about the main process says where in it the memory is; one about another, what it hosts.
+  const where = (pid) => (pid === mainPid ? { main: mainBreakdown(memoryUsage) } : described(pid));
 
   const sample = () => {
     const at = now();
@@ -156,4 +216,4 @@ function createMemoryWatch({ appMetrics, memoryUsage = () => process.memoryUsage
   };
 }
 
-module.exports = { createMemoryWatch, growth, readProcesses, SAMPLE_MS };
+module.exports = { createMemoryWatch, describeRenderer, growth, readProcesses, SAMPLE_MS };

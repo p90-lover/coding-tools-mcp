@@ -23,6 +23,7 @@ const {
   shell,
   Tray,
   webFrameMain,
+  webContents: electronWebContents,
   powerMonitor,
   powerSaveBlocker,
 } = require("electron");
@@ -43,7 +44,7 @@ const { automaticSetupGaveWay, createBrowserAccountMcpSync } = require("./browse
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
-const { createActionTimes, timeIpcHandler, watchPageTimes } = require("./action-times.cjs");
+const { createActionTimes, timeIpcHandler, watchPageTimes, partitionGroup, partitionOf } = require("./action-times.cjs");
 const { createRegisterHost, createRegisterCpaSync } = require("./register-host.cjs");
 const { createChatWindows } = require("./chat-windows.cjs");
 const { readBranch, readGitInfo, readRemote } = require("./git-remote.cjs");
@@ -132,7 +133,7 @@ const {
   applyLaunchSwitch: applyRendererAccessibilitySwitch,
   createRendererAccessibility,
 } = require("./renderer-accessibility.cjs");
-const { createMemoryWatch } = require("./memory-watch.cjs");
+const { createMemoryWatch, describeRenderer } = require("./memory-watch.cjs");
 const { createRuntimeStartupRetry } = require("./runtime-startup-retry.cjs");
 const { actUpstream } = require("./upstream-actions.cjs");
 const {
@@ -550,6 +551,42 @@ function describeTimedPartition(partition) {
     return { group: "GPT Browser", account: entry?.email || entry?.label || gptAccount };
   }
   return {};
+}
+
+// Pages whose session cannot say which part of the app they are (in-memory partitions: chat
+// previews, the Agent Orchestrator view), named where they are made, for memory warnings.
+const rendererRoles = new WeakMap();
+function taggedWebContentsView(role) {
+  // The module it is handed to calls it with `new`; the view returned is the one it gets.
+  return function TaggedWebContentsView(options) {
+    const view = new WebContentsView(options);
+    rendererRoles.set(view.webContents, role);
+    return view;
+  };
+}
+
+const CHATGPT_HOST = /(^|\.)(chatgpt\.com|openai\.com)$/i;
+
+// Which part of the app a page is, for a memory warning about its renderer process (memory-watch
+// describeRenderer adds its origin at most): never its path, title or account.
+function rendererRole(contents) {
+  const main = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (main && contents === main.webContents) return "main window";
+  const tagged = rendererRoles.get(contents);
+  if (tagged) return tagged;
+  // A window's own page (a view's owner, if any, is the window it sits in, with another page).
+  const owner = BrowserWindow.fromWebContents(contents);
+  if (owner && !owner.isDestroyed() && owner.webContents === contents) {
+    if (owner.isVisible()) return "window";
+    let host = "";
+    try { host = new URL(contents.getURL()).hostname; } catch {}
+    return CHATGPT_HOST.test(host) ? "hidden ChatGPT window" : "hidden window";
+  }
+  // A view: its part of the app by its session's partition, and whether the main window shows it.
+  const group = partitionGroup(partitionOf(contents));
+  const name = group === "Browser" ? "browser-host view" : group === "App" ? "view" : `${group} view`;
+  const shown = Boolean(main?.contentView?.children?.some((view) => view.webContents === contents && view.getVisible?.() !== false));
+  return shown ? name : `hidden ${name}`;
 }
 
 // Remote fetches for Node-side services (CPA's release checks and downloads, app plugin and
@@ -5080,7 +5117,7 @@ async function start() {
         (() => { try { return portOf(externalServicesController.cpaConnection()?.baseUrl); } catch { return null; } })(),
       ].filter((port) => Number.isInteger(port) && port > 0);
       const chatPreviews = createNativeChatPreviews({
-        BaseWindow, WebContentsView, Menu, clipboard, mainWindow: () => mainWindow, blockedPorts: appServicePorts, logger,
+        BaseWindow, WebContentsView: taggedWebContentsView("preview"), Menu, clipboard, mainWindow: () => mainWindow, blockedPorts: appServicePorts, logger,
       });
       app.on("will-quit", () => chatPreviews.closeAll());
       // Agents' commands run in Codex's Windows sandbox when it is installed (its unelevated mode:
@@ -5352,7 +5389,7 @@ async function start() {
       cpaUsage: backendBundles.requireModule(backend, "cpa-usage.cjs").createCpaUsage({
         getConnection: () => externalServicesController?.cpaConnection(), quota: cpaQuota, logger,
       }),
-      WebContentsView, dialog, shell, logger,
+      WebContentsView: taggedWebContentsView("Agent Orchestrator view"), dialog, shell, logger,
     });
     // Push AO changes to the Mission chat instead of making it poll: AO's session feed (a role's
     // message, reasoning or tool call moved) and mission run state, batched per 150 ms.
@@ -5701,7 +5738,7 @@ async function start() {
   threadAccounts = createThreadAccounts({ filePath: path.join(CORE_HOME, "sync", "codex-thread-accounts.json"), logger });
   conversationActions = createConversationActions({
     logger,
-    createContents: (partition) => new WebContentsView({
+    createContents: (partition) => new (taggedWebContentsView("chat archive page"))({
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
     }).webContents,
   });
@@ -5938,7 +5975,9 @@ async function start() {
   const diskHealth = createDiskHealthMonitor({ paths: [app.getPath("userData"), path.dirname(process.execPath)], logger, notify: notifyPerson });
   diskHealth.start();
   // Memory that keeps growing in one of the app's processes (a leak), told before it slows the machine.
-  const memoryWatch = createMemoryWatch({ appMetrics: () => app.getAppMetrics(), logger, notify: notifyPerson });
+  // A renderer's entry names the page(s) it hosts: role and origin, read only when an entry is written.
+  const memoryWatch = createMemoryWatch({ appMetrics: () => app.getAppMetrics(), logger, notify: notifyPerson,
+    describe: (pid) => describeRenderer(pid, { contents: () => electronWebContents.getAllWebContents(), roleOf: rendererRole }) });
   memoryWatch.start();
   app.on("will-quit", () => { diskHealth.stop(); memoryWatch.stop(); });
 

@@ -11,7 +11,7 @@ const { MAX_RESPONSE_BYTES } = require("./ipc-schema.cjs");
 const { readCpaCatalog, collectMissionAccounting, accountingMeasurements } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
-const { createDaemonLogFilter, daemonLogEvent } = require("./ao-daemon-log.cjs");
+const { createDaemonLogFilter, daemonLogEvent, createDaemonFailureEvents } = require("./ao-daemon-log.cjs");
 const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
@@ -301,10 +301,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * (daemonLogEvent), where a chat that waited minutes for its agent is looked into.
    */
   let daemonLines = "";
+  // AO's failed requests, warnings and errors go there too (createDaemonFailureEvents): its answers
+  // hide a failure's cause, and it was only in this tail.
+  const daemonFailureEvent = createDaemonFailureEvents();
   const keepDaemonLines = (text) => {
     daemonLines = (daemonLines + text).slice(-DAEMON_LINES_CHARS);
     for (const line of text.split("\n")) {
-      const found = daemonLogEvent(line);
+      const found = daemonLogEvent(line) ?? daemonFailureEvent(line);
       if (found) logger?.[found.level]?.(found.event, found.detail);
     }
   };
