@@ -1114,6 +1114,31 @@ test("a subagent still working when the app restarts comes back with it, and its
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("a turn its chat or the user stopped is not resumed, and recovery gives up after its tries", async () => {
+  let clock = 1_000_000;
+  const w = world({ now: () => clock });
+  try {
+    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
+    // A plain interruption (no reason from the app) is someone's Stop: it ends, as before.
+    w.sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] });
+    const stopped = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    assert.equal(stopped.state, "failed");
+    assert.equal(w.sent.length, 0);
+    const { subagent_id: other } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "y" }));
+    const crash = { turnState: "interrupted", status: "ready", approvals: [], agentGone: true, error: "The agent's process stopped mid-turn. Retry or send a message to continue." };
+    for (let round = 0; round < 8; round += 1) {
+      w.sessions.set(other, crash);
+      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 });
+      clock += 61_000;
+      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 });
+    }
+    const last = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 }));
+    assert.equal(w.sent.filter(([sid]) => sid === other).length, 3, "three tries");
+    assert.equal(last.state, "failed");
+    assert.match(last.error, /after 3 tries to resume it/);
+  } finally { w.cleanup(); }
+});
+
 // #1252 shows each subagent's harness and effort; the runs saved for a restart (#1249) left both out,
 // so a subagent brought back by a restart lost "· High" and its harness from its header.
 test("a subagent's harness and effort come back with it after a restart", async () => {
@@ -1141,29 +1166,4 @@ test("a subagent's harness and effort come back with it after a restart", async 
     assert.equal(back.harness, shown.harness, "its harness");
     assert.equal(back.effort, shown.effort, "its effort");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-});
-
-test("a turn its chat or the user stopped is not resumed, and recovery gives up after its tries", async () => {
-  let clock = 1_000_000;
-  const w = world({ now: () => clock });
-  try {
-    const { subagent_id: id } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "x" }));
-    // A plain interruption (no reason from the app) is someone's Stop: it ends, as before.
-    w.sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] });
-    const stopped = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
-    assert.equal(stopped.state, "failed");
-    assert.equal(w.sent.length, 0);
-    const { subagent_id: other } = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "y" }));
-    const crash = { turnState: "interrupted", status: "ready", approvals: [], agentGone: true, error: "The agent's process stopped mid-turn. Retry or send a message to continue." };
-    for (let round = 0; round < 8; round += 1) {
-      w.sessions.set(other, crash);
-      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 });
-      clock += 61_000;
-      await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 });
-    }
-    const last = parse(await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: other, wait_seconds: 0 }));
-    assert.equal(w.sent.filter(([sid]) => sid === other).length, 3, "three tries");
-    assert.equal(last.state, "failed");
-    assert.match(last.error, /after 3 tries to resume it/);
-  } finally { w.cleanup(); }
 });
