@@ -316,11 +316,7 @@ impl std::io::Write for ByteCount {
 
 /// The newest of `runs` (given newest first), oldest first: at most `limit` of them and, as a JSON
 /// array, at most `budget` bytes. The newest is kept whatever its size, so a read is never empty.
-fn newest_within<'a>(
-    runs: impl Iterator<Item = &'a Run>,
-    limit: usize,
-    budget: usize,
-) -> Vec<Run> {
+fn newest_within<'a>(runs: impl Iterator<Item = &'a Run>, limit: usize, budget: usize) -> Vec<Run> {
     let mut kept = Vec::new();
     // The array's brackets, then each run with the comma before it (one too many: a margin).
     let mut used = 2;
@@ -1127,14 +1123,20 @@ mod tests {
         // The newest runs, oldest first, with none skipped.
         let newest_in_order = |runs: &[Run]| {
             runs.windows(2).all(|pair| pair[0].id < pair[1].id)
-                && runs.last().is_some_and(|run| run.id.starts_with("long-182-"))
+                && runs
+                    .last()
+                    .is_some_and(|run| run.id.starts_with("long-182-"))
         };
         let chat = read_chat_runs(&data, "qa", "goal");
         assert!(size(&chat) <= RUNS_READ_BUDGET, "{} bytes", size(&chat));
         assert!(chat.len() >= 20 && chat.len() < 182, "{} runs", chat.len());
         assert!(newest_in_order(&chat));
         let project = read_runs(&data, "qa", None).unwrap();
-        assert!(size(&project) <= RUNS_READ_BUDGET, "{} bytes", size(&project));
+        assert!(
+            size(&project) <= RUNS_READ_BUDGET,
+            "{} bytes",
+            size(&project)
+        );
         assert!(newest_in_order(&project));
         // One run past the budget on its own still comes back: a read is never empty.
         let mut huge = original.clone();
