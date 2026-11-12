@@ -73,6 +73,22 @@ test("one failure continues to other accounts and does not retry its own recorde
   assert.deepEqual(f.connected, ["one", "two", "one"]);
 });
 
+test("a failed setup's log record names the page state it stopped on, beside the fixed message", async () => {
+  // Live 2026-11-12: "ChatGPT did not expose one Personal plugins tab." twice in 20 minutes, with
+  // nothing to tell a slow tab bar from a hidden or missing one.
+  const f = fixture();
+  const pageState = { tabs: 2, visibleTabs: 1, personalTabs: 0, directoryLoading: false, frameMs: 16 };
+  f.deps.connect = async id => {
+    if (id === "one") throw Object.assign(new Error("ChatGPT did not expose one Personal plugins tab."), { pageState });
+    throw new Error("ChatGPT did not confirm the exact connector state.");
+  };
+  await f.sync.sync();
+  assert.deepEqual(f.warnings, [
+    { event: "browser_accounts.automatic_mcp_failed", message: "ChatGPT did not expose one Personal plugins tab.", pageState },
+    { event: "browser_accounts.automatic_mcp_failed", message: "ChatGPT did not confirm the exact connector state." },
+  ]);
+});
+
 test("a setup that gave way to an account switch runs again, though the switch is already over", async () => {
   const f = fixture();
   let interrupt = true;

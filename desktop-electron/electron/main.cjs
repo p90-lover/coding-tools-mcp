@@ -3681,18 +3681,20 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // The page state a failed Personal plugins wait left (connectorPageState) goes to the log only.
+      const logged = error?.pageState ? { pageState: error.pageState } : {};
       // An automatic setup that gave way (an account switch, the app left) did not fail: the account
       // keeps its connector state and the sync tries again later, with no error on screen.
       if (automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
         publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
-        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
+        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true, ...logged });
       }
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
       } catch {}
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
-      throw Object.assign(new Error(failure.message), { code: failure.code });
+      throw Object.assign(new Error(failure.message), { code: failure.code, ...logged });
     }
   };
   handle("launcher:mcp-create-connector", async (event, accountId) => {

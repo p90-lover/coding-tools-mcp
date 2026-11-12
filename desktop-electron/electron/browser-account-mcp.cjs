@@ -83,6 +83,8 @@ function createBrowserAccountMcpSync(deps) {
           gaveWay = error?.gaveWay === true;
           deps.logger?.warn?.(gaveWay ? "browser_accounts.automatic_mcp_deferred" : "browser_accounts.automatic_mcp_failed", {
             message: error instanceof Error ? error.message : String(error),
+            // What the ChatGPT page showed when a Personal plugins wait gave up (counts and flags only).
+            ...(error?.pageState && typeof error.pageState === "object" ? { pageState: error.pageState } : {}),
           });
         } finally { connecting = false; }
         if (gaveWay || !current()) {
