@@ -4,7 +4,7 @@
   "version": "0.6.0",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "PROVIDER_MANAGER_COMMIT",
+    "commit": "4c2172b823cfd15de08edac1460a327b770d9a68",
     "license": "MIT"
   },
   "changes": [
@@ -19,8 +19,8 @@
   "platforms": {
     "win32/x64": {
       "path": "windows/amd64/cpa-provider-manager-v0.6.0.dll",
-      "sha256": "0e571d45bbaee84357afa79b93f7c741a4485efb27b4bed4d786d1dc9ad17be6",
-      "size": 8444928
+      "sha256": "7ef6a17411ec13e47e95ce408c74c989a32af134ecccc0bed07978cc90dc6008",
+      "size": 27115008
     }
   }
 }
