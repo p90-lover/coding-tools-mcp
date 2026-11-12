@@ -10971,6 +10971,56 @@ test(`"Retry automatically" waits less before retrying a failure that never reac
     workflow.dispose();
   }
 });
+test("a run loop backed off after headless timed out starts again as soon as headless answers", async () => {
+  // 2026-11-12: a 3.5-minute headless hang left 10 chats' loops on backoffs of up to 60 s each,
+  // so they came back 15-55 s after headless did.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  let clock = 1_000_000, loopReads = 0, hung = false;
+  const infos = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    // A backoff's own timer never fires here: only headless answering again can restart the loop.
+    setTimer: (callback, delay) => delay >= 1_000 ? { unref() {} } : setTimeout(callback, delay),
+    clearTimer: timer => clearTimeout(timer),
+    logger: { info: (event, fields) => infos.push([event, fields]), warn() {} },
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read") && body?.run_id) {
+        loopReads += 1;
+        if (hung) throw new Error("Headless request timed out");
+      }
+      return endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [], quiet: true }) },
+    confirm: async () => true,
+  });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    hung = true;
+    for (let tries = 0; tries < 200 && !/timed out/.test(String((await status()).warning ?? "")); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.match(String((await status()).warning), /timed out/, "the loop backed off");
+    const backedOff = loopReads;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(loopReads, backedOff, "nothing reads while it waits");
+    hung = false;
+    clock += 1_500;
+    // Any answer from headless (here the chat list's read) wakes it.
+    await workflow.call("runs", { workspaceId: "ws" });
+    for (let tries = 0; tries < 100 && loopReads === backedOff; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(loopReads > backedOff, "the loop is back without waiting out its backoff");
+    assert.ok(infos.some(([event, fields]) => event === "ao.drive_woken" && fields.loops === 1));
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    workflow.dispose();
+  }
+});
 test("an automatic retry's pause runs from when the step failed, not from when the loop saw it", async () => {
   // 2026-11-12: retries fired 15, 23, 36 and 67 s after pauses of 10, 20, 30 and 60 s.
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };

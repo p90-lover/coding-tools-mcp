@@ -459,14 +459,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (runReads.size > 64) runReads.delete(runReads.keys().next().value);
     return entry.read;
   }
+  // Run loops backed off after a local hiccup (backOffDrive): runKey -> { timer, restart, at }.
+  const drivesBackedOff = new Map();
+  // Any answer from headless means it is back: loops waiting out a hiccup start again at once.
+  const headlessAnswered = (reply) => { if (drivesBackedOff.size) wakeBackedOffDrives(); return reply; };
   // Every argument passes through (a confirmed action's third is its localConfirmation).
   const requestHeadless = (endpoint, ...rest) => {
     if (forPerson()) rest = [rest[0], { ...rest[1], admissionControl: true }, ...rest.slice(2)];
     if (HEADLESS_READS.has(endpoint)
       || endpoint === "/api/v1/ao/harness/compact" && rest[0]?.status === true
-      || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return sendHeadless(endpoint, ...rest);
+      || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered);
     runReads.clear();
-    return Promise.resolve(sendHeadless(endpoint, ...rest)).finally(() => runReads.clear());
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => runReads.clear());
   };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
@@ -5484,9 +5488,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         state.warningAt = now();
         reportRun(workspaceId, runId, state, null);
         logger?.warn?.("ao.drive_timeout_retry", { attempt: state.timeoutRestarts, message: publicText(message, 120) });
-        const timer = setTimer(() => { autoRetryTimers.delete(timer); if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, delay);
-        timer?.unref?.();
-        autoRetryTimers.add(timer);
+        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); });
         return;
       }
       // The machine ran short of local sockets or a local service dropped a connection: the run's
@@ -5506,9 +5508,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.warn?.("ao.drive_socket_retry", { attempt: state.socketRestarts, code: String(error?.code ?? error?.cause?.code ?? "") });
         // Tracked like the timeout retry above, so dispose() cancels it: a bare setTimeout drove the run
         // again into a service the closing app had already stopped.
-        const timer = setTimer(() => { autoRetryTimers.delete(timer); if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, delay);
-        timer?.unref?.();
-        autoRetryTimers.add(timer);
+        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); });
         return;
       }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
@@ -5527,6 +5527,44 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // the run (and its AO agent) again through its stopped harness.
   const autoRetryTimers = new Set();
   let autoRetryDisposed = false;
+  /**
+   * A run loop that waits out a local hiccup (a headless call that timed out, a dropped local
+   * connection) before it starts again: `restart` runs after `delay`, or as soon as headless
+   * answers again (wakeBackedOffDrives). A 3.5-minute headless hang left 10 chats' loops on their
+   * own backoffs of up to 60 s each, so they came back 15-55 s after headless did (2026-11-12).
+   */
+  function backOffDrive(workspaceId, runId, delay, restart) {
+    const key = runKey(workspaceId, runId);
+    const entry = { restart, at: now() };
+    entry.timer = setTimer(() => {
+      autoRetryTimers.delete(entry.timer);
+      if (drivesBackedOff.get(key) === entry) drivesBackedOff.delete(key);
+      restart();
+    }, delay);
+    entry.timer?.unref?.();
+    autoRetryTimers.add(entry.timer);
+    drivesBackedOff.set(key, entry);
+  }
+  // Loops woken together start a moment apart, not all in the same instant.
+  const DRIVE_WAKE_STAGGER_MS = 250;
+  // A loop that backed off this recently is left to its timer: the answer may be one already on its way.
+  const DRIVE_WAKE_MIN_MS = 1_000;
+  /** Headless answered: every loop backed off for a while starts again now. */
+  function wakeBackedOffDrives() {
+    if (!drivesBackedOff.size || autoRetryDisposed) return;
+    let index = 0;
+    for (const [key, entry] of [...drivesBackedOff]) {
+      if (now() - entry.at < DRIVE_WAKE_MIN_MS) continue;
+      drivesBackedOff.delete(key);
+      clearTimer(entry.timer);
+      autoRetryTimers.delete(entry.timer);
+      const timer = setTimer(() => { autoRetryTimers.delete(timer); entry.restart(); }, DRIVE_WAKE_STAGGER_MS * index);
+      index += 1;
+      timer?.unref?.();
+      autoRetryTimers.add(timer);
+    }
+    if (index) logger?.info?.("ao.drive_woken", { loops: index });
+  }
   function scheduleAutoRetry(workspaceId, runId, executable, state, tries = 0) {
     if (!chatPreferences.get().autoRetry) return;
     const key = runKey(workspaceId, runId);
