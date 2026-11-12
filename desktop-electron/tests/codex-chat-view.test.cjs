@@ -788,14 +788,16 @@ test("a stuck turn without recovery capability or accepted identity reports reco
   });
 });
 
-test("while the agent works, /review, /init and a new goal steer it; /rewind goes back to a message", async () => {
+test("while the agent works, /review, /init and a new goal steer it; /rewind waits for the chat to stop, then goes back to a message", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const steered = [], rewound = [];
   const { props, calls } = base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    // Its agent has the message (and works on it): Rewind waits for the chat to stop.
+    activity: { "r1:w": { activity: "running a command", last_event_at_ms: Date.now(), turn_started: true } },
     steer: async (input) => { steered.push(input); return true; },
     pendingMessage: "fix the parser",
-    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind: (index) => rewound.push(index), copyConversation() {}, togglePin() {}, pinned: false } });
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind: (index, stop) => rewound.push(stop ? [index, stop] : index), copyConversation() {}, togglePin() {}, pinned: false } });
   const view = mount(props);
   const type = (value) => walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value } });
   const enter = async () => {
@@ -816,7 +818,20 @@ test("while the agent works, /review, /init and a new goal steer it; /rewind goe
   assert.doesNotMatch(text(card() ?? { props: {} }), /Queued/);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 
-  // /rewind lists the messages (newest first) and opens the chosen one to edit; a number picks directly.
+  // While it works, rewind is held as delete is: the main process refuses it ("Stop the chat before
+  // rewinding a message", seen live 2026-11-12), so /rewind says why and each Rewind button is off.
+  const rewindButtons = () => walk(view.render()).filter((element) => element.props?.["aria-label"] === "Rewind to this message");
+  type("/rewind"); await enter();
+  assert.match(text(card()), /Stop the chat first to rewind a message/);
+  type("/rewind 1"); await enter();
+  assert.deepEqual(rewound, [], "nothing is rewound while the chat works");
+  assert.ok(rewindButtons().length >= 1, "each message offers Rewind");
+  assert.ok(rewindButtons().every((button) => button.props.disabled === true && /Stop the chat first to rewind/.test(button.props.title)),
+    "and says why it is off");
+
+  // Once the turn has finished, /rewind lists the messages (newest first) and opens the chosen one; a number picks directly.
+  props.working = false;
+  props.runs = [run("r1", "t", [node("w", "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { answer: "done" } })], { execution_mode: "single" })];
   type("/rewind"); await enter();
   const items = walk(card()).filter((element) => element.type === "button" && /^\d+\. /.test(text(element)));
   assert.ok(items.length >= 1, "each message is a rewind point");
@@ -826,7 +841,39 @@ test("while the agent works, /review, /init and a new goal steer it; /rewind goe
   assert.deepEqual(rewound, [0, 0]);
   type("/rewind 99"); await enter();
   assert.match(text(card()), /Choose a message from 1 to \d+/);
-  assert.ok(walk(view.render()).some((element) => element.props?.["aria-label"] === "Rewind to this message"), "each message offers Rewind");
+  assert.ok(rewindButtons().length >= 1 && rewindButtons().every((button) => !button.props.disabled), "each message offers Rewind again");
+});
+
+test("a message no agent has started yet can be rewound: Rewind stops its run first, then goes back", async () => {
+  // The user: "it doesnt allow to rewind message when the agent havent started or doing anything" (2026-11-12).
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const rewound = [];
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    // Launching: no agent has the message yet (its receipt says "sending").
+    activity: { "r1:w": { activity: "launching", last_event_at_ms: Date.now(), turn_started: false } },
+    pendingMessage: "fix the parser",
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind: (index, stop) => rewound.push([index, stop]), copyConversation() {}, togglePin() {}, pinned: false } });
+  const view = mount(props);
+  const type = (value) => walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value } });
+  const enter = async () => {
+    walk(view.render()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+    await settle(); await settle();
+  };
+  const rewindButtons = () => walk(view.render()).filter((element) => element.props?.["aria-label"] === "Rewind to this message");
+  assert.ok(rewindButtons().length >= 1, "each message offers Rewind");
+  assert.ok(rewindButtons().every((button) => !button.props.disabled && /no agent has started yet/.test(button.props.title)),
+    "on, and it says the waiting message is stopped first");
+  rewindButtons().at(-1).props.onClick();
+  assert.deepEqual(rewound, [[0, "r1"]], "the rewind names the run to stop first");
+  type("/rewind 1"); await enter();
+  assert.deepEqual(rewound, [[0, "r1"], [0, "r1"]]);
+
+  // Once its agent has the message, Rewind waits for the chat to stop again.
+  props.activity = { "r1:w": { activity: "thinking", last_event_at_ms: Date.now(), turn_started: true } };
+  assert.ok(rewindButtons().every((button) => button.props.disabled === true && /Stop the chat first to rewind/.test(button.props.title)));
+  type("/rewind 1"); await enter();
+  assert.equal(rewound.length, 2, "nothing more is rewound");
 });
 
 test("a working WebGPT (Native Codex) chat steers its turn, as the Codex bridge does", async () => {
@@ -1215,22 +1262,38 @@ test("each chat has its own queue, kept by the app: it is sent with the chat clo
 test("rewind resends the selected message into the same chat without filling or switching the composer", async () => {
   const read = (name) => fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
   const surface = read("AgentOrchestratorSurface.tsx");
-  const rewind = surface.slice(surface.indexOf("const rewindChat = "), surface.indexOf("// Fork: a new chat starting"));
-  const calls = [], errors = [];
+  const rewind = surface.slice(surface.indexOf("const stopForRewind = "), surface.indexOf("// Fork: a new chat starting"));
+  const calls = [], errors = [], modules = [];
   const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
   const exported = {};
+  let statuses = [], refusals = 0;
   vm.runInNewContext(ts.transpileModule(`${rewind}\nexports.rewind = rewindChat;`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText, { exports: exported, loadDescription: async () => description,
+  }).outputText, { exports: exported, loadDescription: async () => description, setTimeout,
     chatMessagesFromDescription: transpile("ao-chat.ts", () => ({})).chatMessagesFromDescription,
-    sendChat: async input => calls.push(JSON.parse(JSON.stringify(input))), setError: error => errors.push(error) });
+    workspaceId: "w", mounted: { current: true }, selection: { current: { workspaceId: "w" } },
+    moduleCall: async (operation, args) => { modules.push([operation, args.workspaceId, args.runId, args.action]); return operation === "run_status" ? statuses.shift() : {}; },
+    sendChat: async input => {
+      if (refusals > 0) { refusals -= 1; throw new Error("Stop the chat before rewinding a message"); }
+      calls.push(JSON.parse(JSON.stringify(input)));
+    }, setError: error => errors.push(error) });
   await exported.rewind("t", 1);
   assert.deepEqual(calls, [{ taskId: "t", message: "second ask", rewind: { index: 1, description } }]);
   assert.deepEqual(errors, []);
+  assert.deepEqual(modules, [], "a chat with nothing on its way stops nothing");
   assert.doesNotMatch(rewind, /setChatSeed|setChatTaskId|setDraft\(/, "rewind keeps the selected chat and the unsent draft");
   await exported.rewind("t", 5);
   assert.equal(calls.length, 1, "an invalid point never sends");
   assert.equal(errors.length, 1, "a stale point is reported");
+
+  // A message no agent has taken yet: its run is stopped and waited on until nothing drives it, then
+  // the rewind goes; main's read trailing the stop once is tried again.
+  statuses = [{ driven: true, status: "running" }, { driven: false, status: "held" }];
+  refusals = 1;
+  await exported.rewind("t", 0, "r9");
+  assert.deepEqual(modules, [["control_run", "w", "r9", "stop"], ["run_status", "w", "r9", undefined], ["run_status", "w", "r9", undefined]]);
+  assert.deepEqual(calls.at(-1), { taskId: "t", message: "first ask", rewind: { index: 0, description } });
+  assert.equal(errors.length, 1, "no new error");
   const chat = read("AgentOrchestratorChat.tsx");
   assert.ok(chat.includes("setCarried(seed.context?.length ? seed.context : null)"));
   assert.ok(chat.includes("[...carried, message].join"), "the first message of the rewound chat carries them ahead of it");

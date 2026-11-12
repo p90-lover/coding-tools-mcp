@@ -964,9 +964,24 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
             const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
             if (now.driven !== false || ["starting", "running"].includes(String(now.status)) || resumedRuns.current.has(key)) return;
           }
+          // Focus can still leave between that check and the call. Seen live 2026-11-12 07:04: the retry
+          // passed, its start_run 1.2 s later was refused, and the chat said "Pursuing goal" with nothing
+          // running, as this resume was spent. A refused step waits for the next focus and is tried once
+          // more, unless something picked the chat up meanwhile; a step that passed is not repeated.
+          let retried = resume !== "retry";
+          const begin = async () => {
+            if (!retried) { await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() }); retried = true; }
+            await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
+          };
           resumedRuns.current.add(key);
-          if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
-          await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
+          try { await begin(); }
+          catch (error) {
+            if (!/focused app window/.test(String((error as Error)?.message ?? error))) throw error;
+            await new Promise<void>((resolve) => window.addEventListener("focus", () => resolve(), { once: true }));
+            if (!mounted.current || selection.current.workspaceId !== workspaceId) throw error;
+            const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
+            if (now.driven === false && !["starting", "running"].includes(String(now.status))) await begin();
+          }
         }
         if (mounted.current && selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
       })().catch(() => { settledRuns.current.delete(key); });
@@ -2385,12 +2400,35 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     setChatTaskId("");
     await Promise.all([loadBoard(id), loadMissions(id)]);
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // A run whose message no agent has taken yet (Rewind on a chat whose last message still says
+  // "sending"): stopped, then waited on until nothing drives it, since main refuses a rewind while a
+  // run is open. It ran nothing, so nothing is lost.
+  const stopForRewind = async (owner: string, runId: string) => {
+    await moduleCall("control_run", { workspaceId: owner, runId, action: "stop" });
+    for (const started = Date.now(); Date.now() - started < 30_000;) {
+      const status = await moduleCall("run_status", { workspaceId: owner, runId });
+      if (status.driven === false && !["starting", "running"].includes(String(status.status))) return;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error("The chat's last message didn't stop in time; stop the chat, then rewind");
+  };
   // Rewind the conversation and run the selected message again; workspace files stay unchanged.
-  const rewindChat = (taskId: string, upTo: number) => (async () => {
+  const rewindChat = (taskId: string, upTo: number, stopRunId?: string) => (async () => {
+    if (stopRunId) {
+      const owner = workspaceId;
+      await stopForRewind(owner, stopRunId);
+      if (!mounted.current || selection.current.workspaceId !== owner) return;
+    }
     const description = await loadDescription(taskId);
     const messages = chatMessagesFromDescription(description);
     if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) throw new Error("That message is no longer in this chat; reload it");
-    await sendChat({ taskId, message: messages[upTo].text, rewind: { index: upTo, description } });
+    const send = () => sendChat({ taskId, message: messages[upTo].text, rewind: { index: upTo, description } });
+    try { await send(); } catch (cause) {
+      // Main's read of the runs can trail the stop by a moment: one more try once it has caught up.
+      if (!stopRunId || !/Stop the chat before rewinding/.test(cause instanceof Error ? cause.message : String(cause))) throw cause;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await send();
+    }
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
@@ -2892,7 +2930,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       rename: (title: string) => chatHandlers.current.renameChat(chatTaskId, title),
       archive: () => chatHandlers.current.missionAction(chatTaskId, "archive"),
       fork: (turnIndex?: number | "first") => chatHandlers.current.forkChat(chatTaskId, turnIndex),
-      rewind: (turnIndex: number) => chatHandlers.current.rewindChat(chatTaskId, turnIndex),
+      rewind: (turnIndex: number, stopRunId?: string) => chatHandlers.current.rewindChat(chatTaskId, turnIndex, stopRunId),
       deleteMessage: (messageIndex: number, runIds: string[], sourceDescription: string, sourceWorkspaceId: string) => chatHandlers.current.deleteChatMessage(chatTaskId, messageIndex, runIds, sourceDescription, sourceWorkspaceId),
       copyConversation: () => chatHandlers.current.copyChat(chatTaskId, "conversation"),
       togglePin: () => chatHandlers.current.togglePin(chatTaskId),

@@ -209,8 +209,11 @@ export type ChatThreadActions = {
   archive: () => void;
   /** Fork from here: a new chat with the messages up to this one (its index in the chat's messages). */
   fork: (messageIndex?: number) => void;
-  /** Rewind this chat to the selected message and immediately run it again. Files are unchanged. */
-  rewind?: (messageIndex: number) => void;
+  /**
+   * Rewind this chat to the selected message and immediately run it again. Files are unchanged.
+   * `stopRunId`: a run whose message no agent has taken yet, stopped first (it has done nothing).
+   */
+  rewind?: (messageIndex: number, stopRunId?: string) => void;
   /**
    * Delete a message and its reply from the chat (asked to confirm first). `runIds` are the runs
    * its turn showed: the run it started first, then any restart or replacement of that run.
@@ -2163,6 +2166,17 @@ export function AgentOrchestratorChat({
   useEffect(() => { setDeleting(null); }, [selectedTaskId, projectId]);
   const deleteBlocked = runOpen || working ? "Stop the chat first to delete a message"
     : rewindPoints.length <= 1 ? "This is the chat's only message; archive or delete the chat instead" : "";
+  // Rewind sends the chosen message again, which the main process refuses while the chat works
+  // ("Stop the chat before rewinding a message", seen live 2026-11-12): it is offered as delete is,
+  // except while the last message is still on its way to an agent (launching, or AO's turn queued:
+  // its "sending" receipt). Nothing has run then, so Rewind stops that run itself and goes back
+  // ("it doesnt allow to rewind message when the agent havent started", 2026-11-12).
+  const lastTurn = turns[turns.length - 1];
+  const lastCards = lastTurn ? [...lastTurn.steps, ...(lastTurn.final ? [lastTurn.final] : [])] : [];
+  const notTaken = (runOpen || working) && Boolean(latest && lastTurn?.user)
+    && turnReceipt(lastTurn, lastCards.flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []), true) === "sending";
+  const rewindBlocked = (runOpen || working) && !notTaken ? "Stop the chat first to rewind a message" : "";
+  const rewindTo = (messageIndex: number) => thread?.rewind?.(messageIndex, notTaken ? latest?.id : undefined);
   const notYet = "This message hasn't run yet. Delete it after its turn runs";
   const confirmDelete = async () => {
     const target = deleting;
@@ -2323,18 +2337,20 @@ export function AgentOrchestratorChat({
           break;
         case "rewind": {
           if (!thread?.rewind) break;
+          if (rewindBlocked) { say("Rewind", `${rewindBlocked}.`); break; }
           if (!rewindPoints.length) { say("Rewind", "No message to go back to yet."); break; }
           const pick = Number(arg);
           if (arg) {
             const point = Number.isInteger(pick) ? rewindPoints[pick - 1] : undefined;
-            if (point) thread.rewind(point.messageIndex);
+            if (point) rewindTo(point.messageIndex);
             else say("Rewind", `Choose a message from 1 to ${rewindPoints.length}, like /rewind ${rewindPoints.length}.`);
             break;
           }
           setCard({ title: "Rewind",
-            text: "Pick a message to rewind and resend in this chat. Later replies leave the conversation; your files don't change. Stop any running task first.",
+            text: `Pick a message to rewind and resend in this chat. Later replies leave the conversation; your files don't change.${notTaken
+              ? " The message no agent has started yet is stopped first." : ""}`,
             items: rewindPoints.map((point, index) => ({ label: `${index + 1}. ${point.text.replace(/\s+/g, " ").slice(0, 90)}`,
-              run: () => { setCard(null); thread.rewind?.(point.messageIndex); } })).reverse() });
+              run: () => { setCard(null); rewindTo(point.messageIndex); } })).reverse() });
           break;
         }
         case "delete": {
@@ -2689,7 +2705,10 @@ export function AgentOrchestratorChat({
       <div className="cx-msg-foot"><SteerReader.Provider value={steerReader(lead)}><SteerReceiptMark receipt={turnReceipt(turn, items, live)} /></SteerReader.Provider>
       <MessageActions text={chatMessageReadable(turn.user.text)}>
         {thread ? <button type="button" title="Fork from here" aria-label="Fork from this message" onClick={() => thread.fork(turn.messageIndex ?? turnIndex)}><ChatGlyph name="fork" /></button> : null}
-        {thread?.rewind ? <button type="button" title="Rewind and resend this message (files are unchanged)" aria-label="Rewind to this message" onClick={() => thread.rewind?.(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
+        {thread?.rewind ? <button type="button" title={rewindBlocked || (notTaken
+          ? "Rewind and resend this message (stops the message no agent has started yet; files are unchanged)"
+          : "Rewind and resend this message (files are unchanged)")} aria-label="Rewind to this message"
+          disabled={Boolean(rewindBlocked)} onClick={() => rewindTo(turn.messageIndex ?? turnIndex)}><Icon name="reload" width="14" height="14" /></button> : null}
         {thread?.deleteMessage ? <button type="button" title={deleteBlocked || (deletion(turn) ? "Delete this message and its reply" : notYet)} aria-label="Delete this message"
           disabled={Boolean(deleteBlocked) || !deletion(turn) || deletingBusy} onClick={() => setDeleting(deletion(turn))}><ChatGlyph name="delete" /></button> : null}
       </MessageActions></div>
@@ -2752,7 +2771,7 @@ export function AgentOrchestratorChat({
               {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
-  }), [turns, thread, deleteBlocked, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
+  }), [turns, thread, deleteBlocked, rewindBlocked, notTaken, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
     replyStyle, roundFolds, openRounds, drawStart, missionWork, goalStart, agentSessionIds, selectedTaskId]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
