@@ -2167,11 +2167,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // this background continuation"). Without a chat, or when the chat's read fails, the project read
   // is used as before.
   async function runsForSend(workspaceId, taskId) {
-    const project = await runs({ workspaceId });
     const task = typeof taskId === "string" ? clean(taskId, 128) : "";
+    // The project's runs and the chat's own, read together: one after the other they were two of
+    // the send's ~11 round trips in a row, each behind headless's admission queue.
+    const [project, own] = await Promise.all([runs({ workspaceId }), task ? runs({ workspaceId, taskId: task }).catch(() => null) : null]);
     if (!task) return project;
-    let own;
-    try { own = await runs({ workspaceId, taskId: task }); } catch { return project; }
     if (!Array.isArray(own?.runs)) return project;
     const lifecycle = Array.isArray(own.task_lifecycle) ? own.task_lifecycle.filter(item => item?.task_id === task) : [];
     return {
@@ -5667,7 +5667,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
   }
 
-  async function startRun(input = {}) {
+  /**
+   * `known`: the run as the caller just made it (chat_send's new run), so the start does not read
+   * it again first. Only this app's own callers pass it; the renderer's start_run cannot.
+   */
+  async function startRun(input = {}, { known = null } = {}) {
     if (!input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["workspaceId", "runId", "executable"].includes(key))) {
       throw new Error("Renderer credential or unsupported AO start field was refused");
@@ -5684,8 +5688,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const state = { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
     backgroundRuns.set(key, state);
     try {
-      const saved = await runs({ workspaceId: id, runId: run });
-      let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+      // A run the caller has just made, and nothing has touched since, is not read again.
+      const fresh = known?.id === run && known.workspace_id === id && Array.isArray(known.nodes) && known.nodes.length
+        && known.nodes.every((node) => node.state === "pending") ? known : null;
+      let mission = fresh ?? (await runs({ workspaceId: id, runId: run })).runs.find((entry) => entry.id === run && entry.workspace_id === id);
       if (mission?.paused) throw new Error("This task is paused. Resume it first.");
       // A grant whose turns are all started or whose hour is over cannot start anything more: a chat
       // resumed on it after restarts and retries stopped with "no turns left" and needed a new
@@ -6075,9 +6081,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A refused create makes nothing, so it reads the board again and retries, a few times.
   const BOARD_RACE = /AO board revision or initial state changed/;
   const BOARD_RACE_ATTEMPTS = 4;
-  async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}) {
+  /** `boardRevision`: the board's revision as the caller's own write just left it, used for the first try. */
+  async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}, { boardRevision } = {}) {
     for (let attempt = 1; ; attempt++) {
-      const current = await board({ workspaceId: id });
+      // A send has just written the chat's message, and its answer carries the board's revision: one
+      // read fewer before the run is made. A revision that moved on since is refused (BOARD_RACE),
+      // and the next try reads the board as before.
+      const current = attempt === 1 && Number.isSafeInteger(boardRevision) && boardRevision >= 0
+        ? { revision: boardRevision } : await board({ workspaceId: id });
       const runId = randomUUID();
       checkCurrent(true);
       try {
@@ -6609,6 +6620,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
     let followUp = null;
     let rewindBefore;
+    // The board's revision as this send's own write left it (createTeamRun's first try needs no read).
+    let boardRevision;
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -6697,8 +6710,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         const saidBefore = String(detail.task.description || "");
         checkCurrent();
-        await write(id, { expected_revision: detail.revision,
+        const written = await write(id, { expected_revision: detail.revision,
           change: { operation: "edit", id: task, title: detail.task.title, description } });
+        boardRevision = written?.revision;
         followUp = { before: saidBefore, description };
       });
       if (rewind) {
@@ -6718,6 +6732,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         created = await write(id, { expected_revision: before.revision, change: {
           operation: "create", title: startTitle, description: text,
         } });
+        boardRevision = created?.revision;
       });
       // The service answers a create with the task it made (board_sync::apply_scoped). The send used
       // to find it as the one task a second board read had that the first had not; the reads held a
@@ -6729,7 +6744,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
     let runId, createdRun;
     try {
-      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent));
+      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
       if (rewind && followUp) {
@@ -6754,14 +6769,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
-      void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
+      void startRun({ workspaceId: id, runId, executable: selectedExecutable }, { known: createdRun }).then(() => {
         if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       }).catch(() => undefined);
       return { ok: true, taskId: task, runId, run: createdRun, status: "starting" };
     }
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
-      const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
+      const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable }, { known: createdRun });
       if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
@@ -7977,13 +7992,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * steers a waiting one into the working agent. One message per settled turn: the next waits for
    * the turn this one starts.
    */
-  async function drainQueue(workspaceId, taskId, { steer = false } = {}) {
+  /** `known`: the project's runs as the caller has just read them (queueAfterRun), so they are not read again. */
+  async function drainQueue(workspaceId, taskId, { steer = false, known = null } = {}) {
     const key = wakeKey(workspaceId, taskId);
     if (wakeupsDisposed || draining.has(key)) return;
     if (!chatQueue.list(workspaceId, taskId).length) return;
     draining.add(key);
     try {
-      let saved = await runs({ workspaceId });
+      let saved = known ?? await runs({ workspaceId });
       // An archived or deleted chat keeps its queue for when it is back.
       if (wakeupsDisposed || taskLifecycle(saved, taskId).visibility !== "active") return;
       if (!chatQueue.list(workspaceId, taskId).length) return;
@@ -8093,8 +8109,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const tasks = Object.keys(chatQueue.forWorkspace(workspaceId));
     if (!tasks.length) return;
-    const run = (await runs({ workspaceId })).runs.find(entry => entry.id === runId);
-    if (run?.project_id && tasks.includes(run.project_id)) await drainQueue(workspaceId, run.project_id);
+    // The read that finds the run's chat is the one its queue goes on from: drainQueue read the
+    // whole project again right after it.
+    const saved = await runs({ workspaceId });
+    const run = saved.runs.find(entry => entry.id === runId);
+    if (run?.project_id && tasks.includes(run.project_id)) await drainQueue(workspaceId, run.project_id, { known: saved });
   }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
   async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {

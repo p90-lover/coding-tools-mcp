@@ -1606,6 +1606,65 @@ test("a follow-up waits for the chat's run, then extends the same task and start
   assert.equal(done.updates[0].task_id, "task-1");
 });
 
+test("a follow-up makes fewer headless round trips in a row before its run starts", async () => {
+  // 2026-11-12: about 11 headless calls ran one after another before the agent was even asked, each
+  // behind headless's admission queue (0.3-1 s healthy, 5-60 s under load).
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
+  const steps = [];
+  let reading = 0, overlap = 0;
+  const workflow = createAgentOrchestratorWorkflow({ findCodexExecutable: () => "C:/c.exe",
+    requestHeadless: async (endpoint, body, options) => {
+      const label = endpoint === "/api/v1/tools/call" ? `${body.tool}${body.arguments?.change ? `:${body.arguments.change.operation}` : ""}`
+        : endpoint === "/api/v1/ao/read" ? (body.run_id ? "read run" : body.task_id ? "read chat" : "read project")
+        : endpoint === "/api/v1/ao/update" ? `update:${body.change?.operation}` : endpoint;
+      steps.push(label);
+      if (endpoint === "/api/v1/ao/read" && !body.run_id) {
+        reading += 1; overlap = Math.max(overlap, reading);
+        await new Promise(resolve => setImmediate(resolve));
+        reading -= 1;
+      }
+      const reply = await world.requestHeadless(endpoint, body, options);
+      // As AO answers a create: the run it made, cards pending.
+      return endpoint === "/api/v1/ao/update" && body.change?.operation === "create_from_team"
+        ? { ...reply, run: { id: body.change.run_id, workspace_id: "ws-1", project_id: "task-1", revision: 1, execution_mode: "single",
+          nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route: { harness_id: "ao:claude-code", model: "cpa/m" } }] } }
+        : reply;
+    },
+    resolveHarness: async () => { steps.push("resolve harness"); throw new Error("stop before the background loop"); } });
+  try {
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "also add tests" });
+    assert.equal(overlap, 2, "the project's runs and the chat's own are read together");
+    const edit = steps.indexOf("workflow_update:edit"), create = steps.indexOf("update:create_from_team");
+    assert.ok(edit >= 0 && create > edit);
+    assert.deepEqual(steps.slice(edit + 1, create), [], "the run is made on the revision the message's write left: no board read between");
+    assert.deepEqual(steps.slice(create + 1, steps.indexOf("resolve harness")), [], "the start takes the run it was given, not a read of it");
+  } finally { workflow.dispose(); }
+});
+
+test("a settled turn's queue goes on from the read that found its chat", async () => {
+  const { world, workflow, queue } = queueChat({ state: "finished" });
+  const request = world.requestHeadless;
+  let projectReads = 0;
+  world.requestHeadless = async (endpoint, body, ...rest) => {
+    if (endpoint === "/api/v1/ao/read" && !body?.run_id && !body?.task_id) projectReads += 1;
+    return request(endpoint, body, ...rest);
+  };
+  try {
+    world.runs[0].nodes[0].state = "running";
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "and deploy" } });
+    await goalSettle();
+    world.runs[0].nodes[0].state = "finished";
+    projectReads = 0;
+    const sends = world.updates.length;
+    await workflow.queueAfterRun("ws-1", "r1", "finished");
+    assert.equal(world.updates.length, sends + 1, "the queued message went");
+    assert.deepEqual(await queue(), []);
+    // queueAfterRun's own read, then the send's (runsForSend): drainQueue no longer reads in between.
+    assert.equal(projectReads, 2);
+  } finally { workflow.dispose(); }
+});
+
 test("a person's follow-up goes ahead of saturated background polls, and the start it leaves running does not", async () => {
   // Seen live 2026-11-09: ten split chats polling on a saturated disk held a follow-up's reads in the
   // ordinary queue until the service gave up ("HEADLESS_CAPACITY: request admission is full").
@@ -9682,7 +9741,8 @@ test("delete admission shares the sender's per-chat gate without replaying or de
   const sending = new Promise(resolve => { enterSend = resolve; }), sendHeld = new Promise(resolve => { releaseSend = resolve; });
   const stopped = new Error("Send fixture stopped after admission");
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: async (endpoint, body, options) => {
-    if (interceptSend) { if (++sendReads > 1) throw new Error("Unexpected read while the sender owns admission"); enterSend(); await sendHeld; throw stopped; }
+    // The send opens with two reads at once (the project's runs and the chat's own, runsForSend).
+    if (interceptSend) { if (++sendReads > 2) throw new Error("Unexpected read while the sender owns admission"); enterSend(); await sendHeld; throw stopped; }
     if (body.tool === "workflow_update") { enterWrite(); await writeHeld; }
     return world.requestHeadless(endpoint, body, options);
   } });
@@ -9699,7 +9759,7 @@ test("delete admission shares the sender's per-chat gate without replaying or de
     await first;
     await sending;
     await assert.rejects(workflow.call("chat_delete_message", { ...input, index: 1, runId: "r3", sourceDescription: world.tasks[0].description }), /operation is already in progress/);
-    assert.equal(sendReads, 1, "the delete's finally must not remove the queued sender's ownership");
+    assert.equal(sendReads, 2, "the delete's finally must not remove the queued sender's ownership");
     releaseSend();
     assert.equal((await queued).error, stopped);
     interceptSend = false;
