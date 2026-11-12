@@ -287,28 +287,68 @@ pub fn read_runs(data: &AppData, workspace_id: &str, run_id: Option<&str>) -> Ap
             .map(|run| vec![run.clone()])
             .ok_or_else(|| err("AO run not found in this workspace"));
     }
-    let mut newest: Vec<_> = scoped.rev().take(100).cloned().collect();
-    newest.reverse();
-    Ok(newest)
+    Ok(newest_within(scoped.rev(), 100, RUNS_READ_BUDGET))
 }
 
-/// The most runs one chat's read returns (its newest), about 1.3 MB of replies.
+/// The most runs one chat's read returns (its newest), within `RUNS_READ_BUDGET`.
 pub const CHAT_RUNS_LIMIT: usize = 200;
+
+/// The most a read's runs may take, serialized. The app accepts at most 1 MiB from this service
+/// and again over IPC to its window, and the same answer carries the project's lifecycles, teams
+/// and the app's own additions (about 85 KB in the largest project seen). A count alone did not
+/// bound it: on 2026-11-12 a 182-run goal chat's read passed 1 MiB, so that chat never opened,
+/// and a 50-chat project's whole read stood at 863 KB.
+pub const RUNS_READ_BUDGET: usize = 768 * 1024;
+
+/// Counts what is written to it, so a run's serialized size is measured without building it.
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The newest of `runs` (given newest first), oldest first: at most `limit` of them and, as a JSON
+/// array, at most `budget` bytes. The newest is kept whatever its size, so a read is never empty.
+fn newest_within<'a>(
+    runs: impl Iterator<Item = &'a Run>,
+    limit: usize,
+    budget: usize,
+) -> Vec<Run> {
+    let mut kept = Vec::new();
+    // The array's brackets, then each run with the comma before it (one too many: a margin).
+    let mut used = 2;
+    for run in runs.take(limit) {
+        let mut size = ByteCount(1);
+        let _ = serde_json::to_writer(&mut size, run);
+        if !kept.is_empty() && used + size.0 > budget {
+            break;
+        }
+        used += size.0;
+        kept.push(run.clone());
+    }
+    kept.reverse();
+    kept
+}
 
 /// One chat's runs, oldest first. The workspace read keeps the project's newest 100 runs, shared
 /// by all of its chats: seen live (2026-11-02), four goal chats filled it, a 63-run chat showed
 /// only its newest 26 replies and the project's 38 other chats opened with none.
 pub fn read_chat_runs(data: &AppData, workspace_id: &str, task_id: &str) -> Vec<Run> {
-    let mut newest: Vec<_> = data
-        .ao_runs
-        .iter()
-        .rev()
-        .filter(|run| run.workspace_id == workspace_id && run.project_id == task_id)
-        .take(CHAT_RUNS_LIMIT)
-        .cloned()
-        .collect();
-    newest.reverse();
-    newest
+    newest_within(
+        data.ao_runs
+            .iter()
+            .rev()
+            .filter(|run| run.workspace_id == workspace_id && run.project_id == task_id),
+        CHAT_RUNS_LIMIT,
+        RUNS_READ_BUDGET,
+    )
 }
 
 pub fn handoff_for<'a>(data: &'a AppData, run: &Run) -> Option<&'a str> {
@@ -1070,6 +1110,38 @@ mod tests {
             capped.last().unwrap().id,
             format!("other-{}", CHAT_RUNS_LIMIT + 10)
         );
+    }
+
+    #[test]
+    fn a_read_of_long_replies_fits_the_budget_and_keeps_the_newest() {
+        // 2026-11-12: a 182-run goal chat's read passed the app's 1 MiB, so that chat never opened.
+        let mut data = fixture();
+        let original = data.ao_runs[0].clone();
+        let long = |index: usize| {
+            let mut run = original.clone();
+            run.id = format!("long-{index:03}-{}", "x".repeat(16 * 1024));
+            run
+        };
+        data.ao_runs.extend((1..=182).map(long));
+        let size = |runs: &[Run]| serde_json::to_vec(runs).unwrap().len();
+        // The newest runs, oldest first, with none skipped.
+        let newest_in_order = |runs: &[Run]| {
+            runs.windows(2).all(|pair| pair[0].id < pair[1].id)
+                && runs.last().is_some_and(|run| run.id.starts_with("long-182-"))
+        };
+        let chat = read_chat_runs(&data, "qa", "goal");
+        assert!(size(&chat) <= RUNS_READ_BUDGET, "{} bytes", size(&chat));
+        assert!(chat.len() >= 20 && chat.len() < 182, "{} runs", chat.len());
+        assert!(newest_in_order(&chat));
+        let project = read_runs(&data, "qa", None).unwrap();
+        assert!(size(&project) <= RUNS_READ_BUDGET, "{} bytes", size(&project));
+        assert!(newest_in_order(&project));
+        // One run past the budget on its own still comes back: a read is never empty.
+        let mut huge = original.clone();
+        huge.id = format!("huge-{}", "y".repeat(RUNS_READ_BUDGET));
+        huge.project_id = "solo".into();
+        data.ao_runs.push(huge);
+        assert_eq!(read_chat_runs(&data, "qa", "solo").len(), 1);
     }
 
     #[test]
