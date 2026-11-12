@@ -4598,10 +4598,17 @@ test("a goal's next round is cancelled before acceptance when paused, cleared, e
             const boardRead = endpoint === "/api/v1/tools/call" && body.tool === "workflow_list";
             if ((stage === "continuation read" && runRead && reads === 1)
               || (stage === "send read" && runRead && reads === 2)
-              || (stage === "message preflight" && boardRead && body.arguments.task_id)
-              || (stage === "run preflight" && boardRead && !body.arguments.task_id)) {
+              || (stage === "message preflight" && boardRead && body.arguments.task_id)) {
               entered = true;
               await pending;
+            }
+            // The run is made on the revision the message's own write answered with (no board read
+            // between): the round's last moment before acceptance is that answer.
+            if (stage === "run preflight" && endpoint === "/api/v1/tools/call" && body.tool === "workflow_update") {
+              const reply = await world.requestHeadless(endpoint, body, ...rest);
+              entered = true;
+              await pending;
+              return reply;
             }
           }
           return world.requestHeadless(endpoint, body, ...rest);
