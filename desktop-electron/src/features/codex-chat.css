@@ -532,6 +532,11 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-queued-foot { display: flex; justify-content: flex-end; padding: 6px 12px; }
 .cx-queued-clear { padding: 0; border: 0; background: transparent; color: var(--ao-red, #c4372c); font: inherit; font-size: 12px; line-height: 16px; cursor: pointer; }
 .cx-queued-clear:hover { text-decoration: underline; }
+/* A queued message's text and, under it, why its last send failed (it stays queued and is tried again). */
+.cx-queued-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 2px; min-width: 0; }
+.cx-queued-note { display: block; padding: 0 12px 6px; color: var(--ao-red, #c4372c); font-size: 12px; line-height: 16px; overflow-wrap: anywhere; }
+.cx-queued-body .cx-queued-note { padding: 0; }
+.cx-queued-band[data-state="sending"] .cx-queued-count, .cx-queued-row[data-state="sending"] .cx-queued-text { color: var(--cq-muted); }
 @media (pointer: coarse) { .cx-queued-actions { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .cx-queued { animation: none; } }
 /* A stuck turn's Restart, inline in its "may be stuck" line: the one thing to press there. */

@@ -197,6 +197,54 @@ const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 const webModel = (model) => WEB_TIERS.includes(model) || LUNA_TIERS.includes(model) || NAMED_WEB_MODELS.includes(model);
 const EFFORT_RANK = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 /**
+ * The ms each awaited step of one action took, for its timing log (memory only, like every launcher
+ * log): `mark(name)` closes the step that ran since the last mark as `<name>Ms` (a name marked again
+ * adds up), and `fields(extra)` gives them with `totalMs`.
+ */
+function stepClock(now = Date.now) {
+  const started = now();
+  let last = started;
+  const steps = {};
+  return {
+    mark(name) { const at = now(); steps[`${name}Ms`] = (steps[`${name}Ms`] ?? 0) + (at - last); last = at; },
+    fields(extra = {}) { return { ...steps, totalMs: now() - started, ...extra }; },
+  };
+}
+
+/**
+ * A read served stale while it revalidates: `get(key, args)` answers at once with the last value
+ * `keep` accepted while it is younger than `staleMs`, and reads again in the background once it is
+ * older than `freshMs`; with nothing kept (or kept too long) it waits for `read(args)`. One read per
+ * key at a time. A read that fails, or a value `keep` refuses, is never kept.
+ */
+function staleWhileRevalidate({ read, now = Date.now, freshMs, staleMs, keep = () => true, limit = 50 }) {
+  const entries = new Map(); // key -> { value, at, pending }
+  const reread = (key, args, entry) => {
+    entry.pending ??= Promise.resolve().then(() => read(args)).then((value) => {
+      if (keep(value)) { entry.value = value; entry.at = now(); }
+      return value;
+    }).finally(() => { entry.pending = null; });
+    return entry.pending;
+  };
+  return {
+    get(key, args) {
+      let entry = entries.get(key);
+      if (!entry) {
+        entry = { value: undefined, at: 0, pending: null };
+        entries.set(key, entry);
+        if (entries.size > limit) entries.delete(entries.keys().next().value);
+      }
+      const age = now() - entry.at;
+      if (entry.value !== undefined && age < staleMs) {
+        if (age >= freshMs) void reread(key, args, entry).catch(() => undefined);
+        return Promise.resolve(entry.value);
+      }
+      return reread(key, args, entry);
+    },
+  };
+}
+
+/**
  * The effort a CPA model with none picked starts on when it lists efforts but no "auto" (the
  * composer's startEffort): sent without one, CPA had nothing to serve DeepSeek V4.1 Flash
  * (None/Low/High/Max). Medium, else High, else the lowest real one by rank (catalogs keep the
@@ -283,6 +331,14 @@ function refusedReason(error) {
 // One distinctive phrase of each refusal aoLaunchArgs throws, not "Launch failed:" as a whole: a
 // launch that timed out is what "Retry automatically" is for.
 const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
+/**
+ * AO could not run the agent's program at all: its version probe failed ("chat driver incompatible:
+ * read Codex version: exit status 1", CHAT_DRIVER_INCOMPATIBLE). The program is missing, broken or
+ * an unsupported build, and every launch fails the same way: 2026-11-12, it was retried up to the
+ * fifth attempt, each a 12-27 s launch. Its "ACP initialize" form is a handshake that timed out
+ * under load, which a retry does get through, so only the version probe is matched.
+ */
+const DRIVER_INCOMPATIBLE = /chat driver incompatible:\s*read [^:\n]{1,40} version/i;
 
 const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
@@ -452,14 +508,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (runReads.size > 64) runReads.delete(runReads.keys().next().value);
     return entry.read;
   }
+  // Run loops backed off after a local hiccup (backOffDrive): runKey -> { timer, restart, at }.
+  const drivesBackedOff = new Map();
+  // Any answer from headless means it is back: loops waiting out a hiccup start again at once.
+  const headlessAnswered = (reply) => { if (drivesBackedOff.size) wakeBackedOffDrives(); return reply; };
   // Every argument passes through (a confirmed action's third is its localConfirmation).
   const requestHeadless = (endpoint, ...rest) => {
     if (forPerson()) rest = [rest[0], { ...rest[1], admissionControl: true }, ...rest.slice(2)];
     if (HEADLESS_READS.has(endpoint)
       || endpoint === "/api/v1/ao/harness/compact" && rest[0]?.status === true
-      || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return sendHeadless(endpoint, ...rest);
+      || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered);
     runReads.clear();
-    return Promise.resolve(sendHeadless(endpoint, ...rest)).finally(() => runReads.clear());
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => runReads.clear());
   };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
@@ -570,7 +630,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function defaultContextWindow(workspaceId, node) {
     if (node.route.context_window != null) return null;
     try {
-      const catalog = await models({ harness: node.route.harness_id, workspaceId });
+      const catalog = await launchModels({ harness: node.route.harness_id, workspaceId });
       const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
       const capability = catalog.capabilities?.[node.route.model] ?? catalog.capabilities?.[baseModel];
       const setting = capability?.contextWindow, limit = capability?.contextLimit;
@@ -586,7 +646,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function defaultEffort(workspaceId, node) {
     if (node.route.effort || !node.route.model.startsWith(CPA_MODEL_PREFIX)) return null;
     try {
-      const catalog = await models({ harness: node.route.harness_id, workspaceId });
+      const catalog = await launchModels({ harness: node.route.harness_id, workspaceId });
       const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
       return startEffort(node.route.model, (catalog.capabilities?.[node.route.model] ?? catalog.capabilities?.[baseModel])?.efforts);
     } catch { return null; }
@@ -682,6 +742,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // instead. A healthy one takes it in about 1.6 s. Seen live: one ready for five minutes never
   // started the turn, and the send waited out AO's 180 s request timeout before the fresh start.
   const WARM_SEND_TIMEOUT_MS = 10_000;
+  // A follow-up sent into the chat's live agent (a continued session): AO takes it in about a
+  // second, eight or nine under disk load. Without a bound of its own it took the POST default of
+  // 180 s: 2 of 6 continuations waited all of it before the fresh fallback (308 s and 253 s in all,
+  // 2026-11-12). Past this, the agent is stopped and a fresh one starts with the chat so far.
+  const CONTINUED_SEND_TIMEOUT_MS = 30_000;
+  const SEND_TIMED_OUT = /TimeoutError|timed? ?out|aborted due to timeout/i;
   // Opening chats warms agents too; keep only the newest few so browsing does not pile them up.
   const WARM_MAX = 2;
   const warm = new Map(); // key -> { promise, session?, timer }
@@ -1323,6 +1389,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return value;
   }
 
+  // The catalog a launch is checked against (a send's model check, a launch's effort and window
+  // check, a blank card's default effort and window): served stale while it revalidates. Each such
+  // read waited out a refresh once the minute's cache ran out, 3-25 s on a busy machine before the
+  // agent even began (2026-11-12). A check the stale list fails is made again on a fresh read, so
+  // only an agreeing answer is ever served stale. The model menus still read models() directly.
+  const LAUNCH_CATALOG_STALE_MS = 30 * 60_000;
+  // Revalidated after a minute, as the catalogs' own caches (CPA_CATALOG_TTL_MS, declared below).
+  const launchCatalogs = staleWhileRevalidate({ read: args => models(args), now, freshMs: 60_000, staleMs: LAUNCH_CATALOG_STALE_MS,
+    keep: catalog => Array.isArray(catalog?.models) && catalog.models.length > 0 && !catalog.stale && Boolean(catalog.capabilities) });
+  const launchModels = (args = {}) => launchCatalogs.get(JSON.stringify([args.harness ?? null, args.workspaceId ?? null]), args);
   async function models({ harness, workspaceId } = {}) {
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
@@ -1634,7 +1710,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // with the reason, which the chat shows and Retry clears.
       const checkRoute = async () => {
         if (continuing || !(node.route.effort || node.route.context_window != null)) return;
-        const catalog = await models({ harness: node.route.harness_id, workspaceId });
+        // Judged on the launch catalog (served stale while it revalidates); only a refusal waits for
+        // a fresh read, so a list that changed since is never the reason a launch is refused.
+        try { return await judgeRoute(await launchModels({ harness: node.route.harness_id, workspaceId })); }
+        catch { return judgeRoute(await models({ harness: node.route.harness_id, workspaceId })); }
+      };
+      const judgeRoute = async (catalog) => {
         const baseModel = node.route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
         const capability = catalog.capabilities[node.route.model] ?? catalog.capabilities[baseModel];
         // A model the harness no longer lists has no known efforts or window: say that, rather
@@ -1726,10 +1807,27 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
           const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
           const sendStarted = now();
-          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key)
-            .catch((error) => { sendError = publicText(error?.message || error, 200); return null; });
+          let sendTimedOut = false;
+          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key,
+            { timeoutMs: CONTINUED_SEND_TIMEOUT_MS })
+            .catch((error) => {
+              sendError = publicText(error?.message || error, 200);
+              sendTimedOut = SEND_TIMED_OUT.test(`${error?.name ?? ""} ${error?.cause?.name ?? ""} ${error?.message ?? error}`);
+              return null;
+            });
           sendMs = now() - sendStarted;
           if (sent?.turnId) givenInstructions(continued.session, standing.hash);
+          // A send that ran out of time may still reach the agent: it is stopped (its session,
+          // worktree and conversation stay) before the fresh agent starts, so the two never work on
+          // the message side by side.
+          if (!sent?.turnId && (sendTimedOut || sendMs >= CONTINUED_SEND_TIMEOUT_MS)) {
+            stage("stopping the chat's agent, which did not take the message in time");
+            const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId)).catch(() => null);
+            logger?.info?.("ao.continued_send_timed_out", { session: continued.session, sendMs, released: stopped?.ok === true || stopped?.exiting === true });
+            if (stopped?.ok !== true && stopped?.exiting !== true) {
+              throw new Error("The chat's agent did not take the message within 30 seconds and could not be stopped; retry the step.");
+            }
+          }
         }
         // A follow-up that should have continued the chat's session starts a fresh one: logged with
         // the session and why, so "it forgot everything" can be traced. "session_gone" covered both a
@@ -1960,11 +2058,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Only sessions this app session spawned for a launch qualify: they hold nothing but the queued
   // message, while a continued chat's session holds its agent's work and is never ended here.
   const LAUNCH_STALL_MS = 4 * 60_000;
-  const LAUNCH_STALL_FAILURE = `The agent did not start within ${LAUNCH_STALL_MS / 60_000} minutes, so its start was stopped; the step is retried on another agent.`;
+  // The stage after the agent's controller is up (AO's controller_start): AO only hands the queued
+  // opening prompt to it (queue_drain), milliseconds when healthy. 3 of 9 cold starts (2026-11-12)
+  // hung there until the 4-minute bound above; this long after the controller came up with the
+  // prompt still undelivered, the start is ended. LAUNCH_STALL_MS stays the outer bound.
+  const LAUNCH_DRAIN_STALL_MS = 90_000;
+  const LAUNCH_STALL_FAILURE = "The agent did not take its first message, so its start was stopped; the step is retried on another agent.";
+  const launchControllerUp = new Map(); // fresh launch's AO session -> when its controller was first seen up
   async function stopStalledLaunch(session, observed, ownership) {
     const launchedAt = freshLaunches.get(session);
     if (!chatPreferences.get().autoRetry || launchedAt === undefined || stalledLaunches.has(session)
-      || observed?.provisioning !== true || observed.turnState !== "queued" || now() - launchedAt <= LAUNCH_STALL_MS) return false;
+      || observed?.provisioning !== true || observed.turnState !== "queued") return false;
+    if (observed.controllerUp === true && !launchControllerUp.has(session)) {
+      launchControllerUp.set(session, now());
+      if (launchControllerUp.size > 200) launchControllerUp.delete(launchControllerUp.keys().next().value);
+    }
+    const upAt = launchControllerUp.get(session);
+    const drainStalled = upAt !== undefined && now() - upAt > LAUNCH_DRAIN_STALL_MS;
+    if (!drainStalled && now() - launchedAt <= LAUNCH_STALL_MS) return false;
     const { workspaceId, runId, nodeId, requestKey } = ownership;
     const latest = await savedNode(workspaceId, runId, nodeId).catch(() => null);
     if (latest?.mission?.cancelled || latest?.node?.state !== "running" || latest.node.receipt?.thread_id !== session
@@ -1978,7 +2089,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return false;
     }
     releaseColdStartOf(session);
-    logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node) });
+    logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node),
+      stage: drainStalled ? "queue_drain" : "start", ...(upAt !== undefined ? { sinceControllerSeconds: Math.round((now() - upAt) / 1000) } : {}) });
     return true;
   }
 
@@ -2013,7 +2125,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const observed = await harnessService().observe(session, ownership.turnId);
     // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
     // the chat's work, never a fresh launch the watchdog may end.
-    if (observed?.provisioning !== true) freshLaunches.delete(session);
+    if (observed?.provisioning !== true) { freshLaunches.delete(session); launchControllerUp.delete(session); }
     const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     // Its start is over (the agent is up, or the start ended): the next cold start may begin.
     if (observed?.provisioning !== true || terminal) releaseColdStartOf(session);
@@ -2078,11 +2190,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // this background continuation"). Without a chat, or when the chat's read fails, the project read
   // is used as before.
   async function runsForSend(workspaceId, taskId) {
-    const project = await runs({ workspaceId });
     const task = typeof taskId === "string" ? clean(taskId, 128) : "";
+    // The project's runs and the chat's own, read together: one after the other they were two of
+    // the send's ~11 round trips in a row, each behind headless's admission queue.
+    const [project, own] = await Promise.all([runs({ workspaceId }), task ? runs({ workspaceId, taskId: task }).catch(() => null) : null]);
     if (!task) return project;
-    let own;
-    try { own = await runs({ workspaceId, taskId: task }); } catch { return project; }
     if (!Array.isArray(own?.runs)) return project;
     const lifecycle = Array.isArray(own.task_lifecycle) ? own.task_lifecycle.filter(item => item?.task_id === task) : [];
     return {
@@ -2237,7 +2349,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A CPA model is judged by CPA's own list: an agent's catalog falls back to the agent's models
     // when CPA cannot be read, which would make every CPA model look gone.
     const viaCpa = route.model.startsWith(CPA_MODEL_PREFIX);
-    const catalog = await (viaCpa ? models() : models({ harness: route.harness_id, workspaceId })).catch(() => null);
+    const args = viaCpa ? {} : { harness: route.harness_id, workspaceId };
+    // The launch catalog (served stale while it revalidates) answers a listed model at once; one it
+    // does not list is looked up again on a fresh read before the send is refused.
+    let catalog = await launchModels(args).catch(() => null);
+    const has = list => Array.isArray(list?.models) && list.models.some(id => [route.model, base].includes(viaCpa ? `${CPA_MODEL_PREFIX}${id}` : id));
+    if (has(catalog)) return null;
+    catalog = await models(args).catch(() => null);
     const listed = Array.isArray(catalog?.models) ? catalog.models.map(id => viaCpa ? `${CPA_MODEL_PREFIX}${id}` : id) : [];
     // Only the remembered list (CPA could not be read) is no verdict either.
     if (!listed.length || catalog.stale) return null;
@@ -3154,7 +3272,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ok: true, status, driven: false };
   }
 
-  async function controlRun({ workspaceId, runId, action, executable, nodeId } = {}) {
+  /**
+   * A Stop is timed: `ao.stop_timing` gives the ms of each awaited step (the run's read, the control
+   * call, the project read beside them, the agents' interrupt and shutdown), so a slow Stop says where.
+   */
+  async function controlRun(input = {}) {
+    if (input?.action !== "stop") return controlSteps(input);
+    const clock = stepClock(now);
+    let ok = false;
+    try {
+      const result = await controlSteps(input, clock);
+      ok = true;
+      return result;
+    } finally { logger?.info?.("ao.stop_timing", clock.fields({ ok })); }
+  }
+  async function controlSteps({ workspaceId, runId, action, executable, nodeId } = {}, clock = stepClock(now)) {
     if (!["pause", "resume", "stop", "retry", "retry_auto", "review_failures"].includes(action)) throw new Error("Choose a mission control");
     const id = clean(workspaceId, 128), run = clean(runId, 80);
     const clearCompactions = action === "stop" ? pendingCompactionStop(id, run) : null;
@@ -3172,8 +3304,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (saved?.ok !== true || !Array.isArray(saved.runs)) throw new Error("AO run read failed");
       return saved;
     };
+    // The project-wide read (its schedule, and which newer run took over a session) goes on beside
+    // the run's own read and the control call: after them, it added up to 30 s to every Stop. Taken
+    // before the cancellation, it shows the same schedule, sessions and runs that one would.
+    const allRunsRead = action === "stop" ? readForStop(true).catch(() => null) : null;
     const beforeStop = action === "stop" ? await readForStop().catch(() => null) : null;
-    const stopTargets = (beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
+    clock.mark("runRead");
+    const stopTargets =(beforeStop?.runs?.find(entry => entry.id === run && entry.workspace_id === id)?.nodes ?? [])
       .filter(node => externalAgent(node) && node.receipt?.thread_id)
       .map(node => ({ nodeId: node.id, sessionId: node.receipt.thread_id,
         requestKey: node.receipt.request_key ?? node.request_key, turnId: node.receipt.turn_id,
@@ -3194,6 +3331,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
       result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
     }
+    clock.mark("control");
     if (action === "stop") releaseNativePreviews(id, run);
     // A retried single-model chat continues its agent's own session, which already holds the
     // conversation and what it read and ran: launching a fresh one began the task again from
@@ -3201,6 +3339,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // refuses the message still falls back to a fresh start (dispatchExternal).
     // The run is running again: a round its goal judged before is judged again when it settles.
     if (["retry", "retry_auto", "resume"].includes(action) && result.run) reopenGoalRound(id, result.run);
+    // A retry is a fresh attempt: "Retry automatically" covers its failures again.
+    if (action === "retry" || action === "retry_auto") autoRetryCancelled.delete(runKey(id, run));
     if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
       const card = result.run.nodes?.[0];
       const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
@@ -3216,12 +3356,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     if (action === "stop") {
-      const saved = await readForStop(true).catch(() => null);
+      const saved = await allRunsRead;
+      clock.mark("projectRead");
       const life = saved ? taskLifecycle(saved,result.run.project_id) : {};
-      if (life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)) {
-        await cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
-          .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }));
-      }
+      // The chat's schedule is cancelled while its agents are stopped, not before.
+      const unscheduled = life.schedule?.run_id === run && !["cancelled","missed"].includes(life.schedule.state)
+        ? cancelSchedule({workspaceId:id,taskId:result.run.project_id,intentId:life.schedule.id})
+          .catch(error => logger?.warn?.("ao.stop.schedule_cancel_failed", { run, error: String(error?.message || error).slice(0, 200) }))
+        : null;
       // Cancellation preserves receipts; capture their exact attempt before sending any shutdown.
       if (!beforeStop && (result.run.nodes ?? []).some(node => externalAgent(node) && node.receipt?.thread_id)) {
         throw new Error("Owned session snapshot is unavailable; shutdown is unconfirmed");
@@ -3230,8 +3372,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const position = saved?.runs.findIndex(entry => entry.id === run && entry.workspace_id === id) ?? -1;
       if (stopTargets.length && position < 0) throw new Error("Owned session ownership view is unavailable; shutdown is unconfirmed");
       const newer = position >= 0 ? saved.runs.slice(position + 1) : [];
+      // The run's cards as the control call left them: the project read is taken beside that call,
+      // so a receipt AO replaced meanwhile shows only in its answer.
+      const after = result.run?.id === run && Array.isArray(result.run.nodes) && result.run.nodes.length ? result.run : saved.runs[position];
       for (const target of stopTargets) {
-        const node = saved.runs[position].nodes?.find(node => node.id === target.nodeId);
+        const node = after.nodes?.find(node => node.id === target.nodeId);
         if (node?.receipt?.thread_id !== target.sessionId || (node.receipt.request_key ?? node.request_key) !== target.requestKey) {
           throw new Error("Owned session identity changed while stopping; refresh before retrying");
         }
@@ -3242,6 +3387,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       const stopped = await Promise.allSettled([...sessions].map(([session, target]) =>
         stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: true, completed: target.completed })));
+      clock.mark("agents");
+      await unscheduled;
       const failure = stopped.find(result => result.status === "rejected");
       if (failure) {
         const message = "Agent stop could not be confirmed: " + publicText(failure.reason?.message || failure.reason, 200);
@@ -4143,11 +4290,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** `decide`: the reviewer already said "ask"; this time it must choose allow or deny. `partial`: the
    *  request was too long to show whole, and "Let the model judge" has the reviewer judge it anyway. */
-  async function askApprover({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }) {
+  /**
+   * One review, timed: `ao.review_timing` gives the ms of each awaited step (the catalog, the
+   * request's context, script excerpts, the repository check, the model calls) and how it ended, so
+   * a slow approval can be told apart from a slow model (848 reviews in 100 minutes, 2026-11-12).
+   */
+  async function askApprover(input) {
+    const clock = stepClock(now);
+    let outcome = "failed";
+    try {
+      const result = await askApproverSteps(input, clock);
+      outcome = clock.cached ? "cached" : String(result?.action ?? "none");
+      return result;
+    } finally {
+      logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
+    }
+  }
+  async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
+    clock.mark("catalog");
     check();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? []);
     // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
@@ -4168,8 +4332,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return [model, effort];
     }));
     const [folder, task, evidence] = await Promise.all([requestFolder(approval, mission), requestTask(mission), requestEvidence(approval)]);
+    clock.mark("context");
     check();
     const scripts = await reviewScriptExcerpts(approval, folder);
+    clock.mark("scripts");
     check();
     const request = describeRequest(approval);
     const publication = gitPushRequest(approval.command) ?? gitPushRequest(approval.toolInput);
@@ -4200,6 +4366,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         return null;
       };
       const settled = await checked();
+      clock.mark("repository");
       check();
       if (settled) return settled;
     }
@@ -4244,11 +4411,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // what the turn showed then is reviewed again on what it shows now.
     const verdictKey = createHash("sha256").update(instructions).update(prompt).update(JSON.stringify(reviewEfforts)).digest("hex");
     await verifyCurrent();
+    clock.mark("verify");
     check();
     const known = reviewVerdicts.get(verdictKey);
     if (known && now() - known.at < REVIEW_CACHE_MS && (known.action === "allow" || !evidence)) {
       logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
         folder: Boolean(folder), reason: publicText(known.reason, 200) });
+      clock.cached = true;
       return { action: known.action, reason: known.reason };
     }
     let failure = null;
@@ -4279,6 +4448,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
+        clock.mark("model");
         await verifyCurrent();
         check();
         reviewerAnswered(model);
@@ -4290,6 +4460,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (reviewVerdicts.size > 200) reviewVerdicts.delete(reviewVerdicts.keys().next().value);
         return { action: decision.action, reason };
       } catch (error) {
+        clock.mark("model");
         check();
         await verifyCurrent();
         check();
@@ -4889,26 +5060,62 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // about 34 minutes in all before the step waits for the person.
   const AUTO_RETRY_PAUSES_MS = [10_000, 20_000, 30_000, 60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
   const AUTO_RETRY_LIMIT = AUTO_RETRY_PAUSES_MS.length;
-  const autoRetryPause = attempt => AUTO_RETRY_PAUSES_MS[Math.min(Math.max(attempt, 1), AUTO_RETRY_LIMIT) - 1];
+  // A failure that never reached the model's provider (the agent did not start, or did not take
+  // the message) has no cooldown to wait out: its first tries come sooner, then the same tail. A
+  // provider's error (429, 5xx, "API Error", a lost connection) always keeps the full pauses: CPA's
+  // own retries times Claude Code's come to about 40 upstream calls per attempt (#650).
+  const LOCAL_RETRY_PAUSES_MS = [2_000, 5_000, 15_000, 30_000, ...AUTO_RETRY_PAUSES_MS.slice(4)];
+  const LOCAL_START_FAILURE = /did not take its first message|did not start within|The agent could not start|AO did not start a turn|CHAT_CONTROLLER_NOT_READY|Couldn't confirm the agent was restored|restoration could not be confirmed|Launch failed:/i;
+  const PROVIDER_FAILURE = /API Error|\b(?:429|5\d\d)\b|rate[ -]?limit|overloaded|Retrying Claude|upstream/i;
+  const localFailure = error => LOCAL_START_FAILURE.test(error) && !PROVIDER_FAILURE.test(error) && !NETWORK_OUTAGE.test(error);
+  const autoRetryPause = (attempt, local = false) => (local ? LOCAL_RETRY_PAUSES_MS : AUTO_RETRY_PAUSES_MS)[Math.min(Math.max(attempt, 1), AUTO_RETRY_LIMIT) - 1];
   const countdown = ms => ms >= 120_000 ? `${Math.ceil(ms / 60_000)} min` : `${Math.ceil(ms / 1000)}s`;
   const autoRetrySeen = new Map(); // `${runId}:${nodeId}:${attempt}` -> when this failure was first seen
+  // Runs whose automatic retry the person ended by changing the chat's setup in the composer
+  // (chat_retry_cancel): the retry relaunches the card's saved route, so it kept running the old
+  // harness and model for up to half an hour after they picked another (the user, 2026-11-12: "i
+  // switched harness model etc it doesnt allow to run on new config and stop the retry"). The step
+  // then waits for their message or Retry, which run on the pick. An explicit retry clears it.
+  const AUTO_RETRY_CANCELLED = "Automatic retry stopped: you changed this chat's model or settings. Send a message, or Retry, to run on the new setup.";
+  const autoRetryCancelled = new Set(); // runKey
+  const retryCancelled = (workspaceId, runId) => autoRetryCancelled.has(runKey(workspaceId, runId));
+  /** chat_retry_cancel: the composer's setup changed while the chat's failed step waited to be retried. */
+  async function cancelAutoRetry({ workspaceId, runId } = {}) {
+    const id = clean(workspaceId, 128), run = clean(runId, 80);
+    const mission = (await runs({ workspaceId: id, runId: run })).runs.find(entry => entry.id === run && entry.workspace_id === id);
+    if (!mission) throw new Error("AO run unavailable");
+    if (mission.cancelled || !mission.nodes.some(node => node.state === "held")) return { ok: true, cancelled: false };
+    autoRetryCancelled.add(runKey(id, run));
+    if (autoRetryCancelled.size > 200) autoRetryCancelled.delete(autoRetryCancelled.values().next().value);
+    // The countdown goes at once; the run's loop ends on its next pass (recoverHeld, autoRetryStep).
+    const live = backgroundRuns.get(runKey(id, run));
+    if (live && !live.stopped) { live.detail = AUTO_RETRY_CANCELLED; live.retryPause = false; }
+    logger?.info?.("ao.auto_retry_cancelled", { runId: run });
+    return { ok: true, cancelled: true, detail: AUTO_RETRY_CANCELLED };
+  }
   function autoRetryStep(mission, held) {
     const node = held.find(entry => entry.role !== "retry") ?? held[0];
     if (!node) return null;
+    if (retryCancelled(mission.workspace_id, mission.id)) return { detail: AUTO_RETRY_CANCELLED };
     const error = String(node.receipt?.error || "");
     if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
     if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
     if (REQUEST_REFUSED.test(error)) return { detail: `The provider refused this request (${refusedReason(error)}). Change that, or choose another model, since retrying won't fix it.` };
     if (ROUTE_REFUSED.test(error)) return { detail: "This chat can't start on its agent as it is set up. Change the model or permissions and send a follow-up, since retrying won't fix it." };
+    if (DRIVER_INCOMPATIBLE.test(error)) return { detail: "The agent's program could not be run (its version check failed). Update or reinstall it, or choose another harness, since retrying won't fix it." };
     const attempt = (node.history?.length ?? 0) + 1;
     if (attempt > AUTO_RETRY_LIMIT) return { detail: `Retried ${AUTO_RETRY_LIMIT} times. Check the saved answer, then retry.` };
     const key = `${mission.id}:${node.id}:${attempt}`;
     if (!autoRetrySeen.has(key)) {
-      autoRetrySeen.set(key, now());
+      // The pause runs from when the step failed (its receipt says), not from when this loop first
+      // saw it: the 3-7 s between the two were added to every pause (2026-11-12). A time ahead of
+      // this clock, or none, counts from now.
+      const failedAt = Number(node.receipt?.finished_at_ms);
+      autoRetrySeen.set(key, Number.isFinite(failedAt) && failedAt > 0 ? Math.min(failedAt, now()) : now());
       if (autoRetrySeen.size > 500) autoRetrySeen.delete(autoRetrySeen.keys().next().value);
     }
-    const wait = autoRetryPause(attempt) - (now() - autoRetrySeen.get(key));
+    const wait = autoRetryPause(attempt, localFailure(error)) - (now() - autoRetrySeen.get(key));
     // `waiting`: the run must keep going until the pause is over (driveRun), or nothing retries it.
     if (wait > 0) return { waiting: true, detail: `Retrying automatically in ${countdown(wait)} (attempt ${attempt} of ${AUTO_RETRY_LIMIT})` };
     autoRetrySeen.delete(key);
@@ -4921,10 +5128,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   function autoRetryAllowed(mission) {
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
+    if (retryCancelled(mission.workspace_id, mission.id)) return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
     const error = String(node?.receipt?.error || "");
     return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error) && !ROUTE_REFUSED.test(error)
+      && !DRIVER_INCOMPATIBLE.test(error)
       && !pickedModelSince(mission) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
   }
   /**
@@ -4967,12 +5176,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { retry: true, attempt, name };
   }
   /** chat_auto_retry: reads the "Retry automatically" preference, or sets it with `enabled`. */
-  async function chatAutoRetry({ enabled } = {}) {
+  async function chatAutoRetry({ enabled, workspaceId, runId } = {}) {
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
       await chatPreferences.set({ autoRetry: enabled });
     }
-    return { ok: true, autoRetry: chatPreferences.get().autoRetry };
+    // Asked about one run (the chat view's restart pickup): off for a run whose retry the person ended.
+    const ended = typeof workspaceId === "string" && typeof runId === "string" && retryCancelled(clean(workspaceId, 128), clean(runId, 80));
+    return { ok: true, autoRetry: chatPreferences.get().autoRetry && !ended };
   }
   /**
    * chat_model_judges: reads "Let the model judge", or sets it with `enabled`. The user: "if its
@@ -5045,7 +5256,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const picked = pickedModelSince(mission);
     if (picked) return { detail: `Moved to ${picked}; the goal's next round runs on it` };
     // A sign-in or account-pool failure (some arrive as a 5xx) is the person's, never a lost connection.
-    const outage = chatPreferences.get().autoRetry
+    const outage = chatPreferences.get().autoRetry && !retryCancelled(workspaceId, mission.id)
       ? held.find(node => node.role !== "retry" && NETWORK_OUTAGE.test(String(node.receipt?.error || ""))
         && !POOL_EXHAUSTED.test(String(node.receipt?.error || ""))) : null;
     const outageRetry = outage ? outageRetryStep(mission, outage) : null;
@@ -5180,6 +5391,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     state.settled = false;
     try {
       for (;;) {
+        // A person's message (or Retry on another model) took over a step that only waited out its
+        // automatic retry (retireOpenRuns): the run is retired by that send, with nothing to report.
+        if (state.superseded) return;
         if (state.stopped) { reportRun(workspaceId, runId, state, null); return; }
         let saved = await runs({ workspaceId, runId }, loopRead);
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
@@ -5314,6 +5528,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         const helped = mission.paused || mission.cancelled ? null : await recoverHeld(workspaceId, mission, state);
         if (helped?.detail) state.detail = helped.detail;
+        // Only waiting out a retry pause, with no card at work: a person's message or a Retry on
+        // another model may take the chat over now (retireOpenRuns). It used to be refused as
+        // "still running" for the whole pause, queued, and sent after the retry ran on the old setup.
+        state.retryPause = Boolean(helped?.waiting) && !mission.paused && !mission.cancelled
+          && !mission.nodes.some(node => ["running", "reserved"].includes(node.state));
         if (helped?.changed || completed.length) {
           saved = await runs({ workspaceId, runId }, loopRead);
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
@@ -5323,6 +5542,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           // was refused, and the loop ended with the step still "held" and "Retry automatically" on.
           if (helped?.retried && (!mission.grant || grantSpent(mission.grant))) {
             state.status = "held";
+            // Taken over by a person's message meanwhile: that send retires the run instead.
+            if (state.stopped) return;
             setTimeout(() => {
               void startRun({ workspaceId, runId, executable }).catch(error => logger?.warn?.("ao.retry_start_failed",
                 { message: publicText(error?.message || error, 200) }));
@@ -5395,9 +5616,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         state.warningAt = now();
         reportRun(workspaceId, runId, state, null);
         logger?.warn?.("ao.drive_timeout_retry", { attempt: state.timeoutRestarts, message: publicText(message, 120) });
-        const timer = setTimer(() => { autoRetryTimers.delete(timer); if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, delay);
-        timer?.unref?.();
-        autoRetryTimers.add(timer);
+        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); });
         return;
       }
       // The machine ran short of local sockets or a local service dropped a connection: the run's
@@ -5417,9 +5636,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.warn?.("ao.drive_socket_retry", { attempt: state.socketRestarts, code: String(error?.code ?? error?.cause?.code ?? "") });
         // Tracked like the timeout retry above, so dispose() cancels it: a bare setTimeout drove the run
         // again into a service the closing app had already stopped.
-        const timer = setTimer(() => { autoRetryTimers.delete(timer); if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, delay);
-        timer?.unref?.();
-        autoRetryTimers.add(timer);
+        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); });
         return;
       }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
@@ -5427,7 +5644,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       state.settled = !chatPreferences.get().autoRetry;
       reportRun(workspaceId, runId, state, null, state.stopped ? null : "error");
       if (!state.stopped) scheduleAutoRetry(workspaceId, runId, executable, state);
-    } finally { state.driving = false; }
+    } finally { state.driving = false; state.retryPause = false; }
   }
   /**
    * A drive that ended on an error left its failed step held with nothing to retry it. With "Retry
@@ -5438,6 +5655,44 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // the run (and its AO agent) again through its stopped harness.
   const autoRetryTimers = new Set();
   let autoRetryDisposed = false;
+  /**
+   * A run loop that waits out a local hiccup (a headless call that timed out, a dropped local
+   * connection) before it starts again: `restart` runs after `delay`, or as soon as headless
+   * answers again (wakeBackedOffDrives). A 3.5-minute headless hang left 10 chats' loops on their
+   * own backoffs of up to 60 s each, so they came back 15-55 s after headless did (2026-11-12).
+   */
+  function backOffDrive(workspaceId, runId, delay, restart) {
+    const key = runKey(workspaceId, runId);
+    const entry = { restart, at: now() };
+    entry.timer = setTimer(() => {
+      autoRetryTimers.delete(entry.timer);
+      if (drivesBackedOff.get(key) === entry) drivesBackedOff.delete(key);
+      restart();
+    }, delay);
+    entry.timer?.unref?.();
+    autoRetryTimers.add(entry.timer);
+    drivesBackedOff.set(key, entry);
+  }
+  // Loops woken together start a moment apart, not all in the same instant.
+  const DRIVE_WAKE_STAGGER_MS = 250;
+  // A loop that backed off this recently is left to its timer: the answer may be one already on its way.
+  const DRIVE_WAKE_MIN_MS = 1_000;
+  /** Headless answered: every loop backed off for a while starts again now. */
+  function wakeBackedOffDrives() {
+    if (!drivesBackedOff.size || autoRetryDisposed) return;
+    let index = 0;
+    for (const [key, entry] of [...drivesBackedOff]) {
+      if (now() - entry.at < DRIVE_WAKE_MIN_MS) continue;
+      drivesBackedOff.delete(key);
+      clearTimer(entry.timer);
+      autoRetryTimers.delete(entry.timer);
+      const timer = setTimer(() => { autoRetryTimers.delete(timer); entry.restart(); }, DRIVE_WAKE_STAGGER_MS * index);
+      index += 1;
+      timer?.unref?.();
+      autoRetryTimers.add(timer);
+    }
+    if (index) logger?.info?.("ao.drive_woken", { loops: index });
+  }
   function scheduleAutoRetry(workspaceId, runId, executable, state, tries = 0) {
     if (!chatPreferences.get().autoRetry) return;
     const key = runKey(workspaceId, runId);
@@ -5458,10 +5713,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     void (async () => {
       const failed = await mission();
       if (!current() || !autoRetryAllowed(failed)) return;
-      // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second.
+      // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second
+      // (2 s and 5 s for a failure that never reached the provider).
       const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
       const attempt = (held?.history?.length ?? 0) + 1;
-      later(autoRetryPause(attempt), () => {
+      // Counted from when the step failed, as autoRetryStep counts it.
+      const failedAt = Number(held?.receipt?.finished_at_ms);
+      const since = Number.isFinite(failedAt) && failedAt > 0 ? Math.max(0, now() - Math.min(failedAt, now())) : 0;
+      later(Math.max(0, autoRetryPause(attempt, localFailure(String(held?.receipt?.error || ""))) - since), () => {
         void (async () => {
           const latest = await mission();
           if (!current() || !autoRetryAllowed(latest)) return;
@@ -5482,7 +5741,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
   }
 
-  async function startRun(input = {}) {
+  /**
+   * `known`: the run as the caller just made it (chat_send's new run), so the start does not read
+   * it again first. Only this app's own callers pass it; the renderer's start_run cannot.
+   */
+  async function startRun(input = {}, { known = null } = {}) {
     if (!input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["workspaceId", "runId", "executable"].includes(key))) {
       throw new Error("Renderer credential or unsupported AO start field was refused");
@@ -5499,8 +5762,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const state = { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
     backgroundRuns.set(key, state);
     try {
-      const saved = await runs({ workspaceId: id, runId: run });
-      let mission = saved.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+      // A run the caller has just made, and nothing has touched since, is not read again.
+      const fresh = known?.id === run && known.workspace_id === id && Array.isArray(known.nodes) && known.nodes.length
+        && known.nodes.every((node) => node.state === "pending") ? known : null;
+      let mission = fresh ?? (await runs({ workspaceId: id, runId: run })).runs.find((entry) => entry.id === run && entry.workspace_id === id);
       if (mission?.paused) throw new Error("This task is paused. Resume it first.");
       // A grant whose turns are all started or whose hour is over cannot start anything more: a chat
       // resumed on it after restarts and retries stopped with "no turns left" and needed a new
@@ -5734,7 +5999,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // so an old task can always be continued or restarted.
   // How long a follow-up waits for a run whose cards have all stopped to finish winding down.
   const RUN_WIND_DOWN_MS = 10_000;
-  async function retireOpenRuns(id, task, runsOfWorkspace) {
+  async function retireOpenRuns(id, task, runsOfWorkspace, { supersedeRetry = false } = {}) {
     const openOf = (list) => list.filter((run) => run.project_id === task && !runSettled(run));
     const carding = (run) => (run.nodes ?? []).some((node) => ["running", "reserved"].includes(node.state));
     const looping = (run) => {
@@ -5758,6 +6023,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     open = open.filter(run => !runSettled(run));
+    // The person's own message (or Retry on another model) takes over a failed step that only waits
+    // out "Retry automatically": its loop ends at its next pass and the run is retired below, so the
+    // new turn runs on what the composer has now. It waited for the loop, which kept driving through
+    // the whole pause (up to 15 minutes), was refused "still running", and went to the queue behind a
+    // retry on the old harness and model (the user, 2026-11-12).
+    if (supersedeRetry) {
+      for (const run of open) {
+        const live = backgroundRuns.get(runKey(id, run.id));
+        if (!live?.driving || !live.retryPause || live.stopped || carding(run)) continue;
+        live.superseded = true;
+        live.stopped = true;
+        live.retryPause = false;
+        live.status = "held";
+        live.detail = "Your message took over this step's automatic retry";
+        logger?.info?.("ao.auto_retry_superseded", { runId: run.id });
+      }
+    }
     // A run whose cards have all stopped can still have its loop winding down for a moment, as after
     // a steer that stopped a stalled turn: its message, queued for the next turn, was sent as soon as
     // the chat read free and refused twice within a second ("This chat is still running"). That loop
@@ -5826,7 +6108,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (generation !== recoveryGeneration) return { resumed };
         // Chats only, and only a chat's newest run: an older one gave way to the message after it.
         if (!run.project_id || saved.runs.filter(entry => entry.project_id === run.project_id).at(-1)?.id !== run.id) continue;
-        const resume = restartResume(run, now(), { autoRetry });
+        const resume = restartResume(run, now(), { autoRetry: autoRetry && !retryCancelled(workspaceId, run.id) });
         const live = backgroundRuns.get(runKey(workspaceId, run.id));
         if (!resume || (live && (live.starting || live.driving || live.status === "running"))) continue;
         // startRun resumes on the run's own grant only while a card is still running under it.
@@ -5873,9 +6155,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A refused create makes nothing, so it reads the board again and retries, a few times.
   const BOARD_RACE = /AO board revision or initial state changed/;
   const BOARD_RACE_ATTEMPTS = 4;
-  async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}) {
+  /** `boardRevision`: the board's revision as the caller's own write just left it, used for the first try. */
+  async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}, { boardRevision } = {}) {
     for (let attempt = 1; ; attempt++) {
-      const current = await board({ workspaceId: id });
+      // A send has just written the chat's message, and its answer carries the board's revision: one
+      // read fewer before the run is made. A revision that moved on since is refused (BOARD_RACE),
+      // and the next try reads the board as before.
+      const current = attempt === 1 && Number.isSafeInteger(boardRevision) && boardRevision >= 0
+        ? { revision: boardRevision } : await board({ workspaceId: id });
       const runId = randomUUID();
       checkCurrent(true);
       try {
@@ -5939,7 +6226,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const missingModel = missingModelNotice(team);
       if (missingModel) return { ok: false, reason: missingModel };
     }
-    await retireOpenRuns(id, mission.project_id, saved.runs);
+    // Asked for by the person (Retry, or Restart, on what the composer has now): it takes over a
+    // pending automatic retry rather than wait for it to run the old setup.
+    await retireOpenRuns(id, mission.project_id, saved.runs, { supersedeRetry: true });
     const next = await createTeamRun(id, mission.project_id, team,
       single ? { executionMode: "single", singleRoute }
         : mission.team?.id ? { executionMode: "team" } : {});
@@ -6279,10 +6568,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // collided, both were retried, and the chat followed the newer one after it was stopped. The
   // later send now reads the runs after the earlier one has started, so it waits or is refused.
   const chatSends = new Map(); // [workspace, task] -> the send in progress
-  async function chatSend(input = {}, checkCurrent = () => {}) {
-    if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input, checkCurrent);
+  async function chatSend(input = {}, checkCurrent = () => {}, options = {}) {
+    if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input, checkCurrent, options);
     const key = JSON.stringify([input.workspaceId.trim(), input.taskId.trim()]);
-    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input, checkCurrent));
+    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input, checkCurrent, options));
     const settled = mine.then(() => undefined, () => undefined);
     chatSends.set(key, settled);
     try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
@@ -6295,7 +6584,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * use chat message to retrigger the chat"; the message ran one turn and the goal stayed stalled. A
    * goal the person paused stays paused. Refused, the goal stays as it was.
    */
-  async function personChatSend(input = {}) {
+  /** `supersedeRetry`: typed in the composer just now (chat_send), so it takes over a pending automatic retry. */
+  async function personChatSend(input = {}, { supersedeRetry = false } = {}) {
     const id = typeof input?.workspaceId === "string" ? input.workspaceId.trim() : "";
     const task = typeof input?.taskId === "string" ? input.taskId.trim() : "";
     const stalled = id && task && input.goal === undefined && goals.get(id, task)?.status === "stalled" ? goals.get(id, task) : null;
@@ -6306,7 +6596,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const still = goalGuard(id, task, stalled);
     try {
-      const result = await asPerson(() => chatSend(input));
+      const result = await asPerson(() => chatSend(input, undefined, { supersedeRetry }));
       if (still() && result?.ok === false) goals.update(id, task, { status: "stalled", note: stalledNote });
       else if (still() && result?.runId) goals.update(id, task, { lastRunId: String(result.runId) });
       // Sent while the goal waited out a pause (a failed round or check): this turn is its next round.
@@ -6331,12 +6621,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
   }
 
-  async function startChatSend({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}) {
+  /**
+   * A chat's send, timed: `ao.send_timing` gives the ms of each awaited step (the reads, the model
+   * check, retiring the last run, the message's write, the run's creation and its start), so a slow
+   * send says where it waited. Before, only the launch after it was timed (ao.launch_timing).
+   */
+  async function startChatSend(input = {}, checkCurrent = () => {}, options = {}) {
+    const clock = stepClock(now);
+    let ok = false;
+    try {
+      const result = await sendSteps(input, checkCurrent, options, clock);
+      ok = result?.ok !== false;
+      return result;
+    } finally {
+      logger?.info?.("ao.send_timing", clock.fields({ ok, followUp: typeof input?.taskId === "string" && Boolean(input.taskId.trim()),
+        deferred: input?.deferStart === true }));
+    }
+  }
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
       const progress = await compactSession({ workspaceId: id, taskId, status: true });
       if (progress.status !== "completed") throw new Error("This chat is still running its context compaction");
+      clock.mark("compaction");
     }
     // /goal <condition>: the first round sends the condition itself; the chat keeps going from there.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -6350,6 +6658,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (utf8Bytes(text) > CHAT_MESSAGE_BYTES) throw new Error(tooLong(text));
     const selectedExecutable = codexExecutable(executable);
     const saved = await runsForSend(id, taskId);
+    clock.mark("reads");
     checkCurrent();
     if (afterRunId !== undefined) {
       const parent = saved.runs.filter(run => run.project_id === taskId).at(-1);
@@ -6394,6 +6703,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (unlisted) return { ok: false, reason: unlisted };
       }
     }
+    clock.mark("modelCheck");
 
     checkCurrent();
     let task;
@@ -6404,6 +6714,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
     let followUp = null;
     let rewindBefore;
+    // The board's revision as this send's own write left it (createTeamRun's first try needs no read).
+    let boardRevision;
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -6419,11 +6731,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         throw new Error("Stop the chat before rewinding a message");
       }
       try {
-        await retireOpenRuns(id, task, saved.runs);
+        await retireOpenRuns(id, task, saved.runs, { supersedeRetry });
       } catch (error) {
         if (/still running/.test(error?.message)) throw new Error("This chat is still running; wait for it to finish or stop it first");
         throw error;
       }
+      clock.mark("retire");
       // Refused only because another chat wrote the board first: nothing was saved, so the edit is
       // read and made again (withBoardRetry).
       let discarded = [];
@@ -6492,10 +6805,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         const saidBefore = String(detail.task.description || "");
         checkCurrent();
-        await write(id, { expected_revision: detail.revision,
+        const written = await write(id, { expected_revision: detail.revision,
           change: { operation: "edit", id: task, title: detail.task.title, description } });
+        boardRevision = written?.revision;
         followUp = { before: saidBefore, description };
       });
+      clock.mark("write");
       if (rewind) {
         try { chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
@@ -6513,7 +6828,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         created = await write(id, { expected_revision: before.revision, change: {
           operation: "create", title: startTitle, description: text,
         } });
+        boardRevision = created?.revision;
       });
+      clock.mark("write");
       // The service answers a create with the task it made (board_sync::apply_scoped). The send used
       // to find it as the one task a second board read had that the first had not; the reads held a
       // project's oldest 100 tasks, so past 100 every new chat was refused and left an empty task
@@ -6524,7 +6841,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
     let runId, createdRun;
     try {
-      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent));
+      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
+      clock.mark("create");
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
       if (rewind && followUp) {
@@ -6549,14 +6867,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     if (deferStart === true) {
       // Keep the normal authorization path: an expired/missing local approval fails visibly.
-      void startRun({ workspaceId: id, runId, executable: selectedExecutable }).then(() => {
+      void startRun({ workspaceId: id, runId, executable: selectedExecutable }, { known: createdRun }).then(() => {
         if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       }).catch(() => undefined);
       return { ok: true, taskId: task, runId, run: createdRun, status: "starting" };
     }
     // The chat exists from here on: report a failed start inside it instead of losing the chat.
     try {
-      const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable });
+      const started = await startRun({ workspaceId: id, runId, executable: selectedExecutable }, { known: createdRun });
+      clock.mark("start");
       if (!taskId && defaultTitled) void nameChat(id, task, naming).catch(() => undefined);
       return { ok: true, taskId: task, runId, status: started.status };
     } catch (error) {
@@ -7752,6 +8071,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return over;
   }
+  /** Whether the chat's last message is queued `item`'s (its send went through before the app quit). */
+  async function queuedMessageInChat(workspaceId, taskId, item) {
+    const detail = await board({ workspaceId, taskId });
+    const said = String(detail.task?.description || "");
+    const text = item.goal ? goalMessage(cleanObjective(item.goal), 1) : boardText(String(item.message || ""));
+    // The last message, without the steers noted under it (chatDescriptionWithSteer).
+    const last = (said.split(/\n\nFollow-up \([^)]+ UTC\):\n/).at(-1) ?? "").split(/\n\n↳ Steer \(/)[0];
+    return Boolean(text.trim()) && last.trim() === text.trim();
+  }
   /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
   function queuedSelection(item, latest) {
     const picked = item.selection;
@@ -7763,13 +8091,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * steers a waiting one into the working agent. One message per settled turn: the next waits for
    * the turn this one starts.
    */
-  async function drainQueue(workspaceId, taskId, { steer = false } = {}) {
+  /** `known`: the project's runs as the caller has just read them (queueAfterRun), so they are not read again. */
+  async function drainQueue(workspaceId, taskId, { steer = false, known = null } = {}) {
     const key = wakeKey(workspaceId, taskId);
     if (wakeupsDisposed || draining.has(key)) return;
     if (!chatQueue.list(workspaceId, taskId).length) return;
     draining.add(key);
     try {
-      let saved = await runs({ workspaceId });
+      let saved = known ?? await runs({ workspaceId });
       // An archived or deleted chat keeps its queue for when it is back.
       if (wakeupsDisposed || taskLifecycle(saved, taskId).visibility !== "active") return;
       if (!chatQueue.list(workspaceId, taskId).length) return;
@@ -7812,12 +8141,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(tries, 2)], true);
         return;
       }
-      chatQueue.remove(workspaceId, taskId, [next.id]);
+      // A `sending` mark seen here is an earlier app session's, whose send never answered (this
+      // session's sends hold `draining`): it went if the chat already ends with it.
+      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next).catch(() => false)) {
+        chatQueue.remove(workspaceId, taskId, [next.id]);
+        logger?.info?.("ao.chat_queue.sent_before_restart", { workspaceId, taskId });
+        armQueue(workspaceId, taskId, QUEUE_FREED_MS);
+        return;
+      }
+      // It stays in the queue, marked as going, until the send answers. Removed first, a message
+      // whose send the app's quit or a crash cut short was gone without ever reaching the chat.
+      chatQueue.update(workspaceId, taskId, next.id, { sending: now() });
       steerTries.delete(next.id);
       try {
         const result = await personChatSend({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}),
           ...queuedSelection(next, latest), ...(next.executable ? { executable: next.executable } : {}), deferStart: true });
         if (result?.ok === false) throw new Error(String(result.reason || "The queued message could not be sent"));
+        chatQueue.remove(workspaceId, taskId, [next.id]);
         queueFailures.delete(next.id);
         logger?.info?.("ao.chat_queue.sent", { workspaceId, taskId, left: chatQueue.list(workspaceId, taskId).length });
       } catch (error) {
@@ -7826,8 +8166,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const busy = /still running/i.test(why);
         const failures = busy ? 0 : (queueFailures.get(next.id) ?? 0) + 1;
         if (failures) queueFailures.set(next.id, failures);
-        // Nothing is lost: it goes back to the front, saying why, and is tried again.
-        chatQueue.add(workspaceId, taskId, { ...next, note: failures ? publicText(why, 300) : undefined }, { front: true });
+        // Nothing is lost: it stays at the front, saying why (the chat's queued bar shows the note),
+        // and is tried again. One the person removed meanwhile stays removed.
+        chatQueue.update(workspaceId, taskId, next.id, { sending: undefined, note: failures ? publicText(why, 300) : undefined });
         logger?.warn?.("ao.chat_queue.send_failed", { workspaceId, taskId, failures, message: publicText(why, 200) });
         // After a few failures it waits for the next settled turn or the person's Send now.
         if (failures < QUEUE_SEND_TRIES) armQueue(workspaceId, taskId, QUEUE_RETRY_MS * Math.max(1, failures));
@@ -7867,8 +8208,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     const tasks = Object.keys(chatQueue.forWorkspace(workspaceId));
     if (!tasks.length) return;
-    const run = (await runs({ workspaceId })).runs.find(entry => entry.id === runId);
-    if (run?.project_id && tasks.includes(run.project_id)) await drainQueue(workspaceId, run.project_id);
+    // The read that finds the run's chat is the one its queue goes on from: drainQueue read the
+    // whole project again right after it.
+    const saved = await runs({ workspaceId });
+    const run = saved.runs.find(entry => entry.id === runId);
+    if (run?.project_id && tasks.includes(run.project_id)) await drainQueue(workspaceId, run.project_id, { known: saved });
   }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
   async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {
@@ -7877,7 +8221,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action === "update") {
       const text = typeof message === "string" ? message.slice(0, 8192) : "";
       if (!text.trim()) throw new Error("Type a message to queue");
-      const updated = chatQueue.update(id, task, clean(itemId, 80), { message: text });
+      // One already going out takes nothing more: what was joined to it would be lost with its send.
+      const target = clean(itemId, 80);
+      if (chatQueue.list(id, task).find(entry => entry.id === target)?.sending) return { ok: true, updated: false, queue: chatQueue.list(id, task) };
+      const updated = chatQueue.update(id, task, target, { message: text });
       return { ok: true, updated: Boolean(updated), queue: chatQueue.list(id, task) };
     }
     if (action === "add") {
@@ -8510,8 +8857,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   const STOP_SETTLE_MS = 15_000;
   const STOP_SETTLE_POLL_MS = 250;
-  /** How long a Stop that ends the agent waits for its interrupt before shutting the agent down. */
-  const STOP_RELEASE_SETTLE_MS = 3_000;
+  /**
+   * How long a Stop that ends the agent waits for its interrupt before shutting the agent down. The
+   * agent is shut down either way, so the wait only lets a turn that settles at once record itself
+   * as interrupted; 3 s of it was most of a Stop's time on a healthy machine (2026-11-12).
+   */
+  const STOP_RELEASE_SETTLE_MS = 1_000;
   // Stops an agent without waiting on a stop or start AO is already carrying out for it: that agent
   // goes to the service's exit worker (releaseAgent), which leaves its card once AO reports it gone.
   // Waiting failed Stop ("Agent stop could not be confirmed: The agent is already exiting") and the
@@ -9105,7 +9456,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function call(operation, args = {}) {
     switch (operation) {
-      case "chat_send": return personChatSend(args);
+      case "chat_send": return personChatSend(args, { supersedeRetry: true });
       case "chat_recover": return chatRecover(args);
       case "chat_steer": return asPerson(() => chatSteer(args));
       case "chat_prewarm": return chatPrewarm(args);
@@ -9156,6 +9507,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_loop": return chatLoop(args);
       case "chat_schedule": return chatSchedule(args);
       case "chat_auto_retry": return chatAutoRetry(args);
+      case "chat_retry_cancel": return cancelAutoRetry(args);
       case "chat_model_judges": return chatModelJudges(args);
       case "agent_instructions": return agentInstructionsCall(args);
       case "chat_question_timeout": return chatQuestionTimeout(args);
@@ -9280,4 +9632,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

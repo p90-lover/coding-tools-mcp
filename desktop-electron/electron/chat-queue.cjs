@@ -8,6 +8,10 @@
 //
 // A steer that reached a turn which then died unread (its agent never answered, or never started)
 // comes back here too, at the front, so it is sent as the next turn instead of disappearing.
+//
+// A message being sent stays here, marked `sending` (when the send began), until the send has
+// answered: it used to be removed first, so an app that quit or crashed mid-send lost it from the
+// queue without its ever reaching the chat.
 
 const { createStateFileWriter, readStateFile } = require("./durable-state.cjs");
 
@@ -130,10 +134,12 @@ function createChatQueueStore({ file = null, now = Date.now, logger = null } = {
       if (keep.length !== current.length) save(workspaceId, taskId, { items: keep });
       return current.length - keep.length;
     },
+    /** Changes item `id` (a field set to undefined is dropped); null once it is gone. */
     update(workspaceId, taskId, id, change) {
       const current = items(workspaceId, taskId);
       if (!current.some(entry => entry.id === id)) return null;
-      const next = current.map(entry => (entry.id === id ? { ...entry, ...change } : entry));
+      const merged = (entry) => Object.fromEntries(Object.entries({ ...entry, ...change }).filter(([, value]) => value !== undefined));
+      const next = current.map(entry => (entry.id === id ? merged(entry) : entry));
       save(workspaceId, taskId, { items: next });
       return { ...next.find(entry => entry.id === id) };
     },

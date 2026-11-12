@@ -1007,6 +1007,44 @@ test("two queued messages fold into Claude Code's stack: Next: …, then a list 
   assert.equal(cleared, 1);
 });
 
+// The user, 2026-11-12: "the message that are waiting to send etc are gone without any issue".
+test("a queued message the app couldn't send says why under it; one it is sending can't be changed", async () => {
+  const { props } = base({ selectedTaskId: "t-q", working: true,
+    runs: [run("r1", "t-q", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
+    steer: async () => { throw new Error("not steerable"); } });
+  const view = mount(props);
+  const band = () => walk(view.render()).find((element) => String(element.props?.className).startsWith("cx-queued-band"));
+  await props.queue.add("t-q", { what: "Message", message: "keep going", note: "AO is busy" });
+  const note = walk(view.render()).find((element) => element.props?.className === "cx-queued-note");
+  assert.equal(text(note), "Not sent yet: AO is busy", "a failed send no longer leaves the message sitting there without a word");
+  assert.equal(band().props["data-state"], "queued");
+  await props.queue.remove("t-q", null);
+  await props.queue.add("t-q", { what: "Message", message: "keep going", sending: 1 });
+  assert.equal(band().props["data-state"], "sending");
+  assert.match(text(band()), /^Sending queued messagekeep going$/);
+  assert.equal(walk(band()).filter((element) => element.type === "button").length, 0, "no Send now, Edit or Remove while it goes");
+  const stacked = walk(view.bar({ items: [{ key: "a", text: "one", state: "queued", note: "AO is busy" }, { key: "b", text: "two", state: "queued" }], onMenu() {} }));
+  assert.equal(text(stacked.find((element) => element.props?.className === "cx-queued-note")), "Not sent yet: AO is busy", "folded, the note still shows");
+});
+
+test("a message neither sent nor queued comes back to its composer with why, never silently gone", async (t) => {
+  // The chat started working again under the message ("still running"), so it went to the queue,
+  // and the queue refused it too (the window was not in front): the message used to vanish.
+  const { props } = base({ selectedTaskId: "t-lost",
+    runs: [run("r1", "t-lost", [node("w", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })],
+    send: async () => { throw new Error("This chat is still running; wait for it to finish or stop it first"); } });
+  props.queue.add = async () => { throw new Error("Click into the Coding Tools window first"); };
+  // Effects on: the composer's draft owner, which takes the message back, registers in one.
+  const view = mount(props, { effects: true });
+  t.after(() => view.unmount());
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  textarea().props.onChange({ target: { value: "rerun the tests" } });
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(textarea().props.value, "rerun the tests", "back where it was typed");
+  assert.match(text(view.render()), /Couldn't send the message: This chat is still running/);
+});
+
 test("the composer sends annotations and typed text once, together, for both send and steer", async () => {
   for (const running of [false, true]) {
     const delivered = [];
