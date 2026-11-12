@@ -150,6 +150,21 @@ const draftEntry = (key: string): DraftEntry => {
   if (!entry) { entry = { snapshot: { text: "" }, pending: [], attaching: 0, preparing: [] }; CHAT_DRAFTS.set(key, entry); }
   return entry;
 };
+/**
+ * A message nothing kept (its queueing was refused, and a send before it too) goes back into its
+ * chat's composer, ahead of anything typed since, with why: also once that chat is open again.
+ */
+/** An app call's error as the person reads it, without the IPC wrapper's prefix. */
+const refusalText = (cause: unknown) => {
+  const message = typeof (cause as Error | null)?.message === "string" ? (cause as Error).message : String(cause);
+  return message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+};
+const giveBackToDraft = (key: string, text: string, cause: unknown) => {
+  const entry = draftEntry(key);
+  const recovery: DraftRecovery = { text, error: refusalText(cause), applied: false };
+  entry.pending.push(recovery);
+  entry.owner?.restore(recovery);
+};
 const trimDraftEntry = (key: string, entry: DraftEntry) => {
   entry.pending = entry.pending.filter((recovery) => !recovery.applied);
   if (entry.snapshot.sent) entry.snapshot = { text: "" };
@@ -1890,11 +1905,16 @@ export function AgentOrchestratorChat({
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         return true;
       }
-      // The surface already shows the error; keep the message so it can be sent again. A steer had
-      // cleared the composer at once: what was typed comes back, unless something new was typed since.
-      if (steerNow && here() && !composing.current.draft.trim() && !composing.current.attachments.length) {
+      // Keep the message so it can be sent again. A steer had cleared the composer at once, and so had
+      // a follow-up refused only for now, left to the queue just above, which refused it too: the window
+      // was still not in front (2026-11-12, chat_send and then chat_queue refused for focus, and the
+      // message was gone). What was typed comes back, or, with something new typed since, goes ahead of
+      // it. The surface shows no error for a refusal for now, so the chat says why.
+      const forNow = fromComposer && Boolean(selectedTaskId && sendRefusedForNow(error));
+      if ((steerNow || forNow) && here() && !composing.current.draft.trim() && !composing.current.attachments.length) {
         setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
-      }
+        if (forNow) say("Message", `Couldn't send or queue the message: ${refusalText(error)}`);
+      } else if (forNow) giveBackToDraft(owner.cacheKey, message, error);
       return false;
     } finally { setSending(false); }
   };
@@ -1986,12 +2006,7 @@ export function AgentOrchestratorChat({
       // Several messages typed during one turn go together, in order.
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
       // Not queued: it goes back into the composer, ahead of anything typed since.
-      void enqueue(selectedTaskId, { what: "Message", message: text }).catch((error) => {
-        const entry = draftEntry(owner.cacheKey);
-        const recovery = { text, error: error instanceof Error ? error.message : String(error), applied: false };
-        entry.pending.push(recovery);
-        entry.owner?.restore(recovery);
-      });
+      void enqueue(selectedTaskId, { what: "Message", message: text }).catch((error) => giveBackToDraft(owner.cacheKey, text, error));
       return;
     }
     await deliver(text);
@@ -2074,9 +2089,11 @@ export function AgentOrchestratorChat({
         input.current?.focus();
       },
       onSendNow: () => {
-        const task = selectedTaskId, taken = takeQueued(index);
+        const task = selectedTaskId, taken = takeQueued(index), key = composing.current.cacheKey;
         if (!taken) return;
-        void deliver(taken.message, taken.goal, false).then((sent) => { if (!sent) void enqueue(task, taken, true).catch(() => undefined); });
+        // Neither sent nor queued again (both refused while the window was not in front): it comes
+        // back as typed, as Edit gives it.
+        void deliver(taken.message, taken.goal, false).then((sent) => { if (!sent) void enqueue(task, taken, true).catch((cause) => giveBackToDraft(key, typed, cause)); });
       },
     }];
   });
@@ -2096,9 +2113,9 @@ export function AgentOrchestratorChat({
         input.current?.focus();
       },
       onSendNow: () => {
-        const task = selectedTaskId, taken = takeQueued(index);
+        const task = selectedTaskId, taken = takeQueued(index), key = composing.current.cacheKey;
         if (!taken) return;
-        void deliver(taken.message, undefined, false).then((sent) => { if (!sent) void enqueue(task, taken, true).catch(() => undefined); });
+        void deliver(taken.message, undefined, false).then((sent) => { if (!sent) void enqueue(task, taken, true).catch((cause) => giveBackToDraft(key, taken.message, cause)); });
       },
     };
   }

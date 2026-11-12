@@ -1979,3 +1979,47 @@ test("a failed work read waits instead of being retried on every poll while AO i
   assert.equal(reads.length, 1, "five polls after a failed read ask AO once");
   assert.match(text(page.render()), /Done/, "the answer still shows without its activity");
 });
+
+// 2026-11-12: a follow-up's chat_send was refused because the window was not in front (sent right
+// before switching away during a stall), and the chat_queue add it falls back to was refused for the
+// same reason. The composer had been cleared, nothing queued it and nothing gave it back.
+test("a follow-up refused for focus whose queueing is refused too comes back to the composer, with why", async () => {
+  const unfocused = new Error("Error invoking remote method 'coding-tools:apps:call': Error: Click into the Coding Tools window and try again: this action runs only from the focused app window");
+  const finished = [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })];
+  for (const typedSince of [false, true]) {
+    const reply = delayedReply();
+    const queue = appQueue();
+    queue.add = async () => { throw unfocused; };
+    const { props } = base({ selectedTaskId: "t", projectId: "ws", runs: finished, queue, send: async () => { await reply.promise; } });
+    const view = mount(props, { effects: true });
+    const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+    textarea().props.onChange({ target: { value: "check the logs again" } });
+    const submitted = walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+    assert.equal(textarea().props.value, "", "the composer cleared as the message went");
+    if (typedSince) { textarea().props.onChange({ target: { value: "and the build" } }); view.render(); }
+    reply.reject(unfocused);
+    await submitted;
+    for (let i = 0; i < 4; i += 1) await new Promise(setImmediate);
+    assert.equal(textarea().props.value, typedSince ? "check the logs again\n\nand the build" : "check the logs again",
+      typedSince ? "it goes back ahead of what was typed since" : "what was typed comes back");
+    assert.match(text(view.render()), /Couldn't (send or )?queue the message: Click into the Coding Tools window/, "the chat says why");
+    assert.equal(queue.chats.get("t"), undefined, "nothing was queued");
+  }
+});
+
+test("Send now on a queued message whose send and re-queue are both refused gives the message back", async () => {
+  const unfocused = new Error("Click into the Coding Tools window and try again: this action runs only from the focused app window");
+  const queue = appQueue();
+  const { props } = base({ selectedTaskId: "t", projectId: "ws", queue, send: async () => { throw unfocused; },
+    runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })] });
+  const view = mount(props, { effects: true });
+  await queue.add("t", { what: "Message", message: "run the tests" });
+  queue.add = async () => { throw unfocused; };
+  for (let i = 0; i < 2; i += 1) await new Promise(setImmediate);
+  const sendNow = walk(view.render()).find((element) => element.props?.["aria-label"] === "Send now");
+  assert.ok(sendNow, "the queued bar offers Send now");
+  sendNow.props.onClick();
+  for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+  assert.equal(walk(view.render()).find((element) => element.type === "textarea").props.value, "run the tests");
+  assert.match(text(view.render()), /Couldn't queue the message: Click into the Coding Tools window/);
+});
