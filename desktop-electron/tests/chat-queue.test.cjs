@@ -108,6 +108,8 @@ test("the app resumes a chat after a restart exactly as the chat view would", ()
     { cancelled: true, nodes: [node("running")] },
     { cancelled: false, paused: true, nodes: [node("pending")] },
     { cancelled: false, nodes: [node("finished")] },
+    { cancelled: false, execution_mode: "single", nodes: [node("held", { receipt: { error: "Launch failed: spawn: chat driver incompatible: read Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)" } })] },
+    { cancelled: false, execution_mode: "single", nodes: [node("held", { receipt: { error: "chat driver incompatible: ACP initialize: context deadline exceeded" } })] },
   ];
   for (const [index, mission] of cases.entries()) {
     for (const autoRetry of [false, true]) {
@@ -118,4 +120,6 @@ test("the app resumes a chat after a restart exactly as the chat view would", ()
   assert.equal(restartResume(cases[2], now), "retry");
   assert.equal(restartResume(cases[4], now, { autoRetry: true }), "retry");
   assert.equal(restartResume(cases[5], now, { autoRetry: true }), null, "a sign-in failure waits for the person");
+  assert.equal(restartResume(cases[11], now, { autoRetry: true }), null, "an agent program AO cannot run waits for the person");
+  assert.equal(restartResume(cases[12], now, { autoRetry: true }), "retry", "a handshake that timed out is retried");
 });

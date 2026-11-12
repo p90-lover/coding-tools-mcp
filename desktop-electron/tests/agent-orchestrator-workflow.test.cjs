@@ -10929,6 +10929,56 @@ test(`"Retry automatically" leaves a request the provider refused (${label}) for
     for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   }
 });
+for (const [label, error, fails] of [
+  ["its version probe failed", "spawn: chat driver incompatible: read Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)", true],
+  ["its handshake timed out", "spawn s-1: chat controller: chat driver incompatible: ACP initialize: {\"code\":-32603,\"message\":\"Internal error\",\"data\":{\"error\":\"context deadline exceeded\"}}", false],
+])
+test(`"Retry automatically" and an agent program AO could not run (${label})`, async () => {
+  // 2026-11-12: "read Codex version: exit status 1" was retried up to the fifth attempt, each a
+  // 12-27 s launch that failed the same way. A handshake that timed out under load is transient.
+  const route = { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", cancelled: false,
+    grant: { executable_sha256: "a".repeat(64), expires_at_ms: Date.now() + 3_600_000 },
+    nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, history: [], receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const controls = [];
+  let clock = 1_000_000;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      if (endpoint === "/api/v1/ao/control") controls.push(body.action);
+      return { ok: true, run: mission };
+    },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  await workflow.call("chat_auto_retry", { enabled: true });
+  await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+  const status = () => workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+  try {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: `Launch failed: ${error}` } };
+    const expected = fails ? /could not be run \(its version check failed\)/ : /Retrying automatically in/;
+    let detail = "";
+    for (let tries = 0; tries < 100 && !expected.test(detail); tries++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      detail = String((await status()).detail ?? "");
+    }
+    assert.match(detail, expected);
+    clock += 60 * 60_000;
+    for (let tries = 0; tries < 50 && !fails && !controls.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    if (fails) await new Promise(resolve => setTimeout(resolve, 300));
+    assert.deepEqual(controls, fails ? [] : ["retry"], fails ? "never retried" : "retried as before");
+  } finally {
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100 && (await status()).status === "running"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    workflow.dispose();
+  }
+});
 test("a model CPA has no provider for is not retried and leaves the picker, though remembered", async () => {
   // gpt-5.5 (2026-10-22): CPA stopped listing it, the menu kept it from memory, and each send spent
   // a 65 s launch on "unknown provider for model gpt-5.5"; Retry automatically spent three more.
