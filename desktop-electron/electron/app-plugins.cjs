@@ -97,7 +97,7 @@ async function readPluginUpdates(stateDir) {
 
 async function writePluginUpdates(stateDir, record) {
   const target = path.join(stateDir, UPDATES_FILE);
-  const staging = `${target}.${process.pid}.tmp`;
+  const staging = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await fs.promises.writeFile(staging, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   await fs.promises.rename(staging, target);
 }
@@ -148,6 +148,9 @@ function createAppPlugins({
   const settingsFile = path.join(settingsDir || path.dirname(cpaStateDir), SETTINGS_FILE);
   let token;
   let settings = null;
+  // Auto-update changes are saved one at a time: two quick toggles shared one staging file, so
+  // the second rename found it gone (ENOENT), and each started from the same old settings.
+  let settingsWrites = Promise.resolve();
 
   async function readSettings() {
     if (settings) return settings;
@@ -604,15 +607,23 @@ function createAppPlugins({
     const item = items.find((entry) => entry.id === key);
     if (!item) throw new Error("Unknown app plugin");
     if (!item.autoUpdatable) throw new Error(`${item.name} updates with the app`);
-    const current = await readSettings();
-    const autoUpdate = { ...current.autoUpdate };
-    if (enabled === true) autoUpdate[key] = true; else delete autoUpdate[key];
-    const next = { schemaVersion: 1, autoUpdate };
-    await fs.promises.mkdir(path.dirname(settingsFile), { recursive: true, mode: 0o700 });
-    const staging = `${settingsFile}.${process.pid}.tmp`;
-    await fs.promises.writeFile(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-    await fs.promises.rename(staging, settingsFile);
-    settings = next;
+    const write = settingsWrites.then(async () => {
+      const current = await readSettings();
+      const autoUpdate = { ...current.autoUpdate };
+      if (enabled === true) autoUpdate[key] = true; else delete autoUpdate[key];
+      const next = { schemaVersion: 1, autoUpdate };
+      await fs.promises.mkdir(path.dirname(settingsFile), { recursive: true, mode: 0o700 });
+      const staging = `${settingsFile}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.promises.writeFile(staging, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+        await fs.promises.rename(staging, settingsFile);
+      } finally {
+        await fs.promises.rm(staging, { force: true });
+      }
+      settings = next;
+    });
+    settingsWrites = write.catch(() => {});
+    await write;
     logger.info?.("app-plugins.auto_update", { plugin: key, enabled: enabled === true });
     return list();
   }
