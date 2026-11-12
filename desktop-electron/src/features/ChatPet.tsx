@@ -1031,8 +1031,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       remember();
       poke();
       cancelPlans();
-      // Shaken off, it comes round from a dizzy spell with stars over its head.
-      if (dizzy.current) { dizzy.current = false; play("dizzy"); float("✦", 12); float("✦", 46); }
+      // Shaken off, it comes round from a dizzy spell. (Not "✦": rising stars read as fireworks, 2026-10-30.)
+      if (dizzy.current) { dizzy.current = false; play("dizzy"); float("💫", 28); }
       wander();
     }, { crouch: false, impact: 0.5 });
   };
@@ -1425,8 +1425,8 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       land(impact, () => {
         activity.current = "box";
         if (bounce) play("jump");
-        // A drop from near the top of the window: seeing stars for a moment.
-        else if (impact >= 0.9) { play("dizzy"); float("✦", 12); float("✦", 46); }
+        // A drop from near the top of the window: dizzy for a moment.
+        else if (impact >= 0.9) { play("dizzy"); float("💫", 28); }
         remember();
         poke();
         wander();
