@@ -308,3 +308,33 @@ test("a quit leaves alone a Nova this app never started", async (t) => {
   assert.equal(nova.up, true, "the user's own Nova keeps routing their other apps");
   assert.deepEqual(nova.calls, [], "not even asked");
 });
+
+// 2026-11-12: every app start read proxybridge-nova.json on the main thread while creating this manager
+// (377 ms on a busy G:), though nothing uses Nova unless its IPC is called.
+test("creating the manager reads nothing; the first use reads the saved settings once", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ct-nova-lazy-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const exe = path.join(root, "ProxyBridgeRewrite.exe");
+  const file = path.join(root, "providers", "proxybridge-nova.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ exePath: exe, apiPort: 17999, migratedAt: "2026-11-01T00:00:00.000Z" }));
+  const readFileSync = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function (target, ...rest) {
+    if (path.resolve(String(target)) === path.resolve(file)) reads += 1;
+    return readFileSync.call(this, target, ...rest);
+  };
+  t.after(() => { fs.readFileSync = readFileSync; });
+  const manager = createNovaManager({
+    userData: root, safeStorage, store: { snapshot: () => ({ routing: {}, proxyProfiles: [] }) }, env: {},
+    applyGlobalRouting: async () => {}, fetchImpl: async () => { throw new TypeError("fetch failed"); },
+  });
+  assert.equal(reads, 0, "creating the manager, as every app start does, reads nothing");
+  const state = manager.state();
+  assert.equal(reads, 1, "the first use reads the saved settings");
+  assert.equal(state.executable, exe);
+  assert.equal(state.apiPort, 17999);
+  assert.equal(state.migratedAt, "2026-11-01T00:00:00.000Z");
+  manager.state();
+  assert.equal(reads, 1, "and only once");
+});

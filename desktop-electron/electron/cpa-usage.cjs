@@ -22,6 +22,9 @@ const { accountOf } = require("./cpa-quota.cjs");
 
 const CACHE_MS = 20_000;
 const TIMEOUT_MS = 8_000;
+// After a read CPA did not answer, how long no read is sent; doubled while the next ones fail too.
+const READ_PAUSE_MS = 2_000;
+const READ_PAUSE_MAX_MS = 30_000;
 const MAX_ACCOUNTS = 40;
 /** Accounts whose usage is split by model (one more CPA Helper read each). */
 const MAX_SPLIT_ACCOUNTS = 24;
@@ -363,13 +366,32 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
     return { status: response.status, ok: response.ok, body };
   }
 
+  // While CPA cannot be reached, reads are not sent. Each one used to be tried and logged: every
+  // open chat's turn lines ask every few seconds, so with CPA down for two minutes at startup
+  // (2026-11-12 09:12) the launcher logged cpa_usage.read_failed 264 times, 134 in one minute, and
+  // its log holds 300 records: whatever had gone wrong before was gone. An unanswered read now
+  // closes the door for READ_PAUSE_MS, doubling to READ_PAUSE_MAX_MS while the next ones fail too.
+  // The outage is logged once, and once more when CPA answers, with how many reads were not sent.
+  let unreachable = { until: 0, pause: 0, since: 0, skipped: 0 };
   /** A read that may fail without failing the view: null when it did. */
   async function optional(target, path) {
+    const asked = now();
+    if (asked < unreachable.until) { unreachable.skipped += 1; return null; }
     try {
       const result = await get(target, path);
+      if (unreachable.pause) {
+        logger.info?.("cpa_usage.read_recovered", { afterMs: now() - unreachable.since, skipped: unreachable.skipped });
+        unreachable = { until: 0, pause: 0, since: 0, skipped: 0 };
+      }
       return result.ok ? result.body : null;
     } catch (error) {
-      logger.warn?.("cpa_usage.read_failed", { path: path.split("?")[0], message: String(error?.message ?? error).slice(0, 200) });
+      // Reads already on their way when the first one failed are the same outage, not a longer one.
+      if (asked >= unreachable.until) {
+        const first = !unreachable.pause;
+        const pause = Math.min(READ_PAUSE_MAX_MS, first ? READ_PAUSE_MS : unreachable.pause * 2);
+        unreachable = { until: now() + pause, pause, since: first ? now() : unreachable.since, skipped: first ? 0 : unreachable.skipped };
+        if (first) logger.warn?.("cpa_usage.read_failed", { path: path.split("?")[0], message: String(error?.message ?? error).slice(0, 200) });
+      }
       return null;
     }
   }

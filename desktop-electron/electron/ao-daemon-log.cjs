@@ -102,4 +102,59 @@ function createDaemonLogFilter(write) {
   };
 }
 
-module.exports = { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs, daemonLogEvent, SLOW_STAGE_MS };
+// How often the same AO failure is put in the launcher log, and how many different ones are tracked.
+const FAILURE_REPEAT_MS = 60_000;
+const FAILURE_KINDS = 200;
+const short = (value, limit) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+
+/**
+ * AO's own failures as launcher log events (memory only): `(line) => event | null`.
+ *
+ * AO hides a failure's cause from its answer ("Internal server error") and writes it only to its
+ * output: the request line of a 5xx carries `error=`, and what AO could not do is a WARN or ERROR
+ * line. The launcher kept those lines in a tail nothing reads, so `ao.idle_release_failed
+ * {"code":"INTERNAL_ERROR"}` (2026-11-11) could not be explained afterwards. They are now events:
+ * `ao.request_failed` for a 5xx request, `ao.daemon_warning` and `ao.daemon_error` for the rest.
+ * The same failure (same message, or same method, route and status) is reported at most once a
+ * minute, with how many repeats it stood for, so a loop cannot fill the log's 300 records.
+ */
+function createDaemonFailureEvents({ now = Date.now } = {}) {
+  const seen = new Map(); // kind -> { at, repeats }
+  const admit = (kind) => {
+    const known = seen.get(kind), at = now();
+    if (known && at - known.at < FAILURE_REPEAT_MS) { known.repeats += 1; return null; }
+    const repeats = known?.repeats ?? 0;
+    seen.delete(kind);
+    seen.set(kind, { at, repeats: 0 });
+    if (seen.size > FAILURE_KINDS) seen.delete(seen.keys().next().value);
+    return repeats;
+  };
+  return (line) => {
+    const level = /^time=\S+ level=(\w+) /.exec(line)?.[1] ?? /^level=(\w+) /.exec(line)?.[1];
+    if (!level) return null;
+    if (line.includes(' msg="http request" ')) {
+      const fields = slogFields(line);
+      const status = Number(fields.status);
+      if (!(status >= 500)) return null;
+      // One kind per route, not per session: ids in the path are folded.
+      const route = short(fields.path, 200).replace(/\/[A-Za-z0-9_-]*\d[A-Za-z0-9_-]*/g, "/:id");
+      const repeats = admit(`request ${fields.method} ${route} ${status}`);
+      if (repeats === null) return null;
+      return { level: "warn", event: "ao.request_failed", detail: { method: short(fields.method, 8), path: short(fields.path, 200), status,
+        ms: Math.round(goDurationMs(fields.duration)) || null, error: short(fields.error, 400), ...(repeats ? { repeats } : {}) } };
+    }
+    if (level !== "WARN" && level !== "ERROR") return null;
+    // The writer report has its own event (daemonLogEvent).
+    if (line.includes('msg="sqlite writer held while writes wait"')) return null;
+    const fields = slogFields(line);
+    const message = short(fields.msg, 160);
+    const repeats = admit(`${level} ${message}`);
+    if (repeats === null) return null;
+    const { time, level: ignored, msg, ...rest } = fields;
+    const detail = { message };
+    for (const [key, value] of Object.entries(rest).slice(0, 8)) detail[short(key, 40)] = short(value, key === "error" || key === "err" ? 400 : 160);
+    return { level: "warn", event: level === "ERROR" ? "ao.daemon_error" : "ao.daemon_warning", detail: { ...detail, ...(repeats ? { repeats } : {}) } };
+  };
+}
+
+module.exports = { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs, daemonLogEvent, createDaemonFailureEvents, SLOW_STAGE_MS };

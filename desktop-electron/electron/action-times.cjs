@@ -219,4 +219,4 @@ function timeIpcHandler(times, channel, handler, { isAppWindow, clock = () => pe
   };
 }
 
-module.exports = { createActionTimes, watchPageTimes, timeIpcHandler, pageShape, partitionGroup, MAX_ENTRIES, MAX_SAMPLES };
+module.exports = { createActionTimes, watchPageTimes, timeIpcHandler, pageShape, partitionGroup, partitionOf, MAX_ENTRIES, MAX_SAMPLES };

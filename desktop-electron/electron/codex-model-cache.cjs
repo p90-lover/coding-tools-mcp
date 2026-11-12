@@ -47,17 +47,24 @@ function codexSkipsBridge(cache, bridgeServedAt) {
   return Boolean(cache) && Number.isFinite(bridgeServedAt) && cache.fetchedAt > bridgeServedAt && !cache.webModels;
 }
 
+// How long no list may go around the bridge before "Restart Codex" clears. The cache names a Codex
+// version, not a process: on 2026-11-12 the Codex app (running since 11-08) went around the bridge
+// every 8 to 23 minutes, and the app's own Codex servers, the same 0.164.0, listed WebGPT through it
+// in between. Clearing at that next list switched the notice off and on 35 times in three hours.
+const QUIET_MS = 45 * 60_000;
+
 /**
  * Watches Codex's model cache while the bridge route is in place and keeps "Restart Codex" up for
  * as long as a Codex goes around it (the catalog check stops at the first Codex that asks the
- * bridge, which can be the app's own). Clears it once that Codex version lists the WebGPT models.
- * One stat a minute; the file is read only when it changed.
+ * bridge, which can be the app's own). Clears it once a list fetched `quietMs` after the last one
+ * that went around lists the WebGPT models, whichever version wrote it (a restarted Codex may be
+ * a newer one). One stat a minute; the file is read only when it changed.
  * `routed()`: whether the bridge route is installed. `bridgeServedAt()`: async, ms or NaN.
  * `restartRequired()` / `setRestartRequired(boolean)`: the shown notice.
  */
 function watchCodexModelCache({ codexHome, routed, bridgeServedAt, restartRequired, setRestartRequired, logger,
-  intervalMs = 60_000, read = readCodexModelCache, setInterval: every = setInterval, clearInterval: stop = clearInterval }) {
-  let modifiedAt = null, skipping = null, busy = false;
+  intervalMs = 60_000, quietMs = QUIET_MS, read = readCodexModelCache, setInterval: every = setInterval, clearInterval: stop = clearInterval }) {
+  let modifiedAt = null, skippedAt = null, busy = false;
   const check = async () => {
     if (busy || !routed()) return;
     busy = true;
@@ -66,15 +73,15 @@ function watchCodexModelCache({ codexHome, routed, bridgeServedAt, restartRequir
       if (!cache || cache.modifiedAt === modifiedAt) return;
       modifiedAt = cache.modifiedAt;
       if (cache.webModels) {
-        if (skipping !== null && cache.clientVersion === skipping && restartRequired()) {
-          skipping = null;
+        if (skippedAt !== null && cache.fetchedAt - skippedAt >= quietMs && restartRequired()) {
+          skippedAt = null;
           setRestartRequired(false);
           logger?.info?.("codex.model_cache_through_bridge", { clientVersion: cache.clientVersion });
         }
         return;
       }
       if (!codexSkipsBridge(cache, await bridgeServedAt())) return;
-      skipping = cache.clientVersion;
+      skippedAt = cache.fetchedAt;
       if (!restartRequired()) {
         setRestartRequired(true);
         logger?.warn?.("codex.model_cache_skips_bridge", { clientVersion: cache.clientVersion, fetchedAt: new Date(cache.fetchedAt).toISOString() });
@@ -90,4 +97,4 @@ function watchCodexModelCache({ codexHome, routed, bridgeServedAt, restartRequir
   return { check, stop: () => stop(timer) };
 }
 
-module.exports = { readCodexModelCache, codexSkipsBridge, watchCodexModelCache };
+module.exports = { readCodexModelCache, codexSkipsBridge, watchCodexModelCache, QUIET_MS };

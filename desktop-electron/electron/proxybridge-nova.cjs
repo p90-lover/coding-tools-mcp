@@ -88,8 +88,17 @@ function createNovaManager({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   const settingsPath = path.join(userData, "providers", "proxybridge-nova.json");
-  let settings = {};
-  try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) ?? {}; } catch {}
+  // Read on first use. The manager is created at every app start but kept only for its IPC, which
+  // nothing calls unless Nova is used; reading here held the main thread 377 ms at launch on
+  // 2026-11-12 (G: busy). Same file, same sync read, so a later call sees the same settings.
+  let settings = null;
+  const saved = () => {
+    if (settings === null) {
+      try { settings = JSON.parse(fs.readFileSync(settingsPath, "utf8")); } catch {}
+      if (!settings || typeof settings !== "object") settings = {};
+    }
+    return settings;
+  };
   let token = null;
   let status = null;
   let lastError = null;
@@ -105,28 +114,28 @@ function createNovaManager({
 
   function saveSettings() {
     fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-    writePrivateFileAtomic(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
+    writePrivateFileAtomic(settingsPath, `${JSON.stringify(saved(), null, 2)}\n`);
   }
 
   // The token outlives the app (Nova does too), so a restarted app adopts the Nova it started.
   // Kept only encrypted; with no OS encryption it lives for this run and Nova is restarted next time.
   function apiToken() {
     if (token) return token;
-    if (settings.token && safeStorage?.isEncryptionAvailable?.()) {
-      try { token = safeStorage.decryptString(Buffer.from(settings.token, "base64")); } catch {}
+    if (saved().token && safeStorage?.isEncryptionAvailable?.()) {
+      try { token = safeStorage.decryptString(Buffer.from(saved().token, "base64")); } catch {}
     }
     if (!token || !/^[A-Za-z0-9_-]{32,}$/.test(token)) {
       token = crypto.randomBytes(36).toString("base64url");
       if (safeStorage?.isEncryptionAvailable?.()) {
-        settings.token = safeStorage.encryptString(token).toString("base64");
+        saved().token = safeStorage.encryptString(token).toString("base64");
         saveSettings();
       }
     }
     return token;
   }
 
-  const apiPort = () => (Number.isInteger(settings.apiPort) ? settings.apiPort : DEFAULT_API_PORT);
-  const executable = () => settings.exePath || defaultExecutable(env);
+  const apiPort = () => (Number.isInteger(saved().apiPort) ? saved().apiPort : DEFAULT_API_PORT);
+  const executable = () => saved().exePath || defaultExecutable(env);
 
   async function api(method, endpoint, body, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
     let response;
@@ -164,7 +173,7 @@ function createNovaManager({
       apiPort: apiPort(),
       status,
       error: lastError,
-      migratedAt: settings.migratedAt ?? null,
+      migratedAt: saved().migratedAt ?? null,
     };
   }
 
@@ -214,7 +223,7 @@ function createNovaManager({
       const { exited } = launched;
       if (exited !== null) {
         if (exited === 0) {
-          settings.unmanagedExe = exeStamp(exe);
+          saved().unmanagedExe = exeStamp(exe);
           saveSettings();
         }
         throw new Error(exited instanceof Error ? `ProxyBridge Nova could not start: ${exited.message}`
@@ -233,14 +242,14 @@ function createNovaManager({
     if (!starting) {
       starting = (async () => {
         if (await refreshStatus()) return status;
-        if (!launchAllowed && settings.unmanagedExe && settings.unmanagedExe === exeStamp(executable())) {
+        if (!launchAllowed && saved().unmanagedExe && saved().unmanagedExe === exeStamp(executable())) {
           lastError = EXIT_REASONS[0];
           return null;
         }
         try {
           const started = await launch();
-          if (settings.unmanagedExe) {
-            delete settings.unmanagedExe;
+          if (saved().unmanagedExe) {
+            delete saved().unmanagedExe;
             saveSettings();
           }
           return started;
@@ -275,7 +284,7 @@ function createNovaManager({
       const now = after.globalEnabled ? store.activeProxy(after.globalProfileId) : null;
       if (result.changed && JSON.stringify(before) !== JSON.stringify(now)) await applyGlobalRouting();
       if (result.changed) publish(null, result.snapshot);
-      if (!settings.migratedAt) await migrate(profile);
+      if (!saved().migratedAt) await migrate(profile);
       return profile;
     });
     return syncing;
@@ -322,7 +331,7 @@ function createNovaManager({
       await store.saved?.();
       await applyGlobalRouting();
     }
-    settings.migratedAt = new Date().toISOString();
+    saved().migratedAt = new Date().toISOString();
     saveSettings();
     logger?.info?.("nova.profiles_migrated", { moved: moved.length, kept: kept.length });
     publish(null, store.snapshot());
@@ -385,7 +394,7 @@ function createNovaManager({
     async setExecutable(exePath) {
       const value = String(exePath ?? "").trim();
       if (value && (!/\.exe$/i.test(value) || !fs.existsSync(value))) throw new Error("Choose ProxyBridgeRewrite.exe");
-      settings.exePath = value || undefined;
+      saved().exePath = value || undefined;
       saveSettings();
       announce();
       return state();

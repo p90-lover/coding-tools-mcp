@@ -140,3 +140,46 @@ test("an endless line is passed on rather than held", () => {
   assert.equal(written.length, 1);
   assert.equal(written[0].length, 70 * 1024 + 1);
 });
+
+// 2026-11-11: `ao.idle_release_failed {"code":"INTERNAL_ERROR"}` could not be explained, because the
+// cause was only in AO's output, which nothing put in the launcher log.
+test("AO's failed requests, warnings and errors become launcher log events, the same one at most once a minute", () => {
+  const { createDaemonFailureEvents } = require("../electron/ao-daemon-log.cjs");
+  let clock = 0;
+  const event = createDaemonFailureEvents({ now: () => clock });
+  const failed = (session) => `time=2026-11-11T23:23:14.030+08:00 level=INFO msg="http request" id=abc method=POST path=/api/v1/sessions/${session}/exit-agent status=500 bytes=96 duration=5.2s remote=127.0.0.1:5 error="exit agent ${session}: record exit: database is locked (5) (SQLITE_BUSY)"`;
+  assert.deepEqual(event(failed("coding-tools-mcp-332")), { level: "warn", event: "ao.request_failed", detail: {
+    method: "POST", path: "/api/v1/sessions/coding-tools-mcp-332/exit-agent", status: 500, ms: 5200,
+    error: "exit agent coding-tools-mcp-332: record exit: database is locked (5) (SQLITE_BUSY)" } });
+  // The same route failing for other sessions is the same kind: not reported again inside a minute.
+  assert.equal(event(failed("coding-tools-mcp-333")), null);
+  assert.equal(event(failed("clash-of-clan-macro-9")), null);
+  clock += 60_001;
+  assert.equal(event(failed("coding-tools-mcp-334")).detail.repeats, 2, "the next report says how many it stood for");
+  // Requests that did not fail on AO's side, and info lines, are not events.
+  assert.equal(event('time=2026-11-11T23:23:14.030+08:00 level=INFO msg="http request" method=POST path=/api/v1/sessions status=409 duration=2ms'), null);
+  assert.equal(event('time=2026-11-11T23:23:14.030+08:00 level=INFO msg="http request" method=GET path=/api/v1/sessions status=200 duration=70s'), null);
+  assert.equal(event('time=2026-11-11T23:23:14.030+08:00 level=INFO msg="cdc change_log retention pruned rows" rows=400'), null);
+  assert.equal(event('time=2026-11-11T23:23:14.030+08:00 level=DEBUG msg="tick"'), null);
+  assert.equal(event("not a log line"), null);
+  // The writer report keeps its own event.
+  assert.equal(event('time=2026-11-11T23:23:14.030+08:00 level=WARN msg="sqlite writer held while writes wait" held=31s waiting=1'), null);
+
+  assert.deepEqual(event('time=2026-11-11T23:23:14.030+08:00 level=WARN msg="usage source ingestion failed" source=4 err="artifact missing"'),
+    { level: "warn", event: "ao.daemon_warning", detail: { message: "usage source ingestion failed", source: "4", err: "artifact missing" } });
+  assert.equal(event('time=2026-11-11T23:23:15.030+08:00 level=WARN msg="usage source ingestion failed" source=5 err="artifact missing"'), null);
+  const stopped = event('level=ERROR msg="persistent chat projection stopped; provider retained for replay" session=s1 kind=turn_completed error="database is locked"');
+  assert.equal(stopped.event, "ao.daemon_error");
+  assert.deepEqual(stopped.detail, { message: "persistent chat projection stopped; provider retained for replay", session: "s1", kind: "turn_completed", error: "database is locked" });
+  // Long values are cut, so one line cannot fill the log.
+  const long = event(`level=ERROR msg="${"m".repeat(500)}" error="${"e".repeat(2000)}" other="${"o".repeat(900)}"`);
+  assert.equal(long.detail.message.length, 160);
+  assert.equal(long.detail.error.length, 400);
+  assert.equal(long.detail.other.length, 160);
+});
+
+test("the launcher puts AO's failures in its log beside the writer and start-stage events", () => {
+  const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  assert.match(source, /const daemonFailureEvent = createDaemonFailureEvents\(\);/);
+  assert.match(source, /const found = daemonLogEvent\(line\) \?\? daemonFailureEvent\(line\);/);
+});

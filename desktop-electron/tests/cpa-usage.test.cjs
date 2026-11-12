@@ -418,3 +418,58 @@ test("a long turn's stats read every page of records instead of stopping at the 
   assert.equal(unpaged.stats.steps, 500, "a helper that ignores page is counted once, not twice");
   assert.deepEqual(unpaged.pages, [1, 2]);
 });
+
+// 2026-11-12 09:12: CPA was down for two minutes at startup and the launcher logged
+// cpa_usage.read_failed 264 times, 134 in one minute, in a log that holds 300 records.
+test("while CPA cannot be reached, reads pause and the outage is logged once, then once when it answers", async () => {
+  let clock = NOW, up = false, sent = 0;
+  const logs = [];
+  const usage = createCpaUsage({
+    now: () => clock,
+    getConnection: () => ({ baseUrl: "http://127.0.0.1:8317", managementKey: KEY }),
+    logger: { warn: (...entry) => logs.push(entry), info: (...entry) => logs.push(entry) },
+    fetchImpl: async () => {
+      sent += 1;
+      if (!up) throw new TypeError("fetch failed");
+      return { ok: true, status: 200, json: async () => ({ items: [{ latency_ms: 1000, ttft_ms: 200, input_tokens: 10, output_tokens: 80 }] }) };
+    },
+  });
+  // Twenty turn lines ask at once, as open chats do, then again every 100 ms for 1.5 s.
+  const ask = (turn) => usage.turnStats({ model: `cpa/model-${turn}`, from: NOW - 5000 - turn });
+  await Promise.all(Array.from({ length: 20 }, (_, turn) => ask(turn)));
+  for (let step = 0; step < 15; step++) { clock += 100; await Promise.all(Array.from({ length: 20 }, (_, turn) => ask(100 + step * 20 + turn))); }
+  const failed = () => logs.filter(([event]) => event === "cpa_usage.read_failed").length;
+  assert.equal(failed(), 1, "one line for the outage, not one per read");
+  assert.ok(sent <= 24, `reads still sent while CPA was down: ${sent}`);
+  // The pause doubles: 2 s, 4 s, 8 s ... up to 30 s. Over the next two minutes only a few reads go out.
+  const before = sent;
+  for (let step = 0; step < 120; step++) { clock += 1000; await ask(1000 + step); }
+  assert.ok(sent - before <= 8, `probes in two minutes of outage: ${sent - before}`);
+  assert.equal(failed(), 1);
+  // CPA is back: the next probe gets through, and everything after it is answered.
+  up = true;
+  clock += 30_001;
+  const stats = await ask(5000);
+  assert.equal(stats.available, true);
+  const recovered = logs.filter(([event]) => event === "cpa_usage.read_recovered");
+  assert.equal(recovered.length, 1);
+  assert.ok(recovered[0][1].skipped > 100 && recovered[0][1].afterMs > 120_000, JSON.stringify(recovered[0][1]));
+  const answered = sent;
+  await Promise.all(Array.from({ length: 5 }, (_, turn) => ask(6000 + turn)));
+  assert.equal(sent - answered, 5, "no pause once CPA answers");
+  assert.equal(logs.filter(([event]) => event === "cpa_usage.read_recovered").length, 1);
+});
+
+test("an HTTP error from a CPA that answers does not pause the reads", async () => {
+  let sent = 0;
+  const logs = [];
+  const usage = createCpaUsage({
+    now: () => NOW,
+    getConnection: () => ({ baseUrl: "http://127.0.0.1:8317", managementKey: KEY }),
+    logger: { warn: (...entry) => logs.push(entry), info: (...entry) => logs.push(entry) },
+    fetchImpl: async () => { sent += 1; return { ok: false, status: 404, json: async () => ({}) }; },
+  });
+  for (let turn = 0; turn < 6; turn++) await usage.turnStats({ model: `cpa/m-${turn}`, from: NOW - 5000 - turn });
+  assert.equal(sent, 6, "a helper route that is missing is not an outage");
+  assert.equal(logs.length, 0);
+});
