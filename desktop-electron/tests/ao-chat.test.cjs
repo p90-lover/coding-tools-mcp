@@ -2207,6 +2207,44 @@ test("a restart's resume waits for the window's focus, then starts only a chat n
   }
 });
 
+test("a resume whose start is refused for focus tries once more at the next focus, without retrying the step again", async () => {
+  // Seen live 2026-11-12 07:04: the retry passed, start_run 1.2 s later was refused ("Click into the
+  // Coding Tools window"), and the chat said "Pursuing goal" with nothing running.
+  const refused = new Error("Error invoking remote method 'coding-tools:apps:call': Error: Click into the Coding Tools window and try again: this action runs only from the focused app window");
+  const mission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "held", history: [], receipt: { error: "Launch failed: The operation was aborted due to timeout", started_at_ms: Date.now() - 3_600_000 } }] };
+  const cases = [
+    ["back in focus", { driven: false, status: "held" }, 1, ["control_run", "start_run", "run_status", "start_run"]],
+    ["picked up meanwhile", { driven: true, status: "running" }, 1, ["control_run", "start_run", "run_status"]],
+    ["refused again", { driven: false, status: "held" }, 2, ["control_run", "start_run", "run_status", "start_run"]],
+  ];
+  for (const [name, statusAfter, refusals, expected] of cases) {
+    const calls = [], focus = [];
+    let starts = 0, statuses = 0;
+    const context = {
+      workspaceId: "a", mounted: { current: true }, missions: [mission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+      selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
+      window: { addEventListener: (event, listener) => { if (event === "focus") focus.push(listener); } },
+      moduleCall: async (operation) => {
+        calls.push(operation);
+        if (operation === "run_status") return (statuses += 1) > 1 ? statusAfter : { driven: false, status: "held" };
+        if (operation === "chat_auto_retry") return { ok: true, autoRetry: true };
+        if (operation === "runs") return { runs: [mission] };
+        if (operation === "start_run" && (starts += 1) <= refusals) throw refused;
+        return { ok: true };
+      },
+      loadMissions: async () => {}, setTimeout,
+    };
+    rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", context)();
+    for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+    assert.equal(focus.length, 1, `${name}: waits for the next focus`);
+    focus[0]();
+    for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+    assert.deepEqual(calls.slice(3), expected, name);
+    assert.equal(focus.length, 1, `${name}: one more try at most`);
+  }
+});
+
 test("with Retry automatically on, opening a project retries a single chat's failed step that no loop is driving", async () => {
   // Seen live: "Launch failed: The operation was aborted due to timeout", held for hours, driven: false.
   const mission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [

@@ -936,9 +936,24 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
             const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
             if (now.driven !== false || ["starting", "running"].includes(String(now.status)) || resumedRuns.current.has(key)) return;
           }
+          // Focus can still leave between that check and the call. Seen live 2026-11-12 07:04: the retry
+          // passed, its start_run 1.2 s later was refused, and the chat said "Pursuing goal" with nothing
+          // running, as this resume was spent. A refused step waits for the next focus and is tried once
+          // more, unless something picked the chat up meanwhile; a step that passed is not repeated.
+          let retried = resume !== "retry";
+          const begin = async () => {
+            if (!retried) { await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() }); retried = true; }
+            await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
+          };
           resumedRuns.current.add(key);
-          if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
-          await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
+          try { await begin(); }
+          catch (error) {
+            if (!/focused app window/.test(String((error as Error)?.message ?? error))) throw error;
+            await new Promise<void>((resolve) => window.addEventListener("focus", () => resolve(), { once: true }));
+            if (!mounted.current || selection.current.workspaceId !== workspaceId) throw error;
+            const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
+            if (now.driven === false && !["starting", "running"].includes(String(now.status))) await begin();
+          }
         }
         if (mounted.current && selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
       })().catch(() => { settledRuns.current.delete(key); });
