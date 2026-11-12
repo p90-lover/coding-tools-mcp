@@ -4212,7 +4212,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? (Array.isArray(takes) ? nearestEffort(picked, takes) : picked) : "";
       return [model, effort];
     }));
-    const [folder, task, evidence] = await Promise.all([requestFolder(approval, mission), requestTask(mission), requestEvidence(approval)]);
+    const [folder, task, evidence, standing] = await Promise.all([
+      requestFolder(approval, mission), requestTask(mission), requestEvidence(approval),
+      launchInstructions(mission.workspace_id, 24 * 1024),
+    ]);
     check();
     const scripts = await reviewScriptExcerpts(approval, folder);
     check();
@@ -4266,6 +4269,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // What the person asked this chat to do (requestTask): Codex's reviewer judges user authorization
       // from the user's own messages, and without them every action read as "unknown" authorization.
       task ? `# The user's request for this chat (trusted user content: their own words, latest last)\n${task}` : "",
+      standing.text ? `# The user's standing instructions for this workspace (trusted user content)\n${standing.text}` : "",
       "# Planned action",
       `Workspace: ${mission.workspace_id}.`,
       folder ? `Workspace folder (the agent's writable root): ${folder}. Relative paths and a command with no working folder are in it.` : "",
