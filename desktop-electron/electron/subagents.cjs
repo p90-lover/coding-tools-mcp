@@ -37,6 +37,22 @@ const MAX_WAIT_SECONDS = 60;
 const MAX_CHECKED_REQUEST = 1500;
 const TERMINAL_TURN = new Set(["completed", "failed", "interrupted", "cancelled", "recovered"]);
 const ACTIVE = new Set(["starting", "running"]);
+/**
+ * A turn cut short by something outside its task is resumed in the same session, not failed: the
+ * app restarting or updating, its agent's process dying (a crash, the machine out of memory), AO's
+ * controller ending, its session ending, or a start that did not take. Each try waits longer first;
+ * after RECOVERIES it fails with why. The user, 2026-11-12: "the subagent always die when some
+ * problem occur" (an Explorer read "The agent's process ended before it finished (the app
+ * restarted); retry this card." and its chat could only start it over).
+ */
+const RECOVERIES = 3;
+const RECOVERY_WAITS_MS = Object.freeze([5_000, 20_000, 60_000]);
+const RECOVERABLE = /process ended before it finished|process stopped mid-turn|controller ended before the turn completed|session ended before it finished|could not start/i;
+const RECOVER_NOTE = "Your previous turn was cut short by a problem outside your task (the app restarted, or your agent's process stopped). "
+  + "Your session and everything you did so far are still here: check where you got to, carry on with the same task, and finish with your report.";
+/** Subagents still working, and recent ones' reports, are kept on disk so a restart of the app finds them. */
+const KEEP_ENDED_MS = 6 * 60 * 60_000;
+const MAX_SAVED_RUNS = 50;
 
 // Ready to use once a default model is chosen; the user edits or removes them.
 const STARTERS = Object.freeze([
@@ -234,31 +250,75 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     return config;
   }
   // Read soon after start, off the main thread, so a chat's first launch finds the agents in memory:
-  // reading them then held every window 0.4 s on the hard disk (0.8.104, 2026-11-10).
+  // reading them then held every window 0.4 s on the hard disk (0.8.104, 2026-11-10). The subagents
+  // a restart interrupted come back with it (loadRuns).
   async function preload() {
+    await loadRuns();
     if (config || !statePath) return;
     let text = null;
     let failure = null;
     try { text = await fs.promises.readFile(statePath, "utf8"); } catch (error) { failure = error; }
     if (!config) config = configFrom(() => { if (failure) throw failure; return text; });
   }
+
+  // The runs, beside the settings: the ones still working, and recent reports. Only in memory, a
+  // restart of the app forgot them: their sessions were left interrupted, and the chat that started
+  // one could no longer read it ("No such subagent in this chat").
+  const runsPath = statePath ? path.join(path.dirname(statePath), "subagent-runs.json") : null;
+  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "task", "startedAt", "endedAt",
+    "state", "report", "error", "turns", "turnId", "turnStartedAt", "recoveries", "released"];
+  let runsSaving = Promise.resolve();
+  let runsQueued = false;
+  /** Saves the runs soon, once for a burst of changes, off the main thread. */
+  function persist() {
+    if (!runsPath || runsQueued) return;
+    runsQueued = true;
+    runsSaving = runsSaving.catch(() => {}).then(async () => {
+      runsQueued = false;
+      const kept = [...runs.values()].filter((run) => ACTIVE.has(run.state) || now() - (run.endedAt ?? run.startedAt) < KEEP_ENDED_MS)
+        .sort((a, b) => b.startedAt - a.startedAt).slice(0, MAX_SAVED_RUNS)
+        .map((run) => Object.fromEntries(SAVED_FIELDS.filter((key) => run[key] !== undefined).map((key) => [key, run[key]])));
+      await writeWhole(runsPath, { version: 1, runs: kept });
+    }).catch((error) => logger?.warn?.("subagents.runs_save_failed", { message: String(error?.message ?? error).slice(0, 200) }));
+  }
+  /**
+   * The runs saved before a restart. One still working is picked up again: its next check finds the
+   * turn the restart interrupted and resumes it (recover). Read once, before anything else adds runs.
+   */
+  let runsLoaded = false;
+  async function loadRuns() {
+    if (runsLoaded || !runsPath) return;
+    runsLoaded = true;
+    let saved;
+    try { saved = JSON.parse(await fs.promises.readFile(runsPath, "utf8")); } catch { return; }
+    for (const item of Array.isArray(saved?.runs) ? saved.runs : []) {
+      if (!item || typeof item.id !== "string" || !item.id || typeof item.parent !== "string" || runs.has(item.id)) continue;
+      if (!ACTIVE.has(item.state) && now() - Number(item.endedAt ?? item.startedAt) >= KEEP_ENDED_MS) continue;
+      runs.set(item.id, { report: "", error: "", turns: 1, ...item, misses: 0, stopping: false, ...(ACTIVE.has(item.state) ? { restored: true } : {}) });
+    }
+    if (active().length) logger?.info?.("subagents.restored", { running: active().length });
+    schedule();
+  }
   // Saves run one after another, so the file always ends with the last one.
   let writing = Promise.resolve();
   let writes = 0;
+  /**
+   * Written whole, then renamed over the old file, so a crash never leaves half a file. Off the main
+   * thread: writing it there held every window 0.5 s on the hard disk (0.8.108, 2026-11-10).
+   */
+  async function writeWhole(target, next) {
+    await fs.promises.mkdir(path.dirname(target), { recursive: true });
+    const temporary = `${target}.tmp-${process.pid}-${now()}-${++writes}`;
+    try {
+      await fs.promises.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+      await fs.promises.rename(temporary, target);
+    } catch (error) {
+      await fs.promises.rm(temporary, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
   function write(next) {
-    const run = writing.catch(() => {}).then(async () => {
-      // Written whole, then renamed over the old file, so a crash never leaves half a file. Off the
-      // main thread: writing it there held every window 0.5 s on the hard disk (0.8.108, 2026-11-10).
-      await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
-      const temporary = `${statePath}.tmp-${process.pid}-${now()}-${++writes}`;
-      try {
-        await fs.promises.writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-        await fs.promises.rename(temporary, statePath);
-      } catch (error) {
-        await fs.promises.rm(temporary, { force: true }).catch(() => {});
-        throw error;
-      }
-    });
+    const run = writing.catch(() => {}).then(() => writeWhole(statePath, next));
     writing = run;
     return run;
   }
@@ -290,6 +350,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     ...(run.model ? { model: run.model } : {}), state: run.state, task: run.task.slice(0, 200),
     elapsed_seconds: Math.round(((run.endedAt ?? now()) - run.startedAt) / 1000), ...(run.turns > 1 ? { turns: run.turns } : {}),
     ...(run.report ? { report: run.report } : {}), ...(run.error ? { error: run.error } : {}), ...(run.stopping ? { stopping: true } : {}),
+    // Cut short and coming back (recover): why, and how many tries so far.
+    ...(run.recovering ? { recovering: run.recovering } : {}), ...(run.recoveries ? { recoveries: run.recoveries } : {}),
   });
   const active = () => [...runs.values()].filter((run) => ACTIVE.has(run.state));
 
@@ -300,6 +362,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       if (!oldest) break;
       runs.delete(oldest.id);
     }
+    persist();
     schedule();
   }
 
@@ -330,8 +393,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   function finish(run, state, fields = {}) {
     if (!ACTIVE.has(run.state)) return;
-    Object.assign(run, { state, stopping: false, endedAt: now(), ...fields });
+    Object.assign(run, { state, stopping: false, endedAt: now(), recovering: null, recoverAt: null, ...fields });
     logger?.info?.("subagents.finished", { agent: run.agentId, state, seconds: Math.round((run.endedAt - run.startedAt) / 1000) });
+    persist();
     if (read().settings.releaseWhenDone && !fields.released) {
       // The session, worktree and conversation stay for inspection; only its agent process goes.
       void release(run).catch(() => undefined);
@@ -428,6 +492,48 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     else finish(run, "completed", { report: report || "(The team finished without a written report.)" });
   }
 
+  /** Whether a turn that ended this way was cut short by something outside its task (see RECOVERABLE). */
+  const recoverable = (observed, error) => observed?.agentGone === true || RECOVERABLE.test(String(error ?? ""));
+
+  /**
+   * Resumes a subagent whose turn was cut short by something outside its task, in the same session:
+   * after a wait (longer each try), a new turn telling it to carry on where it was. It stays running
+   * meanwhile, so the chat waiting on its report keeps waiting. True while recovering or recovered;
+   * false once it has had its tries, was stopped, or its session cannot continue: it then fails.
+   */
+  async function recover(run, why) {
+    if (run.kind === "team" || run.stopping || !ACTIVE.has(run.state)) return false;
+    const tries = run.recoveries ?? 0;
+    if (tries >= RECOVERIES) return false;
+    const service = harness();
+    if (typeof service?.continuable !== "function" || typeof service?.send !== "function") return false;
+    if (!run.recoverAt) {
+      run.recoverAt = now() + RECOVERY_WAITS_MS[Math.min(tries, RECOVERY_WAITS_MS.length - 1)];
+      run.recovering = String(why).slice(0, 300);
+      logger?.info?.("subagents.recovering", { agent: run.agentId, try: tries + 1 });
+      return true;
+    }
+    if (now() < run.recoverAt) return true;
+    run.recoverAt = null;
+    let continuable = false;
+    try { continuable = await service.continuable(run.id); } catch { continuable = false; }
+    // Stopped by its chat while it waited, or its session is gone (removed, or its agent cannot resume).
+    if (!continuable || run.stopping || !ACTIVE.has(run.state)) return false;
+    run.recoveries = tries + 1;
+    try {
+      const sent = await service.send(run.id, RECOVER_NOTE, `subagent:${run.id}:recover:${run.recoveries}`);
+      Object.assign(run, { turnId: sent?.turnId ?? run.turnId, state: "starting", released: false, misses: 0, recovering: null,
+        turns: (run.turns ?? 1) + 1 });
+      logger?.info?.("subagents.recovered", { agent: run.agentId, try: run.recoveries });
+      persist();
+      return true;
+    } catch (error) {
+      // AO did not take the turn (still coming up after a restart): the next check waits and tries again.
+      logger?.warn?.("subagents.recover_failed", { agent: run.agentId, message: String(error?.message ?? error).slice(0, 200) });
+      return run.recoveries < RECOVERIES;
+    }
+  }
+
   async function check(run) {
     if (!ACTIVE.has(run.state)) return;
     const service = harness();
@@ -467,16 +573,23 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const state = observed?.turnState;
     if (run.state === "starting" && state && state !== "queued") run.state = "running";
     if (observed?.exited && !TERMINAL_TURN.has(state)) {
-      finish(run, "failed", { error: "The subagent's session ended before it finished" });
+      const ended = "The subagent's session ended before it finished";
+      if (await recover(run, ended)) return;
+      finish(run, "failed", { error: run.recoveries ? `${ended}, again after ${run.recoveries} tries to resume it` : ended });
       return;
     }
     if (TERMINAL_TURN.has(state)) {
       if (!settled(observed)) return;
       const report = String(observed.answer || "").slice(0, MAX_REPORT);
-      if (state === "completed") finish(run, "completed", { report: report || "(The subagent finished without a written report.)" });
-      else finish(run, "failed", { error: String(observed.error || `The subagent's turn ended (${state})`).slice(0, 1000), ...(report ? { report } : {}) });
+      if (state === "completed") { finish(run, "completed", { report: report || "(The subagent finished without a written report.)" }); return; }
+      const error = String(observed.error || `The subagent's turn ended (${state})`).slice(0, 1000);
+      // Cut short by the app or its agent's process, not by its task: it carries on (recover).
+      if (recoverable(observed, error) && await recover(run, error)) return;
+      finish(run, "failed", { error: run.recoveries ? `${error} (after ${run.recoveries} tries to resume it)` : error, ...(report ? { report } : {}) });
       return;
     }
+    // Back at work after a recovery's wait: the turn it resumed is under way.
+    if (run.recoverAt || run.recovering) Object.assign(run, { recoverAt: null, recovering: null });
     // Its model keeps refusing requests: Claude Code backs off from a 429 up to ten times, about 20
     // minutes, while the chat that started it waits on its report. Seen live: an explorer on Gemini
     // through Antigravity got "Resource has been exhausted" from every Google account for 20 minutes
@@ -811,7 +924,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         turn = { turnId: sent.turnId };
       }
       Object.assign(run, turn, { state: "starting", released: false, turnStartedAt: now(), endedAt: null, report: "", error: "", stopState: undefined,
-        stopAcknowledged: false, misses: 0, turns: (run.turns ?? 1) + 1 });
+        stopAcknowledged: false, misses: 0, turns: (run.turns ?? 1) + 1, recoveries: 0, recovering: null, recoverAt: null });
+      persist();
       schedule();
       logger?.info?.("subagents.continued", { agent: run.agentId, turns: run.turns });
       return { delivered: "new_turn", ...view(run), ...(previous ? { previous_report: previous } : {}) };
