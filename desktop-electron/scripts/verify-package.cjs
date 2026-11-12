@@ -536,12 +536,12 @@ function validateCpaPlugins(resourcesRoot, expectedManifest = readJson(
   const prefix = "app.asar.unpacked/vendor/bundled/cpa-plugins";
   const packaged = regularFile(resourcesRoot, `${prefix}/BUNDLE.json`, "PACKAGE_CPA_PLUGIN_MANIFEST");
   const manifest = readJson(packaged.absolutePath, "PACKAGE_CPA_PLUGIN_MANIFEST_INVALID");
-  if (JSON.stringify(manifest) !== JSON.stringify(expectedManifest)
-    || manifest.id !== "commandcode-go" || manifest.studio?.id !== "auth-commandcode") {
+  // CPA loads one plugin: Provider Manager, which carries every other plugin's work as its parts.
+  if (JSON.stringify(manifest) !== JSON.stringify(expectedManifest) || manifest.id !== "cpa-provider-manager") {
     fail("PACKAGE_CPA_PLUGIN_MANIFEST_MISMATCH", packaged.absolutePath);
   }
   const platform = `${PRODUCT.platform}/${PRODUCT.arch}`;
-  const assets = [manifest.platforms?.[platform], manifest.studio.platforms?.[platform]];
+  const assets = [manifest.platforms?.[platform]];
   return assets.map((asset) => {
     if (!plain(asset) || !Number.isSafeInteger(asset.size) || asset.size < 1 || !SHA256.test(asset.sha256)) {
       fail("PACKAGE_CPA_PLUGIN_ASSET_INVALID", platform);

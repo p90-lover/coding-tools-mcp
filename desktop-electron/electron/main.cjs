@@ -4873,7 +4873,8 @@ async function start() {
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
   // CPA follows its upstream releases: each one installs beside the running CPA, and the switch
   // waits for a quiet moment (or the next start). Off when automaticComponentUpdates is false.
-  const cpaUsageRoot = path.join(app.getPath("userData"), "integrations", "state", "cpa", "cpa-helper-data", "usage");
+  // CPA Helper's usage store, now Provider Manager's "helper" part.
+  const cpaUsageRoot = path.join(app.getPath("userData"), "integrations", "state", "cpa", "cpa-provider-manager-data", "helper", "usage");
   cpaUpdater = createComponentUpdater({
     componentId: "cpa",
     stage: (id) => externalServicesController.updateManagedComponent(id, { swap: false }),

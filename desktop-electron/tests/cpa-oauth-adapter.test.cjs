@@ -241,26 +241,95 @@ test("a browser-open failure also disposes the CPA OAuth session", async () => {
   assert.ok(fixture.requests.some(entry => entry.pathname.endsWith("/oauth-session") && entry.method === "DELETE"));
 });
 
-for (const [adapterId, route, provider] of [
-  ["cpa-commandcode-go", "commandcode-go-auth-url", "commandcode-go"],
-  ["cpa-commandcode-studio", "commandcode-auth-url", "commandcode"],
+// CommandCode Go and CommandCode accounts are Provider Manager account kinds: Provider Manager's
+// login is told which kind to sign in to, and CPA lists the new account as a provider-manager file
+// that Provider Manager's kinds route names.
+const KINDS_PATH = "/v0/management/cpa-provider-manager/api/kinds";
+
+function providerManagerFixture({ kind, existing = [], models = [] }) {
+  const requests = [];
+  const created = { name: `${kind}-user.json`, provider: "provider-manager", type: "provider-manager", email: "user@example.test", status: "ready" };
+  const unrelated = { name: "grok-user.json", provider: "provider-manager", type: "provider-manager", email: "grok@example.test", status: "ready" };
+  let authReads = 0;
+  const requestJson = async (pathname, options = {}) => {
+    const url = new URL(pathname, "http://127.0.0.1:8317/");
+    requests.push({ pathname: url.pathname, search: url.search, method: options.method ?? "GET" });
+    if (url.pathname === "/v0/management/auth-files") {
+      authReads += 1;
+      return { files: authReads === 1 ? [...existing, unrelated] : [...existing, unrelated, created] };
+    }
+    if (url.pathname === KINDS_PATH) {
+      return { files: { ...Object.fromEntries(existing.map((file) => [file.name, kind])), [created.name]: kind, [unrelated.name]: "grok" } };
+    }
+    if (url.pathname === "/v0/management/provider-manager-auth-url") {
+      return { status: "ok", state: "oauth-state", url: "https://login.example.test/oauth" };
+    }
+    if (url.pathname === "/v0/management/get-auth-status") return { status: "ok" };
+    if (url.pathname === "/v0/management/auth-files/models") {
+      assert.equal(url.searchParams.get("name"), created.name);
+      return { models: models.map((id) => ({ id })) };
+    }
+    throw new Error(`Unexpected request ${options.method ?? "GET"} ${url.pathname}`);
+  };
+  return { requestJson, requests, created };
+}
+
+for (const [adapterId, kind] of [
+  ["cpa-commandcode-go", "commandcode-go"],
+  ["cpa-commandcode-studio", "commandcode"],
 ]) {
-  test(`${adapterId} logs in through CPA and binds its plugin auth file`, async () => {
+  test(`${adapterId} logs in through Provider Manager's ${kind} kind and binds that auth file`, async () => {
     const { startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
-    const created = { name: `${provider}-user.json`, provider, email: "user@example.test", status: "ready" };
-    const fixture = jsonSequenceFixture({ provider, route, created, models: [`${provider}/test-model`] });
+    const fixture = providerManagerFixture({ kind, models: [`${kind}/test-model`] });
     let clock = 0;
+    const opened = [];
     const result = await startCpaAccountLogin({
       adapterId,
       requestJson: fixture.requestJson,
-      openExternal: async () => undefined,
+      openExternal: async (url) => { opened.push(url); },
       sleep: async (milliseconds) => { clock += milliseconds; },
       now: () => clock,
       timeoutMs: 10_000,
       pollIntervalMs: 10,
     });
-    assert.equal(result.authFile.provider, provider);
-    assert.deepEqual(result.models, [`${provider}/test-model`]);
-    assert.ok(fixture.requests.some((request) => request.pathname.endsWith(`/${route}`)));
+    assert.deepEqual(opened, ["https://login.example.test/oauth"]);
+    assert.equal(result.authFile.provider, kind, "the account is listed under its kind's provider id");
+    assert.equal(result.authFile.name, fixture.created.name, "the new file of this kind, not another kind's account");
+    assert.deepEqual(result.models, [`${kind}/test-model`]);
+    const login = fixture.requests.filter((request) => request.pathname === "/v0/management/provider-manager-auth-url");
+    assert.deepEqual(login.map((request) => request.search), [`?kind=${kind}&is_webui=true`]);
+    assert.equal(fixture.requests.some((request) => /\/commandcode(?:-go)?-auth-url$/.test(request.pathname)), false,
+      "the retired plugins' login routes are gone");
   });
 }
+
+test("a kind route's login URL adds is_webui to its own query", async () => {
+  const { CPA_LOGIN_ADAPTERS, startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
+  assert.equal(CPA_LOGIN_ADAPTERS["cpa-commandcode-go"].route, "provider-manager-auth-url?kind=commandcode-go");
+  assert.equal(CPA_LOGIN_ADAPTERS["cpa-commandcode-studio"].route, "provider-manager-auth-url?kind=commandcode");
+  const urls = [];
+  await assert.rejects(startCpaAccountLogin({
+    adapterId: "cpa-commandcode-go",
+    requestJson: async (pathname) => {
+      urls.push(pathname);
+      if (pathname === "/v0/management/auth-files") return { files: [] };
+      return { status: "error" };
+    },
+    openExternal: async () => assert.fail("a refused login opens nothing"),
+  }), /CPA did not start commandcode-go authentication/);
+  assert.deepEqual(urls, ["/v0/management/auth-files", "/v0/management/provider-manager-auth-url?kind=commandcode-go&is_webui=true"]);
+});
+
+test("a kind's account listed before the login is not taken as the new one", async () => {
+  const { startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
+  const earlier = { name: "commandcode-go-earlier.json", provider: "provider-manager", type: "provider-manager", email: "earlier@example.test", status: "ready" };
+  const fixture = providerManagerFixture({ kind: "commandcode-go", existing: [earlier] });
+  const result = await startCpaAccountLogin({
+    adapterId: "cpa-commandcode-go", requestJson: fixture.requestJson, openExternal: async () => undefined,
+    sleep: async () => undefined, now: () => 0, timeoutMs: 10_000, pollIntervalMs: 10,
+  });
+  assert.equal(result.authFile.name, fixture.created.name);
+  assert.equal(result.authFile.provider, "commandcode-go");
+  // Each listing (before and after the login) has its kinds named once.
+  assert.equal(fixture.requests.filter((request) => request.pathname === KINDS_PATH).length, 2);
+});

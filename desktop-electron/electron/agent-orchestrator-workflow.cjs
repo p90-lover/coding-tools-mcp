@@ -20,6 +20,7 @@ const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { userMessages } = require("./chat-history.cjs");
 const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
+const { ACCOUNT_KINDS_PATH, withAccountKinds } = require("./cpa-account-kinds.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
 const { gitPushRequest, readReviewRepository } = require("./git-remote.cjs");
 const { nativeChatPreviewSessionId } = require("./chat-agent-tools.cjs");
@@ -1150,7 +1151,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         headers: { Authorization: `Bearer ${managementKey}` }, signal: AbortSignal.timeout(5_000),
       });
       if (!response.ok) return null;
-      const listing = await response.json();
+      // Cline Pass, CommandCode and Grok accounts are Provider Manager account kinds: listed under
+      // their kind's provider id, as their plugins listed them.
+      const listing = await withAccountKinds(await response.json(), async () => {
+        const kinds = await fetchImpl(`${baseUrl}${ACCOUNT_KINDS_PATH}`, {
+          headers: { Authorization: `Bearer ${managementKey}` }, signal: AbortSignal.timeout(5_000),
+        });
+        return kinds.ok ? kinds.json() : null;
+      });
       if (!Array.isArray(listing?.files)) return null;
       const upstreams = new Set();
       const files = listing.files.map(normalizedAuthFile).filter(Boolean).flatMap(entry => {
