@@ -565,7 +565,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
       : name === "./ChatReplyHead" ? replyHead
       : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
-      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
       : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: text => text }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
@@ -1307,6 +1307,15 @@ test("a retried card shows its earlier reply until the new attempt writes, and a
   const [writing] = plain(chat.chatTurns([run("r1", "t", [retried], { execution_mode: "single" })], "go",
     { now: 2, activity: { "r1:p": { output: "New reply so far" } } }));
   assert.equal(writing.steps[0].text, undefined, "the new attempt's own output replaces it");
+  assert.equal(turn.steps[0].earlier, undefined, "shown as the text, it is not listed twice");
+  // 2026-11-12: the new attempt thought and called tools, and the old attempt's failure stayed as the
+  // card's text, drawn below that work as if it were the newest message.
+  const working = { "r1:p": { activity: "thinking", timeline: [
+    { id: "a1", kind: "reasoning", status: "completed", text: "Reading CLI guidance" },
+    { id: "a2", kind: "tool", status: "running", label: "mcp__coding-tools__readmany", text: "" }] } };
+  const [busy] = plain(chat.chatTurns([run("r1", "t", [retried], { execution_mode: "single" })], "go", { now: 2, activity: working }));
+  assert.equal(busy.steps[0].text, undefined, "not drawn after the new attempt's work");
+  assert.deepEqual(busy.steps[0].earlier, [{ label: "Attempt 1", text: "First try's reply" }], "listed with the attempts above it");
   const held = node("p", "planner", "held", { receipt: { error: "Native turn returned no verifiable final answer", answer: "The reply" } });
   const turns = plain(chat.chatTurns([run("r1", "t", [held], { execution_mode: "single" })], "go"));
   assert.equal(turns[0].steps[0].text, "The reply");
@@ -2273,7 +2282,7 @@ function childPoll(file, selector, options = {}) {
     POLL_MS: 4000, QUOTA_POLL_MS: 60000, DETAIL_POLL_MS: 10000, PROCESSES_POLL_MS: 4000, SUBAGENTS_POLL_MS: 3000,
     OVERVIEW_POLL_MS: 5000, SUBAGENT_WORK_POLL_MS: 2000, PREVIEW_POLL_MS: 1500, COMMANDS_POLL_MS: 2000, OUTPUT_POLL_MS: 1000,
     button: { current: { addEventListener: (_event, fn) => clicks.add(fn), removeEventListener: (_event, fn) => clicks.delete(fn) } },
-    seen: { current: null }, polled: { current: new Set() }, openNow: { current: false }, onOpenNow: { current: noop }, onStartedNow: { current: noop },
+    seen: { current: null }, polled: { current: new Set() }, openNow: { current: false }, onOpenNow: { current: noop },
     startsNewChat: () => true, chatSubagents: chat.chatSubagents, subagentActive: chat.subagentActive, isLive: () => true,
     selected: "command", selectedAgentShell: false, offsets: { current: {} }, pinned: { current: false }, shownRequest: { current: "" },
     plain: value => value, TAIL_BYTES: 1024, MAX_OUTPUT_CHARS: 10000,
@@ -2307,7 +2316,7 @@ test("chat child refreshes skip hidden surfaces, minimized windows and hidden pa
     ["ChatTurnStats.tsx", "effect:const [first, ...rest]", ["chat_turn_stats"]],
     ["ChatWorkbench.tsx", "effect:!wanted", ["chat_processes"]],
     ["ChatWorkbench.tsx", "effect:setLivePage(null)", ["chat_preview_state", "chat_processes"]],
-    ["ChatWorkbench.tsx", "effect:seen.current = null", ["subagents_runs"]],
+    ["ChatWorkbench.tsx", "effect:setRuns([])", ["subagents_runs"]],
     ["ChatWorkbench.tsx", "effect:countChanges", ["chat_context", "chat_changes", "chat_processes"]],
     ["ChatWorkbench.tsx", "effect:readCpaUsage(range)", ["usage:24h"]],
     ["ChatWorkbench.tsx", "effect:subagent_transcript", ["subagent_transcript"]],
