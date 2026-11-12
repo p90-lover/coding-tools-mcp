@@ -551,13 +551,22 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * null: the chat's last run was a single model on exactly this route and its card is done (a
    * stopped one too: Stop only interrupts the turn, and continuable() checks the agent is there).
    */
-  function continuationCard(previous, executionMode, singleRoute) {
+  function continuationCard(previous, executionMode, singleRoute, chat = null) {
+    const card = executionMode === "single" && singleRoute ? resumableChatCard(previous) : null;
+    if (!card) return null;
+    // An agent resized in place (chat_context_window) runs with the window it was resized to, not
+    // the one its card was started with.
+    const resized = chat ? chatEdits.resizedWindow(chat.workspaceId, chat.taskId, card.receipt.thread_id) : undefined;
+    const route = resized === undefined ? card.route : { ...card.route, context_window: resized };
+    return ROUTE_IDENTITY.every(field => (route?.[field] ?? null) === (singleRoute[field] ?? null)) ? card : null;
+  }
+  /** The chat's single-model card whose AO agent a follow-up could go on with, whatever its route. */
+  function resumableChatCard(previous) {
     const card = previous?.execution_mode === "single" ? previous.nodes?.[0] : null;
-    if (executionMode !== "single" || !singleRoute || !card || !externalAgent(card) || !card.receipt?.thread_id) return null;
+    if (!card || !externalAgent(card) || !card.receipt?.thread_id) return null;
     // A held card (a hung turn the user's message stopped, an interrupted one) continues its session
     // as a failed one does: starting fresh lost the whole conversation for "keep going".
-    if (!["finished", "failed", "cancelled", "held"].includes(card.state)) return null;
-    return ROUTE_IDENTITY.every(field => (card.route?.[field] ?? null) === (singleRoute[field] ?? null)) ? card : null;
+    return ["finished", "failed", "cancelled", "held"].includes(card.state) ? card : null;
   }
   // Everything that decides how an agent is launched; two routes alike in these share a session.
   const ROUTE_IDENTITY = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
@@ -953,9 +962,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // now (the chat opened its new task the moment it was sent) started a second agent beside
       // the launch on a busy machine, and the launch timed out while the spare one came up.
       if (previous && !previous.cancelled && !runSettled(previous)) return { ok: true, warmed: false, reason: "The chat's run is starting" };
-      const live = freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
+      await chatResizes.get(resizeKey(id, task))?.catch(() => undefined);
+      const agent = freshSessionRequired(id, task) ? null : resumableChatCard(previous);
+      const live = agent ? continuationCard(previous, executionMode, singleRoute, { workspaceId: id, taskId: task }) : null;
       if (live && await prewarmCheck(live.receipt.thread_id)) {
         return { ok: true, warmed: false, continues: true };
+      }
+      // Only the window changed: the chat's own agent is resized to it (chat_context_window), which
+      // the same pick asks for. Warming a new agent for that route was a spare model process.
+      if (!live && agent && windowOnlyChange(agent.route, singleRoute)) {
+        return { ok: true, warmed: false, reason: "The chat's agent is resized to the new window" };
       }
       return chatPrewarmRoute(id, singleRoute, true);
     }
@@ -963,6 +979,61 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const planner = team?.nodes?.find(node => node.role === "planner");
     if (!planner?.route) return { ok: true, warmed: false, reason: "The team has no orchestrator to pre-warm" };
     return chatPrewarmRoute(id, planner.route, false);
+  }
+  // "<workspace>:<task>" -> the resize of that chat's agent under way (chat_context_window). A message
+  // or pre-warm meanwhile waits for it, so it finds the resized agent rather than starting a fresh one.
+  const chatResizes = new Map();
+  const resizeKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
+  /** Whether two routes differ in nothing that decides how an agent is launched but its window. */
+  const windowOnlyChange = (route, other) => ROUTE_IDENTITY.every(field => field === "context_window"
+    || (route?.[field] ?? null) === (other?.[field] ?? null));
+  /**
+   * chat_context_window: resize the chat's agent to `contextWindow` (tokens, or null for the model's
+   * default) now, keeping what it knows. AO saves the window with the session; the agent is stopped
+   * and resumed on its own conversation, and comes back at the new size. Without this a changed
+   * window waited for the next message, which then went to a fresh agent with only a summary of the
+   * chat. A chat whose turn is still running answers "working" and is resized once the turn ends.
+   */
+  async function chatSetContextWindow({ workspaceId, taskId, contextWindow = null } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128);
+    if (contextWindow !== null && (!Number.isSafeInteger(contextWindow) || contextWindow <= 0)) throw new Error("A context window is a whole number of tokens");
+    const key = resizeKey(id, task);
+    const prior = chatResizes.get(key);
+    const resize = (async () => {
+      await prior?.catch(() => undefined);
+      const saved = await runs({ workspaceId: id });
+      const previous = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (previous && !previous.cancelled && !runSettled(previous)) return { ok: false, reason: "working" };
+      // No agent to keep (a new chat, a team chat, or one whose next message starts afresh anyway):
+      // the next message starts its agent at the picked size.
+      const card = freshSessionRequired(id, task) ? null : resumableChatCard(previous);
+      if (!card) return { ok: false, reason: "no_agent" };
+      const session = card.receipt.thread_id;
+      const resized = chatEdits.resizedWindow(id, task, session);
+      if ((resized === undefined ? card.route?.context_window ?? null : resized) === contextWindow) return { ok: true, resized: false };
+      // Checked as a launch on the new route checks it; a blank window is the model's full limit, as a
+      // blank card starts with (defaultContextWindow), and 0 when there is none: the agent's own default.
+      const route = { ...card.route, context_window: contextWindow };
+      let tokens = contextWindow;
+      if (tokens !== null) {
+        const catalog = await models({ harness: route.harness_id, workspaceId: id });
+        const model = String(route.model ?? "");
+        const refused = windowRefusal(catalog.capabilities?.[model]
+          ?? catalog.capabilities?.[model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "")], tokens);
+        if (refused) throw new Error(refused);
+      } else tokens = await defaultContextWindow(id, { route }) ?? 0;
+      await harnessService().setContextWindow(session, tokens);
+      // The agent reads its window when it starts: stopped and resumed, it keeps its conversation.
+      // Recorded once it is stopped: one that could not be stopped still runs at its old size, and
+      // the next message then starts a fresh agent at the new one, as before.
+      await harnessService().exitAgent(session);
+      chatEdits.resized(id, task, session, contextWindow);
+      const resumed = await continuableSession(session).catch(() => false);
+      logger?.info?.("ao.chat_resized", { session, tokens, resumed });
+      return { ok: true, resized: true, contextWindow: tokens, resumed };
+    })();
+    chatResizes.set(key, resize);
+    try { return await resize; } finally { if (chatResizes.get(key) === resize) chatResizes.delete(key); }
   }
   // The person's global and workspace AGENTS.md (agent-instructions.cjs): in front of a new agent's
   // first message, and of a running agent's next one once they changed (AO session -> the version
@@ -1259,6 +1330,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    */
   const REPLY_RESERVE = 128_000;
   const windowCeiling = limit => Number.isSafeInteger(limit) && limit < 1_000_000 && limit + REPLY_RESERVE >= 1_000_000 ? 1_000_000 : limit;
+  /** Why `tokens` can't be the window of the model whose catalog row is `capability`, or null. */
+  function windowRefusal(capability, tokens) {
+    const setting = capability?.contextWindow;
+    const maximum = Math.min(setting?.max ?? 2000000, windowCeiling(capability?.contextLimit) ?? 2000000);
+    return !setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum
+      ? "This model's context window can't be set to that. Its limit is " + maximum + " tokens." : null;
+  }
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -1645,11 +1723,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           throw new Error("This model doesn't support the chosen reasoning effort");
         }
         if (node.route.context_window != null) {
-          const setting = capability?.contextWindow, tokens = node.route.context_window;
-          const maximum = Math.min(setting?.max ?? 2000000, windowCeiling(capability?.contextLimit) ?? 2000000);
-          if (!setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum) {
-            throw new Error("This model's context window can't be set to that. Its limit is " + maximum + " tokens.");
-          }
+          const refused = windowRefusal(capability, node.route.context_window);
+          if (refused) throw new Error(refused);
         }
       };
       const reserved = await requestHeadless("/api/v1/ao/external/reserve", {
@@ -6404,7 +6479,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The session keeps the permission mode, effort and context it was started with, so only an
       // unchanged route continues it; any change starts a fresh session with the new settings. A Team
       // follow-up has no single route and never continues the single card's session.
-      const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute);
+      // A resize of this chat's agent still under way decides which agent the message goes to.
+      await chatResizes.get(resizeKey(id, task))?.catch(() => undefined);
+      const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute, { workspaceId: id, taskId: task });
       if (live) continuation = { session: live.receipt.thread_id, text };
       if (rewind && (chatWorking(id, task, saved.runs)
         || chatEdits.visible(id, saved.runs.filter(run => run.project_id === task)).some(run => !runSettled(run)))) {
@@ -9101,6 +9178,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_recover": return chatRecover(args);
       case "chat_steer": return asPerson(() => chatSteer(args));
       case "chat_prewarm": return chatPrewarm(args);
+      case "chat_context_window": return chatSetContextWindow(args);
       case "turn_timeline": return turnTimeline(args);
       case "codex_executable": return { ok: true, executable: findCodexExecutable() };
       case "inspect": return { ok: true, status: "graph_ready", source: "coding-tools-plan", plannerRoute: "webgpt-on-codex-required", execution: "not_connected" };

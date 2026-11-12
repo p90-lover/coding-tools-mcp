@@ -1798,6 +1798,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return continuing.get(key);
     },
     /**
+     * Sets the context window a session's agent starts with from its next start (AO keeps it with
+     * the session); the agent running now keeps its own until exitAgent and continuable() bring it
+     * back. `tokens` 0 returns the agent to its client default. The meter shows the new window at once.
+     */
+    async setContextWindow(id, tokens) {
+      if (!Number.isSafeInteger(tokens) || tokens < 0) throw new Error("A context window is a whole number of tokens");
+      let outcome;
+      try {
+        outcome = await internalApi("PUT", `/api/v1/sessions/${sessionId(id)}/context-window`, { contextWindow: tokens });
+      } catch (error) {
+        // An AO build from before the endpoint answers an unknown route, not an unknown session.
+        if ([404, 405].includes(error?.status) && error?.code !== "SESSION_NOT_FOUND") {
+          throw Object.assign(new Error("This Agent Orchestrator can't resize a running chat's agent. Update the app, or send a message to start a new agent at this size."),
+            { code: "AO_CONTEXT_WINDOW_UNSUPPORTED", cause: error });
+        }
+        throw error;
+      }
+      if (outcome?.ok !== true || outcome.contextWindow !== tokens) throw new Error("Agent Orchestrator didn't confirm the new context window");
+      if (tokens > 0) rememberLaunchWindow(id, tokens); else launchWindows.delete(id);
+      return { ok: true };
+    },
+    /**
      * Stops a session's agent (its chat host and model process) but keeps the session, worktree and
      * provider conversation; continuable() resumes it on the next message.
      */

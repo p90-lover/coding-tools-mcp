@@ -65,6 +65,7 @@ const SPECS = Object.freeze({
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
   chat_send: { readOnly: false, description: "Send a chat message: create the chat's task (or append a follow-up) and start a team run on it." },
   chat_prewarm: { readOnly: false, description: "Start an AO agent for the new chat's selected model (or its team's orchestrator) ahead of the first message, so it does not launch on send." },
+  chat_context_window: { readOnly: false, description: "Resize a chat's agent to a new context window now, keeping its conversation: the agent is restarted on its own conversation at the new size, so no message is needed and the next one continues it." },
   chat_steer: { readOnly: false, description: "Hand a message to the chat's running AO agent at once (steer), without waiting for its turn to end." },
   chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
   chat_queue: { readOnly: false, description: "Add, remove, clear or list a chat's queued messages; the app sends the next one when the chat's turn settles, with the chat closed too." },

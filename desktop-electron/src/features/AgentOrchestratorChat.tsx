@@ -202,6 +202,23 @@ function routeChange(agent: RouteFields, picked: RouteFields): { now: string; ba
   return { now: list(parts.map(([now]) => now)), back: list(parts.map(([, back]) => back)) };
 }
 
+/** What chat_context_window answered: the agent was resized (or already had that size), or why not. */
+export type ChatAgentResize = { ok: boolean; reason?: "working" | "no_agent"; resized?: boolean; contextWindow?: number; resumed?: boolean };
+/** A window picked for the chat's agent and how its in-place resize is going, for one chat. */
+type AgentResizeState = { taskId: string; contextWindow: number | null; state: "waiting" | "resizing" | "done" | "failed"; error?: string; tries: number };
+
+/**
+ * Whether the person's pick of `picked` in the composer should resize the chat's running agent in
+ * place (chat_context_window: restarted on its own conversation, nothing sent), rather than wait for
+ * the next message, which goes to a fresh agent with only a summary of the chat. `agent` is the
+ * route the chat's agent runs on now, at the window it was last resized to.
+ */
+export function resizesInPlace(agent: RouteFields, picked: RouteFields): boolean {
+  // Only the window travels with the session (AO saves it); any other change still needs a new agent.
+  if ((agent.context_window ?? null) === (picked.context_window ?? null)) return false;
+  return routeChange(agent, { ...picked, context_window: agent.context_window }) === null;
+}
+
 /** Thread actions the chat header, its ⋯ menu and its slash commands share with the thread list. */
 export type ChatThreadActions = {
   newChat: () => void;
@@ -1163,7 +1180,7 @@ function useFarTurns(scroller: { current: HTMLElement | null }, column: { curren
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, sendBusy = busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover, resizeAgent,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
   /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
@@ -1205,6 +1222,8 @@ export function AgentOrchestratorChat({
   steer?: (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => Promise<boolean | "wait" | "restart" | "interrupt" | "starting" | "answered">;
   /** Checks the captured accepted turn without sending a prompt, stopping it, or replaying work. */
   recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
+  /** Resizes the chat's agent to a newly picked context window now, keeping its conversation (chat_context_window). */
+  resizeAgent?: (input: { taskId: string; contextWindow: number | null }) => Promise<ChatAgentResize>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => Promise<void>;
@@ -1717,6 +1736,47 @@ export function AgentOrchestratorChat({
   // it here on every key forced a layout of the whole chat each time, which typing felt.
 
   const runOpen = Boolean(latest) && chatRunOpen(chat?.status);
+  // A window picked for this chat's agent resizes it in place (chat_context_window): the agent is
+  // restarted on its own conversation at the new size, with no message sent, so the next round runs
+  // at it and still knows the chat. Picked during a turn, it waits for the turn to end.
+  const [resize, setResize] = useState<AgentResizeState | null>(null);
+  const resizeHere = resize && resize.taskId === selectedTaskId ? resize : null;
+  const chatLead = latest?.nodes.find((node) => node.role === "planner") ?? latest?.nodes[0];
+  // The route the chat's agent runs on now: its card's, at the window it was resized to here.
+  const agentRoute: RouteFields | null = latest?.execution_mode === "single" && chatLead?.route
+    ? { ...(chatLead.route as unknown as RouteFields), ...(resizeHere?.state === "done" ? { context_window: resizeHere.contextWindow } : {}) } : null;
+  // Only the person's own pick: a window the composer fills in by itself (a blank card's default,
+  // `adjusted`) must not restart the agent of a chat that was merely opened.
+  const pickRoute = (route: ComposerControlsProps["route"], adjusted?: boolean) => {
+    composer?.onRouteChange(route, adjusted);
+    if (adjusted || !selectedTaskId || !resizeAgent || !agentRoute) return;
+    const picked = route as unknown as RouteFields;
+    if (resizesInPlace(agentRoute, picked)) {
+      setResize({ taskId: selectedTaskId, contextWindow: typeof picked.context_window === "number" ? picked.context_window : null, state: "waiting", tries: 0 });
+    } else if (resizeHere?.state === "waiting" || resizeHere?.state === "failed") setResize(null);
+  };
+  // The surface hands a new function each render (it re-renders on every poll): read through a ref,
+  // or each render would restart the wait below and the resize might never be asked for.
+  const resizeCall = useRef(resizeAgent);
+  resizeCall.current = resizeAgent;
+  useEffect(() => {
+    const resizeAgent = resizeCall.current;
+    if (!resize || resize.state !== "waiting" || runOpen || resize.taskId !== selectedTaskId || !resizeAgent) return;
+    const wanted = resize;
+    const same = (current: AgentResizeState | null) => current?.taskId === wanted.taskId && current.contextWindow === wanted.contextWindow;
+    // After the picker settles, as the pre-warm does: trying sizes restarts the agent once, not per
+    // size. A turn the backend still saw running is asked about again, less often each time.
+    const timer = setTimeout(() => {
+      setResize({ ...wanted, state: "resizing" });
+      resizeAgent({ taskId: wanted.taskId, contextWindow: wanted.contextWindow }).then((outcome) => setResize((current) => !same(current) ? current
+        : outcome.ok ? { ...wanted, state: "done" }
+          : outcome.reason === "working" && wanted.tries < 6 ? { ...wanted, state: "waiting", tries: wanted.tries + 1 }
+            // No agent to keep: the next message starts one at this size, as the route note says.
+            : null), (error) => setResize((current) => !same(current) ? current
+        : { ...wanted, state: "failed", error: error instanceof Error ? error.message : String(error) }));
+    }, wanted.tries ? Math.min(30_000, 2_000 * 2 ** wanted.tries) : 600);
+    return () => clearTimeout(timer);
+  }, [resize, runOpen, selectedTaskId]);
   const [compactingTasks, setCompactingTasks] = useState<string[]>([]);
   const compactionStarts = useRef(new Set<string>());
   const compacting = Boolean(selectedTaskId && compactingTasks.includes(selectedTaskId));
@@ -3030,14 +3090,24 @@ export function AgentOrchestratorChat({
           if (runOpen && latest?.execution_mode === "single" && running && picked && picked !== running) {
             return <p className="cx-route-note" role="status">This turn runs on <b>{routeModelName({ model: running })}</b>. Your next message uses <b>{routeModelName({ model: picked })}</b>.</p>;
           }
-          // An agent keeps the model, effort, window and permissions it started with, so a follow-up
-          // with any of them changed starts a new agent that gets only a summary of the chat (it
-          // "forgot everything" after an effort switch from Max to High). Say so before it is sent.
+          // An agent keeps the model, effort and permissions it started with, so a follow-up with any
+          // of them changed starts a new agent that gets only a summary of the chat (it "forgot
+          // everything" after an effort switch from Max to High). Say so before it is sent. A new
+          // window is the exception: the agent is resized in place and keeps the chat.
           const route = composer?.mode === "single" ? composer.route : undefined;
-          const change = !runOpen && latest?.execution_mode === "single" && lead?.route && route
-            ? routeChange(lead.route as unknown as RouteFields, route as unknown as RouteFields) : null;
-          return change ? <p className="cx-route-note" role="status"><b>{change.now}</b> starts a new agent with only a summary of this chat.
-            Switch back to <b>{change.back}</b> to keep this one.</p> : null;
+          const resizing = resizeHere && route && resizeHere.state !== "done"
+            && resizeHere.contextWindow === (typeof route.context_window === "number" ? route.context_window : null) ? resizeHere : null;
+          const size = resizing ? <b>{routeWindowName({ context_window: resizing.contextWindow })}</b> : null;
+          if (resizing && resizing.state !== "failed") {
+            return <p className="cx-route-note" role="status">{runOpen ? <>This chat's agent moves to {size} when this turn ends.</>
+              : <>Restarting this chat's agent at {size}.</>} It keeps the chat; nothing is sent.</p>;
+          }
+          const change = !runOpen && agentRoute && route ? routeChange(agentRoute, route as unknown as RouteFields) : null;
+          return <>
+            {resizing ? <p className="cx-route-note" role="alert">Couldn't move this chat's agent to {size}: {resizing.error}</p> : null}
+            {change ? <p className="cx-route-note" role="status"><b>{change.now}</b> starts a new agent with only a summary of this chat.
+              Switch back to <b>{change.back}</b> to keep this one.</p> : null}
+          </>;
         })()}
         {/* Codex's "… started working" line for a thread's subagents: who works now, a click from their work. */}
         {selectedTaskId && subagentLine ? <button type="button" className="cx-subagent-strip" role="status" title="Show the subagents and what they are doing"
@@ -3123,7 +3193,7 @@ export function AgentOrchestratorChat({
             <button type="button" className="cx-icon-button" title="Attach files" aria-label="Attach files" disabled={busy} onClick={() => picker.current?.click()}>
               <Icon name="plus" width="16" height="16" /></button>
             <input ref={picker} type="file" multiple hidden onChange={(event) => { if (event.target.files) void addFiles(event.target.files); event.target.value = ""; }} />
-            {composer ? <AgentOrchestratorComposerControls {...composer} permissions={permissions} busy={busy || sending} /> : permissions}
+            {composer ? <AgentOrchestratorComposerControls {...composer} onRouteChange={pickRoute} permissions={permissions} busy={busy || sending} /> : permissions}
             {/* Send and what sits by it move as one: a narrow chat box folds its chips onto a second row
                 only when they don't fit, and Send keeps the right end of whichever row it ends on. */}
             <div className="cx-composer-send">

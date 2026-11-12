@@ -5,7 +5,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat, syncChatQueues, type ChatQueueActions } from "./AgentOrchestratorChat";
+import { AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatQueueActions } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
@@ -1898,6 +1898,13 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     const result = await moduleCall("chat_recover", { workspaceId, ...input });
     return { message: String(result.message || "The original work was kept; no message was sent.") };
   };
+  // A window picked for an open chat resizes its agent now, keeping the conversation (chat_context_window).
+  const resizeChatAgent = async (input: { taskId: string; contextWindow: number | null }): Promise<ChatAgentResize> => {
+    if (!workspaceId) throw new Error("Add a project first");
+    const result = await moduleCall("chat_context_window", { workspaceId, ...input });
+    return { ok: result.ok === true, ...(result.reason === "working" || result.reason === "no_agent" ? { reason: result.reason } : {}),
+      resized: result.resized === true, ...(typeof result.contextWindow === "number" ? { contextWindow: result.contextWindow } : {}), resumed: result.resumed === true };
+  };
   // The chats' queued messages are the app's (chat_queue): it sends them when a chat's turn settles,
   // whichever chat is open. A queued message runs on the model or team picked when it was queued.
   const queueCall = async (taskId: string, args: JsonObject) => {
@@ -3092,7 +3099,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} queue={chatQueue} commands={chatCommands}
+                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} resizeAgent={resizeChatAgent} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && composerMode === "team" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>
