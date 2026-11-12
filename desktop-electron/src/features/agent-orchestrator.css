@@ -297,6 +297,10 @@
 
 /* The role editor reuses the movable sheet and stays inside the graph viewport. */
 .ao-role-popup { z-index: 6; width: min(370px, calc(100% - 16px)); max-height: calc(100% - 16px); }
+/* A started card's conversation: wider than the role editor, its timeline scrolls inside. */
+.ao-agent-chat-popup { z-index: 6; width: min(560px, calc(100% - 16px)); max-height: calc(100% - 16px); }
+.ao-agent-chat-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 0 14px 8px; }
+.cx-agent-conversation { min-height: 0; overflow: auto; padding: 0 14px 14px; }
 .ao-role-inspector { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 0 14px 14px; }
 /* Model picker: one slim row (model, agent, effort, context, reset); the list opens below it. */
 .ao-route-picker { display: flex; flex-direction: column; gap: 4px; min-width: 0; }

@@ -106,7 +106,7 @@ export function canvasLayout(nodes: CanvasNode[], levels: CanvasNode[][], height
   return result;
 }
 
-export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children, showState = true, loop = null, points, onBend }: {
+export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSelect, onEdit, onMove, onConnect, canConnect, onUnlink, canUnlink, onRemove, canRemove, describe, children, showState = true, loop = null, points, onBend }: {
   /** The reviewer's way back to the orchestrator, drawn as a dashed link (not a dependency). */
   loop?: { from: string; to: string } | null;
   /** Points links are pulled through, keyed by `linkPointKey` (or `LOOP_LINK`). */
@@ -119,6 +119,8 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
   describe: (node: CanvasNode) => string;
   children?: ReactNode;
   onSelect: (id: string) => void;
+  /** The card menu's Edit, when a click shows something else (a started card's conversation). */
+  onEdit?: (id: string) => void;
   onMove: (positions: { id: string; x: number; y: number }[], parentId?: string) => Promise<void>;
   onConnect: (id: string, parentId: string) => void;
   canConnect: (id: string, parentId: string) => boolean;
@@ -167,7 +169,7 @@ export function AgentOrchestratorCanvas({ nodes, levels, selectedId, busy, onSel
     const name = node.settings?.name || ROLE_TITLE[node.role as keyof typeof ROLE_TITLE] || "Worker";
     setSelected(new Set([node.id]));
     setMenu({ x: event.clientX, y: event.clientY, label: name, items: [
-      { label: "Edit", icon: "edit", run: () => onSelect(node.id) },
+      { label: "Edit", icon: "edit", run: () => (onEdit ?? onSelect)(node.id) },
       { kind: "separator" },
       busy ? { label: "Remove from team", icon: "delete", danger: true, reason: "The team is saving" }
         : canRemove?.(node.id) ? { label: "Remove from team", icon: "delete", danger: true, run: () => onRemove(node.id) }
