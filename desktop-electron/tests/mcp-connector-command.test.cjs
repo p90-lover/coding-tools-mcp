@@ -1068,4 +1068,15 @@ test("a signed-out session and a security check read as what they are, and the l
     "net::ERR_ABORTED loading 'https://auth.openai.com/authorize'", "an address keeps its host and path, never its query");
   assert.equal(cause("x".repeat(500)).length, 240);
   assert.equal(mcpConnectorFailureCause(null, { message: "" }), null);
+
+  // The ownership observer's one message covers many checks; its error names the one that failed.
+  const ownership = "MCP ownership metadata is unavailable or exceeded its bound.";
+  const owned = (ownershipCause) => mcpConnectorFailureCause(Object.assign(new Error(ownership), { ownershipCause }),
+    mcpConnectorCommandFailure(new Error(ownership)));
+  assert.equal(mcpConnectorCommandFailure(Object.assign(new Error(ownership), { ownershipCause: "chatgpt:no_account" })).message,
+    mcpConnectorCommandFailure(new Error(ownership)).message, "the card's words do not change");
+  assert.equal(owned("chatgpt:not_json:text/html"), "ownership check chatgpt:not_json:text/html");
+  assert.equal(owned("tunnels:load_failed:neterr_failed"), "ownership check tunnels:load_failed:neterr_failed");
+  assert.equal(owned("chatgpt:Private Text"), null, "anything but the observer's own words stays out");
+  assert.equal(owned(null), null, "an older error without a check says nothing more than before");
 });

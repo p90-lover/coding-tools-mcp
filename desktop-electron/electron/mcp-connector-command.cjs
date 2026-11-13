@@ -111,9 +111,12 @@ const SETUP_FAILURE_ALIASES = new Map([
  * The setup's own words for a failure, for the log only, when the card says something else: the
  * card's catch-all hid which step stopped ("ChatGPT verification is required" for any text with
  * "sign in" or "verification" in it, 2026-11-13). ChatGPT's own form text stays out, as on the card;
- * a web address keeps its host and path; 240 characters at most.
+ * a web address keeps its host and path; 240 characters at most. The ownership observer's one
+ * message covers many checks, so its error names the check (observer.failure()), which comes first.
  */
 function mcpConnectorFailureCause(error, failure) {
+  const check = error?.ownershipCause;
+  if (typeof check === "string" && /^[a-z]+:[a-z0-9_.:+/-]{1,90}$/.test(check)) return `ownership check ${check}`;
   const text = String(error?.message || error || "").trim();
   if (!text || text === failure?.message) return null;
   if (text.startsWith(CHATGPT_FORM_ERROR)) return CHATGPT_FORM_ERROR.trim();
