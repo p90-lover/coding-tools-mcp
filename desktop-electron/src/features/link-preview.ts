@@ -5,17 +5,30 @@ export function installLinkPreview(doc: Document = document): () => void {
   preview.dir = "ltr";
   preview.hidden = true;
   doc.body.append(preview);
-  let hovered = "", focused = "";
+  type Destination = { href: string; link: Element };
+  let hovered: Destination | null = null, focused: Destination | null = null;
+  let paletteSource: Element | null = null;
 
-  const hrefAt = (target: EventTarget | null): string => {
+  const hrefAt = (target: EventTarget | null): Destination | null => {
     const element = target as Element | null;
     const link = typeof element?.closest === "function" ? element.closest("a[href]") : null;
     const href = link?.getAttribute("href");
-    if (!href) return "";
-    try { return new URL(href, doc.baseURI).href; } catch { return href; }
+    if (!href || !link) return null;
+    try { return { href: new URL(href, doc.baseURI).href, link }; } catch { return { href, link }; }
   };
   const render = () => {
-    const href = hovered || focused;
+    const destination = hovered || focused;
+    const href = destination?.href || "";
+    if (destination && paletteSource !== destination.link) {
+      const palette = doc.defaultView?.getComputedStyle(destination.link);
+      for (const name of ["--color-background-elevated", "--color-text-secondary", "--color-border-heavy"]) {
+        const value = palette?.getPropertyValue(name).trim();
+        if (value) preview.style.setProperty(name, value);
+        else preview.style.removeProperty(name);
+      }
+      paletteSource = destination.link;
+    }
+    if (!destination) paletteSource = null;
     if (preview.textContent !== href) preview.textContent = href;
     if (preview.hidden !== !href) preview.hidden = !href;
   };
@@ -31,14 +44,14 @@ export function installLinkPreview(doc: Document = document): () => void {
   };
   const focus = (event: FocusEvent) => {
     const target = event.target as Element | null;
-    focused = target?.matches?.(":focus-visible") ? hrefAt(target) : "";
+    focused = target?.matches?.(":focus-visible") ? hrefAt(target) : null;
     render();
   };
-  const unfocus = () => { focused = ""; render(); };
-  const clear = () => { hovered = focused = ""; render(); };
+  const unfocus = () => { focused = null; render(); };
+  const clear = () => { hovered = focused = null; render(); };
   const key = (event: KeyboardEvent) => { if (event.key === "Escape") clear(); };
   const visibility = () => { if (doc.hidden) clear(); };
-  const scroll = () => { hovered = ""; render(); };
+  const scroll = () => { hovered = null; render(); };
 
   doc.addEventListener("pointerover", over);
   doc.addEventListener("pointerout", out);
