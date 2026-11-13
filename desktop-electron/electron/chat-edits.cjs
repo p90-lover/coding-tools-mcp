@@ -61,8 +61,9 @@ function chatDescriptionWithSteer(description, messages, steer) {
 
 /**
  * Per chat ("<workspace>:<task>"): the runs of deleted messages, hidden from the chat; whether the
- * next follow-up must start a fresh agent session; and which runs restart an earlier one (Restart
- * mission adds a run without a message, so the chat must not pair it with the next message). Kept
+ * next follow-up must start a fresh agent session; which runs restart an earlier one (Restart
+ * mission adds a run without a message, so the chat must not pair it with the next message); and
+ * the window each agent session was resized to after it started (chat_context_window). Kept
  * in a small JSON file so all of it survives an app restart; without a file (tests) it lives in memory.
  *
  * A change is in memory at once and saved off the main thread: the synchronous save held every
@@ -122,6 +123,21 @@ function createChatEditStore({ file = null, logger = null } = {}) {
     restore(workspaceId, taskId, saved) {
       if (saved) chats[key(workspaceId, taskId)] = saved; else delete chats[key(workspaceId, taskId)];
       return persist();
+    },
+    /**
+     * The chat's agent `session` was resized in place to the card's `contextWindow` (a route value:
+     * tokens, or null for the model's default). Its card still says the window it started with, so
+     * the next follow-up reads this one instead and continues the agent rather than starting afresh.
+     */
+    resized(workspaceId, taskId, session, contextWindow) {
+      const chat = chats[key(workspaceId, taskId)] ?? {};
+      chats[key(workspaceId, taskId)] = { ...chat, windows: { ...(chat.windows ?? {}), [session]: contextWindow ?? null } };
+      persist();
+    },
+    /** The window `session` was resized to (null: the model's default), or undefined when it never was. */
+    resizedWindow: (workspaceId, taskId, session) => {
+      const windows = chats[key(workspaceId, taskId)]?.windows;
+      return windows && Object.hasOwn(windows, session) ? windows[session] : undefined;
     },
     /** Whether the chat's next follow-up must start a fresh session. */
     fresh: (workspaceId, taskId) => chats[key(workspaceId, taskId)]?.fresh === true,

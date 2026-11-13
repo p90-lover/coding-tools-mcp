@@ -9307,6 +9307,62 @@ test("an open chat pre-warms only when its next message cannot continue its agen
   assert.deepEqual(killed, ["warm-1"], "the oldest waiting agent is ended once a third is warmed");
 });
 
+// The user (2026-11-13): "make the next round send context window silently without message sending
+// it". A window picked for an open chat used to wait for the next message, which then went to a new
+// agent with only a summary of the chat. Now the chat's own agent is resized in place.
+test("a chat's agent is resized to a new window in place, and the next message continues it", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-5.5", context_window: 200000 };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const done = { id: "r1", project_id: "task-1", execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [done] });
+  const calls = [], spawned = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models")
+      ? { ok: true, json: async () => ({ data: [{ id: "gpt-5.5", context_window: 272000, max_context_window: 400000 }] }) }
+      : { ok: false, status: 404, json: async () => ({}) },
+    aoHarness: {
+      spawn: async input => { spawned.push(input.model); return "warm"; },
+      setContextWindow: async (id, tokens) => { calls.push(["set", id, tokens]); return { ok: true }; },
+      exitAgent: async id => { calls.push(["exit", id]); return { ok: true }; },
+      continuable: async id => { calls.push(["resume", id]); return true; },
+      warmSessions: async () => [],
+    } });
+  const resize = contextWindow => workflow.call("chat_context_window", { workspaceId: "ws-1", taskId: "task-1", contextWindow });
+
+  // Picked first, before the resize: the same pick's pre-warm starts no spare agent for the new window.
+  const early = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route, context_window: 300000 }, taskId: "task-1" });
+  assert.equal(early.warmed, false);
+  assert.deepEqual(spawned, [], "only the window changed: the chat's own agent is resized instead");
+
+  const resized = await resize(300000);
+  assert.deepEqual({ ...resized }, { ok: true, resized: true, contextWindow: 300000, resumed: true });
+  assert.deepEqual(calls, [["set", "sess-1", 300000], ["exit", "sess-1"], ["resume", "sess-1"]],
+    "AO saves the window, then the agent is stopped and resumed on its own conversation");
+  calls.length = 0;
+  const next = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route, context_window: 300000 }, taskId: "task-1" });
+  assert.equal(next.continues, true, "the next message continues the resized agent, not a fresh one with a summary");
+  assert.deepEqual(spawned, []);
+  calls.length = 0;
+  assert.deepEqual({ ...await resize(300000) }, { ok: true, resized: false }, "the same size again restarts nothing");
+  assert.deepEqual(calls, []);
+
+  await assert.rejects(resize(1_000_000), /can't be set to that\. Its limit is 400000 tokens/);
+  assert.deepEqual(calls, [], "a window past the model's limit never reaches AO");
+
+  // Back to the default: a blank window is the model's full known limit, as a blank card starts with.
+  assert.equal((await resize(null)).contextWindow, 400000);
+  assert.deepEqual(calls[0], ["set", "sess-1", 400000]);
+
+  // A turn still running: resized once it ends (the chat asks again then).
+  done.nodes[0].state = "running";
+  calls.length = 0;
+  assert.deepEqual({ ...await resize(250000) }, { ok: false, reason: "working" });
+  assert.deepEqual(calls, []);
+  workflow.dispose?.();
+});
+
 test("chats opened together bring back their released agents one at a time", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const ids = ["task-1", "task-2", "task-3", "task-4"];
