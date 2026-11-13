@@ -424,7 +424,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
               </Row>
-              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead">
+              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead. When Auto Review can't answer, the chat's own model judges, on that model's quota">
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
               </Row>
