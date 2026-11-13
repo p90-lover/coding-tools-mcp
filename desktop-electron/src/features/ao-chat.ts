@@ -666,6 +666,16 @@ export type ChatRun = {
   replaces_run_id?: string;
   /** Restart mission: this run answers the same message again (set by the bridge). */
   restarts_run_id?: string;
+  /**
+   * Additive continuation: controller-generated run linked to its preceding chat run,
+   * with a typed source and bounded instruction.
+   */
+  continuation?: {
+    run_id: string;
+    revision: number;
+    source: "manual" | "goal" | "wake" | "watch" | "loop" | "schedule";
+    message: string;
+  };
   id: string;
   project_id: string;
   cancelled: boolean;
@@ -978,7 +988,7 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
   const messages: ChatMessage[] = [];
   let messageIndex = 0;
   runs.forEach((run) => {
-    const user = run.replaces_run_id ? undefined : said[messageIndex++];
+    const user = run.replaces_run_id || run.restarts_run_id || run.continuation ? undefined : said[messageIndex++];
     if (run.replaces_run_id) messages.push({ kind: "status", key: `${run.id}:reconfigured`,
       text: "Settings changed. Continuing from the work so far.", state: "finished" });
     if (user) messages.push({ kind: "user", key: `${run.id}:user`, text: user.text, stamp: user.stamp });
@@ -1056,6 +1066,7 @@ export type ChatTurn = {
   key: string;
   runId: string;
   user?: { text: string; stamp?: string; steers?: ChatSteer[] };
+  continuation?: ChatRun["continuation"];
   /** Which of the chat's messages `user` is (its place in the task description). */
   messageIndex?: number;
   /** The cards' work, in pipeline order, without the answer that closes the turn. */
@@ -1606,7 +1617,7 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   // than runs.
   const MINUTE = 60_000;
   let messageIndex = 0;
-  const fresh = runs.filter((run) => !run.restarts_run_id && !run.replaces_run_id);
+  const fresh = runs.filter((run) => !run.restarts_run_id && !run.replaces_run_id && !run.continuation);
   let spare = said.length - fresh.length;
   // A compacted chat (/compact, or a long chat compacting itself to send) keeps one summary in place of
   // its earlier messages but every run, so it has more runs than messages. Paired from the start, each
@@ -1620,8 +1631,8 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   const turns: ChatTurn[] = [];
   for (const run of runs) {
     let index = -1;
-    if (!run.restarts_run_id && !run.replaces_run_id && summarized > 0) summarized -= 1;
-    else if (!run.restarts_run_id && !run.replaces_run_id) {
+    if (!run.restarts_run_id && !run.replaces_run_id && !run.continuation && summarized > 0) summarized -= 1;
+    else if (!run.restarts_run_id && !run.replaces_run_id && !run.continuation) {
       const started = runStartedMs(run);
       while (started !== undefined && spare > 0 && messageIndex + 1 < said.length) {
         const next = stampMs(said[messageIndex + 1].stamp);
@@ -1649,6 +1660,7 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
     turns.push({
       key: run.id, runId: run.id,
       ...(said[index] ? { user: said[index], messageIndex: index } : {}),
+      ...(run.continuation ? { continuation: run.continuation } : {}),
       steps: closing ? steps.filter((step) => step !== closing) : steps,
       ...(closing ? { final: closing } : {}),
       status, solo: Boolean(run.solo),
@@ -1664,12 +1676,12 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   return turns;
 }
 
-/** Every run of the message whose turn ran `runId`: that run, then each restart or replacement of it (and of those). */
+/** Every run of the message whose turn ran `runId`: that run, then each restart, replacement, or continuation of it (and of those). */
 export function chatRunsOfMessage(runs: ChatRun[], runId: string): string[] {
   const found = runId ? [runId] : [];
   for (let at = 0; at < found.length; at += 1) {
     for (const run of runs) {
-      if ((run.restarts_run_id === found[at] || run.replaces_run_id === found[at]) && !found.includes(run.id)) found.push(run.id);
+      if ((run.restarts_run_id === found[at] || run.replaces_run_id === found[at] || run.continuation?.run_id === found[at]) && !found.includes(run.id)) found.push(run.id);
     }
   }
   return found;

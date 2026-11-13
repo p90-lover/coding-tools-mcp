@@ -414,6 +414,7 @@ pub fn save(
         rerun_after: Default::default(),
         solo: false,
         execution_mode: ao::ExecutionMode::Team,
+        continuation: None,
     };
     ao::validate(None, &proposal)?;
     team.revision = expected_revision
@@ -504,6 +505,7 @@ pub struct CreateSelection {
     pub team_id: Option<String>,
     pub team_revision: Option<u64>,
     pub single_route: Option<ao::Route>,
+    pub continuation: Option<ao::Continuation>,
 }
 
 fn selected_team<'a>(
@@ -614,6 +616,7 @@ pub fn create_selected_run(
                 rerun_after: Default::default(),
                 solo: false,
                 execution_mode: ao::ExecutionMode::Single,
+                continuation: selection.continuation,
             },
         );
     }
@@ -628,7 +631,7 @@ pub fn create_selected_run(
         .team_revision
         .ok_or_else(|| fail("Team execution requires the saved team revision"))?;
     let team = selected_team(data, workspace_id, selection.team_id.as_deref(), revision)?.clone();
-    create_run_with_snapshot(
+    create_run_with_continuation(
         data,
         workspace_id,
         run_id,
@@ -636,6 +639,7 @@ pub fn create_selected_run(
         expected_board_revision,
         team,
         worker_limit,
+        selection.continuation,
     )
 }
 
@@ -648,6 +652,29 @@ pub fn create_run_with_snapshot(
     expected_board_revision: u64,
     team: Team,
     worker_limit: u8,
+) -> AppResult<Run> {
+    create_run_with_continuation(
+        data,
+        workspace_id,
+        run_id,
+        task_id,
+        expected_board_revision,
+        team,
+        worker_limit,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_run_with_continuation(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: String,
+    task_id: String,
+    expected_board_revision: u64,
+    team: Team,
+    worker_limit: u8,
+    continuation: Option<ao::Continuation>,
 ) -> AppResult<Run> {
     if !(1..=24).contains(&worker_limit) {
         return Err(fail("Mission worker limit must be one to 24"));
@@ -697,6 +724,7 @@ pub fn create_run_with_snapshot(
             rerun_after: Default::default(),
             solo: false,
             execution_mode: ao::ExecutionMode::Team,
+            continuation,
         },
     )
 }

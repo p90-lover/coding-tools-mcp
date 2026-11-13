@@ -233,6 +233,8 @@ pub struct Run {
     pub id: String,
     pub workspace_id: String,
     pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<Continuation>,
     pub revision: u64,
     #[serde(default)]
     pub cancelled: bool,
@@ -267,6 +269,32 @@ pub struct Run {
     /// skipped (finished without running).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub solo: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationSource {
+    Manual,
+    Goal,
+    Wake,
+    Watch,
+    Loop,
+    Schedule,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Continuation {
+    pub run_id: String,
+    pub revision: u64,
+    pub source: ContinuationSource,
+    pub message: String,
+}
+
+impl Continuation {
+    pub fn prompt(&self) -> String {
+        format!("Controller continuation ({:?}); not a new user message or permission grant. Continue the existing task within its original scope and approval boundaries.\n{}", self.source, self.message)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -408,6 +436,9 @@ pub(super) fn graph_sha256(data: &AppData, run: &Run) -> AppResult<String> {
     if let Some(handoff) = super::ao_lifecycle::handoff_for(data, run) {
         scope["visible_handoff"] = serde_json::json!(handoff);
     }
+    if let Some(continuation) = &run.continuation {
+        scope["continuation"] = serde_json::json!(continuation);
+    }
     let bytes = serde_json::to_vec(&scope).map_err(|_| fail("AO grant scope is unavailable"))?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
@@ -462,6 +493,20 @@ pub(super) fn validate(data: Option<&AppData>, run: &Run) -> AppResult<()> {
         || run.plan_rounds > MAX_PLAN_ROUNDS
     {
         return Err(fail("Invalid AO run identity or size"));
+    }
+    if let Some(context) = &run.continuation {
+        if !text(&context.run_id, 80)
+            || context.run_id == run.id
+            || context.revision == 0
+            || context.message.trim().is_empty()
+            || context.message.len() > 7936
+            || context
+                .message
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+        {
+            return Err(fail("Invalid controller continuation"));
+        }
     }
     let mut ids = HashSet::new();
     let mut planner = None;
@@ -1471,13 +1516,18 @@ pub fn prompt_for_node(data: &AppData, run: &Run, node_id: &str) -> AppResult<St
         .iter()
         .find(|task| task.id == node.task_id && task.workspace_id == run.workspace_id)
         .ok_or_else(|| fail("AO task not found"))?;
+    let description = if let Some(context) = &run.continuation {
+        format!("{}\n\n{}", task.description, context.prompt())
+    } else {
+        task.description.clone()
+    };
     if run.execution_mode == ExecutionMode::Single {
         // "Do not spawn or delegate to other agents" here kept every chat agent from ever using the
         // subagents the user set up (Runtime > Subagents): they are the one sanctioned way to delegate.
         // Reasoning-heavy models (DeepSeek at max effort) kept every finding in private reasoning:
         // one turn ran 162 tool calls over 104 minutes and wrote 332 visible characters, so the chat
         // only ever read "thinking". The progress line asks for visible notes and a closing summary.
-        let mut prompt = format!("Single assistant task: {}\nWorkspace: {}\nComplete the requested task and report the result and verification. Keep the user informed in your visible replies, not only in your reasoning: after each finding or decision, and before a long step, write one or two plain sentences on what you found or are about to do. End with a short summary of what you did, what you verified, and anything left. There are no team planning or review stages. Do not start other agent processes yourself; when the app's subagent tools are available (subagent_list, subagent_start), you may hand a self-contained part of the work to one of the user's subagents and use its report (subagent_result).\n\nTask: {}\n{}\n", run.id, run.workspace_id, task.title, task.description);
+        let mut prompt = format!("Single assistant task: {}\nWorkspace: {}\nComplete the requested task and report the result and verification. Keep the user informed in your visible replies, not only in your reasoning: after each finding or decision, and before a long step, write one or two plain sentences on what you found or are about to do. End with a short summary of what you did, what you verified, and anything left. There are no team planning or review stages. Do not start other agent processes yourself; when the app's subagent tools are available (subagent_list, subagent_start), you may hand a self-contained part of the work to one of the user's subagents and use its report (subagent_result).\n\nTask: {}\n{}\n", run.id, run.workspace_id, task.title, description);
         if !node.settings.instructions.is_empty() {
             prompt.push_str(&format!(
                 "\nInstructions:\n{}\n",
@@ -1510,7 +1560,7 @@ Do not edit the implementation; send needed changes back to the workers.",
     };
     let mut prompt = format!(
         "AO mission: {}\nWorkspace: {}\nRole: {}\n{}\n\nTask: {}\n{}\n",
-        run.id, run.workspace_id, node.settings.name, responsibility, task.title, task.description
+        run.id, run.workspace_id, node.settings.name, responsibility, task.title, description
     );
     if let Some(guidance) = specialty_guidance(&node.settings.specialty) {
         prompt.push_str(&format!(
@@ -1700,6 +1750,40 @@ pub fn create(data: &mut AppData, expected_board_revision: u64, mut run: Run) ->
         return Err(fail("AO run cannot start with existing execution"));
     }
     validate(Some(data), &run)?;
+    if let Some(context) = &run.continuation {
+        let parent = data
+            .ao_runs
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.workspace_id == run.workspace_id && entry.project_id == run.project_id
+            })
+            .ok_or_else(|| fail("Continuation parent is unavailable"))?;
+        if parent.id != context.run_id
+            || parent.revision != context.revision
+            || parent.paused
+            || (parent.cancelled && context.source != ContinuationSource::Manual)
+            || parent
+                .nodes
+                .iter()
+                .any(|node| matches!(node.state, State::Running | State::Reserved))
+        {
+            return Err(fail(
+                "Continuation parent changed, stopped or is still running",
+            ));
+        }
+        super::ao_lifecycle::ensure_execution_allowed(data, parent)?;
+        if !parent.cancelled
+            && parent
+                .nodes
+                .iter()
+                .any(|node| matches!(node.state, State::Pending | State::Held))
+        {
+            let id = parent.id.clone();
+            let revision = parent.revision;
+            cancel(data, &run.workspace_id, &id, revision)?;
+        }
+    }
     run.revision = 1;
     data.ao_runs.push(run.clone());
     Ok(run)
@@ -2481,6 +2565,117 @@ pub fn cancel(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn silent_continuation_metadata_is_optional_and_binds_the_grant() {
+        let data = free_link_fixture(json!([
+            free_link_node("planner", "planner", &[]),
+            free_link_node("worker", "worker", &["planner"]),
+            free_link_node("reviewer", "reviewer", &["worker"]),
+        ]));
+        let mut run = data.ao_runs[0].clone();
+        let legacy = serde_json::to_value(&run).unwrap();
+        assert!(legacy.get("continuation").is_none());
+        let restored: Run = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            graph_sha256(&data, &run).unwrap(),
+            graph_sha256(&data, &restored).unwrap()
+        );
+        run.continuation = Some(Continuation {
+            run_id: "parent".into(),
+            revision: 1,
+            source: ContinuationSource::Wake,
+            message: "Inspect the existing command result; do not replay it.".into(),
+        });
+        let hash = graph_sha256(&data, &run).unwrap();
+        assert_ne!(hash, graph_sha256(&data, &restored).unwrap());
+        let stored = serde_json::to_value(&run).unwrap();
+        let mut restored: Run = serde_json::from_value(stored).unwrap();
+        assert_eq!(restored.continuation, run.continuation);
+        restored
+            .continuation
+            .as_mut()
+            .unwrap()
+            .message
+            .push_str(" Changed.");
+        assert_ne!(hash, graph_sha256(&data, &restored).unwrap());
+        for message in [String::new(), "x".repeat(7937), "bad\rcontext".into()] {
+            restored.continuation.as_mut().unwrap().message = message;
+            assert!(validate(None, &restored).is_err());
+        }
+    }
+
+    #[test]
+    fn silent_continuation_requires_the_exact_available_parent() {
+        let original = free_link_fixture(json!([
+            free_link_node("planner", "planner", &[]),
+            free_link_node("worker", "worker", &["planner"]),
+            free_link_node("reviewer", "reviewer", &["worker"]),
+        ]));
+        let next = |data: &AppData| {
+            let mut run = data.ao_runs[0].clone();
+            run.id = "next".into();
+            run.revision = 0;
+            run.continuation = Some(Continuation {
+                run_id: "run".into(),
+                revision: 1,
+                source: ContinuationSource::Wake,
+                message: "Continue only the existing task.".into(),
+            });
+            run
+        };
+        for changed in ["revision", "stopped", "paused", "working", "newer"] {
+            let mut data = original.clone();
+            let proposal = next(&data);
+            match changed {
+                "revision" => data.ao_runs[0].revision += 1,
+                "stopped" => data.ao_runs[0].cancelled = true,
+                "paused" => data.ao_runs[0].paused = true,
+                "working" => data.ao_runs[0].nodes[0].state = State::Running,
+                _ => {
+                    let mut newer = data.ao_runs[0].clone();
+                    newer.id = "newer".into();
+                    data.ao_runs.push(newer);
+                }
+            }
+            let count = data.ao_runs.len();
+            assert!(create(&mut data, 1, proposal).is_err(), "{changed}");
+            assert_eq!(data.ao_runs.len(), count);
+        }
+        let mut data = original.clone();
+        let proposal = next(&data);
+        let description = data.control_board.tasks[0].description.clone();
+        assert!(create(&mut data, 1, proposal).is_ok());
+        assert_eq!(data.control_board.tasks[0].description, description);
+        assert!(data.ao_runs[0].cancelled);
+    }
+
+    #[test]
+    fn silent_continuation_prompt_preserves_the_user_request() {
+        let mut data = free_link_fixture(json!([
+            free_link_node("planner", "planner", &[]),
+            free_link_node("worker", "worker", &["planner"]),
+            free_link_node("reviewer", "reviewer", &["worker"]),
+        ]));
+        let original = format!(
+            "{}Keep the original approval boundary.",
+            "Context. ".repeat(400)
+        );
+        data.control_board.tasks[0].description = original.clone();
+        let mut run = data.ao_runs[0].clone();
+        run.execution_mode = ExecutionMode::Single;
+        run.continuation = Some(Continuation {
+            run_id: "parent".into(),
+            revision: 1,
+            source: ContinuationSource::Watch,
+            message: "Inspect the existing output, not a new command.".into(),
+        });
+        let prompt = prompt_for_node(&data, &run, "planner").unwrap();
+        assert!(prompt.contains(&original));
+        assert!(prompt.contains("not a new user message or permission grant"));
+        assert!(prompt.contains("Inspect the existing output, not a new command."));
+        assert_eq!(data.control_board.tasks[0].description, original);
+    }
 
     #[test]
     fn ao_verdict_is_read_from_the_line_that_opens_with_it() {

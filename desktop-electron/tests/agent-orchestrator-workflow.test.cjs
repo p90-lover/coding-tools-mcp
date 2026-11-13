@@ -4605,13 +4605,11 @@ test("a goal's next round is cancelled before acceptance when paused, cleared, e
             const boardRead = endpoint === "/api/v1/tools/call" && body.tool === "workflow_list";
             if ((stage === "continuation read" && runRead && reads === 1)
               || (stage === "send read" && runRead && reads === 2)
-              || (stage === "message preflight" && boardRead && body.arguments.task_id)) {
+              || (stage === "message preflight" && boardRead)) {
               entered = true;
               await pending;
             }
-            // The run is made on the revision the message's own write answered with (no board read
-            // between): the round's last moment before acceptance is that answer.
-            if (stage === "run preflight" && endpoint === "/api/v1/tools/call" && body.tool === "workflow_update") {
+            if (stage === "run preflight" && boardRead) {
               const reply = await world.requestHeadless(endpoint, body, ...rest);
               entered = true;
               await pending;
@@ -4624,7 +4622,7 @@ test("a goal's next round is cancelled before acceptance when paused, cleared, e
       child.after(() => workflow.dispose());
       const goal = await goalOf(workflow);
       const previous = { round: goal.round, lastMessage: goal.lastMessage };
-      world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+      world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
         nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { thread_id: "sess-1", answer: "not yet" } }] });
       const before = world.updates.length, description = world.tasks[0].description;
       const checking = workflow.goalAfterRun("ws-1", "r1", "finished");
@@ -4694,7 +4692,7 @@ test("pausing or clearing a goal leaves a round already accepted by run creation
 test("after a round without the goal achieved, the chat runs the next round with the same Single model", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", effort: "max" };
   const { world, workflow, checks } = await goalChat();
-  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { answer: "Fixed 3 of 5; the rest is done too." } }] });
   const updatesBefore = world.updates.length;
   await workflow.goalAfterRun("ws-1", "r1", "finished", null);
@@ -4706,7 +4704,9 @@ test("after a round without the goal achieved, the chat runs the next round with
   assert.equal(next.length, 1, "one new round");
   assert.equal(next[0].execution_mode, "single");
   assert.deepEqual(next[0].single_route, route, "the same Single model, effort and permissions");
-  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green\]: Two tests still fail\./, "Claude Code's stop-hook feedback");
+  assert.equal(next[0].continuation?.source, "goal");
+  assert.match(next[0].continuation?.message, /Stop hook feedback:\n\[build green\]: Two tests still fail\./, "Claude Code's stop-hook feedback");
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /Stop hook feedback/, "no synthetic board edit for continuation");
   const goal = await goalOf(workflow);
   assert.equal(goal.status, "active");
   assert.equal(goal.round, 2);
@@ -5151,7 +5151,7 @@ test("with \"Let the model judge\" on, a goal round that needs the person or fai
   let verdict = { met: false, stop: false, reason: "Nobody will answer: pick the safest option yourself and train on." };
   const { world, workflow, checks } = await goalChat({ evaluator: () => verdict });
   await workflow.call("chat_model_judges", { enabled: true });
-  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { thread_id: "sess-1", error: "Which account first?" } }] });
   const before = world.updates.length;
   await workflow.goalAfterRun("ws-1", "r1", "held", null);
@@ -5159,15 +5159,16 @@ test("with \"Let the model judge\" on, a goal round that needs the person or fai
   const prompt = checks[0].messages[0].content;
   assert.match(prompt, /How the turn ended: It stopped waiting for the user: Which account first\?/);
   assert.match(prompt, /"stop": true\|false/);
-  // The held round is stopped (its question goes unanswered), then the next round starts.
-  assert.deepEqual(world.updates.slice(before).map((update) => [update.operation, update.run_id === "r1"]), [["cancel", true], ["create_from_team", false]]);
+  // The next continuation round starts with the judge's instructions.
+  assert.deepEqual(world.updates.slice(before).map((update) => [update.operation, update.run_id === "r1"]), [["create_from_team", false]]);
+  assert.equal(world.updates.at(-1).continuation?.source, "goal");
   let goal = await goalOf(workflow);
   assert.equal(goal.status, "active");
   assert.equal(goal.round, 2);
   assert.equal(goal.feedback, verdict.reason, "the judge's reason is the agent's next instruction");
   // A failed round the judge says must end: the goal stops, with its reason, and nothing more runs.
   verdict = { met: false, stop: true, reason: "The same login error repeated three rounds; going on cannot help." };
-  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "failed", route, history: [], receipt: { thread_id: "sess-1", error: "login refused" } }] });
   const sent = world.updates.length;
   await workflow.goalAfterRun("ws-1", "r2", "failed", null);
@@ -5180,7 +5181,7 @@ test("with \"Let the model judge\" on, a goal round that needs the person or fai
   await workflow.call("chat_model_judges", { enabled: false });
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
   await goalSettle();
-  world.runs.push({ id: "r3", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  world.runs.push({ id: "r3", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "held", route, history: [], receipt: { thread_id: "sess-1", error: "needs approval" } }] });
   const asked = checks.length;
   await workflow.goalAfterRun("ws-1", "r3", "held", null);
@@ -5314,7 +5315,7 @@ test("a goal judged not met whose next round never started goes on at the next r
 test("a failed goal round does not stall the goal: the next round starts after a pause, told why; three in a row stall it", async () => {
   // The user: the goal "doesnt know how to keep going if the chat is stopped or something issued".
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
-  const failed = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  const failed = (id) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "failed", route, receipt: { error: "upstream 500 from the model" } }] });
   const timers = [];
   // A fixed clock: a pause is saved as a time and timed from it, and a millisecond between the two
@@ -5340,7 +5341,9 @@ test("a failed goal round does not stall the goal: the next round starts after a
     timers.shift().callback();
     await goalSettle(() => world.updates.length > before);
     assert.equal(world.updates.length, before + 1, "the next round started");
-    assert.match(world.edits.at(-1).description, /The last round failed \(upstream 500 from the model\)\. Carry on from where it stopped\./);
+    assert.equal(world.updates.at(-1).continuation?.source, "goal");
+    assert.match(world.updates.at(-1).continuation?.message, /The last round failed \(upstream 500 from the model\)\. Carry on from where it stopped\./);
+    assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /The last round failed/);
   }
   // Resume starts afresh: one more failure does not stall it again at once.
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
@@ -5428,7 +5431,7 @@ test("a goal round that failed on a model the person has since moved the goal of
     const timers = [];
     const { world, workflow, checks } = await goalChat({ timers, now: () => 1_000_000, models: ["gpt-6-luna", "cline-pass/deepseek-v4.1-flash-1017", "opencode-go/deepseek-v4.1-flash"] });
     await workflow.call("chat_auto_retry", { enabled: true });
-    world.runs.push({ id: "c1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    world.runs.push({ id: "c1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
       nodes: [{ id: "one", role: "planner", parents: [], state: outcome, route: cline, history: [{ error }], receipt: { error } }] });
     await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "route", singleRoute: picked });
     const before = world.updates.length;
@@ -5439,14 +5442,14 @@ test("a goal round that failed on a model the person has since moved the goal of
     assert.equal(checks.length, 0, "not sent to the evaluator");
     assert.equal(timers.length, 0, "no pause first");
     const next = world.updates.slice(before);
-    // The held round on the old model is retired, and the next one starts on the pick.
-    assert.deepEqual(next.map(change => change.operation), outcome === "held" ? ["cancel", "create_from_team"] : ["create_from_team"]);
+    assert.deepEqual(next.map(change => change.operation), ["create_from_team"]);
+    assert.equal(next.at(-1).continuation?.source, "goal");
     assert.equal(next.at(-1).single_route.model, picked.model, "on the picked model");
     assert.equal(goal.round, 2);
   }
   // The same round on the goal's own model is retried as before (or paused, here: its quota is spent).
   const { world, workflow } = await goalChat({ models: ["gpt-6-luna", "cline-pass/deepseek-v4.1-flash-1017"] });
-  world.runs.push({ id: "c2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  world.runs.push({ id: "c2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "held", route: cline, history: [], receipt: { error } }] });
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "route", singleRoute: cline });
   await workflow.goalAfterRun("ws-1", "c2", "held");
@@ -5530,7 +5533,7 @@ test("a goal waiting out a pause carries on after an app restart, is not judged 
     const timers = [];
     const first = await goalChat({ timers, goalsFile, now });
     const { world } = first;
-    world.runs.push({ id: "f1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    world.runs.push({ id: "f1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
       nodes: [{ id: "one", role: "planner", parents: [], state: "failed", route, receipt: { error: "upstream 500 from the model" } }] });
     await first.workflow.goalAfterRun("ws-1", "f1", "failed");
     assert.deepEqual((await goalOf(first.workflow)).retry, { at: clock + 30_000, runId: "f1", check: false }, "the pause is saved with the goal");
@@ -5561,7 +5564,9 @@ test("a goal waiting out a pause carries on after an app restart, is not judged 
     await third.workflow.call("runs", { workspaceId: "ws-1" });
     await goalSettle(() => world.updates.length > before);
     assert.equal(world.updates.length, before + 1, "the next round started");
-    assert.match(world.edits.at(-1).description, /The last round failed \(upstream 500 from the model\)\. Carry on from where it stopped\./);
+    assert.equal(world.updates.at(-1).continuation?.source, "goal");
+    assert.match(world.updates.at(-1).continuation?.message, /The last round failed \(upstream 500 from the model\)\. Carry on from where it stopped\./);
+    assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /The last round failed/);
     assert.equal((await goalOf(third.workflow)).retry, null);
     third.workflow.dispose();
   } finally {
@@ -5570,7 +5575,7 @@ test("a goal waiting out a pause carries on after an app restart, is not judged 
 });
 
 test("a team's goal round continues on the chat's team; an achieved, failed or stopped goal stops, and there is no round limit", async () => {
-  const teamRun = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, team: { id: "team-1", revision: 7 }, nodes: [
+  const teamRun = (id, answer) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false, revision: 1, team: { id: "team-1", revision: 7 }, nodes: [
     { id: "lead", role: "planner", parents: [], state: "finished", receipt: { answer: "plan" } },
     { id: "rev", role: "reviewer", parents: ["lead"], state: "finished", receipt: { answer } }] });
   let { world, workflow, checks } = await goalChat();
@@ -5657,9 +5662,10 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
   assert.equal(resumed.goal.round, 11, "resume answers before the round is set up");
   let after = resumed.goal;
   for (let tick = 0; tick < 50 && after.round !== 12; tick += 1) { await goalSettle(); after = await goalOf(workflow); }
-  await goalSettle(() => /Stop hook feedback/.test(world.edits.at(-1)?.description ?? ""));
+  await goalSettle(() => /Stop hook feedback/.test(world.updates.at(-1)?.continuation?.message ?? ""));
   assert.equal(after.round, 12, "and the next round starts right after");
-  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
+  assert.match(world.updates.at(-1).continuation?.message, /Stop hook feedback:\n\[build green on CI\]: Two tests still fail\./, "with the last feedback");
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /Stop hook feedback/);
   await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "pause" });
   world.runs.push(teamRun("t5", "more"));
   const paused = world.updates.length;
@@ -5671,7 +5677,7 @@ test("a team's goal round continues on the chat's team; an achieved, failed or s
 });
 
 test("resuming a goal first judges the round nobody judged: one that ran while paused, or was stopped part-way", async () => {
-  const single = (id, answer, extra = {}) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  const single = (id, answer, extra = {}) => ({ id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer } }], ...extra });
   // Paused mid-round; the round then finished with the goal met. Resume finds that out, starts nothing.
   let { world, workflow, checks } = await goalChat();
@@ -5696,13 +5702,15 @@ test("resuming a goal first judges the round nobody judged: one that ran while p
   before = world.updates.length;
   resumed = await workflow.call("chat_goal", { workspaceId: "ws-1", taskId: "task-1", action: "resume" });
   assert.equal(resumed.goal.status, "active");
-  await goalSettle(() => world.updates.length > before && /Stop hook feedback/.test(world.edits.at(-1)?.description ?? ""));
+  await goalSettle(() => world.updates.length > before && /Stop hook feedback/.test(world.updates.at(-1)?.continuation?.message ?? ""));
   assert.equal(checks.length, 1);
   const going = await goalOf(workflow);
   assert.equal(going.status, "active");
   assert.equal(going.round, 2);
   assert.equal(world.updates.length, before + 1, "the next round started");
-  assert.match(world.edits.at(-1).description, /Stop hook feedback:\n\[build green\]: Two tests still fail\./);
+  assert.equal(world.updates.at(-1).continuation?.source, "manual");
+  assert.match(world.updates.at(-1).continuation?.message, /Stop hook feedback:\n\[build green\]: Two tests still fail\./);
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /Stop hook feedback/);
   assert.equal(going.feedback, "Two tests still fail.", "the reason it goes on stays readable while the round runs");
 });
 
@@ -5744,7 +5752,7 @@ test("a team round's evaluator reads every card's answer, named by its card, wit
 function wakeChat({ goal = false, hold = false, loopsFile = null, schedulesFile = null } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
   const world = chatWorld({ tasks: [{ id: "task-1", title: "Ship", description: "watch CI", state: "in_progress", clauses: [] }], runs: [
-    { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
       nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { thread_id: "sess-1", answer: goal ? "GOAL: CONTINUE" : "Waiting on CI." } }] }] });
   const clock = { at: 1_000_000 };
   const timers = new Map();
@@ -5786,7 +5794,9 @@ test("a command watch actually starts its next turn after the final answer, on t
   assert.equal(await delivered, "delivered");
   assert.equal(world.updates.length, before + 1, "a real run was created, not just a notification string");
   assert.deepEqual(world.updates.at(-1).single_route, route);
-  assert.match(world.edits.at(-1).description, /registered background command watch ended[\s\S]*verify CI and finish delivery[\s\S]*Continue that pending next step now/);
+  assert.equal(world.updates.at(-1).continuation?.source, "watch");
+  assert.match(world.updates.at(-1).continuation?.message, /registered background command watch ended[\s\S]*verify CI and finish delivery[\s\S]*Continue that pending next step now/);
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /registered background command watch/);
   await advance(60_000);
   assert.equal(world.updates.length, before + 1, "completion is delivered only once");
 });
@@ -6097,7 +6107,9 @@ test("a wake-up sends the chat the agent's note after its minutes, on the same S
   await advance(60_000);
   assert.equal(world.updates.length, before + 1, "one follow-up turn");
   assert.deepEqual(world.updates.at(-1).single_route, route, "the same Single model, so the agent's session continues");
-  assert.match(world.edits.at(-1).description, /Wake-up: 10 minutes ago you asked to be woken[\s\S]*Your note: see whether CI run 42 passed[\s\S]*schedule_wakeup again/);
+  assert.equal(world.updates.at(-1).continuation?.source, "wake");
+  assert.match(world.updates.at(-1).continuation?.message, /Wake-up: 10 minutes ago you asked to be woken[\s\S]*Your note: see whether CI run 42 passed[\s\S]*schedule_wakeup again/);
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /Wake-up:/);
   assert.equal(await wakeupOf(workflow), undefined, "it is spent");
 });
 
@@ -6138,7 +6150,9 @@ test("the user edits a wake-up's note and minutes: it fires on the new clock wit
   const before = world.updates.length;
   await advance(2 * 60_000);
   assert.equal(world.updates.length, before + 1, "the old 30-minute timer is gone; the new one fired");
-  assert.match(world.edits.at(-1).description, /Your note: check the deploy logs/);
+  assert.equal(world.updates.at(-1).continuation?.source, "wake");
+  assert.match(world.updates.at(-1).continuation?.message, /Your note: check the deploy logs/);
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /check the deploy logs/);
   await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id, minutes: 5 }), /already fired/);
   await assert.rejects(workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "snooze", id }), /edit or cancel/);
 });
@@ -6168,7 +6182,9 @@ for (const change of ["cancel", "postpone", "replace", "dispose"]) {
     if (change === "postpone" || change === "replace") {
       await advance(2 * 60_000);
       assert.equal(world.updates.length, before + 1, "the current wake-up still fires once at its own time");
-      assert.match(world.edits.at(-1).description, /Your note: new note/);
+      assert.equal(world.updates.at(-1).continuation?.source, "wake");
+      assert.match(world.updates.at(-1).continuation?.message, /Your note: new note/);
+      assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /new note/);
     }
   });
 }
@@ -6209,7 +6225,9 @@ test("a replacement wake-up whose timer fired during an older read is rearmed af
   await settle();
   await advance(1);
   assert.equal(world.updates.length, before + 1);
-  assert.match(world.edits.at(-1).description, /Your note: replacement note/, "only the current wake-up sends");
+  assert.equal(world.updates.at(-1).continuation?.source, "wake");
+  assert.match(world.updates.at(-1).continuation?.message, /Your note: replacement note/, "only the current wake-up sends");
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /replacement note/);
   await advance(60_000);
   assert.equal(world.updates.length, before + 1, "it is sent once");
 });
@@ -6219,7 +6237,7 @@ test("a goal waits for its agent's wake-up instead of starting the next round at
   const route = world.runs[0].nodes[0].route;
   await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "ship", goal: "ship", executionMode: "single", singleRoute: route });
   // The goal's first round is the chat's newest run; its agent asks to be woken, then the round settles.
-  const round = { id: "g1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  const round = { id: "g1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "finished", route, receipt: { thread_id: "sess-1", answer: "GOAL: CONTINUE — CI runs" } }] };
   world.runs.push(round);
   await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 3, reason: "CI result" });
@@ -6228,7 +6246,9 @@ test("a goal waits for its agent's wake-up instead of starting the next round at
   assert.equal(world.updates.length, before, "no new round while the agent sleeps");
   await advance(3 * 60_000);
   assert.equal(world.updates.length, before + 1, "the wake-up continues the chat");
-  assert.match(world.edits.at(-1).description, /Your note: CI result/);
+  assert.equal(world.updates.at(-1).continuation?.source, "wake");
+  assert.match(world.updates.at(-1).continuation?.message, /Your note: CI result/);
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /CI result/);
 });
 
 // ---- /loop ----
@@ -6243,13 +6263,15 @@ test("/loop on an interval sends its prompt now and every interval, waits out a 
   assert.equal(started.loop.round, 1);
   assert.equal(world.updates.length, before + 1, "the first round runs now");
   assert.deepEqual(world.updates.at(-1).single_route, route, "on the chat's own Single model");
-  assert.match(world.edits.at(-1).description, /\ncheck the deploy$/, "the prompt as it is, as Claude Code sends it");
+  assert.equal(world.updates.at(-1).continuation?.source, "loop");
+  assert.match(world.updates.at(-1).continuation?.message, /check the deploy$/, "the prompt as it is, as Claude Code sends it");
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /check the deploy/);
   await advance(4 * 60_000);
   assert.equal(world.updates.length, before + 1, "nothing before the interval");
   await advance(60_000);
   assert.equal(world.updates.length, before + 2, "the next round, five minutes on");
   // A turn the user started meanwhile holds the next round until it settles, and does not end the loop.
-  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "running", route }] });
   await advance(5 * 60_000);
   assert.equal(world.updates.length, before + 2, "held while the chat works");
@@ -6269,15 +6291,18 @@ test("a self-paced /loop goes on whenever its agent schedules a wake-up and ends
   const before = world.updates.length;
   await workflow.call("chat_loop", { workspaceId: "ws-1", taskId: "task-1", action: "start", prompt: "watch CI and fix what fails", minutes: null });
   assert.equal(world.updates.length, before + 1, "the first round runs now");
-  assert.match(world.edits.at(-1).description, /watch CI and fix what fails\n\nThis is a self-paced \/loop\. [\s\S]*call schedule_wakeup[\s\S]*To end the loop/);
+  assert.equal(world.updates.at(-1).continuation?.source, "loop");
+  assert.match(world.updates.at(-1).continuation?.message, /watch CI and fix what fails\n\nThis is a self-paced \/loop\. [\s\S]*call schedule_wakeup[\s\S]*To end the loop/);
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /watch CI and fix what fails/);
   // The round's agent (session sess-1 holds r1, the chat's newest run here) asks for its next round.
   await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 7, reason: "CI run 42" });
   assert.equal((await wakeupOf(workflow)).loop, true, "this wake-up paces the loop");
   // A message the user sent meanwhile does not drop the loop's next round, as it would a plain wake-up.
-  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, nodes: [] });
+  world.runs.push({ id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1, nodes: [] });
   await advance(7 * 60_000);
   assert.equal(world.updates.length, before + 2, "the loop's next round");
-  assert.match(world.edits.at(-1).description, /watch CI and fix what fails\n\n\(Your note from the last round: CI run 42\)\n\nThis is a self-paced \/loop/);
+  assert.equal(world.updates.at(-1).continuation?.source, "loop");
+  assert.match(world.updates.at(-1).continuation?.message, /watch CI and fix what fails\n\n\(Your note from the last round: CI run 42\)\n\nThis is a self-paced \/loop/);
   const loop = await loopOf(workflow);
   assert.equal(loop.round, 2);
   // That round settles without a wake-up: the loop ends.
@@ -6328,7 +6353,9 @@ test("a self-paced round that fails to start stays due and is retried, and is re
   assert.match(pending.note, /could not start \(board unavailable\)/);
   await advance(60_000);
   assert.equal(world.updates.length, before + 1, "retried a minute later");
-  assert.match(world.edits.at(-1).description, /\(Your note from the last round: CI run 42\)/, "with the agent's note");
+  assert.equal(world.updates.at(-1).continuation?.source, "loop");
+  assert.match(world.updates.at(-1).continuation?.message, /\(Your note from the last round: CI run 42\)/, "with the agent's note");
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /CI run 42/);
   assert.equal((await loopOf(workflow)).round, 2);
 
   // A due self-paced round saved before a restart runs shortly after the app is back.
@@ -6393,7 +6420,7 @@ test("/schedule continues the chat at its time, waits out a working turn the per
   await advance(5 * HOUR - 60_000);
   assert.equal(world.updates.length, before, "nothing before its time");
   // A turn the person started meanwhile does not cancel the schedule: it holds the send until that turn settles.
-  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+  world.runs.push({ id: "busy", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
     nodes: [{ id: "one", role: "planner", parents: [], state: "running", route }] });
   await advance(60_000);
   assert.equal(world.updates.length, before, "held while the chat works");
@@ -6402,7 +6429,9 @@ test("/schedule continues the chat at its time, waits out a working turn the per
   await workflow.chatScheduleAfterRun("ws-1");
   assert.equal(world.updates.length, before + 1, "sent once the turn settled");
   assert.deepEqual(world.updates.at(-1).single_route, route, "on the chat's own Single model");
-  assert.match(world.edits.at(-1).description, /\nContinue\. \(Scheduled 5h ago: check what has changed/);
+  assert.equal(world.updates.at(-1).continuation?.source, "schedule");
+  assert.match(world.updates.at(-1).continuation?.message, /Continue\. \(Scheduled 5h ago: check what has changed/);
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /Scheduled 5h ago/);
   assert.equal(await scheduleOf(workflow), undefined, "a sent schedule is gone");
   await advance(24 * HOUR);
   assert.equal(world.updates.length, before + 1, "and it sends once");
@@ -6421,7 +6450,9 @@ test("a schedule sends the person's own words; /clearschedule deletes only the s
   assert.equal(world.updates.length, before, "the replaced schedule sends nothing");
   await advance(HOUR);
   assert.equal(world.updates.length, before + 1);
-  assert.ok(world.edits.at(-1).description.includes("check the overnight build"), "the person's own words are sent");
+  assert.equal(world.updates.at(-1).continuation?.source, "schedule");
+  assert.ok(world.updates.at(-1).continuation?.message.includes("check the overnight build"), "the person's own words are sent");
+  assert.doesNotMatch(world.edits.at(-1)?.description ?? "", /check the overnight build/);
 
   const third = await call({ action: "set", dueAt: clock.at + HOUR, message: "", spec: "1h" });
   assert.equal((await call({ action: "clear", id: "another-id" })).cleared, false, "only the schedule named is deleted");

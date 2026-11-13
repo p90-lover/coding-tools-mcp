@@ -801,6 +801,7 @@ enum AoMutation {
         #[serde(default)] team_id: Option<String>,
         #[serde(default)] execution_mode: Option<integrations::ao::ExecutionMode>,
         #[serde(default)] single_route: Option<Box<integrations::ao::Route>>,
+        #[serde(default)] continuation: Option<integrations::ao::Continuation>,
     },
     Create {
         expected_board_revision: u64,
@@ -6646,9 +6647,9 @@ async fn ao_update(
         let mut result = coding_tools_core::data::DataStore::update_file(|data| match body.change {
             AoMutation::Lifecycle { change } => integrations::ao_lifecycle::apply_change(data, &workspace_id, change, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(0)),
             AoMutation::MoveChat { task_id, target_workspace_id, expected_board_revision } => integrations::ao_lifecycle::move_chat(data, &workspace_id, &target_workspace_id, &task_id, expected_board_revision, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(0)),
-            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, execution_mode, single_route, worker_limit } =>
+            AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, execution_mode, single_route, worker_limit, continuation } =>
                 integrations::ao_team::create_selected_run(data, &workspace_id, run_id, task_id, expected_board_revision, worker_limit,
-                    integrations::ao_team::CreateSelection { execution_mode, team_id, team_revision, single_route: single_route.map(|route| *route) })
+                    integrations::ao_team::CreateSelection { execution_mode, team_id, team_revision, single_route: single_route.map(|route| *route), continuation })
                     .map(|run| json!({"ok":true,"run":run})),
             AoMutation::SaveTeam { expected_revision, team } => integrations::ao_team::save(data, &workspace_id, expected_revision, team)
                 .map(|team| json!({"ok":true,"team":team})),
