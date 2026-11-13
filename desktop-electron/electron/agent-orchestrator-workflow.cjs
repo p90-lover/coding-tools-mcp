@@ -471,7 +471,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Messages waiting for their chat's turn, and steers waiting to be read (chat-queue.cjs).
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
-  const chatEdits = createChatEditStore({ file: chatEditsFile, logger });
+  const chatEdits = createChatEditStore({ file: chatEditsFile });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
   const archive = createChatArchiveStore({ file: archiveFile, now });
   // Points per model from finished Team rounds, for the model picker (model-scores.cjs).
@@ -6489,11 +6489,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         followUp = { before: saidBefore, description };
       });
       if (rewind) {
-        // The save runs off the main thread; a failed one withdraws the follow-up and puts the edits back.
-        try { await chatEdits.deleteMessage(id, task, discarded); }
+        try { chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
           await withdrawFollowUp(id, task, runsBefore, followUp);
-          await chatEdits.restore(id, task, rewindBefore).catch(() => undefined);
+          chatEdits.restore(id, task, rewindBefore);
           throw error;
         }
       }
@@ -8451,13 +8450,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
       const before = chatEdits.get(id, task);
       try {
-        // Saved (off the main thread) before the record changes: a delete that can't be saved is refused.
-        await chatEdits.deleteMessage(id, task, hidden);
+        chatEdits.deleteMessage(id, task, hidden);
         await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
       } catch (error) {
-        // Restore changes memory at once, then saves. A second persistence failure must not
+        // Restore changes memory before persisting. A second persistence failure must not
         // replace the original error or leave this failed delete hidden in memory.
-        await chatEdits.restore(id, task, before).catch(() => undefined);
+        try { chatEdits.restore(id, task, before); } catch {}
         throw error;
       }
       return { ok: true, taskId: task, index, runIds: hidden };
