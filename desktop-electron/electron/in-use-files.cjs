@@ -5,11 +5,35 @@
 // a running image but does allow renaming it: the running agent keeps its mapped copy under the
 // new name, and the installer writes the new version at the original path. Leftovers are deleted
 // on a later start, once nothing runs them.
+//
+// An app update (app-update-worker.cjs) keeps its old copies under the same `.old-<stamp>` names,
+// and its rollback puts them back. update.cjs copies this file on its own for the installer's
+// worker, so it names the update's files here rather than requiring that module.
 const fs = require("node:fs");
 const path = require("node:path");
 
 const IMAGE = /\.(exe|dll|node)$/i;
 const SET_ASIDE = /\.old-\d+$/;
+const APP_UPDATE_JOURNAL = path.join("_update", "journal.json");
+const APP_UPDATE_MARKER = path.join("_update", "applying.json");
+
+/**
+ * Whether an app update owns `.old-<stamp>` copies in the install now: it is journaled (its rollback
+ * or commit still needs them), or its worker is alive and about to swap or swapping (the marker
+ * names it). Asynchronous: start-up's main thread asks.
+ */
+async function appUpdateInFlight(installRoot) {
+  if (await fs.promises.access(path.join(installRoot, APP_UPDATE_JOURNAL)).then(() => true, () => false)) return true;
+  let marker = null;
+  try { marker = JSON.parse(await fs.promises.readFile(path.join(installRoot, APP_UPDATE_MARKER), "utf8")); } catch {}
+  if (!Number.isInteger(marker?.pid)) return false;
+  try {
+    process.kill(marker.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
 
 function* images(root) {
   let entries;
@@ -50,7 +74,11 @@ function setAsideInUse(roots, { now = Date.now, log = () => {} } = {}) {
  * at every start, so it walks asynchronously: synchronously, the walk of acp-runtime's node_modules
  * held the main process (every window) 1.15 s on the busy hard disk (2026-10-30).
  */
-async function sweepSetAside(roots) {
+async function sweepSetAside(roots, { installRoot = null } = {}) {
+  // Not while an app update owns its old copies. On 2026-11-13 an app started during a swap deleted
+  // them here: the rollback then left ten files missing, ao-daemon.exe among them, and no chat
+  // could start.
+  if (installRoot && await appUpdateInFlight(installRoot)) return 0;
   let removed = 0;
   const walk = async (dir) => {
     let entries;
@@ -72,4 +100,4 @@ function agentRuntimeRoots(resourcesDir) {
   return [path.join(resourcesDir, "agent-orchestrator"), path.join(resourcesDir, "acp-runtime")];
 }
 
-module.exports = { setAsideInUse, sweepSetAside, agentRuntimeRoots, inUse };
+module.exports = { setAsideInUse, sweepSetAside, agentRuntimeRoots, appUpdateInFlight, inUse };

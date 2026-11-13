@@ -10,8 +10,6 @@ on:
         type: boolean
   pull_request:
     branches: [main]
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -45,15 +43,10 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
-          BEFORE: ${{ github.event.before }}
-          AFTER: ${{ github.sha }}
         run: |
           files=ALL
           if [ "$EVENT" = pull_request ]; then
             files=$(gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[].filename') || files=ALL
-          elif [ "$EVENT" = push ] && [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
-            # The compare API lists at most 300 files; a longer list runs everything.
-            files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq 'if (.files | length) >= 300 then "ALL" else .files[].filename end') || files=ALL
           fi
           [ -n "$files" ] || files=ALL
           # "true" unless every changed file matches the pattern of files that area never reads.

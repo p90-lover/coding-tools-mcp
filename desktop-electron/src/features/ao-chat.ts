@@ -765,6 +765,24 @@ function runStartedMs(run: ChatRun): number | undefined {
   return starts.length ? Math.min(...starts) : undefined;
 }
 
+/**
+ * How many of a chat's newest messages no run has taken yet: those sent, beyond doubt, after its newest
+ * run started (the message's whole minute began after that start). None while the newest run has not
+ * started, since that run is the newest message's. The first message has no stamp and is never counted.
+ */
+function sentSinceRuns(said: { stamp?: string }[], fresh: ChatRun[]): number {
+  const last = fresh.at(-1);
+  if (!last || runStartedMs(last) === undefined) return 0;
+  const newest = Math.max(...fresh.map(runStartedMs).filter((value): value is number => value !== undefined));
+  let count = 0;
+  for (let index = said.length - 1; index > 0; index -= 1) {
+    const stamp = stampMs(said[index].stamp);
+    if (stamp === undefined || stamp <= newest) break;
+    count += 1;
+  }
+  return count;
+}
+
 /** The user's messages in a chat, oldest first: the task description plus each follow-up. */
 export function chatMessagesFromDescription(description: string | undefined): { text: string; stamp?: string; steers?: ChatSteer[] }[] {
   const parts = (description ?? "").split(FOLLOW_UP);
@@ -1588,13 +1606,17 @@ export function chatTurns(runs: ChatRun[], description: string | undefined, opti
   // than runs.
   const MINUTE = 60_000;
   let messageIndex = 0;
-  let spare = said.length - runs.filter((run) => !run.restarts_run_id && !run.replaces_run_id).length;
+  const fresh = runs.filter((run) => !run.restarts_run_id && !run.replaces_run_id);
+  let spare = said.length - fresh.length;
   // A compacted chat (/compact, or a long chat compacting itself to send) keeps one summary in place of
   // its earlier messages but every run, so it has more runs than messages. Paired from the start, each
   // new message showed beside an old run far up the chat and the newest turn had none: the user's
   // "the message doesnt sent to chat" in goal chats, whose rounds fill the chat and compact it often.
-  // The oldest runs are the ones whose messages were summarized; they show without one.
-  let summarized = Math.max(0, -spare);
+  // The oldest runs are the ones whose messages were summarized; they show without one. A message
+  // sent after every run had started has no run yet and stays out of that count: counted in, it took
+  // the run before it, so a chat that compacted itself to send showed its new message answered by the
+  // previous reply ("Worked for 14m 30s" a minute after it was sent, 2026-11-14) until its run started.
+  let summarized = Math.max(0, fresh.length - (said.length - sentSinceRuns(said, fresh)));
   const turns: ChatTurn[] = [];
   for (const run of runs) {
     let index = -1;

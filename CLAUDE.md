@@ -11,11 +11,11 @@
 
 ## Delivery
 
-Follow the **Delivery** section of `AGENTS.md` for every change in this repository. Read it before you finish a task. In short: every change goes in a PR against `main` (never push to `main`); merge it once checks pass; plugin repositories do the same in their own repository; then release a new version (a `release: 0.8.x` bump PR, then `gh workflow run electron-windows-release.yml --ref main -f publish=true`, unless a release is already under way).
+Follow **GitHub delivery** and **Delivery** in `AGENTS.md`. Keep verified task commits on a reusable branch and join the release owner's batch: one coordinated PR against `main` includes the ready changes, version bump and notes. Do not create a separate PR/build for each small task or follow-up. After required checks pass and the batch merges, the owner dispatches `gh workflow run electron-windows-release.yml --ref main -f publish=true` once. Package on GitHub; do not fall back to a local installer build unless the user explicitly asks. Never start a competing release. Use the coordinated PR, except for `AGENTS.md`'s explicitly authorized unavailable-PR fallback; do not otherwise push directly to `main`.
 
-## Required delivery: PR, merge, build and release
+## Required delivery: batch, merge and publish
 
-Read and follow `AGENTS.md`, especially **GitHub delivery** and **Delivery: every change ships as a release**. The user has standing authorization for verified task-scoped commits, pushes, PRs, merges and a new published build; do not stop at an open PR or queued build and make them ask again. Coordinate one release owner, preserve explicit opt-outs and verification/permission boundaries, and report real blockers truthfully. Docs-only changes need no redundant installer; installing, patching or restarting the running app still needs the user's separate request.
+Read and follow `AGENTS.md`, especially **GitHub delivery** and **Delivery: every change ships as a release**. The user has standing authorization for verified commits, pushes, a coordinated batch PR, merges and a published build. Deliver the task through its shared release rather than opening one PR and installer build per task. Preserve explicit opt-outs, failed gates and permission boundaries; report actual blockers. Docs/instructions/CI-only changes need no redundant installer. Installing, patching or restarting the running app still needs the user's separate request.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence

@@ -140,7 +140,16 @@ async function swapIn(job, stamp) {
     return journal;
   } catch (error) {
     const failed = [];
+    const kept = [];
     for (const entry of journal.reverse()) {
+      // A placed file whose old copy has gone stays: moved back to the stage, it would leave its path
+      // empty. On 2026-11-13 the old copies of ten files were deleted under a swap (an app started
+      // during it swept them), and this put the new ones back, leaving ao-daemon.exe missing.
+      if (entry.placed && entry.aside && !fs.existsSync(entry.aside)) {
+        kept.push(entry.rel);
+        appendLog(job, `kept the new ${entry.rel}: its old copy is missing`);
+        continue;
+      }
       try {
         // With the same retries as the swap: a restore refused once (antivirus scanning the file
         // just renamed) left a new app.asar beside the old runtime, or a file missing.
@@ -151,11 +160,13 @@ async function swapIn(job, stamp) {
         appendLog(job, `could not restore ${entry.rel}: ${rollback?.code || rollback}`);
       }
     }
+    const note = kept.length ? `; old copies missing, new files kept: ${kept.join(", ")}` : "";
     if (failed.length) {
-      const incomplete = new Error(`${error?.message || error}; rollback incomplete: ${failed.join("; ")}`, { cause: error });
+      const incomplete = new Error(`${error?.message || error}${note}; rollback incomplete: ${failed.join("; ")}`, { cause: error });
       incomplete.rollbackFailures = failed;
       throw incomplete;
     }
+    if (note) throw new Error(`${error?.message || error}${note}`, { cause: error });
     throw error;
   }
 }
@@ -227,8 +238,10 @@ function createJournal(job, jobPath, stamp) {
   return {
     schema: 1, state: "swapping", version: job.version, stamp, at: Date.now(), attempts: 0, launches: 0,
     installRoot: job.installRoot, stageRoot: job.stageRoot, filesRoot: job.filesRoot, executable: job.executable, jobPath,
+    // `replaced`: an old file stood there, so its old copy is what a rollback puts back.
     changed: swapOrder(job.changed).map((rel) => ({
       rel, size: expected.get(rel)?.size ?? null, sha256: expected.get(rel)?.sha256 ?? null,
+      replaced: isFile(target(job, rel)),
     })),
     obsolete: [...job.obsolete],
   };
@@ -325,6 +338,8 @@ async function rollBack(journal, hash = hashFile) {
       if (fs.existsSync(aside)) {
         if (fs.existsSync(destination)) await moveToStage(destination, staged);
         await renameWithRetry(aside, destination);
+      } else if (file.replaced) {
+        // Its old copy has gone: the new file stays rather than leave the path empty (see swapIn).
       } else if (file.sha256 && !isFile(staged) && await matches(destination, file, hash)) {
         // A file this update added (nothing stood there before) goes back to the stage.
         await moveToStage(destination, staged);
@@ -399,9 +414,17 @@ async function applyJob(jobPath) {
 
 async function applyStaged(job, jobPath) {
   appendLog(job, `waiting for the app (PID ${job.parentPid}) to close before updating to v${job.version}`);
+  // While files are being swapped the app must not start from a half-updated install: a launch
+  // meanwhile waits for this marker to go (see waitForUpdateApply in app-update.cjs), and a marker
+  // whose worker died leads it to the journal. It goes down before the wait, not when the swap
+  // starts: on 2026-11-13 an app started from Explorer 5 s after the old one closed and before the
+  // swap began, so it did not wait, and its start-up sweep deleted the old copies the swap set aside.
+  const marker = updateFile(job.installRoot, MARKER);
+  try { writeJsonDurable(marker, { pid: process.pid, version: job.version, at: Date.now(), jobPath }); } catch {}
   if (!await waitForParent(job.parentPid)) {
     // Still running after PARENT_WAIT_MS: change nothing and start nothing (a second app would only
     // bring this one forward). The next start logs why the update did not happen.
+    try { fs.rmSync(marker, { force: true }); } catch {}
     recordResult(job.installRoot, {
       version: job.version, ok: false, stage: "wait", countFailure: false,
       message: `the app did not close within ${PARENT_WAIT_MS / 60_000} minutes; the update was not applied`,
@@ -412,16 +435,13 @@ async function applyStaged(job, jobPath) {
   const stamp = Date.now();
   const journalPath = updateFile(job.installRoot, JOURNAL);
   const journal = createJournal(job, jobPath, stamp);
-  // While files are being swapped the app must not start from a half-updated install: a launch
-  // meanwhile waits for this marker to go (see waitForUpdateApply in app-update.cjs), and a marker
-  // whose worker died leads it to the journal.
-  const marker = updateFile(job.installRoot, MARKER);
   try {
     writeJsonDurable(journalPath, journal);
   } catch (error) {
     // Unjournaled, a cut-off swap could not be repaired: the update waits for another try.
     recordResult(job.installRoot, { version: job.version, ok: false, stage: "apply", message: `could not write the update journal: ${error?.message || error}` });
     appendLog(job, `update not applied: could not write the update journal: ${errorText(error)}`);
+    try { fs.rmSync(marker, { force: true }); } catch {}
     launch(job.executable);
     try { fs.rmSync(job.stageRoot, { recursive: true, force: true }); } catch {}
     return;
@@ -467,9 +487,13 @@ async function applyStaged(job, jobPath) {
  */
 async function recoverJournal(journalPath, parentPid) {
   const journal = JSON.parse(fs.readFileSync(journalPath, "utf8"));
-  if (!await waitForParent(parentPid)) return;
+  // Down before the wait, as in applyStaged: an app started once the old one exits waits for this.
   const marker = updateFile(journal.installRoot, MARKER);
   try { writeJsonDurable(marker, { pid: process.pid, version: journal.version, at: Date.now(), journal: journalPath }); } catch {}
+  if (!await waitForParent(parentPid)) {
+    try { fs.rmSync(marker, { force: true }); } catch {}
+    return;
+  }
   let relaunch = false;
   try {
     // "restoring" was recorded as a failure by the app that could not start; a cut-off swap is
