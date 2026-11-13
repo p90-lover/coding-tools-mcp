@@ -1392,3 +1392,25 @@ test("a CPA model's spend comes from the accounts that served it: its exact id, 
   assert.deepEqual(servingAccounts(accounts, "cpa/claude-sonnet-5-5", "claude").map(row => row.id), ["anthropic-key"]);
   assert.equal(servingAccounts(accounts, "cpa/step-5-preview", null).length, 0);
 });
+
+test("two subagent avatars never share a gradient id, so one on a hidden chat page can't blank another", () => {
+  // #1252 named each avatar's gradient sa-0..27 by its look, so subagents with the same look shared an id. url(#sa-N)
+  // finds the FIRST element with that id, and ChatPages keeps visited pages mounted in <section hidden>: in Electron 41
+  // (2026-11-13) an avatar on chat page 2 drew blank when page 1's hidden one with the same look came first.
+  const view = load("chat-subagents.tsx", { "./ao-chat": chat, "./AgentOrchestratorRoleEditor": roles });
+  const avatar = (size) => React.createElement(view.SubagentAvatar, { seed: "sub-1", size });
+  const html = renderToStaticMarkup(React.createElement(React.Fragment, null,
+    React.createElement("section", { hidden: true }, avatar(24)), avatar(24), avatar(16)));
+  const svgs = html.match(/<svg[\s\S]*?<\/svg>/g);
+  assert.equal(svgs.length, 3);
+  const ids = svgs.map((svg) => svg.match(/<linearGradient id="([^"]+)"/)[1]);
+  assert.equal(new Set(ids).size, 3, `each avatar's gradient has its own id: ${ids.join(", ")}`);
+  svgs.forEach((svg, index) => {
+    const fills = [...svg.matchAll(/fill="url\(#([^)]+)\)"/g)].map((match) => match[1]);
+    assert.ok(fills.length > 0 && fills.every((fill) => fill === ids[index]), `avatar ${index + 1} paints with its own gradient`);
+    assert.match(ids[index], /^[\w-]+$/, "an id that url(#...) finds as written");
+  });
+  // The look still comes from the seed alone: one subagent keeps its avatar everywhere.
+  const look = (svg) => svg.replace(/id="[^"]+"|url\(#[^)]+\)|width="\d+" height="\d+"/g, "");
+  assert.equal(new Set(svgs.map(look)).size, 1, "same tints and petals at every size");
+});
