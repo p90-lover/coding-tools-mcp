@@ -3609,6 +3609,8 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // The page state a failed Personal plugins wait left (connectorPageState) goes to the log only.
+      const logged = error?.pageState ? { pageState: error.pageState } : {};
       // An automatic setup that gave way (an account switch, the app left) did not fail: the account
       // keeps its connector state and the sync tries again later, with no error on screen. Neither did
       // one stopped for the person's own sign-in, logout or account removal (stopOperationFor).
@@ -3616,19 +3618,19 @@ function registerIpc({ logger, stateStore }) {
       if (stopped || automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
         publishOperation({ name: "mcp-connector-create", status: "cancelled",
           message: stopped && typeof assertAutomaticCurrent !== "function" ? failure.message : "MCP connector setup will continue later" });
-        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
+        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true, ...logged });
       }
       // The card's words can be a category ("ChatGPT verification is required…") for several steps;
       // the log keeps the setup's own (mcpConnectorFailureCause), or nothing said which step stopped.
       const setupCause = mcpConnectorFailureCause(error, failure);
       logger.warn("mcp.account_connect_failed", { automatic: typeof assertAutomaticCurrent === "function", code: failure.code,
-        ...(setupCause ? { setupCause } : {}) });
+        ...(setupCause ? { setupCause } : {}), ...logged });
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
       } catch {}
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
-      throw Object.assign(new Error(failure.message), { code: failure.code });
+      throw Object.assign(new Error(failure.message), { code: failure.code, ...logged });
     }
   };
   handle("launcher:mcp-create-connector", async (event, accountId) => {
