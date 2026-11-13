@@ -3,9 +3,11 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
-const { createRtk, powerShellHookFrom } = require("../electron/rtk.cjs");
+const { createRtk, powerShellHookFrom, codexPowerShellHookFrom } = require("../electron/rtk.cjs");
 
 const RTK = "C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Links\\rtk.exe";
+/** RTK's Codex hook on Windows: rtk named bare, in the PowerShell guard. */
+const CODEX_HOOK = codexPowerShellHookFrom("rtk hook codex");
 
 /** A fake rtk: --version answers `version`; rewrite answers from `rewrites` ({ command: [status, stdout] }). */
 function world({ version = "rtk 1.0.1", rewrites = {}, enabled = true, files = [RTK] } = {}) {
@@ -98,7 +100,7 @@ test("turned off while rtk is rewriting, the command runs as written", async () 
 
 test("on, Claude Code's hook and the agents' PATH point at the installed rtk", () => {
   const { rtk } = world();
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude`, CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom(`"${RTK}" hook claude`), CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude`, CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom(`"${RTK}" hook claude`), CODING_TOOLS_RTK_CODEX_HOOK: CODEX_HOOK,CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
 });
 
@@ -106,7 +108,7 @@ test("Codex's hook names rtk bare, the PATH's first rtk, and only an rtk with `h
   // Codex runs a hook with the turn's shell, PowerShell on Windows, where `"C:\...\rtk.exe" hook codex`
   // is a syntax error: every hook run exited 1 and nothing was rewritten (codex 0.164.0, 2026-11-09).
   // Named bare, it is the rtk at the front of the agents' PATH, the same one `rtk git status` then runs.
-  for (const [version, hook] of [["rtk 1.2.0", "rtk hook codex"], ["rtk 1.0.1", "rtk hook codex"], ["rtk 1.0.0", ""], ["rtk 0.50.0", ""]]) {
+  for (const [version, hook] of [["rtk 1.2.0", CODEX_HOOK], ["rtk 1.0.1", CODEX_HOOK], ["rtk 1.0.0", ""], ["rtk 0.50.0", ""]]) {
     const { rtk } = world({ version });
     assert.equal(rtk.codexHook(), hook, version);
     assert.equal(rtk.daemonEnvironment().CODING_TOOLS_RTK_CODEX_HOOK, hook, version);
@@ -115,6 +117,19 @@ test("Codex's hook names rtk bare, the PATH's first rtk, and only an rtk with `h
   }
   assert.equal(world({ enabled: false }).rtk.codexHook(), "", "off");
   assert.equal(world({ files: [] }).rtk.codexHook(), "", "missing");
+});
+
+test("Codex's hook drops rewrites PowerShell can't run on Windows only, as one plain line AO registers", () => {
+  // Codex on Windows runs the model's commands in PowerShell: "ls -Force" became "rtk ls -Force" and
+  // exited 1, and "tree -L 2" reached tree.com (codex 0.164.0 with rtk 1.2.0, 2026-11-12).
+  assert.ok(CODEX_HOOK.includes("$o=-join (rtk hook codex); $s=$LASTEXITCODE; "), CODEX_HOOK);
+  assert.equal(codexPowerShellHookFrom(""), "");
+  // AO registers a Codex hook only as one plain line of at most 1,024 characters.
+  assert.ok(CODEX_HOOK.length < 1024 && /^[ -~]+$/.test(CODEX_HOOK), CODEX_HOOK);
+  // Elsewhere Codex's shell is bash or zsh, where rtk's rewrites run as they are.
+  const rtk = createRtk({ getEnabled: () => true, platform: "linux", now: () => 0, env: { PATH: "/usr/local/bin" },
+    exists: (file) => path.basename(file) === "rtk", run: () => ({ status: 0, stdout: "rtk 1.2.0\n" }) });
+  assert.equal(rtk.codexHook(), "rtk hook codex");
 });
 
 test("rtk never tells an agent or the RTK page \"No hook installed\" while the app hooks each session", async () => {
@@ -197,7 +212,7 @@ test("AO's timed-out first RTK lookup stays asynchronous for its hook and PATH",
     release({ code: 0, stdout: "rtk 1.0.1\n" });
     await checking;
   }
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude', CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom('"' + RTK + '" hook claude'), CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude', CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom('"' + RTK + '" hook claude'), CODING_TOOLS_RTK_CODEX_HOOK: CODEX_HOOK,CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
   assert.equal(syncLookups, 0);
   assert.equal(installs, 0);
@@ -566,5 +581,63 @@ test("the PowerShell hook drops rtk's answer when it would run ls, tree, grep, w
     if (want.status === "not 2") assert.notEqual(got.status, 2, want.name);
     else assert.equal(got.status, want.status, want.name);
     assert.equal(got.stdout, want.stdout, want.name);
+  }
+});
+
+/** Windows PowerShell, which Codex runs hook commands with on Windows, or null. */
+function hookPowerShell() {
+  if (process.platform !== "win32") return null;
+  const file = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return require("node:fs").existsSync(file) ? file : null;
+}
+
+test("Codex's hook drops rtk's answer when it would run ls, tree, grep, wc or wget, and passes everything else through byte for byte (powershell)", { skip: hookPowerShell() ? false : "no Windows PowerShell" }, async () => {
+  const { spawn } = require("node:child_process");
+  const powershell = hookPowerShell();
+  // `hook` stands in for rtk: node printing rtk's answer, echoing stdin or exiting as rtk would. Each
+  // case runs as Codex runs a hook, `powershell.exe -NoProfile -Command <hook>` with the tool call on
+  // stdin, a few at a time: PowerShell is slow to start on a loaded machine.
+  const node = `& '${process.execPath.replace(/'/g, "''")}' -e`;
+  const printing = (text, status = 0) =>
+    `${node} 'process.stdout.write(Buffer.from(process.argv[1],process.argv[2]));process.exitCode=${status}' '${Buffer.from(text).toString("base64")}' base64`;
+  const answer = (command) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecisionReason: "RTK auto-rewrite", updatedInput: { command }, permissionDecision: "allow" } });
+  // PowerShell reads a program's output in the console's code page unless the hook switches it, which
+  // would hand Codex a mangled command.
+  const kept = ["rtk git status", "echo héllo 中文 ✓ && rtk git log -1", 'rtk git log --format="%h ls" -3', "rtk git ls-files", "rtk read ls.txt"];
+  const dropped = ["rtk ls -Force", "rtk git status; rtk ls -la", "rtk tree -L 2", "Set-Location x; rtk grep -n foo src", "rtk wc -l a.txt", "rtk wget https://example.test/a"];
+  const input = JSON.stringify({ tool_name: "Bash", tool_input: { command: "echo héllo 中文 && git status" } });
+  const cases = [
+    ...kept.map((command) => ({ name: command, hook: printing(answer(command)), status: 0, stdout: answer(command) })),
+    ...dropped.map((command) => ({ name: `${command} (runs as written)`, hook: printing(answer(command)), status: 0, stdout: "" })),
+    // rtk reads the tool call from stdin, and its exit status is the hook's.
+    { name: "stdin reaches rtk", hook: `${node} 'process.stdin.pipe(process.stdout)'`, stdin: input, status: 0, stdout: input },
+    { name: "rtk's exit status", hook: printing("{}", 3), status: 3, stdout: "{}" },
+    // A missing rtk never blocks the command, as exit 2 would.
+    { name: "missing rtk", hook: "rtk-no-such-program hook codex", status: "not 2", stdout: "" },
+  ];
+  const run = ({ hook, stdin = "{}" }) => new Promise((resolve) => {
+    const child = spawn(powershell, ["-NoProfile", "-Command", codexPowerShellHookFrom(hook)], { windowsHide: true, timeout: 180_000 });
+    const out = [];
+    const err = [];
+    child.stdout.on("data", (chunk) => out.push(chunk));
+    child.stderr.on("data", (chunk) => err.push(chunk));
+    child.stdin.on("error", () => {});
+    child.on("error", (error) => resolve({ status: null, stdout: "", stderr: String(error) }));
+    child.on("close", (status) => resolve({ status, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") }));
+    child.stdin.end(stdin);
+  });
+  const results = [];
+  let next = 0;
+  await Promise.all(Array.from({ length: 4 }, async () => {
+    while (next < cases.length) {
+      const index = next++;
+      results[index] = await run(cases[index]);
+    }
+  }));
+  for (const [index, want] of cases.entries()) {
+    const got = results[index];
+    if (want.status === "not 2") assert.notEqual(got.status, 2, want.name);
+    else assert.equal(got.status, want.status, `${want.name}: ${got.stderr}`);
+    assert.equal(got.stdout, want.stdout, `${want.name}: ${got.stderr}`);
   }
 });

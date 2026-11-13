@@ -36,7 +36,7 @@ const ALLOWED = {
   // CPA's own wrapper process (cpa-managed.cjs run/refresh), never on Electron main, which only asks
   // helperPricesPath for a path.
   "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 54, "durable-state.cjs": 5, "external-services.cjs": 27,
-  "extra-tunnels.cjs": 5, "gpt-browser.cjs": 1, "gui-update.cjs": 12, "headless-host.cjs": 11, "in-use-files.cjs": 4,
+  "extra-tunnels.cjs": 5, "gui-update.cjs": 12, "headless-host.cjs": 11, "in-use-files.cjs": 4,
   "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1,
   // +1: the off-system-drive temporary folder is made once at startup, before any window or child
   // exists (system-drive.cjs): Chromium's helpers read TEMP as they start.

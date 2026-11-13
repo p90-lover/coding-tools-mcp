@@ -22,7 +22,9 @@ function slice(startText, close) {
   return source.slice(start, match.index + match[0].length);
 }
 
-const HANDLER = slice('  handle("launcher:update-install",', /\r?\n {2}\}\);\r?\n/g);
+// The handler is one line since 2026-11-13; the install it runs is installAppUpdate (also App plugins').
+const HANDLER = slice('  handle("launcher:update-install",', /\);\r?\n/g);
+const INSTALL = slice("function installAppUpdate()", /\r?\n\}\r?\n/g);
 const PREPARE = slice("async function prepareBrowserForUpdate()", /\r?\n\}\r?\n/g);
 
 function harness({ install = async ({ beforeAppInstall }) => { await beforeAppInstall(); return true; } } = {}) {
@@ -38,7 +40,7 @@ function harness({ install = async ({ beforeAppInstall }) => { await beforeAppIn
     updateController: { beginInstall: async (options) => { order.push("install"); return install(options, order); } },
     handle: (channel, fn) => { assert.equal(channel, "launcher:update-install"); handler = fn; },
   };
-  vm.runInNewContext(`${PREPARE}\n${HANDLER}`, context);
+  vm.runInNewContext(`${PREPARE}\n${INSTALL}\n${HANDLER}`, context);
   return { order, context, click: () => handler({}) };
 }
 

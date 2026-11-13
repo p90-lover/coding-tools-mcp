@@ -95,15 +95,18 @@ function readGithubCliToken({ execFile = require("node:child_process").execFile 
   });
 }
 
+/** A URL's lowercase host name, or "" when it doesn't parse. */
+function hostOf(url) {
+  try { return new URL(String(url ?? "")).hostname.toLowerCase(); } catch { return ""; }
+}
+
 /**
  * A GitHub MCP server with the GitHub CLI's sign-in as its Authorization header, so one click adds
  * it without a token to create and paste. Refused for any other host: the token is the person's
  * whole GitHub CLI login and goes only to GitHub.
  */
 async function withGithubCliToken(input, readToken = readGithubCliToken) {
-  let host = "";
-  try { host = new URL(String(input?.url ?? "")).hostname.toLowerCase(); } catch { /* checked below */ }
-  if (input?.type !== "http" || host !== GITHUB_MCP_HOST) throw fail("The GitHub CLI sign-in is used only for GitHub's MCP server");
+  if (input?.type !== "http" || hostOf(input?.url) !== GITHUB_MCP_HOST) throw fail("The GitHub CLI sign-in is used only for GitHub's MCP server");
   const token = await readToken();
   return { ...input, headers: { ...(input.headers ?? {}), Authorization: `Bearer ${token}` } };
 }
@@ -171,6 +174,16 @@ function createChatMcpServers({ filePath, logger = null }) {
   return Object.freeze({
     list,
     preload,
+    /**
+     * Whether `name` is the person's GitHub MCP server: an enabled http server at GitHub's own host
+     * (GITHUB_MCP_HOST). "Approve for me" lets its read tools run unreviewed (agent-orchestrator-
+     * workflow.cjs githubRead); a server merely named "github" that points elsewhere is not it.
+     */
+    isGithubServer(name) {
+      const wanted = String(name ?? "").toLowerCase();
+      return Boolean(wanted) && load().some((server) => server.enabled && server.type === "http"
+        && server.name.toLowerCase() === wanted && hostOf(server.url) === GITHUB_MCP_HOST);
+    },
     /** Resolves once every change so far is on disk; rejects when the last write failed. */
     async saved() {
       while (saving) await saving;

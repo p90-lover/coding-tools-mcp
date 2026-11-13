@@ -24,6 +24,37 @@ function shellZoomActionForInput(input, platform = process.platform) {
   return null;
 }
 
+/**
+ * What a key pressed on a Browser tab page asks for, as Chrome does it, or null to leave it to the
+ * page. The Browser tab used to hand every key to the page: F12 opened nothing, and Ctrl+R, Alt+Left
+ * or Ctrl+L did nothing (2026-11-13).
+ */
+function browserKeyActionForInput(input, platform = process.platform) {
+  if (input?.type !== "keyDown") return null;
+  const mac = platform === "darwin";
+  const primary = mac ? input.meta === true : input.control === true;
+  const shift = input.shift === true, alt = input.alt === true;
+  const key = String(input.key || "");
+  const letter = key.length === 1 ? key.toLowerCase() : "";
+  // Developer tools: F12, and Ctrl+Shift+I / J / C (Cmd+Option+I / J / C on macOS).
+  if (key === "F12" && !primary && !alt && !shift) return "devtools";
+  if (primary && (mac ? alt : shift && !alt) && ["i", "j", "c"].includes(letter)) return "devtools";
+  // Reload: F5 or Ctrl+R; Ctrl+F5, Shift+F5 or Ctrl+Shift+R reload without the cache.
+  if (key === "F5" && !alt) return primary || shift ? "hard-reload" : "reload";
+  if (primary && !alt && letter === "r") return shift ? "hard-reload" : "reload";
+  // Back and forward: Alt+Left / Alt+Right (Cmd+[ / Cmd+] on macOS) and the keyboards' own keys.
+  if ((alt && !primary && key === "ArrowLeft") || (mac && primary && key === "[") || key === "BrowserBack") return "back";
+  if ((alt && !primary && key === "ArrowRight") || (mac && primary && key === "]") || key === "BrowserForward") return "forward";
+  // The address bar: Ctrl+L, Alt+D, F6.
+  if ((primary && !alt && !shift && letter === "l") || (alt && !primary && letter === "d") || (key === "F6" && !primary && !alt)) {
+    return "focus-address";
+  }
+  // Tabs: Ctrl+T opens one; Ctrl+W or Ctrl+F4 closes the one shown.
+  if (primary && !alt && !shift && letter === "t") return "new-tab";
+  if (primary && !alt && !shift && (letter === "w" || key === "F4")) return "close-tab";
+  return null;
+}
+
 function constrainBrowserBounds(bounds, contentSize) {
   const contentWidth = Math.max(1, Math.round(contentSize?.width || 0));
   const contentHeight = Math.max(1, Math.round(contentSize?.height || 0));
@@ -81,12 +112,15 @@ function navigateBrowser(contents, action) {
     if (history.canGoForward()) history.goForward();
   } else if (action === "reload") {
     contents.reload();
+  } else if (action === "hard-reload") {
+    contents.reloadIgnoringCache();
   } else {
     throw new Error(`Unknown browser navigation action: ${action}`);
   }
 }
 
 module.exports = {
+  browserKeyActionForInput,
   browserViewVisible,
   constrainBrowserBounds,
   navigateBrowser,
