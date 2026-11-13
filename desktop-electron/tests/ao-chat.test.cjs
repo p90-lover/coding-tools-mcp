@@ -265,6 +265,34 @@ test("a compacted chat pairs its newest messages with its newest runs", () => {
   assert.deepEqual(restarted.slice(-2).map(turn => [turn.runId, turn.user?.text ?? null]), [["r5", "one more thing"], ["again", null]]);
 });
 
+test("a compacted chat's just-sent message waits for its own run instead of taking the reply before it", () => {
+  // Seen live 2026-11-14: a chat compacted itself to send "action reenabled" (16:17 UTC). Until that
+  // message's run started (16:19) the message showed answered by the run before it, "Worked for 14m 30s",
+  // a reply that had started at 15:44: counted from the newest end, the message had no run to pair with.
+  const at = (stamp) => Date.parse(`${stamp.replace(" ", "T")}:00Z`);
+  const answered = (id, started, finished) => run(id, "t", [node("p", "planner", "finished",
+    { receipt: { started_at_ms: started, finished_at_ms: finished, answer: id } })], { execution_mode: "single" });
+  const runs = ["r1", "r2", "r3"].map((id, index) => answered(id, at("2026-11-13 08:00") + index * 3_600_000, at("2026-11-13 08:30") + index * 3_600_000));
+  runs.push(answered("r4", at("2026-11-13 15:44") + 53_000, at("2026-11-13 15:59") + 24_000));
+  const summary = "Summary of the earlier conversation (compacted 2026-11-13 16:17 UTC):\nwhat happened so far";
+  const description = `${summary}\n\nFollow-up (2026-11-13 16:17 UTC):\naction reenabled`;
+  const waiting = plain(chat.chatTurns(runs, description));
+  assert.deepEqual(waiting.map(turn => [turn.key, turn.user?.text ?? null, turn.status]), [
+    ["r1", null, "done"], ["r2", null, "done"], ["r3", null, "done"],
+    ["r4", summary, "done"],
+    ["pending:1", "action reenabled", "queued"],
+  ]);
+  // Its run, once saved, answers it, whether its card has started yet or not; the summary stays put.
+  const saved = run("r5", "t", [node("p", "planner", "pending")], { execution_mode: "single" });
+  const started = run("r5", "t", [node("p", "planner", "running", { receipt: { started_at_ms: at("2026-11-13 16:19") + 25_000 } })], { execution_mode: "single" });
+  for (const newest of [saved, started]) {
+    assert.deepEqual(plain(chat.chatTurns([...runs, newest], description)).slice(-2).map(turn => [turn.key, turn.user?.text ?? null]),
+      [["r4", summary], ["r5", "action reenabled"]], `with its run ${newest.nodes[0].state}`);
+  }
+  // A compacted chat whose summary is its only message (nothing sent since) pairs as before.
+  assert.deepEqual(plain(chat.chatTurns(runs, summary)).map(turn => turn.user?.text ?? null), [null, null, null, summary]);
+});
+
 test("a chat's runs the project's newest-100 read dropped come back from the chat's own read", () => {
   // Seen live (2026-11-02): a goal chat on round 69 had 63 runs saved, but the project's read held
   // only its newest 26, so its earlier replies were gone; chats with none left in it showed no replies.
