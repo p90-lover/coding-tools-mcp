@@ -1834,7 +1834,7 @@ function outgoingSend() {
       composing.current = { taskId: "", cacheKey: scope(projectId), draft: message, snapshot: { text: message }, attachments, annotations };
       const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
         selectedTaskId: "", draft: message, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
-        setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+        setSending() {}, sendsInFlight: { current: 0 }, settleSavedDraft() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
         setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
         setOutgoing: set("outgoing"), setAnnotations() {},
         // A failed send the composer did not take back goes back to its own draft (recoverMessage).
@@ -1904,7 +1904,7 @@ test("a message the local service had no room for waits in its chat's queue; a n
     const composing = { current: { taskId, cacheKey: `scope-${taskId}`, draft: "also add tests", snapshot: { text: "also add tests" }, attachments, annotations } };
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: taskId, draft: state.draft, attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
-      setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: async () => { throw new Error(FULL); },
+      setSending() {}, sendsInFlight: { current: 0 }, settleSavedDraft() {}, steering: false, steer: undefined, carried: null, title: "", send: async () => { throw new Error(FULL); },
       sendRefusedForNow: chat.sendRefusedForNow, enqueue: async (task, item, front) => { queued.push([task, item.message, front]); },
       // The composer's own copy follows what is typed, as the component's effect keeps it.
       setDraft: next => { state.draft = next; composing.current = { ...composing.current, draft: next }; },
@@ -1940,7 +1940,7 @@ test("send completion preserves the next chat's draft and edits typed during the
     const state = { draft: "sent text" }, set = key => value => { state[key] = value; };
     const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
       selectedTaskId: "task-a", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
-      setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+      setSending() {}, sendsInFlight: { current: 0 }, settleSavedDraft() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
       setDraft: set("draft"), setTitle() {}, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
       // The message shows in the chat at once (setOutgoing) and leaves the composer before it is sent.
       setOutgoing() {}, setAnnotations() {},
@@ -1959,7 +1959,7 @@ test("a pending new-chat send keeps its real API identity and leaves the next pr
   const state = { draft: "sent text", title: "First project" };
   const deliver = rendererCallback("AgentOrchestratorChat.tsx", "deliver", {
     selectedTaskId: "", draft: "sent text", attachments, composing, alive: { current: true }, CHAT_DRAFTS: new Map(), CHAT_ATTACHMENTS: new Map(),
-    setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: input => { calls.push(input); return reply.promise; },
+    setSending() {}, sendsInFlight: { current: 0 }, settleSavedDraft() {}, steering: false, steer: undefined, carried: null, title: "", send: input => { calls.push(input); return reply.promise; },
     setDraft: value => { state.draft = value; }, setTitle: value => { state.title = value; }, setAttachments() {}, setAttachNote() {}, setAtBottom() {}, followBottom() {}, setCarried() {},
     setOutgoing() {}, setAnnotations() {},
   });
@@ -1985,7 +1985,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
   const draftEntry = rendererCallback("AgentOrchestratorChat.tsx", "draftEntry", maps);
   const giveBackToDraft = rendererCallback("AgentOrchestratorChat.tsx", "giveBackToDraft", { draftEntry, refusalText: rendererCallback("AgentOrchestratorChat.tsx", "refusalText", {}) });
   const helpers = { draftEntry, trimDraftEntry: rendererCallback("AgentOrchestratorChat.tsx", "trimDraftEntry", maps), giveBackToDraft };
-  const globals = () => ({ ...maps, ...helpers, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, attachments: state.attachments, annotations: state.annotations,
+  const globals = () => ({ ...maps, ...helpers, sendsInFlight: { current: 0 }, settleSavedDraft() {}, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, attachments: state.attachments, annotations: state.annotations,
     setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachmentWork() {}, setAttachNote() {}, setCard: set("card") });
   releaseDraft = rendererCallback("AgentOrchestratorChat.tsx", "releaseDraft", globals());
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8"), tree = ts.createSourceFile("Chat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -2017,7 +2017,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
     send() {
       const reply = delayedReply();
       const result = rendererCallback("AgentOrchestratorChat.tsx", "deliver", { ...globals(), selectedTaskId: state.taskId,
-        setSending() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
+        setSending() {}, sendsInFlight: { current: 0 }, settleSavedDraft() {}, steering: false, steer: undefined, carried: null, title: "", send: () => reply.promise,
         setTitle() {}, setAtBottom() {}, followBottom() {}, setCarried() {}, setOutgoing() {} })(state.draft);
       return { finish: () => { reply.resolve(); return result; } };
     },

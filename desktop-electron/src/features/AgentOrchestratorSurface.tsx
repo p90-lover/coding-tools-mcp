@@ -5,7 +5,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatQueueActions } from "./AgentOrchestratorChat";
+import { AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatDraftActions, type ChatQueueActions, type SavedChatDraft } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
@@ -2002,6 +2002,19 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     update: async (taskId, id, message) => (await queueCall(taskId, { action: "update", itemId: id, message })).updated === true,
     remove: async (taskId, ids) => { await queueCall(taskId, ids === null ? { action: "clear" } : { action: "remove", ids }); },
   };
+  // Each composer's unsent draft is saved by the app too (chat_draft), so a crash or restart keeps
+  // what was typed, attached and annotated, as Claude Code and Codex keep an unsent prompt.
+  const chatDrafts: ChatDraftActions = {
+    load: async (key) => {
+      if (!workspaceId) return null;
+      const result = await moduleCall("chat_draft", { workspaceId, key, action: "get" });
+      return result.draft && typeof result.draft === "object" ? result.draft as unknown as SavedChatDraft : null;
+    },
+    save: async (key, draft) => {
+      if (!workspaceId) return;
+      await moduleCall("chat_draft", { workspaceId, key, action: "set", draft: draft as unknown as JsonObject | null });
+    },
+  };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an
   // open chat whenever its agent cannot simply continue (the backend decides, and wakes one that was
@@ -3202,7 +3215,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} resizeAgent={resizeChatAgent} queue={chatQueue} commands={chatCommands}
+                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} resizeAgent={resizeChatAgent} queue={chatQueue} drafts={chatDrafts} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && composerMode === "team" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>
