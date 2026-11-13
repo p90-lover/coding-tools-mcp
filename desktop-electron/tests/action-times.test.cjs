@@ -172,8 +172,8 @@ test("the record stays bounded: oldest entries go first and each keeps its recen
 test("main times every page and every app-window request, and serves the record to Activity", () => {
   const main = read("electron", "main.cjs");
   assert.match(main, /app\.on\("web-contents-created", \(_event, contents\) => \{[^]*?watchPageTimes\(contents, \{ times: actionTimes, describe: describeTimedPartition \}\);\r?\n\}\);/);
-  // getGptBrowser is run in other tests' sandboxes: the host is kept by the hook, not by it.
-  assert.doesNotMatch(main.match(/function getGptBrowser\([^]*?\n}/)[0], /gptBrowserHost/);
+  // The GPT Browser host and its getter are gone (2026-11-13): nothing of it is left to time.
+  assert.doesNotMatch(main, /getGptBrowser|gptBrowserHost/);
   assert.match(main, /registerLoggedIpc\(ipcMain, logger, channel, timeIpcHandler\(actionTimes, channel, handler, \{ isAppWindow \}\)\);/);
   for (const channel of ["launcher:action-times", "launcher:action-times-clear", "launcher:action-time-tab"]) {
     assert.match(main, new RegExp(`handle\\("${channel}"`));

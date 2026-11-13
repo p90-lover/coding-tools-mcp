@@ -14,7 +14,7 @@ const {
 const { validateConnectorName } = require("./connector-identity.cjs");
 const { processRunning } = require("./process-tree.cjs");
 const { browserPartitionForLauncherProfile, isBrowserAccountPartition } = require("./profile.cjs");
-const { browsableUrl, cleanUserAgent } = require("./gpt-browser.cjs");
+const { browsableUrl, cleanUserAgent } = require("./browser-url.cjs");
 const { isCloudflareCheckPage } = require("./chatgpt-cloudflare-check.cjs");
 const { validatePasskeyLoginState } = require("./passkey-login-state.cjs");
 const {
@@ -23,6 +23,7 @@ const {
   sweepGapIndicatesSuspension,
 } = require("./turn-suspension.cjs");
 const {
+  browserKeyActionForInput,
   browserViewVisible,
   constrainBrowserBounds,
   navigateBrowser,
@@ -705,6 +706,8 @@ class BrowserHost {
     partition,
     profile = "production",
     publishState,
+    // A browser key the toolbar answers (Ctrl+L, Alt+D, F6: "focus-address"), sent to the renderer.
+    publishShortcut = null,
     showWindow = () => {},
     clipboardApi = clipboard,
     getBrowserInteractionMode = () => "automatic",
@@ -755,6 +758,7 @@ class BrowserHost {
     this.onConnectorObserved = onConnectorObserved;
     this.profile = profile;
     this.publishState = publishState;
+    this.publishShortcut = publishShortcut;
     this.showWindow = showWindow;
     this.clipboard = clipboardApi;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
@@ -1481,6 +1485,52 @@ class BrowserHost {
     contents.setZoomLevel(next);
   }
 
+  /**
+   * Chrome's keys on the Browser tab's pages (browserKeyActionForInput): developer tools, reload,
+   * back and forward, the address bar, new and close tab. A Codex turn's tab gets developer tools
+   * only: a reload or Back there would break its turn. `shown` says whether this page is the one
+   * on screen (the home page of a parked account is not).
+   */
+  bindBrowserKeys(contents, { turn = false, shown = () => true } = {}) {
+    if (!contents || contents.isDestroyed?.() || typeof contents.on !== "function") return;
+    contents.on("before-input-event", (event, input) => {
+      const action = browserKeyActionForInput(input);
+      if (!action || (turn && action !== "devtools") || !shown()) return;
+      event.preventDefault();
+      try {
+        this.runBrowserKey(contents, action);
+      } catch (error) {
+        this.logger.warn("browser.key_failed", { action, message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+  }
+
+  runBrowserKey(contents, action) {
+    if (contents.isDestroyed?.()) return;
+    if (action === "devtools") {
+      // In a window of their own: the pane is laid out by the app and has no room to dock them.
+      if (contents.isDevToolsOpened()) contents.closeDevTools();
+      else contents.openDevTools({ mode: "detach", activate: true });
+      return;
+    }
+    // The rest act on the page shown, as its toolbar does (and under the toolbar's own locks).
+    if (contents !== this.activeView()?.webContents) return;
+    if (action === "focus-address") {
+      // The key came from the page's own view: the app's page takes the keyboard back first.
+      const shell = this.window?.webContents;
+      if (shell && !shell.isDestroyed()) shell.focus();
+      this.publishShortcut?.("focus-address");
+    } else if (action === "new-tab") {
+      this.createUserTab();
+    } else if (action === "close-tab") {
+      void this.closeTab(this.selectedTabId).catch((error) => {
+        this.logger.warn("browser.key_failed", { action, message: error instanceof Error ? error.message : String(error) });
+      });
+    } else {
+      this.navigate(action);
+    }
+  }
+
   bindShellZoomShortcuts(contents) {
     if (!contents || contents.isDestroyed() || this.shellZoomShortcutBindings.has(contents)) return;
     const handler = (event, input) => {
@@ -1503,6 +1553,7 @@ class BrowserHost {
 
   bindTurnContents(tab) {
     const contents = tab.view.webContents;
+    this.bindBrowserKeys(contents, { turn: true });
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
         this.logger.warn("browser.turn_authentication_blocked", { tabId: tab.id, traceId: tab.traceId });
@@ -1656,6 +1707,7 @@ class BrowserHost {
     const publish = () => {
       if (this.userTabs.get(tab.id) === tab) this.publishState?.(this.snapshot());
     };
+    this.bindBrowserKeys(contents, { shown: () => this.userTabs.get(tab.id) === tab });
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
         if (this.externalLogin && browserInteractionModeFor(this) === "automatic") {
@@ -1819,6 +1871,7 @@ class BrowserHost {
     // A parked account's page keeps loading off screen; only the shown account's page sets state.
     const shown = () => this.view?.webContents === contents;
     const on = (event, handler) => contents.on(event, (...args) => { if (shown()) handler(...args); });
+    this.bindBrowserKeys(contents, { shown });
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
         if (this.externalLogin && browserInteractionModeFor(this) === "automatic") {

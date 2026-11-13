@@ -1,6 +1,6 @@
 "use strict";
 
-const { cleanUserAgent } = require("./gpt-browser.cjs");
+const { cleanUserAgent } = require("./browser-url.cjs");
 
 // Cloudflare's check in place of a ChatGPT page. The Browser tab's own pages (browser-host.cjs) and
 // the hidden windows that inspect accounts and set up MCP (chatgpt-workspace.cjs,

@@ -36,7 +36,6 @@ import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
 import { KeysmithSetupPanel } from "./features/KeysmithSetupPanel";
-import { GptBrowserDock } from "./features/GptBrowserDock";
 import { BrowserAccountSwitcher } from "./features/BrowserAccountSwitcher";
 import { BrowserAddressBar } from "./features/BrowserAddressBar";
 import { ChatGptBrowserManagement } from "./features/ChatGptBrowserManagement";
@@ -468,7 +467,6 @@ function LauncherShell({
   useTabRenderTiming(api, surface, tabSwitchStartedAt);
   // Tabs mount on first visit and then stay mounted while hidden, so switching back never reloads
   // them. The MCP wizard is left out: it seeds its step from how it was opened.
-  const [standaloneChatHost, setStandaloneChatHost] = useState<HTMLDivElement | null>(null);
   const [visitedSurfaces, setVisitedSurfaces] = useState<ReadonlySet<Surface>>(() => new Set([surface]));
   useEffect(() => {
     setVisitedSurfaces((current) => (current.has(surface) ? current : new Set(current).add(surface)));
@@ -912,14 +910,8 @@ function LauncherShell({
                   label={copy.browser}
                   onClick={() => navigateSurface("browser")}
                 />
-                {/* The GPT Browser is its own browser again (gpt-browser.cjs): pages you open and look at,
-                    one account at a time, apart from the pages the Codex bridge runs in the background. */}
-                <SidebarItem
-                  active={surface === "gpt-browser"}
-                  icon="globe"
-                  label="GPT Browser"
-                  onClick={() => navigateSurface("gpt-browser")}
-                />
+                {/* One browser (2026-11-13): the GPT Browser page is gone; Browser is the one you browse in,
+                    with its accounts, keys (F12, Ctrl+L, Ctrl+T...) and the pages the Codex bridge runs. */}
                 <SidebarItem
                   active={surface === "chatgpt-browser-management"}
                   icon="layers"
@@ -1076,11 +1068,6 @@ function LauncherShell({
                   codexRestartRequired: !devProfile && snapshot.state.codexRestartRequired === true }}
               />
             ))}
-            {keepAlive("gpt-browser", () => <div className="gpb-portal-host" ref={setStandaloneChatHost} />)}
-            {(surface === "gpt-browser" || visitedSurfaces.has("gpt-browser")) ? <GptBrowserDock
-              standaloneHost={standaloneChatHost} chatHost={null} inChat={false}
-              active={surface === "gpt-browser"} covered={browserCovered}
-              api={api!} setError={setError} /> : null}
             {keepAlive("chatgpt-desktop", () => (
               <ChatGptDesktopSurface
                 active={surface === "chatgpt-desktop" && !sidebarCovers && !biggerContextRecommendationOpen}
@@ -1427,6 +1414,11 @@ function BrowserSurface({
   setError: (error: string | null) => void;
 }) {
   const [passkeyContinuationRequested, setPasskeyContinuationRequested] = useState(false);
+  // Ctrl+L, Alt+D or F6 pressed on the page (browser-host bindBrowserKeys): the address bar takes the keys.
+  const [addressFocusRequests, setAddressFocusRequests] = useState(0);
+  useEffect(() => api?.onBrowserShortcut?.((action) => {
+    if (action === "focus-address") setAddressFocusRequests(count => count + 1);
+  }), []);
   const passkeyContinuationPending = passkeyContinuationRequested || chromeLoginContinuationPending(operation);
   const passkeyWaitingForClose = chromeLoginWaitingForClose(operation);
   const passkeyContinuationLabel = passkeyWaitingForClose ? copy.passkeyWaitingForClose
@@ -1544,6 +1536,7 @@ function BrowserSurface({
           // Typed addresses open in a tab of the person's own, never the home page or a Codex turn's tab.
           navigate={input => api!.openBrowserUrl(input.url)}
           setError={setError}
+          focusRequests={addressFocusRequests}
         />
         {browser?.loading ? <span className="gpb-muted">{copy.loading}</span> : null}
         <span className="gpb-nav gpb-zoom">
@@ -2773,7 +2766,8 @@ export function AppPluginsSurface({ active, setError }: { active: boolean; setEr
     }
   }, [setError]);
   useEffect(() => { if (active) void load(false); }, [active, load]);
-  const due = snapshot?.items.filter((item) => item.updateAvailable && item.canUpdate) ?? [];
+  // The browser engine's Update installs the whole app, so "Update all" leaves it to its own button.
+  const due = snapshot?.items.filter((item) => item.updateAvailable && item.canUpdate && item.id !== "browser-engine") ?? [];
   const update = async (item: AppPlugin) => {
     setUpdating(item.id);
     setOutcomes(({ [item.id]: _, ...rest }) => rest);
