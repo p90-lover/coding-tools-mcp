@@ -524,3 +524,62 @@ test("CPA's bundled Provider Manager replaces an older checked update with the p
     assert.deepEqual(fs.readdirSync(trash).map((name) => fs.readdirSync(path.join(trash, name))), [["cpa-provider-manager-v0.0.1.dll"]],
       "the older copy is kept in Trash");
   });
+
+// 2026-11-13: the Browser tab's engine is Chromium inside Electron, built into the app. Its row says
+// which one runs and whether npm has a newer one; Update installs the app update that brings it.
+test("the Browser engine row compares the app's Electron with npm's latest, and Update installs the app update", async () => {
+  const root = tempRoot("app-plugins-engine");
+  const stateDir = path.join(root, "cpa");
+  fs.mkdirSync(path.join(stateDir, "plugins", "windows", "amd64"), { recursive: true });
+  let latest = "45.2.2";
+  let npmStatus = 200;
+  let app = { status: "idle" };
+  const installs = [];
+  const fetchImpl = async (url) => {
+    if (String(url) === "https://registry.npmjs.org/-/package/electron/dist-tags") return json({ latest }, npmStatus);
+    return json({ message: "Not Found" }, 404);
+  };
+  const plugins = createAppPlugins({
+    cpaStateDir: stateDir, restartCpa: async () => {},
+    services: () => ({ managedComponentsSnapshot: () => ({ components: [] }), checkManagedComponentUpdate: async () => ({}) }),
+    fetchImpl, env: { GH_TOKEN: "ghp_testtoken0123456789abcdef" }, spawnImpl: () => { throw new Error("no gh"); },
+    platform: "win32", arch: "x64", logger: { info() {} }, pluginBundleFile: path.join(root, "BUNDLE.json"),
+    engineVersions: { electron: "45.2.2", chrome: "156.0.8078.80" },
+    appUpdates: () => ({ getState: () => app }),
+    installAppUpdate: async () => { installs.push(app.version); },
+  });
+  const engine = async () => (await plugins.list({ refresh: true })).items.find((item) => item.id === "browser-engine");
+
+  let row = await engine();
+  assert.deepEqual([row.kind, row.installed, row.latest, row.updateAvailable, row.canUpdate, row.autoUpdatable], ["service", "45.2.2", "45.2.2", false, false, false]);
+  assert.match(row.note, /Chromium 156\.0\.8078\.80 \(Electron 45\.2\.2\)/);
+
+  latest = "45.3.1";
+  row = await engine();
+  assert.deepEqual([row.updateAvailable, row.canUpdate, row.viaAppUpdate], [true, false, true]);
+  assert.match(row.note, /Electron 45\.3\.1 comes with a Coding Tools update/);
+  assert.equal(row.releaseUrl, "https://github.com/electron/electron/releases/tag/v45.3.1");
+  await assert.rejects(plugins.update("browser-engine"), /No Coding Tools update is out yet/);
+
+  app = { status: "available", version: "0.8.116" };
+  row = await engine();
+  assert.deepEqual([row.canUpdate, row.viaAppUpdate], [true, false]);
+  assert.match(row.note, /Update installs Coding Tools 0\.8\.116/);
+  const all = await plugins.updateAll();
+  assert.equal(all.results.some((result) => result.id === "browser-engine"), false, "Update all never restarts the whole app");
+  assert.deepEqual(installs, []);
+  await plugins.update("browser-engine");
+  assert.deepEqual(installs, ["0.8.116"]);
+
+  npmStatus = 503;
+  const failing = createAppPlugins({
+    cpaStateDir: stateDir, restartCpa: async () => {},
+    services: () => ({ managedComponentsSnapshot: () => ({ components: [] }), checkManagedComponentUpdate: async () => ({}) }),
+    fetchImpl, env: {}, spawnImpl: () => { throw new Error("no gh"); }, platform: "win32", arch: "x64", logger: { info() {} },
+    pluginBundleFile: path.join(root, "BUNDLE.json"), engineVersions: { electron: "45.2.2", chrome: "156.0.8078.80" },
+  });
+  row = (await failing.list({ refresh: true })).items.find((item) => item.id === "browser-engine");
+  assert.match(row.error, /npm returned HTTP 503/);
+  assert.equal(row.updateAvailable, false);
+  fs.rmSync(root, { recursive: true, force: true });
+});

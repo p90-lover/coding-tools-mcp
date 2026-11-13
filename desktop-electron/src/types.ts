@@ -2,7 +2,7 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "chatgpt-browser-management" | "gpt-browser" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "computer-use" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-browser-management" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "computer-use" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
 
 /** Plugins > MCPs (chat-mcp-servers.cjs): one of the person's own MCP servers for chat agents. */
 export interface McpServerEntry {
@@ -882,16 +882,11 @@ export interface RegisterStatus {
   pid?: number | null;
 }
 
+/** An account's name as the Browser tab lists it (once the GPT Browser's; it joined the Browser tab 2026-11-13). */
 export interface GptBrowserAccount {
   id: string;
   label: string;
   email: string | null;
-}
-
-export interface GptBrowserStatus {
-  accounts: GptBrowserAccount[];
-  activeId: string | null;
-  page: { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean } | null;
 }
 
 /** A Browser-tab account: its own sign-in, and optionally its own proxy (one proxy per account). */
@@ -1073,18 +1068,6 @@ export interface LauncherApi {
   setRegisterSurfaceActive(active: boolean): Promise<RegisterStatus>;
   setRegisterBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
   onRegisterChanged(listener: (status: RegisterStatus) => void): () => void;
-  gptBrowserStatus(): Promise<GptBrowserStatus>;
-  addGptBrowserAccount(): Promise<GptBrowserStatus>;
-  switchGptBrowserAccount(id: string): Promise<GptBrowserStatus>;
-  openGptBrowserUrl(url: string): Promise<GptBrowserStatus>;
-  navigateGptBrowser(action: "back" | "forward" | "reload" | "home"): Promise<GptBrowserStatus>;
-  renameGptBrowserAccount(id: string, label: string): Promise<GptBrowserStatus>;
-  removeGptBrowserAccount(id: string): Promise<GptBrowserStatus>;
-  setGptBrowserSurfaceActive(active: boolean): Promise<GptBrowserStatus>;
-  setGptBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
-  /** A JPEG data URL of the page in the window, or null: drawn in its place while the sidebar covers it. */
-  gptBrowserSnapshot(): Promise<string | null>;
-  onGptBrowserChanged(listener: (status: GptBrowserStatus) => void): () => void;
   /** AO pushed a change: session ids whose conversation or state moved, "<workspace>:<run>" run keys. */
   onAoChanged?(listener: (change: { sessions: string[]; runs: string[]; moved?: { from: string; to: string; taskId: string }[] }) => void): () => void;
   chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
@@ -1339,6 +1322,8 @@ export interface LauncherApi {
   onWindowStateChanged(listener: (state: { fullScreen: boolean; maximized: boolean }) => void): () => void;
   onStateChanged(listener: (state: LauncherState) => void): () => void;
   onBrowserState(listener: (state: BrowserState) => void): () => void;
+  /** A browser key the toolbar answers, pressed on a Browser tab page (Ctrl+L, Alt+D, F6). */
+  onBrowserShortcut?(listener: (action: "focus-address") => void): () => void;
   onOperation(listener: (state: OperationState) => void): () => void;
   onLog(listener: (record: LogRecord) => void): () => void;
   onUpdateState(listener: (state: UpdateState) => void): () => void;
