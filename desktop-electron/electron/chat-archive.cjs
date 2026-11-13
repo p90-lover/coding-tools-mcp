@@ -4,10 +4,12 @@
 // recoverable "deleted" state (still listed under Archived › Recently deleted, still restorable),
 // and after how many days without activity an open chat is archived (idleDays), so the project
 // list stops loading it. Nothing is erased. Kept in a small JSON file so it survives restarts; without one (tests) it
-// lives in memory.
+// lives in memory. A change is in memory at once and saved off the main thread (as chat-edits.cjs
+// and chat-goals.cjs are): archiving, restoring or listing chats no longer waits on the disk with
+// every window held.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 const DEFAULT_ARCHIVE_DAYS = 5;
 const DEFAULT_IDLE_DAYS = 7;
@@ -16,7 +18,7 @@ const DAY_MS = 86_400_000;
 
 const validDays = (days) => Number.isSafeInteger(days) && days >= 0 && days <= MAX_ARCHIVE_DAYS;
 
-function createChatArchiveStore({ file = null, now = Date.now } = {}) {
+function createChatArchiveStore({ file = null, now = Date.now, logger = null } = {}) {
   let state = { days: DEFAULT_ARCHIVE_DAYS, idleDays: DEFAULT_IDLE_DAYS, archived: {}, restored: {} };
   const record = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
   if (file) {
@@ -33,14 +35,23 @@ function createChatArchiveStore({ file = null, now = Date.now } = {}) {
     } catch { /* Nothing archived yet. */ }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  // One save at a time; changes made meanwhile go in one more save after it (a listing can date
+  // several archived chats in a row).
+  let saving = null;
+  let saveAgain = false;
   const persist = () => {
     if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(state, null, 2));
-    fs.renameSync(temporary, file);
+    if (saving) { saveAgain = true; return; }
+    saving = writePrivateFileAtomicAsync(file, JSON.stringify(state, null, 2), { durable: true, protectDirectory: false })
+      .catch((error) => logger?.warn?.("chat_archive.not_saved", { message: String(error?.message ?? error).slice(0, 200) }))
+      .finally(() => {
+        saving = null;
+        if (saveAgain) { saveAgain = false; persist(); }
+      });
   };
   return {
+    /** Resolves once every change so far is on disk, or has failed to get there (a caller about to exit, tests). */
+    async saved() { while (saving) await saving; },
     /** Days an archived chat stays archived; 0 keeps it there for good. */
     days: () => state.days,
     setDays(days) {

@@ -265,8 +265,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   // restart of the app forgot them: their sessions were left interrupted, and the chat that started
   // one could no longer read it ("No such subagent in this chat").
   const runsPath = statePath ? path.join(path.dirname(statePath), "subagent-runs.json") : null;
-  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "task", "startedAt", "endedAt",
-    "state", "report", "error", "turns", "turnId", "turnStartedAt", "recoveries", "released"];
+  // A field the views show must be here too, or a restart drops it (effort and harness did, 2026-11-13).
+  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "effort", "harness", "task",
+    "startedAt", "endedAt", "state", "report", "error", "turns", "turnId", "turnStartedAt", "recoveries", "released"];
   let runsSaving = Promise.resolve();
   let runsQueued = false;
   /** Saves the runs soon, once for a burst of changes, off the main thread. */
@@ -522,8 +523,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     run.recoveries = tries + 1;
     try {
       const sent = await service.send(run.id, RECOVER_NOTE, `subagent:${run.id}:recover:${run.recoveries}`);
+      // A resumed turn gets the whole time limit again, as a follow-up does (check).
       Object.assign(run, { turnId: sent?.turnId ?? run.turnId, state: "starting", released: false, misses: 0, recovering: null,
-        turns: (run.turns ?? 1) + 1 });
+        turns: (run.turns ?? 1) + 1, turnStartedAt: now() });
       logger?.info?.("subagents.recovered", { agent: run.agentId, try: run.recoveries });
       persist();
       return true;
@@ -537,8 +539,13 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   async function check(run) {
     if (!ACTIVE.has(run.state)) return;
     const service = harness();
-    // A follow-up turn gets the whole time limit again.
-    if (!run.stopping && now() - (run.turnStartedAt ?? run.startedAt) > read().settings.timeoutMinutes * 60_000) {
+    // A follow-up turn gets the whole time limit again. The clock stops while a subagent the app's
+    // restart brought back has not been read yet, and while one cut short waits to resume: it read
+    // from the start of the turn the restart cut short, so one 25 minutes into the default 30 was
+    // stopped as timed out on its first check after a 10-minute update, before it could resume
+    // (2026-11-13). A team is not resumed (recover), so its clock runs on.
+    const resuming = run.kind !== "team" && (run.restored || run.recoverAt);
+    if (!run.stopping && !resuming && now() - (run.turnStartedAt ?? run.startedAt) > read().settings.timeoutMinutes * 60_000) {
       run.stopState = "timed_out";
       run.error = `Stopped after ${read().settings.timeoutMinutes} minutes (the Subagents page's time limit); awaiting confirmed settlement`;
       await stop(run.id).catch(() => undefined);
@@ -569,7 +576,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       if (settled(observed)) await stop(run.id).catch(() => undefined);
       return;
     }
-    run.misses = 0;
+    // Read since the restart: a turn still under way keeps its time limit from here on.
+    Object.assign(run, { misses: 0, restored: false });
     const state = observed?.turnState;
     if (run.state === "starting" && state && state !== "queued") run.state = "running";
     if (observed?.exited && !TERMINAL_TURN.has(state)) {
@@ -768,8 +776,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!service) throw new Error("Agent Orchestrator is not running");
     const id = await service.spawn({ ...args, prompt, plain: true, subagent: true });
     // The effort it runs at is the one AO was given (launchArgs fits it to the model's levels), which
-    // the chat's subagent view shows beside the model, as Codex's does.
-    const effort = args.effort ?? route.effort ?? null;
+    // the chat's subagent view shows beside the model, as Codex's does: the spawn's effort, else the
+    // level in the CPA model's name (opencode and pi get it only there). Never the saved one: an
+    // effort that was fitted, or dropped (agy, a plugin's model, "auto"), is not what it ran at.
+    const named = String(args.gateway?.model ?? "").match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
+    const effort = args.effort ?? named ?? null;
     const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, model: route.model.replace(/^cpa\//, ""), task: brief,
       ...(typeof effort === "string" && effort ? { effort } : {}), harness: route.harness_id,
       startedAt: now(), endedAt: null, state: "starting", report: "", error: "", turns: 1 };

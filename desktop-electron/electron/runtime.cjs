@@ -22,6 +22,11 @@ const MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 const MAX_RUNTIME_LOG_LINE_CHARS = 64 * 1024;
 const CORE_SETUP_TIMEOUT_MS = 5 * 60_000;
 const MCP_SETUP_TIMEOUT_MS = 10 * 60_000;
+// Setup's validation run (`--preflight-only`) before anything changes: a cold start of the setup
+// CLI. Capped at 15 s, it was cut off while still working on the busy shared disk (seen live
+// 2026-11-13 00:11Z: an account switch's bridge refresh failed with it). Failing it changes nothing,
+// so a longer wait only delays a failure.
+const SETUP_PREFLIGHT_TIMEOUT_MS = 60_000;
 const UNINSTALL_TIMEOUT_MS = 2 * 60_000;
 // Reading or restoring Codex's route only edits its config, but on a busy machine took ~19 s.
 const ROUTE_COMMAND_TIMEOUT_MS = 60_000;
@@ -1615,7 +1620,7 @@ class RuntimeHost {
           ...options,
           message: "Validating Codex configuration before changing the runtime",
           successMessage: "Codex configuration is ready for setup",
-          timeoutMs: Math.min(options.timeoutMs || 15_000, 15_000),
+          timeoutMs: Math.min(options.timeoutMs || SETUP_PREFLIGHT_TIMEOUT_MS, SETUP_PREFLIGHT_TIMEOUT_MS),
         });
       }
       if (previousRuntime.owner === "launcher") {

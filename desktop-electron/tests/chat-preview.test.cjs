@@ -1126,3 +1126,22 @@ test("a pane hides only its own agent's page: another split pane's Preview stays
   assert.equal(service.hide(), true, "without a key, whichever page is shown");
   assert.equal(service.state("a").shown, false);
 });
+
+test("the PR row reads gh again when a turn ends, so a pull request the agent just opened shows", async (t) => {
+  // #1252's 2-minute cache answered every read, so the summary's re-read at a turn's end got the read from before the
+  // turn: open the details, let the agent run `gh pr create`, and the row stayed missing until a later re-read.
+  const runs = [];
+  let reply = new Error("no pull requests found for branch \"ao/x\"");
+  const env = server({ runGh: async (call) => { runs.push(call); if (reply instanceof Error) throw reply; return reply; } });
+  t.after(env.cleanup);
+  await leased(env.tools);
+  assert.equal((await env.tools.pullRequest({ sessionId: "ao-1", refreshKey: "1:working:t1" })).pullRequest, null, "no PR yet");
+  reply = JSON.stringify({ number: 1262, title: "Avatars", url: "https://github.com/o/r/pull/1262", state: "OPEN", isDraft: false });
+  const [after, alongside] = await Promise.all([env.tools.pullRequest({ sessionId: "ao-1", refreshKey: "1:idle:t1" }),
+    env.tools.pullRequest({ sessionId: "ao-1", refreshKey: "1:idle:t1" })]);
+  assert.equal(after.pullRequest?.number, 1262, "the turn that opened it has ended: the row shows it");
+  assert.equal(alongside.pullRequest?.number, 1262);
+  assert.equal(runs.length, 2, "readers asking about the same turn still share one gh run");
+  await env.tools.pullRequest({ sessionId: "ao-1", refreshKey: "1:idle:t1" });
+  assert.equal(runs.length, 2, "reopening the details within 2 minutes reads nothing");
+});

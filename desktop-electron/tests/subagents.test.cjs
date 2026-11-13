@@ -1114,6 +1114,71 @@ test("a subagent still working when the app restarts comes back with it, and its
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+/** A subagent started, then the app restarted `awayMs` later; the second service is the app after its restart. */
+async function restartedSubagent(awayMs, afterRestart) {
+  const dir = fs.mkdtempSync(path.join(__dirname, "..", "..", "subagents-restart-"));
+  const sessions = new Map();
+  const sent = [];
+  let clock = 1_000_000;
+  const harness = {
+    spawn: async () => { sessions.set("sub-1", { turnState: "running", approvals: [] }); return "sub-1"; },
+    observe: async (id) => ({ turnId: sent.length ? "t2" : "t1", ...sessions.get(id) }),
+    continuable: async () => true,
+    send: async (id, text) => { sent.push([id, text]); sessions.set(id, { turnState: "running", approvals: [] }); return { turnId: "t2" }; },
+    resolveApproval: async () => {}, resolveInput: async () => {}, exitAgent: async () => ({ ok: true }),
+    interrupt: async (id) => { sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [] }); },
+  };
+  const make = () => createSubagents({ statePath: path.join(dir, "subagents.json"), harness: () => harness, logger: { info() {}, warn() {} },
+    launchArgs: () => ({ workspace_id: "ws-1" }), now: () => clock });
+  let after = null;
+  try {
+    const before = make();
+    await before.save({ settings: { defaultRoute: ROUTE }, agents: STARTERS });
+    const { subagent_id: id } = parse(await before.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read it" }));
+    for (let tries = 0; tries < 100 && !fs.existsSync(path.join(dir, "subagent-runs.json")); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    before.dispose();
+    clock += awayMs;
+    after = make();
+    await after.preload();
+    const result = async () => parse(await after.call("chat-1", "ws-1", "subagent_result", { subagent_id: id, wait_seconds: 0 }));
+    await afterRestart({ id, sessions, sent, result, wait: (ms) => { clock += ms; } });
+  } finally {
+    after?.dispose();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// 2026-11-13: the time limit counted from the start of the turn the restart cut short, and it is
+// checked before the turn is read. A subagent 25 minutes into the default 30 when the app updated,
+// back 10 minutes later, was stopped as timed out instead of resumed.
+test("a subagent cut short by an app restart is resumed, not timed out, and its resumed turn gets the whole time limit", async () => {
+  await restartedSubagent(35 * 60_000, async ({ id, sessions, sent, result, wait }) => {
+    sessions.set(id, { turnState: "interrupted", status: "ready", approvals: [], error: "The agent's process ended before it finished (the app restarted); retry this card." });
+    let seen = await result();
+    assert.doesNotMatch(seen.error ?? "", /Stopped after/, "the minutes the app was closed do not count");
+    assert.match(seen.recovering ?? "", /app restarted/, "it waits to resume");
+    wait(6_000);
+    seen = await result();
+    assert.equal(sent.length, 1, "resumed in the same session");
+    wait(29 * 60_000);
+    seen = await result();
+    assert.doesNotMatch(seen.error ?? "", /Stopped after/, "29 minutes into its resumed turn it is within the limit");
+    assert.equal(seen.state, "running");
+    wait(2 * 60_000);
+    seen = await result();
+    assert.match(seen.error ?? "", /Stopped after 30 minutes/, "the limit still applies to the resumed turn");
+  });
+});
+
+test("a subagent whose agent kept working through the restart still has its time limit", async () => {
+  await restartedSubagent(35 * 60_000, async ({ sent, result }) => {
+    let seen = await result();
+    seen = await result();
+    assert.equal(sent.length, 0, "nothing was cut short: nothing to resume");
+    assert.match(seen.error ?? "", /Stopped after 30 minutes/, "35 minutes of a running turn is over the limit");
+  });
+});
+
 test("a turn its chat or the user stopped is not resumed, and recovery gives up after its tries", async () => {
   let clock = 1_000_000;
   const w = world({ now: () => clock });
@@ -1137,4 +1202,59 @@ test("a turn its chat or the user stopped is not resumed, and recovery gives up 
     assert.equal(last.state, "failed");
     assert.match(last.error, /after 3 tries to resume it/);
   } finally { w.cleanup(); }
+});
+
+// #1252 shows each subagent's harness and effort; the runs saved for a restart (#1249) left both out,
+// so a subagent brought back by a restart lost "· High" and its harness from its header.
+test("a subagent's harness and effort come back with it after a restart", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-fields-"));
+  const harness = {
+    spawn: async () => "sub-1", observe: async () => ({ turnId: "t1", turnState: "running", approvals: [] }),
+    continuable: async () => true, send: async () => ({ turnId: "t2" }), resolveApproval: async () => {}, resolveInput: async () => {},
+    interrupt: async () => {}, exitAgent: async () => ({ ok: true }),
+  };
+  const make = () => createSubagents({ statePath: path.join(dir, "subagents.json"), harness: () => harness, logger: { info() {}, warn() {} },
+    // AO is given the route's effort, as the workflow's launch arguments give it.
+    launchArgs: (_workspace, route) => ({ workspace_id: "ws-1", ...(route.effort ? { effort: route.effort } : {}) }), now: () => 1_000_000 });
+  try {
+    const before = make();
+    await before.save({ settings: { defaultRoute: { ...ROUTE, effort: "high" } }, agents: STARTERS });
+    await before.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read it" });
+    for (let tries = 0; tries < 100 && !fs.existsSync(path.join(dir, "subagent-runs.json")); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+    const shown = before.runs()[0];
+    before.dispose();
+    assert.equal(shown.harness, ROUTE.harness_id);
+    assert.equal(shown.effort, "high");
+    const after = make();
+    await after.preload();
+    const back = after.runs()[0];
+    after.dispose();
+    assert.equal(back.harness, shown.harness, "its harness");
+    assert.equal(back.effort, shown.effort, "its effort");
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// #1252 labelled a subagent with `args.effort ?? route.effort`. When the effort went in the model's name (opencode, after
+// being fitted to the model's levels) or nowhere (agy), the label showed the saved effort, one the agent never ran at.
+test("a subagent's effort label is the effort its agent was given, never a saved one that was fitted or dropped", async () => {
+  const runOn = async (route) => {
+    const w = world({ settings: { defaultRoute: route } });
+    try {
+      const started = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" }));
+      return { spawned: w.spawned[0], shown: w.service.runs().find((run) => run.subagent_id === started.subagent_id) };
+    } finally { await w.cleanup(); }
+  };
+  // DeepSeek V4.1 Flash takes none/low/high/max, so a saved "medium" runs at "high": on opencode, named in the model.
+  const fitted = await runOn({ harness_id: "ao:opencode", model: "cpa/cline-pass/deepseek-v4.1-flash", effort: "medium" });
+  assert.match(fitted.spawned.gateway.model, /\(high\)$/);
+  assert.equal(fitted.shown.effort, "high", "the level it ran at, not the saved one");
+  // agy gets the bare model and picks its own thinking level.
+  const dropped = await runOn({ harness_id: "ao:agy", model: "cpa/gemini-3.8-flash", effort: "high" });
+  assert.equal(dropped.spawned.effort, undefined);
+  assert.doesNotMatch(dropped.spawned.gateway.model, /\(/);
+  assert.equal(dropped.shown.effort, undefined, "nothing carried an effort, so none is shown");
+  // Claude Code carries the fitted level in the body too: as before.
+  const body = await runOn({ harness_id: "ao:claude-code", model: "cpa/cline-pass/deepseek-v4.1-flash", effort: "medium" });
+  assert.equal(body.spawned.effort, "high");
+  assert.equal(body.shown.effort, "high");
 });

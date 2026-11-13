@@ -98,9 +98,35 @@ const CHATGPT_PAGE_FAILURES = new Set([
 // could carry page data); the card says where it stopped instead of the catch-all.
 const CHATGPT_FORM_ERROR = "ChatGPT connector creation failed: ";
 
+// Setup texts that mean a case the card already has words for: the account's own session answered
+// that it is signed out (401), or ChatGPT showed its security check in the setup's page. They fell
+// to the catch-all's "ChatGPT verification is required in Coding Tools Browser." until 2026-11-13,
+// which read the same as a setup that had only met a page not yet loaded.
+const SETUP_FAILURE_ALIASES = new Map([
+  ["ChatGPT verification is required in the intended account.", "Sign in to this account in the Browser tab before connecting MCP."],
+  ["Complete Cloudflare verification in Coding Tools Browser, then try again.", SETUP_CHECK_MESSAGE],
+]);
+
+/**
+ * The setup's own words for a failure, for the log only, when the card says something else: the
+ * card's catch-all hid which step stopped ("ChatGPT verification is required" for any text with
+ * "sign in" or "verification" in it, 2026-11-13). ChatGPT's own form text stays out, as on the card;
+ * a web address keeps its host and path; 240 characters at most.
+ */
+function mcpConnectorFailureCause(error, failure) {
+  const text = String(error?.message || error || "").trim();
+  if (!text || text === failure?.message) return null;
+  if (text.startsWith(CHATGPT_FORM_ERROR)) return CHATGPT_FORM_ERROR.trim();
+  return text.replace(/(https?:\/\/[^\s?#'"]*)[?#][^\s'"]*/g, "$1").slice(0, 240);
+}
+
 function mcpConnectorCommandFailure(error, action = "create") {
   if (action === "add-tunnel") return { code: "tunnel_add_failed", message: "MCP tunnel connection failed. The private input was retained for retry." };
   const text = String(error?.message || error || "");
+  // Stopped for the person's own sign-in, logout or account removal (connectorSetupStopped): its own words.
+  if (error?.mcpStopped === true) return { code: "stopped", message: text };
+  const alias = SETUP_FAILURE_ALIASES.get(text);
+  if (alias) return { ...PREFLIGHT_FAILURES.get(alias) };
   const known = PREFLIGHT_FAILURES.get(text);
   if (known) {
     // A setup window that moved names where it went (navigationPlace: host and path only).
@@ -200,4 +226,4 @@ function createMcpConnectorCommand({ app, run, logger }) {
   };
 }
 
-module.exports = { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure };
+module.exports = { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure, mcpConnectorFailureCause };

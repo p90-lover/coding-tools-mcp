@@ -175,7 +175,8 @@ export function useChatSummaryFacts(sessionId: string | undefined, workspaceId: 
       const changes = { ...diffLineCounts(typeof result.diff === "string" ? result.diff : ""), files: Array.isArray(result.entries) ? result.entries.length : 0 };
       setFacts((current) => ({ ...current, for: sessionId, changes }));
     }).catch(() => undefined);
-    void paneCall("chat_pull_request", scope).then((result) => {
+    // The key tells the main process's shared read when a turn has ended, so it asks gh again then.
+    void paneCall("chat_pull_request", { ...scope, refreshKey }).then((result) => {
       if (live) setFacts((current) => ({ ...current, for: sessionId, pullRequest: (result.pullRequest as ChatPullRequest | null | undefined) ?? null }));
     }).catch(() => undefined);
     return () => { live = false; };

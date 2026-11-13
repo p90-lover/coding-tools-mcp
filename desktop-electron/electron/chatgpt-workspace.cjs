@@ -1,7 +1,7 @@
 "use strict";
 
 const { chatGptMcpContextScript, observeMcpSetupContext, extensionHelpersSource, createConfiguredConnector,
-  requireAutomaticConnectorSetup, navigationPlace, UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED } = require("./mcp-connector-setup.cjs");
+  requireAutomaticConnectorSetup, navigationPlace, UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, connectorSetupStopped } = require("./mcp-connector-setup.cjs");
 const { loadPastCloudflareCheck, matchBrowserUserAgent, SETUP_CHECK_WAIT_MS } = require("./chatgpt-cloudflare-check.cjs");
 
 const ADMIN_REQUIRED = WORKSPACE_OWNER_REQUIRED;
@@ -94,12 +94,16 @@ async function workspaceUi(action, input) {
   throw new Error("Unsupported workspace action.");
 }
 
-async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, assertCurrent, expectedContext, onContext, metadataOnly = false }, action) {
+async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, assertCurrent, expectedContext, onContext, metadataOnly = false, stopSignal = null }, action) {
   if (metadataOnly && (action || workspaceId || expectedContext)) throw new Error("Subscription inspection cannot perform MCP actions.");
   assertCurrent?.();
+  if (stopSignal?.aborted) throw connectorSetupStopped(stopSignal);
   const popup = new BrowserWindow({ show: false, width: 1100, height: 800,
     webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true,
       backgroundThrottling: false, offscreen: true } });
+  // MCP setup stopped for the person's own sign-in, logout or account removal: the window closes now.
+  const closeForStop = () => { if (!popup.isDestroyed()) popup.destroy(); };
+  stopSignal?.addEventListener("abort", closeForStop, { once: true });
   let observer, loading = false, changed = false, version = 0, timedOut = false, expectedPath = null, timer, movedTo = null;
   const changedTo = value => { changed = true; movedTo ??= navigationPlace(value); };
   // A hidden window can take half a minute just to start on the busy hard disk (31 s on
@@ -208,10 +212,12 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
     await fresh();
     return result;
   } catch (error) {
+    if (stopSignal?.aborted) throw connectorSetupStopped(stopSignal);
     if (timedOut) throw new Error("ChatGPT workspace inspection timed out. Retry this account's action.");
     throw error;
   } finally {
     clearTimeout(timer); observer?.dispose();
+    stopSignal?.removeEventListener("abort", closeForStop);
     if (!popup.isDestroyed()) {
       popup.webContents.removeListener("did-start-navigation", navigation);
       popup.destroy();
@@ -226,6 +232,9 @@ async function createWorkspaceConnector(options) {
   const assertCurrent = () => { requireAutomaticConnectorSetup(options.runtimeHost, browserHost); options.assertCurrent?.(); };
   assertCurrent();
   return browserHost.withManualOperation("MCP connector creation", async () => {
+    // Every hidden window below closes when the person's own sign-in, logout or account removal
+    // stops this setup (browser stopOperationFor); each inspection reads the signal from options.
+    options = { ...options, stopSignal: browserHost.operationSignal?.() ?? null };
     const member = await inspectChatGptAccount({ ...options, partition: target.partition, assertCurrent });
     const connect = (partition, context, shared) => createConfiguredConnector({ ...options,
       operationHeld: true, expectedContext: context, shared, assertCurrent,
@@ -305,7 +314,7 @@ async function createWorkspaceConnector(options) {
       throw error;
     }
     return { ...result, setupAccountId: admin.id, setupWorkspaceRole: admin.context.workspaceRole };
-  }, { preserveSurface: options.preserveSurface === true });
+  }, { preserveSurface: options.preserveSurface === true, stoppable: true });
 }
 
 module.exports = { ADMIN_REQUIRED, PUBLISH_REQUIRED, CONTEXT_CHANGED, isWorkspaceAdmin, workspaceUiScript, inspectChatGptAccount, createWorkspaceConnector };
