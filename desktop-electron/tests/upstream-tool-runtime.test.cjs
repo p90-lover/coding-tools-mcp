@@ -44,7 +44,7 @@ test("diagnostic restart retains its IPC contract while retired upstream UI is u
   assert.match(main, /launcher:upstream-tool-restart/);
   assert.match(
     main,
-    /handle\("launcher:upstream-tool-restart",[\s\S]*?assertFocusedMainWindow\(event, true\);[\s\S]*?upstreamToolController\.restart\(toolId\)/,
+    /handle\("launcher:upstream-tool-restart",[\s\S]*?await assertFocusedMainWindowSettled\(event, true\);[\s\S]*?upstreamToolController\.restart\(toolId\)/,
   );
   assert.match(main, /upstreamToolController\.openEmbeddedTool\(toolId, section\)/);
   assert.match(main, /upstreamToolController\.openExternalTool\(toolId, section\)/);

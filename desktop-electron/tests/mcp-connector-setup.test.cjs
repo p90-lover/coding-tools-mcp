@@ -327,6 +327,10 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "an unavailable shared plugin does not seed a member binding", business: true, shared: true, transient: true, sharedUnavailable: true, error: /plugin connection/ },
     { name: "a transient publisher result cannot be replayed", business: true, shared: true, transient: true, replay: true },
     { name: "an owner creator explicitly selects its intended workspace in a fresh popup", business: true, selectAdmin: true },
+    // Live 2026-11-13: the shown account's card read "ChatGPT verification is required in Coding Tools
+    // Browser" while it was signed in: the Browser's own page (no ChatGPT tab open, a failed load)
+    // answered "signed out" without asking. The setup's page proves the session for every account.
+    { name: "the shown account connects though the Browser's own page cannot vouch for its sign-in", shownPageSignedOut: true },
   ]) await t.test(scenario.name, async () => {
     const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
     fs.mkdirSync(work, { recursive: true });
@@ -358,7 +362,7 @@ test("the production connector action verifies fresh owner and workspace proof b
     let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     let workspaceRole = scenario.shared ? "standard-user" : scenario.creatorRole ?? "account-owner", publishing = false, held = false, publisherResult;
     const runtimeHost = runtime();
-    const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: true }),
+    const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: !scenario.shownPageSignedOut }),
       currentOperation: () => held ? "MCP connector creation" : null,
       withManualOperation: async (_name, work) => { const previous = held; held = true; try { return await work(); } finally { held = previous; } } };
     const select = id => network.observed("POST", "https://chatgpt.com/backend-api/aip/connectors/mcp/list_accessible", { "chatgpt-account-id": id }, {});
@@ -855,7 +859,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   const accounts = new Set(["main", "other"]), calls = [], records = [];
   const tunnels = [{ id: "extra", accountId: "other", tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", state: "stopped" }];
   const context = {
-    Error, handle: (_name, action) => { handler = action; }, assertFocusedMainWindow() {}, IS_DEV_PROFILE: false,
+    Error, handle: (_name, action) => { handler = action; }, assertFocusedMainWindow() {}, async assertFocusedMainWindowSettled() {}, IS_DEV_PROFILE: false,
     // The handler's hold on the automatic sync and its wait for the browser (browser-account-mcp.test.cjs).
     automaticAccountMcp: null, waitForManualOperation: async () => {}, MANUAL_MCP_CONNECT_WAIT_MS: 60_000,
     quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
@@ -863,7 +867,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     browserAccounts: { has: id => accounts.has(id), partitionOf(id) { if (!accounts.has(id)) throw new Error("Unknown account"); return `persist:${id}`; },
       async recordConnector(id, result) { await Promise.resolve(); if (!accounts.has(id)) return false; records.push({ id, ...result }); return true; } },
     session: { fromPartition: partition => ({ cookies: { get: async () => { calls.push(partition); return []; } } }) },
-    signedInFromCookies: () => signedIn, routeIdleAccountPartition: async partition => calls.push(`route:${partition}`), logger: {},
+    signedInFromCookies: () => signedIn, routeIdleAccountPartition: async partition => calls.push(`route:${partition}`), logger: { warn() {} },
     runtimeSupervisor: { extraTunnels: { status: () => tunnels,
       reconnect: async id => { calls.push(`reconnect:${id}`); tunnels[0].state = "ready"; },
       setConnector: async (id, href, binding) => { await Promise.resolve(); assert.equal(binding.tunnelId, tunnels[0].tunnelId); if (removeDuringSave) accounts.delete("other"); calls.push(`connector:${id}`); } } },
@@ -878,6 +882,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
     connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
     mcpConnectorCommandFailure: error => ({ code: "fixture_failure", message: error.message }),
+    mcpConnectorFailureCause: () => null,
   };
   vm.runInNewContext(snippet, context);
   assert.equal(await handler({}), "legacy");
@@ -929,6 +934,8 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   // The page state a failed Personal plugins wait left survives the rewrap for the log; the account's
   // recorded error and the operation line stay the fixed text.
   const pageState = { tabs: 2, visibleTabs: 0, personalTabs: 0, frameMs: null };
+  const warnings = [];
+  context.logger.warn = (event, fields) => warnings.push({ event, ...fields });
   records.length = 0;
   context.createWorkspaceConnector = async options => {
     options.assertCurrent();
@@ -938,6 +945,8 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     error => error.message === "ChatGPT did not expose one Personal plugins tab." && error.pageState === pageState);
   assert.deepEqual(records, [{ id: "other", error: "ChatGPT did not expose one Personal plugins tab." }]);
   assert.equal(operations.at(-1).message, "ChatGPT did not expose one Personal plugins tab.");
+  // A Connect the person asked for has no automatic_mcp_failed record; this one names the page state too.
+  assert.deepEqual(warnings.find(entry => entry.event === "mcp.account_connect_failed")?.pageState, pageState);
 });
 
 test("a request the page cancels itself neither confirms nor fails the workspace", async t => {

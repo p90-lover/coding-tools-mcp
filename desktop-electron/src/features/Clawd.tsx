@@ -23,7 +23,12 @@ export type Feet = "both" | "left" | "right";
 export type Facing = "right-12" | "right-30" | "right-55" | "right-75" | "edge" | "back-105" | "back-125" | "back-150" | "back"
   | "left-75" | "left-55" | "left-30" | "left-12";
 export type Parts = { eyes: Eyes; arms: Arms; feet: Feet };
-export type Pose = "default" | "arms-up" | "look-left" | "look-right" | Parts | { facing: Facing };
+/**
+ * A turned frame. `step` lifts one foot (the one on the viewer's left or right), so it can walk
+ * turned toward where it goes, as the CLI's waddle lifts a foot on its front-facing frame.
+ */
+export type Turned = { facing: Facing; step?: "left" | "right" };
+export type Pose = "default" | "arms-up" | "look-left" | "look-right" | Parts | Turned;
 export type Frame = { pose: Pose; offset: number; x?: number; poof?: "dot" | "wave"; shadow?: "wide" | "narrow" };
 
 const POSES: Record<"default" | "arms-up" | "look-left" | "look-right", Parts> = {
@@ -107,11 +112,36 @@ export const ANIMATIONS = {
   "coin-hop": [...repeat("default", 2, { offset: 1 }), ...repeat("arms-up", 1, { shadow: "wide" }),
     ...turning(["right-55", "edge", "back-125", "back"], "narrow"), ...turning(["back-125", "edge", "left-55"], "narrow"),
     ...repeat("arms-up", 1, { shadow: "wide" }), ...land(), REST_FRAME],
+  // Beyond the CLI's set, built from its own parts and turn frames (the user, 2026-11-12: "give it more
+  // animations"). Nothing moves sideways in its box: the box clips, so a sway would cut off an arm.
+  /** A hello: one arm waving, a wink at the end. */
+  wave: [...repeat(parts("right", "one-up"), 2), ...repeat(parts("right"), 1), ...repeat(parts("right", "one-up"), 2),
+    ...repeat(parts("right"), 1), ...repeat(parts("wink", "one-up"), 4), REST_FRAME],
+  /** Waking up or winding down: down low, arms right up with its eyes shut, and a blink. */
+  stretch: [...repeat(parts("closed", "up"), 2, { offset: 1 }), ...repeat(parts("closed", "up"), 6), ...repeat("arms-up", 2),
+    ...repeat("default", 2), ...blinkEnd],
+  /** Sleepy: a paw over its mouth, eyes shut, then a slow blink. */
+  yawn: [...repeat(parts("closed", "one-up"), 6), ...repeat(parts("closed"), 4), ...repeat("default", 3), ...blinkEnd],
+  /** A happy shimmy: turning side to side, paws up one after the other, a hop to finish. */
+  dance: [...turning(["left-30", "left-30"]), ...repeat("arms-up", 1), ...turning(["right-30", "right-30"]), ...repeat("arms-up", 1),
+    ...turning(["left-30", "left-30"]), ...repeat(parts("open", "left-up", "left"), 2), ...repeat(parts("open", "one-up", "right"), 2),
+    ...repeat(parts("open", "left-up", "left"), 2), ...repeat(parts("open", "one-up", "right"), 2), ...repeat("arms-up", 2), ...land(), REST_FRAME],
+  /** Shaken up: eyes rolling side to side, sinking, and coming round. */
+  dizzy: [...repeat("look-left", 2), ...repeat("look-right", 2), ...repeat("look-left", 2), ...repeat("look-right", 2),
+    ...repeat(parts("closed"), 3, { offset: 1 }), ...repeat("default", 2), ...blinkEnd],
+  /** Something broke: it sinks low, eyes shut, then looks up again. */
+  sad: [...repeat(parts("closed"), 2), ...repeat(parts("closed"), 8, { offset: 1 }), ...repeat("look-left", 3, { offset: 1 }),
+    ...repeat("default", 2), ...blinkEnd],
+  /** At the end of its box: down low, peering out one way and then the other. */
+  peer: [...repeat("default", 1, { offset: 1 }), ...repeat("look-right", 6, { offset: 1 }), ...repeat("look-left", 6, { offset: 1 }),
+    ...repeat("default", 1), ...blinkEnd],
 } satisfies Record<string, Frame[]>;
 export type AnimationName = keyof typeof ANIMATIONS;
 /** The CLI's entrance picks (`ou`), and the ones a click can play: those that start in place (`nu`). */
 export const ENTRANCES: AnimationName[] = ["skip", "jump", "look", "spin", "peekaboo", "drop", "waddle", "peek", "wink", "boop", "tap", "sneeze", "turn", "coin-hop"];
 export const CLICKABLE: AnimationName[] = ENTRANCES.filter((name) => (ANIMATIONS[name][0]?.x ?? 0) === 0);
+/** Its own extras that also suit a click or an idle moment. */
+export const PLAYFUL: AnimationName[] = ["wave", "stretch", "dance"];
 
 /** Which quadrants of a cell a block glyph fills: upper-left, upper-right, lower-left, lower-right. */
 const QUADRANTS: Record<string, [number, number, number, number]> = {
@@ -131,12 +161,32 @@ function run(cells: Cell[], glyphs: string, column: number, row: number, color: 
   });
 }
 
+/**
+ * The columns [from, to) of the foot on the viewer's `side` in a feet row: its first run of glyphs
+ * for the left, its last for the right. A row with a single run keeps it whole.
+ */
+export function footRun(chars: readonly string[], side: "left" | "right"): [number, number] {
+  const runs: [number, number][] = [];
+  chars.forEach((glyph, col) => {
+    if (glyph === " ") return;
+    const last = runs.at(-1);
+    if (last && last[1] === col) last[1] = col + 1;
+    else runs.push([col, col + 1]);
+  });
+  if (runs.length < 2) return [0, chars.length];
+  return side === "left" ? runs[0]! : runs.at(-1)!;
+}
+
 /** The cells of a pose, laid out as the CLI's `aEe` (or `ae` for a turning frame). */
 export function clawdCells(pose: Pose, color = CLAWD_BODY): Cell[] {
   const cells: Cell[] = [];
   if (typeof pose !== "string" && "facing" in pose) {
     FACINGS[pose.facing].forEach(({ glyphs, from, to }, row) => {
-      Array.from(glyphs).forEach((glyph, col) => {
+      const chars = Array.from(glyphs);
+      // Mid-step, the feet row keeps only one foot: the other is up off the ground.
+      const kept = row === ROWS - 1 && pose.step ? footRun(chars, pose.step) : null;
+      chars.forEach((glyph, col) => {
+        if (kept && glyph !== " " && (col < kept[0] || col >= kept[1])) return;
         const backed = col >= from && col < to;
         if (glyph !== " " || backed) cells.push({ col, row, glyph, color, background: backed ? CLAWD_BACKGROUND : undefined });
       });

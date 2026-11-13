@@ -24,7 +24,7 @@ test("Native Codex IPC fails closed on unsupported reviewer or missing consent",
   const section = main.split('handle("coding-tools:native-codex:connect", async (event, input) => {')[1]
     ?.split('handle("coding-tools:native-codex:disconnect"')[0];
   assert.ok(section, "native connection handler exists");
-  assert.match(section, /assertFocusedMainWindow\(event, true\)/);
+  assert.match(section, /await assertFocusedMainWindowSettled\(event, true\)/);
   assert.match(section, /reviewer !== "user" && reviewer !== "auto_review"/);
   assert.match(section, /reviewer === "auto_review" && \(input.permissionProfile !== ":workspace" \|\| input.allowModelUsage !== true\)/);
   assert.match(section, /approval_policy: "on-request", approvals_reviewer: reviewer/);

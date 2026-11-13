@@ -94,32 +94,25 @@ test("cached five-stack runtime must be CPA only before resource staging", () =>
   assert.throws(() => resolveFiveStackRuntimeRoot({ desktopRoot: root, explicit: runtime, required: true, platform: "win32", arch: "x64" }), /PACKAGE_RESOURCE_FIVE_STACK_RUNTIME_RETIRED/);
 });
 
-test("packaged CPA Go and Studio OAuth DLLs match the bundled manifest", () => {
+test("the packaged Provider Manager DLL matches the bundled manifest", () => {
   const root = path.join(projectRoot, "aiTemp", "retired-package-boundary-tests", `${process.pid}-${crypto.randomUUID()}`);
   const pluginRoot = path.join(root, "app.asar.unpacked", "vendor", "bundled", "cpa-plugins");
-  const entries = [
-    ["platforms", "go.dll", Buffer.from("MZgo")],
-    ["studio", "studio.dll", Buffer.from("MZstudio")],
-  ];
-  const manifest = { id: "commandcode-go", studio: { id: "auth-commandcode", platforms: {} }, platforms: {} };
-  for (const [section, name, bytes] of entries) {
-    const record = {
-      path: `windows/amd64/${name}`,
-      sha256: crypto.createHash("sha256").update(bytes).digest("hex"),
-      size: bytes.length,
-    };
-    if (section === "studio") manifest.studio.platforms["win32/x64"] = record;
-    else manifest.platforms["win32/x64"] = record;
-    const destination = path.join(pluginRoot, ...record.path.split("/"));
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    fs.writeFileSync(destination, bytes);
-  }
+  const bytes = Buffer.from("MZmanager");
+  const record = { path: "windows/amd64/manager.dll", sha256: crypto.createHash("sha256").update(bytes).digest("hex"), size: bytes.length };
+  const manifest = { id: "cpa-provider-manager", platforms: { "win32/x64": record } };
+  const dll = path.join(pluginRoot, "windows", "amd64", "manager.dll");
+  fs.mkdirSync(path.dirname(dll), { recursive: true });
+  fs.writeFileSync(dll, bytes);
   fs.writeFileSync(path.join(pluginRoot, "BUNDLE.json"), JSON.stringify(manifest));
-  assert.equal(validateCpaPlugins(root, manifest).length, 2);
-  const studio = path.join(pluginRoot, "windows", "amd64", "studio.dll");
-  fs.renameSync(studio, path.join(root, "studio.dll.backup"));
+  assert.deepEqual(validateCpaPlugins(root, manifest), ["windows/amd64/manager.dll"]);
+  // The retired plugins' manifest is refused: CPA would load them beside Provider Manager.
+  const retired = { ...manifest, id: "commandcode-go" };
+  fs.writeFileSync(path.join(pluginRoot, "BUNDLE.json"), JSON.stringify(retired));
+  assert.throws(() => validateCpaPlugins(root, retired), /PACKAGE_CPA_PLUGIN_MANIFEST_MISMATCH/);
+  fs.writeFileSync(path.join(pluginRoot, "BUNDLE.json"), JSON.stringify(manifest));
+  fs.renameSync(dll, path.join(root, "manager.dll.backup"));
   assert.throws(() => validateCpaPlugins(root, manifest), /PACKAGE_CPA_PLUGIN/);
-  fs.renameSync(path.join(root, "studio.dll.backup"), studio);
-  fs.writeFileSync(studio, Buffer.from("MZtampered"));
+  fs.renameSync(path.join(root, "manager.dll.backup"), dll);
+  fs.writeFileSync(dll, Buffer.from("MZtampered"));
   assert.throws(() => validateCpaPlugins(root, manifest), /PACKAGE_CPA_PLUGIN_CHECKSUM_MISMATCH/);
 });

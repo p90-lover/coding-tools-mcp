@@ -134,7 +134,7 @@ function mount(props, { effects = false, objectUrls } = {}) {
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
-          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [], useChatProcesses: () => [], chatProcessRows: () => [] }
+          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
           : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: (text) => text }
           : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
@@ -788,14 +788,16 @@ test("a stuck turn without recovery capability or accepted identity reports reco
   });
 });
 
-test("while the agent works, /review, /init and a new goal steer it; /rewind goes back to a message", async () => {
+test("while the agent works, /review, /init and a new goal steer it; /rewind waits for the chat to stop, then goes back to a message", async () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const steered = [], rewound = [];
   const { props, calls } = base({ selectedTaskId: "t", working: true,
     runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    // Its agent has the message (and works on it): Rewind waits for the chat to stop.
+    activity: { "r1:w": { activity: "running a command", last_event_at_ms: Date.now(), turn_started: true } },
     steer: async (input) => { steered.push(input); return true; },
     pendingMessage: "fix the parser",
-    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind: (index) => rewound.push(index), copyConversation() {}, togglePin() {}, pinned: false } });
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind: (index, stop) => rewound.push(stop ? [index, stop] : index), copyConversation() {}, togglePin() {}, pinned: false } });
   const view = mount(props);
   const type = (value) => walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value } });
   const enter = async () => {
@@ -816,7 +818,20 @@ test("while the agent works, /review, /init and a new goal steer it; /rewind goe
   assert.doesNotMatch(text(card() ?? { props: {} }), /Queued/);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
 
-  // /rewind lists the messages (newest first) and opens the chosen one to edit; a number picks directly.
+  // While it works, rewind is held as delete is: the main process refuses it ("Stop the chat before
+  // rewinding a message", seen live 2026-11-12), so /rewind says why and each Rewind button is off.
+  const rewindButtons = () => walk(view.render()).filter((element) => element.props?.["aria-label"] === "Rewind to this message");
+  type("/rewind"); await enter();
+  assert.match(text(card()), /Stop the chat first to rewind a message/);
+  type("/rewind 1"); await enter();
+  assert.deepEqual(rewound, [], "nothing is rewound while the chat works");
+  assert.ok(rewindButtons().length >= 1, "each message offers Rewind");
+  assert.ok(rewindButtons().every((button) => button.props.disabled === true && /Stop the chat first to rewind/.test(button.props.title)),
+    "and says why it is off");
+
+  // Once the turn has finished, /rewind lists the messages (newest first) and opens the chosen one; a number picks directly.
+  props.working = false;
+  props.runs = [run("r1", "t", [node("w", "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { answer: "done" } })], { execution_mode: "single" })];
   type("/rewind"); await enter();
   const items = walk(card()).filter((element) => element.type === "button" && /^\d+\. /.test(text(element)));
   assert.ok(items.length >= 1, "each message is a rewind point");
@@ -826,7 +841,39 @@ test("while the agent works, /review, /init and a new goal steer it; /rewind goe
   assert.deepEqual(rewound, [0, 0]);
   type("/rewind 99"); await enter();
   assert.match(text(card()), /Choose a message from 1 to \d+/);
-  assert.ok(walk(view.render()).some((element) => element.props?.["aria-label"] === "Rewind to this message"), "each message offers Rewind");
+  assert.ok(rewindButtons().length >= 1 && rewindButtons().every((button) => !button.props.disabled), "each message offers Rewind again");
+});
+
+test("a message no agent has started yet can be rewound: Rewind stops its run first, then goes back", async () => {
+  // The user: "it doesnt allow to rewind message when the agent havent started or doing anything" (2026-11-12).
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const rewound = [];
+  const { props } = base({ selectedTaskId: "t", working: true,
+    runs: [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })],
+    // Launching: no agent has the message yet (its receipt says "sending").
+    activity: { "r1:w": { activity: "launching", last_event_at_ms: Date.now(), turn_started: false } },
+    pendingMessage: "fix the parser",
+    thread: { newChat() {}, rename: async () => {}, archive() {}, fork() {}, rewind: (index, stop) => rewound.push([index, stop]), copyConversation() {}, togglePin() {}, pinned: false } });
+  const view = mount(props);
+  const type = (value) => walk(view.render()).find((element) => element.type === "textarea").props.onChange({ target: { value } });
+  const enter = async () => {
+    walk(view.render()).find((element) => element.type === "textarea").props.onKeyDown({ key: "Enter", shiftKey: false, preventDefault() {} });
+    await settle(); await settle();
+  };
+  const rewindButtons = () => walk(view.render()).filter((element) => element.props?.["aria-label"] === "Rewind to this message");
+  assert.ok(rewindButtons().length >= 1, "each message offers Rewind");
+  assert.ok(rewindButtons().every((button) => !button.props.disabled && /no agent has started yet/.test(button.props.title)),
+    "on, and it says the waiting message is stopped first");
+  rewindButtons().at(-1).props.onClick();
+  assert.deepEqual(rewound, [[0, "r1"]], "the rewind names the run to stop first");
+  type("/rewind 1"); await enter();
+  assert.deepEqual(rewound, [[0, "r1"], [0, "r1"]]);
+
+  // Once its agent has the message, Rewind waits for the chat to stop again.
+  props.activity = { "r1:w": { activity: "thinking", last_event_at_ms: Date.now(), turn_started: true } };
+  assert.ok(rewindButtons().every((button) => button.props.disabled === true && /Stop the chat first to rewind/.test(button.props.title)));
+  type("/rewind 1"); await enter();
+  assert.equal(rewound.length, 2, "nothing more is rewound");
 });
 
 test("a working WebGPT (Native Codex) chat steers its turn, as the Codex bridge does", async () => {
@@ -1007,6 +1054,44 @@ test("two queued messages fold into Claude Code's stack: Next: …, then a list 
   assert.equal(cleared, 1);
 });
 
+// The user, 2026-11-12: "the message that are waiting to send etc are gone without any issue".
+test("a queued message the app couldn't send says why under it; one it is sending can't be changed", async () => {
+  const { props } = base({ selectedTaskId: "t-q", working: true,
+    runs: [run("r1", "t-q", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
+    steer: async () => { throw new Error("not steerable"); } });
+  const view = mount(props);
+  const band = () => walk(view.render()).find((element) => String(element.props?.className).startsWith("cx-queued-band"));
+  await props.queue.add("t-q", { what: "Message", message: "keep going", note: "AO is busy" });
+  const note = walk(view.render()).find((element) => element.props?.className === "cx-queued-note");
+  assert.equal(text(note), "Not sent yet: AO is busy", "a failed send no longer leaves the message sitting there without a word");
+  assert.equal(band().props["data-state"], "queued");
+  await props.queue.remove("t-q", null);
+  await props.queue.add("t-q", { what: "Message", message: "keep going", sending: 1 });
+  assert.equal(band().props["data-state"], "sending");
+  assert.match(text(band()), /^Sending queued messagekeep going$/);
+  assert.equal(walk(band()).filter((element) => element.type === "button").length, 0, "no Send now, Edit or Remove while it goes");
+  const stacked = walk(view.bar({ items: [{ key: "a", text: "one", state: "queued", note: "AO is busy" }, { key: "b", text: "two", state: "queued" }], onMenu() {} }));
+  assert.equal(text(stacked.find((element) => element.props?.className === "cx-queued-note")), "Not sent yet: AO is busy", "folded, the note still shows");
+});
+
+test("a message neither sent nor queued comes back to its composer with why, never silently gone", async (t) => {
+  // The chat started working again under the message ("still running"), so it went to the queue,
+  // and the queue refused it too (the window was not in front): the message used to vanish.
+  const { props } = base({ selectedTaskId: "t-lost",
+    runs: [run("r1", "t-lost", [node("w", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })],
+    send: async () => { throw new Error("This chat is still running; wait for it to finish or stop it first"); } });
+  props.queue.add = async () => { throw new Error("Click into the Coding Tools window first"); };
+  // Effects on: the composer's draft owner, which takes the message back, registers in one.
+  const view = mount(props, { effects: true });
+  t.after(() => view.unmount());
+  const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+  textarea().props.onChange({ target: { value: "rerun the tests" } });
+  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  await new Promise(setImmediate);
+  assert.equal(textarea().props.value, "rerun the tests", "back where it was typed");
+  assert.match(text(view.render()), /Couldn't send (or queue )?the message: This chat is still running/);
+});
+
 test("the composer sends annotations and typed text once, together, for both send and steer", async () => {
   for (const running of [false, true]) {
     const delivered = [];
@@ -1177,22 +1262,38 @@ test("each chat has its own queue, kept by the app: it is sent with the chat clo
 test("rewind resends the selected message into the same chat without filling or switching the composer", async () => {
   const read = (name) => fs.readFileSync(path.resolve(__dirname, "../src/features", name), "utf8");
   const surface = read("AgentOrchestratorSurface.tsx");
-  const rewind = surface.slice(surface.indexOf("const rewindChat = "), surface.indexOf("// Fork: a new chat starting"));
-  const calls = [], errors = [];
+  const rewind = surface.slice(surface.indexOf("const stopForRewind = "), surface.indexOf("// Fork: a new chat starting"));
+  const calls = [], errors = [], modules = [];
   const description = "first ask\n\nFollow-up (2026-10-10 10:00 UTC):\nsecond ask";
   const exported = {};
+  let statuses = [], refusals = 0;
   vm.runInNewContext(ts.transpileModule(`${rewind}\nexports.rewind = rewindChat;`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-  }).outputText, { exports: exported, loadDescription: async () => description,
+  }).outputText, { exports: exported, loadDescription: async () => description, setTimeout,
     chatMessagesFromDescription: transpile("ao-chat.ts", () => ({})).chatMessagesFromDescription,
-    sendChat: async input => calls.push(JSON.parse(JSON.stringify(input))), setError: error => errors.push(error) });
+    workspaceId: "w", mounted: { current: true }, selection: { current: { workspaceId: "w" } },
+    moduleCall: async (operation, args) => { modules.push([operation, args.workspaceId, args.runId, args.action]); return operation === "run_status" ? statuses.shift() : {}; },
+    sendChat: async input => {
+      if (refusals > 0) { refusals -= 1; throw new Error("Stop the chat before rewinding a message"); }
+      calls.push(JSON.parse(JSON.stringify(input)));
+    }, setError: error => errors.push(error) });
   await exported.rewind("t", 1);
   assert.deepEqual(calls, [{ taskId: "t", message: "second ask", rewind: { index: 1, description } }]);
   assert.deepEqual(errors, []);
+  assert.deepEqual(modules, [], "a chat with nothing on its way stops nothing");
   assert.doesNotMatch(rewind, /setChatSeed|setChatTaskId|setDraft\(/, "rewind keeps the selected chat and the unsent draft");
   await exported.rewind("t", 5);
   assert.equal(calls.length, 1, "an invalid point never sends");
   assert.equal(errors.length, 1, "a stale point is reported");
+
+  // A message no agent has taken yet: its run is stopped and waited on until nothing drives it, then
+  // the rewind goes; main's read trailing the stop once is tried again.
+  statuses = [{ driven: true, status: "running" }, { driven: false, status: "held" }];
+  refusals = 1;
+  await exported.rewind("t", 0, "r9");
+  assert.deepEqual(modules, [["control_run", "w", "r9", "stop"], ["run_status", "w", "r9", undefined], ["run_status", "w", "r9", undefined]]);
+  assert.deepEqual(calls.at(-1), { taskId: "t", message: "first ask", rewind: { index: 0, description } });
+  assert.equal(errors.length, 1, "no new error");
   const chat = read("AgentOrchestratorChat.tsx");
   assert.ok(chat.includes("setCarried(seed.context?.length ? seed.context : null)"));
   assert.ok(chat.includes("[...carried, message].join"), "the first message of the rewound chat carries them ahead of it");
@@ -1978,4 +2079,48 @@ test("a failed work read waits instead of being retried on every poll while AO i
   }
   assert.equal(reads.length, 1, "five polls after a failed read ask AO once");
   assert.match(text(page.render()), /Done/, "the answer still shows without its activity");
+});
+
+// 2026-11-12: a follow-up's chat_send was refused because the window was not in front (sent right
+// before switching away during a stall), and the chat_queue add it falls back to was refused for the
+// same reason. The composer had been cleared, nothing queued it and nothing gave it back.
+test("a follow-up refused for focus whose queueing is refused too comes back to the composer, with why", async () => {
+  const unfocused = new Error("Error invoking remote method 'coding-tools:apps:call': Error: Click into the Coding Tools window and try again: this action runs only from the focused app window");
+  const finished = [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })];
+  for (const typedSince of [false, true]) {
+    const reply = delayedReply();
+    const queue = appQueue();
+    queue.add = async () => { throw unfocused; };
+    const { props } = base({ selectedTaskId: "t", projectId: "ws", runs: finished, queue, send: async () => { await reply.promise; } });
+    const view = mount(props, { effects: true });
+    const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
+    textarea().props.onChange({ target: { value: "check the logs again" } });
+    const submitted = walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+    assert.equal(textarea().props.value, "", "the composer cleared as the message went");
+    if (typedSince) { textarea().props.onChange({ target: { value: "and the build" } }); view.render(); }
+    reply.reject(unfocused);
+    await submitted;
+    for (let i = 0; i < 4; i += 1) await new Promise(setImmediate);
+    assert.equal(textarea().props.value, typedSince ? "check the logs again\n\nand the build" : "check the logs again",
+      typedSince ? "it goes back ahead of what was typed since" : "what was typed comes back");
+    assert.match(text(view.render()), /Couldn't (send or )?queue the message: Click into the Coding Tools window/, "the chat says why");
+    assert.equal(queue.chats.get("t"), undefined, "nothing was queued");
+  }
+});
+
+test("Send now on a queued message whose send and re-queue are both refused gives the message back", async () => {
+  const unfocused = new Error("Click into the Coding Tools window and try again: this action runs only from the focused app window");
+  const queue = appQueue();
+  const { props } = base({ selectedTaskId: "t", projectId: "ws", queue, send: async () => { throw unfocused; },
+    runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })] });
+  const view = mount(props, { effects: true });
+  await queue.add("t", { what: "Message", message: "run the tests" });
+  queue.add = async () => { throw unfocused; };
+  for (let i = 0; i < 2; i += 1) await new Promise(setImmediate);
+  const sendNow = walk(view.render()).find((element) => element.props?.["aria-label"] === "Send now");
+  assert.ok(sendNow, "the queued bar offers Send now");
+  sendNow.props.onClick();
+  for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
+  assert.equal(walk(view.render()).find((element) => element.type === "textarea").props.value, "run the tests");
+  assert.match(text(view.render()), /Couldn't queue the message: Click into the Coding Tools window/);
 });

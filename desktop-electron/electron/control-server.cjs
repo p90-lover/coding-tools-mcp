@@ -64,8 +64,10 @@ function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, g
     const headers = new Headers(options.headers);
     headers.delete("cookie");
     headers.delete("proxy-authorization");
+    // Electron's net.request takes only a string: a URL object (the app plugin download passes one)
+    // fails with "Invalid URL" before any request is made.
     const request = electronNet.request({
-      url, method: options.method, headers: Object.fromEntries(headers),
+      url: String(url), method: options.method, headers: Object.fromEntries(headers),
       session: browserSession, credentials: sessionRead ? "include" : "omit", useSessionCookies: sessionRead,
       redirect: "manual",
     });

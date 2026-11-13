@@ -3,6 +3,13 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { normalizedAuthFile, startCpaAccountLogin } = require("./cpa-oauth-adapter.cjs");
+const { fetchOffThread } = require("./off-thread-run.cjs");
+
+// CPA's management API is read from a worker, never with Node's fetch on main: a socket connect to
+// CPA that the network filter held froze every window for 43.7 s (2026-11-12 09:38Z). Its replies
+// are account lists, well under this.
+const MAX_MANAGEMENT_REPLY_BYTES = 4 * 1024 * 1024;
+const offThread = (url, init) => fetchOffThread(url, { maxBytes: MAX_MANAGEMENT_REPLY_BYTES, ...init });
 
 // Gemini models reach CPA through its Antigravity provider (same Google OAuth client as the Antigravity CLI).
 const PROVIDERS = new Set(["antigravity"]);
@@ -27,7 +34,7 @@ function needsAuth(account) {
  */
 function createAntigravityReauth({
   cpaConnection, openExternal, notify = () => {}, statePath, logger = console,
-  fetchImpl = fetch, now = () => Date.now(), intervalMs = 10 * 60_000, promptGapMs = 6 * 60 * 60_000,
+  fetchImpl = offThread, now = () => Date.now(), intervalMs = 10 * 60_000, promptGapMs = 6 * 60 * 60_000,
   login = startCpaAccountLogin,
 }) {
   let timer = null;

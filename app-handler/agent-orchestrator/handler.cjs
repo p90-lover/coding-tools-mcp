@@ -65,6 +65,7 @@ const SPECS = Object.freeze({
   next: { readOnly: true, description: "Return the next actionable plan clause for the active Codex harness." },
   chat_send: { readOnly: false, description: "Send a chat message: create the chat's task (or append a follow-up) and start a team run on it." },
   chat_prewarm: { readOnly: false, description: "Start an AO agent for the new chat's selected model (or its team's orchestrator) ahead of the first message, so it does not launch on send." },
+  chat_context_window: { readOnly: false, description: "Resize a chat's agent to a new context window now, keeping its conversation: the agent is restarted on its own conversation at the new size, so no message is needed and the next one continues it." },
   chat_steer: { readOnly: false, description: "Hand a message to the chat's running AO agent at once (steer), without waiting for its turn to end." },
   chat_goal: { readOnly: false, description: "Pause, resume, edit or clear a chat's goal (/goal); a resumed goal starts its next round." },
   chat_queue: { readOnly: false, description: "Add, remove, clear or list a chat's queued messages; the app sends the next one when the chat's turn settles, with the chat closed too." },
@@ -72,6 +73,7 @@ const SPECS = Object.freeze({
   chat_loop: { readOnly: false, description: "Start or stop a chat's loop (/loop): a prompt it runs now and again every interval, or whenever its agent schedules the next round." },
   chat_schedule: { readOnly: false, description: "Set or delete a chat's schedule (/schedule, /clearschedule): at the time the person chose, the chat is sent a message (by default, to continue), even after the app restarts." },
   chat_auto_retry: { readOnly: false, description: "Read or set \"Retry automatically\": a failed single-model step runs again by itself, up to three times." },
+  chat_retry_cancel: { readOnly: false, description: "End a run's pending automatic retry because the person changed the chat's model or settings; the next message or Retry runs on the new setup." },
   chat_model_judges: { readOnly: false, description: "Read or set \"Let the model judge\": requests the command reviewer would hand to you, and goal rounds that end needing you or failed, are judged by the model, which may also end the goal." },
   agent_instructions: { readOnly: false, description: "Read or save the user's global AGENTS.md and a project's workspace AGENTS.md (scope \"global\" or \"workspace\" with text). Both are put in front of every new chat agent's first message, and of a running agent's next message once they change." },
   chat_question_timeout: { readOnly: false, description: "Read or set \"Agent questions\": the seconds an agent's question waits for you in an Approve for me or Full access chat before it gets its recommended answer, or 0 to keep it (and the agent) waiting until you answer. Default 30." },
@@ -96,6 +98,7 @@ const SPECS = Object.freeze({
   chat_turn_stats: { readOnly: true, description: "Read a chat turn's model requests through CPA from CPA Helper's log: steps, model time, time to first token, output speed, cache hits and tokens (the line under the chat box, and each ended turn's foot)." },
   chat_terminal_start: { readOnly: false, description: "Start the user's own shell in a chat agent's worktree (the side panel's Terminal tab)." },
   chat_changes: { readOnly: true, description: "Read a chat agent's worktree changes: git status with new files and the diff (the side panel's Changes tab)." },
+  chat_pull_request: { readOnly: true, description: "Read the pull request on a chat agent's branch with gh pr view in its worktree (the chat details' PR row); null when there is none." },
   chat_files: { readOnly: true, description: "List one folder of a chat agent's worktree (the side panel's Files tab)." },
   chat_file: { readOnly: true, description: "Read one file of a chat agent's worktree as text (the side panel's Files tab)." },
   chat_branches: { readOnly: true, description: "List a project's git branches, the worktree each is checked out in, and which one the project folder and the chat are on (the composer's branch bar)." },
@@ -111,7 +114,7 @@ const SPECS = Object.freeze({
 // Operations served by the AO runtime service although their names do not start with "upstream_".
 const UPSTREAM_OPERATIONS = new Set(["dependency_link_info", "workspace_mode", "chat_processes", "chat_process_output", "chat_process_stop",
   "chat_process_input", "chat_preview_state", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "chat_preview_navigate", "chat_context",
-  "cpa_quota", "cpa_usage", "chat_turn_stats", "chat_terminal_start", "chat_changes", "chat_files", "chat_file", "chat_branches", "chat_switch_branch"]);
+  "cpa_quota", "cpa_usage", "chat_turn_stats", "chat_terminal_start", "chat_changes", "chat_pull_request", "chat_files", "chat_file", "chat_branches", "chat_switch_branch"]);
 
 module.exports = Object.freeze({
   operations: Object.freeze(Object.keys(SPECS)),

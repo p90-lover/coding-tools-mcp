@@ -1,5 +1,7 @@
 "use strict";
 
+const { fetchOffThread } = require("./off-thread-run.cjs");
+
 const IMAGE_MODEL = /^gpt-image-[a-z0-9][a-z0-9.-]{0,63}$/;
 const SIZES = ["auto", "1024x1024", "1536x1024", "1024x1536"];
 const QUALITIES = ["auto", "low", "medium", "high"];
@@ -81,7 +83,12 @@ async function readReply(response) {
   return { data, mimeType };
 }
 
-function createChatImageGenerator({ connection, fetchImpl = fetch, timeoutMs = 120000 } = {}) {
+// The request to CPA is made from a worker (fetchOffThread), never with Node's fetch on main: a
+// socket connect to CPA that the network filter held froze every window for 43.7 s (2026-11-12
+// 09:38Z, "socket.connect 127.0.0.1:8317"). The worker keeps the same size cap as readReply.
+const offThread = (url, init) => fetchOffThread(url, { maxBytes: MAX_REPLY_BYTES, ...init });
+
+function createChatImageGenerator({ connection, fetchImpl = offThread, timeoutMs = 120000 } = {}) {
   if (typeof connection !== "function") throw new Error("A configured CPA connection is required");
   return async (args, { signal } = {}) => {
     const body = imageRequest(args);
@@ -111,6 +118,9 @@ function createChatImageGenerator({ connection, fetchImpl = fetch, timeoutMs = 1
       return { ...image, model: body.model };
     } catch (error) {
       if (error instanceof ImageGenerationError) throw error;
+      if (error?.code === "ERR_RESPONSE_TOO_LARGE") {
+        throw new ImageGenerationError("The image provider's response exceeded the image size limit.", "failed");
+      }
       throw new ImageGenerationError(cancellation.aborted
         ? "The image request was cancelled or timed out; its upstream outcome is unknown. It was not retried."
         : "The image provider connection failed; its upstream outcome is unknown. It was not retried.", "unknown");

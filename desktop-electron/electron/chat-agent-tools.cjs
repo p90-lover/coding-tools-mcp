@@ -74,6 +74,54 @@ const SERVER_NAME = "coding-tools";
 const PROTOCOL_VERSIONS = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
 const MAX_BODY_BYTES = 1024 * 1024;
 const TOOL_CALL_TIMEOUT_MS = 120_000;
+// The chat summary's pull request row: one `gh pr view` per worktree at most every 2 minutes,
+// given up after 10 s (gh may wait on the network or a proxy).
+const PULL_REQUEST_CACHE_MS = 120_000;
+const PULL_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * A program's absolute path from PATH's absolute folders, or null. Only .exe and .com on Windows:
+ * execFile runs no .cmd or .bat without a shell. A relative entry ("." or an empty one) is skipped,
+ * since it would mean the folder the program runs in.
+ */
+async function executableOnPath(name, { pathValue = process.env.PATH ?? "", platform = process.platform, stat = fs.promises.stat } = {}) {
+  const folders = String(pathValue).split(path.delimiter).map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+    .filter((entry) => entry && path.isAbsolute(entry));
+  for (const folder of folders) {
+    for (const extension of platform === "win32" ? [".exe", ".com"] : [""]) {
+      const candidate = path.join(folder, `${name}${extension}`);
+      try { if ((await stat(candidate)).isFile()) return candidate; } catch { /* not in this folder */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Runs the GitHub CLI in a folder and resolves with what it prints (rejects on a non-zero exit). It is
+ * found on PATH first: given a bare "gh" with a chat's worktree as cwd, Windows ran a gh.exe in that
+ * worktree before the one on PATH (libuv looks in the child's cwd first unless
+ * NoDefaultCurrentDirectoryInExePath is set), so an agent or a cloned repository could have the app
+ * run its own program outside the chat's sandbox, with no approval (2026-11-13).
+ */
+async function runGhCommand({ cwd, args, timeoutMs }) {
+  const gh = await executableOnPath("gh");
+  if (!gh) throw new Error("The GitHub CLI (gh) is not on PATH");
+  return new Promise((resolve, reject) => {
+    require("node:child_process").execFile(gh, args, { cwd, timeout: timeoutMs, windowsHide: true, encoding: "utf8", maxBuffer: 256 * 1024 },
+      (error, stdout) => (error ? reject(error) : resolve(stdout)));
+  });
+}
+
+/** `gh pr view --json …` output as the summary's pull request, or null when it names none. */
+function pullRequestFrom(text) {
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { return null; }
+  if (!Number.isInteger(parsed?.number) || parsed.number <= 0 || typeof parsed.url !== "string" || !/^https:\/\/[^\s]+$/.test(parsed.url)) return null;
+  const state = parsed.isDraft === true ? "draft" : String(parsed.state ?? "").toLowerCase();
+  return { number: parsed.number, url: parsed.url, title: String(parsed.title ?? "").slice(0, 300),
+    state: ["open", "draft", "merged", "closed"].includes(state) ? state : "open" };
+}
+
 // Agents whose AO chat driver takes an HTTP MCP server: Claude Code and opencode over ACP,
 // Codex through app-server's mcp_servers config. Other ACP agents may lack the HTTP
 // capability, which would fail the whole session, so they launch without these tools.
@@ -104,14 +152,15 @@ const AGENT_TOOLS = new Set([
   "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
   "redact_message", "move_chat",
 ]);
-// The app's own agent tool (not headless's): brings a pane of the chat forward for the user. Seen
-// live: an agent asked to "open the browser and keep checking" started it, but nothing showed in
-// the chat, since the panel opens by itself only for a server process.
+// The app's own agent tool (not headless's): brings a pane of the chat forward for the user. It is
+// the only way the side panel opens without a click: pages, commands and subagents never open it by
+// themselves (the user, 2026-11-12: open tabs "only when i tell the model to open").
 const SHOW_TOOL_DEFS = Object.freeze([{
   name: "show_in_chat", title: "Show a pane in the chat",
   description: "Bring the chat's Terminal or Preview pane in front of the user. Use it when the user asks to see something you "
     + "started: pane \"terminal\" with the command_id exec_command returned shows that command's live output; pane \"preview\" shows "
-    + "the page you opened with preview_open. It only shows what already runs; it starts nothing.",
+    + "the page you opened with preview_open. Nothing else opens these panes: a page you load or a command you run stays out of "
+    + "the user's way until you call this. It only shows what already runs; it starts nothing.",
   inputSchema: {
     type: "object", additionalProperties: false, required: ["pane"],
     properties: {
@@ -381,7 +430,7 @@ const CHAT_DESCRIPTIONS = Object.freeze({
     + "yield_time_ms, then use read_output to see more of its output and write_stdin to type into it. If a reply was lost, "
     + "use list_commands to recover this chat's known handles; a tool timeout is not proof the command stopped. Keep the server "
     + "command in the foreground; this tool manages its lifetime. Do not detach it with Start-Process, Start-Job, nohup "
-    + "or a background shell. Open its localhost URL with preview_open so the user sees it in this chat. "
+    + "or a background shell. Check its localhost URL with preview_open; call show_in_chat when the user asks to see it. "
     + "On Windows this tool runs cmd.exe: use set for environment variables. For PowerShell syntax, explicitly run "
     + "powershell.exe -NoProfile -Command followed by a quoted PowerShell command; do not send $env: syntax directly. "
     + "Pass the shell text as cmd in a JSON object. An approved tool call is not proof the command ran or succeeded: check "
@@ -1119,7 +1168,7 @@ function paneRulesFor(groups) {
     rules.push("BROWSER / GUI PREVIEW: preview_render creates or updates a live panel; preview_open opens a project page. "
       + "Verify both with preview_screenshot and preview_read. This chat has its own browser, the Preview pane (what the user calls the browser, "
       + "the sandbox browser, the preview or the frontend). When the user asks to open, show or see the browser, the "
-      + "preview or the frontend, they mean this pane: call show_pane with pane \"preview\" when a page is open in it. "
+      + "preview or the frontend, they mean this pane: call show_in_chat with pane \"preview\" when a page is open in it. "
       + "For a live AI-editable panel, chart, diagram or mini-app, call preview_render with self-contained HTML, CSS and "
       + "JavaScript; call it again to update the same panel in a later turn. Then use preview_read, preview_click and "
       + "preview_screenshot to verify it. These panels need no dev server and cannot use the network or the app's APIs. "
@@ -1127,7 +1176,7 @@ function paneRulesFor(groups) {
       + "Whenever you build or change anything with a user interface "
       + "(a web page, a frontend, a web app's GUI), or the user asks you to look at, test or show that project, check it there: "
       + "1) start the dev server (with exec_command when you have it) and note its port; 2) call preview_open with its URL, "
-      + "e.g. http://localhost:5173/ or http://127.0.0.1:8000/ (this opens the Preview pane for the user); 3) call "
+      + "e.g. http://localhost:5173/ or http://127.0.0.1:8000/ (the page loads in the Preview pane, which stays closed until you call show_in_chat); 3) call "
       + "preview_screenshot to see the page and preview_read for its text and elements; 4) use preview_click, preview_type "
       + "and preview_press to try it, and preview_console for errors and failed requests. Do not check a page with curl, "
       + "a headless browser, Playwright or a browser tool of your own, and do not ask the user to open it themselves; if "
@@ -1199,7 +1248,7 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       : "")
     + (groups.includes("preview")
       ? "preview_open opens a page your dev server serves on this machine (localhost, 127.0.0.1 or [::1] only) in this "
-        + "chat's own browser and shows it to the user in the chat's Preview pane; preview_read, preview_screenshot, "
+        + "chat's own browser, the chat's Preview pane (show_in_chat brings it forward when the user asks to see it); preview_read, preview_screenshot, "
         + "preview_click, preview_type, preview_press, preview_scroll, preview_wait and preview_console let you check the "
         + "page works as intended. Use them for every GUI or frontend check. "
       : "")
@@ -1362,6 +1411,8 @@ function createChatAgentTools({
   // Where the leases (credential hashes, never credentials) and the port are kept across restarts.
   statePath = null,
   worktreesRoot = null,
+  // The chat summary's pull request lookup (({ cwd, args, timeoutMs }) => stdout); null leaves the row out.
+  runGh = runGhCommand,
   logger = console, version = "1", now = Date.now,
   // How long the user must have had a prompt open for an approval to count (see MIN_ANSWER_MS),
   // on a monotonic clock.
@@ -1375,6 +1426,7 @@ function createChatAgentTools({
   const guides = createComputerGuides({ notesDir: computerGuidesDir, logger });
   const sessions = new Map(); // key -> session entry (see mint)
   const paneEntries = new Map(); // AO session -> retained command owner, independent of credentials
+  const pullRequestReads = new Map(); // worktree path -> { at, read }: the summary's last `gh pr view` there
   const commandWatches = createCommandWatches({ now });
   const canWatch = entry => typeof commandEvents?.register === "function" && !entry.subagent && !entry.previewOnly;
   let server = null;
@@ -3258,6 +3310,23 @@ function createChatAgentTools({
         diff: typeof diff?.diff === "string" ? diff.diff : "", truncated: diff?.truncated === true,
       };
     },
+    /** The pull request on the session's branch, for the chat summary's "PR #N" row (Codex's): `gh pr
+     *  view` in its worktree, shared by every reader for 2 minutes. null when the branch has none, gh is
+     *  missing or signed out, or it does not answer in 10 s; the summary then leaves the row out. */
+    async pullRequest({ sessionId, workspaceId } = {}) {
+      const entry = paneEntry(sessionId, workspaceId);
+      if (!entry) throw new Error("That chat agent's session has ended");
+      const root = await rootOf(entry);
+      if (typeof runGh !== "function" || typeof root?.path !== "string") return { ok: true, pullRequest: null };
+      const cached = pullRequestReads.get(root.path);
+      if (cached && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
+      const read = Promise.resolve()
+        .then(() => runGh({ cwd: root.path, args: ["pr", "view", "--json", "number,title,url,state,isDraft"], timeoutMs: PULL_REQUEST_TIMEOUT_MS }))
+        .then(pullRequestFrom, () => null);
+      pullRequestReads.set(root.path, { at: now(), read });
+      if (pullRequestReads.size > 64) pullRequestReads.delete(pullRequestReads.keys().next().value);
+      return { ok: true, pullRequest: await read };
+    },
     /** One folder of the session's worktree for the Files tab (`path` relative to its root). */
     async files({ sessionId, workspaceId, path: folder = "." } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
@@ -3340,6 +3409,8 @@ function createChatAgentTools({
 }
 
 module.exports = Object.freeze({
+  executableOnPath,
+  runGhCommand,
   moveTarget,
   AGENT_TOOLS,
   DESKTOP_TOOLS,

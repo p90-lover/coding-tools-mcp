@@ -30,15 +30,21 @@ test("an archived chat counts its days from when it was archived (or first seen)
   assert.equal(store.due("ws", "a"), false, "a restored chat starts again if archived later");
 });
 
-test("the archive times and the days setting survive a restart", () => {
+test("the archive times and the days setting survive a restart", async (t) => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-archive-"));
   const file = path.join(folder, "chat-archive.json");
   let now = 5_000;
   const first = createChatArchiveStore({ file, now: () => now });
   assert.equal(first.idleDays(), DEFAULT_IDLE_DAYS, "open chats are archived after 7 days unless set");
+  // Saved off the main thread: a synchronous save held every window on the hard disk.
+  for (const name of ["writeFileSync", "renameSync", "mkdirSync", "openSync", "fsyncSync"]) {
+    t.mock.method(fs, name, () => { throw new Error(`${name} on the main thread`); });
+  }
   first.setDays(2);
   first.setIdleDays(30);
   first.archived("ws", "t");
+  await first.saved();
+  t.mock.restoreAll();
   now += 3 * DAY;
   const second = createChatArchiveStore({ file, now: () => now });
   assert.equal(second.days(), 2);

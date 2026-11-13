@@ -932,11 +932,13 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
   };
   const run = async () => {
     checkHost();
-    // Another account's sign-in is checked by the page itself: the Plugins page will not load.
-    if (partition === browserHost.partition && !(await browserHost.probeAuthentication()).authenticated) {
-      throw new Error("Complete ChatGPT verification in Coding Tools Browser before creating its connector.");
-    }
-    checkHost();
+    // Every account's sign-in, the one shown in the Browser too, is proven by this setup's own page:
+    // it reads the account's session (a 401 stops it as signed out) and a security check stops it
+    // as one. The shown account used to be checked first through the Browser's visible page, which
+    // answered "signed out" without asking whenever that page was not a ChatGPT one (a failed load,
+    // a switch's blank page) and could not answer while it moved; each such setup failed as "ChatGPT
+    // verification is required" on an account that was signed in (2026-11-13), and the check could
+    // navigate the page automatic setup must leave alone.
     const popup = new BrowserWindow({
       show: false,
       width: 960,

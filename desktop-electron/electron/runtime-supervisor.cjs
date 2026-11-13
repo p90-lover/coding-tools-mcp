@@ -1539,8 +1539,12 @@ class RuntimeSupervisor {
     }
   }
 
+  // true: ready. false: seen not ready. null: not observed (its health URL not known and the
+  // inventory did not answer in time), which is no evidence either way, as the tunnel monitor
+  // treats it (observeTunnelForMonitor).
   async tunnelHealth(config) {
-    return (await this.observeTunnelForMonitor(config)).ready;
+    const health = await this.observeTunnelForMonitor(config);
+    return health.ready ? true : health.statusKnown === false ? null : false;
   }
 
   async waitForKnownTunnelStatus(config, timeoutMs = 10_000) {
@@ -2137,7 +2141,8 @@ class RuntimeSupervisor {
     const verdict = (failed) => ({ ready: !failed, ...(failed ? { failed } : {}) });
     const tunnelVerdict = async () => {
       if (!this.tunnel) return verdict("tunnel_missing");
-      return verdict(await this.tunnelHealth(config) ? null : "tunnel_health");
+      const healthy = await this.tunnelHealth(config);
+      return verdict(healthy ? null : healthy === null ? "tunnel_unobserved" : "tunnel_health");
     };
     if (this.launcherProfile === "development") {
       return config.mode !== "full" ? verdict(null) : tunnelVerdict();
