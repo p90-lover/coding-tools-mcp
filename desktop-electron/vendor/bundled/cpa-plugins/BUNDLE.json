@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "4c2172b823cfd15de08edac1460a327b770d9a68",
+    "commit": "86c5784e2c11094c0aed08ca7db4c0b8d7fd6908",
     "license": "MIT"
   },
   "changes": [
-    "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
-    "Cline Pass, CommandCode Go, CommandCode and Grok accounts are provider-manager auth files with a kind; their models, logins and management routes are unchanged"
+    "Smart routing: within a Codex priority tier, the account with the most quota at risk per hour before its soonest reset (the least left in any window, over the hours to that reset) is used first; accounts within 1% share requests and a spent window skips the account",
+    "Managed account pools (OpenCode Go and other API-key accounts that fail over to each other) are ordered the same way from each account's cached quota reading; accounts without a fresh reading come next and spent ones last; pinned requests, the 429 cooldown and failover are unchanged"
   ],
   "build": {
     "go": "1.27.3",
@@ -18,9 +18,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/cpa-provider-manager-v0.6.0.dll",
-      "sha256": "7ef6a17411ec13e47e95ce408c74c989a32af134ecccc0bed07978cc90dc6008",
-      "size": 27115008
+      "path": "windows/amd64/cpa-provider-manager-v0.7.0.dll",
+      "sha256": "c5b47f39878791119b1c1dfd996cc88a3bb0c8d5a4e1426932287ed8d4ebd231",
+      "size": 27131904
     }
   }
 }
