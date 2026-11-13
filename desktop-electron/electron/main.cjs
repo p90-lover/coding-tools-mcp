@@ -1160,10 +1160,16 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
   if (!runtimeHost.runtimeConfigSnapshot().configured) return { skipped: true, reason: "not-configured" };
   if (codexBridgeConnectInFlight) return codexBridgeConnectInFlight;
   const work = (async () => {
-    await waitForRuntimeHostIdle();
-    const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready" && runtime.status !== "degraded") return { skipped: true, reason: runtime.status, runtime };
-    const route = await runtimeHost.connectBridgeRoute();
+    // An operation that starts between the idle wait and these steps refuses them: an account
+    // switch's core-setup began during startIfConfigured, and the connect failed "Another launcher
+    // operation is active" (seen live 2026-11-13 00:11Z). As at startup, they wait for idle again
+    // and retry (whenRuntimeHostIdle).
+    const { runtime, route } = await whenRuntimeHostIdle(logger, "bridge-connect", async () => {
+      const started = await runtimeSupervisor.startIfConfigured();
+      if (started.status !== "ready" && started.status !== "degraded") return { runtime: started, route: null };
+      return { runtime: started, route: await runtimeHost.connectBridgeRoute() };
+    });
+    if (!route) return { skipped: true, reason: runtime.status, runtime };
     // A sign-in or an account switch checks the connector again, in that account's ChatGPT.
     if (/^(browser-|setup-signin)/.test(reason)) automaticMcpAttempt = null;
     applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
@@ -3583,9 +3589,11 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // Stopped for the person's own sign-in, logout or account removal: not a failure.
+      const stopped = error?.mcpStopped === true;
       const setupCause = mcpConnectorFailureCause(error, failure);
-      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      if (!stopped) logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
+      publishOperation({ name: "mcp-connector-create", status: stopped ? "cancelled" : "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   } });
@@ -3691,9 +3699,12 @@ function registerIpc({ logger, stateStore }) {
       // The page state a failed Personal plugins wait left (connectorPageState) goes to the log only.
       const logged = error?.pageState ? { pageState: error.pageState } : {};
       // An automatic setup that gave way (an account switch, the app left) did not fail: the account
-      // keeps its connector state and the sync tries again later, with no error on screen.
-      if (automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
-        publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
+      // keeps its connector state and the sync tries again later, with no error on screen. Neither did
+      // one stopped for the person's own sign-in, logout or account removal (stopOperationFor).
+      const stopped = error?.mcpStopped === true;
+      if (stopped || automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
+        publishOperation({ name: "mcp-connector-create", status: "cancelled",
+          message: stopped && typeof assertAutomaticCurrent !== "function" ? failure.message : "MCP connector setup will continue later" });
         throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true, ...logged });
       }
       // The card's words can be a category ("ChatGPT verification is required…") for several steps;
@@ -4077,9 +4088,11 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // Stopped for the person's own sign-in, logout or account removal: not a failure.
+      const stopped = error?.mcpStopped === true;
       const setupCause = mcpConnectorFailureCause(error, failure);
-      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      if (!stopped) logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
+      publishOperation({ name: "mcp-connector-create", status: stopped ? "cancelled" : "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   });

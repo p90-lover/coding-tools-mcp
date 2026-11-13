@@ -176,18 +176,17 @@ function createBrowserAccountService(deps) {
   // Signs the account out for good. Removing the account in use first switches to another one.
   async function remove(accountId, context) {
     deps.registry.partitionOf(accountId);
-    if (deps.host()?.currentOperation?.() === "MCP connector creation") {
-      throw new Error("Wait for MCP connector creation to finish before removing accounts.");
-    }
+    // The person's removal goes first: a running MCP connector setup is stopped, and this waits until it
+    // has let go of the browser. It refused every removal while it ran (2026-11-13).
+    await deps.host()?.stopOperationFor?.("account removal");
     const { accounts } = deps.registry.status();
     if (accounts.length <= 1) throw new Error("The Browser tab needs at least one account");
     if (accountId === deps.registry.activeId()) {
       await switchTo(accounts.find((entry) => entry.id !== accountId).id, context);
     }
     const host = deps.host();
-    if (host?.currentOperation?.() === "MCP connector creation") {
-      throw new Error("Wait for MCP connector creation to finish before removing accounts.");
-    }
+    // One may have started on the account switched to meanwhile.
+    await host?.stopOperationFor?.("account removal");
     if (host?.livePartitions?.().includes(deps.registry.partitionOf(accountId)) && host.accountSwitchBlocker?.()) {
       throw new Error(`That account cannot be removed while ${host.accountSwitchBlocker()}. Try again when it is done.`);
     }

@@ -8224,7 +8224,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       // A `sending` mark seen here is an earlier app session's, whose send never answered (this
       // session's sends hold `draining`): it went if the chat already ends with it.
-      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next).catch(() => false)) {
+      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next)) {
         chatQueue.remove(workspaceId, taskId, [next.id]);
         logger?.info?.("ao.chat_queue.sent_before_restart", { workspaceId, taskId });
         armQueue(workspaceId, taskId, QUEUE_FREED_MS);
@@ -8254,6 +8254,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // After a few failures it waits for the next settled turn or the person's Send now.
         if (failures < QUEUE_SEND_TRIES) armQueue(workspaceId, taskId, QUEUE_RETRY_MS * Math.max(1, failures));
       }
+    } catch (error) {
+      // A failed state read leaves delivery unknown; keep the sending mark until it can be checked.
+      logger?.warn?.("ao.chat_queue.check_failed", { workspaceId, taskId, message: publicText(error?.message || error, 200) });
+      armQueue(workspaceId, taskId, QUEUE_RETRY_MS, steer);
     } finally { draining.delete(key); }
   }
   /** The timelines of a run's agent cards, for whether a steer was read; null when none can be read. */

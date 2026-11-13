@@ -307,6 +307,10 @@ test("the production connector action verifies fresh owner and workspace proof b
         return true;
       } },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
+    // Live 2026-11-13: an automatic setup refused Log out and Remove account for its whole run.
+    { name: "the person's own logout stops the setup and closes its window, which is not a failure", change: "stopped",
+      error: error => error.mcpStopped === true && /stopped for ChatGPT logout/.test(error.message)
+        && mcpConnectorCommandFailure(error).code === "stopped" },
     { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, identityMissing: true, error: /existing connector.*tunnel.*unverified/i },
     { name: "consent is not confirmed after a later workspace switch", change: "consent", error: /context|workspace.*changed/i, submitted: true },
@@ -362,7 +366,10 @@ test("the production connector action verifies fresh owner and workspace proof b
     let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     let workspaceRole = scenario.shared ? "standard-user" : scenario.creatorRole ?? "account-owner", publishing = false, held = false, publisherResult;
     const runtimeHost = runtime();
+    // What the browser's stopOperationFor aborts for the person's own sign-in, logout or removal.
+    const stop = new AbortController();
     const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: !scenario.shownPageSignedOut }),
+      operationSignal: () => stop.signal,
       currentOperation: () => held ? "MCP connector creation" : null,
       withManualOperation: async (_name, work) => { const previous = held; held = true; try { return await work(); } finally { held = previous; } } };
     const select = id => network.observed("POST", "https://chatgpt.com/backend-api/aip/connectors/mcp/list_accessible", { "chatgpt-account-id": id }, {});
@@ -407,6 +414,10 @@ test("the production connector action verifies fresh owner and workspace proof b
           if (scenario.change === "navigation") { url = "https://chatgpt.com/"; contents.emit("did-start-navigation", {}, url, false, true); }
           if (scenario.change === "busy") busy = true;
           if (scenario.change === "manual") host.interactionModeOverride = "manual";
+          if (scenario.change === "stopped") {
+            stop.abort(Object.assign(new Error("MCP connector creation stopped for ChatGPT logout"), { forAction: "ChatGPT logout" }));
+            assert.equal(destroyed, true, "the setup window closes as soon as it is stopped, not at its next step");
+          }
           return { prepared: true };
         }
         if (phase === "submitPreparedTunnelConnector" || phase === "createTunnelConnector") { counts.create++; return { created: true, href: "/plugins/plugin_fixture" }; }

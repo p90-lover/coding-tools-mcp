@@ -3311,19 +3311,23 @@ function createChatAgentTools({
       };
     },
     /** The pull request on the session's branch, for the chat summary's "PR #N" row (Codex's): `gh pr
-     *  view` in its worktree, shared by every reader for 2 minutes. null when the branch has none, gh is
-     *  missing or signed out, or it does not answer in 10 s; the summary then leaves the row out. */
-    async pullRequest({ sessionId, workspaceId } = {}) {
+     *  view` in its worktree, shared for 2 minutes by every reader with the same `refreshKey` (the chat's
+     *  turn and state), so the summary's re-read when a turn ends asks gh again and shows a PR the turn
+     *  opened. null when the branch has none, gh is missing or signed out, or it does not answer in 10 s;
+     *  the summary then leaves the row out. */
+    async pullRequest({ sessionId, workspaceId, refreshKey } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const root = await rootOf(entry);
       if (typeof runGh !== "function" || typeof root?.path !== "string") return { ok: true, pullRequest: null };
+      const key = typeof refreshKey === "string" ? refreshKey.slice(0, 256) : "";
       const cached = pullRequestReads.get(root.path);
-      if (cached && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
+      if (cached && cached.key === key && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
       const read = Promise.resolve()
         .then(() => runGh({ cwd: root.path, args: ["pr", "view", "--json", "number,title,url,state,isDraft"], timeoutMs: PULL_REQUEST_TIMEOUT_MS }))
         .then(pullRequestFrom, () => null);
-      pullRequestReads.set(root.path, { at: now(), read });
+      pullRequestReads.delete(root.path); // re-added last, so the oldest worktree is the one dropped past 64
+      pullRequestReads.set(root.path, { at: now(), key, read });
       if (pullRequestReads.size > 64) pullRequestReads.delete(pullRequestReads.keys().next().value);
       return { ok: true, pullRequest: await read };
     },
