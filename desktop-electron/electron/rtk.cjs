@@ -12,7 +12,8 @@
 //   gets the same hook, minus rewrites PowerShell can't run, from
 //   CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK (claudePowerShellHook).
 // - Codex's own shell gets RTK's PreToolUse hook on its app-server command line, trusted for that
-//   process only: AO reads it from CODING_TOOLS_RTK_CODEX_HOOK.
+//   process only: AO reads it from CODING_TOOLS_RTK_CODEX_HOOK. On Windows, where that shell is
+//   PowerShell, it drops the same rewrites (codexPowerShellHookFrom).
 // - OpenCode's own bash tool gets a plugin that asks rtk about each command (OPENCODE_PLUGIN), which
 //   AO lists in that chat's inline OpenCode config only: AO reads its path from
 //   CODING_TOOLS_RTK_OPENCODE_PLUGIN.
@@ -104,7 +105,8 @@ const QUIET = Object.freeze({ RTK_SUPPRESS_HOOK_WARNING: "1" });
  * Get-ChildItem, `tree` is tree.com and the rest are missing, so "rtk ls -Force" fails where
  * "ls -Force" worked (rtk 1.2.0, 2026-11-12). The rest of what rtk rewrites there runs the same
  * program (all 351 rewrites of 5,365 recorded PowerShell commands were git, gh, cargo or bun) or is
- * rtk's own (read, find, diff).
+ * rtk's own (read, find, diff). Codex runs its shell commands in PowerShell on Windows too, where
+ * "ls -Force" became "rtk ls -Force" and exited 1 (codex 0.164.0, 2026-11-12).
  */
 const POWERSHELL_MISSING = Object.freeze(["ls", "tree", "grep", "wc", "wget"]);
 
@@ -119,6 +121,22 @@ const POWERSHELL_MISSING = Object.freeze(["ls", "tree", "grep", "wc", "wget"]);
 function powerShellHookFrom(hook) {
   if (!hook) return "";
   return `o=$(${hook}); s=$?; [[ $o =~ rtk\\ (${POWERSHELL_MISSING.join("|")})([^[:alnum:]_-]|$) ]] && o=; printf '%s' "$o"; exit $s`;
+}
+
+/**
+ * The same guard written in PowerShell, for Codex on Windows: Codex runs a hook with the turn's own
+ * shell, `powershell.exe -NoProfile -Command <hook>` with the tool call on a piped stdin (codex
+ * 0.164.0 hooks/src/engine/command_runner.rs), so bash's form would not parse there. `hook` (RTK's
+ * Codex hook) reads that stdin itself. PowerShell decodes a program's output with the console's code
+ * page, which would mangle a command's non-ASCII text in rtk's answer, so the console is switched to
+ * UTF-8 first, and if it can't be the hook answers nothing. The answer is dropped when the rewrite
+ * would run one of POWERSHELL_MISSING, written out otherwise as it came, and rtk's exit status is the
+ * hook's. The guard starts no process: Codex starts PowerShell for the bare hook as well.
+ */
+function codexPowerShellHookFrom(hook) {
+  if (!hook) return "";
+  return `try{[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)}catch{exit}; $o=-join (${hook}); $s=$LASTEXITCODE; ` +
+    `if($o -cmatch 'rtk (${POWERSHELL_MISSING.join("|")})([^\\w-]|$)'){$o=''}; [Console]::Out.Write($o); exit $s`;
 }
 
 const atLeast = (version, minimum) => {
@@ -301,11 +319,13 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
    * with the turn's own shell, PowerShell on Windows, where a quoted path followed by arguments is a
    * syntax error (every run failed with exit 1). So rtk is named bare: binDir puts its folder first
    * on the agents' PATH, which the command rtk returns ("rtk git status") needs as well. Without it
-   * the hook fails and Codex runs the command as written.
+   * the hook fails and Codex runs the command as written. On Windows it is wrapped in the PowerShell
+   * guard (codexPowerShellHookFrom), since the commands it rewrites run in PowerShell too.
    */
   const codexHook = () => {
     const tool = active();
-    return tool && atLeast(tool.version.split(".").map(Number), CODEX_HOOK_VERSION) ? "rtk hook codex" : "";
+    if (!tool || !atLeast(tool.version.split(".").map(Number), CODEX_HOOK_VERSION)) return "";
+    return platform === "win32" ? codexPowerShellHookFrom("rtk hook codex") : "rtk hook codex";
   };
   /**
    * OPENCODE_PLUGIN's file, written to `pluginDir` once per run (again only when it is missing or
@@ -479,4 +499,4 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
   return { locate, active, rewrite, unwrap, claudeHook, claudePowerShellHook, codexHook, opencodePlugin, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
 }
 
-module.exports = { createRtk, powerShellHookFrom, POWERSHELL_MISSING };
+module.exports = { createRtk, powerShellHookFrom, codexPowerShellHookFrom, POWERSHELL_MISSING };

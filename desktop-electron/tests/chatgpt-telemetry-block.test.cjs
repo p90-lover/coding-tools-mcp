@@ -34,9 +34,9 @@ test("a session without webRequest (a test stand-in) is left alone", () => {
   assert.equal(blockChatGptTelemetry(null), false);
 });
 
-test("every Browser tab view and the GPT Browser block them", () => {
+test("every Browser tab view blocks them (the GPT Browser, which did too, is gone)", () => {
   const read = (name) => fs.readFileSync(path.join(__dirname, "..", "electron", name), "utf8");
   const host = read("browser-host.cjs");
   assert.equal((host.match(/signInFriendlyUserAgent\(view\.webContents\);\r?\n\s+blockChatGptTelemetry\(view\.webContents\.session\);/g) || []).length, 4);
-  assert.match(read("gpt-browser.cjs"), /blockChatGptTelemetry\(browserSession\);/);
+  assert.equal(fs.existsSync(path.join(__dirname, "..", "electron", "gpt-browser.cjs")), false);
 });

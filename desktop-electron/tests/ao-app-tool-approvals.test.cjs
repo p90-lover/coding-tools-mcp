@@ -50,6 +50,41 @@ test("the terminal's commands and input, the screen, unknown tools and look-alik
   ]) assert.equal(routineAppTool(name), null, String(name));
 });
 
+test("GitHub MCP reads run without a review when the server is the person's GitHub one; its writes still go to the reviewer", () => {
+  // The user: "auto review still blocking github mcp". Each read waited for a full review (23 s
+  // median, up to 158 s, over 76 calls), and one get_latest_release was denied.
+  const asked = [];
+  const { githubRead } = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => ({ ok: true }),
+    githubMcpServer: (name) => { asked.push(name); return name === "github"; },
+  });
+  // The calls seen in those chats, and the rest of github-mcp-server's read names.
+  for (const name of ["get_me", "pull_request_read", "get_latest_release", "list_pull_requests", "get_commit", "get_file_contents",
+    "get_tag", "get_release_by_tag", "list_repository_collaborators", "search_code", "list_commits", "get_job_logs", "issue_read",
+    "sub_issue_read", "actions_get", "actions_list", "projects_list"]) {
+    assert.match(githubRead(`mcp__github__${name}`) ?? "", /changes nothing/, name);
+  }
+  // Anything that changes GitHub, including a write whose name ends in "_read".
+  for (const name of ["create_pull_request", "merge_pull_request", "update_pull_request", "update_pull_request_branch", "push_files",
+    "create_or_update_file", "delete_file", "create_branch", "fork_repository", "add_issue_comment", "issue_write", "sub_issue_write",
+    "pull_request_review_write", "mark_all_notifications_read", "actions_run_trigger", "request_copilot_review", "create_repository"]) {
+    assert.equal(githubRead(`mcp__github__${name}`), null, `${name} is reviewed`);
+  }
+  // A read's name on a server that isn't the person's GitHub one, or malformed names.
+  for (const name of ["mcp__other__get_me", "mcp__coding-tools__get_me", "mcp__github__Get_me", "mcp__github__get_me extra",
+    "github__get_me", "get_me", "", undefined]) {
+    assert.equal(githubRead(name), null, String(name));
+  }
+  assert.ok(asked.includes("other") && asked.includes("github"), "the server is looked up by its name");
+  // Without the lookup (or when it fails) nothing is answered unreviewed.
+  const bare = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }) });
+  assert.equal(bare.githubRead("mcp__github__get_me"), null);
+  const failing = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), githubMcpServer: () => { throw new Error("no list"); } });
+  assert.equal(failing.githubRead("mcp__github__get_me"), null);
+  const truthy = createAgentOrchestratorWorkflow({ requestHeadless: async () => ({ ok: true }), githubMcpServer: () => "yes" });
+  assert.equal(truthy.githubRead("mcp__github__get_me"), null, "only a real true counts");
+});
+
 test("a question nobody answers gets each field's recommended choice, and a URL request is declined", () => {
   const answer = recommendedAnswer({ mode: "form", fields: [
     { key: "framework", type: "choice", options: [{ value: "vue", label: "Vue", description: "" }, { value: "react", label: "React (Recommended)", description: "" }] },

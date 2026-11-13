@@ -63,14 +63,17 @@ test("desktop GUI updates reload the renderer without the full-installer quit pa
   const end = mainSource.indexOf('handle("launcher:window-state"', start);
   assert.ok(start >= 0 && end > start);
   const handler = mainSource.slice(start, end);
-  assert.match(handler, /return await updateController\.beginInstall\(/);
-  assert.doesNotMatch(handler, /requestQuit|shutdown|restart|cancelInstall/);
+  // The install is installAppUpdate since 2026-11-13: App plugins' Browser engine row runs it too.
+  assert.match(handler, /async \(\) => installAppUpdate\(\)/);
+  const install = mainSource.slice(mainSource.indexOf("function installAppUpdate()"), mainSource.indexOf("async function prepareBrowserForUpdate"));
+  assert.match(install, /return await updateController\.beginInstall\(/);
+  assert.doesNotMatch(handler + install, /requestQuit|shutdown|restart|cancelInstall/);
   assert.doesNotMatch(mainSource, /promptForAvailableUpdate|Install and restart/);
 });
 
 test("Update offers to stop a running ChatGPT turn instead of refusing", () => {
-  const start = mainSource.indexOf('handle("launcher:update-install"');
-  const handler = mainSource.slice(start, mainSource.indexOf('handle("launcher:window-state"', start));
+  // The Update button's install (installAppUpdate, shared with App plugins' Browser engine row).
+  const handler = mainSource.slice(mainSource.indexOf("function installAppUpdate()"), mainSource.indexOf("async function prepareBrowserForUpdate"));
   // The turns stop before a whole-app install starts, so its quit no longer meets a running turn; a
   // renderer-only update leaves them running (combineUpdateControllers runs the hook on that path only).
   // prepareBrowserForUpdate lets the background connector setup finish its account, then asks here.
