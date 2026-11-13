@@ -5466,6 +5466,8 @@ async function start() {
       agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
       // "Approve for me" runs a computer use step in an app the chat may use without the reviewer.
       computerStepAllowed: (input) => chatAgentTools?.computerStepAllowed?.(input) ?? null,
+      // ...and a read through the person's GitHub MCP server (Plugins > MCPs) the same way.
+      githubMcpServer: (name) => userMcpServers(logger).isGithubServer(name),
       nativePreviewTools: chatAgentTools,
       // Runtime > Subagents: its settings, saved subagents and running ones.
       subagents: subagentsService,
