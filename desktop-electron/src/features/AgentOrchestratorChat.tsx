@@ -140,6 +140,24 @@ export type ChatQueueActions = {
   /** Removes the items `ids`, or all of the chat's with null. */
   remove: (taskId: string, ids: string[] | null) => Promise<void>;
 };
+/** A composer's unsent draft as the app saves it (chat_draft): attachments without their thumbnails. */
+export type SavedChatDraft = { text: string; attachments: ChatAttachment[]; annotations: Omit<DraftAnnotation, "id">[] };
+/** The app's copy of each composer's unsent draft (chat-drafts.cjs), so a crash or restart keeps it. */
+export type ChatDraftActions = {
+  load: (key: string) => Promise<SavedChatDraft | null>;
+  /** null removes the saved copy. */
+  save: (key: string, draft: SavedChatDraft | null) => Promise<void>;
+};
+/** The draft worth saving from a composer's state, or null when it holds nothing. */
+export function savedDraftOf(text: string, attachments: ChatAttachment[], annotations: DraftAnnotation[]): SavedChatDraft | null {
+  const files = attachments.filter((item) => item.path || item.text).map((item): ChatAttachment => ({ name: item.name,
+    ...(item.path ? { path: item.path } : {}), ...(!item.path && item.text ? { text: item.text } : {}),
+    ...(item.image ? { image: true } : {}), ...(item.markup ? { markup: item.markup } : {}) }));
+  const notes = annotations.map((note) => Object.fromEntries(Object.entries(note).filter(([field]) => field !== "id")) as Omit<DraftAnnotation, "id">);
+  return text.trim() || files.length || notes.length ? { text, attachments: files, annotations: notes } : null;
+}
+// Composer keys whose saved draft has been read back in this window: their saves may now replace it.
+const LOADED_DRAFTS = new Set<string>();
 type DraftSnapshot = { text: string; sent?: boolean };
 /** A message that could be neither sent nor queued, back in its chat's composer; `failed`: what failed. */
 type DraftRecovery = { text: string; error: string; applied: boolean; failed?: "send" | "queue" | "send or queue" };
@@ -1210,10 +1228,12 @@ export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, sendBusy = busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover, resizeAgent,
-  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
+  pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue, drafts,
 }: {
   /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
   queue?: ChatQueueActions;
+  /** The app's saved copy of each composer's unsent draft (chat_draft). */
+  drafts?: ChatDraftActions;
   /** Close split view: set on every pane while the window is split (ChatSplit). */
   onClosePane?: () => void;
   /** A finished card's thinking and tool calls, read back from its AO session (turn_timeline). */
@@ -1758,6 +1778,96 @@ export function AgentOrchestratorChat({
     registration.entry.snapshot = composing.current.snapshot;
     trimDraftEntry(registration.key, registration.entry);
   });
+  // The unsent draft is saved by the app too (drafts: chat-drafts.cjs), as Claude Code and Codex keep an
+  // unsent prompt: a crash, a reload or a restart kept nothing typed, attached or annotated here, since
+  // CHAT_DRAFTS lives in this window's memory. Read back once per composer, into a composer that holds
+  // nothing yet; saved 400 ms after each change, and at once when the window hides or this view closes.
+  // A message going out (sent, steered or queued) keeps its saved copy until the app has it, so a crash
+  // mid-send brings it back instead of losing it; then the copy is settled (settleSavedDraft).
+  const draftsNow = useRef(drafts);
+  draftsNow.current = drafts;
+  const sendsInFlight = useRef(0);
+  const draftSave = useRef<{ key: string; written: string | null; pending: SavedChatDraft | null | undefined; timer: number | null }>({
+    key: draftKey, written: null, pending: undefined, timer: null });
+  const writeDraft = (key: string, value: SavedChatDraft | null) => {
+    const slot = draftSave.current;
+    const json = JSON.stringify(value);
+    if (slot.key === key) {
+      if (slot.written === json) return;
+      slot.written = json;
+    }
+    void draftsNow.current?.save(key, value).catch(() => { if (draftSave.current.key === key) draftSave.current.written = null; });
+  };
+  const flushDraft = () => {
+    const slot = draftSave.current;
+    if (slot.timer !== null) { window.clearTimeout(slot.timer); slot.timer = null; }
+    if (slot.pending === undefined) return;
+    const value = slot.pending;
+    slot.pending = undefined;
+    writeDraft(slot.key, value);
+  };
+  /**
+   * After a message from composer `owner` is sent, steered or queued (`handedOff`), or has failed:
+   * its saved copy becomes what that composer holds now (nothing, or what was typed since), once
+   * React has applied the composer's own clear. A composer that moved on (a new chat got its task)
+   * drops the copy of a message the app now has.
+   */
+  const settleSavedDraft = (owner: { cacheKey: string }, handedOff: boolean) => {
+    sendsInFlight.current = Math.max(0, sendsInFlight.current - 1);
+    window.setTimeout(() => {
+      const latest = composing.current;
+      if (latest.cacheKey === owner.cacheKey && alive.current) writeDraft(owner.cacheKey, savedDraftOf(latest.draft, latest.attachments, latest.annotations));
+      else if (handedOff) writeDraft(owner.cacheKey, null);
+    }, 0);
+  };
+  useEffect(() => {
+    const store = draftsNow.current;
+    if (!store || LOADED_DRAFTS.has(draftKey)) return;
+    const key = draftKey;
+    void store.load(key).then((saved) => {
+      LOADED_DRAFTS.add(key);
+      const latest = composing.current;
+      if (!saved || !alive.current || latest.cacheKey !== key) return;
+      if (draftSave.current.key === key) draftSave.current.written = JSON.stringify(saved);
+      // Something typed or attached since wins (and is saved now): the saved copy fills an empty composer only.
+      if (latest.draft.trim() || latest.attachments.length || latest.annotations.length) {
+        writeDraft(key, savedDraftOf(latest.draft, latest.attachments, latest.annotations));
+        return;
+      }
+      const files = saved.attachments.map((item) => ({ ...item }));
+      setDraft(saved.text);
+      setAttachments(files);
+      setAnnotations(saved.annotations.map((note) => ({ ...note, id: ++annotationIds } as DraftAnnotation)));
+      // An image's thumbnail is rebuilt from its file.
+      for (const file of files) {
+        if (!file.image || !file.path || !attachmentPreview) continue;
+        void attachmentPreview(file.path).then((preview) => {
+          if (alive.current && preview) setAttachments((list) => list.map((entry) => entry === file ? { ...entry, preview } : entry));
+        }).catch(() => undefined);
+      }
+    }, () => { LOADED_DRAFTS.add(key); });
+  }, [draftKey]);
+  useEffect(() => {
+    const slot = draftSave.current;
+    if (slot.key !== draftKey) {
+      flushDraft();
+      draftSave.current = { key: draftKey, written: null, pending: undefined, timer: null };
+    }
+    // Not before the saved copy was read back: an empty composer's first render would remove it.
+    if (!draftsNow.current || !LOADED_DRAFTS.has(draftKey)) return;
+    const value = savedDraftOf(draft, attachments, annotations);
+    if (value === null && sendsInFlight.current > 0) return;
+    const current = draftSave.current;
+    current.pending = value;
+    if (current.timer !== null) window.clearTimeout(current.timer);
+    current.timer = window.setTimeout(flushDraft, 400);
+  }, [draftKey, draft, attachments, annotations]);
+  useEffect(() => {
+    const hide = () => { if (document.visibilityState === "hidden") flushDraft(); };
+    window.addEventListener("pagehide", flushDraft);
+    document.addEventListener("visibilitychange", hide);
+    return () => { window.removeEventListener("pagehide", flushDraft); document.removeEventListener("visibilitychange", hide); flushDraft(); };
+  }, []);
   // Messages a rewound chat carries as context ahead of its first message; the composer holds only
   // the chosen message. Dropped with the chip's ×, or sent once with that first message.
   const [carried, setCarried] = useState<string[] | null>(null);
@@ -1874,6 +1984,9 @@ export function AgentOrchestratorChat({
   /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
   const deliver = async (message: string, goal?: string, fromComposer = true, restart = false) => {
     const owner = composing.current;
+    // Its saved draft stays until the app has it (settleSavedDraft); handedOff once it does.
+    if (fromComposer) sendsInFlight.current += 1;
+    let handedOff = false;
     const here = () => alive.current && composing.current.taskId === owner.taskId && composing.current.cacheKey === owner.cacheKey;
     // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
     const current = () => fromComposer && here() && composing.current.draft === owner.draft && composing.current.attachments === owner.attachments
@@ -1913,7 +2026,7 @@ export function AgentOrchestratorChat({
       if (steered === "answered") {
         dropPending();
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
-        return true;
+        handedOff = true; return true;
       }
       // Delivered: it stays shown until the turn shows it (see pendingSteers); anything else drops it.
       if (steered !== true && !waits) dropPending();
@@ -1935,7 +2048,7 @@ export function AgentOrchestratorChat({
         if (here() && steered === "interrupt") {
           say("Interrupting", "A command was still running, so it was stopped. The same agent gets your message next.", chatMessageReadable(message));
         }
-        return true;
+        handedOff = true; return true;
       }
       // A rewound chat's first message takes the earlier messages along ahead of it, as context.
       const first = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n").slice(-8192) : message;
@@ -1981,7 +2094,7 @@ export function AgentOrchestratorChat({
         if (!selectedTaskId) setCarried(null);
       }
       if (here()) followBottom();
-      return true;
+      handedOff = true; return true;
     } catch (error) {
       dropPending();
       // Refused only for the moment, not for what it says: the chat started working again under it
@@ -1996,7 +2109,7 @@ export function AgentOrchestratorChat({
       if (selectedTaskId && sendRefusedForNow(error) && await enqueue(selectedTaskId, { what: "Message", message, ...(goal ? { goal } : {}) }, true).then(() => true, () => false)) {
         // It shows in the queued-message bar above the composer (#466), which has no notice cards.
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
-        return true;
+        handedOff = true; return true;
       }
       // Keep the message so it can be sent again. A steer had cleared the composer at once, and so had
       // a follow-up refused only for now, left to the queue just above, which refused it too: the window
@@ -2016,7 +2129,10 @@ export function AgentOrchestratorChat({
       }
       if ((cleared || forNow) && !restored) recoverMessage(owner.cacheKey, message, error, forNow ? "send or queue" : "send");
       return false;
-    } finally { setSending(false); }
+    } finally {
+      setSending(false);
+      if (fromComposer) settleSavedDraft(owner, handedOff);
+    }
   };
   /**
    * Puts a message that could be neither sent nor queued back in its chat's composer (now, or when
@@ -2113,10 +2229,15 @@ export function AgentOrchestratorChat({
     }
     if (queueing || queueWhileSending) {
       const owner = composing.current;
+      // Its saved draft stays until the app's queue has it (settleSavedDraft).
+      sendsInFlight.current += 1;
       // Several messages typed during one turn go together, in order.
       setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
       // Not queued: it goes back into the composer, ahead of anything typed since.
-      void enqueue(selectedTaskId, { what: "Message", message: text }).catch((error) => giveBackToDraft(owner.cacheKey, text, error));
+      void enqueue(selectedTaskId, { what: "Message", message: text }).then(() => settleSavedDraft(owner, true), (error) => {
+        giveBackToDraft(owner.cacheKey, text, error);
+        settleSavedDraft(owner, false);
+      });
       return;
     }
     await deliver(text);

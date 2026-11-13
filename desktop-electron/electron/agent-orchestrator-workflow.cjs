@@ -7,6 +7,7 @@ const path = require("node:path");
 const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
+const { createChatDraftStore } = require("./chat-drafts.cjs");
 const { restartResume } = require("./chat-resume.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 // CPA requests (model lists, goal checks, reviews) go from a worker thread: a connect or write on
@@ -460,7 +461,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -531,6 +532,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const schedules = createScheduleStore({ file: schedulesFile, now });
   // Messages waiting for their chat's turn, and steers waiting to be read (chat-queue.cjs).
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
+  // Each composer's unsent draft (chat-drafts.cjs): a crash or restart no longer loses a prompt being written.
+  const chatDrafts = createChatDraftStore({ file: chatDraftsFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile, logger });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
@@ -8366,6 +8369,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const run = saved.runs.find(entry => entry.id === runId);
     if (run?.project_id && tasks.includes(run.project_id)) await drainQueue(workspaceId, run.project_id, { known: saved });
   }
+  /**
+   * chat_draft: a composer's unsent draft (chat-drafts.cjs). `get` reads it back when the composer
+   * opens; `set` saves it a moment after each change, and an empty one removes it.
+   */
+  async function chatDraftCall({ workspaceId, key, action, draft } = {}) {
+    const id = clean(workspaceId, 128), name = typeof key === "string" ? key.slice(0, 512) : "";
+    if (!id || !name) throw new Error("A draft needs its project and chat");
+    if (action === "get") return { ok: true, draft: chatDrafts.get(id, name) };
+    if (action === "set") return { ok: true, kept: chatDrafts.set(id, name, draft) };
+    throw new Error("Unknown draft action");
+  }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
   async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
@@ -9656,6 +9670,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           queues: chatQueue.forWorkspace(clean(args.workspaceId, 128)) };
       }
       case "chat_queue": return chatQueueCall(args);
+      case "chat_draft": return chatDraftCall(args);
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
@@ -9784,8 +9799,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const schedulesSaved = () => schedules.saved();
   /** Resolves once every wake-up and /loop change so far is on disk (saved off the main thread too). */
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
-  /** Resolves once every deleted-message and archive change so far is on disk (saved off the main thread too). */
-  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved()]);
+  /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
+  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 

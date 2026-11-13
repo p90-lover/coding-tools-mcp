@@ -86,6 +86,7 @@ const BACKEND_MODULES = Object.freeze([
   // agent-orchestrator-workflow.cjs keeps each chat's queued messages and read steers, and resumes
   // chats after a restart (#706).
   "chat-queue.cjs",
+  "chat-drafts.cjs",
   "chat-resume.cjs",
   // main.cjs gives chat agents computer control through it: the window picker and the control bar.
   "computer-control.cjs",

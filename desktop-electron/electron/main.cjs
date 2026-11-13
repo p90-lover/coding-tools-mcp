@@ -2901,7 +2901,7 @@ function registerIpc({ logger, stateStore }) {
     // Activity log ("Click into the Coding Tools window", 22 a night) and left the archived list,
     // the agent pre-warm and the Retry automatically switch unset. Layout still needs a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
-      && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm"].includes(input.operation)
+      && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm", "chat_draft"].includes(input.operation)
         || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined));
     const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
@@ -5410,6 +5410,8 @@ async function start() {
       schedulesFile: path.join(app.getPath("userData"), "integrations", "chat-schedules.json"),
       // So do the chats' queued messages, sent with the chat closed too (chat-queue.cjs).
       chatQueueFile: path.join(app.getPath("userData"), "integrations", "chat-queue.json"),
+      // So do the composers' unsent drafts (chat-drafts.cjs): a crash no longer loses a prompt being written.
+      chatDraftsFile: path.join(app.getPath("userData"), "integrations", "chat-drafts.json"),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
