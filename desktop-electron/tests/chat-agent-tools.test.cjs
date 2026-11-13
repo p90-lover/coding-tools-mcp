@@ -691,7 +691,7 @@ test("the MCP endpoint answers initialize, lists the agent tools and calls them 
     const reply = await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth);
     assert.deepEqual(reply.body.result.tools.map((entry) => entry.name),
       ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"],
-      "terminal and desktop tools are off by default; request_permissions, the default cwd, task board, native Codex, history, operation store, sandbox and harness tools are never offered");
+      "terminal and desktop tools are off by default (with them monitor and sleep; push_notification needs a notifier); request_permissions, the default cwd, task board, native Codex, history, operation store, sandbox and harness tools are never offered");
     assert.equal(Object.hasOwn(reply.body.result.tools[0], "outputSchema"), false);
     assert.deepEqual(reply.body.result.tools[0].annotations, { readOnlyHint: true });
     assert.equal(calls[0].endpoint, "/api/v1/tools/catalog?workspace_id=ws1");
