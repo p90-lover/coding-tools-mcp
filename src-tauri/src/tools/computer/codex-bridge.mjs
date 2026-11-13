@@ -149,6 +149,7 @@ const KINDS = [
 export function failureReply(error, closed = false) {
   const message = String(error?.message ?? '');
   if (/stopped by the user|physical Escape/i.test(message)) return { ok: false, code: 'CODEX_ENGINE_INTERRUPTED', fatal: true };
+  if (/^Computer Use has been stopped for this turn\b/i.test(message)) return { ok: false, code: 'CODEX_POLICY_STOPPED', fatal: true };
   // The SDK's own words when it gives up on its helper. Its request timer kills the helper
   // (measured with @oai/sky 0.7.12 on 2026-11-10: the exit listeners ran 20 ms after the
   // rejection), and that exit ends this worker through loadEngine's onExit. So these replies are
