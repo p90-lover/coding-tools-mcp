@@ -26,13 +26,16 @@ const ALLOWED = {
   "browser-account-mcp.cjs": 1,
   // The prior port record is captured before the first await; ready apps are rejected before IO.
   "browser-debugging.cjs": 1,
-  "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 4, "chat-archive.cjs": 4, "chat-edits.cjs": 4,
+  "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 4, "chat-archive.cjs": 1, "chat-edits.cjs": 1,
   "chat-goals.cjs": 2, "chat-loops.cjs": 1, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 1,
   // /schedule reads its saved schedules once, when the workflow is created at startup; it saves off the main thread.
   "chat-schedules.cjs": 1,
   "chatgpt-desktop-sync.cjs": 1, "chatgpt-desktop.cjs": 25, "codex-chat-lifecycle-sync.cjs": 9,
   "codex-thread-accounts.cjs": 2, "codex-thread-stats.cjs": 1, "computer-control.cjs": 4, "cpa-antigravity-reauth.cjs": 4,
-  "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 45, "durable-state.cjs": 5, "external-services.cjs": 27,
+  // +9 (#1251): the account migration to Provider Manager kinds and the retired-plugin Trash step run in
+  // CPA's own wrapper process (cpa-managed.cjs run/refresh), never on Electron main, which only asks
+  // helperPricesPath for a path.
+  "cpa-codex-long-run.cjs": 6, "cpa-managed.cjs": 54, "durable-state.cjs": 5, "external-services.cjs": 27,
   "extra-tunnels.cjs": 5, "gpt-browser.cjs": 1, "gui-update.cjs": 12, "headless-host.cjs": 11, "in-use-files.cjs": 4,
   "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1,
   // +1: the off-system-drive temporary folder is made once at startup, before any window or child

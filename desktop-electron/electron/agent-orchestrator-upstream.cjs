@@ -1642,6 +1642,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // AO is still starting this chat's agent in the background (spawn's async), so nothing has
         // taken its opening message yet: the run loop can tell a start that hung (stopStalledLaunch).
         ...(session?.session?.provisionState === "provisioning" ? { provisioning: true } : {}),
+        // Its agent's controller is up (AO's controller_start stage is over) though the start still
+        // provisions: only the opening prompt's delivery (queue_drain) is left, which takes
+        // milliseconds when healthy. The launch watchdog gives that stage a much shorter bound.
+        ...(session?.session?.provisionState === "provisioning" && ["ready", "busy", "recovering"].includes(conversation?.controller) ? { controllerUp: true } : {}),
         needsInput: status === "needs_input", exited: ["exited", "terminated"].includes(status),
         // No agent process behind this session (released while idle, or it exited): nothing runs,
         // so a stop has nothing to wait for and a steer nothing to reach.

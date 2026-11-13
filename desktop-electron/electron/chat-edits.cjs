@@ -9,7 +9,7 @@
 // chat's next follow-up starts a fresh session.
 
 const fs = require("node:fs");
-const path = require("node:path");
+const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 // The same follow-up marker ao-chat.ts (chatMessagesFromDescription) reads.
 const FOLLOW_UP = /\n\nFollow-up \(([^)]+) UTC\):\n/;
@@ -65,8 +65,13 @@ function chatDescriptionWithSteer(description, messages, steer) {
  * mission adds a run without a message, so the chat must not pair it with the next message); and
  * the window each agent session was resized to after it started (chat_context_window). Kept
  * in a small JSON file so all of it survives an app restart; without a file (tests) it lives in memory.
+ *
+ * A change is in memory at once and saved off the main thread: the synchronous save held every
+ * window 470 ms on the hard disk when a follow-up cleared `fresh` (launcher.main_blocked
+ * writeFileSync chat-edits.json < clearFresh < startChatSend, 2026-11-12). Each change returns its
+ * save, so a delete that must not stand unsaved waits for it and fails with it; saves land in order.
  */
-function createChatEditStore({ file = null } = {}) {
+function createChatEditStore({ file = null, logger = null } = {}) {
   let chats = {};
   if (file) {
     try {
@@ -75,30 +80,35 @@ function createChatEditStore({ file = null } = {}) {
     } catch { /* Nothing deleted yet. */ }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  let lastSave = Promise.resolve();
+  /** Saves every chat as it is now: resolves once that is on disk, rejects when it could not be. */
   const persist = () => {
-    if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(chats, null, 2));
-    fs.renameSync(temporary, file);
+    if (!file) return Promise.resolve();
+    const save = writePrivateFileAtomicAsync(file, JSON.stringify(chats, null, 2), { durable: true, protectDirectory: false });
+    // A caller that does not wait keeps its change in memory, and the next change saves it again.
+    save.catch((error) => logger?.warn?.("chat_edits.not_saved", { message: String(error?.message ?? error).slice(0, 200) }));
+    lastSave = save;
+    return save;
   };
   const projectChats = (workspaceId) => {
     const prefix = `${workspaceId}:`;
     return Object.entries(chats).filter(([name]) => name.startsWith(prefix)).map(([, chat]) => chat);
   };
   return {
+    /** Resolves once every change so far is on disk, or has failed to get there (a caller about to exit, tests). */
+    saved: () => lastSave.then(() => {}, () => {}),
     get: (workspaceId, taskId) => chats[key(workspaceId, taskId)] ?? null,
     /** A message was deleted: hide its runs (the one it started and any restarts of it) and start the next follow-up afresh. */
     deleteMessage(workspaceId, taskId, runIds) {
       const chat = chats[key(workspaceId, taskId)] ?? { deletedRuns: [] };
       chats[key(workspaceId, taskId)] = { ...chat, deletedRuns: [...new Set([...(chat.deletedRuns ?? []), ...runIds.filter(Boolean)])], fresh: true };
-      persist();
+      return persist();
     },
     /** Restart mission: `runId` is a fresh run of the same message as `previousRunId`. */
     restarted(workspaceId, taskId, previousRunId, runId) {
       const chat = chats[key(workspaceId, taskId)] ?? {};
       chats[key(workspaceId, taskId)] = { ...chat, restarts: { ...(chat.restarts ?? {}), [runId]: previousRunId } };
-      persist();
+      return persist();
     },
     /** Every run of one message: the run it started, then each restart of it (and of those). */
     runsOfMessage(workspaceId, taskId, runId) {
@@ -112,7 +122,7 @@ function createChatEditStore({ file = null } = {}) {
     /** Puts a chat's entry back as it was (a failed delete). */
     restore(workspaceId, taskId, saved) {
       if (saved) chats[key(workspaceId, taskId)] = saved; else delete chats[key(workspaceId, taskId)];
-      persist();
+      return persist();
     },
     /**
      * The chat's agent `session` was resized in place to the card's `contextWindow` (a route value:
@@ -133,9 +143,9 @@ function createChatEditStore({ file = null } = {}) {
     fresh: (workspaceId, taskId) => chats[key(workspaceId, taskId)]?.fresh === true,
     clearFresh(workspaceId, taskId) {
       const chat = chats[key(workspaceId, taskId)];
-      if (!chat?.fresh) return;
+      if (!chat?.fresh) return Promise.resolve();
       chats[key(workspaceId, taskId)] = { ...chat, fresh: false };
-      persist();
+      return persist();
     },
     /**
      * The runs a chat shows: those of deleted messages are left out, and a restart says which run it

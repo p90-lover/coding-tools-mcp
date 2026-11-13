@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const path = require("node:path");
-const { createRtk } = require("../electron/rtk.cjs");
+const { createRtk, powerShellHookFrom } = require("../electron/rtk.cjs");
 
 const RTK = "C:\\Users\\me\\AppData\\Local\\Microsoft\\WinGet\\Links\\rtk.exe";
 
@@ -77,7 +77,7 @@ test("a command runs as rtk's rewrite on exit 0 or 3, and as written otherwise",
 test("turned off, nothing is rewritten and Claude Code gets no hook", async () => {
   const { rtk, calls } = world({ enabled: false, rewrites: { "git status": [0, "rtk git status"] } });
   assert.equal(await rtk.rewrite("git status"), null);
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" }, "an empty hook turns it off in AO");
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" }, "an empty hook turns it off in AO");
   assert.equal(rtk.binDir(), "");
   assert.ok(!calls.some((call) => call[1] === "rewrite"), "rtk is not even asked");
 });
@@ -98,7 +98,7 @@ test("turned off while rtk is rewriting, the command runs as written", async () 
 
 test("on, Claude Code's hook and the agents' PATH point at the installed rtk", () => {
   const { rtk } = world();
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude`, CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${RTK}" hook claude`, CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom(`"${RTK}" hook claude`), CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
 });
 
@@ -189,7 +189,7 @@ test("AO's timed-out first RTK lookup stays asynchronous for its hook and PATH",
     t.mock.timers.tick(15_000);
     await waiting;
     assert.equal(asyncLookups, 1, "the worker lookup is still pending after readiness expires");
-    assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" });
+    assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" });
     assert.equal(rtk.binDir(), "");
     assert.equal(syncLookups, 0, "the environment does not restart that lookup on the caller");
     assert.equal(asyncLookups, 1, "the readers leave the existing lookup running");
@@ -197,7 +197,7 @@ test("AO's timed-out first RTK lookup stays asynchronous for its hook and PATH",
     release({ code: 0, stdout: "rtk 1.0.1\n" });
     await checking;
   }
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude', CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: '"' + RTK + '" hook claude', CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom('"' + RTK + '" hook claude'), CODING_TOOLS_RTK_CODEX_HOOK: "rtk hook codex", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(RTK));
   assert.equal(syncLookups, 0);
   assert.equal(installs, 0);
@@ -241,7 +241,7 @@ test("rtk winget unpacked into its Packages folder is found: no Links shim, its 
   const { rtk } = machine({ installed: true });
   assert.equal((await rtk.status()).path, PACKAGED);
   // This machine's rtk 0.50.0 predates `rtk hook codex`.
-  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${PACKAGED}" hook claude`, CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
+  assert.deepEqual(rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: `"${PACKAGED}" hook claude`, CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom(`"${PACKAGED}" hook claude`), CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "", RTK_SUPPRESS_HOOK_WARNING: "1" });
   assert.equal(rtk.binDir(), path.dirname(PACKAGED), "AO's agents get its folder on PATH");
 });
 
@@ -394,7 +394,7 @@ test("OpenCode chats get the plugin AO's start wrote, from an rtk with `rtk hook
   }
   const off = pluginWorld({ enabled: false });
   await off.rtk.ready(5_000);
-  assert.deepEqual(off.rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" }, "off");
+  assert.deepEqual(off.rtk.daemonEnvironment(), { CODING_TOOLS_RTK_CLAUDE_HOOK: "", CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: "", CODING_TOOLS_RTK_CODEX_HOOK: "", CODING_TOOLS_RTK_OPENCODE_PLUGIN: "" }, "off");
   const missing = pluginWorld({ files: [] });
   await missing.rtk.ready(5_000);
   assert.equal(missing.rtk.opencodePlugin(), "", "no rtk");
@@ -501,5 +501,70 @@ test("the OpenCode plugin rewrites only the bash tool's command, with rtk's answ
   } finally {
     if (saved === undefined) delete process.env.RTK_DISABLED;
     else process.env.RTK_DISABLED = saved;
+  }
+});
+
+test("Claude Code's PowerShell tool gets RTK's Claude hook, wrapped to drop rewrites PowerShell can't run", () => {
+  // Seen 2026-11-12: agents ran 136 of 137 commands through the PowerShell tool, which a hook for
+  // Bash alone never saw. Off or missing, there is no PowerShell hook either.
+  const { rtk } = world();
+  assert.equal(rtk.claudePowerShellHook(), powerShellHookFrom(`"${RTK}" hook claude`));
+  assert.ok(rtk.claudePowerShellHook().startsWith(`o=$("${RTK}" hook claude); s=$?; `), rtk.claudePowerShellHook());
+  assert.equal(rtk.daemonEnvironment().CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK, rtk.claudePowerShellHook());
+  assert.equal(world({ enabled: false }).rtk.claudePowerShellHook(), "", "off");
+  assert.equal(world({ files: [] }).rtk.claudePowerShellHook(), "", "missing");
+  assert.equal(powerShellHookFrom(""), "");
+  // AO registers a hook only as one plain line of at most 1,024 characters.
+  const long = powerShellHookFrom(`"C:\\Users\\${"x".repeat(60)}\\AppData\\Local\\Microsoft\\WinGet\\Packages\\rtk-ai.rtk_Microsoft.Winget.Source_8wekyb3d8bbwe\\rtk.exe" hook claude`);
+  assert.ok(long.length < 1024 && !/[\u0000-\u001f\u007f]/.test(long), long);
+});
+
+/** Git Bash, which Claude Code runs hook commands with on Windows (bash elsewhere), or null. */
+function hookBash() {
+  const candidates = process.platform === "win32"
+    ? [path.join(process.env.ProgramFiles || "C:\\Program Files", "Git", "bin", "bash.exe"), path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Git", "bin", "bash.exe")]
+    : ["/bin/bash", "/usr/bin/bash"];
+  return candidates.find((file) => require("node:fs").existsSync(file)) ?? null;
+}
+
+test("the PowerShell hook drops rtk's answer when it would run ls, tree, grep, wc or wget, and passes everything else through (bash)", { skip: hookBash() ? false : "no bash" }, () => {
+  const { spawnSync } = require("node:child_process");
+  const bash = hookBash();
+  // `hook` stands in for rtk: it prints rtk's answer, reads stdin or exits as rtk would. Git Bash
+  // took 12-17 s to start on the loaded test machine (2026-11-12), so one bash runs every case, each
+  // in its own subshell, and one more runs the hook as Claude Code does, as `bash -c`.
+  const answer = (command) => JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecisionReason: "RTK auto-rewrite", updatedInput: { command } } });
+  const printing = (text) => `printf '%s' '${text}'`;
+  const options = { encoding: "utf8", timeout: 180_000, windowsHide: true };
+  const direct = spawnSync(bash, ["-c", powerShellHookFrom(printing(answer("rtk git status")))], { ...options, input: "{}" });
+  assert.equal(direct.status, 0, direct.stderr);
+  assert.equal(direct.stdout, answer("rtk git status"));
+
+  const input = JSON.stringify({ tool_name: "PowerShell", tool_input: { command: "git status" } });
+  const kept = ["rtk git status", "Set-Location x; rtk git diff --stat 2>&1", 'rtk git log --format="%h ls" -3', "rtk read ls.txt", "rtk gh pr view 1", "rtk cargo test"];
+  const dropped = ["rtk ls -Force", "rtk ls", "rtk git status; rtk ls -la", "rtk tree", "rtk tree /F", "Set-Location x; rtk grep -n foo src", "rtk wc -l a.txt", "rtk wget https://example.test/a"];
+  const cases = [
+    ...kept.map((command) => ({ name: command, hook: printing(answer(command)), status: 0, stdout: answer(command) })),
+    ...dropped.map((command) => ({ name: `${command} (runs as written)`, hook: printing(answer(command)), status: 0, stdout: "" })),
+    // rtk reads the tool call from stdin, and its exit status is the hook's.
+    { name: "stdin reaches rtk", hook: "cat", stdin: input, status: 0, stdout: input },
+    { name: "rtk's exit status", hook: `${printing("{}")}; exit 3`, status: 3, stdout: "{}" },
+    // A missing rtk never blocks the command, as exit 2 would.
+    { name: "missing rtk", hook: '"C:\\no\\such\\rtk.exe" hook claude', status: "not 2", stdout: "" },
+  ];
+  const script = cases.map(({ hook, stdin = "{}" }, index) =>
+    `r=$(printf '%s' '${stdin}' | (${powerShellHookFrom(hook)})); printf '\\n@@${index} %s %s' "$?" "$r"`).join("\n");
+  const all = spawnSync(bash, ["-c", script], options);
+  assert.equal(all.error, undefined, String(all.error));
+  const results = new Map(all.stdout.split("\n@@").slice(1).map((line) => {
+    const [, index, status, stdout] = /^(\d+) (\d+) ?([\s\S]*)$/.exec(line);
+    return [Number(index), { status: Number(status), stdout }];
+  }));
+  for (const [index, want] of cases.entries()) {
+    const got = results.get(index);
+    assert.ok(got, `${want.name}: no result in ${JSON.stringify(all.stdout)} ${all.stderr}`);
+    if (want.status === "not 2") assert.notEqual(got.status, 2, want.name);
+    else assert.equal(got.status, want.status, want.name);
+    assert.equal(got.stdout, want.stdout, want.name);
   }
 });

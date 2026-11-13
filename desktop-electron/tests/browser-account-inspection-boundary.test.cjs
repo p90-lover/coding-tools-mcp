@@ -7,8 +7,10 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-const guard = source.match(/function assertFocusedMainWindow\([^]*?\n\}/)?.[0];
-assert.ok(guard);
+// Both checks as main.cjs has them: write handlers first wait a moment for a late focus event.
+const guard = [source.match(/\nfunction assertFocusedMainWindow\([^]*?\n\}/)?.[0],
+  source.match(/\nasync function assertFocusedMainWindowSettled\([^]*?\n\}/)?.[0]];
+assert.ok(guard.every(Boolean));
 
 function registration(channel) {
   const start = source.indexOf(`  handle("${channel}",`);
@@ -60,8 +62,10 @@ function fixture(options = {}) {
     },
     recordBrowserWorkspaceContext: (partition, result) => calls.push(["record", partition, result.planType]),
     browserAccountsStatus: () => ({ activeId: "main" }),
+    // No focus event arrives while a write waits for one (focus-settle.cjs).
+    waitForFocus: async ({ focused }) => focused(),
   };
-  vm.runInNewContext(guard + "\n" + registration("launcher:browser-account-inspect"), context);
+  vm.runInNewContext(guard.join("\n") + "\n" + registration("launcher:browser-account-inspect"), context);
   const event = { sender, senderFrame: mainFrame };
   return { state, context, calls, event, handlers,
     inspect: (input = event) => handlers.get("launcher:browser-account-inspect")(input, "other") };

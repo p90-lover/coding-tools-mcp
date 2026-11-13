@@ -43,14 +43,16 @@ const readJson = async (file) => {
  * the marker. Leaves alone a marker that is missing or is not the switcher's bridge marker.
  */
 async function syncClineMarker(stateRoot) {
-  const data = path.join(stateRoot, "cline-pass-switcher-data");
+  // The switcher is Provider Manager's "cline" part; its state lives in Provider Manager's folder.
+  const data = path.join(stateRoot, "cpa-provider-manager-data", "cline");
   const config = await readJson(path.join(data, "config.json"));
   // The metadata also holds request history; read it only when the catalog is served.
   const revision = clineModelsRevision(config, config?.exposeCatalog === true ? await readJson(path.join(data, "metadata.json")) : null);
   if (!revision) return false;
   const markerFile = path.join(stateRoot, "auth", "cline-pass-switcher.json");
   const marker = await readJson(markerFile);
-  if (!marker || marker.type !== "cline" || marker.switcher !== true) return false;
+  // A Cline Pass account is a provider-manager auth file of kind "cline" (an older one, type "cline").
+  if (!marker || (marker.type !== "cline" && marker.kind !== "cline") || marker.switcher !== true) return false;
   if (marker.modelsRevision === revision) return false;
   writePrivateFileAtomic(markerFile, `${JSON.stringify({ ...marker, modelsRevision: revision })}\n`);
   return true;

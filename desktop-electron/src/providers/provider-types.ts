@@ -213,7 +213,7 @@ export const DEFAULT_PROVIDERS = [
     baseUrl: "http://127.0.0.1:8317",
     modelsEndpoint: "/v1/models",
     loginAdapters: [
-      { id: "cpa-commandcode-go", kind: "cpa_oauth", label: "CommandCode Go via CPA", labelTraditionalChinese: "透過 CPA 登入 CommandCode Go", route: "commandcode-go-auth-url", cpaProvider: "commandcode-go" },
+      { id: "cpa-commandcode-go", kind: "cpa_oauth", label: "CommandCode Go via CPA", labelTraditionalChinese: "透過 CPA 登入 CommandCode Go", route: "provider-manager-auth-url?kind=commandcode-go", cpaProvider: "commandcode-go" },
     ],
     subagentEnabled: true,
     paseoEnabled: true,
@@ -232,7 +232,7 @@ export const DEFAULT_PROVIDERS = [
     baseUrl: "http://127.0.0.1:8317",
     modelsEndpoint: "/v1/models",
     loginAdapters: [
-      { id: "cpa-commandcode-studio", kind: "cpa_oauth", label: "CommandCode Studio via CPA", labelTraditionalChinese: "透過 CPA 登入 CommandCode Studio", route: "commandcode-auth-url", cpaProvider: "commandcode" },
+      { id: "cpa-commandcode-studio", kind: "cpa_oauth", label: "CommandCode Studio via CPA", labelTraditionalChinese: "透過 CPA 登入 CommandCode Studio", route: "provider-manager-auth-url?kind=commandcode", cpaProvider: "commandcode" },
     ],
     subagentEnabled: true,
     paseoEnabled: true,
