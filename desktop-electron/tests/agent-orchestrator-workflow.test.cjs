@@ -9021,9 +9021,9 @@ test("a cold launch whose agent is up but never gets its first message is ended 
 // retry spawned a fresh agent with only the opening prompt. The steer counted as delivered, and the
 // retried turn's finish counted it as read, so no agent ever had it.
 test("a steer handed to a launch the watchdog ended goes back to the front of its chat's queue, still a steer", async () => {
-  let controllerUp = false;
+  let controllerUp = false, seenUp = 0;
   const steered = [];
-  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => world?.killed.includes(id)
+  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => (controllerUp && seenUp++, world?.killed.includes(id))
     ? { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" }
     : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
       lastActivityAt: at, timeline: [], approvals: [] },
@@ -9037,7 +9037,8 @@ test("a steer handed to a launch the watchdog ended goes back to the front of it
     // The chat's own read sees the run its card started on.
     world.chat.runs.push([...world.created.values()].at(-1));
     controllerUp = true;
-    await wait(() => false, 30); // seen up from here
+    // Seen up from the first look after this (not a fixed pause: a busy machine polls later).
+    await wait(() => seenUp > 0);
     const sent = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm" });
     assert.equal(sent.steered, true, "AO took it for the agent that was starting");
     assert.deepEqual(steered, [["agent-1", "use pnpm"]]);
@@ -12875,6 +12876,48 @@ for (const change of ["none", "clear", "edit", "replace", "dispose", "archive", 
         "the latest fallback route is fresh; an explicitly queued route still wins");
       assert.deepEqual((await queue()).map(item => item.message), change === "replace" ? ["next queued text"] : [], "FIFO is preserved");
     }
+  });
+}
+
+for (const [phase, inChat] of [["initial read", false], ["receipt read", false], ["receipt read", true]]) {
+  test(`queued restart recovery retries a failed ${phase} without guessing delivery (${inChat})`, async (t) => {
+    const dir = path.join(__dirname, "..", "..", "aiTemp", "chat-queue-tests", crypto.randomUUID());
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "chat-queue.json");
+    fs.writeFileSync(file, JSON.stringify({ version: 1, chats: { "ws-1:task-1": {
+      workspaceId: "ws-1", taskId: "task-1", delivered: [],
+      items: [{ id: "queued-recovery", message: "deploy it", at: 1, sending: 999_000 }],
+    } } }));
+    const { world, workflow, advance, queue } = queueChat({ state: "finished", chatQueueFile: file });
+    t.after(async () => {
+      workflow.dispose();
+      for (let pass = 0; pass < 5; pass += 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+    if (inChat) world.tasks[0].description += "\n\nFollow-up (2026-11-12 10:00 UTC):\ndeploy it";
+    const request = world.requestHeadless;
+    let unavailable = true, refused = false;
+    world.requestHeadless = async (endpoint, body, ...rest) => {
+      const targeted = phase === "initial read" ? endpoint === "/api/v1/ao/read"
+        : endpoint === "/api/v1/tools/call" && body.tool === "workflow_list" && body.arguments?.task_id;
+      if (unavailable && targeted && !refused) {
+        refused = true;
+        throw new Error("temporary recovery read failure");
+      }
+      return request(endpoint, body, ...rest);
+    };
+    await advance(30_000);
+    await goalSettle();
+    assert.equal(refused, true);
+    assert.equal(world.updates.length, 0, "an unreadable receipt never authorizes a replay");
+    assert.equal((await queue()).length, 1, "uncertain delivery stays recoverable");
+    unavailable = false;
+    await advance(60_000);
+    await goalSettle();
+    assert.equal(world.updates.length, inChat ? 0 : 1, "the timer retries without opening the chat");
+    assert.deepEqual(await queue(), []);
   });
 }
 

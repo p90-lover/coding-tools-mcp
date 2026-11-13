@@ -38,6 +38,8 @@ test("Codex route waits for authenticated browser evidence and retries after log
     stateStore: { read: () => state, update: patch => Object.assign(state, patch) },
     logger: { info() {}, warn() {} },
     waitForRuntimeHostIdle: async () => {},
+    // The connect's busy-refusal retry (startup-runtime-busy.test.cjs runs the real one).
+    whenRuntimeHostIdle: (_logger, _step, run) => run(),
     applyReadyRuntimeAfterBridge() {},
     send() {}, nextSessionRefreshReminderAt: () => 1,
     codexBridgeConnectInFlight: null,

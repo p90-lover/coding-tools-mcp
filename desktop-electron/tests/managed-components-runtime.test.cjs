@@ -881,7 +881,7 @@ test("CPA bundled-source Start fails closed when app resources are missing", asy
 
 // The worker has not published a PID until finish() runs. Every child and process-tree
 // operation is fake, including handles adopted from a previous launcher.
-async function managedOwnerFixture(t, { persistent = false, prepare = false, install = true, healthProbe = async () => true, fetchImpl } = {}) {
+async function managedOwnerFixture(t, { persistent = false, prepare = false, install = true, healthProbe = async () => true, fetchImpl, atomicFile = null } = {}) {
   const { createRequire, wrap } = require("node:module");
   const vm = require("node:vm");
   const sourcePath = require.resolve("../electron/managed-components.cjs");
@@ -915,6 +915,7 @@ async function managedOwnerFixture(t, { persistent = false, prepare = false, ins
   }, (timer) => polls.delete(timer))(
     loaded.exports, (name) => name === "./process-tree.cjs"
       ? { processRunning: (pid) => alive.has(pid), terminateOwnedProcessTree: terminate }
+      : name === "./atomic-file.cjs" && atomicFile ? atomicFile
       : name === "node:child_process"
         ? { spawnSync: () => assert.fail("no real process is permitted") }
         : localRequire(name), loaded, sourcePath, path.dirname(sourcePath));
@@ -1445,6 +1446,87 @@ test("managed owner: a record written during worker start cannot be overwritten 
   assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
   await assert.rejects(f.controller.startComponent("cpa"), /needs attention/);
   assert.deepEqual(fs.readFileSync(f.recordPath), bytes);
+});
+
+// The process record is written off the main thread (0.8.113 held every window 17.6 s writing it
+// synchronously). Each write to a `.process.json` waits here until the test releases it.
+function gatedRecordWrites() {
+  const real = require("../electron/atomic-file.cjs");
+  const gates = [];
+  const writePrivateFileAtomicAsync = (filePath, ...rest) => {
+    if (!filePath.endsWith(".process.json")) return real.writePrivateFileAtomicAsync(filePath, ...rest);
+    return new Promise((resolve, reject) => gates.push({
+      release: () => real.writePrivateFileAtomicAsync(filePath, ...rest).then(resolve, reject),
+    }));
+  };
+  return { gates, module: { ...real, writePrivateFileAtomicAsync } };
+}
+
+test("managed owner: Stop during the record write waits for it, then removes it with the child", async (t) => {
+  const writes = gatedRecordWrites();
+  const f = await managedOwnerFixture(t, { persistent: true, atomicFile: writes.module });
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await waitManagedOwner(() => writes.gates.length === 1);
+  const stopping = f.controller.stopComponent("cpa");
+  await assert.rejects(pending, /canceled/);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(f.killed, [], "the Stop's record read waits behind the write");
+  assert.equal(fs.existsSync(f.recordPath), false);
+  writes.gates[0].release();
+  await stopping;
+  assert.deepEqual(f.killed, [f.launches[0].child.pid]);
+  await f.controller.processRecordsSaved();
+  assert.equal(fs.existsSync(f.recordPath), false, "removed after the write landed, never left naming the stopped pid");
+});
+
+test("managed owner: a child that exits during its record write leaves no record behind", async (t) => {
+  const writes = gatedRecordWrites();
+  const f = await managedOwnerFixture(t, { persistent: true, atomicFile: writes.module });
+  const pending = f.controller.startComponent("cpa");
+  pending.catch(() => {});
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await waitManagedOwner(() => writes.gates.length === 1);
+  const child = f.launches[0].child;
+  child.exitCode = 7;
+  f.alive.delete(child.pid);
+  child.emit("exit", 7, null);
+  writes.gates[0].release();
+  await assert.rejects(pending, /exited \(7\)/);
+  await f.controller.processRecordsSaved();
+  assert.equal(fs.existsSync(f.recordPath), false, "the exit's clear waited for the write, then removed it");
+  assert.match(f.controller.project("cpa").error, /exited \(7\)/);
+  // No record names the dead pid, so the next start is not refused as unresolved.
+  const retry = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 2);
+  f.launches[1].finish();
+  await waitManagedOwner(() => writes.gates.length === 2);
+  writes.gates[1].release();
+  await retry;
+  assert.equal(JSON.parse(fs.readFileSync(f.recordPath, "utf8")).pid, f.launches[1].child.pid);
+});
+
+test("managed owner: a keep-running quit waits for the record write a start has queued", async (t) => {
+  const writes = gatedRecordWrites();
+  const f = await managedOwnerFixture(t, { persistent: true, atomicFile: writes.module });
+  const pending = f.controller.startComponent("cpa");
+  await waitManagedOwner(() => f.launches.length === 1);
+  f.launches[0].finish();
+  await waitManagedOwner(() => writes.gates.length === 1);
+  f.controller.dispose({ keepPersistent: true });
+  let flushed = false;
+  const flush = f.controller.processRecordsSaved().then(() => { flushed = true; });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(flushed, false, "the quit waits while the record is still being written");
+  writes.gates[0].release();
+  await flush;
+  assert.equal(JSON.parse(fs.readFileSync(f.recordPath, "utf8")).pid, f.launches[0].child.pid,
+    "the next launcher finds the CPA this one left running");
+  await pending;
+  assert.equal(f.launches[0].child.killed, false);
 });
 
 test("Windows managed cleanup terminates owned trees and retains failed handles", { skip: process.platform !== "win32" }, async () => {

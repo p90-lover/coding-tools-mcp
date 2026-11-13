@@ -1304,6 +1304,51 @@ test("a chat AO could not reconnect after a restart is resumed before a message,
   assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)].sort(), ["stale"], "without the shorter limit, as before");
 });
 
+test("a chat AO is still recovering after it started is waited for, not sent to and replaced", async () => {
+  // Seen live 2026-11-12 19:13Z: 54 s after an update restarted AO, a follow-up went to a chat whose
+  // startup recovery was still running ("checking"), failed CHAT_CONTROLLER_NOT_READY, and the chat
+  // went on with a fresh agent.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const posts = [], logged = [];
+  let verdicts = [];
+  let readiness = "checking";
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
+    exitedReleased: new Set(), logger: { info: (event, detail) => logged.push([event, detail]) }, setTimeout: (resolve) => { resolve(); return 0; },
+    internalApi: async (method, endpoint) => {
+      if (method === "POST") posts.push(endpoint.split("/").at(-1));
+      if (endpoint.endsWith("/resume-agent")) { readiness = "ready"; return { ok: true }; }
+      if (method === "GET") readiness = verdicts.length ? verdicts.shift() : readiness;
+      return { session: { id: endpoint.split("/")[4], mode: "chat", status: "working", statusReadiness: readiness, activity: { state: "active" } } };
+    },
+  });
+
+  verdicts = ["checking", "checking", "checking", "ready"];
+  assert.equal(await upstream.continuable("recovering"), true);
+  assert.deepEqual(posts, [], "recovered by AO itself: sent to as it is, with no resume");
+  assert.equal(verdicts.length, 0, "it read again until AO said ready");
+  assert.equal(logged.find(([event]) => event === "ao.continuable_awaited_recovery")?.[1].readiness, "ready");
+
+  readiness = "checking";
+  verdicts = ["checking", "unavailable"];
+  assert.equal(await upstream.continuable("not-recovered"), true);
+  assert.deepEqual(posts, ["resume-agent"], "AO could not get it back: it is resumed, keeping its conversation");
+
+  posts.length = 0; logged.length = 0;
+  readiness = "checking";
+  verdicts = [];
+  assert.equal(await upstream.continuable("still-checking"), true, "past the wait it is sent to as before");
+  assert.deepEqual(posts, []);
+  assert.equal(logged.find(([event]) => event === "ao.continuable_awaited_recovery")?.[1].reads, 70, "the wait is bounded");
+});
+
 test("stale sessions are this project's live, unpinned, idle ones with no message (or creation) within the limit", async () => {
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
@@ -1390,7 +1435,7 @@ test("a resumed chat gets the person's own MCP servers after the app's, for its 
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, logger: { warn() {}, info() {} },
     agentTools: { renew: async id => id === "chat-1" ? { servers: [app] } : null }, fileTools: null,
-    userMcpServers: { forSession: (agent, taken) => { asked.push([agent, JSON.parse(JSON.stringify(taken.map(server => server.name)))]); if (broken) throw new Error("unreadable"); return [mine]; } },
+    userMcpServers: { forSession: async (agent, taken) => { await Promise.resolve(); asked.push([agent, JSON.parse(JSON.stringify(taken.map(server => server.name)))]); if (broken) throw new Error("unreadable"); return [mine]; } },
     internalApi: async (method, endpoint, body) => {
       if (endpoint.endsWith("/resume-agent")) { bodies.push(JSON.parse(JSON.stringify(body))); status = "idle"; return { ok: true }; }
       return { session: { id: endpoint.split("/")[4], mode: "chat", harness: "opencode", status } };

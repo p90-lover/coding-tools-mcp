@@ -7,6 +7,7 @@
 
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const path = require("node:path");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
 // AO takes at most 8 servers per session; the app's own server is one of them.
@@ -95,15 +96,18 @@ function readGithubCliToken({ execFile = require("node:child_process").execFile 
   });
 }
 
+/** A URL's lowercase host name, or "" when it doesn't parse. */
+function hostOf(url) {
+  try { return new URL(String(url ?? "")).hostname.toLowerCase(); } catch { return ""; }
+}
+
 /**
  * A GitHub MCP server with the GitHub CLI's sign-in as its Authorization header, so one click adds
  * it without a token to create and paste. Refused for any other host: the token is the person's
  * whole GitHub CLI login and goes only to GitHub.
  */
 async function withGithubCliToken(input, readToken = readGithubCliToken) {
-  let host = "";
-  try { host = new URL(String(input?.url ?? "")).hostname.toLowerCase(); } catch { /* checked below */ }
-  if (input?.type !== "http" || host !== GITHUB_MCP_HOST) throw fail("The GitHub CLI sign-in is used only for GitHub's MCP server");
+  if (input?.type !== "http" || hostOf(input?.url) !== GITHUB_MCP_HOST) throw fail("The GitHub CLI sign-in is used only for GitHub's MCP server");
   const token = await readToken();
   return { ...input, headers: { ...(input.headers ?? {}), Authorization: `Bearer ${token}` } };
 }
@@ -116,8 +120,90 @@ function sessionConfig(server) {
     : { name: server.name, type: "http", url: server.url, ...(Object.keys(server.headers).length ? { headers: server.headers } : {}) };
 }
 
-function createChatMcpServers({ filePath, logger = null }) {
+function mcpLaunchEnvironment(dataRoot, source = process.env) {
+  if (typeof dataRoot !== "string" || !path.isAbsolute(dataRoot)) throw fail("MCP launches need an absolute app data directory");
+  const env = {};
+  const configured = (key) => Object.entries(source).some(([name, value]) => name.toLowerCase() === key.toLowerCase() && typeof value === "string" && value.trim());
+  // Catalog STDIO servers install on their first launch; that can exceed the CLI's connection window.
+  if (!configured("MCP_TIMEOUT")) env.MCP_TIMEOUT = "120000";
+  if (!configured("MCP_CONNECT_TIMEOUT_MS")) env.MCP_CONNECT_TIMEOUT_MS = "120000";
+  if (!configured("npm_config_cache")) env.npm_config_cache = path.join(dataRoot, "cache", "mcp-npm");
+  if (!configured("npm_config_logs_max")) env.npm_config_logs_max = "0";
+  return env;
+}
+
+const CATALOG_NPX_BINS = new Map([
+  ["chrome-devtools-mcp@latest", ["chrome-devtools-mcp", "chrome-devtools-mcp"]],
+  ["@playwright/mcp@latest", ["@playwright/mcp", "playwright-mcp"]],
+  ["@modelcontextprotocol/server-sequential-thinking", ["@modelcontextprotocol/server-sequential-thinking", "mcp-server-sequential-thinking"]],
+]);
+
+function environmentValue(environment, key) {
+  return Object.entries(environment).find(([name, value]) => name.toLowerCase() === key.toLowerCase() && typeof value === "string" && value.trim())?.[1];
+}
+
+function catalogNpxSpec(server) {
+  if (server.type !== "stdio") return null;
+  let args = server.args;
+  if (/^cmd(?:\.exe)?$/i.test(server.command)) {
+    if (args[0]?.toLowerCase() !== "/c" || !/^npx(?:\.cmd)?$/i.test(args[1] ?? "")) return null;
+    args = args.slice(2);
+  } else if (!/^npx(?:\.cmd)?$/i.test(server.command)) return null;
+  return args.length === 2 && ["-y", "--yes"].includes(args[0]) && CATALOG_NPX_BINS.has(args[1]) ? args[1] : null;
+}
+
+async function cachedCatalogLaunch(server, { nodeExecutable, npmCacheRoots, environment }) {
+  const spec = catalogNpxSpec(server);
+  if (!spec || typeof nodeExecutable !== "string" || !path.isAbsolute(nodeExecutable)) return null;
+  if (Object.keys({ ...environment, ...server.env }).some(name => /^npm_config_/i.test(name) && !/^npm_config_(cache|logs_max)$/i.test(name))) return null;
+  const explicitCache = environmentValue(server.env, "npm_config_cache") || environmentValue(environment, "npm_config_cache");
+  const roots = explicitCache ? [explicitCache] : npmCacheRoots;
+  const [packageName, binaryName] = CATALOG_NPX_BINS.get(spec);
+  const slot = crypto.createHash("sha512").update(spec).digest("hex").slice(0, 16);
+  try { if (!(await fs.promises.stat(nodeExecutable)).isFile()) return null; } catch { return null; }
+  for (const root of roots) {
+    if (typeof root !== "string" || !path.isAbsolute(root)) continue;
+    const folder = path.join(root, "_npx", slot);
+    try {
+      const [receipt, manifest] = await Promise.all([
+        fs.promises.readFile(path.join(folder, "package.json"), "utf8").then(JSON.parse),
+        fs.promises.readFile(path.join(folder, "node_modules", packageName, "package.json"), "utf8").then(JSON.parse),
+      ]);
+      // npm writes this receipt after installation; a partially populated node_modules is not ready.
+      if (!Array.isArray(receipt._npx?.packages) || !receipt._npx.packages.includes(spec) || manifest.name !== packageName) continue;
+      const bin = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[binaryName];
+      if (typeof bin !== "string" || !/\.[cm]?js$/i.test(bin)) continue;
+      const packageRoot = path.join(folder, "node_modules", packageName);
+      const entry = path.resolve(packageRoot, bin);
+      const relative = path.relative(packageRoot, entry);
+      if (!relative || relative.startsWith(`..${path.sep}`) || relative === ".." || path.isAbsolute(relative)) continue;
+      if (!(await fs.promises.stat(entry)).isFile()) continue;
+      return { command: nodeExecutable, args: [entry] };
+    } catch { /* An absent or incomplete cache keeps the explicitly configured launcher. */ }
+  }
+  return null;
+}
+
+function createChatMcpServers({ filePath, logger = null, nodeExecutable = process.execPath, environment = process.env,
+  npmCacheRoots = [path.join(path.dirname(filePath), "cache", "mcp-npm"),
+    ...(environment.LOCALAPPDATA ? [path.join(environment.LOCALAPPDATA, "npm-cache")] : [])] }) {
   let servers = null;
+  let launchGeneration = 0;
+  let launches = new Map();
+  let resolving = Promise.resolve();
+  const launchKey = server => JSON.stringify([server.type, server.command, server.args, server.env]);
+  const refreshLaunches = () => {
+    const generation = ++launchGeneration;
+    resolving = Promise.all((servers ?? []).map(async server => [launchKey(server), await cachedCatalogLaunch(server,
+      { nodeExecutable, npmCacheRoots, environment })])).then(entries => {
+      if (generation === launchGeneration) launches = new Map(entries);
+    });
+    return resolving;
+  };
+  const awaitLaunches = async () => {
+    let pending;
+    do { pending = resolving; await pending; } while (pending !== resolving);
+  };
   // The saved list from `readText()`: the file's text, or the error reading it threw.
   const fromSaved = (readText) => {
     const list = [];
@@ -135,17 +221,24 @@ function createChatMcpServers({ filePath, logger = null }) {
   };
   // preload() normally reads the file first, off the main thread; this read is for a call before it.
   const load = () => {
-    if (!servers) servers = fromSaved(() => fs.readFileSync(filePath, "utf8"));
+    if (!servers) {
+      servers = fromSaved(() => fs.readFileSync(filePath, "utf8"));
+      refreshLaunches();
+    }
     return servers;
   };
   // Read soon after start, off the main thread, so a chat's first launch finds the list in memory:
   // reading it then held every window 0.5 s on the hard disk (0.8.104, 2026-11-10).
   async function preload() {
-    if (servers) return;
+    if (servers) { await awaitLaunches(); return; }
     let text = null;
     let failure = null;
     try { text = await fs.promises.readFile(filePath, "utf8"); } catch (error) { failure = error; }
-    if (!servers) servers = fromSaved(() => { if (failure) throw failure; return text; });
+    if (!servers) {
+      servers = fromSaved(() => { if (failure) throw failure; return text; });
+      refreshLaunches();
+    }
+    await awaitLaunches();
   }
   // Saves run off the main thread: written synchronously, one save held every window for 0.5 s on
   // the busy hard disk. The list changes at once; a burst of changes is one write plus at most one
@@ -164,6 +257,7 @@ function createChatMcpServers({ filePath, logger = null }) {
   };
   const store = (next) => {
     servers = next;
+    refreshLaunches();
     persist();
     return list();
   };
@@ -171,6 +265,16 @@ function createChatMcpServers({ filePath, logger = null }) {
   return Object.freeze({
     list,
     preload,
+    /**
+     * Whether `name` is the person's GitHub MCP server: an enabled http server at GitHub's own host
+     * (GITHUB_MCP_HOST). "Approve for me" lets its read tools run unreviewed (agent-orchestrator-
+     * workflow.cjs githubRead); a server merely named "github" that points elsewhere is not it.
+     */
+    isGithubServer(name) {
+      const wanted = String(name ?? "").toLowerCase();
+      return Boolean(wanted) && load().some((server) => server.enabled && server.type === "http"
+        && server.name.toLowerCase() === wanted && hostOf(server.url) === GITHUB_MCP_HOST);
+    },
     /** Resolves once every change so far is on disk; rejects when the last write failed. */
     async saved() {
       while (saving) await saving;
@@ -204,9 +308,10 @@ function createChatMcpServers({ filePath, logger = null }) {
       const names = new Set(taken.map((server) => String(server?.name ?? "").toLowerCase()));
       const room = Math.max(0, MAX_SESSION_SERVERS - taken.length);
       return load().filter((server) => server.enabled && !names.has(server.name.toLowerCase())
-        && (server.type === "stdio" || httpAgents.has(agent))).slice(0, room).map(sessionConfig);
+        && (server.type === "stdio" || httpAgents.has(agent))).slice(0, room)
+        .map(server => sessionConfig({ ...server, ...launches.get(launchKey(server)) }));
     },
   });
 }
 
-module.exports = Object.freeze({ MAX_SESSION_SERVERS, createChatMcpServers, normalizeServer, readGithubCliToken, sessionConfig, withGithubCliToken });
+module.exports = Object.freeze({ MAX_SESSION_SERVERS, createChatMcpServers, mcpLaunchEnvironment, normalizeServer, readGithubCliToken, sessionConfig, withGithubCliToken });

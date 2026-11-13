@@ -77,6 +77,53 @@ test("one failure continues to other accounts and does not retry its own recorde
   assert.deepEqual(f.connected, ["one", "two", "one"]);
 });
 
+test("a failed setup is tried again later, longer after each failure; one only the person can clear waits an hour", async () => {
+  // Live 2026-11-13: one failure ("ChatGPT verification is required…", on a signed-in account) left
+  // that account's automatic setup stopped until its sign-in cookie changed, so it never connected.
+  const f = fixture();
+  f.accounts.splice(1);
+  let code = "creation_failed";
+  f.deps.connect = async id => {
+    f.connected.push(id);
+    if (code) {
+      f.accounts[0].connector = { errorAt: f.state.time };
+      throw Object.assign(new Error("ChatGPT did not confirm the selected workspace."), { code });
+    }
+    return { connected: true };
+  };
+  const at = minutes => { f.state.time += minutes * 60_000; return f.sync.sync(); };
+  await f.sync.sync();
+  assert.equal(f.warnings.at(-1).code, "creation_failed", "the warning says which kind of failure");
+  await at(9);
+  assert.equal(f.connected.length, 1, "not at once");
+  await at(1);
+  assert.equal(f.connected.length, 2, "10 minutes after the first failure");
+  await at(19);
+  assert.equal(f.connected.length, 2);
+  await at(1);
+  assert.equal(f.connected.length, 3, "20 after the second");
+  for (const minutes of [40, 60, 60]) await at(minutes);
+  assert.equal(f.connected.length, 6, "then 40, and never more than an hour");
+  code = null;
+  await at(60);
+  assert.equal(f.connected.length, 7, "it connects");
+  await at(600);
+  assert.equal(f.connected.length, 7, "a connected account waits for new sign-in cookies");
+
+  const person = fixture();
+  person.accounts.splice(1);
+  person.deps.connect = async id => {
+    person.connected.push(id);
+    person.accounts[0].connector = { errorAt: person.state.time };
+    throw Object.assign(new Error("Sign in to this account in the Browser tab before connecting MCP."), { code: "verification_required" });
+  };
+  await person.sync.sync();
+  person.state.time += 59 * 60_000; await person.sync.sync();
+  assert.equal(person.connected.length, 1, "a sign-in the person must do is not retried every 10 minutes");
+  person.state.time += 60_000; await person.sync.sync();
+  assert.equal(person.connected.length, 2, "but an hour later it looks again");
+});
+
 test("a setup that gave way to an account switch runs again, though the switch is already over", async () => {
   const f = fixture();
   let interrupt = true;

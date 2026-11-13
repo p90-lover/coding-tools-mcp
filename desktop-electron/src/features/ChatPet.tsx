@@ -569,9 +569,17 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
       if (found.width > 0 && found.bottom > top && found.top < bottom) blocked.push({ left: found.left - frame.left - 6, right: found.right - frame.left + 6 });
     };
     const seen = new Set<Element>();
+    // The topmost element is enough unless it is the pet itself: the whole stack under each of ~100
+    // points cost 126-144 ms a look on a 50k-element chat, the topmost alone 20 ms (2026-11-13), and
+    // the pet looks every few seconds.
+    const PET = ".cx-pet, .cx-pet-cottage-spot, .cx-pet-peek";
+    const under = (x: number, y: number) => {
+      const first = document.elementFromPoint(x, y);
+      return first && !first.closest(PET) ? first : document.elementsFromPoint(x, y).find((found) => !found.closest(PET));
+    };
     for (let x = frame.left + 4; x < frame.right; x += 14) {
       for (const y of [bottom - 6, bottom - 20, top + 6]) {
-        const hit = document.elementsFromPoint(x, y).find((found) => !found.closest(".cx-pet, .cx-pet-cottage-spot, .cx-pet-peek"));
+        const hit = under(x, y);
         if (!hit || seen.has(hit) || target.contains(hit)) continue;
         seen.add(hit);
         const control = hit.closest(CONTENT);
@@ -731,7 +739,9 @@ function PetBody({ mood, context, onHide, split }: PetProps & {
     const working = moodNow.current === "working";
     const pause = working ? 5500 + Math.random() * 4000 : 2200 + Math.random() * 3200;
     wanderTimer.current = window.setTimeout(() => {
-      if (busy() || motion.current || moodNow.current === "ask" || moodNow.current === "error") { wander(); return; }
+      // Hidden or minimized, nobody sees it stroll: it waits instead of measuring the page for a spot.
+      const away = document.hidden || document.documentElement.hasAttribute("data-window-away");
+      if (away || busy() || motion.current || moodNow.current === "ask" || moodNow.current === "error") { wander(); return; }
       setJob("none");
       const to = nextSpot(working);
       if (to === null || Math.abs(to - feet.current.x) < 8) { act(); wander(); return; }

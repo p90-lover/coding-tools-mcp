@@ -212,6 +212,63 @@ test("the plugins page's current list request (GET ps/plugins/list) names the se
   assert(observer.snapshot().selectionVersion > selected.selectionVersion, "another workspace invalidates the captured context");
 });
 
+test("an ownership failure names the check that stopped it, in fixed words only", async t => {
+  // One message covered every check, so a Connect and an Inspect that failed with it every few
+  // hours (2026-11-13) could not say why. The message stays; errorCause names the check.
+  const accountId = "602b5d8d-e211-49b1-9762-206108d52954", tunnelId = `tunnel_${"b".repeat(32)}`, org = "org-fixture";
+  const list = "https://chatgpt.com/backend-api/ps/plugins/list";
+  const failure = async (tunnel, steps) => {
+    const network = fakeMcpNetwork();
+    const observer = await observeMcpSetupContext({ debugger: network.debuggerClient }, tunnel);
+    t.after(() => observer.dispose());
+    const emit = (method, params) => network.debuggerClient.emit("message", {}, method, params);
+    steps({ ...network, emit });
+    await new Promise(resolve => setImmediate(resolve));
+    return Object.assign(observer.snapshot(), { thrown: observer.failure() });
+  };
+  const sent = (emit, id, method, url, headers) => emit("Network.requestWillBeSent", { requestId: id, request: { method, url, headers } });
+
+  const html = await failure(null, ({ emit }) => {
+    sent(emit, "1", "GET", list, { "chatgpt-account-id": accountId });
+    emit("Network.responseReceived", { requestId: "1", response: { url: list, status: 200, mimeType: "text/html" } });
+  });
+  assert.equal(html.error, "MCP ownership metadata is unavailable or exceeded its bound.", "the card's words do not change");
+  assert.equal(html.errorCause, "chatgpt:not_json:text/html", "a page instead of the list (a security check)");
+  assert.equal(html.thrown.message, html.error, "the thrown error keeps the mapped message");
+  assert.equal(html.thrown.ownershipCause, "chatgpt:not_json:text/html");
+
+  assert.equal((await failure(null, ({ observed }) => observed("GET", list, {}, {}))).errorCause, "chatgpt:no_account");
+  assert.equal((await failure(null, ({ emit }) => {
+    sent(emit, "1", "GET", list, { "chatgpt-account-id": accountId });
+    emit("Network.loadingFailed", { requestId: "1", errorText: "net::ERR_FAILED <PRIVATE>" });
+  })).errorCause, "chatgpt:load_failed:neterr_failedprivate", "only letters, digits and a few marks of the network error");
+  const cancelled = await failure(null, ({ emit }) => {
+    sent(emit, "1", "GET", list, { "chatgpt-account-id": accountId });
+    emit("Network.loadingFailed", { requestId: "1", errorText: "net::ERR_ABORTED", canceled: true });
+  });
+  assert.equal(cancelled.error, null, "a request the page dropped itself is no failure");
+  assert.equal(cancelled.errorCause, null);
+  assert.equal(cancelled.thrown, null);
+  const denied = await failure(null, ({ emit }) => {
+    sent(emit, "1", "GET", list, { "chatgpt-account-id": accountId });
+    emit("Network.responseReceived", { requestId: "1", response: { url: list, status: 403, mimeType: "application/json" } });
+  });
+  assert.equal(denied.errorCause, "chatgpt:http_403");
+  assert.match(denied.error, /HTTP 403/);
+  assert.equal((await failure(tunnelId, ({ observed, bodies }) => {
+    const id = observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, {});
+    bodies.set(id, { body: "<html>", base64Encoded: false });
+  })).errorCause, "tunnels:body_parse");
+  assert.equal((await failure(tunnelId, ({ observed }) => {
+    observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, { tunnels: "not a list" });
+  })).errorCause, "tunnels:body_shape");
+  assert.equal((await failure(tunnelId, ({ observed }) => observed("GET", "https://api.openai.com/v1/tunnels", {}, { tunnels: [] }))).errorCause,
+    "tunnels:no_org");
+  const detached = await failure(null, ({ debuggerClient }) => debuggerClient.emit("detach", {}, "target_closed"));
+  assert.equal(detached.errorCause, "inspection:detached");
+  for (const snapshot of [html, denied]) assert(!JSON.stringify(snapshot.errorCause).includes(accountId), "no account id in the cause");
+});
+
 test("a new Platform login cannot combine its identity with the previous user's org proof", async t => {
   const network = fakeMcpNetwork(), tunnelId = `tunnel_${"a".repeat(32)}`, org = "org-fixture";
   const observer = await observeMcpSetupContext({ debugger: network.debuggerClient }, tunnelId);
@@ -290,6 +347,10 @@ test("the production connector action verifies fresh owner and workspace proof b
       error: error => /navigation changed/.test(error.message) && error.navigatedTo === "accounts.example.com/o/oauth2/auth"
         && mcpConnectorCommandFailure(error).message.endsWith(" It moved to accounts.example.com/o/oauth2/auth.") },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
+    // Live 2026-11-13: an automatic setup refused Log out and Remove account for its whole run.
+    { name: "the person's own logout stops the setup and closes its window, which is not a failure", change: "stopped",
+      error: error => error.mcpStopped === true && /stopped for ChatGPT logout/.test(error.message)
+        && mcpConnectorCommandFailure(error).code === "stopped" },
     { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, identityMissing: true, error: /existing connector.*tunnel.*unverified/i },
     { name: "consent is not confirmed after a later workspace switch", change: "consent", error: /context|workspace.*changed/i, submitted: true },
@@ -310,6 +371,10 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "an unavailable shared plugin does not seed a member binding", business: true, shared: true, transient: true, sharedUnavailable: true, error: /plugin connection/ },
     { name: "a transient publisher result cannot be replayed", business: true, shared: true, transient: true, replay: true },
     { name: "an owner creator explicitly selects its intended workspace in a fresh popup", business: true, selectAdmin: true },
+    // Live 2026-11-13: the shown account's card read "ChatGPT verification is required in Coding Tools
+    // Browser" while it was signed in: the Browser's own page (no ChatGPT tab open, a failed load)
+    // answered "signed out" without asking. The setup's page proves the session for every account.
+    { name: "the shown account connects though the Browser's own page cannot vouch for its sign-in", shownPageSignedOut: true },
   ]) await t.test(scenario.name, async () => {
     const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
     fs.mkdirSync(work, { recursive: true });
@@ -341,7 +406,10 @@ test("the production connector action verifies fresh owner and workspace proof b
     let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     let workspaceRole = scenario.shared ? "standard-user" : scenario.creatorRole ?? "account-owner", publishing = false, held = false, publisherResult;
     const runtimeHost = runtime();
-    const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: true }),
+    // What the browser's stopOperationFor aborts for the person's own sign-in, logout or removal.
+    const stop = new AbortController();
+    const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: !scenario.shownPageSignedOut }),
+      operationSignal: () => stop.signal,
       currentOperation: () => held ? "MCP connector creation" : null,
       withManualOperation: async (_name, work) => { const previous = held; held = true; try { return await work(); } finally { held = previous; } } };
     const select = id => network.observed("POST", "https://chatgpt.com/backend-api/aip/connectors/mcp/list_accessible", { "chatgpt-account-id": id }, {});
@@ -374,6 +442,10 @@ test("the production connector action verifies fresh owner and workspace proof b
           if (scenario.change === "navigation") { url = "https://chatgpt.com/"; contents.emit("did-start-navigation", {}, url, false, true); }
           if (scenario.change === "busy") busy = true;
           if (scenario.change === "manual") host.interactionModeOverride = "manual";
+          if (scenario.change === "stopped") {
+            stop.abort(Object.assign(new Error("MCP connector creation stopped for ChatGPT logout"), { forAction: "ChatGPT logout" }));
+            assert.equal(destroyed, true, "the setup window closes as soon as it is stopped, not at its next step");
+          }
           return { prepared: true };
         }
         if (phase === "submitPreparedTunnelConnector" || phase === "createTunnelConnector") { counts.create++; return { created: true, href: "/plugins/plugin_fixture" }; }
@@ -834,7 +906,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     browserAccounts: { has: id => accounts.has(id), partitionOf(id) { if (!accounts.has(id)) throw new Error("Unknown account"); return `persist:${id}`; },
       async recordConnector(id, result) { await Promise.resolve(); if (!accounts.has(id)) return false; records.push({ id, ...result }); return true; } },
     session: { fromPartition: partition => ({ cookies: { get: async () => { calls.push(partition); return []; } } }) },
-    signedInFromCookies: () => signedIn, routeIdleAccountPartition: async partition => calls.push(`route:${partition}`), logger: {},
+    signedInFromCookies: () => signedIn, routeIdleAccountPartition: async partition => calls.push(`route:${partition}`), logger: { warn() {} },
     runtimeSupervisor: { extraTunnels: { status: () => tunnels,
       reconnect: async id => { calls.push(`reconnect:${id}`); tunnels[0].state = "ready"; },
       setConnector: async (id, href, binding) => { await Promise.resolve(); assert.equal(binding.tunnelId, tunnels[0].tunnelId); if (removeDuringSave) accounts.delete("other"); calls.push(`connector:${id}`); } } },
@@ -849,6 +921,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
     currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
     connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
     mcpConnectorCommandFailure: error => ({ code: "fixture_failure", message: error.message }),
+    mcpConnectorFailureCause: () => null,
   };
   vm.runInNewContext(snippet, context);
   assert.equal(await handler({}), "legacy");

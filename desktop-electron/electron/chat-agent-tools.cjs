@@ -69,6 +69,8 @@ const { createCommandWatches, WATCH_TOOL_DEFS, WATCH_TOOLS } = require("./chat-c
 const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { DUPLICATE_TOOLS: UNIFIED_DUPLICATE_TOOLS, FILE_TOOLS: UNIFIED_FILE_TOOLS, SERVER_NAME: UNIFIED_SERVER } = require("./unified-agent-tools.cjs");
+const { dispatchToolBatch, FAST_EXECUTION_GUIDANCE } = require("./chat-tool-batches.cjs");
+const { VERIFICATION_SCHEMA, prepareVerification, observeVerification, verificationReceipt } = require("./chat-verification.cjs");
 
 const SERVER_NAME = "coding-tools";
 const PROTOCOL_VERSIONS = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
@@ -356,10 +358,11 @@ const COMMAND_LIST_DEFS = Object.freeze([{
   description: "List command handles already tracked by this chat, including after a reply was lost. Read-only: starts, stops and probes nothing. "
     + "States are last-observed, not fresh process checks; use read_output or an empty write_stdin on the returned command_id for current output. "
     + "No raw commands or other chats' handles are included. An empty list is not proof that an unobserved operation never ran; do not blindly relaunch it. "
-    + "Handles belong to the current app runtime, not restart-surviving jobs.",
+    + "Handles belong to the current app runtime, not restart-surviving jobs. Set include_verification to recheck declared input files for retained verification receipts; this does not rerun tests or validate the environment.",
   inputSchema: { type: "object", additionalProperties: false, properties: {
     offset: { type: "integer", minimum: 0, default: 0 },
     limit: { type: "integer", minimum: 1, maximum: 200, default: 40 },
+    include_verification: { type: "boolean", default: false, description: "Refresh declared file fingerprints for this page's retained receipts (no commands are run)." },
   } },
   annotations: { readOnlyHint: true },
 }]);
@@ -512,6 +515,7 @@ function chatSchema(name, schema) {
   if (!schema || typeof schema !== "object" || !schema.properties || typeof schema.properties !== "object") return schema;
   const properties = { ...schema.properties };
   let changed = false;
+  if (name === "exec_command") { properties.verification = VERIFICATION_SCHEMA; changed = true; }
   for (const key of CHAT_HIDDEN_PROPERTIES) if (Object.hasOwn(properties, key)) { delete properties[key]; changed = true; }
   for (const [key, value] of Object.entries(CHAT_RESULT_DEFAULTS[name] ?? {})) {
     if (properties[key] && typeof properties[key] === "object") { properties[key] = { ...properties[key], default: value }; changed = true; }
@@ -1204,6 +1208,8 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
   // has unified-agent-tools for them, which is told to use those for every file operation.
   const scriptTool = unifiedFiles ? "Write" : ownFileTools ? "your Write tool" : "apply_patch";
   return paneRulesFor(groups)
+    + FAST_EXECUTION_GUIDANCE
+    + (groups.includes("terminal") ? "For a focused test, exec_command's optional verification.inputs records bounded source/test/config fingerprints and observed exit status. Use list_commands with include_verification to check retained receipts before repeating work. These are advisory: undeclared dependencies and environment changes still need judgment; save evidence in the existing task handoff for restarts. " : "")
     // Seen live: an agent whose client deferred these tools (names only, loaded through its tool
     // search) said "there is no list_dir tool" and fell back to dir, never loading it.
     + "Every Coding Tools tool named here is available: if your client lists one as deferred or you do not see it, "
@@ -2392,11 +2398,16 @@ function createChatAgentTools({
         return failedCall("offset must be a nonnegative safe integer and limit must be an integer from 1 to 200");
       }
       const known = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
-      const commands = known.slice(offset, offset + limit).map(command => ({
-        command_id: command.id, session_id: command.id, started_at_ms: command.startedAt,
-        last_observed_status: command.status, exit_code: command.exitCode ?? null,
-        output_refs: { stdout: `command:${command.id}:stdout`, stderr: `command:${command.id}:stderr` },
-      }));
+      if (args.include_verification !== undefined && typeof args.include_verification !== "boolean") return inputError("include_verification must be a boolean");
+      const commands = [];
+      for (const command of known.slice(offset, offset + limit)) {
+        commands.push({
+          command_id: command.id, session_id: command.id, started_at_ms: command.startedAt,
+          last_observed_status: command.status, exit_code: command.exitCode ?? null,
+          output_refs: { stdout: `command:${command.id}:stdout`, stderr: `command:${command.id}:stderr` },
+          ...(command.verification ? { verification: await verificationReceipt(command.verification, now(), args.include_verification === true) } : {}),
+        });
+      }
       return plainResult({ ok: true, commands, offset, next_offset: offset + commands.length < known.length ? offset + commands.length : null,
         status_source: "last observed by this chat; not a fresh process probe", safe_to_retry: false });
     }
@@ -2407,6 +2418,12 @@ function createChatAgentTools({
       let compact = null;
       try { compact = await rewriteCommand(args.cmd); } catch { compact = null; }
       if (typeof compact === "string" && compact && compact !== args.cmd) args = { ...args, cmd: compact };
+    }
+    let verification = null;
+    if (name === "exec_command" && given.verification !== undefined) {
+      try { verification = await prepareVerification(root.path, args, entry.commands, now()); }
+      catch (error) { return inputError(`${errorMessage(error)}; nothing was run.`); }
+      delete args.verification;
     }
     // The control pill names a computer_* call from the moment it arrives, while it waits for its
     // review too (computer-control.cjs). Until 2026-11-09 it appeared only once the call ran, so a
@@ -2420,7 +2437,19 @@ function createChatAgentTools({
     const progress = typeof channel.progress === "function" ? channel.progress : null;
     const shown = computerControl && name.startsWith("computer_") && computerControl.controlled?.()
       ? computerControl.activity?.({ agent: agentName(entry), model: await pillModel(entry), tool: name, args, waiting: reviewed }) : null;
-    if (!shown) return reviewAndRun(entry, name, args, root, group, waits, null, progress);
+    if (!shown) {
+      const result = await reviewAndRun(entry, name, args, root, group, waits, null, progress);
+      if (group !== "terminal" || result?.isError) return result;
+      const value = result?.structuredContent;
+      const command = entry.commands.get(value?.command_id ?? commandIdOf(name, args));
+      if (!command) return result;
+      if (verification) command.verification = verification;
+      if (!command.verification) return result;
+      track(entry, name, args, result);
+      await observeVerification(command.verification, value, now());
+      const receipt = await verificationReceipt(command.verification, now());
+      return toolResult(name, args, { ...value, verification: receipt });
+    }
     let result = null;
     try {
       result = await reviewAndRun(entry, name, args, root, group, waits, shown, progress);
@@ -2564,7 +2593,7 @@ function createChatAgentTools({
         entry.commands.delete(oldest.id);
       }
       if (entry.commandState.ended) endCommands(entry);
-    } else if (entry.commands.has(id) && ["write_stdin", "kill_command", "kill_session"].includes(name)) {
+    } else if (entry.commands.has(id) && ["read_output", "write_stdin", "kill_command", "kill_session"].includes(name)) {
       Object.assign(entry.commands.get(id), status);
     }
   }
@@ -2624,7 +2653,9 @@ function createChatAgentTools({
       if (typeof id !== "string" || !entry.commands.get(id)?.sandboxed || !sandbox.owns(id)) return failedCall("That command is not one of this chat\'s sandboxed commands");
       if (name === "read_output") {
         const stream = args.output_ref.split(":")[2] === "stderr" ? "stderr" : "stdout";
-        return toolResult(name, args, sandbox.read(id, stream, args.offset ?? 0, args.limit ?? 4096));
+        const result = toolResult(name, args, sandbox.read(id, stream, args.offset ?? 0, args.limit ?? 4096));
+        track(entry, name, args, result);
+        return result;
       }
       if (name === "write_stdin") {
         if (typeof args.chars === "string" && args.chars) sandbox.write(id, args.chars);
@@ -2822,16 +2853,10 @@ function createChatAgentTools({
       const batch = Array.isArray(parsed);
       const messages = batch ? parsed : [parsed];
       if (!messages.length || messages.length > 32) { send(response, 400, rpcError(null, -32600, "Invalid request")); return; }
-      // One message at a time: a batch of calls that each need the user's confirmation asks
-      // about them one after another, never all at once.
       const single = batch ? null : messages[0];
       const channel = callChannel(request, response,
         single?.method === "tools/call" && Object.hasOwn(single, "id") ? single : null);
-      const answers = [];
-      for (const message of messages) {
-        const answer = await dispatch(entry, message, channel);
-        if (answer) answers.push(answer);
-      }
+      const answers = await dispatchToolBatch(messages, message => dispatch(entry, message, channel));
       channel.finish(!answers.length ? null : batch ? answers : answers[0]);
     });
   }
@@ -3311,19 +3336,23 @@ function createChatAgentTools({
       };
     },
     /** The pull request on the session's branch, for the chat summary's "PR #N" row (Codex's): `gh pr
-     *  view` in its worktree, shared by every reader for 2 minutes. null when the branch has none, gh is
-     *  missing or signed out, or it does not answer in 10 s; the summary then leaves the row out. */
-    async pullRequest({ sessionId, workspaceId } = {}) {
+     *  view` in its worktree, shared for 2 minutes by every reader with the same `refreshKey` (the chat's
+     *  turn and state), so the summary's re-read when a turn ends asks gh again and shows a PR the turn
+     *  opened. null when the branch has none, gh is missing or signed out, or it does not answer in 10 s;
+     *  the summary then leaves the row out. */
+    async pullRequest({ sessionId, workspaceId, refreshKey } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const root = await rootOf(entry);
       if (typeof runGh !== "function" || typeof root?.path !== "string") return { ok: true, pullRequest: null };
+      const key = typeof refreshKey === "string" ? refreshKey.slice(0, 256) : "";
       const cached = pullRequestReads.get(root.path);
-      if (cached && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
+      if (cached && cached.key === key && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
       const read = Promise.resolve()
         .then(() => runGh({ cwd: root.path, args: ["pr", "view", "--json", "number,title,url,state,isDraft"], timeoutMs: PULL_REQUEST_TIMEOUT_MS }))
         .then(pullRequestFrom, () => null);
-      pullRequestReads.set(root.path, { at: now(), read });
+      pullRequestReads.delete(root.path); // re-added last, so the oldest worktree is the one dropped past 64
+      pullRequestReads.set(root.path, { at: now(), key, read });
       if (pullRequestReads.size > 64) pullRequestReads.delete(pullRequestReads.keys().next().value);
       return { ok: true, pullRequest: await read };
     },

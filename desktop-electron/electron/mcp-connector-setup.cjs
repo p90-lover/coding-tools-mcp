@@ -13,6 +13,16 @@ const WORKSPACE_OWNER_REQUIRED = "Only a verified owner of this ChatGPT workspac
 const PLATFORM_SIGN_IN_HOSTS = ["platform.openai.com", "auth.openai.com", "auth0.openai.com"];
 const PLATFORM_SIGN_IN_UNFINISHED = "OpenAI Platform asked this account to sign in again, and the sign-in did not finish by itself. Sign in to OpenAI Platform with this ChatGPT account, then retry.";
 
+/**
+ * What a setup stopped for the person's own sign-in, logout or account removal throws (the browser's
+ * stopOperationFor): not a failure, so an automatic setup gives way and runs again later.
+ */
+function connectorSetupStopped(signal, details = {}) {
+  const action = typeof signal?.reason?.forAction === "string" ? signal.reason.forAction : "your own browser action";
+  return Object.assign(new Error(`MCP connector setup stopped for ${action}. Connect again when you are ready.`),
+    { mcpStopped: true, ...details });
+}
+
 function requireMcpWorkspaceOwner(context) {
   if (!["workspace", "personal"].includes(context?.workspaceStructure) || context.workspaceRole !== "account-owner") {
     throw new Error(WORKSPACE_OWNER_REQUIRED);
@@ -154,6 +164,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
   const requests = new Map(), organizations = new Map(), latest = new Map();
   let attached = false, disposed = false, user = null, organizationId = null, activeAccountId = null;
   let selectionVersion = 0, platformSelectionVersion = 0, platformIdentityVersion = 0, metadataVersion = 0, sequence = 0, error = null;
+  // Which check set `error`, as "<request kind>:<check>". The message is the same for every check, so
+  // a Connect and an account check that failed with it every few hours (2026-11-13) could not say
+  // whether it was a bound, a dropped request, a page that was not JSON (a Cloudflare check) or a
+  // list without the account it is for. Only fixed words and a sanitized mime type or network error.
+  let errorCause = null;
+  const causeWord = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9_.+/-]/g, "").slice(0, 60) || "none";
   let navigationRequest = null, navigationAccountId = null, navigationVersion = 0;
   const header = (headers, wanted) => {
     const key = Object.keys(headers || {}).find(name => name.toLowerCase() === wanted);
@@ -161,10 +177,11 @@ async function observeMcpSetupContext(contents, tunnelId) {
   };
   const scope = (values, pattern) => Array.isArray(values) && values.length <= 1024
     && values.every(id => typeof id === "string" && pattern.test(id)) ? [...new Set(values)] : null;
-  const failed = (fact, status = null) => {
+  const failed = (fact, status = null, cause = "unavailable") => {
     if (disposed) return;
     error = status === null ? "MCP ownership metadata is unavailable or exceeded its bound."
       : `MCP ownership metadata request was denied or unavailable (HTTP ${status}).`;
+    errorCause = `${fact.kind}:${status === null ? cause : `http_${status}`}`;
     metadataVersion++;
     if (fact.kind === "chatgpt") { activeAccountId = null; selectionVersion++; }
     else if (fact.kind === "login") user = null;
@@ -174,7 +191,7 @@ async function observeMcpSetupContext(contents, tunnelId) {
   const onDetach = () => { if (!disposed) {
     attached = false; user = null; organizations.clear(); platformIdentityVersion++; metadataVersion++;
     if (organizationId !== null) platformSelectionVersion++;
-    organizationId = null; error = "MCP metadata inspection disconnected.";
+    organizationId = null; error = "MCP metadata inspection disconnected."; errorCause = "inspection:detached";
   } };
   const onMessage = (_event, method, params) => {
     if (disposed || !params || typeof params.requestId !== "string") return;
@@ -222,7 +239,7 @@ async function observeMcpSetupContext(contents, tunnelId) {
       }
       fact.identityVersion = platformIdentityVersion;
       if (requests.size >= 128 || (fact.org && organizations.size >= 16 && !organizations.has(fact.org))
-        || (latest.size >= 64 && !latest.has(fact.key))) { failed(fact); return; }
+        || (latest.size >= 64 && !latest.has(fact.key))) { failed(fact, null, "bound"); return; }
       fact.sequence = ++sequence;
       latest.set(fact.key, fact.sequence);
       // Invalidate captured proof as soon as a different context is requested, before its response.
@@ -260,20 +277,23 @@ async function observeMcpSetupContext(contents, tunnelId) {
       // no answer either way, so nothing is confirmed and nothing failed. Sending it already cleared
       // any different context it asked for, so only a later answered request can confirm that.
       if (params.canceled === true) return;
-      failed(fact); return;
+      failed(fact, null, `load_failed:${causeWord(params.errorText)}`); return;
     }
     if (method === "Network.responseReceived") {
       let url;
-      try { url = new URL(params.response?.url); } catch { requests.delete(id); failed(fact); return; }
+      try { url = new URL(params.response?.url); } catch { requests.delete(id); failed(fact, null, "bad_url"); return; }
       const status = params.response.status;
-      if (url.origin !== fact.origin || url.pathname !== fact.path || !Number.isInteger(status)
-        || !String(params.response.mimeType || "").toLowerCase().includes("application/json")) {
-        requests.delete(id); failed(fact); return;
+      const mimeType = String(params.response.mimeType || "").toLowerCase();
+      if (url.origin !== fact.origin || url.pathname !== fact.path || !Number.isInteger(status) || !mimeType.includes("application/json")) {
+        requests.delete(id);
+        failed(fact, null, url.origin !== fact.origin || url.pathname !== fact.path ? "redirected"
+          : !Number.isInteger(status) ? "no_status" : `not_json:${causeWord(mimeType)}`);
+        return;
       }
       if (status < 200 || status >= 300) { requests.delete(id); failed(fact, status); return; }
       if (fact.kind === "chatgpt") {
         requests.delete(id);
-        if (!fact.account) { failed(fact); return; }
+        if (!fact.account) { failed(fact, null, "no_account"); return; }
         if (activeAccountId !== fact.account) { activeAccountId = fact.account; selectionVersion++; }
       } else fact.responseOk = true;
       return;
@@ -281,7 +301,10 @@ async function observeMcpSetupContext(contents, tunnelId) {
     if (method !== "Network.loadingFinished") return;
     requests.delete(id);
     if (!fact.responseOk || (typeof params.encodedDataLength === "number" && params.encodedDataLength > limit)
-      || (fact.kind !== "login" && !fact.org)) { failed(fact); return; }
+      || (fact.kind !== "login" && !fact.org)) {
+      failed(fact, null, !fact.responseOk ? "no_response" : fact.kind !== "login" && !fact.org ? "no_org" : "too_large");
+      return;
+    }
     void client.sendCommand("Network.getResponseBody", { requestId: id }).then(result => {
       if (disposed || latest.get(fact.key) !== fact.sequence || fact.identityVersion !== platformIdentityVersion) return;
       if (typeof result?.body !== "string" || result.body.length > (result.base64Encoded ? Math.ceil(limit / 3) * 4 : limit)) throw unavailable();
@@ -310,7 +333,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
         organizations.set(fact.org, data);
       }
       metadataVersion++;
-    }).catch(() => { if (latest.get(fact.key) === fact.sequence && fact.identityVersion === platformIdentityVersion) failed(fact); });
+    }).catch(problem => {
+      if (latest.get(fact.key) !== fact.sequence || fact.identityVersion !== platformIdentityVersion) return;
+      // Not JSON, JSON of the wrong shape or size, or a body Chromium no longer holds.
+      failed(fact, null, problem instanceof SyntaxError ? "body_parse"
+        : problem?.message === unavailable().message ? "body_shape" : "body_read");
+    });
   };
   const dispose = () => {
     if (disposed) return;
@@ -329,9 +357,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
   } catch { dispose(); throw unavailable(); }
   return {
     snapshot: () => structuredClone({ activeAccountId, selectionVersion, navigationAccountId, navigationVersion,
-      platformSelectionVersion, platformIdentityVersion, metadataVersion, error,
+      platformSelectionVersion, platformIdentityVersion, metadataVersion, error, errorCause,
       platform: { user, organizationId, permissions: organizations.get(organizationId)?.permissions ?? null,
         tunnels: organizations.get(organizationId)?.tunnels ?? null } }),
+    // The failure as an error, or null: its message stays the words the connector command maps
+    // (mcpConnectorCommandFailure), and `ownershipCause` says which check stopped it, for the log.
+    failure: () => error === null ? null : Object.assign(new Error(error), { ownershipCause: errorCause }),
     dispose,
   };
 }
@@ -845,7 +876,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     freshConnectorResults.delete(shared.creationResult);
   }
   const activePartition = browserHost.partition;
+  // Read in run(): only then does this setup hold the browser and its stop signal.
+  let stopSignal = null;
   const checkHost = () => {
+    if (stopSignal?.aborted) throw connectorSetupStopped(stopSignal);
     requireAutomaticConnectorSetup(runtimeHost, browserHost);
     if (operationHeld && browserHost.currentOperation?.() !== "MCP connector creation") throw new Error("MCP connector setup is busy");
     if (browserHost.partition !== activePartition) throw new Error("The browser account changed during MCP setup.");
@@ -855,12 +889,15 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     if (current.name !== settings.name || current.tunnelId !== settings.tunnelId) throw new Error("The MCP configuration changed during setup.");
   };
   const run = async () => {
+    stopSignal = browserHost.operationSignal?.() ?? null;
     checkHost();
-    // Another account's sign-in is checked by the page itself: the Plugins page will not load.
-    if (partition === browserHost.partition && !(await browserHost.probeAuthentication()).authenticated) {
-      throw new Error("Complete ChatGPT verification in Coding Tools Browser before creating its connector.");
-    }
-    checkHost();
+    // Every account's sign-in, the one shown in the Browser too, is proven by this setup's own page:
+    // it reads the account's session (a 401 stops it as signed out) and a security check stops it
+    // as one. The shown account used to be checked first through the Browser's visible page, which
+    // answered "signed out" without asking whenever that page was not a ChatGPT one (a failed load,
+    // a switch's blank page) and could not answer while it moved; each such setup failed as "ChatGPT
+    // verification is required" on an account that was signed in (2026-11-13), and the check could
+    // navigate the page automatic setup must leave alone.
     const popup = new BrowserWindow({
       show: false,
       width: 960,
@@ -874,6 +911,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         offscreen: true,
       },
     });
+    // Stopped for the person's own action: the window closes now, not at the setup's next step (a
+    // step can wait up to its whole budget), so their logout or removal starts within moments.
+    const closeForStop = () => { if (!popup.isDestroyed()) popup.destroy(); };
+    stopSignal?.addEventListener("abort", closeForStop, { once: true });
     let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
     let navigatedTo = null;
     const changedTo = value => { navigationChanged = true; navigatedTo ??= navigationPlace(value); };
@@ -938,7 +979,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
             throw Object.assign(new Error("The browser navigation changed during MCP context inspection."), { navigatedTo });
           }
           const snapshot = observer.snapshot();
-          if (snapshot.error) throw new Error(snapshot.error);
+          if (snapshot.error) throw observer.failure();
           if (ready(snapshot)) return snapshot;
           await new Promise(resolve => setTimeout(resolve, 50));
         }
@@ -1091,6 +1132,8 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         name: settings.name, href, at: Date.now() });
       return connected;
     } catch (error) {
+      // Its window closed under it: whatever the step reported, the person's own action stopped it.
+      if (stopSignal?.aborted) throw connectorSetupStopped(stopSignal, { mcpMutationStarted: mutationStarted });
       if (timedOut && platformPhase && platformSignIn) {
         // Platform's sign-in stopped on a page that wants a person (a password or account choice).
         throw Object.assign(new Error(PLATFORM_SIGN_IN_UNFINISHED), { navigatedTo: platformSignIn });
@@ -1107,13 +1150,15 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     } finally {
       clearTimeout(timer);
       observer?.dispose();
+      stopSignal?.removeEventListener("abort", closeForStop);
       if (!popup.isDestroyed()) {
         popup.webContents.removeListener("did-start-navigation", navigation);
         popup.destroy();
       }
     }
   };
-  return operationHeld ? run() : browserHost.withManualOperation("MCP connector creation", run, { preserveSurface });
+  return operationHeld ? run()
+    : browserHost.withManualOperation("MCP connector creation", run, { preserveSurface, stoppable: true });
 }
 
 async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtimeHost, partition = browserHost.partition }) {
@@ -1157,4 +1202,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, connectorSetupStopped, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

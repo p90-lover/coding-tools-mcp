@@ -24,6 +24,8 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
   const nativeStops = [];
   const quits = [];
   const order = [], recovered = [], goalSaves = [], accountSaves = [], settingsSaves = [], guards = [], relaunches = [];
+  // Each flush of the components' process records, with the controllers disposed by then.
+  const recordFlushes = [];
   const controller = name => ({ dispose() {
     disposed.push(name);
     if (failCleanup && name === "external") throw new Error("Owned process cleanup failed");
@@ -56,7 +58,9 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     // The docked ChatGPT desktop host (main.cjs `chatgptDesktop`) is shut down on every quit.
     chatgptDesktop: { shutdown: async () => { order.push("stop-chatgpt-desktop"); } },
     managedBootstrapController: controller("bootstrap"), originalUiController: controller("visuals"),
-    externalServicesController: controller("external"), upstreamToolController: controller("upstream"),
+    // CPA's process record is saved off the main thread (managed-components.cjs); the quit waits for it.
+    externalServicesController: { ...controller("external"), processRecordsSaved: async () => { recordFlushes.push([...disposed]); } },
+    upstreamToolController: controller("upstream"),
     // requestQuit runs each shutdown step under quit-steps.cjs's deadline (main.cjs requires it).
     boundedQuitStep: require("../electron/quit-steps.cjs").boundedQuitStep,
     quitLogger: null, antigravityAuthBrowser: { closeAll() {} },
@@ -71,7 +75,7 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
   const quit = vm.runInContext(`(${quitSource})`, context);
   let result;
   context.requestQuit = () => (result = quit());
-  return { disposed, chatHosts, nativeStops, quits, order, recovered, goalSaves, accountSaves, settingsSaves, guards, relaunches, browser: context.browserHost, quit, async beforeQuit() {
+  return { disposed, chatHosts, nativeStops, quits, order, recovered, goalSaves, accountSaves, settingsSaves, guards, relaunches, recordFlushes, browser: context.browserHost, quit, async beforeQuit() {
     let prevented = 0;
     for (const listener of listeners) vm.runInContext(`(${listener})`, context)({ preventDefault: () => { prevented += 1; } });
     assert.equal(prevented, 1);
@@ -162,6 +166,15 @@ test("accepted app quit disposes each integration controller once", async () => 
   assert.deepEqual(f.goalSaves, [true], "the last goal change is on disk before the app goes");
   assert.deepEqual(f.accountSaves, [true], "so is the last Browser account change");
   assert.deepEqual(f.settingsSaves, [true], "and the last settings change");
+  assert.deepEqual(f.recordFlushes, [["bootstrap", "visuals", "external", "upstream"]],
+    "component process records are flushed once, after every controller is disposed");
+});
+
+test("a keep-bridge restart flushes CPA's process record before the app goes", async () => {
+  const f = fixture();
+  assert.equal((await f.quit({ keepBridge: true, relaunch: true })).ok, true);
+  assert.equal(f.recordFlushes.length, 1, "the next app adopts the CPA left running only if its record is on disk");
+  assert.equal(f.quits.length, 1);
 });
 
 test("route restoration failure cancels quit unless the user chooses Quit anyway", async () => {

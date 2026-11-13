@@ -57,6 +57,11 @@ const TOOL_SOURCES = Object.freeze({
 
 /** Agent Orchestrator's fork: the branch the app's pinned AO commit is built from. */
 const AO_SOURCE = Object.freeze({ repository: "p90-lover/agent-orchestrator", branch: "main" });
+/**
+ * The Browser tab's engine: Chromium inside Electron. Its newest is npm's "latest" tag, what an app
+ * release can be built with: GitHub tagged v45.3.2 hours before npm had it (2026-11-13).
+ */
+const ENGINE_SOURCE = Object.freeze({ repository: "electron/electron", npm: "electron" });
 const REPOSITORY = /^[\w.-]+\/[\w.-]+$/u;
 
 const PLUGIN_FILE = /^([a-z0-9][a-z0-9_-]*?)(?:-v(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?))?\.dll$/i;
@@ -130,6 +135,11 @@ function createAppPlugins({
   rtk = null,
   // The folder holding AO's daemon and its build manifest.json (null before the backend starts).
   agentOrchestratorRoot = () => null,
+  // The browser engine is built into the app: its row reads the app's updater ({ getState }) and
+  // its Update installs the app update (installAppUpdate, as Settings -> Updates does).
+  appUpdates = () => null,
+  installAppUpdate = null,
+  engineVersions = process.versions,
   // Where the auto-update choices are kept: beside CPA's state folder by default.
   settingsDir = null,
   pluginBundleFile = BUNDLE_FILE,
@@ -323,6 +333,64 @@ function createAppPlugins({
     };
   }
 
+  /**
+   * The Browser tab's engine: the Electron (and Chromium) this app runs, against Electron's newest
+   * stable release. It is built into the app, so it can't be swapped on its own: a newer engine
+   * comes with a Coding Tools release, and Update installs that release once one is out.
+   */
+  async function browserEngineItem(force) {
+    const electron = String(engineVersions?.electron || ""), chromium = String(engineVersions?.chrome || "");
+    const base = {
+      id: "browser-engine", kind: "service", name: "Browser engine", repository: ENGINE_SOURCE.repository,
+      installed: electron || null, latest: null, updateAvailable: false, canUpdate: false, error: null,
+      note: chromium ? `Chromium ${chromium} (Electron ${electron}).` : null,
+      updating: updating.has("browser-engine"), releaseUrl: null,
+    };
+    if (!electron) return { ...base, note: "Not running in Electron." };
+    const release = await latestEngine(force);
+    if (release.error) return { ...base, error: release.error };
+    const newer = compare(release.version, electron) > 0;
+    const item = { ...base, latest: release.version, releaseUrl: release.url, updateAvailable: newer };
+    if (!newer) return item;
+    let app = null;
+    try { app = appUpdates()?.getState?.() ?? null; } catch { /* no updater yet */ }
+    const ready = app?.status === "available" && typeof installAppUpdate === "function";
+    return { ...item, canUpdate: ready, viaAppUpdate: !ready,
+      note: ready
+        ? `Chromium ${chromium}. Update installs Coding Tools ${app.version}, with the engine it was built with.`
+        : `Chromium ${chromium}. Electron ${release.version} comes with a Coding Tools update.` };
+  }
+
+  /** Electron's newest version on npm ({ version, url } or { error }), cached like the GitHub checks. */
+  async function latestEngine(force) {
+    const key = `npm:${ENGINE_SOURCE.npm}`;
+    const cached = releases.get(key);
+    if (!force && cached && now() - cached.at < CHECK_TTL_MS) return cached;
+    let entry;
+    try {
+      const response = await fetchImpl(`https://registry.npmjs.org/-/package/${ENGINE_SOURCE.npm}/dist-tags`, {
+        headers: { Accept: "application/json", "User-Agent": "Coding-Tools" },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!response.ok) throw new Error(`npm returned HTTP ${response.status}`);
+      const version = String((await response.json())?.latest || "");
+      if (!/^\d+\.\d+\.\d+$/u.test(version)) throw new Error("npm gave no Electron version");
+      entry = { at: now(), version, url: `https://github.com/${ENGINE_SOURCE.repository}/releases/tag/v${version}` };
+    } catch (error) {
+      entry = { at: now(), error: error instanceof Error ? error.message : String(error) };
+    }
+    releases.set(key, entry);
+    return entry;
+  }
+
+  async function updateBrowserEngine() {
+    if (typeof installAppUpdate !== "function") throw new Error("App updates are unavailable here");
+    const app = appUpdates()?.getState?.() ?? null;
+    if (app?.status !== "available") throw new Error("No Coding Tools update is out yet: the newer engine comes with the next one");
+    logger.info?.("app-plugins.browser_engine_update", { electron: String(engineVersions?.electron || ""), app: app.version });
+    await installAppUpdate();
+  }
+
   async function agentOrchestratorItem(force) {
     const base = {
       id: "agent-orchestrator", kind: "service", name: "Agent Orchestrator", repository: AO_SOURCE.repository,
@@ -443,7 +511,7 @@ function createAppPlugins({
   // Every item is checked at once: one after another, a cold check waited on each GitHub call in turn.
   async function list({ refresh = false } = {}) {
     const plugins = await installedPlugins();
-    const [items, { autoUpdate }] = await Promise.all([Promise.all([cpaItem(refresh), agentOrchestratorItem(refresh), antigravityItem(refresh), rtkItem(refresh),
+    const [items, { autoUpdate }] = await Promise.all([Promise.all([cpaItem(refresh), agentOrchestratorItem(refresh), browserEngineItem(refresh), antigravityItem(refresh), rtkItem(refresh),
       ...plugins.map((plugin) => pluginItem(plugin, refresh))]), readSettings()]);
     for (const item of items) {
       item.autoUpdatable = autoUpdatable(item);
@@ -552,6 +620,8 @@ function createAppPlugins({
       if (key === "cpa") {
         const result = await services().updateManagedComponent("cpa", { swap: true });
         if (result?.rolledBack) throw new Error(`CPA ${result.to} failed its health check, so CPA ${result.from} stays: ${result.error}`);
+      } else if (key === "browser-engine") {
+        await updateBrowserEngine();
       } else if (key === "antigravity-cli") {
         await updateAntigravity();
       } else if (key === "rtk") {
@@ -577,7 +647,8 @@ function createAppPlugins({
    */
   async function updateAll(pick = () => true) {
     const { items } = await list({ refresh: true });
-    const due = items.filter((item) => item.updateAvailable && item.canUpdate && !item.updating && pick(item))
+    // The browser engine's Update installs the whole app (and restarts it): only its own button runs it.
+    const due = items.filter((item) => item.updateAvailable && item.canUpdate && !item.updating && item.id !== "browser-engine" && pick(item))
       .sort((left, right) => Number(left.id === "cpa") - Number(right.id === "cpa"));
     const results = [];
     let pluginsChanged = false;

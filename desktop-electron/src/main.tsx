@@ -4,6 +4,7 @@ import { App } from "./App";
 import { AppErrorBoundary } from "./AppErrorBoundary";
 import { installEntranceSettle } from "./features/entrance-settle";
 import { installShimmerTicker } from "./features/shimmer-ticker";
+import { installLinkPreview } from "./features/link-preview";
 import "./tokens.css";
 import "./styles.css";
 // The provider screens' styles. They came in with ProviderHubIntegration, whose Providers row under
@@ -11,9 +12,11 @@ import "./styles.css";
 import "./providers/provider-manager.css";
 // The GPT Browser's bar and tabs, which the browser screen wears.
 import "./features/gpt-browser.css";
+import "./features/link-preview.css";
 
 installShimmerTicker();
 installEntranceSettle();
+installLinkPreview();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

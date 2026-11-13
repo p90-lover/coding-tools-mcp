@@ -5,6 +5,7 @@ const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const { resolve } = require("node:path");
 const {
+  browserKeyActionForInput,
   browserViewVisible,
   constrainBrowserBounds,
   navigateBrowser,
@@ -14,6 +15,7 @@ const {
 } = require("../electron/browser-state.cjs");
 const {
   allowedAuthUrl,
+  signOutUrl,
   BrowserHost,
   IDLE_BROWSER_URL,
   isChatGptCloudflareChallengeResponse,
@@ -2413,6 +2415,123 @@ test("concurrent launcher session refresh requests share one browser operation",
   assert.equal(fixture.sessionRefreshOperation, null);
 });
 
+// Live 2026-11-13: ChatGPT's own "Log out" sat on "Logging out..." (its navigation to a sign-out address
+// was cancelled as a sign-in), and Log out, Remove account and the address bar were all refused while an
+// automatic MCP connector setup ran.
+test("a sign-out address is not taken for a sign-in", () => {
+  for (const url of ["https://chatgpt.com/auth/logout", "https://auth.openai.com/logout?returnTo=https%3A%2F%2Fchatgpt.com",
+    "https://auth0.openai.com/v2/logout", "https://login.microsoftonline.com/common/oauth2/v2.0/logout",
+    "https://accounts.google.com/Logout", "https://auth.openai.com/sign-out"]) assert.equal(signOutUrl(url), true, url);
+  for (const url of ["https://chatgpt.com/auth/login", "https://chatgpt.com/login", "https://accounts.google.com/o/oauth2/v2/auth",
+    "https://auth.openai.com/authorize?client_id=x", "https://example.com/logout", "https://chatgpt.com/c/logout-notes",
+    "not a url"]) assert.equal(signOutUrl(url), false, url);
+});
+
+function operationFixture(states = []) {
+  return Object.assign(Object.create(BrowserHost.prototype), {
+    ready: async () => {},
+    turnTabs: new Map(),
+    manualOperation: null,
+    manualOperationStop: null,
+    manualOperationSettled: null,
+    activateHomeSurface() {},
+    setState: (state) => states.push(state),
+    logger: { info() {}, warn() {} },
+    view: { webContents: { isDestroyed: () => false, setBackgroundThrottling() {} } },
+  });
+}
+
+const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+
+test("the person's own action stops MCP connector setup at once and leaves no error on the browser", async () => {
+  const states = [];
+  const host = operationFixture(states);
+  const running = host.withManualOperation("MCP connector creation", () => new Promise((_resolve, reject) => {
+    // The setup's hidden window closes on the signal; the step it was on then rejects.
+    host.operationSignal().addEventListener("abort", () => reject(new Error("window closed")), { once: true });
+  }), { preserveSurface: true, stoppable: true });
+  const outcome = running.then(() => null, error => error);
+  while (!host.manualOperation) await nextTurn();
+  assert.equal(host.operationSignal().aborted, false);
+
+  assert.equal(await host.stopOperationFor("ChatGPT logout"), true);
+  assert.equal((await outcome)?.message, "window closed");
+  assert.equal(host.manualOperation, null);
+  assert.equal(host.operationSignal(), null);
+  assert.deepEqual(states.filter(state => state.status === "error"), [], "a stopped setup is not a browser error");
+  assert.equal(await host.stopOperationFor("ChatGPT logout"), false, "nothing left to stop");
+});
+
+test("an operation that is not stoppable keeps the browser, and one that will not stop is reported", async () => {
+  const host = operationFixture();
+  let finish;
+  const login = host.withManualOperation("ChatGPT login", () => new Promise(resolve => { finish = resolve; }));
+  while (!host.manualOperation) await nextTurn();
+  assert.equal(await host.stopOperationFor("account removal"), false);
+  assert.equal(host.manualOperation, "ChatGPT login");
+  finish("done");
+  assert.equal(await login, "done");
+
+  const stuck = host.withManualOperation("MCP connector creation", () => new Promise(() => {}), { stoppable: true });
+  void stuck;
+  while (!host.manualOperation) await nextTurn();
+  // The stop's own timer never holds the app open (unref), so this test holds the loop meanwhile.
+  const keepAlive = setTimeout(() => {}, 5_000);
+  await assert.rejects(host.stopOperationFor("ChatGPT logout", { timeoutMs: 20 }), /MCP connector creation did not stop in time/);
+  clearTimeout(keepAlive);
+});
+
+test("the address bar works while MCP connector setup runs in its own hidden window", () => {
+  const calls = [];
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    selectedTabId: "user-tab",
+    userTabs: new Map([["user-tab", { id: "user-tab", view: { webContents: { reload: () => calls.push("reload-user") } } }]]),
+    turnTabs: new Map(),
+    authView: null,
+    view: { webContents: { reload: () => calls.push("reload-home") } },
+    manualOperation: "MCP connector creation",
+    manualOperationYields: false,
+    manualOperationStop: new AbortController(),
+    snapshot() { return { activeTabId: this.selectedTabId }; },
+  });
+  assert.equal(host.navigate("reload").activeTabId, "user-tab");
+  assert.deepEqual(calls, ["reload-user"]);
+  // An operation that works on the shown page (a sign-in, a logout) still holds the address bar.
+  Object.assign(host, { manualOperation: "ChatGPT logout", manualOperationStop: null });
+  assert.throws(() => host.navigate("reload"), /Browser navigation is locked during ChatGPT logout/);
+});
+
+test("logout and sign-in stop a running MCP connector setup before they take the browser", async () => {
+  const calls = [];
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    state: { authenticated: false },
+    loginOperation: null,
+    sessionRefreshOperation: null,
+    manualOperationStop: new AbortController(),
+    stopOperationFor: async (action) => { calls.push(`stop:${action}`); return true; },
+    withManualOperation: async (name) => { calls.push(`run:${name}`); return name; },
+  });
+  assert.equal(await host.logout(), "ChatGPT logout");
+  assert.equal(await host.openPasskeyLogin(), "ChatGPT passkey login");
+  assert.deepEqual(calls, ["stop:ChatGPT logout", "run:ChatGPT logout", "stop:ChatGPT sign-in", "run:ChatGPT passkey login"]);
+});
+
+test("a sign-in the page asks for after its own Log out checks the session before opening", async () => {
+  const calls = [];
+  const contents = { session: {} };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    destroyed: false,
+    view: { webContents: contents },
+    state: { authenticated: true },
+    probeAuthentication: async () => { calls.push("probe"); host.state.authenticated = false; return { authenticated: false }; },
+    openPasskeyLogin: async () => { calls.push(`sign-in:${host.state.authenticated ? "signed-in" : "signed-out"}`); },
+    setState() {},
+  });
+  host.requestChromeLogin(contents);
+  await nextTurn();
+  assert.deepEqual(calls, ["probe", "sign-in:signed-out"]);
+});
+
 test("manual browser operations disable background throttling until completion", async () => {
   const throttling = [];
   const surfaces = [];
@@ -4260,4 +4379,96 @@ test("a manual operation tells waiting turns when it ends, failed or not", async
   assert.equal(await Promise.race([during.then(() => "settled"), new Promise((resolve) => setTimeout(() => resolve("pending"), 50))]), "settled");
   assert.equal(fixture.manualOperation, null);
   assert.equal(fixture.manualOperationSettled, null);
+});
+
+// 2026-11-13: the Browser tab handed every key to the page, so F12 opened nothing and Ctrl+R,
+// Alt+Left or Ctrl+L did nothing. It answers Chrome's keys now (and the GPT Browser page is gone).
+test("Chrome's browser keys map to their actions, and every other key stays the page's", () => {
+  const key = (name, mods = {}) => browserKeyActionForInput({ type: "keyDown", key: name, ...mods }, "win32");
+  assert.equal(key("F12"), "devtools");
+  assert.equal(key("I", { control: true, shift: true }), "devtools");
+  assert.equal(key("J", { control: true, shift: true }), "devtools");
+  assert.equal(key("C", { control: true, shift: true }), "devtools");
+  assert.equal(key("F5"), "reload");
+  assert.equal(key("r", { control: true }), "reload");
+  assert.equal(key("R", { control: true, shift: true }), "hard-reload");
+  assert.equal(key("F5", { control: true }), "hard-reload");
+  assert.equal(key("F5", { shift: true }), "hard-reload");
+  assert.equal(key("ArrowLeft", { alt: true }), "back");
+  assert.equal(key("ArrowRight", { alt: true }), "forward");
+  assert.equal(key("BrowserBack"), "back");
+  assert.equal(key("l", { control: true }), "focus-address");
+  assert.equal(key("d", { alt: true }), "focus-address");
+  assert.equal(key("F6"), "focus-address");
+  assert.equal(key("t", { control: true }), "new-tab");
+  assert.equal(key("w", { control: true }), "close-tab");
+  assert.equal(key("F4", { control: true }), "close-tab");
+  for (const [name, mods] of [["a", {}], ["c", { control: true }], ["v", { control: true }], ["ArrowLeft", {}],
+    ["t", { control: true, shift: true }], ["Enter", {}], ["F4", { alt: true }], ["r", { alt: true }]]) {
+    assert.equal(key(name, mods), null, `${name} ${JSON.stringify(mods)}`);
+  }
+  assert.equal(browserKeyActionForInput({ type: "keyUp", key: "F12" }, "win32"), null);
+  // macOS: Cmd stands for Ctrl, Cmd+Option+I opens the tools, Cmd+[ and Cmd+] go back and forward.
+  const mac = (name, mods = {}) => browserKeyActionForInput({ type: "keyDown", key: name, ...mods }, "darwin");
+  assert.equal(mac("i", { meta: true, alt: true }), "devtools");
+  assert.equal(mac("[", { meta: true }), "back");
+  assert.equal(mac("]", { meta: true }), "forward");
+  assert.equal(mac("l", { meta: true }), "focus-address");
+  assert.equal(mac("l", { control: true }), null);
+});
+
+test("a hard reload skips the cache; it goes through the same navigation as the toolbar's", () => {
+  const calls = [];
+  navigateBrowser({ reloadIgnoringCache: () => calls.push("hard"), reload: () => calls.push("soft"), navigationHistory: {} }, "hard-reload");
+  assert.deepEqual(calls, ["hard"]);
+});
+
+test("F12 opens developer tools on any page; the other keys act like the toolbar on the page shown", () => {
+  const calls = [];
+  const page = (name) => ({
+    name, open: false, isDestroyed: () => false,
+    isDevToolsOpened() { return this.open; },
+    openDevTools(options) { this.open = true; calls.push(`tools-open:${name}:${options.mode}`); },
+    closeDevTools() { this.open = false; calls.push(`tools-close:${name}`); },
+  });
+  const shown = page("shown"), parked = page("parked");
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    window: { webContents: { isDestroyed: () => false, focus: () => calls.push("app-page-focus") } },
+    selectedTabId: "user-1",
+    activeView: () => ({ webContents: shown }),
+    navigate: (action) => calls.push(`navigate:${action}`),
+    createUserTab: () => calls.push("new-tab"),
+    closeTab: async (id) => { calls.push(`close-tab:${id}`); },
+    publishShortcut: (action) => calls.push(`shortcut:${action}`),
+    logger: { warn() {} },
+  });
+  host.runBrowserKey(shown, "devtools");
+  host.runBrowserKey(shown, "devtools");
+  host.runBrowserKey(parked, "devtools");
+  for (const action of ["reload", "hard-reload", "back", "forward", "focus-address", "new-tab", "close-tab"]) host.runBrowserKey(shown, action);
+  host.runBrowserKey(parked, "reload");
+  assert.deepEqual(calls, ["tools-open:shown:detach", "tools-close:shown", "tools-open:parked:detach",
+    "navigate:reload", "navigate:hard-reload", "navigate:back", "navigate:forward",
+    "app-page-focus", "shortcut:focus-address", "new-tab", "close-tab:user-1"]);
+});
+
+test("a Codex turn's tab answers the developer tools key only, and a page off screen answers none", () => {
+  const handlers = [];
+  const ran = [];
+  const contents = { isDestroyed: () => false, on: (event, handler) => { if (event === "before-input-event") handlers.push(handler); } };
+  const host = Object.assign(Object.create(BrowserHost.prototype), { runBrowserKey: (_contents, action) => ran.push(action), logger: { warn() {} } });
+  let onScreen = true;
+  host.bindBrowserKeys(contents, { turn: true });
+  host.bindBrowserKeys(contents, { shown: () => onScreen });
+  const press = (handler, key) => {
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    handler(event, { type: "keyDown", key });
+    return event.prevented;
+  };
+  assert.equal(press(handlers[0], "F5"), false, "a reload would break the turn");
+  assert.equal(press(handlers[0], "F12"), true);
+  assert.equal(press(handlers[1], "F5"), true);
+  onScreen = false;
+  assert.equal(press(handlers[1], "F5"), false, "a parked account's page leaves the key alone");
+  assert.deepEqual(ran, ["devtools", "reload"]);
 });

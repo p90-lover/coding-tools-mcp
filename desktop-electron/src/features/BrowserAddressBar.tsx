@@ -1,20 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "../icons";
 
-export function BrowserAddressBar({ url, displayAddress, targetId, disabled, navigate, setError }: {
+export function BrowserAddressBar({ url, displayAddress, targetId, disabled, navigate, setError, focusRequests = 0 }: {
   url: string;
   displayAddress: string;
   targetId?: number;
   disabled: boolean;
   navigate: (input: { url: string; targetId: number }) => Promise<unknown>;
   setError: (message: string | null) => void;
+  /** Goes up each time Ctrl+L, Alt+D or F6 is pressed on the page: the address is selected for typing. */
+  focusRequests?: number;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const submitting = useRef<string | null>(null);
   const request = useRef(0);
+  const input = useRef<HTMLInputElement | null>(null);
   const locked = disabled || !Number.isSafeInteger(targetId) || !targetId || targetId < 0;
   useEffect(() => () => { request.current += 1; }, []);
+  useEffect(() => {
+    if (focusRequests > 0 && !locked) input.current?.focus();
+  }, [focusRequests, locked]);
 
   const submit = async () => {
     const address = draft?.trim();
@@ -42,6 +48,7 @@ export function BrowserAddressBar({ url, displayAddress, targetId, disabled, nav
     <form className="browser-address" title={url} onSubmit={event => { event.preventDefault(); void submit(); }}>
       <Icon name="globe" />
       <input
+        ref={input}
         aria-label="Browser address"
         autoCapitalize="off"
         autoComplete="off"

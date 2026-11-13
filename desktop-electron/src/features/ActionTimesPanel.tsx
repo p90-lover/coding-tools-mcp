@@ -45,7 +45,6 @@ function tabLabel(tab: string, copy: Copy): string {
     "computer-use": "Computer use",
     "native-codex": copy.nativeCodex,
     browser: copy.browser,
-    "gpt-browser": "GPT Browser",
     "chatgpt-browser-management": "ChatGPT browser management",
     "chatgpt-desktop": "ChatGPT Desktop",
     email: "Email",

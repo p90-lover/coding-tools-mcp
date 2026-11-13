@@ -706,6 +706,8 @@ function createManagedExternalServicesController({
     configure: forgettingCpaConnection(configure),
     /** Resolves once every settings change so far is on disk (saved off the main thread). */
     saved: () => baseController.saved(),
+    /** Resolves once every managed component's process record change so far is on disk; never rejects. */
+    processRecordsSaved: () => managedController.processRecordsSaved(),
     inspect,
     start: forgettingCpaConnection(start),
     stop: forgettingCpaConnection(stop),

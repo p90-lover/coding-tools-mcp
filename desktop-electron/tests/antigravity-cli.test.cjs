@@ -284,7 +284,7 @@ test("Google sign-in applies its selected proxy before navigation and owns brows
     setPermissionRequestHandler() {}, setPermissionCheckHandler() {},
   };
   const open = createAntigravityAuthBrowser({
-    BrowserWindow: FakeWindow, sessionFor: () => browserSession, cleanUserAgent: require("../electron/gpt-browser.cjs").cleanUserAgent,
+    BrowserWindow: FakeWindow, sessionFor: () => browserSession, cleanUserAgent: require("../electron/browser-url.cjs").cleanUserAgent,
     proxyEnvironment: () => ({ HTTPS_PROXY: "http://user:p%40ss@127.0.0.1:7890", NO_PROXY: "localhost,127.0.0.1" }),
   });
   const handle = await open("https://accounts.google.com/o/oauth2/auth", { onCancel: () => { cancelled += 1; } });

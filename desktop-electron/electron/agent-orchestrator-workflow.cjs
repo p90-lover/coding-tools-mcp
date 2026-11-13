@@ -460,7 +460,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -4050,6 +4050,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       ? "An edit through the app's tools, confined to the agent's worktree (like Claude's own edits)"
       : "A read through the app's tools, confined to the agent's worktree";
   }
+  // GitHub's own MCP server (Plugins > MCPs, one click with the GitHub CLI's sign-in). Claude Code
+  // asks for every MCP tool, so each read (get_me, pull_request_read, list_pull_requests...) waited
+  // for a full review: 23 s median, up to 158 s, over 76 calls on 2026-11-12/13, and one
+  // get_latest_release was denied. Reads run like `gh pr view` in a shell; anything that changes
+  // GitHub (create, update, merge, push, delete, the *_write tools) still goes to the reviewer. The
+  // server must be the person's GitHub one by its URL (githubMcpServer), not by its name alone.
+  // github-mcp-server names its reads get_*, list_* and search_*; the few others are listed by name,
+  // as a suffix would also take writes such as mark_all_notifications_read.
+  const GITHUB_READ_NAMES = new Set(["pull_request_read", "issue_read", "sub_issue_read", "actions_get", "actions_list", "projects_get", "projects_list"]);
+  const githubReadName = (name) => /^(?:get|list|search)_[a-z0-9_]+$/.test(name) || GITHUB_READ_NAMES.has(name);
+  /** Why a GitHub MCP tool call "Approve for me" may answer itself (a read), or null. */
+  function githubRead(tool) {
+    const match = /^mcp__([A-Za-z0-9_-]{1,64})__([a-z0-9_]{1,80})$/.exec(String(tool ?? ""));
+    if (!match || !githubReadName(match[2]) || typeof githubMcpServer !== "function") return null;
+    try {
+      return githubMcpServer(match[1]) === true ? "Reads from GitHub through your GitHub MCP server; it changes nothing there" : null;
+    } catch { return null; }
+  }
   /**
    * Why a computer use call may run without the reviewer, or null: the app's own rule
    * (chat-agent-tools.cjs computerStepAllowed), as Codex's Computer Use asks once per app, not per
@@ -4838,6 +4856,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
+      : githubRead(approval.tool)
+      ? { action: "allow", actor: "safety_rules", reason_code: "github_read", reason: githubRead(approval.tool) }
       // The hard deny list still wins: a blocked command typed into an allowed app is not a routine step.
       : !blocked && inAllowedApp(workspaceId, approval)
       ? { action: "allow", actor: "safety_rules", reason_code: "allowed_app_step", reason: inAllowedApp(workspaceId, approval) }
@@ -8250,7 +8270,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       // A `sending` mark seen here is an earlier app session's, whose send never answered (this
       // session's sends hold `draining`): it went if the chat already ends with it.
-      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next).catch(() => false)) {
+      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next)) {
         chatQueue.remove(workspaceId, taskId, [next.id]);
         logger?.info?.("ao.chat_queue.sent_before_restart", { workspaceId, taskId });
         armQueue(workspaceId, taskId, QUEUE_FREED_MS);
@@ -8281,12 +8301,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (failures < QUEUE_SEND_TRIES) armQueue(workspaceId, taskId, QUEUE_RETRY_MS * Math.max(1, failures));
       }
     } catch (error) {
-      // A look at the chat that failed (AO restarting, a read the busy disk held past its timeout)
-      // left nothing to send the queue: it waited for the window's next read or the chat's next
-      // settle, and a minimized window reads nothing. It looks again in a minute, unless something
-      // already will.
-      if (!wakeupsDisposed && !queueTimers.has(key)) armQueue(workspaceId, taskId, QUEUE_RETRY_MS, steer);
-      throw error;
+      // A failed state read leaves delivery unknown; keep the sending mark until it can be checked.
+      // It looks again in a minute (a minimized window reads nothing to wake it), unless a sooner
+      // look was armed while this one waited.
+      logger?.warn?.("ao.chat_queue.check_failed", { workspaceId, taskId, message: publicText(error?.message || error, 200) });
+      if (!queueTimers.has(key)) armQueue(workspaceId, taskId, QUEUE_RETRY_MS, steer);
     } finally { draining.delete(key); }
   }
   /** The timelines of a run's agent cards, for whether a steer was read; null when none can be read. */
@@ -9748,7 +9767,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
   /** Resolves once every deleted-message and archive change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

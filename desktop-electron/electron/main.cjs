@@ -36,8 +36,8 @@ const { watchCodexModelCache } = require("./codex-model-cache.cjs");
 const { createThreadAccounts, isThreadId } = require("./codex-thread-accounts.cjs");
 const { createConversationActions } = require("./chatgpt-conversation-actions.cjs");
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
-const { createGptBrowserHost, cleanUserAgent, readGptBrowserState } = require("./gpt-browser.cjs");
-const { restoreGptBrowserAccounts } = require("./gpt-browser-restore.cjs");
+const { cleanUserAgent } = require("./browser-url.cjs");
+const { mergeGptBrowserAccounts } = require("./gpt-browser-merge.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { automaticSetupGaveWay, createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
@@ -53,7 +53,7 @@ const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector, currentConnectorSettings, connectorCredentials, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
-const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
+const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure, mcpConnectorFailureCause } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { probeTcpOffThread } = require("./off-thread-run.cjs");
@@ -223,8 +223,6 @@ app.on("session-created", (created) => created.setCertificateVerifyProc(caDistru
 // app opens is timed from here, so new views need no wiring of their own.
 const actionTimes = createActionTimes();
 app.on("web-contents-created", (_event, contents) => {
-  // A GPT Browser page is made only once its host has been: keep the host to name the page's account.
-  if (gptBrowser && !gptBrowserHost) void gptBrowser.then((host) => { gptBrowserHost = host; }, () => {});
   watchPageTimes(contents, { times: actionTimes, describe: describeTimedPartition });
 });
 let mainWindowReadyToShow = false;
@@ -246,10 +244,6 @@ let conversationActions = null;
 let lifecycleScan = null;
 let savedChatsInUse = () => true;
 let chatgptDesktop = null;
-let gptBrowser = null;
-// The GPT Browser host once made (gptBrowser is its promise), for naming its pages' timings; kept
-// by the web-contents-created hook, so getGptBrowser stays as it was.
-let gptBrowserHost = null;
 let emailHost = null;
 let registerHost = null;
 const chatgptDesktopOwners = new WeakSet();
@@ -375,7 +369,8 @@ let computerControlService = null;
 let chatMcpServers = null;
 function userMcpServers(logger = null) {
   chatMcpServers ??= require("./chat-mcp-servers.cjs").createChatMcpServers({
-    filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger });
+    filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger,
+    nodeExecutable: app.isPackaged ? path.join(process.resourcesPath, "acp-runtime", "node", process.platform === "win32" ? "node.exe" : "bin/node") : "node" });
   return chatMcpServers;
 }
 // The page hears "saved" only once the file is on disk; the write itself runs off the main thread.
@@ -492,50 +487,6 @@ function getChatGptDesktop(logger) {
   return chatgptDesktop;
 }
 
-// GPT Browser account partitions take the same route as the main browser (Global Routing
-// publishes it in HTTPS_PROXY/NO_PROXY); chatgpt.com refuses this machine's direct route.
-async function routeGptBrowserSession(browserSession) {
-  let route = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
-  if (!route) {
-    await browserSession.setProxy({ mode: "direct" });
-    return;
-  }
-  // The built-in gateway's env route carries its local token; Chromium takes the bare proxy and
-  // answers the proxy's 407 through the app's login handler instead.
-  try {
-    const parsed = new URL(route);
-    if (parsed.username || parsed.password) route = `${parsed.protocol}//${parsed.host}`;
-  } catch {}
-  await browserSession.setProxy({ mode: "fixed_servers", proxyRules: route, proxyBypassRules: process.env.NO_PROXY || "" });
-}
-
-/** The GPT Browser host, made on first use once its saved accounts are read off the main thread. */
-function getGptBrowser(logger) {
-  if (gptBrowser) return gptBrowser;
-  const dataRoot = path.join(CORE_HOME, "gpt-browser");
-  gptBrowser = readGptBrowserState(dataRoot, logger).then((savedText) => createGptBrowserHost({
-    logger,
-    dataRoot,
-    savedText,
-    sessionFor: (partition) => session.fromPartition(partition),
-    prepareSession: routeGptBrowserSession,
-    createView: (partition) => new WebContentsView({
-      webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: true },
-    }),
-    attachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.addChildView(view); },
-    detachView: (view) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.contentView.removeChildView(view); },
-    // The pane hands only mailto: links out (to the mail app); openWebUrl refuses them, so every
-    // mailto click failed as an unhandled rejection and the mail app never opened.
-    openExternal: (url) => (/^mailto:/i.test(String(url)) ? shell.openExternal(String(url)) : openWebUrl(url)),
-    onChange: (status) => send("launcher:gpt-browser-changed", status),
-  })).catch((error) => {
-    // A host that could not be made is made again on the next call, as before.
-    gptBrowser = null;
-    throw error;
-  });
-  return gptBrowser;
-}
-
 // Names a timed page's part of the app and its account (Activity > Action time), from the
 // partition its session lives in.
 function describeTimedPartition(partition) {
@@ -544,11 +495,6 @@ function describeTimedPartition(partition) {
   if (accountId) {
     const entry = browserAccounts.status().accounts.find((item) => item.id === accountId);
     return { group: "Browser", account: entry?.email || entry?.label || accountId };
-  }
-  const gptAccount = /^persist:gpt-browser-([a-z0-9]{12})$/.exec(partition)?.[1];
-  if (gptAccount) {
-    const entry = gptBrowserHost?.status().accounts.find((item) => item.id === gptAccount);
-    return { group: "GPT Browser", account: entry?.email || entry?.label || gptAccount };
   }
   return {};
 }
@@ -1160,10 +1106,16 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
   if (!runtimeHost.runtimeConfigSnapshot().configured) return { skipped: true, reason: "not-configured" };
   if (codexBridgeConnectInFlight) return codexBridgeConnectInFlight;
   const work = (async () => {
-    await waitForRuntimeHostIdle();
-    const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready" && runtime.status !== "degraded") return { skipped: true, reason: runtime.status, runtime };
-    const route = await runtimeHost.connectBridgeRoute();
+    // An operation that starts between the idle wait and these steps refuses them: an account
+    // switch's core-setup began during startIfConfigured, and the connect failed "Another launcher
+    // operation is active" (seen live 2026-11-13 00:11Z). As at startup, they wait for idle again
+    // and retry (whenRuntimeHostIdle).
+    const { runtime, route } = await whenRuntimeHostIdle(logger, "bridge-connect", async () => {
+      const started = await runtimeSupervisor.startIfConfigured();
+      if (started.status !== "ready" && started.status !== "degraded") return { runtime: started, route: null };
+      return { runtime: started, route: await runtimeHost.connectBridgeRoute() };
+    });
+    if (!route) return { skipped: true, reason: runtime.status, runtime };
     // A sign-in or an account switch checks the connector again, in that account's ChatGPT.
     if (/^(browser-|setup-signin)/.test(reason)) automaticMcpAttempt = null;
     applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
@@ -3075,7 +3027,11 @@ function registerIpc({ logger, stateStore }) {
     }
     await routeIdleAccountPartition(partition, logger);
     assertCurrent();
-    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true });
+    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true }).catch(error => {
+      // The card shows the observer's one message; the log keeps which check stopped it (observer.failure()).
+      if (typeof error?.ownershipCause === "string") logger.warn("browser_accounts.inspect_failed", { ownershipCause: error.ownershipCause });
+      throw error;
+    });
     assertCurrent();
     recordBrowserWorkspaceContext(partition, context);
     return browserAccountsStatus();
@@ -3214,43 +3170,6 @@ function registerIpc({ logger, stateStore }) {
     const returnTo = Number(native.length >= 8 ? native.readBigUInt64LE(0) : native.readUInt32LE(0));
     return getChatGptDesktop(logger).localSend(input.text, { returnTo });
   });
-  // Workspace -> GPT Browser. Every change needs the focused main window; status is read-only.
-  handle("launcher:gpt-browser-status", async () => (await getGptBrowser(logger)).status());
-  handle("launcher:gpt-browser-add", async (event) => {
-    await assertFocusedMainWindowSettled(event, true);
-    return (await getGptBrowser(logger)).addAccount();
-  });
-  handle("launcher:gpt-browser-switch", async (event, id) => {
-    await assertFocusedMainWindowSettled(event, true);
-    return (await getGptBrowser(logger)).switchTo(id);
-  });
-  handle("launcher:gpt-browser-open-url", async (event, url) => {
-    await assertFocusedMainWindowSettled(event, true);
-    return (await getGptBrowser(logger)).openUrl(url);
-  });
-  handle("launcher:gpt-browser-navigate", async (event, action) => {
-    assertFocusedMainWindow(event, false);
-    return (await getGptBrowser(logger)).navigate(action);
-  });
-  handle("launcher:gpt-browser-rename", async (event, input) => {
-    await assertFocusedMainWindowSettled(event, true);
-    return (await getGptBrowser(logger)).rename(input?.id, input?.label);
-  });
-  handle("launcher:gpt-browser-remove", async (event, id) => {
-    await assertFocusedMainWindowSettled(event, true);
-    return (await getGptBrowser(logger)).remove(id);
-  });
-  handle("launcher:gpt-browser-surface-active", async (_event, active) => (await getGptBrowser(logger)).setSurfaceActive(active === true));
-  handle("launcher:gpt-browser-bounds", async (event, bounds) => {
-    const rect = validateBounds(bounds);
-    const zoom = event.sender.getZoomFactor();
-    (await getGptBrowser(logger)).setBounds({
-      x: Math.round(rect.x * zoom), y: Math.round(rect.y * zoom),
-      width: Math.round(rect.width * zoom), height: Math.round(rect.height * zoom),
-    });
-    return true;
-  });
-  handle("launcher:gpt-browser-snapshot", async () => (await getGptBrowser(logger)).snapshot());
   handle("launcher:chatgpt-desktop-surface-active", (_event, active) => {
     getChatGptDesktop(logger).setSurfaceActive(active === true);
     return true;
@@ -3583,7 +3502,11 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      // Stopped for the person's own sign-in, logout or account removal: not a failure.
+      const stopped = error?.mcpStopped === true;
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      if (!stopped) logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
+      publishOperation({ name: "mcp-connector-create", status: stopped ? "cancelled" : "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   } });
@@ -3687,11 +3610,19 @@ function registerIpc({ logger, stateStore }) {
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
       // An automatic setup that gave way (an account switch, the app left) did not fail: the account
-      // keeps its connector state and the sync tries again later, with no error on screen.
-      if (automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
-        publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
+      // keeps its connector state and the sync tries again later, with no error on screen. Neither did
+      // one stopped for the person's own sign-in, logout or account removal (stopOperationFor).
+      const stopped = error?.mcpStopped === true;
+      if (stopped || automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
+        publishOperation({ name: "mcp-connector-create", status: "cancelled",
+          message: stopped && typeof assertAutomaticCurrent !== "function" ? failure.message : "MCP connector setup will continue later" });
         throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
       }
+      // The card's words can be a category ("ChatGPT verification is required…") for several steps;
+      // the log keeps the setup's own (mcpConnectorFailureCause), or nothing said which step stopped.
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      logger.warn("mcp.account_connect_failed", { automatic: typeof assertAutomaticCurrent === "function", code: failure.code,
+        ...(setupCause ? { setupCause } : {}) });
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
@@ -4068,7 +3999,11 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      // Stopped for the person's own sign-in, logout or account removal: not a failure.
+      const stopped = error?.mcpStopped === true;
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      if (!stopped) logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
+      publishOperation({ name: "mcp-connector-create", status: stopped ? "cancelled" : "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   });
@@ -4314,19 +4249,7 @@ function registerIpc({ logger, stateStore }) {
   // that time was refused at once (0.8.104, 2026-11-10 00:02-00:03 UTC: 35 clicks, "Wait for MCP
   // connector creation to finish before quitting"). It starts no account while the install is
   // prepared, and clicks meanwhile join that attempt instead of each asking again.
-  handle("launcher:update-install", async () => {
-    if (!updateController) throw new Error("Launcher updates are unavailable");
-    updateInstallInFlight ??= (async () => {
-      const release = automaticAccountMcp?.hold();
-      try {
-        return await updateController.beginInstall({ beforeAppInstall: prepareBrowserForUpdate });
-      } finally {
-        release?.();
-        updateInstallInFlight = null;
-      }
-    })();
-    return updateInstallInFlight;
-  });
+  handle("launcher:update-install", async () => installAppUpdate());
   handle("launcher:window-state", (event) => {
     const window = BrowserWindow.fromWebContents(event.sender);
     return windowStateSnapshot(window);
@@ -4337,6 +4260,24 @@ function registerIpc({ logger, stateStore }) {
     reason: "ready-path",
     channels: registeredIpcChannels.size,
   });
+}
+
+/**
+ * Installs the newest app update: Settings -> Updates, and App plugins' Browser engine row (the
+ * engine is built into the app, so a newer one comes with an app release). One attempt at a time.
+ */
+function installAppUpdate() {
+  if (!updateController) throw new Error("Launcher updates are unavailable");
+  updateInstallInFlight ??= (async () => {
+    const release = automaticAccountMcp?.hold();
+    try {
+      return await updateController.beginInstall({ beforeAppInstall: prepareBrowserForUpdate });
+    } finally {
+      release?.();
+      updateInstallInFlight = null;
+    }
+  })();
+  return updateInstallInFlight;
 }
 
 // Before a whole-app install: the background connector setup's account in progress gets up to a
@@ -4481,6 +4422,10 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     // bridge was already detached, with nothing logged. An overrun is logged and the quit goes on.
     const step = (name, work, ms) => boundedQuitStep(name, work, { ms,
       onTimeout: (stepName, limit) => quitLogger?.warn("launcher.quit_step_timeout", { step: stepName, ms: limit }) });
+    // A component's process record is saved off the main thread (managed-components.cjs): a CPA left
+    // running for the next app must be on disk before this one goes, or that app starts a second CPA.
+    // After dispose, so a start the CPA switch finished and every child exit since are included.
+    await step("component-records", () => externalServicesController?.processRecordsSaved?.(), 5_000);
     await step("headless", () => headlessHost?.shutdown("launcher-quit"));
     await step("register", () => registerHost?.shutdown());
     stopCatalogVerificationMonitor();
@@ -4909,6 +4854,9 @@ async function start() {
     antigravityCli: () => antigravityCliService,
     rtk,
     agentOrchestratorRoot: () => agentOrchestratorResourceRoot,
+    // The Browser engine row: a newer engine comes with an app release, installed as Settings does.
+    appUpdates: () => updateController,
+    installAppUpdate,
     logger,
   });
   // Auto-update: only the items the person turned it on for; the first pass waits a few minutes.
@@ -5387,7 +5335,7 @@ async function start() {
         // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
         // agent set "*/10 * * * *" to carry on, said it would check again in 10 minutes, and nothing
         // ever ran (2026-10-24). Without it the agent waits with the app's schedule_wakeup instead.
-        env = { ...env, CLAUDE_CODE_DISABLE_CRON: "1" };
+        env = { ...env, ...require("./chat-mcp-servers.cjs").mcpLaunchEnvironment(app.getPath("userData")), CLAUDE_CODE_DISABLE_CRON: "1" };
         // Lets AO run any session's model through CPA; the daemon blanks it for the agents themselves.
         let cpaKey = null;
         try { cpaKey = externalServicesController?.cpaConnection()?.proxyApiKey; } catch { /* CPA not running */ }
@@ -5402,8 +5350,11 @@ async function start() {
       openAuth: (url) => antigravityAuthBrowser(url),
       agentTools: chatAgentTools,
       // Plugins > MCPs: an HTTP server only for agents whose AO driver takes one (the app's own rule).
-      userMcpServers: { forSession: (agent, taken) => userMcpServers(logger).forSession(agent, taken,
-        backendBundles.requireModule(backend, "chat-agent-tools.cjs").MCP_HTTP_AGENTS) },
+      userMcpServers: { forSession: async (agent, taken) => {
+        const servers = userMcpServers(logger);
+        await servers.preload();
+        return servers.forSession(agent, taken, backendBundles.requireModule(backend, "chat-agent-tools.cjs").MCP_HTTP_AGENTS);
+      } },
       // A GPT model's chat gets unified-agent-tools, and its coding-tools lease leaves out its own file tools.
       fileTools: { forSession: (agent, model) => unifiedAgentTools(logger).forSession(agent, model) },
       // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
@@ -5444,6 +5395,8 @@ async function start() {
       agentToolsIdentity: (workspaceId) => chatAgentTools?.identity(workspaceId) ?? null,
       // "Approve for me" runs a computer use step in an app the chat may use without the reviewer.
       computerStepAllowed: (input) => chatAgentTools?.computerStepAllowed?.(input) ?? null,
+      // ...and a read through the person's GitHub MCP server (Plugins > MCPs) the same way.
+      githubMcpServer: (name) => userMcpServers(logger).isGithubServer(name),
       nativePreviewTools: chatAgentTools,
       // Runtime > Subagents: its settings, saved subagents and running ones.
       subagents: subagentsService,
@@ -5798,6 +5751,8 @@ async function start() {
       signInConflict: (partition, user) => browserAccounts.otherAccountWithLogin(partition, user)?.label ?? null,
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,
+      // Ctrl+L, Alt+D or F6 on a Browser tab page: the renderer's address bar takes the keys.
+      publishShortcut: (action) => { if (host && browserHost === host) send("launcher:browser-shortcut", action); },
       publishState: (state) => {
         if (!host || browserHost !== host) return;
         send("launcher:browser-state", state);
@@ -5839,14 +5794,16 @@ async function start() {
     return host;
   };
   setProviderBrowserProxyBinding((partition) => browserAccounts.proxyForPartition(partition));
-  // The GPT Browser is its own browser again: the accounts #1044 merged into this list come back
-  // to it once, before any partition opens (gpt-browser-restore.cjs). The Browser tab keeps them too.
-  await restoreGptBrowserAccounts({
+  // One browser (2026-11-13): the GPT Browser page is gone, and the accounts it still keeps join this
+  // list once, before any partition opens, signed in as they were (gpt-browser-merge.cjs). A second
+  // sign-in to an account the list already has goes to Trash, not deleted.
+  await mergeGptBrowserAccounts({
     gptDataRoot: path.join(CORE_HOME, "gpt-browser"),
     partitionsRoot: path.join(app.getPath("userData"), "Partitions"),
     trashRoot: path.join(app.getPath("userData"), "Trash", "gpt-browser"),
+    accounts: browserAccounts,
     logger,
-  }).catch((error) => logger.warn("gpt_browser_restore.failed", { message: error instanceof Error ? error.message : String(error) }));
+  }).catch((error) => logger.warn("gpt_browser_merge.failed", { message: error instanceof Error ? error.message : String(error) }));
   await routeBrowserAccountPartition(browserAccounts.activePartition(), logger);
   browserHost = createBrowserHostForAccount(browserAccounts.activeId());
   void refreshBrowserAccountSignIns(logger);
