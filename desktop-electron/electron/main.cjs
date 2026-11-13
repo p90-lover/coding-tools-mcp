@@ -1155,10 +1155,16 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
   if (!runtimeHost.runtimeConfigSnapshot().configured) return { skipped: true, reason: "not-configured" };
   if (codexBridgeConnectInFlight) return codexBridgeConnectInFlight;
   const work = (async () => {
-    await waitForRuntimeHostIdle();
-    const runtime = await runtimeSupervisor.startIfConfigured();
-    if (runtime.status !== "ready" && runtime.status !== "degraded") return { skipped: true, reason: runtime.status, runtime };
-    const route = await runtimeHost.connectBridgeRoute();
+    // An operation that starts between the idle wait and these steps refuses them: an account
+    // switch's core-setup began during startIfConfigured, and the connect failed "Another launcher
+    // operation is active" (seen live 2026-11-13 00:11Z). As at startup, they wait for idle again
+    // and retry (whenRuntimeHostIdle).
+    const { runtime, route } = await whenRuntimeHostIdle(logger, "bridge-connect", async () => {
+      const started = await runtimeSupervisor.startIfConfigured();
+      if (started.status !== "ready" && started.status !== "degraded") return { runtime: started, route: null };
+      return { runtime: started, route: await runtimeHost.connectBridgeRoute() };
+    });
+    if (!route) return { skipped: true, reason: runtime.status, runtime };
     // A sign-in or an account switch checks the connector again, in that account's ChatGPT.
     if (/^(browser-|setup-signin)/.test(reason)) automaticMcpAttempt = null;
     applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
