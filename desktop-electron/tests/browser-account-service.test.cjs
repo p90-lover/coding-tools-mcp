@@ -102,11 +102,27 @@ function setup(t, overrides = {}) {
 
 const ids = status => status.accounts.map(entry => entry.id);
 
-test("an inactive account cannot be removed while its connector popup is creating MCP", async (t) => {
+// Live 2026-11-13: "Wait for MCP connector creation to finish before removing accounts" refused every
+// removal for the whole run of an automatic MCP setup. The person's removal now goes first.
+test("removing an account stops a running MCP connector setup first, then removes it", async (t) => {
   const { registry, service, host, forgotten, erased } = setup(t);
   const other = registry.add();
-  host().currentOperation = () => "MCP connector creation";
-  await assert.rejects(service.remove(other, { logger: logger() }), /Wait for MCP connector creation/);
+  const stops = [];
+  let holding = true;
+  host().currentOperation = () => (holding ? "MCP connector creation" : null);
+  host().stopOperationFor = async (action) => { stops.push(action); holding = false; return true; };
+  await service.remove(other, { logger: logger() });
+  assert.deepEqual(stops, ["account removal", "account removal"]);
+  assert.equal(registry.has(other), false);
+  assert.deepEqual(forgotten, [other]);
+  assert.equal(erased.length, 1);
+});
+
+test("an account stays when the MCP connector setup does not stop in time", async (t) => {
+  const { registry, service, host, forgotten, erased } = setup(t);
+  const other = registry.add();
+  host().stopOperationFor = async () => { throw new Error("MCP connector creation did not stop in time. Try again in a moment."); };
+  await assert.rejects(service.remove(other, { logger: logger() }), /did not stop in time/);
   const bulk = await service.removeMany([other], { logger: logger() });
   assert.equal(bulk.failed.length, 1);
   assert.equal(registry.has(other), true);
@@ -313,18 +329,23 @@ test("an account in a running turn cannot be removed", async (t) => {
   assert.deepEqual(erased, []);
 });
 
-test("removal rechecks MCP setup after an awaited account switch", async t => {
+test("removal stops an MCP setup that started during its awaited account switch", async t => {
   let later = false, state;
+  const stops = [];
   state = setup(t, { failCreate() {
-    if (later) queueMicrotask(() => { state.host().currentOperation = () => "MCP connector creation"; });
+    if (later) queueMicrotask(() => {
+      state.host().currentOperation = () => "MCP connector creation";
+      state.host().stopOperationFor = async (action) => { stops.push(action); return true; };
+    });
     return false;
   } });
   const keep = state.registry.add();
   later = true;
-  await assert.rejects(state.service.remove(FIRST_ACCOUNT_ID, {}), /MCP connector creation/);
-  assert.equal(state.registry.has(FIRST_ACCOUNT_ID), true);
+  await state.service.remove(FIRST_ACCOUNT_ID, {});
+  assert.deepEqual(stops, ["account removal"], "the account switched to has its setup stopped before the removal goes on");
+  assert.equal(state.registry.has(FIRST_ACCOUNT_ID), false);
   assert.equal(state.registry.activeId(), keep);
-  assert.deepEqual(state.erased, []);
+  assert.equal(state.erased.length, 1);
 });
 
 test("sign-in reads that arrive during a read coalesce into one more read", async (t) => {

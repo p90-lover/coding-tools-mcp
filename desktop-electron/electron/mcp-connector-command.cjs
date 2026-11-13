@@ -123,6 +123,8 @@ function mcpConnectorFailureCause(error, failure) {
 function mcpConnectorCommandFailure(error, action = "create") {
   if (action === "add-tunnel") return { code: "tunnel_add_failed", message: "MCP tunnel connection failed. The private input was retained for retry." };
   const text = String(error?.message || error || "");
+  // Stopped for the person's own sign-in, logout or account removal (connectorSetupStopped): its own words.
+  if (error?.mcpStopped === true) return { code: "stopped", message: text };
   const alias = SETUP_FAILURE_ALIASES.get(text);
   if (alias) return { ...PREFLIGHT_FAILURES.get(alias) };
   const known = PREFLIGHT_FAILURES.get(text);

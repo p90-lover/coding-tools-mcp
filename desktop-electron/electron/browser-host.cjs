@@ -353,6 +353,16 @@ function allowedAuthUrl(value) {
   return AUTH_PROVIDER_HOSTS.has(parsed.hostname);
 }
 
+/**
+ * A page leaving its ChatGPT/OpenAI session (its own Log out), not asking for one. The sign-in
+ * interception lets it through: it cancelled ChatGPT's logout navigation and opened no sign-in for
+ * an account still counted as signed in, so the page sat on "Logging out..." (2026-11-13).
+ */
+function signOutUrl(value) {
+  if (!allowedAuthUrl(value)) return false;
+  return /(^|\/)(log-?out|sign-?out)(\/|$)/i.test(new URL(value).pathname);
+}
+
 function navigationOriginForLog(value) {
   try {
     const parsed = new URL(value);
@@ -765,6 +775,8 @@ class BrowserHost {
     this.manualOperation = null;
     this.manualOperationYields = false;
     this.manualOperationSettled = null;
+    // The running operation's AbortController when it can be stopped (stopOperationFor), else null.
+    this.manualOperationStop = null;
     // The page an account switch is opening: { view, done } (presentHome).
     this.homeOpening = null;
     this.loginOperation = null;
@@ -1664,7 +1676,7 @@ class BrowserHost {
       return { action: "deny" };
     });
     contents.on("will-navigate", (event, url) => {
-      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url)) {
+      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url) && !signOutUrl(url)) {
         event.preventDefault();
         this.requestChromeLogin(contents);
       }
@@ -1832,7 +1844,7 @@ class BrowserHost {
       return { action: "deny" };
     });
     on("will-navigate", (event, url) => {
-      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url)) {
+      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url) && !signOutUrl(url)) {
         event.preventDefault();
         this.requestChromeLogin(contents);
       }
@@ -3049,7 +3061,9 @@ class BrowserHost {
     if (this.activeTraceId && !this.selectedUserTab()) {
       throw new Error("Browser navigation is locked while ChatGPT is running a Codex turn");
     }
-    if (this.manualOperation) {
+    // MCP connector setup works in hidden windows of its own (a stoppable or background operation),
+    // so the shown page stays the person's. It refused the address bar for its whole run.
+    if (this.manualOperation && !this.manualOperationYields && !this.manualOperationStop) {
       throw new Error(`Browser navigation is locked during ${this.manualOperation}`);
     }
     const contents = this.activeView().webContents;
@@ -3813,6 +3827,7 @@ class BrowserHost {
           // An explicit login is the recovery path after a failed saved-session refresh.
         }
       }
+      if (this.manualOperationStop) await this.stopOperationFor("ChatGPT sign-in");
       return await this.withManualOperation("ChatGPT login", async () => {
         if (this.loginMode === "passkey") return this.runPasskeyLogin();
         this.authNavigationError = null;
@@ -3857,6 +3872,7 @@ class BrowserHost {
           // Explicit sign-in is the recovery path after a failed saved-session refresh.
         }
       }
+      if (this.manualOperationStop) await this.stopOperationFor("ChatGPT sign-in");
       return await this.withManualOperation("ChatGPT passkey login", () => this.runPasskeyLogin());
     })();
     const tracked = operation.finally(() => {
@@ -3869,7 +3885,10 @@ class BrowserHost {
   requestChromeLogin(contents) {
     // A parked account's page must not open a sign-in for the account now shown.
     if (this.destroyed || contents?.session !== this.view?.webContents?.session) return;
-    void this.openPasskeyLogin().catch(error => {
+    // After a Log out in the page the account may still count as signed in, and openPasskeyLogin then
+    // only shows the page: the sign-in the page asked for never opened. Check the session first.
+    const recheck = this.state.authenticated ? this.probeAuthentication().catch(() => null) : null;
+    void Promise.resolve(recheck).then(() => this.openPasskeyLogin()).catch(error => {
       if (!this.destroyed && contents.session === this.view?.webContents?.session) {
         this.setState({ authenticated: false, status: "error", loading: false,
           message: error instanceof Error ? error.message : String(error) });
@@ -4075,6 +4094,7 @@ class BrowserHost {
 
   async logout() {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT logout verification");
+    if (this.manualOperationStop) await this.stopOperationFor("ChatGPT logout");
     return await this.withManualOperation("ChatGPT logout", async () => {
       if (this.authView) this.closeAuthView(this.authView, true, false);
       for (const tab of [...(this.userTabs?.values() ?? [])]) this.removeUserTab(tab);
@@ -4469,7 +4489,7 @@ class BrowserHost {
     return inspected;
   }
 
-  async withManualOperation(name, action, { preserveSurface = false } = {}) {
+  async withManualOperation(name, action, { preserveSurface = false, stoppable = false } = {}) {
     await this.ready();
     // The page an account switch just opened (sign-in, the connector check and setup all read it).
     await this.homeOpened?.();
@@ -4483,6 +4503,10 @@ class BrowserHost {
     this.manualOperation = name;
     // One that leaves the shown page alone runs in the background and yields to an account switch.
     this.manualOperationYields = preserveSurface === true;
+    // One that works only in hidden windows of its own (MCP connector setup) is stopped for the
+    // person's own sign-in, logout or account removal (stopOperationFor); it closes them on this signal.
+    const stop = stoppable === true ? new AbortController() : null;
+    this.manualOperationStop = stop;
     let settle;
     this.manualOperationSettled = new Promise((resolve) => { settle = resolve; });
     const contents = this.view?.webContents;
@@ -4490,16 +4514,46 @@ class BrowserHost {
     try {
       return await action();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.setState({ status: "error", message });
+      // A stopped operation did not fail: the person's own action has the browser now.
+      if (!stop?.signal.aborted) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.setState({ status: "error", message });
+      }
       throw error;
     } finally {
       if (contents && !contents.isDestroyed()) contents.setBackgroundThrottling(true);
       this.manualOperation = null;
       this.manualOperationYields = false;
+      this.manualOperationStop = null;
       this.manualOperationSettled = null;
       settle();
     }
+  }
+
+  /** The running operation's stop signal when it can be stopped (withManualOperation stoppable), else null. */
+  operationSignal() {
+    return this.manualOperationStop?.signal ?? null;
+  }
+
+  /**
+   * Lets the person's own sign-in, logout or account removal go first: a stoppable operation (MCP
+   * connector setup) is stopped, and this resolves once it has let go of the browser. Seen
+   * 2026-11-13: an automatic MCP setup refused Log out, Remove account and the address bar for its
+   * whole run, so the person could not leave the account. Nothing stoppable running: resolves at
+   * once, and the caller's own busy check still applies to any other operation.
+   */
+  async stopOperationFor(action, { timeoutMs = 20_000 } = {}) {
+    const stop = this.manualOperationStop, settled = this.manualOperationSettled, name = this.manualOperation;
+    if (!stop || !settled) return false;
+    if (!stop.signal.aborted) {
+      this.logger.info("browser.operation_stopped", { operation: name, for: action });
+      stop.abort(Object.assign(new Error(`${name} stopped for ${action}`), { forAction: action }));
+    }
+    let timer;
+    await Promise.race([settled, new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); })]);
+    clearTimeout(timer);
+    if (this.manualOperationStop === stop) throw new Error(`${name} did not stop in time. Try again in a moment.`);
+    return true;
   }
 
   /**
@@ -4663,6 +4717,7 @@ module.exports = {
   restartMarkerPath,
   writeRestartMarker,
   allowedAuthUrl,
+  signOutUrl,
   BrowserHost,
   BrowserTurnCancelledError,
   CHATGPT_VIEWPORT_CSS,
