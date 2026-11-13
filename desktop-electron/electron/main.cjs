@@ -369,7 +369,8 @@ let computerControlService = null;
 let chatMcpServers = null;
 function userMcpServers(logger = null) {
   chatMcpServers ??= require("./chat-mcp-servers.cjs").createChatMcpServers({
-    filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger });
+    filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger,
+    nodeExecutable: app.isPackaged ? path.join(process.resourcesPath, "acp-runtime", "node", process.platform === "win32" ? "node.exe" : "bin/node") : "node" });
   return chatMcpServers;
 }
 // The page hears "saved" only once the file is on disk; the write itself runs off the main thread.
@@ -5334,7 +5335,7 @@ async function start() {
         // (CronCreate, /loop) lives in one claude process and never fires once its turn ends: a goal
         // agent set "*/10 * * * *" to carry on, said it would check again in 10 minutes, and nothing
         // ever ran (2026-10-24). Without it the agent waits with the app's schedule_wakeup instead.
-        env = { ...env, CLAUDE_CODE_DISABLE_CRON: "1" };
+        env = { ...env, ...require("./chat-mcp-servers.cjs").mcpLaunchEnvironment(app.getPath("userData")), CLAUDE_CODE_DISABLE_CRON: "1" };
         // Lets AO run any session's model through CPA; the daemon blanks it for the agents themselves.
         let cpaKey = null;
         try { cpaKey = externalServicesController?.cpaConnection()?.proxyApiKey; } catch { /* CPA not running */ }
@@ -5349,8 +5350,11 @@ async function start() {
       openAuth: (url) => antigravityAuthBrowser(url),
       agentTools: chatAgentTools,
       // Plugins > MCPs: an HTTP server only for agents whose AO driver takes one (the app's own rule).
-      userMcpServers: { forSession: (agent, taken) => userMcpServers(logger).forSession(agent, taken,
-        backendBundles.requireModule(backend, "chat-agent-tools.cjs").MCP_HTTP_AGENTS) },
+      userMcpServers: { forSession: async (agent, taken) => {
+        const servers = userMcpServers(logger);
+        await servers.preload();
+        return servers.forSession(agent, taken, backendBundles.requireModule(backend, "chat-agent-tools.cjs").MCP_HTTP_AGENTS);
+      } },
       // A GPT model's chat gets unified-agent-tools, and its coding-tools lease leaves out its own file tools.
       fileTools: { forSession: (agent, model) => unifiedAgentTools(logger).forSession(agent, model) },
       // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
