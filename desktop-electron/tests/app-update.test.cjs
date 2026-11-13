@@ -571,6 +571,65 @@ test("the controller stages the update, starts the worker and closes the app kee
   }
 });
 
+// 2026-11-14: retrying a rolled-back 0.8.117 update failed with "EPERM: operation not permitted,
+// unlink" on a file of the earlier stage that another process still held. This update never reads
+// an earlier stage, so one it can't remove is kept for the next update instead of failing this one.
+test("an earlier stage another process still holds is kept, and the update stages anyway", async () => {
+  const root = tempRoot();
+  const realRm = fs.promises.rm;
+  try {
+    const installRoot = path.join(root, "install");
+    const assets = path.join(root, "assets");
+    writeTree(installRoot, {
+      "Coding Tools.exe": "exe", "resources/app.asar": "v1",
+      "_update/stage-old/files/resources/agent-orchestrator/ao-daemon.exe": "held",
+      "_update/stage-gone/files/resources/app.asar": "old",
+    });
+    writeTree(path.join(root, "next"), { "Coding Tools.exe": "exe", "resources/app.asar": "v2" });
+    writeRuntime(installRoot, "0.8.0");
+    writeRuntime(path.join(root, "next"), "0.8.0");
+    const built = await buildAppUpdate({ appRoot: path.join(root, "next"), output: assets, version: "0.8.0", electron: "41.10.7" });
+    fs.writeFileSync(path.join(assets, "SHA256SUMS.txt"), `${built.sums.join("\n")}\n`);
+    const names = fs.readdirSync(assets);
+    const fromUrl = (url) => path.join(assets, decodeURIComponent(url.split("/").pop()));
+    const held = [];
+    fs.promises.rm = async (target, options) => {
+      if (path.basename(String(target)) === "stage-old") {
+        held.push(options);
+        throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${target}'`), { code: "EPERM" });
+      }
+      return realRm(target, options);
+    };
+    const warnings = [];
+    let workerJob = null;
+    const controller = createAppUpdateController({
+      currentVersion: "0.7.0", electronVersion: "41.10.7", platform: "win32", arch: "x64", packaged: true,
+      executablePath: path.join(installRoot, "Coding Tools.exe"), logsDirectory: path.join(root, "logs"),
+      publish: () => {}, logger: { info() {}, error() {}, warn: (event, detail) => warnings.push([event, detail]) },
+      closeForUpdate: async () => ({ ok: true }), closeBlocker: () => null,
+      dependencies: {
+        fetchRelease: async () => [release("0.8.0", names)],
+        downloadText: async (url) => fs.readFileSync(fromUrl(url), "utf8"),
+        downloadFile: async (url, destination) => { fs.copyFileSync(fromUrl(url), destination); },
+        spawnWorker: (_runtime, _worker, job) => { workerJob = JSON.parse(fs.readFileSync(job, "utf8")); return { pid: 4242, unref() {} }; },
+      },
+    });
+    assert.equal((await controller.checkNow()).status, "available");
+    assert.equal(await controller.beginInstall(), true, "a held earlier stage does not fail the update");
+    assert.equal(fs.readFileSync(path.join(workerJob.filesRoot, "resources", "app.asar"), "utf8"), "v2");
+    assert.ok(fs.existsSync(path.join(installRoot, "_update", "stage-old")), "the held stage is kept for the next update");
+    assert.equal(fs.existsSync(path.join(installRoot, "_update", "stage-gone")), false, "a stage nothing holds is still removed");
+    assert.ok(held[0]?.maxRetries > 0, "the removal retries before it gives up");
+    assert.deepEqual(
+      warnings.filter(([event]) => event === "launcher.app_update_stale_stage_kept").map(([, detail]) => [detail.stage, detail.code]),
+      [["stage-old", "EPERM"]],
+    );
+  } finally {
+    fs.promises.rm = realRm;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an app update outranks a GUI-only update, which still installs on its own", async () => {
   assert.equal(combinedUpdateState({ status: "available", version: "0.8.0", kind: "app" }, { status: "available", version: "r2" }).version, "0.8.0");
   assert.equal(combinedUpdateState({ status: "up-to-date" }, { status: "available", version: "r2" }).version, "r2");

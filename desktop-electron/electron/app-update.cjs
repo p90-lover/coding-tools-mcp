@@ -551,11 +551,20 @@ function createAppUpdateController({
     fs.mkdirSync(updateRoot, { recursive: true });
     // An earlier stage holds a whole update's files: removing it synchronously held the windows.
     // The stage a pending journal names holds what finishes or undoes that update: it stays.
+    // This update stages into a fresh folder and never reads an earlier one, so a stage another
+    // process still holds a file in stays for the next update instead of failing this one. On
+    // 2026-11-14 the retry of a rolled-back 0.8.117 update failed with "EPERM: operation not
+    // permitted, unlink" on the old stage's ao-daemon.exe, which something (likely an antivirus
+    // scan of the just-written executable) kept open for minutes.
     const journalStage = readJournal(installRoot)?.stageRoot;
     for (const entry of fs.readdirSync(updateRoot, { withFileTypes: true })) {
       if (journalStage && path.resolve(updateRoot, entry.name).toLowerCase() === path.resolve(journalStage).toLowerCase()) continue;
       if (entry.isDirectory() && entry.name.startsWith("stage-")) {
-        await fs.promises.rm(path.join(updateRoot, entry.name), { recursive: true, force: true });
+        await fs.promises.rm(path.join(updateRoot, entry.name), { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+          .catch((error) => logger?.warn("launcher.app_update_stale_stage_kept", {
+            stage: entry.name, code: String(error?.code ?? ""),
+            message: error instanceof Error ? error.message : String(error),
+          }));
       }
     }
     const stageRoot = fs.mkdtempSync(path.join(updateRoot, "stage-"));
