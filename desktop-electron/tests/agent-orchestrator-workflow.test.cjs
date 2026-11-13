@@ -7152,14 +7152,19 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
     nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
   let clock = 1_000_000;
-  const resolved = [], reasons = [];
+  const resolved = [], reasons = [], logged = [];
+  // 2026-11-13: CPA Auto Review answered 503 for 1.75 h with both review accounts at their limit. The
+  // log said only "returned HTTP 503", and each deny read reason_code "model_decision".
+  const failure = { error: { message: "None of the 2 review accounts could complete the review (reviewer@example.test)", code: "review_execution_failed" } };
   const workflow = createAgentOrchestratorWorkflow({
     findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     now: () => clock,
+    logger: { info: (event, detail) => logged.push([event, detail]), warn: (event, detail) => logged.push([event, detail]) },
     fetchImpl: async (url) => String(url).endsWith("/models")
-      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) } : { ok: false, status: 502, json: async () => ({}) },
+      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) }
+      : { ok: false, status: 503, json: async () => failure, text: async () => JSON.stringify(failure) },
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
     aoHarness: {
       observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
@@ -7181,6 +7186,13 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
     assert.match(reasons[0], /Run the same request again/);
     assert.doesNotMatch(reasons[0], /Try a safer way/);
     assert.doesNotMatch(JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" })), /check it yourself/);
+    // The log tells an outage from a verdict: nobody judged it, and CPA's own reason says why.
+    const decided = logged.filter(([event]) => event === "ao.approval_decided").map(([, detail]) => detail);
+    assert.deepEqual(decided.map(detail => [detail.decision, detail.reason_code]), [["deny", "reviewer_unavailable"]]);
+    const failed = logged.filter(([event]) => event === "ao.approval_review_failed").map(([, detail]) => detail.reason);
+    assert.ok(failed.length >= 3 && failed.every(reason => /HTTP 503: None of the 2 review accounts could complete the review/.test(reason)),
+      `CPA's reason is in each failed review (${failed.join(" | ")})`);
+    assert.ok([...failed, reasons[0]].every(reason => !reason.includes("reviewer@example.test")), "no account address in the log or the agent's reason");
   } finally { mission.nodes[0].state = "finished"; }
 });
 
