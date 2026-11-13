@@ -419,11 +419,37 @@ test("menu sends captured revision and cancel/full-access refusal does not save"
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls.length, 1); assert.equal(calls[0][1], 12); assert.equal(calls[0][0].revision, 7);
   assert.deepEqual(plain(calls[0][2]), ["lead"]); assert.deepEqual(plain(calls[0][3]), { profile: ":workspace", policy: "on-request", reviewer: "user" });
-  tree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false]);
-  elements(tree, item => item.type === "button" && item.props.role === "menuitemradio")[2].props.onClick();
-  assert.equal(calls.length, 1);
-  elements(tree, item => item.type === "button" && item.props["aria-label"] === "Close permissions")[0].props.onClick();
-  assert.equal(calls.length, 1);
+  // Full access asks first, in Codex's "Turn on Full Access?" dialog rather than a native confirm box.
+  const dialog = () => elements(tree, item => item.type?.name === "FullAccessDialog")[0];
+  const pickFullAccess = () => {
+    tree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false]);
+    elements(tree, item => item.type === "button" && item.props.role === "menuitemradio")[2].props.onClick();
+    tree = view.render("AgentOrchestratorPermissions", props);
+  };
+  pickFullAccess();
+  assert.equal(calls.length, 1, "picking Full access saves nothing yet");
+  assert.equal(elements(tree, item => item.props?.role === "menuitemradio").length, 0, "as in Codex, the menu closes once a row is picked");
+  const shown = dialog().type(dialog().props);
+  assert.match(text(shown), /^Turn on Full Access\?These agents will be able to run commands/);
+  assert.ok(["Files and folders", "Terminal commands", "Internet and connected apps", "Project MCP access stays the same.", "Cancel", "Confirm"].every(part => text(shown).includes(part)));
+  dialog().props.onCancel();
+  tree = view.render("AgentOrchestratorPermissions", props);
+  assert.equal(dialog(), undefined, "Cancel closes the dialog");
+  assert.equal(calls.length, 1, "and arms nothing");
+  pickFullAccess();
+  dialog().props.onConfirm();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.length, 2);
+  assert.deepEqual(plain(calls[1][3]), { profile: ":danger-full-access", policy: "never", reviewer: "user" }, "Confirm applies Full access's exact tuple");
+});
+
+test("the permission menu is Codex's: a title row and three rows, no close button", () => {
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const props = { team: { id: "team", nodes: [node("lead")] }, busy: false, loadProfiles: async () => ({}), save: async () => "" };
+  const tree = view.render("AgentOrchestratorPermissions", props, [true, {}, "", false]);
+  const panel = elements(tree, item => item.props?.id === "ao-permissions-panel")[0];
+  assert.equal(text(panel.props.children[0]), "How should actions be approved?");
+  assert.equal(elements(panel, item => item.type === "button").length, 3, "only the three mode rows: Escape or a click outside closes it");
 });
 
 test("runtime policy is labelled effective only after actual acknowledgement", () => {
