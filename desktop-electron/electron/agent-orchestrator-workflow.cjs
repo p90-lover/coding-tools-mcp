@@ -3958,7 +3958,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       } else if (tokens[0] && localVariable(tokens[0]) && tokens[1]?.toLowerCase() === "in") continue; // foreach's ($x in …)
       // A command's output held in a local is never an argument (see `derived`).
       if (tokens.slice(1).some((token) => derived.has(localName(token) ?? ""))) return null;
-      const [first, second] = tokens;
+      const [first] = tokens;
       if (first && WEB_READ_VERBS.has(first.toLowerCase())) {
         // A request to a service on this machine that sends and writes nothing.
         if (!loopbackRead(tokens, valueOf)) return null;
@@ -3968,8 +3968,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // member name: `ForEach-Object Delete`, `foreach Kill`) calls a method unseen (review).
       if (first && /^(?:foreach-object|foreach|%)$/i.test(first) && tokens.length > 1) return null;
       if (first && first.toLowerCase() === "git") {
-        // `git status --porcelain`, `git diff --stat`, `git log -5`: a read-only subcommand only.
-        if (!second || !GIT_READS.has(second.toLowerCase())) return null;
+        // `git status --porcelain`, `git diff --stat`, `git log -5`: a read-only subcommand only. It
+        // may follow `-C <folder>` (a path, checked with the others below) and `--no-pager`, as in
+        // `git -C <worktree> diff --stat`. `-c` (config can name a program to run) and every other
+        // global option still go to review, and so do the options that start a program: grep's
+        // -O/--open-files-in-pager and --ext-diff.
+        let at = 1;
+        while (tokens[at] === "--no-pager" || (tokens[at] === "-C" && tokens[at + 1])) at += tokens[at] === "-C" ? 2 : 1;
+        if (!tokens[at] || !GIT_READS.has(tokens[at].toLowerCase())) return null;
+        if (tokens.slice(at + 1).some((token) => /^(?:-O|--open-files-in-pager|--ext-diff)/.test(token))) return null;
         continue;
       }
       // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
