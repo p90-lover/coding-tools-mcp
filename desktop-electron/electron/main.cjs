@@ -2084,6 +2084,23 @@ function noticeAoApproval(update) {
   }
 }
 
+// push_notification (chat-agent-tools.cjs): Claude Code's PushNotification for the app's chat agents,
+// shown like an approval wait above: a notification, and the taskbar button flashes when the app is
+// not in front. One a chat per 10 seconds at most, so a looping agent cannot flood the desktop.
+const agentNotices = new Map();
+function notifyFromAgent({ session, message }) {
+  const key = String(session ?? "");
+  if (Date.now() - (agentNotices.get(key) ?? 0) < 10_000) throw new Error("this chat sent a notification less than 10 seconds ago");
+  if (!Notification.isSupported()) throw new Error("desktop notifications are not available");
+  agentNotices.set(key, Date.now());
+  if (agentNotices.size > 200) agentNotices.delete(agentNotices.keys().next().value);
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  if (window && !window.isFocused()) window.flashFrame(true);
+  const notice = new Notification({ title: "A chat in Coding Tools", body: String(message ?? "").slice(0, 500) });
+  notice.on("click", () => { if (window) { if (window.isMinimized()) window.restore(); window.show(); window.focus(); } });
+  notice.show();
+}
+
 function assertFocusedMainWindow(event, write = false, backgroundRead = false) {
   const window = BrowserWindow.fromWebContents(event.sender);
   const valid = window
@@ -5188,6 +5205,18 @@ async function start() {
             if (!missionWorkflowRuntime?.registerCommandWatch) throw new Error("Agent Orchestrator is not ready yet");
             return missionWorkflowRuntime.registerCommandWatch(request);
           },
+          // monitor: each stdout line of the monitored command reaches the chat as a follow-up.
+          monitor: request => {
+            if (!missionWorkflowRuntime?.registerCommandMonitor) throw new Error("Agent Orchestrator is not ready yet");
+            return missionWorkflowRuntime.registerCommandMonitor(request);
+          },
+        },
+        // push_notification: a desktop notification from the chat (Claude Code's PushNotification).
+        notifyUser: notifyFromAgent,
+        // sleep ends early once the person has queued a message for the chat (Codex's sleep).
+        chatInput: request => {
+          if (!missionWorkflowRuntime?.chatInputCheck) throw new Error("Agent Orchestrator is not ready yet");
+          return missionWorkflowRuntime.chatInputCheck(request);
         },
         // get_goal, create_goal, update_goal: Codex's goal tools, on the chat's /goal.
         goals: {

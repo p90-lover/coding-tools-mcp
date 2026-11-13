@@ -47,6 +47,8 @@ const BACKEND_MODULES = Object.freeze([
   "chat-verification.cjs",
   "chat-images.cjs",
   "chat-command-watches.cjs",
+  // chat-agent-tools.cjs requires it for monitor (Claude Code's Monitor).
+  "chat-command-monitors.cjs",
   // chat-agent-tools.cjs requires it for computer_guide.
   "computer-guides.cjs",
   // chat-agent-tools.cjs requires it for the file tools a GPT session gets instead of its own.

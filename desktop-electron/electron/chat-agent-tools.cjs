@@ -66,6 +66,7 @@ const { CHAT_HISTORY_TOOL_DEFS, CHAT_HISTORY_TOOLS } = require("./chat-history.c
 const { IMAGE_TOOL_DEFS } = require("./chat-images.cjs");
 const { MAX_SECRET, MAX_SECRETS } = require("./chat-redaction.cjs");
 const { createCommandWatches, WATCH_TOOL_DEFS, WATCH_TOOLS } = require("./chat-command-watches.cjs");
+const { createCommandMonitors, monitorTimeout, MONITOR_TOOL_DEFS, MONITOR_TOOLS } = require("./chat-command-monitors.cjs");
 const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { DUPLICATE_TOOLS: UNIFIED_DUPLICATE_TOOLS, FILE_TOOLS: UNIFIED_FILE_TOOLS, SERVER_NAME: UNIFIED_SERVER } = require("./unified-agent-tools.cjs");
@@ -152,7 +153,7 @@ const AGENT_TOOLS = new Set([
   "view_image", "image_info", "compare_images", "ocr_image", "generate_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
-  "redact_message", "move_chat",
+  "redact_message", "move_chat", "push_notification",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. It is
 // the only way the side panel opens without a click: pages, commands and subagents never open it by
@@ -187,6 +188,31 @@ const WAKE_TOOL_DEFS = Object.freeze([{
       reason: { type: "string", maxLength: 500, description: "What to check when you wake, e.g. \"see whether CI run 123 passed\"" },
     },
   },
+}]);
+// Claude Code's PushNotification (message, status) and Codex's sleep (duration_ms), for the app's
+// chat agents. The user, 2026-11-14: "set up tools that exact the same as codex and claude code that
+// can monitor task or anything that require attention". push_notification reaches the person through
+// a desktop notification and the taskbar, the way the app already asks for an approval; sleep waits
+// inside the turn and ends early at Stop or when the person writes to this chat.
+const SLEEP_MAX_MS = 100_000;
+const ATTENTION_TOOL_DEFS = Object.freeze([{
+  name: "push_notification", title: "Notify the user",
+  description: "Send the user a desktop notification from this chat: a Windows notification, and the app's taskbar button flashes "
+    + "when the window is not in front. Use it when something needs the user's attention or they asked to be told: a long task "
+    + "finished or failed, a decision or approval only they can give, a monitor caught what they were waiting for. Not for "
+    + "routine progress: the chat itself shows that. It sends nothing anywhere else and runs nothing.",
+  inputSchema: { type: "object", additionalProperties: false, required: ["message"], properties: {
+    message: { type: "string", minLength: 1, maxLength: 500, description: "The notification body. Keep it under 200 characters; mobile OSes truncate." },
+    status: { type: "string", enum: ["proactive"], description: "\"proactive\" when you send it on your own initiative rather than because the user asked to be told." },
+  } },
+}, {
+  name: "sleep", title: "Sleep",
+  description: "Pause execution for a specified duration. The sleep ends early when new input arrives for the active turn (the user "
+    + "writes to this chat) or the turn is stopped. Returns the elapsed wall-clock time. For waits longer than this allows, end "
+    + "your turn with schedule_wakeup, watch_command or monitor instead of sleeping again and again.",
+  inputSchema: { type: "object", additionalProperties: false, required: ["duration_ms"], properties: {
+    duration_ms: { type: "integer", minimum: 1, maximum: SLEEP_MAX_MS, description: `How long to sleep in milliseconds. Must be between 1 and ${SLEEP_MAX_MS}.` },
+  } },
 }]);
 // The app's own monitor (app-processes.cjs): Coding Tools' processes and what they started, with
 // CPU, memory and uptime. Read-only, and private: no command line (it can carry a token) is read.
@@ -352,6 +378,8 @@ function redactToolDefs(list) {
 // Opt-in: commands start in the worktree but are not confined to it.
 const TERMINAL_TOOLS = new Set([
   "exec_command", "write_stdin", "read_output", "kill_command", "kill_session", "check_exec_environment", "list_commands", ...WATCH_TOOLS,
+  // Waiting tools sit with the commands they wait on: a default chat's tool list stays as short as before.
+  ...MONITOR_TOOLS, "sleep",
 ]);
 const COMMAND_LIST_DEFS = Object.freeze([{
   name: "list_commands", title: "List this chat's known commands",
@@ -535,7 +563,8 @@ const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(
  * other tool the app serves is answered as routine, a tool added later included, so a new tool no
  * longer asks the person until someone lists it for the reviewer as well.
  */
-const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || (DESKTOP_TOOLS.has(name) && !UNREVIEWED_DESKTOP.has(name));
+const reviewedTool = (name) => name === "exec_command" || name === "write_stdin" || name === "monitor"
+  || (DESKTOP_TOOLS.has(name) && !UNREVIEWED_DESKTOP.has(name));
 // The app's own chat_list / chat_read (chat-history.cjs): another project's chats need the user's
 // yes, once per project per chat; a dialog names at most this many projects.
 const MAX_ASKED_PROJECTS = 12;
@@ -1202,7 +1231,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false, watches = false,
-  renames = false, moves = false, redacts = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
+  monitors = false, notifies = false, renames = false, moves = false, redacts = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either; nor is a GPT session that
   // has unified-agent-tools for them, which is told to use those for every file operation.
@@ -1299,6 +1328,16 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
         + "list_command_watches verifies registrations and delivery state; cancel_command_watch cancels the watch, not the command. "
         + "A command running in a terminal alone does not schedule your next turn. "
       : "")
+    + (monitors && groups.includes("terminal")
+      ? "Monitors: to be told every time something happens (a log line, a CI step, a new file, a test failure), call monitor with "
+        + "a command that prints one line per event, filtered to lines you would act on and covering failures too. Its events reach "
+        + "this chat as notifications after your turn ends; do not poll. Its exit or its timeout_ms ends it; stop_monitor stops it. "
+        + "For a single \"done\" use watch_command instead. "
+      : "")
+    + (notifies
+      ? "Attention: push_notification sends the user a desktop notification. Use it when they must act or asked to be told "
+        + "(a long task finished or failed, a decision only they can make), not for routine progress. "
+      : "")
     // Every poll of a slow job is another round of tokens; a turn that ends costs nothing while it waits.
     + (wakeups
       ? "Waiting: when you must wait for something slow (a build, CI, a deploy, a long job, a server starting), do not sleep, "
@@ -1378,8 +1417,15 @@ function createChatAgentTools({
   subagents = null,
   // schedule_wakeup's scheduler ({ schedule({ workspaceId, session, minutes, reason }) }); without it the tool is not offered.
   wakeups = null,
-  // Registers an owned command's completion-to-turn bridge; absent means no watch tools.
+  // Registers an owned command's completion-to-turn bridge; absent means no watch tools. Its
+  // monitor({ workspaceId, session, monitorId, description, isCurrent }) delivers a monitor's events
+  // (the workflow's registerCommandMonitor); without it the monitor tools are not offered.
   commandEvents = null,
+  // push_notification's sender (({ workspaceId, session, message, proactive }) => void); without it the tool is not offered.
+  notifyUser = null,
+  // sleep's early wake (({ workspaceId, session }) => Promise<() => boolean>, true once the person has
+  // written to the chat); without it a sleep ends early only at Stop.
+  chatInput = null,
   // app_processes's reader (({ sampleMs, sort, limit }) => listAppProcesses result); without it the tool is not offered.
   appProcesses = null,
   // view_app's capture (({ maxWidth }) => { base64, mimeType, width, height }); without it the tool is not offered.
@@ -1435,6 +1481,9 @@ function createChatAgentTools({
   const pullRequestReads = new Map(); // worktree path -> { at, read }: the summary's last `gh pr view` there
   const commandWatches = createCommandWatches({ now });
   const canWatch = entry => typeof commandEvents?.register === "function" && !entry.subagent && !entry.previewOnly;
+  const commandMonitors = createCommandMonitors({ now });
+  const canMonitor = entry => typeof commandEvents?.monitor === "function" && !entry.subagent && !entry.previewOnly;
+  const canNotify = entry => typeof notifyUser === "function" && !entry.previewOnly;
   let server = null;
   let listening = null;
   let port = 0;
@@ -1693,7 +1742,9 @@ function createChatAgentTools({
     if (entry.previewOnly) return allowed(entry, "preview") ? [...PREVIEW_TOOL_DEFS] : [];
     const catalog = await requestHeadless(`/api/v1/tools/catalog?workspace_id=${encodeURIComponent(entry.workspaceId)}`, null, { method: "GET" });
     // The preview's tools are the app's own, not headless's.
-    const own = [...COMMAND_LIST_DEFS, ...(canWatch(entry) ? WATCH_TOOL_DEFS : []), ...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
+    const own = [...COMMAND_LIST_DEFS, ...(canWatch(entry) ? WATCH_TOOL_DEFS : []), ...(canMonitor(entry) ? MONITOR_TOOL_DEFS : []),
+      ...ATTENTION_TOOL_DEFS.filter(tool => tool.name !== "push_notification" || canNotify(entry)),
+      ...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
       ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
@@ -1703,7 +1754,8 @@ function createChatAgentTools({
         && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
         && tool?.name !== "view_app" && tool?.name !== "generate_image" && tool?.name !== "computer_guide" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
-        && tool?.name !== "list_commands" && !WATCH_TOOLS.has(tool?.name)), ...own]
+        && tool?.name !== "list_commands" && !WATCH_TOOLS.has(tool?.name) && !MONITOR_TOOLS.has(tool?.name)
+        && tool?.name !== "push_notification" && tool?.name !== "sleep"), ...own]
       .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
         && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -2137,6 +2189,98 @@ function createChatAgentTools({
     } catch (error) { return failedCall(`No command watch was confirmed: ${errorMessage(error)}`); }
   }
 
+  /**
+   * monitor / list_monitors / stop_monitor: Claude Code's Monitor (chat-command-monitors.cjs). The
+   * command runs as an ordinary exec_command of this chat (reviewed, sandboxed and tracked the same
+   * way, and stopped by its own timeout at the monitor's deadline); its stdout lines are the events.
+   */
+  async function monitorCall(entry, name, given, channel) {
+    if (!canMonitor(entry)) return failedCall(`Unknown tool: ${name}`);
+    const owner = entry.commandState;
+    const invalid = (message) => failedCall(`${message}; nothing was run.`, { code: "INVALID_ARGUMENTS", execution_status: "not_started" });
+    if (name === "list_monitors") return plainResult({ ok: true, monitors: commandMonitors.list(owner) });
+    if (name === "stop_monitor") {
+      if (typeof given.monitor_id !== "string") return invalid("stop_monitor needs a monitor_id");
+      const commandId = commandMonitors.commandOf(owner, given.monitor_id);
+      const stopped = commandMonitors.stop(owner, given.monitor_id);
+      const command = stopped && commandId ? entry.commands.get(commandId) : null;
+      let commandStopped = false;
+      if (command?.status === "running") {
+        try { commandStopped = (await stopCommand(entry, command)).ok === true; } catch { commandStopped = false; }
+      }
+      return plainResult({ ok: true, stopped, command_stopped: commandStopped });
+    }
+    if (owner.ended) return failedCall("This chat's session has ended; no monitor was started.");
+    if (typeof given.command !== "string" || !given.command.trim()) return invalid("monitor needs a nonempty command");
+    if (typeof given.description !== "string" || !given.description.trim() || given.description.length > 200) return invalid("monitor needs a description of 1 to 200 characters");
+    let timeoutMs;
+    try { timeoutMs = monitorTimeout(given.timeout_ms); } catch (error) { return invalid(errorMessage(error)); }
+    const started = await callTool(entry, { name: "exec_command", arguments: { cmd: given.command, yield_time_ms: 0, timeout_ms: timeoutMs } }, channel);
+    const commandId = typeof started?.structuredContent?.command_id === "string" ? started.structuredContent.command_id : null;
+    const command = commandId ? entry.commands.get(commandId) : null;
+    if (started?.isError || !command) return started?.isError ? started : failedCall("The monitor's command did not start; no monitor is running.");
+    const currentEntry = () => [...sessions.values()].find(other => other.commandState === owner && other.aoSession === entry.aoSession
+      && other.workspaceId === entry.workspaceId && other.expected && allowed(other, "terminal") && canMonitor(other) && !owner.ended);
+    try {
+      const monitor = await commandMonitors.start({ owner, description: given.description, timeoutMs, commandId,
+        active: () => Boolean(currentEntry()),
+        read: async (offset) => {
+          const current = currentEntry();
+          if (!current) throw new Error("The monitor's chat is no longer available");
+          return readCommand(current, command, "stdout", offset);
+        },
+        prepare: (record) => commandEvents.monitor({ workspaceId: entry.workspaceId, session: entry.aoSession, monitorId: record.id,
+          description: given.description, isCurrent: () => Boolean(currentEntry()) }),
+      });
+      return plainResult({ ok: true, ...monitor, next_action: "The monitor is running. Keep working or end your turn: each line its command "
+        + "prints reaches this chat as a notification once your turn has ended. Do not poll it; stop it with stop_monitor when you no longer need it." });
+    } catch (error) {
+      // No monitor means nobody reads the command: stop it rather than leave it running unwatched.
+      try { await stopCommand(entry, command); } catch { /* reported below */ }
+      return failedCall(`No monitor was started: ${errorMessage(error)}. Its command was stopped.`);
+    }
+  }
+
+  /** push_notification: Claude Code's PushNotification, as a desktop notification from this chat. */
+  async function pushNotification(entry, given) {
+    if (!canNotify(entry)) return failedCall("Unknown tool: push_notification");
+    if (typeof given.message !== "string" || !given.message.trim() || given.message.length > 500) {
+      return failedCall("message must contain 1 to 500 characters; nothing was sent.", { code: "INVALID_ARGUMENTS", execution_status: "not_started" });
+    }
+    try {
+      await notifyUser({ workspaceId: entry.workspaceId, session: entry.aoSession, message: given.message.trim(), proactive: given.status === "proactive" });
+    } catch (error) {
+      return failedCall(`The notification was not shown: ${errorMessage(error)}`);
+    }
+    return { content: [{ type: "text", text: "The user was sent a desktop notification." }] };
+  }
+
+  /** sleep: Codex's sleep. Waits up to duration_ms, ending early at Stop or once the person writes to this chat. */
+  async function sleepCall(entry, given, signal, channel) {
+    const duration = given.duration_ms;
+    if (!Number.isSafeInteger(duration) || duration < 1 || duration > SLEEP_MAX_MS) {
+      return failedCall(`duration_ms must be an integer from 1 to ${SLEEP_MAX_MS}; nothing waited.`, { code: "INVALID_ARGUMENTS", execution_status: "not_started" });
+    }
+    const started = now();
+    let waiting = () => false;
+    try { if (typeof chatInput === "function" && entry.aoSession) waiting = await chatInput({ workspaceId: entry.workspaceId, session: entry.aoSession }); }
+    catch { waiting = () => false; }
+    const reason = await new Promise((resolve) => {
+      const finish = (why) => { clearTimeout(timer); clearInterval(check); signal?.removeEventListener("abort", stop); channel?.signal?.removeEventListener("abort", stop); resolve(why); };
+      const stop = () => finish("stopped");
+      const timer = setTimeout(() => finish("elapsed"), Math.max(0, duration - (now() - started)));
+      const check = setInterval(() => { try { if (waiting()) finish("input"); } catch { /* keep sleeping */ } }, Math.min(1000, duration));
+      timer.unref?.(); check.unref?.();
+      if (signal?.aborted || channel?.signal?.aborted) { finish("stopped"); return; }
+      signal?.addEventListener("abort", stop, { once: true });
+      channel?.signal?.addEventListener("abort", stop, { once: true });
+    });
+    const elapsed = now() - started;
+    const why = reason === "input" ? "The user wrote to this chat, so the sleep ended early: read their message."
+      : reason === "stopped" ? "The turn was stopped, so the sleep ended early." : "The full duration elapsed.";
+    return { content: [{ type: "text", text: `Slept ${elapsed} ms. ${why}` }], structuredContent: { elapsed_ms: elapsed, ended: reason } };
+  }
+
   /** Whether a session may schedule wake-ups: a chat's own agent, not a subagent (its report goes to the chat that started it). */
   const canWake = (entry) => Boolean(wakeups) && !entry.subagent;
 
@@ -2335,6 +2479,8 @@ function createChatAgentTools({
     }
     if (name === "show_in_chat") return showInChat(entry, given);
     if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
+    if (name === "push_notification") return pushNotification(entry, given);
+    if (name === "sleep") return sleepCall(entry, given, signal, channel);
     if (name === "app_processes") return listProcesses(given);
     if (name === "view_app") return viewApp(given);
     if (name === "computer_guide") {
@@ -2369,6 +2515,8 @@ function createChatAgentTools({
       return stopped || chatHistory.call({ session: entry.aoSession, workspaceId: entry.workspaceId, name, args: withoutConsent(given),
         permit: (projects) => permitProjects(entry, projects, name, signal) });
     }
+    // A monitor's command is started through this same callTool as exec_command, below.
+    if (MONITOR_TOOLS.has(name)) return monitorCall(entry, name, given, channel);
     let args = withChatDefaults(name, withoutConsent(given));
     let root;
     try {
@@ -2716,7 +2864,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), watches: canWatch(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
+              wakeups: canWake(entry), watches: canWatch(entry), monitors: canMonitor(entry), notifies: canNotify(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
               unifiedFiles: entry.unifiedFiles === true, computerSteps: Boolean(computerControl) && !setting(reviewComputerSteps) }),
           } };
         }
@@ -2958,8 +3106,20 @@ function createChatAgentTools({
     return { ok: true, status: command.status };
   }
 
+  /** Stop ends a chat's monitors and their commands: a monitor's follow-ups would start the stopped agent again. */
+  function stopMonitors(entry) {
+    for (const monitor of commandMonitors.list(entry.commandState)) {
+      if (monitor.status !== "running" || !commandMonitors.stop(entry.commandState, monitor.monitor_id)) continue;
+      const command = entry.commands.get(monitor.command_id);
+      if (command?.status === "running" && !command.stopPromise) {
+        void stopCommand(entry, command).catch((error) => logger.warn?.("chat_agent_tools.monitor_stop_failed", { message: errorMessage(error) }));
+      }
+    }
+  }
+
   function endCommands(entry) {
     commandWatches.cancelOwner(entry.commandState);
+    commandMonitors.cancelOwner(entry.commandState);
     entry.commandState.ended = true;
     for (const command of entry.commands.values()) {
       if (command.user || command.status !== "running" || command.stopPromise) continue;
@@ -3157,6 +3317,7 @@ function createChatAgentTools({
     cancelSessionCalls(sessionId) {
       for (const entry of sessions.values()) if (entry.aoSession === sessionId) {
         commandWatches.cancelOwner(entry.commandState);
+        stopMonitors(entry);
         entry.lifetime.abort();
         entry.lifetime = new AbortController();
       }
@@ -3424,6 +3585,7 @@ function createChatAgentTools({
       if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
       closing = true;
       commandWatches.close();
+      commandMonitors.close();
       // A save still in flight would otherwise land after this one with older leases.
       await leasesWrite;
       writeLeases();
