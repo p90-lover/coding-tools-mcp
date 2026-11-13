@@ -20,6 +20,7 @@ const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.c
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const { spawnOffThread, fetchOffThread, probeTcpOffThread } = require("./off-thread-run.cjs");
 const { redactionLabel } = require("./chat-redaction.cjs");
+const { createOrchestratorHandler } = require("./orchestrator-handler.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -2827,7 +2828,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return fs.existsSync(path.join(folder, process.platform === "win32" ? "ao.cmd" : "ao")) ? folder : null;
   }
 
-  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder };
+  return createOrchestratorHandler({ runtime: { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder } });
 }
 
 /**

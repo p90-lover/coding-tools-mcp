@@ -30,6 +30,7 @@ const BACKEND_MODULES = Object.freeze([
   "agent-orchestrator-gateway.cjs",
   "agent-orchestrator-accounting.cjs",
   "agent-orchestrator-upstream.cjs",
+  "orchestrator-handler.cjs",
   "agent-orchestrator-workflow.cjs",
   // Publication review and subagent guards share its command parser and repository facts.
   "git-remote.cjs",
