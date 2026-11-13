@@ -6659,7 +6659,7 @@ test("Approve for me is reviewed by codex-auto-review only, and the person decid
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
   // `asks`: how many model calls one review pass makes; the status is read once the pass is over.
-  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [], asks = 1 } = {}) {
+  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [], asks = 1, judges = false } = {}) {
     const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
     const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
       { id: "one", role: "planner", state: "running", parents: [], route: { ...route, model }, receipt: { thread_id: "session-1", request_key: "k" } }] };
@@ -6690,6 +6690,7 @@ test("Approve for me is reviewed by codex-auto-review only, and the person decid
       },
       confirm: async () => true,
     });
+    if (judges) await workflow.call("chat_model_judges", { enabled: true });
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     for (let tries = 0; tries < 200 && !resolved.length && asked.length < asks; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -6735,6 +6736,23 @@ test("Approve for me is reviewed by codex-auto-review only, and the person decid
   assert.ok(onlyCodex.asked.length >= 1 && onlyCodex.asked.every((model) => model === "codex-auto-review"),
     `with no other model the person decides rather than a paid review (asked ${onlyCodex.asked.join(", ")})`);
   assert.deepEqual(onlyCodex.resolved, []);
+  // "Let the model judge" on, the person's own switch (2026-11-13: both review accounts at their
+  // limit, every request denied unjudged): Auto Review is asked first, and when it cannot answer the
+  // chat's own model judges instead.
+  const judged = await review(["codex-auto-review"], { judges: true, asks: 2 });
+  assert.deepEqual(judged.asked.slice(0, 2), ["codex-auto-review", "test-model"], `Auto Review first, then the chat's own model (asked ${judged.asked.join(", ")})`);
+  assert.deepEqual(judged.resolved, ["yes"], "the chat's own model answered for the person");
+  // Still only the chat's own model, even a Codex one: never another provider's model listed first.
+  const judgedCodex = await review(["codex-auto-review"], { judges: true, asks: 2, model: "cpa/gpt-6.1-sol",
+    catalog: ["cline-pass/deepseek-v4.1-flash", "Claude Fable 5.1", "gpt-6.1-sol", "codex-auto-review"] });
+  assert.ok(judgedCodex.asked.every((model) => ["codex-auto-review", "gpt-6.1-sol"].includes(model)),
+    `no model the chat doesn't use (asked ${judgedCodex.asked.join(", ")})`);
+  assert.deepEqual(judgedCodex.resolved, ["yes"]);
+  // A chat whose model CPA does not serve has no own model to fall back on.
+  const judgedUnserved = await review(["codex-auto-review"], { judges: true, catalog: ["codex-auto-review"] });
+  assert.ok(judgedUnserved.asked.every((model) => model === "codex-auto-review"), `nothing else to ask (asked ${judgedUnserved.asked.join(", ")})`);
+  // With the judge on, a review nobody could answer is denied (after its retries), never allowed.
+  assert.ok(!judgedUnserved.resolved.includes("yes"), `never allowed unjudged (resolved ${judgedUnserved.resolved.join(", ")})`);
 });
 
 test("Approve for me reviews with codex-auto-review although CPA hides it from model menus, and menus still leave it out", async () => {

@@ -8,7 +8,7 @@ import { getCodingToolsClient } from "../api/client";
  * allow the model to judge it … until end and it can safety kill the goal". The preference lives in
  * the app, so it holds for every chat and after a restart; shown where something waits on you.
  */
-const DETAIL = "Requests the reviewer would leave to you, and goal rounds that end needing you, are judged by the model. It may end a goal that cannot safely go on";
+const DETAIL = "Requests the reviewer would leave to you, and goal rounds that end needing you, are judged by the model. When Auto Review can't answer, the chat's own model judges, on that model's quota. It may end a goal that cannot safely go on";
 
 /** Lucide's scale, the mark of the goal bar's Model judges toggle. */
 function JudgeGlyph() {
