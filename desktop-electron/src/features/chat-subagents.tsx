@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { ReactNode } from "react";
 import { prettyModelName } from "./AgentOrchestratorRoleEditor";
 import { subagentActive, type ChatSubagent } from "./ao-chat";
@@ -69,7 +69,10 @@ export function SubagentAvatar({ seed, size = 24, className }: { seed: string; s
   const index = avatarIndex(seed);
   const [light, deep] = TINTS[index % TINTS.length];
   const shape = PETALS[Math.floor(index / TINTS.length)];
-  const id = `sa-${index}`;
+  // Each avatar its own gradient id. url(#…) paints with the first element of that id, and a chat page that is hidden
+  // but still mounted (ChatPages' <section hidden>) holding an avatar of the same look made this one draw blank.
+  // Only [\w-] is kept, so the reference finds the id as written whatever form React's ids take.
+  const id = `sa-${useId().replace(/[^\w-]/g, "")}`;
   return <svg className={`cx-sa-avatar${className ? ` ${className}` : ""}`} width={size} height={size} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
     <defs><linearGradient id={id} x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor={light} /><stop offset="1" stopColor={deep} /></linearGradient></defs>
     {Array.from({ length: shape.count }, (_, petal) => {

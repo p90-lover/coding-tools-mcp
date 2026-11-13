@@ -776,8 +776,11 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!service) throw new Error("Agent Orchestrator is not running");
     const id = await service.spawn({ ...args, prompt, plain: true, subagent: true });
     // The effort it runs at is the one AO was given (launchArgs fits it to the model's levels), which
-    // the chat's subagent view shows beside the model, as Codex's does.
-    const effort = args.effort ?? route.effort ?? null;
+    // the chat's subagent view shows beside the model, as Codex's does: the spawn's effort, else the
+    // level in the CPA model's name (opencode and pi get it only there). Never the saved one: an
+    // effort that was fitted, or dropped (agy, a plugin's model, "auto"), is not what it ran at.
+    const named = String(args.gateway?.model ?? "").match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
+    const effort = args.effort ?? named ?? null;
     const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, model: route.model.replace(/^cpa\//, ""), task: brief,
       ...(typeof effort === "string" && effort ? { effort } : {}), harness: route.harness_id,
       startedAt: now(), endedAt: null, state: "starting", report: "", error: "", turns: 1 };
