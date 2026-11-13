@@ -21,24 +21,36 @@ const NOTIFY_AGAIN_MS = 12 * 60 * 60_000;
 const GIB = 1024 ** 3;
 
 // disk: 7 bad block, 51 error during a paging operation, 153 I/O retried.
-// NTFS: 50 delayed write lost ("Ntfs"), 55 file system structure corrupt, 98 volume needs repair,
-// 140 failed to flush data ("Microsoft-Windows-Ntfs").
+// NTFS: 50 delayed write lost ("Ntfs"), 55 file system structure corrupt, 98 volume needs repair
+// (at Warning or Error; see PROBLEM_LEVELS), 140 failed to flush data ("Microsoft-Windows-Ntfs").
 const DISK_EVENT_IDS = [7, 51, 153];
 const NTFS_EVENT_IDS = [50, 55, 98, 140];
+// Only Critical (1), Error (2) and Warning (3). NTFS logs 98 at Information on every volume mount,
+// "Volume ... is healthy. No action is needed." (a virtual disk mounting, 2026-11-13 14:58), and
+// counting it raised a critical "A disk is reporting errors ... back up your work" for a healthy disk.
+// 98 means repair only at Warning (spot fix) or Error (full chkdsk).
+const PROBLEM_LEVELS = [1, 2, 3];
 
 function eventQuery(lookbackMs) {
   const ids = (list) => list.map((id) => `EventID=${id}`).join(" or ");
   return `*[System[((Provider[@Name='disk'] and (${ids(DISK_EVENT_IDS)}))`
     + ` or ((Provider[@Name='Ntfs'] or Provider[@Name='Microsoft-Windows-Ntfs']) and (${ids(NTFS_EVENT_IDS)})))`
+    + ` and (${PROBLEM_LEVELS.map((level) => `Level=${level}`).join(" or ")})`
     + ` and TimeCreated[timediff(@SystemTime) <= ${Math.max(1, Math.round(lookbackMs))}]]]`;
 }
 
-/** Parses `wevtutil qe /f:xml` output into `{ provider, id, at, drives }`; `drives` are the letters named in the event's data (NTFS names the file it lost). */
+/**
+ * Parses `wevtutil qe /f:xml` output into `{ provider, id, at, drives }`; `drives` are the letters
+ * named in the event's data (NTFS names the file it lost). An event whose level says it is only
+ * information is left out, as the query does; one with no level is kept.
+ */
 function parseEvents(xml) {
   const events = [];
   for (const [block] of String(xml).matchAll(/<Event[\s>][\s\S]*?<\/Event>/g)) {
     const provider = /<Provider\s+Name=['"]([^'"]+)['"]/.exec(block)?.[1] ?? "";
     const id = Number(/<EventID[^>]*>(\d+)<\/EventID>/.exec(block)?.[1]);
+    const level = /<Level>(\d+)<\/Level>/.exec(block)?.[1];
+    if (level !== undefined && !PROBLEM_LEVELS.includes(Number(level))) continue;
     const at = /<TimeCreated\s+SystemTime=['"]([^'"]+)['"]/.exec(block)?.[1] ?? null;
     const data = (/<EventData>([\s\S]*?)<\/EventData>/.exec(block)?.[1] ?? "");
     const drives = [...new Set([...data.matchAll(/\b([A-Za-z]):\\/g)].map((m) => `${m[1].toUpperCase()}:`))];
