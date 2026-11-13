@@ -1214,7 +1214,8 @@ test("a subagent's harness and effort come back with it after a restart", async 
     interrupt: async () => {}, exitAgent: async () => ({ ok: true }),
   };
   const make = () => createSubagents({ statePath: path.join(dir, "subagents.json"), harness: () => harness, logger: { info() {}, warn() {} },
-    launchArgs: () => ({ workspace_id: "ws-1" }), now: () => 1_000_000 });
+    // AO is given the route's effort, as the workflow's launch arguments give it.
+    launchArgs: (_workspace, route) => ({ workspace_id: "ws-1", ...(route.effort ? { effort: route.effort } : {}) }), now: () => 1_000_000 });
   try {
     const before = make();
     await before.save({ settings: { defaultRoute: { ...ROUTE, effort: "high" } }, agents: STARTERS });
@@ -1231,4 +1232,29 @@ test("a subagent's harness and effort come back with it after a restart", async 
     assert.equal(back.harness, shown.harness, "its harness");
     assert.equal(back.effort, shown.effort, "its effort");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// #1252 labelled a subagent with `args.effort ?? route.effort`. When the effort went in the model's name (opencode, after
+// being fitted to the model's levels) or nowhere (agy), the label showed the saved effort, one the agent never ran at.
+test("a subagent's effort label is the effort its agent was given, never a saved one that was fitted or dropped", async () => {
+  const runOn = async (route) => {
+    const w = world({ settings: { defaultRoute: route } });
+    try {
+      const started = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Map it" }));
+      return { spawned: w.spawned[0], shown: w.service.runs().find((run) => run.subagent_id === started.subagent_id) };
+    } finally { await w.cleanup(); }
+  };
+  // DeepSeek V4.1 Flash takes none/low/high/max, so a saved "medium" runs at "high": on opencode, named in the model.
+  const fitted = await runOn({ harness_id: "ao:opencode", model: "cpa/cline-pass/deepseek-v4.1-flash", effort: "medium" });
+  assert.match(fitted.spawned.gateway.model, /\(high\)$/);
+  assert.equal(fitted.shown.effort, "high", "the level it ran at, not the saved one");
+  // agy gets the bare model and picks its own thinking level.
+  const dropped = await runOn({ harness_id: "ao:agy", model: "cpa/gemini-3.8-flash", effort: "high" });
+  assert.equal(dropped.spawned.effort, undefined);
+  assert.doesNotMatch(dropped.spawned.gateway.model, /\(/);
+  assert.equal(dropped.shown.effort, undefined, "nothing carried an effort, so none is shown");
+  // Claude Code carries the fitted level in the body too: as before.
+  const body = await runOn({ harness_id: "ao:claude-code", model: "cpa/cline-pass/deepseek-v4.1-flash", effort: "medium" });
+  assert.equal(body.spawned.effort, "high");
+  assert.equal(body.shown.effort, "high");
 });
