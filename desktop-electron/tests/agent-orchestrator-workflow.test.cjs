@@ -8912,7 +8912,7 @@ test("a warm agent that does not take the first message within seconds is ended 
  * A chat launched cold (no warm agent for its route) whose agent AO is still starting: observe says
  * `provisioning` with the opening prompt queued, until `started` is set.
  */
-function coldLaunchWorld({ autoRetry, started = () => false, observeAs = null }) {
+function coldLaunchWorld({ autoRetry, started = () => false, observeAs = null, harness = {} }) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
   const world = chatWorld();
@@ -8955,9 +8955,11 @@ function coldLaunchWorld({ autoRetry, started = () => false, observeAs = null })
           : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, lastActivityAt: clock, timeline: [], approvals: [] },
       warmSessions: async () => [],
       kill: async id => { killed.push(id); return { ok: true }; },
+      ...harness,
     },
   });
-  return { workflow, route, spawned, killed, failures, logged, advance: ms => { clock += ms; }, autoRetry };
+  // `chat`: the board and project read; `created`: the runs as the run read sees them.
+  return { workflow, route, spawned, killed, failures, logged, advance: ms => { clock += ms; }, autoRetry, chat: world, created };
 }
 
 test("a cold launch whose agent never takes its message is ended after four minutes, and its step says why", async () => {
@@ -9010,6 +9012,44 @@ test("a cold launch whose agent is up but never gets its first message is ended 
     await wait(() => world.failures.length > 0);
     assert.match(world.failures[0], /did not take its first message/);
     assert.ok(world.logged.some(([event, detail]) => event === "ao.launch_stalled" && detail.stage === "queue_drain" && detail.waitedSeconds < 240));
+  } finally { world.workflow.dispose(); }
+});
+
+// The user, 2026-11-12: "it happen when a agent is failed to start, but later its started by auto
+// recovery and the chat queued message wont go to it". A message typed while the agent started went
+// to it as a steer once its controller was up; the launch watchdog then ended that start, and the
+// retry spawned a fresh agent with only the opening prompt. The steer counted as delivered, and the
+// retried turn's finish counted it as read, so no agent ever had it.
+test("a steer handed to a launch the watchdog ended goes back to the front of its chat's queue, still a steer", async () => {
+  let controllerUp = false, seenUp = 0;
+  const steered = [];
+  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => (controllerUp && seenUp++, world?.killed.includes(id))
+    ? { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" }
+    : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
+      lastActivityAt: at, timeline: [], approvals: [] },
+  harness: { steer: async (id, text) => { steered.push([id, text]); return { steered: true }; } } });
+  const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  const queue = async () => (await world.workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "list" })).queue;
+  try {
+    await world.workflow.call("chat_auto_retry", { enabled: true });
+    await world.workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: world.route });
+    await wait(() => world.spawned.length > 0);
+    // The chat's own read sees the run its card started on.
+    world.chat.runs.push([...world.created.values()].at(-1));
+    controllerUp = true;
+    // Seen up from the first look after this (not a fixed pause: a busy machine polls later).
+    await wait(() => seenUp > 0);
+    const sent = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm" });
+    assert.equal(sent.steered, true, "AO took it for the agent that was starting");
+    assert.deepEqual(steered, [["agent-1", "use pnpm"]]);
+    assert.deepEqual(await queue(), []);
+    world.advance(91_000);
+    await wait(() => world.killed.length > 0);
+    assert.deepEqual(world.killed, ["agent-1"], "the start never took its first message");
+    await wait(() => world.logged.some(([event]) => event === "ao.chat_queue.steer_unread"));
+    assert.deepEqual((await queue()).map(item => [item.message, item.steer === true]), [["use pnpm", true]],
+      "back at the front, steered into the retried agent once it is up");
+    assert.ok(world.logged.some(([event, detail]) => event === "ao.chat_queue.steer_unread" && detail.outcome === "launch_stalled" && detail.count === 1));
   } finally { world.workflow.dispose(); }
 });
 
@@ -12931,6 +12971,29 @@ test("a queued message whose send fails is never lost: it stays at the front, sa
   assert.equal(world.updates.length, 1, "sent on the next try");
   assert.deepEqual(await queue(), []);
   workflow.dispose();
+});
+
+// A look at the chat that failed (AO restarting under a start that failed) left the queue with nothing
+// to send it: it waited for the window's next read or the chat's next settle, and a minimized window
+// reads nothing.
+test("a queued message whose look at the chat failed is looked at again a minute later", async () => {
+  const { world, workflow, advance, queue } = queueChat({ state: "finished" });
+  const request = world.requestHeadless;
+  let down = true;
+  world.requestHeadless = async (endpoint, ...rest) => {
+    if (endpoint === "/api/v1/ao/read" && down) throw new Error("connect ECONNREFUSED 127.0.0.1:17841");
+    return request(endpoint, ...rest);
+  };
+  try {
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "and deploy" } });
+    await goalSettle();
+    assert.equal(world.updates.length, 0, "AO could not be read");
+    assert.equal((await queue()).length, 1, "kept");
+    down = false;
+    await advance(60_000);
+    assert.equal(world.updates.length, 1, "sent on the next look");
+    assert.deepEqual(await queue(), []);
+  } finally { workflow.dispose(); }
 });
 
 // The user, 2026-11-12: "the message that are waiting to send etc are gone without any issue". The
