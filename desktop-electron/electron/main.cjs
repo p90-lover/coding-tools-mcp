@@ -53,7 +53,7 @@ const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector, currentConnectorSettings, connectorCredentials, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
-const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
+const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure, mcpConnectorFailureCause } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { probeTcpOffThread } = require("./off-thread-run.cjs");
@@ -726,6 +726,11 @@ function startBridgeWatchdog(logger, stateStore) {
         bridgeWatchdogQuietUntil = 0;
         return;
       }
+      // A tunnel that could not be observed (no health URL, inventory too slow on a saturated disk)
+      // is no evidence it is down: the tunnel monitor skips such a round, and so does the watchdog,
+      // neither counting it nor clearing misses. Counted, it restarted the whole runtime three
+      // times on 2026-11-12 (14:37, 15:04, 16:27), each dropping the bridge.
+      if (check.failed === "tunnel_unobserved") return;
       if (Date.now() < bridgeWatchdogQuietUntil) return;
       bridgeWatchdogMisses += 1;
       // Which part failed and how long the check took: a slow daemon_health on a stalled machine
@@ -2257,7 +2262,7 @@ function registerIpc({ logger, stateStore }) {
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
   handle("coding-tools:workspaces:create", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!headlessHost || !input || Object.keys(input).some((key) => !["path", "name", "confirm"].includes(key))
       || input.confirm !== true || typeof input.path !== "string" || input.path.length > 4096
       || !path.isAbsolute(input.path) || input.name !== undefined && (typeof input.name !== "string" || !input.name.trim() || input.name.length > 128)) {
@@ -2273,7 +2278,7 @@ function registerIpc({ logger, stateStore }) {
   // The chat's Edit project dialog. Its Save is the user's confirmation; the folders were picked
   // with the system folder dialog, and the service validates them like a new project's.
   handle("coding-tools:workspaces:update", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const folderText = (value) => typeof value === "string" && value.length > 0 && value.length <= 4096 && path.isAbsolute(value);
     if (!headlessHost || !input || Object.keys(input).some((key) => !["workspaceId", "name", "path", "linkedPaths", "confirm"].includes(key))
       || input.confirm !== true || typeof input.workspaceId !== "string" || !input.workspaceId || input.workspaceId.length > 128
@@ -2299,7 +2304,7 @@ function registerIpc({ logger, stateStore }) {
   // "Remove local project": drops the project from the list only. The dialog asks first; the
   // service refuses while the project's missions or listeners are running.
   handle("coding-tools:workspaces:remove", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!headlessHost || !input || Object.keys(input).some((key) => !["workspaceId", "confirm"].includes(key))
       || input.confirm !== true || typeof input.workspaceId !== "string" || !input.workspaceId || input.workspaceId.length > 128) {
       throw new Error("Confirm removing the project");
@@ -2310,7 +2315,7 @@ function registerIpc({ logger, stateStore }) {
     }, { localConfirmation: true });
   });
   handle("coding-tools:workspaces:auth-update", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
     const workspace = Array.isArray(catalog.workspaces)
       ? catalog.workspaces.find((item) => item.id === input.workspaceId)
@@ -2341,7 +2346,7 @@ function registerIpc({ logger, stateStore }) {
     });
   });
   handle("coding-tools:workspaces:policy-update", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
     const workspace = Array.isArray(catalog.workspaces)
       ? catalog.workspaces.find((item) => item.id === input.workspaceId)
@@ -2401,7 +2406,7 @@ function registerIpc({ logger, stateStore }) {
     });
   });
   handle("coding-tools:workspaces:copy-secret", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const catalog = await headlessHost.request("/api/v1/workspaces", null, { method: "GET" });
     const workspace = Array.isArray(catalog.workspaces)
       ? catalog.workspaces.find((item) => item.id === input.workspaceId)
@@ -2440,8 +2445,8 @@ function registerIpc({ logger, stateStore }) {
     return { requests: computerControlService?.requests() ?? [] };
   });
   // Its answer allows an app, so it must be the person's click in the focused window.
-  handle("coding-tools:computer:answer", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("coding-tools:computer:answer", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return computerControlService.answer(input);
   });
@@ -2450,8 +2455,8 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return { apps: computerControlService?.allowedApps() ?? [] };
   });
-  handle("coding-tools:computer:forget-app", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("coding-tools:computer:forget-app", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return { ok: computerControlService.forgetApp(input.app), apps: computerControlService.allowedApps() };
   });
@@ -2464,7 +2469,7 @@ function registerIpc({ logger, stateStore }) {
   });
   // Stop on the tab, as on the control pill.
   handle("coding-tools:computer:stop", async (event) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     await computerControlService.stop("Stop pressed in Computer use");
     return { ok: true };
@@ -2478,7 +2483,7 @@ function registerIpc({ logger, stateStore }) {
   });
   // Allowing an app is the person's click in the focused window, as on a chat's card.
   handle("coding-tools:computer:allow-app", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!computerControlService) return { ok: false, error: "Computer control is not ready yet" };
     return { ok: true, apps: await computerControlService.allowApp(input.app) };
   });
@@ -2519,7 +2524,7 @@ function registerIpc({ logger, stateStore }) {
     }
   });
   handle("coding-tools:native-codex:connect", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const reviewer = input.approvalsReviewer ?? "user";
     if (reviewer !== "user" && reviewer !== "auto_review") {
       throw new Error("Unsupported native Codex approval reviewer");
@@ -2732,7 +2737,7 @@ function registerIpc({ logger, stateStore }) {
   // The chat's project picker ("+ New project"): the system folder dialog, over the main window.
   // It only returns the chosen path; registering it as a workspace still asks for confirmation.
   handle("launcher:choose-folder", async (event) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const picked = await dialog.showOpenDialog(mainWindow, { title: "Add a project", properties: ["openDirectory"] });
     return picked.canceled || !picked.filePaths[0] ? null : picked.filePaths[0];
   });
@@ -2774,18 +2779,18 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("Managed components controller is unavailable");
     return externalServicesController.managedComponentsSnapshot();
   });
-  handle("launcher:managed-component-install", (event, serviceId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:managed-component-install", async (event, serviceId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("Managed components controller is unavailable");
     return externalServicesController.installManagedComponent(serviceId);
   });
-  handle("launcher:managed-component-repair", (event, serviceId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:managed-component-repair", async (event, serviceId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("Managed components controller is unavailable");
     return externalServicesController.repairManagedComponent(serviceId);
   });
-  handle("launcher:managed-component-credential", (event, serviceId, key, value) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:managed-component-credential", async (event, serviceId, key, value) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("Managed components controller is unavailable");
     return externalServicesController.setManagedComponentCredential(serviceId, key, value);
   });
@@ -2795,7 +2800,7 @@ function registerIpc({ logger, stateStore }) {
     return externalServicesController.snapshot();
   });
   handle("launcher:external-service-configure", async (event, serviceId, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     const service = externalServicesController.configure(serviceId, input);
     // The change is saved off the main thread; one that could not be saved still fails here.
@@ -2807,18 +2812,18 @@ function registerIpc({ logger, stateStore }) {
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.inspect(serviceId);
   });
-  handle("launcher:external-service-start", (event, serviceId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:external-service-start", async (event, serviceId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.start(serviceId);
   });
-  handle("launcher:external-service-stop", (event, serviceId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:external-service-stop", async (event, serviceId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.stop(serviceId);
   });
-  handle("launcher:external-service-restart", (event, serviceId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:external-service-restart", async (event, serviceId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     return externalServicesController.restart(serviceId);
   });
@@ -2827,8 +2832,8 @@ function registerIpc({ logger, stateStore }) {
     if (!managedBootstrapController) throw new Error("Managed bootstrap controller is unavailable");
     return managedBootstrapController.getSnapshot();
   });
-  handle("launcher:managed-bootstrap-reconcile", (event, input = {}) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:managed-bootstrap-reconcile", async (event, input = {}) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!managedBootstrapController) throw new Error("Managed bootstrap controller is unavailable");
     return managedBootstrapController.reconcile({
       reason: typeof input?.reason === "string" ? input.reason : "manual",
@@ -2846,23 +2851,23 @@ function registerIpc({ logger, stateStore }) {
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.inspect(toolId);
   });
-  handle("launcher:upstream-tool-endpoint", (event, toolId, endpoint) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:upstream-tool-endpoint", async (event, toolId, endpoint) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.setEndpoint(toolId, endpoint);
   });
-  handle("launcher:upstream-tool-start", (event, toolId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:upstream-tool-start", async (event, toolId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.start(toolId);
   });
-  handle("launcher:upstream-tool-stop", (event, toolId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:upstream-tool-stop", async (event, toolId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.stop(toolId);
   });
-  handle("launcher:upstream-tool-restart", (event, toolId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:upstream-tool-restart", async (event, toolId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.restart(toolId);
   });
@@ -2871,17 +2876,17 @@ function registerIpc({ logger, stateStore }) {
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.openEmbeddedTool(toolId, section);
   });
-  handle("launcher:upstream-tool-open-external", (event, toolId, section) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:upstream-tool-open-external", async (event, toolId, section) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!upstreamToolController) throw new Error("Upstream tool controller is unavailable");
     return upstreamToolController.openExternalTool(toolId, section);
   });
-  handle("launcher:upstream-tool-act", (event, input = {}) => {
+  handle("launcher:upstream-tool-act", async (event, input = {}) => {
     const toolId = String(input.toolId || "").trim();
     if (["paseo", "anneal", "codex-router", "commandcode-proxy"].includes(toolId)) {
       throw new Error(`Retired upstream integration: ${toolId}`);
     }
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!externalServicesController) throw new Error("External services controller is unavailable");
     const config = externalServicesController.upstreamConfiguration(toolId);
     const annealConnection = toolId === "anneal" ? externalServicesController.loopbackRequest("anneal") : null;
@@ -2902,18 +2907,18 @@ function registerIpc({ logger, stateStore }) {
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.inspect(toolId);
   });
-  handle("launcher:original-ui-start", (event, toolId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:original-ui-start", async (event, toolId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.start(toolId);
   });
-  handle("launcher:original-ui-stop", (event, toolId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:original-ui-stop", async (event, toolId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.stop(toolId);
   });
-  handle("launcher:original-ui-restart", (event, toolId) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:original-ui-restart", async (event, toolId) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.restart(toolId);
   });
@@ -2922,13 +2927,13 @@ function registerIpc({ logger, stateStore }) {
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.openEmbedded(toolId, section);
   });
-  handle("launcher:original-ui-open-external", (event, toolId, section) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:original-ui-open-external", async (event, toolId, section) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.openExternalTool(toolId, section);
   });
-  handle("launcher:original-ui-copy-cpa-key", (event) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:original-ui-copy-cpa-key", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!originalUiController) throw new Error("Original UI controller is unavailable");
     return originalUiController.copyCpaManagementKey(clipboard);
   });
@@ -3004,41 +3009,41 @@ function registerIpc({ logger, stateStore }) {
     void refreshBrowserAccountSignIns(logger);
     return browserAccountsStatus();
   });
-  handle("launcher:browser-account-add", (event) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-account-add", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
     return addBrowserAccount({ logger, stateStore });
   });
-  handle("launcher:browser-account-switch", (event, id) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-account-switch", async (event, id) => {
+    await assertFocusedMainWindowSettled(event, true);
     return switchBrowserAccount(id, { logger, stateStore });
   });
-  handle("launcher:browser-account-rename", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-account-rename", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     browserAccounts.rename(input?.id, input?.label);
     publishBrowserAccounts();
     return browserAccountsStatus();
   });
-  handle("launcher:browser-account-proxy", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-account-proxy", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     return setBrowserAccountProxy(input?.id, input?.profileId ?? null, { logger });
   });
-  handle("launcher:browser-account-proxies-assign", (event) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-account-proxies-assign", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
     return assignBrowserAccountProxies({ logger });
   });
-  handle("launcher:browser-account-remove", (event, id) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-account-remove", async (event, id) => {
+    await assertFocusedMainWindowSettled(event, true);
     return removeBrowserAccount(id, { logger, stateStore });
   });
   // Bulk delete (ChatGPT browser management): several accounts in one action, same focus rule.
-  handle("launcher:browser-accounts-remove", (event, ids) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-accounts-remove", async (event, ids) => {
+    await assertFocusedMainWindowSettled(event, true);
     return browserAccountService.removeMany(ids, { logger, stateStore });
   });
   // Browser settings: one account's (tab limit, new sessions), every account's, and a fresh look at
   // the account in use's plan. Every change needs the focused main window.
-  handle("launcher:browser-account-settings", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-account-settings", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     browserAccounts.setAccountSettings(input?.id, {
       ...(input?.maxTabs !== undefined ? { maxTabs: input.maxTabs } : {}),
       ...(input?.acceptsNewSessions !== undefined ? { acceptsNewSessions: input.acceptsNewSessions } : {}),
@@ -3047,8 +3052,8 @@ function registerIpc({ logger, stateStore }) {
     browserHost?.publishState?.(browserHost.snapshot());
     return browserAccountsStatus();
   });
-  handle("launcher:browser-accounts-settings", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:browser-accounts-settings", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     browserAccounts.setSettings({
       ...(input?.newSessions !== undefined ? { newSessions: input.newSessions } : {}),
       ...(input?.keepFinishedTabsMinutes !== undefined ? { keepFinishedTabsMinutes: input.keepFinishedTabsMinutes } : {}),
@@ -3083,8 +3088,8 @@ function registerIpc({ logger, stateStore }) {
   });
   // Codex threads bound to ChatGPT accounts. Every change needs the focused main window.
   handle("launcher:codex-threads", () => codexThreadsStatus(logger));
-  handle("launcher:codex-thread-action", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:codex-thread-action", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     return codexThreadAction(input, logger);
   });
   handle("launcher:browser-tab-select", (_event, tabId) => browserHost.selectTab(tabId));
@@ -3172,19 +3177,19 @@ function registerIpc({ logger, stateStore }) {
     return host.status();
   });
   handle("launcher:chatgpt-desktop-open", async (event, slotId) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const host = getChatGptDesktop(logger);
     await host.ready;
     return host.open(slotId);
   });
   handle("launcher:chatgpt-desktop-new-sign-in", async (event) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const host = getChatGptDesktop(logger);
     await host.ready;
     return host.newSignIn();
   });
   handle("launcher:chatgpt-desktop-clear", async (event, expectedSlotId) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (typeof expectedSlotId !== "string" || !expectedSlotId.trim()) {
       throw new Error("Confirm the ChatGPT desktop account to clear");
     }
@@ -3193,7 +3198,7 @@ function registerIpc({ logger, stateStore }) {
     return host.clearActive(expectedSlotId);
   });
   handle("launcher:chatgpt-desktop-stop", async (event) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const host = getChatGptDesktop(logger);
     await host.ready;
     return host.stop();
@@ -3207,7 +3212,7 @@ function registerIpc({ logger, stateStore }) {
   // Types the panel's message into that app and sends it. Only the user's click or Enter in the
   // focused main window gets here; focus returns to Coding Tools afterwards.
   handle("launcher:chatgpt-desktop-local-send", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!input || typeof input !== "object" || Object.keys(input).some((key) => key !== "text")) {
       throw new Error("A ChatGPT message needs only its text");
     }
@@ -3218,15 +3223,15 @@ function registerIpc({ logger, stateStore }) {
   // Workspace -> GPT Browser. Every change needs the focused main window; status is read-only.
   handle("launcher:gpt-browser-status", async () => (await getGptBrowser(logger)).status());
   handle("launcher:gpt-browser-add", async (event) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     return (await getGptBrowser(logger)).addAccount();
   });
   handle("launcher:gpt-browser-switch", async (event, id) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     return (await getGptBrowser(logger)).switchTo(id);
   });
   handle("launcher:gpt-browser-open-url", async (event, url) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     return (await getGptBrowser(logger)).openUrl(url);
   });
   handle("launcher:gpt-browser-navigate", async (event, action) => {
@@ -3234,11 +3239,11 @@ function registerIpc({ logger, stateStore }) {
     return (await getGptBrowser(logger)).navigate(action);
   });
   handle("launcher:gpt-browser-rename", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     return (await getGptBrowser(logger)).rename(input?.id, input?.label);
   });
   handle("launcher:gpt-browser-remove", async (event, id) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     return (await getGptBrowser(logger)).remove(id);
   });
   handle("launcher:gpt-browser-surface-active", async (_event, active) => (await getGptBrowser(logger)).setSurfaceActive(active === true));
@@ -3286,12 +3291,12 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return getEmailHost(logger).currentStatus();
   });
-  handle("launcher:email-connect", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:email-connect", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     return getEmailHost(logger).connect(input);
   });
-  handle("launcher:email-disconnect", (event) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:email-disconnect", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
     return getEmailHost(logger).disconnect();
   });
   handle("launcher:email-mailboxes", (event, input) => {
@@ -3306,20 +3311,20 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     return getEmailHost(logger).getMessage(input);
   });
-  handle("launcher:email-create-address", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:email-create-address", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     return getEmailHost(logger).createAddress(input);
   });
-  handle("launcher:email-delete-message", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:email-delete-message", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     return getEmailHost(logger).deleteMessage(input);
   });
-  handle("launcher:email-clear-inbox", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:email-clear-inbox", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     return getEmailHost(logger).clearInbox(input);
   });
-  handle("launcher:email-remove-mailbox", (event, input) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:email-remove-mailbox", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
     return getEmailHost(logger).removeMailbox(input);
   });
   installKeysmithIpc({
@@ -3584,6 +3589,8 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
@@ -3693,6 +3700,11 @@ function registerIpc({ logger, stateStore }) {
         publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
         throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
       }
+      // The card's words can be a category ("ChatGPT verification is required…") for several steps;
+      // the log keeps the setup's own (mcpConnectorFailureCause), or nothing said which step stopped.
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      logger.warn("mcp.account_connect_failed", { automatic: typeof assertAutomaticCurrent === "function", code: failure.code,
+        ...(setupCause ? { setupCause } : {}) });
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
@@ -3702,7 +3714,7 @@ function registerIpc({ logger, stateStore }) {
     }
   };
   handle("launcher:mcp-create-connector", async (event, accountId) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (accountId === undefined) return mcpConnectorCommand.request("create", "settings");
     // A Connect the user asked for comes first. On 2026-11-09 a Connect for every account was refused
     // for all 22 in 8 s ("Finish the active browser or setup operation…") because the background
@@ -3817,7 +3829,7 @@ function registerIpc({ logger, stateStore }) {
   // Settings → "Use Coding Tools in Codex". The choice is saved first, so even if restoring or
   // reconnecting the route fails now, no later setup or reconnect goes against it.
   handle("launcher:set-codex-route", async (event, enabled) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (IS_DEV_PROFILE) throw new Error("DEV profile has no Codex route");
     if (typeof enabled !== "boolean") throw new Error("Choose on or off");
     const state = stateStore.update({ codexRoute: enabled });
@@ -3919,7 +3931,7 @@ function registerIpc({ logger, stateStore }) {
   // Extra MCP tunnels, one per further ChatGPT account. Status is read-only; changes need the focused window.
   handle("launcher:mcp-tunnels", () => runtimeSupervisor?.extraTunnels.status() ?? []);
   handle("launcher:mcp-tunnel-add", async (event, input) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
     const accountId = typeof input?.accountId === "string" && input.accountId ? input.accountId : null;
     if (accountId) browserAccounts.partitionOf(accountId); // throws for an unknown account
@@ -3938,12 +3950,12 @@ function registerIpc({ logger, stateStore }) {
       throw error;
     }
   });
-  handle("launcher:mcp-tunnel-remove", (event, id) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:mcp-tunnel-remove", async (event, id) => {
+    await assertFocusedMainWindowSettled(event, true);
     return runtimeSupervisor.extraTunnels.remove(id);
   });
   handle("launcher:mcp-tunnel-reconnect", async (event, id) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
     const supervisor = runtimeSupervisor, host = runtimeHost, extraTunnels = supervisor?.extraTunnels;
     const tunnel = typeof id === "string" && /^[a-f0-9]{8}$/.test(id)
@@ -3983,7 +3995,7 @@ function registerIpc({ logger, stateStore }) {
     let config = assertCurrent();
     let health = await supervisor.ownedRuntimeCheck(config);
     assertCurrent();
-    const primaryFailures = ["tunnel_missing", "tunnel_health"];
+    const primaryFailures = ["tunnel_missing", "tunnel_health", "tunnel_unobserved"];
     if (runtimeStartups !== startups || !extraTunnels.config || host.managedRuntimeUpgradeRequired()
       || (!health.ready && !primaryFailures.includes(health.failed))) {
       if (runtimeStartups === startups) {
@@ -4011,7 +4023,7 @@ function registerIpc({ logger, stateStore }) {
     return extraTunnels.reconnect(id);
   });
   handle("launcher:mcp-tunnel-settings", async (event, id) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!event.sender.mainFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("Platform settings require the main launcher frame");
     if (IS_DEV_PROFILE) throw new Error("Extra MCP tunnels are available in the production profile only");
     if (typeof id !== "string" || !/^[a-f0-9]{8}$/.test(id)) throw new Error("That tunnel is not configured.");
@@ -4042,7 +4054,7 @@ function registerIpc({ logger, stateStore }) {
     return result;
   });
   handle("launcher:mcp-tunnel-connector", async (event, id) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     const tunnel = runtimeSupervisor.extraTunnels.status().find(candidate => candidate.id === id);
     if (!tunnel) throw new Error("That tunnel is not configured.");
     if (!tunnel.accountId) throw new Error("Choose the ChatGPT account this tunnel belongs to first.");
@@ -4069,6 +4081,8 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
@@ -4167,7 +4181,7 @@ function registerIpc({ logger, stateStore }) {
   handle("rtk:gain", async () => (await rtk.gain()) ?? { available: false });
   handle("rtk:install", async (event) => {
     // Installing software is the person's own click in the visible app.
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!rtkService) throw new Error("RTK is unavailable in this build");
     return rtk.install();
   });
@@ -4178,17 +4192,17 @@ function registerIpc({ logger, stateStore }) {
     return appPluginsService.list({ refresh: refresh === true });
   });
   handle("launcher:app-plugin-update", async (event, id) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!appPluginsService) throw new Error("App plugins are still starting");
     return appPluginsService.update(String(id || ""));
   });
   handle("launcher:app-plugin-auto-update", async (event, id, enabled) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!appPluginsService) throw new Error("App plugins are still starting");
     return appPluginsService.setAutoUpdate(String(id || ""), enabled === true);
   });
   handle("launcher:app-plugins-update-all", async (event) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     if (!appPluginsService) throw new Error("App plugins are still starting");
     return appPluginsService.updateAll();
   });
@@ -4197,18 +4211,18 @@ function registerIpc({ logger, stateStore }) {
   // visible app; errors name the field, never a value (env and headers carry tokens).
   handle("mcp-servers:list", () => userMcpServers(logger).list());
   handle("mcp-servers:save", async (event, server, options) => {
-    assertFocusedMainWindow(event, true);
+    await assertFocusedMainWindowSettled(event, true);
     // "Use my GitHub CLI sign-in": the token is read here and never passes through the page.
     const input = options?.githubCliToken === true
       ? await require("./chat-mcp-servers.cjs").withGithubCliToken(server) : server;
     return savedMcpServers(userMcpServers(logger).save(input));
   });
-  handle("mcp-servers:remove", (event, id) => {
-    assertFocusedMainWindow(event, true);
+  handle("mcp-servers:remove", async (event, id) => {
+    await assertFocusedMainWindowSettled(event, true);
     return savedMcpServers(userMcpServers(logger).remove(String(id)));
   });
-  handle("mcp-servers:set-enabled", (event, id, enabled) => {
-    if (enabled === true) assertFocusedMainWindow(event, true);
+  handle("mcp-servers:set-enabled", async (event, id, enabled) => {
+    if (enabled === true) await assertFocusedMainWindowSettled(event, true);
     return savedMcpServers(userMcpServers(logger).setEnabled(String(id), enabled === true));
   });
   handle("launcher:set-preference", (_event, key, value) => {
@@ -4233,8 +4247,8 @@ function registerIpc({ logger, stateStore }) {
   });
   // What chat agents hide in the user's messages (redact_message): one kind per line; an empty
   // list goes back to the defaults. It is the user's own list, so it is set from the visible app.
-  handle("launcher:set-redact-list", (event, lines) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:set-redact-list", async (event, lines) => {
+    await assertFocusedMainWindowSettled(event, true);
     if (!Array.isArray(lines) || lines.length > 100 || lines.some((line) => typeof line !== "string" || line.length > 1000)) {
       throw new Error("The list must be lines of text");
     }
@@ -4250,8 +4264,8 @@ function registerIpc({ logger, stateStore }) {
     return true;
   });
   handle("launcher:action-times", () => actionTimes.snapshot());
-  handle("launcher:action-times-clear", (event) => {
-    assertFocusedMainWindow(event, true);
+  handle("launcher:action-times-clear", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
     actionTimes.clear();
     return actionTimes.snapshot();
   });
@@ -4425,12 +4439,13 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     }
     quitting = true;
     await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
-    // A goal, /schedule, wake-up, /loop, browser-account or settings change still being saved (off
-    // the main thread) lands before the app goes; a disk that hangs holds the quit 5 s at most, and
-    // each file keeps the change before.
+    // A goal, /schedule, wake-up, /loop, deleted message, archive, browser-account or settings change
+    // still being saved (off the main thread) lands before the app goes; a disk that hangs holds the
+    // quit 5 s at most, and each file keeps the change before.
     await Promise.race([
       Promise.all([missionWorkflowRuntime?.goalsSaved(), missionWorkflowRuntime?.schedulesSaved?.(),
-        missionWorkflowRuntime?.wakeupsSaved?.(), browserAccounts.saved(), launcherStateStore?.saved(),
+        missionWorkflowRuntime?.wakeupsSaved?.(), missionWorkflowRuntime?.chatEditsSaved?.(),
+        browserAccounts.saved(), launcherStateStore?.saved(),
         externalServicesController?.saved?.().catch(() => undefined)]),
       new Promise((resolve) => setTimeout(resolve, 5_000).unref?.()),
     ]);
@@ -4879,7 +4894,8 @@ async function start() {
   setProviderCpaConnection(() => externalServicesController?.cpaConnection());
   // CPA follows its upstream releases: each one installs beside the running CPA, and the switch
   // waits for a quiet moment (or the next start). Off when automaticComponentUpdates is false.
-  const cpaUsageRoot = path.join(app.getPath("userData"), "integrations", "state", "cpa", "cpa-helper-data", "usage");
+  // CPA Helper's usage store, now Provider Manager's "helper" part.
+  const cpaUsageRoot = path.join(app.getPath("userData"), "integrations", "state", "cpa", "cpa-provider-manager-data", "helper", "usage");
   cpaUpdater = createComponentUpdater({
     componentId: "cpa",
     stage: (id) => externalServicesController.updateManagedComponent(id, { swap: false }),
@@ -4972,10 +4988,21 @@ async function start() {
     },
   });
   if (!LAUNCHER_SMOKE_TEST) mcpEventMonitor.start();
+  // These confirmations check focus again after the agent call that the click started, and that
+  // call can span a main stall: a focus event queued behind it lands late. (2026-11-12 08:19:05Z: an
+  // Approve was refused right after a 46.5 s stall, though its IPC check had passed.) They wait for
+  // it as assertFocusedMainWindowSettled does; a hidden or minimized window is still refused at once.
+  const mainWindowFocusSettled = async () => {
+    const focused = () => Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && mainWindow.isFocused());
+    if (!focused() && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()) {
+      await waitForFocus({ focused, emitters: [mainWindow] });
+    }
+    return focused();
+  };
   // `signal` closes the dialog unanswered (a chat agent's prompt "Approve for me" answers itself
   // after 20 seconds).
   const confirmAoAction = async ({ message, detail, signal }) => {
-    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+    if (!(await mainWindowFocusSettled())) {
       throw new Error("Use the focused Coding Tools window to approve workflow changes");
     }
     const answer = await dialog.showMessageBox(mainWindow, {
@@ -4993,7 +5020,7 @@ async function start() {
   // dialog, which offers "Don't ask again". Either way the answer must come from the visible,
   // focused window, so it is still the person's click.
   const confirmToolRequest = async ({ message, detail }) => {
-    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || !mainWindow.isFocused()) {
+    if (!(await mainWindowFocusSettled())) {
       throw new Error("Use the focused Coding Tools window to answer the agent's request");
     }
     if (stateStore.read().confirmAgentToolRequests === false) return true;

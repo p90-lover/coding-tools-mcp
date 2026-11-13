@@ -2,7 +2,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createStateFileWriter, readStateFile, writeStateFile } = require("./durable-state.cjs");
-const { connectErrorText: tcpErrorText, probeTcpOffThread } = require("./off-thread-run.cjs");
+const { connectErrorText: tcpErrorText, fetchOffThread, probeTcpOffThread } = require("./off-thread-run.cjs");
 const {
   CPA_LOGIN_ADAPTERS,
   inspectCpaAccount,
@@ -41,6 +41,11 @@ const DEFAULT_ANTIGRAVITY_BASE_URL = "http://127.0.0.1:8317";
 const DEFAULT_CPA_BASE_URL = DEFAULT_ANTIGRAVITY_BASE_URL;
 const COMMANDCODE_PROVIDER_ID = "commandcode-proxy";
 const DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS = 15_000;
+// CPA's management API, provider APIs and Decodo are read from a worker, never with Node's fetch on
+// main: a socket connect to CPA that the network filter held froze every window for 43.7 s
+// (2026-11-12 09:38Z). Their replies are account, model and endpoint lists, well under this.
+const MAX_PROVIDER_REPLY_BYTES = 8 * 1024 * 1024;
+const fetchProviderOffThread = (url, init) => fetchOffThread(url, { maxBytes: MAX_PROVIDER_REPLY_BYTES, ...init });
 const DEFAULT_OAUTH_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_OAUTH_TIMEOUT_MS = 5 * 60_000;
 
@@ -1046,7 +1051,7 @@ function createProviderNetworkController({
   session,
   shell,
   userData,
-  fetchImpl = globalThis.fetch,
+  fetchImpl = fetchProviderOffThread,
   sleepImpl = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
   oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,

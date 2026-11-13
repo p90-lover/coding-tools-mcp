@@ -3,8 +3,12 @@ const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+// main.cjs's write handlers first wait a moment for a late focus event (assertFocusedMainWindowSettled):
+// in a sandbox that is its own focus check.
+const settledFocus = (context) => Object.assign(context, { assertFocusedMainWindowSettled: context.assertFocusedMainWindowSettled
+  ?? (async (...args) => context.assertFocusedMainWindow(...args)) });
 const { EventEmitter } = require("node:events");
-const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
+const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure, mcpConnectorFailureCause } = require("../electron/mcp-connector-command.cjs");
 
 test("workspace-owner refusal stays actionable across command and UI error boundaries", () => {
   const { WORKSPACE_OWNER_REQUIRED } = require("../electron/mcp-connector-setup.cjs");
@@ -90,7 +94,7 @@ function reconnectFixture(options = {}) {
     applyReadyRuntimeAfterBridge: () => { state.coreSetupComplete = true; }, send() {},
     publishOperation: operation => { context.lastOperation = operation; if (operation.status === "failed") world.failure = operation.message; },
     delay: () => new Promise(() => {}), STARTUP_AUTH_WAIT_MS: 20_000 };
-  vm.runInNewContext(`${startup}\n${handlerSource}`, context);
+  vm.runInNewContext(`${startup}\n${handlerSource}`, settledFocus(context));
   return { context, world, events, manager, state, tunnel, host, release,
     run: (id = tunnel.id) => handler({}, id),
     startPending: () => context.trackRuntimeStartup(context.startManagedRuntime({ logger, stateStore,
@@ -242,7 +246,7 @@ test("the real main action uses the current account-switch state before creating
   let run, created = 0, settingsOpened = 0, switching = false;
   const host = { partition: "persist:primary", ready: async () => {} };
   const context = {
-    app: {}, BrowserWindow: function () {}, mcpConnectorCommand: null, mcpConnectorCommandFailure, LAUNCHER_PROFILE: { browserPartition: "persist:original" },
+    app: {}, BrowserWindow: function () {}, mcpConnectorCommand: null, mcpConnectorCommandFailure, mcpConnectorFailureCause, LAUNCHER_PROFILE: { browserPartition: "persist:original" },
     createMcpConnectorCommand: options => { run = options.run; return {}; },
     IS_DEV_PROFILE: false, runtimeStartupInFlight: Promise.resolve(), quitting: false,
     shutdownInProgress: false, browserAccountsStatus: () => ({ switching }),
@@ -255,10 +259,10 @@ test("the real main action uses the current account-switch state before creating
       settingsOpened++;
       return { opened: true };
     },
-    stateStore: { update: value => value }, publishOperation() {}, send() {}, logger: {},
+    stateStore: { update: value => value }, publishOperation() {}, send() {}, logger: { warn() {} },
     startCatalogVerificationMonitor() {}, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   await run();
   assert.equal(created, 1);
   await run("tunnel-settings");
@@ -314,7 +318,7 @@ test("the real main action selects the captured account's tunnel and waits for r
       },
     };
     const context = {
-      app: {}, BrowserWindow: function () {}, mcpConnectorCommand: null, mcpConnectorCommandFailure,
+      app: {}, BrowserWindow: function () {}, mcpConnectorCommand: null, mcpConnectorCommandFailure, mcpConnectorFailureCause,
       createMcpConnectorCommand: options => { run = options.run; return {}; },
       IS_DEV_PROFILE: false, runtimeStartupInFlight: Promise.resolve(), quitting: false,
       shutdownInProgress: false, browserAccountsStatus: () => ({ switching: false }),
@@ -326,10 +330,10 @@ test("the real main action selects the captured account's tunnel and waits for r
         options.assertCurrent?.();
         return { created: true, href: "/plugins/account-2", binding };
       },
-      stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: {},
+      stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: { warn() {} },
       startCatalogVerificationMonitor: () => { monitors++; }, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     if (scenario.switches || scenario.staysUnready || scenario.switchesDuringSetup || scenario.switchesDuringBinding) {
       await assert.rejects(run(), scenario.staysUnready ? /ready/ : /switch|account/);
       assert.equal(created.length, scenario.switchesDuringSetup || scenario.switchesDuringBinding ? 1 : 0, "changed or unready accounts cannot proceed");
@@ -370,7 +374,7 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
       await new Promise(resolve => setImmediate(resolve));
       recorded.push(args);
     } } },
-    runtimeHost: { currentOperation: () => null }, app: {}, BrowserWindow: function () {}, mcpConnectorCommandFailure,
+    runtimeHost: { currentOperation: () => null }, app: {}, BrowserWindow: function () {}, logger: { warn() {} }, mcpConnectorCommandFailure, mcpConnectorFailureCause,
     publishOperation: value => published.push(value),
     createConfiguredConnector: async options => {
       creates++;
@@ -381,7 +385,7 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
       return { created: true, href: "/plugins/proven", binding };
     },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   await action({}, tunnel.id);
   assert.equal(focused, 1);
   assert.deepEqual(recorded, [[tunnel.id, "/plugins/proven", binding]]);
@@ -454,10 +458,10 @@ test("account setup keeps its captured account and tunnel across awaited workspa
           return { created: false, connected: !scenario.unconfirmed, href: "/plugins/exact", binding: { tunnelId: "tunnel_original" } };
         } finally { browserOperation = null; }
       },
-      app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
+      app: {}, BrowserWindow() {}, logger: { warn() {} }, mcpConnectorCommandFailure, mcpConnectorFailureCause,
       recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation() {}, automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
     else await assert.rejects(handler({}, "account-2"));
     const saving = scenario.saveSwitch || scenario.saveActive || scenario.saveBusy || scenario.saveRuntime || scenario.saveRetarget || scenario.saveRemap;
@@ -532,10 +536,10 @@ test("account setup verifies the configured main tunnel without an extra assignm
             binding: { tunnelId: scenario.wrongTunnel ? otherId : tunnelId } };
         } finally { browserOperation = null; }
       },
-      app: {}, BrowserWindow() {}, logger: {}, mcpConnectorCommandFailure,
+      app: {}, BrowserWindow() {}, logger: { warn() {} }, mcpConnectorCommandFailure, mcpConnectorFailureCause,
       recordBrowserWorkspaceContext() {}, publishBrowserAccounts() {}, publishOperation: value => operations.push(value), automaticSetupGaveWay: require("../electron/browser-account-mcp.cjs").automaticSetupGaveWay,
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
     else await assert.rejects(handler({}, "account-2"));
     assert.equal(created.length, scenario.completes || scenario.creates ? 1 : 0);
@@ -591,7 +595,7 @@ test("extra tunnel Platform settings open only the registered account partition 
       stateStore: { update: mutate("save launcher") }, createConfiguredConnector: mutate("create connector"),
       openConfiguredTunnelSettings: async options => { opened.push(options); return { opened: true, name: "Coding Tools" }; },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     const input = Object.hasOwn(scenario, "input") ? scenario.input : "b41a6986";
     if (scenario.opens) {
       assert.equal((await action(event, input)).opened, true);
@@ -667,10 +671,10 @@ test("the real hidden tunnel-add action consumes only successful stable account 
       browserAccounts: { accountIdOfPartition: partition => partition === "persist:account-2" ? "account-2" : "account-1" },
       runtimeSupervisor: { extraTunnels }, runtimeHost: { currentOperation: () => null }, browserHost: host,
       createConfiguredConnector: async () => { creates++; return { created: true }; },
-      stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: {},
+      stateStore: { update: value => { stateUpdates.push(value); return value; } }, publishOperation() {}, send() {}, logger: { warn() {} },
       startCatalogVerificationMonitor() {}, automaticMcpAttempt: { pid: 1, failures: 0, retryAt: null },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     const fails = scenario.mismatch || scenario.fails || scenario.switches || scenario.replaces || scenario.oversized || scenario.malformed;
     if (fails) await assert.rejects(run("add-tunnel"));
     else assert.equal((await run("add-tunnel")).added, true);
@@ -716,7 +720,7 @@ test("real hidden startup defers maximized/fullscreen restoration and tracking u
     startHidden: true, showMainWindow: () => window.show(), trackWindowState: () => { tracking++; },
     windowStatePath: "unused", windowStateSnapshot: () => ({}), send() {}, logger: { warn() {} }, quitting: false,
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   window.emit("ready-to-show");
   assert.equal(visible, false, "restoring a maximized window must not expose background startup");
   assert.equal(tracking, 0, "hidden shutdown must preserve the saved layout");
@@ -737,7 +741,7 @@ test("real second-instance CLI dispatch returns before showing or recovering the
     mainWindow: { isDestroyed: () => false, webContents: { isCrashed: () => true } },
     loadRenderer: async () => { recovered++; }, showMainWindow: () => { shown++; },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   handler({}, ["app", "--create-mcp-connector"]);
   assert.equal(dispatched, 1);
   assert.equal(shown, 0);
@@ -1045,4 +1049,23 @@ test("every fixed text the setup throws reaches the card in its own words or a n
     assert.equal(mcpConnectorCommandFailure(new Error(text)).message, text);
   }
   assert.equal(mcpConnectorCommandFailure(new Error("PRIVATE_REMOTE_DOM_ALERT")).message, catchAll, "unknown text never passes");
+});
+
+test("a signed-out session and a security check read as what they are, and the log keeps the setup's own words", () => {
+  // Live 2026-11-13: a card read "ChatGPT verification is required in Coding Tools Browser" and the log
+  // said only that, so nothing told a signed-out account from a page the setup had misread.
+  const { SETUP_CHECK_MESSAGE } = require("../electron/chatgpt-cloudflare-check.cjs");
+  assert.deepEqual(mcpConnectorCommandFailure(new Error("ChatGPT verification is required in the intended account.")),
+    { code: "verification_required", message: "Sign in to this account in the Browser tab before connecting MCP." }, "the account's own session said 401");
+  assert.deepEqual(mcpConnectorCommandFailure(new Error("Complete Cloudflare verification in Coding Tools Browser, then try again.")),
+    { code: "verification_required", message: SETUP_CHECK_MESSAGE }, "ChatGPT showed its security check");
+
+  const cause = (text) => mcpConnectorFailureCause(new Error(text), mcpConnectorCommandFailure(new Error(text)));
+  assert.equal(cause("Use the managed browser to finish signing in"), "Use the managed browser to finish signing in", "a text the card files under a category");
+  assert.equal(cause("ChatGPT did not confirm the selected workspace."), null, "nothing when the card already says it");
+  assert.equal(cause("ChatGPT connector creation failed: PRIVATE_PAGE_TEXT"), "ChatGPT connector creation failed:", "ChatGPT's own form text stays out");
+  assert.equal(cause("net::ERR_ABORTED loading 'https://auth.openai.com/authorize?state=SECRET&code=SECRET#x'"),
+    "net::ERR_ABORTED loading 'https://auth.openai.com/authorize'", "an address keeps its host and path, never its query");
+  assert.equal(cause("x".repeat(500)).length, 240);
+  assert.equal(mcpConnectorFailureCause(null, { message: "" }), null);
 });

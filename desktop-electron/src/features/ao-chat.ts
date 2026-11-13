@@ -1077,7 +1077,7 @@ export const RESTART_RESUME_WINDOW_MS = 24 * 60 * 60_000;
 // (POOL_EXHAUSTED, QUOTA_EXHAUSTED).
 const RESTART_ATTEMPT_LIMIT = 8;
 const AUTO_RETRY_ATTEMPT_LIMIT = 8;
-const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|insufficient_quota|usage_limit_reached|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)|API Error: (?:400|404|422)\b/i;
+const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|insufficient_quota|usage_limit_reached|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)|API Error: (?:400|404|422)\b|chat driver incompatible:\s*read [^:\n]{1,40} version/i;
 
 /** The newest time any card of the run started, current receipts and earlier attempts alike (0: none). */
 function newestStart(mission: ResumeCandidate): number {
@@ -1924,7 +1924,8 @@ export function goalFeedback(text: string): { objective: string; reason: string 
  * The app keeps the queue (chat-queue.cjs): `id` is its item's, `steer` steers it into the working
  * agent rather than waiting for the turn, and `note` says why its last send failed.
  */
-export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string; id?: string; steer?: boolean; note?: string };
+// `note`: why the app's last try to send it failed; `sending`: when the app began sending it (chat-queue.cjs).
+export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string; id?: string; steer?: boolean; note?: string; sending?: number };
 /**
  * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
  * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.

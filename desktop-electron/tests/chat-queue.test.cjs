@@ -41,6 +41,22 @@ test("a chat's queue keeps its order, takes a message at the front, and survives
   assert.deepEqual(createChatQueueStore({ file }).chats(), [], "an emptied queue leaves nothing behind");
 });
 
+test("a message being sent keeps its place and its mark across a restart; clearing the mark drops the field", async (t) => {
+  const file = tempFile(t);
+  const store = createChatQueueStore({ file });
+  const item = store.add("ws", "task", { what: "Message", message: "deploy it", sending: 5 });
+  assert.equal(item.sending, undefined, "a mark is the app's own, never taken from the chat view");
+  store.update("ws", "task", item.id, { sending: 123 });
+  await store.saved();
+  const reopened = createChatQueueStore({ file });
+  assert.equal(reopened.list("ws", "task")[0].sending, 123, "an app that quit mid-send still has the message");
+  const cleared = reopened.update("ws", "task", item.id, { sending: undefined, note: "AO is busy" });
+  assert.equal("sending" in cleared, false);
+  assert.equal(cleared.note, "AO is busy");
+  assert.equal("note" in reopened.update("ws", "task", item.id, { note: undefined }), false);
+  await reopened.saved();
+});
+
 test("a torn queue file is read back from its copy (power cut, failing disk)", async (t) => {
   const file = tempFile(t);
   const store = createChatQueueStore({ file });
@@ -92,6 +108,8 @@ test("the app resumes a chat after a restart exactly as the chat view would", ()
     { cancelled: true, nodes: [node("running")] },
     { cancelled: false, paused: true, nodes: [node("pending")] },
     { cancelled: false, nodes: [node("finished")] },
+    { cancelled: false, execution_mode: "single", nodes: [node("held", { receipt: { error: "Launch failed: spawn: chat driver incompatible: read Codex version: exit status 1 (CHAT_DRIVER_INCOMPATIBLE)" } })] },
+    { cancelled: false, execution_mode: "single", nodes: [node("held", { receipt: { error: "chat driver incompatible: ACP initialize: context deadline exceeded" } })] },
   ];
   for (const [index, mission] of cases.entries()) {
     for (const autoRetry of [false, true]) {
@@ -102,4 +120,6 @@ test("the app resumes a chat after a restart exactly as the chat view would", ()
   assert.equal(restartResume(cases[2], now), "retry");
   assert.equal(restartResume(cases[4], now, { autoRetry: true }), "retry");
   assert.equal(restartResume(cases[5], now, { autoRetry: true }), null, "a sign-in failure waits for the person");
+  assert.equal(restartResume(cases[11], now, { autoRetry: true }), null, "an agent program AO cannot run waits for the person");
+  assert.equal(restartResume(cases[12], now, { autoRetry: true }), "retry", "a handshake that timed out is retried");
 });

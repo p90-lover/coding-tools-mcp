@@ -248,7 +248,7 @@ test("sending needs the focused main window and only a text field; the preview n
     return main.slice(start, main.indexOf("\n  });", start));
   };
   const send = handler("launcher:chatgpt-desktop-local-send");
-  assert.match(send, /assertFocusedMainWindow\(event, true\)/);
+  assert.match(send, /await assertFocusedMainWindowSettled\(event, true\)/);
   assert.match(send, /Object\.keys\(input\)\.some\(\(key\) => key !== "text"\)/);
   assert.match(send, /localSend\(input\.text, \{ returnTo \}\)/);
   const preview = handler("launcher:chatgpt-desktop-local-preview");
@@ -374,6 +374,7 @@ test("the Clear IPC requires a captured ID and forwards it unchanged after readi
   vm.runInNewContext(registration, { Error, logger: {},
     handle: (_, callback) => { handler = callback; },
     assertFocusedMainWindow: (event, focused) => { assert.equal(event, "owner"); assert.equal(focused, true); },
+    assertFocusedMainWindowSettled: async (event, focused) => { assert.equal(event, "owner"); assert.equal(focused, true); },
     getChatGptDesktop: () => ({ ready: Promise.resolve(), clearActive: async (id) => calls.push(id) }),
   });
   for (const id of [undefined, null, "", " ", 42, {}]) {

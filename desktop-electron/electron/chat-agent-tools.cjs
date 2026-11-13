@@ -79,10 +79,35 @@ const TOOL_CALL_TIMEOUT_MS = 120_000;
 const PULL_REQUEST_CACHE_MS = 120_000;
 const PULL_REQUEST_TIMEOUT_MS = 10_000;
 
-/** Runs the GitHub CLI in a folder and resolves with what it prints (rejects on a non-zero exit). */
-function runGhCommand({ cwd, args, timeoutMs }) {
+/**
+ * A program's absolute path from PATH's absolute folders, or null. Only .exe and .com on Windows:
+ * execFile runs no .cmd or .bat without a shell. A relative entry ("." or an empty one) is skipped,
+ * since it would mean the folder the program runs in.
+ */
+async function executableOnPath(name, { pathValue = process.env.PATH ?? "", platform = process.platform, stat = fs.promises.stat } = {}) {
+  const folders = String(pathValue).split(path.delimiter).map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+    .filter((entry) => entry && path.isAbsolute(entry));
+  for (const folder of folders) {
+    for (const extension of platform === "win32" ? [".exe", ".com"] : [""]) {
+      const candidate = path.join(folder, `${name}${extension}`);
+      try { if ((await stat(candidate)).isFile()) return candidate; } catch { /* not in this folder */ }
+    }
+  }
+  return null;
+}
+
+/**
+ * Runs the GitHub CLI in a folder and resolves with what it prints (rejects on a non-zero exit). It is
+ * found on PATH first: given a bare "gh" with a chat's worktree as cwd, Windows ran a gh.exe in that
+ * worktree before the one on PATH (libuv looks in the child's cwd first unless
+ * NoDefaultCurrentDirectoryInExePath is set), so an agent or a cloned repository could have the app
+ * run its own program outside the chat's sandbox, with no approval (2026-11-13).
+ */
+async function runGhCommand({ cwd, args, timeoutMs }) {
+  const gh = await executableOnPath("gh");
+  if (!gh) throw new Error("The GitHub CLI (gh) is not on PATH");
   return new Promise((resolve, reject) => {
-    require("node:child_process").execFile("gh", args, { cwd, timeout: timeoutMs, windowsHide: true, encoding: "utf8", maxBuffer: 256 * 1024 },
+    require("node:child_process").execFile(gh, args, { cwd, timeout: timeoutMs, windowsHide: true, encoding: "utf8", maxBuffer: 256 * 1024 },
       (error, stdout) => (error ? reject(error) : resolve(stdout)));
   });
 }
@@ -3286,19 +3311,23 @@ function createChatAgentTools({
       };
     },
     /** The pull request on the session's branch, for the chat summary's "PR #N" row (Codex's): `gh pr
-     *  view` in its worktree, shared by every reader for 2 minutes. null when the branch has none, gh is
-     *  missing or signed out, or it does not answer in 10 s; the summary then leaves the row out. */
-    async pullRequest({ sessionId, workspaceId } = {}) {
+     *  view` in its worktree, shared for 2 minutes by every reader with the same `refreshKey` (the chat's
+     *  turn and state), so the summary's re-read when a turn ends asks gh again and shows a PR the turn
+     *  opened. null when the branch has none, gh is missing or signed out, or it does not answer in 10 s;
+     *  the summary then leaves the row out. */
+    async pullRequest({ sessionId, workspaceId, refreshKey } = {}) {
       const entry = paneEntry(sessionId, workspaceId);
       if (!entry) throw new Error("That chat agent's session has ended");
       const root = await rootOf(entry);
       if (typeof runGh !== "function" || typeof root?.path !== "string") return { ok: true, pullRequest: null };
+      const key = typeof refreshKey === "string" ? refreshKey.slice(0, 256) : "";
       const cached = pullRequestReads.get(root.path);
-      if (cached && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
+      if (cached && cached.key === key && now() - cached.at < PULL_REQUEST_CACHE_MS) return { ok: true, pullRequest: await cached.read };
       const read = Promise.resolve()
         .then(() => runGh({ cwd: root.path, args: ["pr", "view", "--json", "number,title,url,state,isDraft"], timeoutMs: PULL_REQUEST_TIMEOUT_MS }))
         .then(pullRequestFrom, () => null);
-      pullRequestReads.set(root.path, { at: now(), read });
+      pullRequestReads.delete(root.path); // re-added last, so the oldest worktree is the one dropped past 64
+      pullRequestReads.set(root.path, { at: now(), key, read });
       if (pullRequestReads.size > 64) pullRequestReads.delete(pullRequestReads.keys().next().value);
       return { ok: true, pullRequest: await read };
     },
@@ -3384,6 +3413,8 @@ function createChatAgentTools({
 }
 
 module.exports = Object.freeze({
+  executableOnPath,
+  runGhCommand,
   moveTarget,
   AGENT_TOOLS,
   DESKTOP_TOOLS,

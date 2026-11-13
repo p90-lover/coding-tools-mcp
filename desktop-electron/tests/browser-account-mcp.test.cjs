@@ -3,6 +3,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
+// main.cjs's write handlers first wait a moment for a late focus event (assertFocusedMainWindowSettled):
+// in a sandbox that is its own focus check.
+const settledFocus = (context) => Object.assign(context, { assertFocusedMainWindowSettled: context.assertFocusedMainWindowSettled
+  ?? (async (...args) => context.assertFocusedMainWindow(...args)) });
 const { createBrowserAccountMcpSync } = require("../electron/browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("../electron/chatgpt-auth-session.cjs");
 
@@ -71,6 +75,53 @@ test("one failure continues to other accounts and does not retry its own recorde
   f.accounts[0].connector.errorAt = ++f.state.time; // a later tool/explicit check reported a new failure
   await f.sync.sync();
   assert.deepEqual(f.connected, ["one", "two", "one"]);
+});
+
+test("a failed setup is tried again later, longer after each failure; one only the person can clear waits an hour", async () => {
+  // Live 2026-11-13: one failure ("ChatGPT verification is required…", on a signed-in account) left
+  // that account's automatic setup stopped until its sign-in cookie changed, so it never connected.
+  const f = fixture();
+  f.accounts.splice(1);
+  let code = "creation_failed";
+  f.deps.connect = async id => {
+    f.connected.push(id);
+    if (code) {
+      f.accounts[0].connector = { errorAt: f.state.time };
+      throw Object.assign(new Error("ChatGPT did not confirm the selected workspace."), { code });
+    }
+    return { connected: true };
+  };
+  const at = minutes => { f.state.time += minutes * 60_000; return f.sync.sync(); };
+  await f.sync.sync();
+  assert.equal(f.warnings.at(-1).code, "creation_failed", "the warning says which kind of failure");
+  await at(9);
+  assert.equal(f.connected.length, 1, "not at once");
+  await at(1);
+  assert.equal(f.connected.length, 2, "10 minutes after the first failure");
+  await at(19);
+  assert.equal(f.connected.length, 2);
+  await at(1);
+  assert.equal(f.connected.length, 3, "20 after the second");
+  for (const minutes of [40, 60, 60]) await at(minutes);
+  assert.equal(f.connected.length, 6, "then 40, and never more than an hour");
+  code = null;
+  await at(60);
+  assert.equal(f.connected.length, 7, "it connects");
+  await at(600);
+  assert.equal(f.connected.length, 7, "a connected account waits for new sign-in cookies");
+
+  const person = fixture();
+  person.accounts.splice(1);
+  person.deps.connect = async id => {
+    person.connected.push(id);
+    person.accounts[0].connector = { errorAt: person.state.time };
+    throw Object.assign(new Error("Sign in to this account in the Browser tab before connecting MCP."), { code: "verification_required" });
+  };
+  await person.sync.sync();
+  person.state.time += 59 * 60_000; await person.sync.sync();
+  assert.equal(person.connected.length, 1, "a sign-in the person must do is not retried every 10 minutes");
+  person.state.time += 60_000; await person.sync.sync();
+  assert.equal(person.connected.length, 2, "but an hour later it looks again");
 });
 
 test("a setup that gave way to an account switch runs again, though the switch is already over", async () => {
@@ -184,7 +235,7 @@ test("main's account Connect holds the automatic sync, waits for the browser, an
     connectAccountMcp: async id => { order.push(`connect ${id}`); if (id === "bad") throw new Error("busy"); return { connected: true }; },
     handle: (channel, fn) => { assert.equal(channel, "launcher:mcp-create-connector"); handler = fn; },
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   assert.deepEqual(await handler({}, "one"), { connected: true });
   assert.deepEqual(order, ["focus", "hold", "wait 60000", "connect one", "release"]);
   order.length = 0;
@@ -359,7 +410,7 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
     connectAccountMcp: async (id, current) => { mode = "MCP connector creation"; current(); connections.push(id); mode = null; return { connected: true }; },
     setInterval: fn => { callbacks.timer = fn; return { unref() {} }; }, clearInterval() {},
   };
-  vm.runInNewContext(source.slice(start, end), context);
+  vm.runInNewContext(source.slice(start, end), settledFocus(context));
   await context.automaticAccountMcp.sync();
   assert.equal(coreReads, 0, "no background reads or setup before genuine app focus");
   focused = true;
@@ -398,7 +449,7 @@ test("launcher transport pins owned session reads to the bound proxy and keeps n
       session: { fromPartition: partition => ({ partition }) }, electronNet: {},
       fetchNativeWithProxyAuth: async options => { requests.push(options); return { status: 200 }; },
     };
-    vm.runInNewContext(source.slice(start, end), context);
+    vm.runInNewContext(source.slice(start, end), settledFocus(context));
     await context.fetchThroughLauncherNetwork(mode === "native" ? "https://github.com/update" : "https://chatgpt.com/api/auth/session", { method: "GET" },
       mode === "native" ? undefined : { partition: "persist:selected", useSessionCookies: true });
     assert.equal(requests.length, 1);
