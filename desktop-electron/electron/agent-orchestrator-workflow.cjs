@@ -2166,7 +2166,31 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     releaseColdStartOf(session);
     logger?.info?.("ao.launch_stalled", { waitedSeconds: Math.round((now() - launchedAt) / 1000), agent: externalAgent(latest.node),
       stage: drainStalled ? "queue_drain" : "start", ...(upAt !== undefined ? { sinceControllerSeconds: Math.round((now() - upAt) / 1000) } : {}) });
+    handBackSteers(workspaceId, runId, session);
     return true;
+  }
+  /**
+   * Steers a start that was just ended had taken. Its agent never took its first message, so it read
+   * none of them, and the retry starts a fresh agent with the opening prompt only. Each goes back to
+   * the front of its chat's queue, still a steer: it is steered into the retried agent once that is
+   * up, or sent as the next turn if the chat settles first. Before, it stayed "delivered" to the run,
+   * and the retried turn's finish counted it as read (the user, 2026-11-12: "it happen when a agent
+   * is failed to start, but later its started by auto recovery and the chat queued message wont go
+   * to it").
+   */
+  function handBackSteers(workspaceId, runId, session) {
+    const steers = chatQueue.deliveredTo(workspaceId, runId).filter(steer => steer.session === session);
+    for (const taskId of new Set(steers.map(steer => steer.taskId))) {
+      const mine = steers.filter(steer => steer.taskId === taskId);
+      chatQueue.forgetDelivered(workspaceId, taskId, mine.map(steer => steer.id));
+      // Added at the front one by one, last first, so they keep the order they were typed in.
+      for (const steer of [...mine].reverse()) {
+        chatQueue.add(workspaceId, taskId, { ...(steer.goal ? { what: "Goal", message: steer.goal, goal: steer.goal } : { what: "Message", message: steer.message }),
+          steer: true, ...(steer.selection ? { selection: steer.selection } : {}) }, { front: true });
+      }
+      logger?.info?.("ao.chat_queue.steer_unread", { workspaceId, taskId, count: mine.length, outcome: "launch_stalled" });
+      armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[0], true);
+    }
   }
 
   // AO marks a session needs_input as a permission request comes in, about 2 s before the request
@@ -6617,7 +6641,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Kept until the turn shows the agent read it: a turn that dies first (its agent never answered,
     // or never really started) hands it back to the chat's queue as the next turn (queueAfterRun).
     // Before, such a steer was simply gone.
-    try { chatQueue.delivered(id, task, { message: text, runId: run.id, ...(objective ? { goal: objective } : {}) }); } catch { /* best effort */ }
+    try {
+      chatQueue.delivered(id, task, { message: text, runId: run.id, session: card.receipt?.thread_id, ...(objective ? { goal: objective } : {}) });
+    } catch { /* best effort */ }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
     // `messages`: how many messages the chat had when the steer went in; it belongs under the last.
     const note = (messages) => withBoardRetry(async () => {
@@ -8254,6 +8280,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // After a few failures it waits for the next settled turn or the person's Send now.
         if (failures < QUEUE_SEND_TRIES) armQueue(workspaceId, taskId, QUEUE_RETRY_MS * Math.max(1, failures));
       }
+    } catch (error) {
+      // A look at the chat that failed (AO restarting, a read the busy disk held past its timeout)
+      // left nothing to send the queue: it waited for the window's next read or the chat's next
+      // settle, and a minimized window reads nothing. It looks again in a minute, unless something
+      // already will.
+      if (!wakeupsDisposed && !queueTimers.has(key)) armQueue(workspaceId, taskId, QUEUE_RETRY_MS, steer);
+      throw error;
     } finally { draining.delete(key); }
   }
   /** The timelines of a run's agent cards, for whether a steer was read; null when none can be read. */

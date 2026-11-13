@@ -143,9 +143,13 @@ function createChatQueueStore({ file = null, now = Date.now, logger = null } = {
       save(workspaceId, taskId, { items: next });
       return { ...next.find(entry => entry.id === id) };
     },
-    /** A steer handed to run `runId`'s turn: kept until that turn shows whether it was read. */
+    /**
+     * A steer handed to run `runId`'s turn: kept until that turn shows whether it was read. `session`
+     * is the agent's AO session that took it, so a start the app ended can hand back its own steers.
+     */
     delivered(workspaceId, taskId, steer) {
       const entry = { id: makeId(), message: text(steer.message, MESSAGE_LIMIT), runId: text(steer.runId, 80), at: now(),
+        ...(steer.session ? { session: text(steer.session, 128) } : {}),
         ...(steer.goal ? { goal: text(steer.goal, MESSAGE_LIMIT) } : {}),
         ...(steer.selection ? { selection: steer.selection } : {}) };
       save(workspaceId, taskId, { delivered: [...delivered(workspaceId, taskId), entry].slice(-DELIVERED_LIMIT) });
