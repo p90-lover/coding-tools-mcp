@@ -3026,7 +3026,11 @@ function registerIpc({ logger, stateStore }) {
     }
     await routeIdleAccountPartition(partition, logger);
     assertCurrent();
-    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true });
+    const context = await inspectChatGptAccount({ BrowserWindow, partition, assertCurrent, metadataOnly: true }).catch(error => {
+      // The card shows the observer's one message; the log keeps which check stopped it (observer.failure()).
+      if (typeof error?.ownershipCause === "string") logger.warn("browser_accounts.inspect_failed", { ownershipCause: error.ownershipCause });
+      throw error;
+    });
     assertCurrent();
     recordBrowserWorkspaceContext(partition, context);
     return browserAccountsStatus();

@@ -164,6 +164,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
   const requests = new Map(), organizations = new Map(), latest = new Map();
   let attached = false, disposed = false, user = null, organizationId = null, activeAccountId = null;
   let selectionVersion = 0, platformSelectionVersion = 0, platformIdentityVersion = 0, metadataVersion = 0, sequence = 0, error = null;
+  // Which check set `error`, as "<request kind>:<check>". The message is the same for every check, so
+  // a Connect and an account check that failed with it every few hours (2026-11-13) could not say
+  // whether it was a bound, a dropped request, a page that was not JSON (a Cloudflare check) or a
+  // list without the account it is for. Only fixed words and a sanitized mime type or network error.
+  let errorCause = null;
+  const causeWord = (value) => String(value ?? "").toLowerCase().replace(/[^a-z0-9_.+/-]/g, "").slice(0, 60) || "none";
   let navigationRequest = null, navigationAccountId = null, navigationVersion = 0;
   const header = (headers, wanted) => {
     const key = Object.keys(headers || {}).find(name => name.toLowerCase() === wanted);
@@ -171,10 +177,11 @@ async function observeMcpSetupContext(contents, tunnelId) {
   };
   const scope = (values, pattern) => Array.isArray(values) && values.length <= 1024
     && values.every(id => typeof id === "string" && pattern.test(id)) ? [...new Set(values)] : null;
-  const failed = (fact, status = null) => {
+  const failed = (fact, status = null, cause = "unavailable") => {
     if (disposed) return;
     error = status === null ? "MCP ownership metadata is unavailable or exceeded its bound."
       : `MCP ownership metadata request was denied or unavailable (HTTP ${status}).`;
+    errorCause = `${fact.kind}:${status === null ? cause : `http_${status}`}`;
     metadataVersion++;
     if (fact.kind === "chatgpt") { activeAccountId = null; selectionVersion++; }
     else if (fact.kind === "login") user = null;
@@ -184,7 +191,7 @@ async function observeMcpSetupContext(contents, tunnelId) {
   const onDetach = () => { if (!disposed) {
     attached = false; user = null; organizations.clear(); platformIdentityVersion++; metadataVersion++;
     if (organizationId !== null) platformSelectionVersion++;
-    organizationId = null; error = "MCP metadata inspection disconnected.";
+    organizationId = null; error = "MCP metadata inspection disconnected."; errorCause = "inspection:detached";
   } };
   const onMessage = (_event, method, params) => {
     if (disposed || !params || typeof params.requestId !== "string") return;
@@ -232,7 +239,7 @@ async function observeMcpSetupContext(contents, tunnelId) {
       }
       fact.identityVersion = platformIdentityVersion;
       if (requests.size >= 128 || (fact.org && organizations.size >= 16 && !organizations.has(fact.org))
-        || (latest.size >= 64 && !latest.has(fact.key))) { failed(fact); return; }
+        || (latest.size >= 64 && !latest.has(fact.key))) { failed(fact, null, "bound"); return; }
       fact.sequence = ++sequence;
       latest.set(fact.key, fact.sequence);
       // Invalidate captured proof as soon as a different context is requested, before its response.
@@ -270,20 +277,23 @@ async function observeMcpSetupContext(contents, tunnelId) {
       // no answer either way, so nothing is confirmed and nothing failed. Sending it already cleared
       // any different context it asked for, so only a later answered request can confirm that.
       if (params.canceled === true) return;
-      failed(fact); return;
+      failed(fact, null, `load_failed:${causeWord(params.errorText)}`); return;
     }
     if (method === "Network.responseReceived") {
       let url;
-      try { url = new URL(params.response?.url); } catch { requests.delete(id); failed(fact); return; }
+      try { url = new URL(params.response?.url); } catch { requests.delete(id); failed(fact, null, "bad_url"); return; }
       const status = params.response.status;
-      if (url.origin !== fact.origin || url.pathname !== fact.path || !Number.isInteger(status)
-        || !String(params.response.mimeType || "").toLowerCase().includes("application/json")) {
-        requests.delete(id); failed(fact); return;
+      const mimeType = String(params.response.mimeType || "").toLowerCase();
+      if (url.origin !== fact.origin || url.pathname !== fact.path || !Number.isInteger(status) || !mimeType.includes("application/json")) {
+        requests.delete(id);
+        failed(fact, null, url.origin !== fact.origin || url.pathname !== fact.path ? "redirected"
+          : !Number.isInteger(status) ? "no_status" : `not_json:${causeWord(mimeType)}`);
+        return;
       }
       if (status < 200 || status >= 300) { requests.delete(id); failed(fact, status); return; }
       if (fact.kind === "chatgpt") {
         requests.delete(id);
-        if (!fact.account) { failed(fact); return; }
+        if (!fact.account) { failed(fact, null, "no_account"); return; }
         if (activeAccountId !== fact.account) { activeAccountId = fact.account; selectionVersion++; }
       } else fact.responseOk = true;
       return;
@@ -291,7 +301,10 @@ async function observeMcpSetupContext(contents, tunnelId) {
     if (method !== "Network.loadingFinished") return;
     requests.delete(id);
     if (!fact.responseOk || (typeof params.encodedDataLength === "number" && params.encodedDataLength > limit)
-      || (fact.kind !== "login" && !fact.org)) { failed(fact); return; }
+      || (fact.kind !== "login" && !fact.org)) {
+      failed(fact, null, !fact.responseOk ? "no_response" : fact.kind !== "login" && !fact.org ? "no_org" : "too_large");
+      return;
+    }
     void client.sendCommand("Network.getResponseBody", { requestId: id }).then(result => {
       if (disposed || latest.get(fact.key) !== fact.sequence || fact.identityVersion !== platformIdentityVersion) return;
       if (typeof result?.body !== "string" || result.body.length > (result.base64Encoded ? Math.ceil(limit / 3) * 4 : limit)) throw unavailable();
@@ -320,7 +333,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
         organizations.set(fact.org, data);
       }
       metadataVersion++;
-    }).catch(() => { if (latest.get(fact.key) === fact.sequence && fact.identityVersion === platformIdentityVersion) failed(fact); });
+    }).catch(problem => {
+      if (latest.get(fact.key) !== fact.sequence || fact.identityVersion !== platformIdentityVersion) return;
+      // Not JSON, JSON of the wrong shape or size, or a body Chromium no longer holds.
+      failed(fact, null, problem instanceof SyntaxError ? "body_parse"
+        : problem?.message === unavailable().message ? "body_shape" : "body_read");
+    });
   };
   const dispose = () => {
     if (disposed) return;
@@ -339,9 +357,12 @@ async function observeMcpSetupContext(contents, tunnelId) {
   } catch { dispose(); throw unavailable(); }
   return {
     snapshot: () => structuredClone({ activeAccountId, selectionVersion, navigationAccountId, navigationVersion,
-      platformSelectionVersion, platformIdentityVersion, metadataVersion, error,
+      platformSelectionVersion, platformIdentityVersion, metadataVersion, error, errorCause,
       platform: { user, organizationId, permissions: organizations.get(organizationId)?.permissions ?? null,
         tunnels: organizations.get(organizationId)?.tunnels ?? null } }),
+    // The failure as an error, or null: its message stays the words the connector command maps
+    // (mcpConnectorCommandFailure), and `ownershipCause` says which check stopped it, for the log.
+    failure: () => error === null ? null : Object.assign(new Error(error), { ownershipCause: errorCause }),
     dispose,
   };
 }
@@ -958,7 +979,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
             throw Object.assign(new Error("The browser navigation changed during MCP context inspection."), { navigatedTo });
           }
           const snapshot = observer.snapshot();
-          if (snapshot.error) throw new Error(snapshot.error);
+          if (snapshot.error) throw observer.failure();
           if (ready(snapshot)) return snapshot;
           await new Promise(resolve => setTimeout(resolve, 50));
         }
