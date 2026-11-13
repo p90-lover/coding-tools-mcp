@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
-import type { ReactNode } from "react";
+import { CheckGlyph, FolderGlyph, GlobeGlyph, HandGlyph, ShieldAlertGlyph, ShieldCodeGlyph, TerminalGlyph, WarningGlyph } from "./AgentOrchestratorPermissionGlyphs";
+import type { KeyboardEvent, ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 import { NATIVE_HARNESS, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
 
@@ -59,9 +61,57 @@ export function selectPermissions(team: AoTeam, ids: string[], selection: Permis
 // Codex's three approval modes, in its order, glyphs and wording; Full access is drawn as a warning.
 export const PERMISSION_MODES = [
   { label: "Ask for approval", detail: "Always ask to edit external files and use the internet", icon: "hand", profile: ":workspace", policy: "on-request", reviewer: "user", danger: false },
-  { label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe", icon: "shieldPrompt", profile: ":workspace", policy: "on-request", reviewer: "auto_review", danger: false },
-  { label: "Full access", detail: "Unrestricted access to the internet and any file on your computer", icon: "warning", profile: ":danger-full-access", policy: "never", reviewer: "user", danger: true },
+  { label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe", icon: "shieldCode", profile: ":workspace", policy: "on-request", reviewer: "auto_review", danger: false },
+  { label: "Full access", detail: "Unrestricted access to the internet and any file on your computer", icon: "shieldAlert", profile: ":danger-full-access", policy: "never", reviewer: "user", danger: true },
 ] as const;
+const MODE_GLYPHS = { hand: HandGlyph, shieldCode: ShieldCodeGlyph, shieldAlert: ShieldAlertGlyph };
+
+// Codex's "Turn on Full Access?" dialog: what the agents can then do, three capability rows, Cancel and Confirm.
+const FULL_ACCESS_CAPABILITIES = [
+  { glyph: FolderGlyph, title: "Files and folders", detail: "Read, create, modify, upload, or delete files anywhere on this computer" },
+  { glyph: TerminalGlyph, title: "Terminal commands", detail: "Run commands, install software, and change system settings" },
+  { glyph: GlobeGlyph, title: "Internet and connected apps", detail: "Access websites, send data, and use enabled plugins" },
+] as const;
+
+/**
+ * Asks before Full access is armed. It covers the whole window like Codex's, so it renders into
+ * document.body, carrying the chat's light or dark theme with it. Escape and a click outside cancel.
+ */
+export function FullAccessDialog({ dark, onCancel, onConfirm }: { dark: boolean; onCancel: () => void; onConfirm: () => void }) {
+  const cancel = useRef<HTMLButtonElement>(null);
+  useEffect(() => { cancel.current?.focus({ preventScroll: true }); }, []);
+  // React events bubble out of a portal to the composer that owns it; the dialog keeps its own.
+  const onKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    event.stopPropagation();
+    if (event.key === "Escape") { event.preventDefault(); onCancel(); return; }
+    if (event.key !== "Tab") return;
+    // Keep focus on the two buttons while the dialog is up.
+    const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button"));
+    const first = buttons[0], last = buttons[buttons.length - 1], active = document.activeElement;
+    if (event.shiftKey ? active === first : active === last) { event.preventDefault(); (event.shiftKey ? last : first)?.focus(); }
+  };
+  const dialog = <div className="cx-fullaccess" data-theme={dark ? "dark" : "light"} onKeyDown={onKeyDown} onClick={event => event.stopPropagation()}
+    onPointerDown={event => { event.stopPropagation(); if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="cx-fullaccess-panel" role="dialog" aria-modal="true" aria-labelledby="cx-fullaccess-title" aria-describedby="cx-fullaccess-description">
+      <form onSubmit={event => { event.preventDefault(); onConfirm(); }}>
+        <div className="cx-fullaccess-section"><h2 id="cx-fullaccess-title"><WarningGlyph />Turn on Full Access?</h2></div>
+        <div className="cx-fullaccess-section"><p id="cx-fullaccess-description">These agents will be able to run commands, use the internet, and create and edit files anywhere on this computer without your permission. This includes but is not limited to:</p></div>
+        <div className="cx-fullaccess-section"><div className="cx-fullaccess-capabilities">
+          {FULL_ACCESS_CAPABILITIES.map(({ glyph: Glyph, title, detail }) => <div key={title} className="cx-fullaccess-capability">
+            <Glyph />
+            <div><strong>{title}</strong><small>{detail}</small></div>
+          </div>)}
+        </div></div>
+        <div className="cx-fullaccess-section"><p>This comes with risks like loss or exposure of sensitive data and prompt injection. You can turn this off. Project MCP access stays the same.</p></div>
+        <div className="cx-fullaccess-section"><div className="cx-fullaccess-actions">
+          <button ref={cancel} type="button" className="cx-fullaccess-cancel" onClick={onCancel}>Cancel</button>
+          <button type="submit" className="cx-fullaccess-confirm"><WarningGlyph />Confirm</button>
+        </div></div>
+      </form>
+    </section>
+  </div>;
+  return typeof document !== "undefined" && document.body ? createPortal(dialog, document.body) : dialog;
+}
 
 /**
  * The permission choices a role may take before it has connected, when there is no runtime yet
@@ -69,7 +119,7 @@ export const PERMISSION_MODES = [
  * refused later if that route's permissions don't match what the runtime grants.
  */
 export function draftPermissionCapability(): PermissionCapability {
-  // Every Codex mode, Full access included: apply() still asks before arming it.
+  // Every Codex mode, Full access included: choosing it still asks in FullAccessDialog first.
   const unique = (values: string[]) => [...new Set(values)];
   return { supported: true,
     profiles: unique(PERMISSION_MODES.map(mode => mode.profile)).map(id => ({ id, allowed: true })),
@@ -89,10 +139,12 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [failed, setFailed] = useState(false);
+  /** Full access waiting on the dialog, and whether the chat it opened from is dark. */
+  const [confirming, setConfirming] = useState<{ selection: PermissionSelection; dark: boolean } | null>(null);
   const nodes = team?.nodes ?? [];
   const supported = nodes.filter(node => metadata[node.id]?.supported);
   const key = nodes.map(node => node.id).join("|");
-  useEffect(() => { popup.setOpen(false); setMetadata({}); setNotice(""); }, [mission?.id, team?.id]);
+  useEffect(() => { popup.setOpen(false); setMetadata({}); setNotice(""); setConfirming(null); }, [mission?.id, team?.id]);
   useEffect(() => {
     if (!popup.open) return;
     let live = true;
@@ -122,15 +174,27 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     || (!nodes.length ? "Choose a model or saved team first." : !nodes.every(node => metadata[node.id] !== undefined) ? "Checking permissions…" : !supported.length ? "This agent can't change permissions. Settings are unchanged." : "This agent or your policy doesn't allow this.");
   const apply = async (selection: PermissionSelection) => {
     if (!team || !canSelect(selection) || busy || saving) return;
-    if (selection.profile === ":danger-full-access" && !window.confirm("Full access turns off the sandbox for these agents. Continue? Project MCP access stays the same.")) return;
     setSaving(true); setNotice(""); setFailed(false);
     try {
       const ids = supported.map(node => node.id);
       setNotice(await save(selectPermissions(team, ids, selection), mission?.revision, ids, selection));
-      popup.close();
     } catch (cause) { setFailed(true); setNotice(cause instanceof Error ? cause.message : String(cause)); }
     finally { setSaving(false); }
   };
+  // As in Codex, picking a row closes the menu at once; Full access first asks in its own dialog.
+  const choose = (selection: PermissionSelection) => {
+    if (!team || !canSelect(selection) || busy || saving) return;
+    popup.close();
+    if (selection.profile !== ":danger-full-access") { void apply(selection); return; }
+    setConfirming({ selection, dark: popup.root.current?.closest("[data-theme]")?.getAttribute("data-theme") === "dark" });
+  };
+  const settle = (confirmed: boolean) => {
+    const selection = confirming?.selection;
+    setConfirming(null);
+    popup.trigger.current?.focus({ preventScroll: true });
+    if (confirmed && selection) void apply(selection);
+  };
+  const ChipGlyph = active ? MODE_GLYPHS[active.icon] : null;
   // The chip is its level's icon (each level has its own), its name in the label and tooltip; Full
   // access is tinted, so the risky level still stands out without its words.
   return <div className="ao-permissions ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
@@ -138,18 +202,22 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
       aria-controls="ao-permissions-panel" aria-label={`Permissions: ${active?.label || "Custom"}`} data-danger={active?.danger ? "" : undefined}
       disabled={busy || saving} title={(active?.label || "Custom") + "\n" + permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
-      <Icon name={active?.icon ?? "shield"} width="16" height="16" />
+      {ChipGlyph ? <ChipGlyph width="16" height="16" /> : <Icon name="shield" width="16" height="16" />}
     </button>
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
-      <header><h3>How should actions be approved?</h3><button type="button" className="ao-popover-close" aria-label="Close permissions" onClick={popup.close}><Icon name="close" width="14" height="14" /></button></header>
-      {PERMISSION_MODES.map(mode => <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
-        className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies from the next turn" : unavailableReason(mode)}
-        onClick={() => void apply({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
-        <span className="ao-permission-symbol"><Icon name={mode.icon} width="17" height="17" /></span>
-        <span><strong>{mode.label}</strong><small>{mode.detail}</small></span>
-        {active?.label === mode.label ? <Icon name="check" width="16" height="16" /> : null}
-      </button>)}
+      <div className="ao-permissions-title">How should actions be approved?</div>
+      {PERMISSION_MODES.map(mode => {
+        const Glyph = MODE_GLYPHS[mode.icon];
+        return <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
+          className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies from the next turn" : unavailableReason(mode)}
+          onClick={() => choose({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
+          <span className="ao-permission-symbol"><Glyph /></span>
+          <span className="ao-permission-text"><strong>{mode.label}</strong><small>{mode.detail}</small></span>
+          {active?.label === mode.label ? <CheckGlyph className="ao-permission-check" /> : null}
+        </button>;
+      })}
     </section> : null}
+    {confirming ? <FullAccessDialog dark={confirming.dark} onCancel={() => settle(false)} onConfirm={() => settle(true)} /> : null}
     {notice ? <span className="ao-permission-notice" role={failed ? "alert" : "status"}
       style={failed ? undefined : { position: "absolute", width: 1, height: 1, minWidth: 0, padding: 0, margin: -1, overflow: "hidden", clipPath: "inset(50%)", whiteSpace: "nowrap", border: 0 }}>{notice}</span> : null}
   </div>;

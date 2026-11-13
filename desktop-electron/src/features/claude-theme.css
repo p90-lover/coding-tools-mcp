@@ -343,18 +343,17 @@
 .ao-workflow .cx-chat .cx-plan-chip { background: var(--claude-accent-soft); color: var(--claude-accent-hover); }
 .ao-workflow .cx-chat .cx-to-bottom { border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: none; }
 
-/* Composer popovers (model, permissions) render inside the chat; give them the warm surface. */
-.ao-workflow .cx-chat .ao-composer-popover, .ao-workflow .cx-chat .ao-permissions-panel, .ao-workflow .cx-chat .ao-permission-notice {
+/* Composer popovers (model, context) render inside the chat; give them the warm surface. The permission
+   menu keeps Codex's own look (agent-orchestrator.css), as asked for 2026-11-13. */
+.ao-workflow .cx-chat .ao-composer-popover:not(.ao-permissions-panel), .ao-workflow .cx-chat .ao-permission-notice {
   border-color: var(--claude-line); background: var(--claude-raised); color: var(--claude-text); box-shadow: var(--claude-shadow); }
 .ao-workflow .cx-chat .ao-composer-popover:is(.ao-harness-popup, .ao-model-popup) {
   background: color-mix(in srgb, var(--claude-raised) 90%, transparent); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
 .ao-workflow .cx-chat .ao-composer-popover.ao-context-popup {
   background: color-mix(in srgb, var(--claude-raised) 68%, transparent); backdrop-filter: blur(16px) saturate(1.3); -webkit-backdrop-filter: blur(16px) saturate(1.3); }
 .ao-workflow .cx-chat .ao-context-popup .ao-context-custom input { background: transparent; }
-.ao-workflow .cx-chat .ao-composer-popover label, .ao-workflow .cx-chat .ao-permission-option, .ao-workflow .cx-chat .ao-permission-symbol,
-.ao-workflow .cx-chat .ao-permission-option > svg:last-child, .ao-workflow .cx-chat .ao-picker-option { color: var(--claude-text); }
+.ao-workflow .cx-chat .ao-composer-popover label, .ao-workflow .cx-chat .ao-picker-option { color: var(--claude-text); }
 .ao-workflow .cx-chat .ao-composer-popover .ao-hint, .ao-workflow .cx-chat .ao-popup-muted, .ao-workflow .cx-chat .ao-picker-option small,
-.ao-workflow .cx-chat .ao-permission-option small, .ao-workflow .cx-chat .ao-permissions-panel > header h3,
 .ao-workflow .cx-chat .ao-popover-close, .ao-workflow .cx-chat .ao-model-group > h4, .ao-workflow .cx-chat .ao-chip-provider { color: var(--claude-text-2); }
 .ao-workflow .cx-chat .ao-picker-option { background: transparent; }
 .ao-workflow .cx-chat .ao-picker-option:hover { background: var(--cx-hover); }
@@ -362,7 +361,6 @@
 .ao-workflow .cx-chat .ao-option-radio { border-color: var(--claude-text-2); }
 .ao-workflow .cx-chat .ao-picker-option[aria-checked="true"] .ao-option-radio { border-color: var(--claude-accent); background: var(--claude-accent);
   box-shadow: inset 0 0 0 3px var(--claude-raised); }
-.ao-workflow .cx-chat .ao-permission-option:hover:not(:disabled), .ao-workflow .cx-chat .ao-permission-option:focus-visible { background: var(--cx-hover); }
 .ao-workflow .cx-chat .ao-composer-popover input, .ao-workflow .cx-chat .ao-composer-popover select { border-color: var(--claude-line); background: var(--claude-bg); color: var(--claude-text); }
 
 /* ---------- Side panels inside the chat (cards, workbench, details) ---------- */

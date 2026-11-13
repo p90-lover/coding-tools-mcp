@@ -3504,8 +3504,8 @@ function permissionSaveFixture({ mode = "single", gateAt = "apply_team", cancel 
       let timer;
       try { await Promise.race([entered.promise, new Promise((_, reject) => { timer = setTimeout(() => reject(Error("Save did not reach " + gateAt)), 5000); })]); }
       finally { clearTimeout(timer); }
-      const close = f.walk(widgetTree()).find(item => item.props?.["aria-label"] === "Close permissions");
-      assert.equal(close.props.disabled, undefined); close.props.onClick();
+      // As in Codex, picking a row closed the menu at once; the save carries on behind it.
+      assert.equal(f.walk(widgetTree()).some(item => item.props?.role === "menuitemradio"), false);
     },
     select(taskId, commitNow = true) {
       f.walk(f.render()).find(item => item.props?.actions?.select).props.actions.select(taskId);
