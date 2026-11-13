@@ -586,3 +586,15 @@ test("Clawd reacts to you: waves, comes over, dances when petted, hops when you 
   assert.match(petSource, /if \(mood === "error"\) \{ play\("sad"\);/);
   assert.match(petPart("goHome", "goOut"), /if \(nap && !still\) \{\s*play\("yawn"\);/, "bedtime starts with a yawn");
 });
+
+test("finding a clear spot asks only for the topmost element, and nothing is measured while the window is hidden", () => {
+  // Live 2026-11-13: each look for a spot hit-tested ~100 points with elementsFromPoint, 126-144 ms on
+  // a 50k-element chat (the topmost element alone: 20 ms), every few seconds, hidden window or not.
+  const blocked = petSource.slice(petSource.indexOf("const blockedOn ="), petSource.indexOf("const spotOn ="));
+  assert.match(blocked, /const first = document\.elementFromPoint\(x, y\);\s*return first && !first\.closest\(PET\) \? first : document\.elementsFromPoint\(x, y\)\.find/,
+    "the whole stack only where the pet itself is on top");
+  assert.equal((blocked.match(/elementsFromPoint/g) || []).length, 1, "and nowhere else");
+  const wander = petSource.slice(petSource.indexOf("const wander ="), petSource.indexOf("const runToSend ="));
+  assert.match(wander, /const away = document\.hidden \|\| document\.documentElement\.hasAttribute\("data-window-away"\);\s*if \(away \|\|/,
+    "hidden or minimized, it waits instead of looking for a spot");
+});

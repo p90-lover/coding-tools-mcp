@@ -157,7 +157,7 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
       const end = Date.now() + 12_000;
       while (Date.now() < end) {
         check(); const snapshot = observer.snapshot();
-        if (snapshot.error) throw new Error(snapshot.error);
+        if (snapshot.error) throw observer.failure();
         // Normal account navigation can identify a subscription without granting MCP authority.
         const accountId = metadataOnly ? snapshot.navigationAccountId || snapshot.activeAccountId : snapshot.activeAccountId;
         if (accountId && (!id || accountId === id)) return { ...snapshot, accountId };

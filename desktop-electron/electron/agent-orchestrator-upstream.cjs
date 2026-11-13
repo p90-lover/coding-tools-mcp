@@ -20,6 +20,7 @@ const { windowsChildEnvironment, systemEnvironment } = require("./chat-sandbox.c
 const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const { spawnOffThread, fetchOffThread, probeTcpOffThread } = require("./off-thread-run.cjs");
 const { redactionLabel } = require("./chat-redaction.cjs");
+const { createOrchestratorHandler } = require("./orchestrator-handler.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -1180,9 +1181,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    * The person's own MCP servers (Plugins > MCPs) for one chat session, after the `taken` ones the
    * app adds itself. Never fails a launch or a resume: without them the agent starts without them.
    */
-  function userServers(agent, taken = []) {
+  async function userServers(agent, taken = []) {
     if (!userMcpServers || typeof agent !== "string") return [];
-    try { return userMcpServers.forSession(agent, taken); } catch (cause) {
+    try { return await userMcpServers.forSession(agent, taken); } catch (cause) {
       logger.warn?.("ao.user_mcp_servers_unavailable", { agent, message: String(cause?.message || cause).slice(0, 200) });
       return [];
     }
@@ -1422,7 +1423,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         let created;
         try {
           const servers = [...(tools?.servers ?? []), ...(files ? [files] : [])];
-          created = await launchSession(mode, mode === "chat" ? [...servers, ...userServers(agent, servers)] : []);
+          created = await launchSession(mode, mode === "chat" ? [...servers, ...await userServers(agent, servers)] : []);
         } catch (error) {
           tools?.release();
           throw error;
@@ -1748,7 +1749,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           const renewed = await Promise.resolve().then(() => agentTools?.renew?.(key, { unifiedFiles: Boolean(files) })).catch(() => null);
           // AO keeps a session's servers only while its daemon runs, so the person's own go in again too.
           const servers = [...(renewed?.servers ?? []), ...(files ? [files] : [])];
-          servers.push(...userServers(session.harness, servers));
+          servers.push(...await userServers(session.harness, servers));
           let body = servers.length ? { mcpServers: servers } : {};
           // AO answers only once the agent is up. On a busy disk that took 150-180 s (seen live
           // 2026-10-27), and two attempts at the 180 s POST default kept a message "starting" for
@@ -2827,7 +2828,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return fs.existsSync(path.join(folder, process.platform === "win32" ? "ao.cmd" : "ao")) ? folder : null;
   }
 
-  return { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder };
+  return createOrchestratorHandler({ runtime: { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder } });
 }
 
 /**

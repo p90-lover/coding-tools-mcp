@@ -5,7 +5,58 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { MAX_SESSION_SERVERS, createChatMcpServers, readGithubCliToken, withGithubCliToken } = require("../electron/chat-mcp-servers.cjs");
+const { MAX_SESSION_SERVERS, createChatMcpServers, mcpLaunchEnvironment, readGithubCliToken, withGithubCliToken } = require("../electron/chat-mcp-servers.cjs");
+
+test("MCP cold starts have a bounded connection window and a shared app-drive package cache without replacing custom settings", () => {
+  const root = path.resolve(__dirname, "../../aiTemp/mcp-test-data");
+  const source = { PATH: "unchanged" };
+  assert.deepEqual(mcpLaunchEnvironment(root, source), {
+    MCP_TIMEOUT: "120000", MCP_CONNECT_TIMEOUT_MS: "120000",
+    npm_config_cache: path.join(root, "cache", "mcp-npm"), npm_config_logs_max: "0",
+  });
+  assert.deepEqual(source, { PATH: "unchanged" });
+  assert.deepEqual(mcpLaunchEnvironment(root, {
+    MCP_TIMEOUT: "60000", MCP_CONNECT_TIMEOUT_MS: "90000", NPM_CONFIG_CACHE: "G:/custom-cache", NPM_CONFIG_LOGS_MAX: "2",
+  }), {});
+  assert.throws(() => mcpLaunchEnvironment("", {}), /absolute app data directory/);
+  const main = fs.readFileSync(path.resolve(__dirname, "../electron/main.cjs"), "utf8");
+  assert.match(main, /mcpLaunchEnvironment\(app\.getPath\("userData"\)\)/);
+});
+
+test("completed catalog installs launch Node directly, with partial caches and custom npm settings left alone", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ct-mcp-cache-"));
+  const cache = path.join(dir, "npm"), spec = "@modelcontextprotocol/server-sequential-thinking";
+  const slot = require("node:crypto").createHash("sha512").update(spec).digest("hex").slice(0, 16);
+  const folder = path.join(cache, "_npx", slot);
+  const packageRoot = path.join(folder, "node_modules", spec), entry = path.join(packageRoot, "dist", "index.js");
+  fs.mkdirSync(path.dirname(entry), { recursive: true });
+  fs.writeFileSync(entry, "");
+  fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: spec, bin: { "mcp-server-sequential-thinking": "dist/index.js" } }));
+  const filePath = path.join(dir, "servers.json");
+  const servers = createChatMcpServers({ filePath, nodeExecutable: process.execPath, environment: {}, npmCacheRoots: [cache] });
+  t.after(async () => { await servers.saved(); fs.rmSync(dir, { recursive: true, force: true }); });
+  let saved = servers.save({ name: "thinking", command: "cmd", args: ["/c", "npx", "-y", spec], env: { DEBUG: "fixture" } })[0];
+  await servers.preload();
+  assert.equal(servers.forSession("claude-code")[0].command, "cmd", "partial installation cannot be used");
+  fs.writeFileSync(path.join(folder, "package.json"), JSON.stringify({ _npx: { packages: [spec] } }));
+  servers.save(saved); await servers.preload();
+  assert.deepEqual(servers.forSession("claude-code"), [{ name: "thinking", type: "stdio", command: process.execPath, args: [entry], env: { DEBUG: "fixture" } }]);
+  assert.deepEqual(servers.list()[0], saved, "the user's stored command is never rewritten");
+  await servers.saved();
+  const custom = createChatMcpServers({ filePath, nodeExecutable: process.execPath,
+    environment: { NPM_CONFIG_REGISTRY: "https://registry.example.test" }, npmCacheRoots: [cache] });
+  await custom.preload();
+  assert.equal(custom.forSession("claude-code")[0].command, "cmd", "an inherited custom registry is respected too");
+  saved = { ...saved, env: { NPM_CONFIG_REGISTRY: "https://registry.example.test" } };
+  servers.save(saved); await servers.preload();
+  assert.equal(servers.forSession("claude-code")[0].command, "cmd", "a custom registry keeps its own launcher");
+  saved = { ...saved, env: { npm_config_cache: path.join(dir, "different-cache") } };
+  servers.save(saved); await servers.preload();
+  assert.equal(servers.forSession("claude-code")[0].command, "cmd", "an explicit cache is not replaced by another cache");
+  fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ name: spec, bin: "../escape.js" }));
+  saved = { ...saved, env: {} }; servers.save(saved); await servers.preload();
+  assert.equal(servers.forSession("claude-code")[0].command, "cmd", "a package entry cannot escape its own folder");
+});
 
 const HTTP_AGENTS = new Set(["claude-code", "codex", "opencode"]);
 function store() {

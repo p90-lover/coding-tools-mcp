@@ -123,7 +123,9 @@ test("every window click handler waits for a late focus event too, not only chat
   // The reconnect asks again after its long checks (still the person's click when it acts): that one stays plain.
   assert.deepEqual(plain, ["launcher:mcp-tunnel-reconnect"]);
   const settled = main.match(/await assertFocusedMainWindowSettled\(event, true\)/g) ?? [];
-  assert.ok(settled.length >= 70, `the write handlers use the settled check (${settled.length})`);
+  // 73 until #1276 removed the GPT Browser page and its five write handlers (add, switch, open URL,
+  // navigate, remove), each with this check: 68. The plain-check list above is what catches a regression.
+  assert.ok(settled.length >= 68, `the write handlers use the settled check (${settled.length})`);
 });
 
 // 2026-11-12 08:19:05Z: an Approve on an agent's request passed the settled IPC check, then was

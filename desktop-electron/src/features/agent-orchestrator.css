@@ -614,20 +614,79 @@
 .ao-workflow .ao-model-row { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .ao-workflow .ao-model-row > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ao-workflow .ao-chip-provider { color: #7b899e; }
-.ao-workflow .ao-permissions-panel { width: min(390px, calc(100vw - 40px)); padding: 8px 6px 6px; border-radius: 14px; }
-.ao-workflow .ao-permissions-panel > header { display: flex; align-items: center; justify-content: space-between; margin: 0 8px 4px; }
-.ao-workflow .ao-permissions-panel > header h3 { margin: 0; color: #8a8f98; font-size: 12.5px; font-weight: 400; }
-.ao-workflow .ao-permissions-panel .ao-popover-close { width: 22px; height: 22px; color: #8a8f98; }
-.ao-workflow .ao-permission-option { display: flex; align-items: flex-start; width: 100%; gap: 10px; margin: 0; padding: 7px 10px; border: 0; border-radius: 9px; background: transparent; color: #1f2329; text-align: left; cursor: pointer; }
-.ao-workflow .ao-permission-option:hover:not(:disabled), .ao-workflow .ao-permission-option:focus-visible { background: #f3f4f6; outline: none; }
-.ao-workflow .ao-permission-option > svg:last-child { align-self: center; color: #1f2329; }
-.ao-workflow .ao-permission-option > span:nth-child(2) { flex: 1; }
-.ao-workflow .ao-permission-option strong { display: block; font-size: 13px; font-weight: 400; }
-.ao-workflow .ao-permission-option small { display: block; margin-top: 1px; color: #8a8f98; font-size: 11.5px; line-height: 1.4; }
-.ao-workflow .ao-permission-option.is-danger, .ao-workflow .ao-permission-option.is-danger small, .ao-workflow .ao-permission-option.is-danger .ao-permission-symbol { color: #e2571e; }
-.ao-workflow .ao-permission-symbol { display: grid; place-items: center; width: 18px; height: 18px; margin-top: 1px; color: #1f2329; }
-.ao-workflow .ao-permission-option:disabled { opacity: .42; cursor: not-allowed; }
+/* The permission menu is Codex's composer dropdown, measured from Codex's own markup and stylesheet: a
+   frosted card (white or #2d2d2d at 90 %, 0.5 px ring), 4 px gutter, 12 px rows with 11 px descriptions,
+   18 px glyphs at 75 % until hovered, a tick on the chosen row, and Full access in warning orange. */
+.ao-workflow .ao-permissions-panel {
+  --cxp-ink: #1a1c1f; --cxp-muted: rgb(26 28 31 / 49.4%); --cxp-warning: #e25507; --cxp-hover: rgb(26 28 31 / 5.3%);
+  --cxp-surface: rgb(255 255 255 / 90%); --cxp-ring: rgb(26 28 31 / 7.8%);
+  bottom: calc(100% + 2px); width: max-content; max-width: calc(100vw - 16px); padding: 4px; border: 0; border-radius: 20px;
+  background: var(--cxp-surface); color: var(--cxp-ink);
+  box-shadow: 0 0 0 .5px var(--cxp-ring), 0 0 0 .5px var(--cxp-ring), 0 8px 16px -4px rgb(0 0 0 / 12%);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; user-select: none; }
+.ao-workflow[data-theme="dark"] .ao-permissions-panel {
+  --cxp-ink: rgb(223 223 223); --cxp-muted: rgb(255 255 255 / 49.8%); --cxp-warning: #ff8549; --cxp-hover: rgb(255 255 255 / 7.8%);
+  --cxp-surface: rgb(45 45 45 / 90%); --cxp-ring: rgb(255 255 255 / 8.2%); }
+.ao-workflow .ao-permissions-title { display: flex; align-items: center; min-height: 24px; padding: 4px 8px; color: var(--cxp-muted); font-size: 12px; line-height: 16px; }
+.ao-workflow .ao-permission-option { display: flex; align-items: center; width: 100%; gap: 6px; margin: 0; padding: 4px 8px; border: 0; border-radius: 15px;
+  background: transparent; color: var(--cxp-ink); font: inherit; font-size: 12px; line-height: calc(1.25 / .875); text-align: left; cursor: pointer; }
+.ao-workflow .ao-permission-option:hover:not(:disabled), .ao-workflow .ao-permission-option:focus-visible { background: var(--cxp-hover); outline: none; }
+.ao-workflow .ao-permission-symbol { display: inline-flex; flex: none; align-items: center; justify-content: center; width: 16px; height: 16px; }
+.ao-workflow .ao-permission-symbol > svg { flex: none; width: 18px; height: 18px; }
+.ao-workflow .ao-permission-check { flex: none; width: 16px; height: 16px; }
+.ao-workflow .ao-permission-option :is(.ao-permission-symbol > svg, .ao-permission-check) { opacity: .75; }
+.ao-workflow .ao-permission-option:is(:hover, :focus-visible) :is(.ao-permission-symbol > svg, .ao-permission-check) { opacity: 1; }
+.ao-workflow .ao-permission-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.ao-workflow .ao-permission-option strong { font-weight: 400; }
+.ao-workflow .ao-permission-option small { color: var(--cxp-muted); font-size: 11px; line-height: calc(7 / 6); }
+.ao-workflow .ao-permission-option.is-danger :is(strong, small, .ao-permission-symbol, .ao-permission-check) { color: var(--cxp-warning); }
+.ao-workflow .ao-permission-option:disabled { opacity: .5; cursor: default; }
 .ao-workflow .ao-permission-notice { position: absolute; bottom: calc(100% + 4px); left: 0; min-width: 220px; max-width: 360px; padding: 8px 10px; border: 1px solid var(--ao-line); border-radius: 8px; background: #fff; color: #46536b; box-shadow: 0 3px 12px rgb(31 54 86 / 8%); font-size: 11px; z-index: 41; }
+/* Codex's "Turn on Full Access?" dialog (FullAccessDialog), with Codex's measured sizes and colours: a
+   520 px frosted card (25 px corners) over a light scrim, 20 px title, 14 px text, the three
+   capabilities in a tinted box, then pill Cancel and red Confirm. It opens on <body>, outside the chat,
+   so it is not scoped to .ao-workflow; data-theme carries the chat's light or dark. */
+.cx-fullaccess {
+  --cxfa-ink: #1a1c1f; --cxfa-muted: rgb(26 28 31 / 49.4%); --cxfa-surface: rgb(255 255 255 / 90%); --cxfa-ring: rgb(26 28 31 / 7.8%);
+  --cxfa-tint: rgb(26 28 31 / 5%); --cxfa-tint-hover: rgb(26 28 31 / 10%); --cxfa-line: rgb(26 28 31 / 5.5%);
+  --cxfa-red: #e02e2a; --cxfa-focus: #339cff; --cxfa-terminal: #4d4d4d; --cxfa-globe-face: #cdf3ff; --cxfa-globe: #41cef9;
+  position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / 13.3%);
+  color: var(--cxfa-ink); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color-scheme: light; }
+.cx-fullaccess[data-theme="dark"] {
+  --cxfa-ink: rgb(223 223 223); --cxfa-muted: rgb(255 255 255 / 49.8%); --cxfa-surface: rgb(45 45 45 / 90%); --cxfa-ring: rgb(255 255 255 / 8.2%);
+  --cxfa-tint: rgb(223 223 223 / 5%); --cxfa-tint-hover: rgb(223 223 223 / 10%); --cxfa-line: rgb(255 255 255 / 5.8%);
+  --cxfa-red: #ff6764; --cxfa-focus: rgb(131 195 255 / 76%); --cxfa-terminal: #bebebe; --cxfa-globe-face: #2b393e; --cxfa-globe: #43d0fb;
+  color-scheme: dark; }
+.cx-fullaccess-panel { box-sizing: border-box; width: 520px; max-width: 92vw; max-height: calc(100dvh - 32px); overflow-y: auto; border-radius: 25px;
+  background: var(--cxfa-surface); box-shadow: 0 0 0 .5px var(--cxfa-ring), 0 4px 8px -2px rgb(0 0 0 / 10%);
+  backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+.cx-fullaccess form { display: flex; flex-direction: column; margin: 0; padding: 20px; font-size: 14px; line-height: 1.5; }
+.cx-fullaccess-section + .cx-fullaccess-section { padding-top: 12px; }
+.cx-fullaccess h2 { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--cxfa-ink); font-size: 20px; font-weight: 600; line-height: 28px; letter-spacing: normal; }
+.cx-fullaccess h2 > svg { flex: none; width: 18px; height: 18px; }
+.cx-fullaccess p { margin: 0; color: var(--cxfa-muted); text-wrap: pretty; }
+.cx-fullaccess-capabilities { padding: 12px 16px; border-radius: 20px; background: var(--cxfa-tint); }
+.cx-fullaccess-capability { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--cxfa-line); }
+.cx-fullaccess-capability:first-child { padding-top: 0; }
+.cx-fullaccess-capability:last-child { padding-bottom: 0; border-bottom: 0; }
+.cx-fullaccess-capability > svg { flex: none; width: 24px; height: 24px; }
+.cx-fullaccess-capability > div { min-width: 0; }
+.cx-fullaccess-capability strong { display: block; color: var(--cxfa-ink); font-size: 12px; font-weight: 600; line-height: calc(1.25 / .875); }
+.cx-fullaccess-capability small { display: block; color: var(--cxfa-muted); font-size: 11px; line-height: calc(1 / .75); }
+.cx-fullaccess-terminal { fill: var(--cxfa-terminal); }
+.cx-fullaccess-globe-face { fill: var(--cxfa-globe-face); }
+.cx-fullaccess-globe { fill: var(--cxfa-globe); }
+.cx-fullaccess-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px; }
+.cx-fullaccess-actions > button { display: flex; align-items: center; gap: 4px; margin: 0; padding: 8px 20px; border: 1px solid transparent; border-radius: 9999px;
+  font: inherit; font-size: 14px; font-weight: 400; line-height: 18px; white-space: nowrap; cursor: pointer; }
+.cx-fullaccess-actions > button:focus { outline: none; }
+.cx-fullaccess-actions > button:focus-visible { box-shadow: 0 0 0 2px var(--cxfa-focus); }
+.cx-fullaccess-cancel { background: var(--cxfa-tint); color: var(--cxfa-ink); }
+.cx-fullaccess-cancel:hover { background: var(--cxfa-tint-hover); }
+.cx-fullaccess-confirm { background: color-mix(in srgb, var(--cxfa-red) 10%, transparent); color: var(--cxfa-red); }
+.cx-fullaccess-confirm:hover { background: color-mix(in srgb, var(--cxfa-red) 20%, transparent); }
+.cx-fullaccess-confirm > svg { flex: none; width: 16px; height: 16px; }
 .ao-workflow .ao-canvas { background-image: radial-gradient(#d9e4f0 1px, transparent 1px); }
 .ao-workflow .ao-canvas-card { border-color: #dce5ef; box-shadow: 0 2px 7px rgb(31 54 86 / 5%); }
 .ao-workflow .ao-canvas-card.ao-node-finished { border-color: #dce5ef; background: #fff; }

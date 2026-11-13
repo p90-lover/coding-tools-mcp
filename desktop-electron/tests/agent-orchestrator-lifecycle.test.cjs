@@ -113,6 +113,7 @@ function createHarness(hooks = {}) {
     "./ao-context-breakdown.cjs": require("../electron/ao-context-breakdown.cjs"),
     "./ao-daemon-log.cjs": require("../electron/ao-daemon-log.cjs"),
     "./chat-redaction.cjs": require("../electron/chat-redaction.cjs"),
+    "./orchestrator-handler.cjs": require("../electron/orchestrator-handler.cjs"),
     // The launcher's ao.db compaction has its own module; these fixtures have no database.
     "./ao-db-maintenance.cjs": { compactAoDatabase: async () => ({ action: "none" }) },
     "./chat-agent-shell.cjs": require("../electron/chat-agent-shell.cjs"),

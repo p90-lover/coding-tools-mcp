@@ -6659,7 +6659,7 @@ test("Approve for me is reviewed by codex-auto-review only, and the person decid
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
   // `asks`: how many model calls one review pass makes; the status is read once the pass is over.
-  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [], asks = 1 } = {}) {
+  async function review(failing, { model = "cpa/test-model", catalog = ["test-model", "codex-auto-review"], empty = [], asks = 1, judges = false } = {}) {
     const request = { approval_id: "write", source: "ao", kind: "permission", path: "C:/elsewhere/file", tool: "Write", summary: "Write", decisions };
     const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
       { id: "one", role: "planner", state: "running", parents: [], route: { ...route, model }, receipt: { thread_id: "session-1", request_key: "k" } }] };
@@ -6690,6 +6690,7 @@ test("Approve for me is reviewed by codex-auto-review only, and the person decid
       },
       confirm: async () => true,
     });
+    if (judges) await workflow.call("chat_model_judges", { enabled: true });
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     for (let tries = 0; tries < 200 && !resolved.length && asked.length < asks; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -6735,6 +6736,23 @@ test("Approve for me is reviewed by codex-auto-review only, and the person decid
   assert.ok(onlyCodex.asked.length >= 1 && onlyCodex.asked.every((model) => model === "codex-auto-review"),
     `with no other model the person decides rather than a paid review (asked ${onlyCodex.asked.join(", ")})`);
   assert.deepEqual(onlyCodex.resolved, []);
+  // "Let the model judge" on, the person's own switch (2026-11-13: both review accounts at their
+  // limit, every request denied unjudged): Auto Review is asked first, and when it cannot answer the
+  // chat's own model judges instead.
+  const judged = await review(["codex-auto-review"], { judges: true, asks: 2 });
+  assert.deepEqual(judged.asked.slice(0, 2), ["codex-auto-review", "test-model"], `Auto Review first, then the chat's own model (asked ${judged.asked.join(", ")})`);
+  assert.deepEqual(judged.resolved, ["yes"], "the chat's own model answered for the person");
+  // Still only the chat's own model, even a Codex one: never another provider's model listed first.
+  const judgedCodex = await review(["codex-auto-review"], { judges: true, asks: 2, model: "cpa/gpt-6.1-sol",
+    catalog: ["cline-pass/deepseek-v4.1-flash", "Claude Fable 5.1", "gpt-6.1-sol", "codex-auto-review"] });
+  assert.ok(judgedCodex.asked.every((model) => ["codex-auto-review", "gpt-6.1-sol"].includes(model)),
+    `no model the chat doesn't use (asked ${judgedCodex.asked.join(", ")})`);
+  assert.deepEqual(judgedCodex.resolved, ["yes"]);
+  // A chat whose model CPA does not serve has no own model to fall back on.
+  const judgedUnserved = await review(["codex-auto-review"], { judges: true, catalog: ["codex-auto-review"] });
+  assert.ok(judgedUnserved.asked.every((model) => model === "codex-auto-review"), `nothing else to ask (asked ${judgedUnserved.asked.join(", ")})`);
+  // With the judge on, a review nobody could answer is denied (after its retries), never allowed.
+  assert.ok(!judgedUnserved.resolved.includes("yes"), `never allowed unjudged (resolved ${judgedUnserved.resolved.join(", ")})`);
 });
 
 test("Approve for me reviews with codex-auto-review although CPA hides it from model menus, and menus still leave it out", async () => {
@@ -7134,14 +7152,19 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
   const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
     nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "s", request_key: "k" } }] };
   let clock = 1_000_000;
-  const resolved = [], reasons = [];
+  const resolved = [], reasons = [], logged = [];
+  // 2026-11-13: CPA Auto Review answered 503 for 1.75 h with both review accounts at their limit. The
+  // log said only "returned HTTP 503", and each deny read reason_code "model_decision".
+  const failure = { error: { message: "None of the 2 review accounts could complete the review (reviewer@example.test)", code: "review_execution_failed" } };
   const workflow = createAgentOrchestratorWorkflow({
     findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "k" }),
     now: () => clock,
+    logger: { info: (event, detail) => logged.push([event, detail]), warn: (event, detail) => logged.push([event, detail]) },
     fetchImpl: async (url) => String(url).endsWith("/models")
-      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) } : { ok: false, status: 502, json: async () => ({}) },
+      ? { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) }
+      : { ok: false, status: 503, json: async () => failure, text: async () => JSON.stringify(failure) },
     requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
     aoHarness: {
       observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
@@ -7163,6 +7186,13 @@ test("with \"Let the model judge\" on, a reviewer that never answers denies the 
     assert.match(reasons[0], /Run the same request again/);
     assert.doesNotMatch(reasons[0], /Try a safer way/);
     assert.doesNotMatch(JSON.stringify(await workflow.call("run_status", { workspaceId: "ws", runId: "run" })), /check it yourself/);
+    // The log tells an outage from a verdict: nobody judged it, and CPA's own reason says why.
+    const decided = logged.filter(([event]) => event === "ao.approval_decided").map(([, detail]) => detail);
+    assert.deepEqual(decided.map(detail => [detail.decision, detail.reason_code]), [["deny", "reviewer_unavailable"]]);
+    const failed = logged.filter(([event]) => event === "ao.approval_review_failed").map(([, detail]) => detail.reason);
+    assert.ok(failed.length >= 3 && failed.every(reason => /HTTP 503: None of the 2 review accounts could complete the review/.test(reason)),
+      `CPA's reason is in each failed review (${failed.join(" | ")})`);
+    assert.ok([...failed, reasons[0]].every(reason => !reason.includes("reviewer@example.test")), "no account address in the log or the agent's reason");
   } finally { mission.nodes[0].state = "finished"; }
 });
 
@@ -8912,7 +8942,7 @@ test("a warm agent that does not take the first message within seconds is ended 
  * A chat launched cold (no warm agent for its route) whose agent AO is still starting: observe says
  * `provisioning` with the opening prompt queued, until `started` is set.
  */
-function coldLaunchWorld({ autoRetry, started = () => false, observeAs = null }) {
+function coldLaunchWorld({ autoRetry, started = () => false, observeAs = null, harness = {} }) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
   const world = chatWorld();
@@ -8955,9 +8985,11 @@ function coldLaunchWorld({ autoRetry, started = () => false, observeAs = null })
           : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, lastActivityAt: clock, timeline: [], approvals: [] },
       warmSessions: async () => [],
       kill: async id => { killed.push(id); return { ok: true }; },
+      ...harness,
     },
   });
-  return { workflow, route, spawned, killed, failures, logged, advance: ms => { clock += ms; }, autoRetry };
+  // `chat`: the board and project read; `created`: the runs as the run read sees them.
+  return { workflow, route, spawned, killed, failures, logged, advance: ms => { clock += ms; }, autoRetry, chat: world, created };
 }
 
 test("a cold launch whose agent never takes its message is ended after four minutes, and its step says why", async () => {
@@ -9010,6 +9042,44 @@ test("a cold launch whose agent is up but never gets its first message is ended 
     await wait(() => world.failures.length > 0);
     assert.match(world.failures[0], /did not take its first message/);
     assert.ok(world.logged.some(([event, detail]) => event === "ao.launch_stalled" && detail.stage === "queue_drain" && detail.waitedSeconds < 240));
+  } finally { world.workflow.dispose(); }
+});
+
+// The user, 2026-11-12: "it happen when a agent is failed to start, but later its started by auto
+// recovery and the chat queued message wont go to it". A message typed while the agent started went
+// to it as a steer once its controller was up; the launch watchdog then ended that start, and the
+// retry spawned a fresh agent with only the opening prompt. The steer counted as delivered, and the
+// retried turn's finish counted it as read, so no agent ever had it.
+test("a steer handed to a launch the watchdog ended goes back to the front of its chat's queue, still a steer", async () => {
+  let controllerUp = false, seenUp = 0;
+  const steered = [];
+  const world = coldLaunchWorld({ autoRetry: true, observeAs: (id, at) => (controllerUp && seenUp++, world?.killed.includes(id))
+    ? { status: "idle", turnId: "turn-1", turnState: "failed", error: "The agent could not start: context canceled" }
+    : { status: "idle", turnId: "turn-1", turnState: "queued", provisioning: true, ...(controllerUp ? { controllerUp: true } : {}),
+      lastActivityAt: at, timeline: [], approvals: [] },
+  harness: { steer: async (id, text) => { steered.push([id, text]); return { steered: true }; } } });
+  const wait = async (done, tries = 300) => { for (let i = 0; i < tries && !done(); i++) await new Promise(resolve => setTimeout(resolve, 10)); };
+  const queue = async () => (await world.workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "list" })).queue;
+  try {
+    await world.workflow.call("chat_auto_retry", { enabled: true });
+    await world.workflow.call("chat_send", { workspaceId: "ws-1", message: "fix the login", executionMode: "single", singleRoute: world.route });
+    await wait(() => world.spawned.length > 0);
+    // The chat's own read sees the run its card started on.
+    world.chat.runs.push([...world.created.values()].at(-1));
+    controllerUp = true;
+    // Seen up from the first look after this (not a fixed pause: a busy machine polls later).
+    await wait(() => seenUp > 0);
+    const sent = await world.workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "use pnpm" });
+    assert.equal(sent.steered, true, "AO took it for the agent that was starting");
+    assert.deepEqual(steered, [["agent-1", "use pnpm"]]);
+    assert.deepEqual(await queue(), []);
+    world.advance(91_000);
+    await wait(() => world.killed.length > 0);
+    assert.deepEqual(world.killed, ["agent-1"], "the start never took its first message");
+    await wait(() => world.logged.some(([event]) => event === "ao.chat_queue.steer_unread"));
+    assert.deepEqual((await queue()).map(item => [item.message, item.steer === true]), [["use pnpm", true]],
+      "back at the front, steered into the retried agent once it is up");
+    assert.ok(world.logged.some(([event, detail]) => event === "ao.chat_queue.steer_unread" && detail.outcome === "launch_stalled" && detail.count === 1));
   } finally { world.workflow.dispose(); }
 });
 
@@ -12931,6 +13001,29 @@ test("a queued message whose send fails is never lost: it stays at the front, sa
   assert.equal(world.updates.length, 1, "sent on the next try");
   assert.deepEqual(await queue(), []);
   workflow.dispose();
+});
+
+// A look at the chat that failed (AO restarting under a start that failed) left the queue with nothing
+// to send it: it waited for the window's next read or the chat's next settle, and a minimized window
+// reads nothing.
+test("a queued message whose look at the chat failed is looked at again a minute later", async () => {
+  const { world, workflow, advance, queue } = queueChat({ state: "finished" });
+  const request = world.requestHeadless;
+  let down = true;
+  world.requestHeadless = async (endpoint, ...rest) => {
+    if (endpoint === "/api/v1/ao/read" && down) throw new Error("connect ECONNREFUSED 127.0.0.1:17841");
+    return request(endpoint, ...rest);
+  };
+  try {
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "and deploy" } });
+    await goalSettle();
+    assert.equal(world.updates.length, 0, "AO could not be read");
+    assert.equal((await queue()).length, 1, "kept");
+    down = false;
+    await advance(60_000);
+    assert.equal(world.updates.length, 1, "sent on the next look");
+    assert.deepEqual(await queue(), []);
+  } finally { workflow.dispose(); }
 });
 
 // The user, 2026-11-12: "the message that are waiting to send etc are gone without any issue". The

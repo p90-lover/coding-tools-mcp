@@ -23,6 +23,19 @@ test("disk and NTFS errors are read from wevtutil's XML with the drives they nam
   assert.match(query, /timediff\(@SystemTime\) <= 1800000/);
 });
 
+test("a volume NTFS calls healthy is no disk error; 98 at Warning or Error still is", () => {
+  // Logged on every volume mount (a virtual disk on 2026-11-13); counted, it raised a critical
+  // "A disk is reporting errors ... back up your work" for a healthy disk.
+  const ntfs98 = (level) => `<Event xmlns='http://schemas.microsoft.com/win/2004/08/events/event'><System><Provider Name='Microsoft-Windows-Ntfs' Guid='{3ff9c3f8}'/><EventID>98</EventID><Version>1</Version><Level>${level}</Level><TimeCreated SystemTime='2026-11-13T06:58:16.0Z'/></System><EventData><Data Name='DriveName'>\\\\?\\Volume{0000}</Data><Data Name='DeviceName'>\\Device\\HarddiskVolume17</Data></EventData></Event>`;
+  assert.deepEqual(parseEvents(ntfs98(4)), [], "Information: 'is healthy. No action is needed.'");
+  assert.deepEqual(assessDiskHealth({ events: parseEvents(ntfs98(4)) }), [], "so no problem and no notification");
+  assert.equal(parseEvents(ntfs98(3)).length, 1, "Warning: a spot fix is needed");
+  assert.equal(parseEvents(ntfs98(2)).length, 1, "Error: a full chkdsk is needed");
+  assert.deepEqual(parseEvents(ntfs98(0)), [], "LogAlways carries no problem either");
+  assert.equal(parseEvents(EVENTS_XML).length, 2, "an event with no level is kept");
+  assert.match(eventQuery(30 * 60_000), / and \(Level=1 or Level=2 or Level=3\) and TimeCreated/, "Windows leaves the rest out first");
+});
+
 test("disk errors are a problem, and lost writes make it critical", () => {
   const [problem] = assessDiskHealth({ events: parseEvents(EVENTS_XML), lookbackMs: 30 * 60_000 });
   assert.equal(problem.key, "disk-errors");

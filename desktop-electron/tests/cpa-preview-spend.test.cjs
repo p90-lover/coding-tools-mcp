@@ -47,8 +47,12 @@ test("an actual recorded zero differs from loading, offline and unknown cost", (
   assert.match(render({ available: false }, true, true), /<strong[^>]*>Null<\/strong>/);
 });
 
-test("CPA preview cost stays outside the plugin frame and only on CPA", () => {
+// #1285: CPA opens without the app's own strip above it ("CPA also opens without the extra price
+// strip and the 'Running inside Coding Tools' notice; Provider Manager still shows usage"), so the
+// CPA page no longer renders this component; its cost rendering above is kept and still tested.
+test("CPA opens without the app's price strip or 'Running inside' notice: Provider Manager shows usage itself", () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/OriginalUiSurface.tsx"), "utf8");
-  assert.match(source, /toolId === "cpa" \? <CpaPreviewSpend active=\{ready\}/);
-  assert.ok(source.indexOf("<CpaPreviewSpend") < source.indexOf('<div className="original-ui-frame-shell">'));
+  assert.doesNotMatch(source, /<CpaPreviewSpend/, "no strip above the CPA frame");
+  assert.doesNotMatch(source, /Running inside Coding Tools/, "and no notice that it runs inside the app");
+  assert.match(source, /original-ui-frame-shell/, "the CPA page itself still renders");
 });

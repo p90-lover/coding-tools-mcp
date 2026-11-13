@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/p90-lover/Orchestrator",
+  "version": "0.1.0",
+  "contractVersion": 1,
+  "commit": "171c355e76a873b19c70161b156822234bf3be30",
+  "source": "src/orchestrator-handler.cjs",
+  "target": "electron/orchestrator-handler.cjs",
+  "sha256": "f9458065804cf69078101b532a147669ac9d1ca6db25f371f4ca0dd9c5094e2f",
+  "compatibility": "legacy-adapter-forwarding; native-engine-not-certified"
+}

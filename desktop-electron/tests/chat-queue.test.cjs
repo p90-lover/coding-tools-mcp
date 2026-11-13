@@ -72,11 +72,14 @@ test("a torn queue file is read back from its copy (power cut, failing disk)", a
 test("steers handed to a turn are kept by run until that turn shows whether they were read", () => {
   const store = createChatQueueStore();
   const one = store.delivered("ws", "task", { message: "use pnpm", runId: "r1" });
-  store.delivered("ws", "task", { message: "/goal green CI", runId: "r2", goal: "green CI" });
+  store.delivered("ws", "task", { message: "/goal green CI", runId: "r2", goal: "green CI", session: "agent-2" });
   assert.deepEqual(store.deliveredTo("ws", "r1").map(steer => [steer.taskId, steer.message]), [["task", "use pnpm"]]);
   store.forgetDelivered("ws", "task", [one.id]);
   assert.deepEqual(store.deliveredTo("ws", "r1"), []);
   assert.equal(store.deliveredTo("ws", "r2")[0].goal, "green CI");
+  // The agent session that took it, so a start the app ended hands back only its own steers.
+  assert.equal(store.deliveredTo("ws", "r2")[0].session, "agent-2");
+  assert.equal("session" in one, false, "none when none was given");
 });
 
 test("a steer reads as read only once the model went on past it, as the chat's receipt says", () => {
