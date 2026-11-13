@@ -12,6 +12,16 @@ const { signedInFromCookies } = require("./browser-accounts.cjs");
 // a chatgpt.com or OpenAI Platform page, and never connected anything.
 const GAVE_WAY_RETRY_MS = 2 * 60_000;
 const GAVE_WAY_RETRY_MAX_MS = 30 * 60_000;
+// A setup that failed is tried again later, not never. Until 2026-11-13 one failure stopped automatic
+// setup for that account until its sign-in cookie changed, so a page that loaded slowly on the busy
+// disk, or a check that misread a signed-in account, left it unconnected for good. A failure only the
+// person can clear (signing in, a security check, a workspace owner) waits the longest; any other
+// waits 10 minutes, twice as long after each failure in a row, up to an hour. Success starts over.
+const FAILED_RETRY_MS = 10 * 60_000;
+const FAILED_RETRY_MAX_MS = 60 * 60_000;
+const NEEDS_THE_PERSON = new Set(["verification_required", "platform_sign_in_required", "workspace_owner_required",
+  "workspace_admin_required", "workspace_publish_required", "tunnel_owner_mismatch", "platform_account_mismatch",
+  "tunnel_permission_required", "configuration_required", "mcp_access_denied", "manual_browser_inspection_disabled"]);
 
 function createBrowserAccountMcpSync(deps) {
   const attempts = new Map();
@@ -19,6 +29,8 @@ function createBrowserAccountMcpSync(deps) {
   // may start. Not keyed by the session cookie: loading ChatGPT may refresh it, which must not
   // count as a new reason to start over.
   const gaveWays = new Map();
+  // Per account: how many setups in a row failed at this partition and target (see FAILED_RETRY_MS).
+  const failures = new Map();
   const now = deps.now ?? Date.now;
   let inFlight = null;
   let generation = 0;
@@ -36,6 +48,9 @@ function createBrowserAccountMcpSync(deps) {
     }
     for (const id of gaveWays.keys()) {
       if (!accounts.some(account => account.id === id)) gaveWays.delete(id);
+    }
+    for (const id of failures.keys()) {
+      if (!accounts.some(account => account.id === id)) failures.delete(id);
     }
     for (const account of accounts) {
       if (!admitted()) return;
@@ -72,7 +87,7 @@ function createBrowserAccountMcpSync(deps) {
           continue;
         }
         attempts.set(account.id, { key, errorAt, retryAt: Infinity });
-        let gaveWay = false;
+        let gaveWay = false, failed = null;
         try {
           connecting = true;
           const result = await deps.connect(account.id, current);
@@ -81,8 +96,10 @@ function createBrowserAccountMcpSync(deps) {
           // It stopped for an account switch (automaticSetupGaveWay): no failure, and it runs again.
           // An account switch is over in a moment, so by now this setup may be admitted again.
           gaveWay = error?.gaveWay === true;
+          if (!gaveWay) failed = error;
           deps.logger?.warn?.(gaveWay ? "browser_accounts.automatic_mcp_deferred" : "browser_accounts.automatic_mcp_failed", {
             message: error instanceof Error ? error.message : String(error),
+            ...(typeof error?.code === "string" ? { code: error.code } : {}),
           });
         } finally { connecting = false; }
         if (gaveWay || !current()) {
@@ -97,9 +114,20 @@ function createBrowserAccountMcpSync(deps) {
           continue;
         }
         gaveWays.delete(account.id);
-        // Our own recorded failure is not a new external failure that warrants another setup.
+        // Our own recorded failure is not a new external failure that warrants another setup at once;
+        // a failure waits its turn (FAILED_RETRY_MS), a connected account waits for new sign-in cookies.
         const recorded = deps.accounts().find(entry => entry.id === account.id);
-        attempts.set(account.id, { key, errorAt: recorded?.connector?.errorAt ?? null, retryAt: Infinity });
+        let retryAt = Infinity;
+        if (failed) {
+          const before = failures.get(account.id);
+          const count = before?.place === place ? before.count + 1 : 1;
+          failures.set(account.id, { place, count });
+          retryAt = now() + (NEEDS_THE_PERSON.has(failed?.code) ? FAILED_RETRY_MAX_MS
+            : Math.min(FAILED_RETRY_MAX_MS, FAILED_RETRY_MS * 2 ** (count - 1)));
+        } else {
+          failures.delete(account.id);
+        }
+        attempts.set(account.id, { key, errorAt: recorded?.connector?.errorAt ?? null, retryAt });
       } catch (error) {
         deps.logger?.warn?.("browser_accounts.automatic_mcp_scan_failed", {
           message: error instanceof Error ? error.message : String(error),
@@ -118,7 +146,7 @@ function createBrowserAccountMcpSync(deps) {
       return inFlight;
     },
     // An explicit runtime/tunnel restart starts a new round, even with unchanged login cookies.
-    invalidate() { generation++; attempts.clear(); gaveWays.clear(); },
+    invalidate() { generation++; attempts.clear(); gaveWays.clear(); failures.clear(); },
     /**
      * A Connect the user asked for comes first. Until the returned release runs, no round starts, and
      * one already connecting fails its admission check at its next step, so it gives way (deferred,
