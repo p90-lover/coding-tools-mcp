@@ -13,6 +13,16 @@ const WORKSPACE_OWNER_REQUIRED = "Only a verified owner of this ChatGPT workspac
 const PLATFORM_SIGN_IN_HOSTS = ["platform.openai.com", "auth.openai.com", "auth0.openai.com"];
 const PLATFORM_SIGN_IN_UNFINISHED = "OpenAI Platform asked this account to sign in again, and the sign-in did not finish by itself. Sign in to OpenAI Platform with this ChatGPT account, then retry.";
 
+/**
+ * What a setup stopped for the person's own sign-in, logout or account removal throws (the browser's
+ * stopOperationFor): not a failure, so an automatic setup gives way and runs again later.
+ */
+function connectorSetupStopped(signal, details = {}) {
+  const action = typeof signal?.reason?.forAction === "string" ? signal.reason.forAction : "your own browser action";
+  return Object.assign(new Error(`MCP connector setup stopped for ${action}. Connect again when you are ready.`),
+    { mcpStopped: true, ...details });
+}
+
 function requireMcpWorkspaceOwner(context) {
   if (!["workspace", "personal"].includes(context?.workspaceStructure) || context.workspaceRole !== "account-owner") {
     throw new Error(WORKSPACE_OWNER_REQUIRED);
@@ -845,7 +855,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     freshConnectorResults.delete(shared.creationResult);
   }
   const activePartition = browserHost.partition;
+  // Read in run(): only then does this setup hold the browser and its stop signal.
+  let stopSignal = null;
   const checkHost = () => {
+    if (stopSignal?.aborted) throw connectorSetupStopped(stopSignal);
     requireAutomaticConnectorSetup(runtimeHost, browserHost);
     if (operationHeld && browserHost.currentOperation?.() !== "MCP connector creation") throw new Error("MCP connector setup is busy");
     if (browserHost.partition !== activePartition) throw new Error("The browser account changed during MCP setup.");
@@ -855,6 +868,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     if (current.name !== settings.name || current.tunnelId !== settings.tunnelId) throw new Error("The MCP configuration changed during setup.");
   };
   const run = async () => {
+    stopSignal = browserHost.operationSignal?.() ?? null;
     checkHost();
     // Every account's sign-in, the one shown in the Browser too, is proven by this setup's own page:
     // it reads the account's session (a 401 stops it as signed out) and a security check stops it
@@ -876,6 +890,10 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         offscreen: true,
       },
     });
+    // Stopped for the person's own action: the window closes now, not at the setup's next step (a
+    // step can wait up to its whole budget), so their logout or removal starts within moments.
+    const closeForStop = () => { if (!popup.isDestroyed()) popup.destroy(); };
+    stopSignal?.addEventListener("abort", closeForStop, { once: true });
     let timedOut = false, observer = null, navigating = false, submitting = false, navigationChanged = false, navigationVersion = 0, mutationStarted = false;
     let navigatedTo = null;
     const changedTo = value => { navigationChanged = true; navigatedTo ??= navigationPlace(value); };
@@ -1093,6 +1111,8 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         name: settings.name, href, at: Date.now() });
       return connected;
     } catch (error) {
+      // Its window closed under it: whatever the step reported, the person's own action stopped it.
+      if (stopSignal?.aborted) throw connectorSetupStopped(stopSignal, { mcpMutationStarted: mutationStarted });
       if (timedOut && platformPhase && platformSignIn) {
         // Platform's sign-in stopped on a page that wants a person (a password or account choice).
         throw Object.assign(new Error(PLATFORM_SIGN_IN_UNFINISHED), { navigatedTo: platformSignIn });
@@ -1109,13 +1129,15 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     } finally {
       clearTimeout(timer);
       observer?.dispose();
+      stopSignal?.removeEventListener("abort", closeForStop);
       if (!popup.isDestroyed()) {
         popup.webContents.removeListener("did-start-navigation", navigation);
         popup.destroy();
       }
     }
   };
-  return operationHeld ? run() : browserHost.withManualOperation("MCP connector creation", run, { preserveSurface });
+  return operationHeld ? run()
+    : browserHost.withManualOperation("MCP connector creation", run, { preserveSurface, stoppable: true });
 }
 
 async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtimeHost, partition = browserHost.partition }) {
@@ -1159,4 +1181,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, connectorSetupStopped, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

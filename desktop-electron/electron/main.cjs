@@ -3589,9 +3589,11 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // Stopped for the person's own sign-in, logout or account removal: not a failure.
+      const stopped = error?.mcpStopped === true;
       const setupCause = mcpConnectorFailureCause(error, failure);
-      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      if (!stopped) logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
+      publishOperation({ name: "mcp-connector-create", status: stopped ? "cancelled" : "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   } });
@@ -3695,9 +3697,12 @@ function registerIpc({ logger, stateStore }) {
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
       // An automatic setup that gave way (an account switch, the app left) did not fail: the account
-      // keeps its connector state and the sync tries again later, with no error on screen.
-      if (automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
-        publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
+      // keeps its connector state and the sync tries again later, with no error on screen. Neither did
+      // one stopped for the person's own sign-in, logout or account removal (stopOperationFor).
+      const stopped = error?.mcpStopped === true;
+      if (stopped || automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
+        publishOperation({ name: "mcp-connector-create", status: "cancelled",
+          message: stopped && typeof assertAutomaticCurrent !== "function" ? failure.message : "MCP connector setup will continue later" });
         throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
       }
       // The card's words can be a category ("ChatGPT verification is required…") for several steps;
@@ -4081,9 +4086,11 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // Stopped for the person's own sign-in, logout or account removal: not a failure.
+      const stopped = error?.mcpStopped === true;
       const setupCause = mcpConnectorFailureCause(error, failure);
-      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
-      publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
+      if (!stopped) logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
+      publishOperation({ name: "mcp-connector-create", status: stopped ? "cancelled" : "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
   });
