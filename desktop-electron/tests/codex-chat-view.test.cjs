@@ -1011,21 +1011,30 @@ test("a steer on its way stays in the chat while a message waiting for the next 
   assert.doesNotMatch(text(view.render()), /Restarting|stopped responding/);
 });
 
-test("a turn waiting for you: Answer when a request is shown, else Continue, which restarts the agent with Continue.", async () => {
-  const steered = [];
+test("a turn waiting for you: Answer shows its request, else Continue uses the captured run without sending a message", async () => {
+  const continued = [], steered = [], sent = [];
   const runs = [run("r1", "t", [node("w", "planner", "running", { route: { harness_id: "ao:claude-code", model: "cpa/m" } })], { execution_mode: "single" })];
   const request = { nodeId: "w", approval_id: "req-1", source: "ao", kind: "command", command: "curl -s http://127.0.0.1:7411/api/status",
     decisions: [{ id: "allow", kind: "allow_once", label: "Yes" }, { id: "deny", kind: "reject_once", label: "No" }] };
-  const provided = (extra) => walk(mount(base({ selectedTaskId: "t", working: true, runs, steer: async (input) => { steered.push(input); return "restart"; }, ...extra }).props).render())
+  const provided = (extra) => walk(mount(base({ selectedTaskId: "t", working: true, runs,
+    continueChat: async (input) => { continued.push(input); },
+    steer: async (input) => { steered.push(input); return "restart"; },
+    send: async (input) => { sent.push(input); }, ...extra }).props).render())
     .find((element) => element.type === "TurnRestartProvider").props.value;
   const shown = provided({ approvals: [request] });
   assert.equal(typeof shown.onAnswer, "function", "a request in the chat is what Answer brings into view");
   const lost = provided({ approvals: [] });
   assert.equal(lost.onAnswer, undefined, "with none shown there is nothing to bring up");
+  assert.equal(typeof lost.onContinue, "function");
   lost.onContinue();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "Continue.", restart: true }], "Continue restarts the stuck turn with one message");
-  assert.equal(provided({ steer: undefined }).onContinue, undefined, "a chat that cannot steer offers no Continue");
+  assert.deepEqual(JSON.parse(JSON.stringify(continued)), [{ taskId: "t", runId: "r1" }]);
+  assert.deepEqual(steered, [], "Continue is not a steer or restart message");
+  assert.deepEqual(sent, [], "Continue does not send a synthetic user message");
+  assert.equal(provided({ continueChat: undefined }).onContinue, undefined, "steering alone does not provide silent Continue");
+  provided({ busy: true }).onContinue();
+  provided({ sendBusy: true }).onContinue();
+  assert.equal(continued.length, 1, "busy surfaces cannot dispatch another continuation");
 });
 
 test("two queued messages fold into Claude Code's stack: Next: …, then a list with ⋮ and Clear all", () => {
