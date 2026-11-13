@@ -1435,7 +1435,7 @@ test("a resumed chat gets the person's own MCP servers after the app's, for its 
   const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
     Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), Date, Math, Number, Promise, logger: { warn() {}, info() {} },
     agentTools: { renew: async id => id === "chat-1" ? { servers: [app] } : null }, fileTools: null,
-    userMcpServers: { forSession: (agent, taken) => { asked.push([agent, JSON.parse(JSON.stringify(taken.map(server => server.name)))]); if (broken) throw new Error("unreadable"); return [mine]; } },
+    userMcpServers: { forSession: async (agent, taken) => { await Promise.resolve(); asked.push([agent, JSON.parse(JSON.stringify(taken.map(server => server.name)))]); if (broken) throw new Error("unreadable"); return [mine]; } },
     internalApi: async (method, endpoint, body) => {
       if (endpoint.endsWith("/resume-agent")) { bodies.push(JSON.parse(JSON.stringify(body))); status = "idle"; return { ok: true }; }
       return { session: { id: endpoint.split("/")[4], mode: "chat", harness: "opencode", status } };

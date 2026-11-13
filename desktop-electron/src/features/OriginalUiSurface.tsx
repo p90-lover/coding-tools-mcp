@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { JsonObject } from "../api/contracts";
 import type { Language, OriginalUiId, OriginalUiSnapshot, OriginalUiCatalog } from "../types";
 import { readCpaUsage } from "./cpa-usage";
-import { CpaPreviewSpend } from "./CpaPreviewSpend";
 import { attachCpaProviderUsageBridge } from "./cpa-provider-usage-bridge";
 import "./original-ui.css";
 
@@ -123,11 +122,7 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
     }
     setDependency(null);
     setLocalError("");
-    setNotice(localize(
-      language,
-      "Running inside Coding Tools. No separate window opens.",
-      "畫面由 Coding Tools 內嵌。處理常式在行程內執行，不會開啟獨立應用程式視窗。",
-    ));
+    setNotice("");
     return result;
   };
 
@@ -280,8 +275,6 @@ export function OriginalUiSurface({ toolId, initialSection, language, setError }
       ) : null}
       {localError || tool.error ? <p className="original-ui-error">{localError || tool.error}</p> : null}
       {notice ? <p className="original-ui-note">{notice}</p> : null}
-      {toolId === "cpa" ? <CpaPreviewSpend active={ready} zh={language === "zh-TW" || language === "zh-CN"} /> : null}
-      {/* Per-account details remain inside CPA Provider Manager (cpm:usage:read). */}
 
       <div className="original-ui-frame-shell">
         {frameUrl ? (

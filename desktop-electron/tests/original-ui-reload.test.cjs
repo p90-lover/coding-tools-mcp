@@ -48,7 +48,7 @@ function mount(toolId) {
   Function("require", "module", "exports", compiled.outputText)(
     (specifier) => specifier === "react" ? react
       : specifier === "react/jsx-runtime" ? { jsx, jsxs: jsx }
-        : {},
+        : specifier === "./CpaPreviewSpend" ? { CpaPreviewSpend: "cpa-spend" } : {},
     component, component.exports,
   );
   const previousWindow = global.window;
@@ -86,6 +86,8 @@ test("Reload visual remounts CPA's same-URL iframe but keeps Codex Router's ifra
       await settle();
       const before = find(surface.render(), (node) => node.type === "iframe");
       assert.ok(before, `${toolId} frame opened`);
+      assert.equal(find(surface.render(), (node) => node.type === "cpa-spend"), null, "no duplicate API-price strip outside the management UI");
+      assert.equal(find(surface.render(), (node) => node.props.className === "original-ui-note"), null, "no automatic host explanation after opening");
 
       const button = find(surface.render(), (node) => node.type === "button" && node.props.className === "primary");
       button.props.onClick();
