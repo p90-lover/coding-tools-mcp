@@ -53,7 +53,7 @@ const { installKeysmithIpc } = require("./keysmith-ipc.cjs");
 const { parseMessage, sanitizeHtml } = require("./email-mime.cjs");
 const { createConfiguredConnector, currentConnectorSettings, connectorCredentials, openConfiguredTunnelSettings } = require("./mcp-connector-setup.cjs");
 const { inspectChatGptAccount, createWorkspaceConnector } = require("./chatgpt-workspace.cjs");
-const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure } = require("./mcp-connector-command.cjs");
+const { isMcpConnectorCommand, mcpConnectorCommandAction, createMcpConnectorCommand, mcpConnectorCommandFailure, mcpConnectorFailureCause } = require("./mcp-connector-command.cjs");
 const { BrowserControlServer, fetchNativeWithProxyAuth } = require("./control-server.cjs");
 const { createMcpEventMonitor } = require("./mcp-events-monitor.cjs");
 const { probeTcpOffThread } = require("./off-thread-run.cjs");
@@ -3583,6 +3583,8 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
@@ -3692,6 +3694,11 @@ function registerIpc({ logger, stateStore }) {
         publishOperation({ name: "mcp-connector-create", status: "cancelled", message: "MCP connector setup will continue later" });
         throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
       }
+      // The card's words can be a category ("ChatGPT verification is required…") for several steps;
+      // the log keeps the setup's own (mcpConnectorFailureCause), or nothing said which step stopped.
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      logger.warn("mcp.account_connect_failed", { automatic: typeof assertAutomaticCurrent === "function", code: failure.code,
+        ...(setupCause ? { setupCause } : {}) });
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
@@ -4068,6 +4075,8 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      const setupCause = mcpConnectorFailureCause(error, failure);
+      logger.warn("mcp.connector_create_failed", { code: failure.code, ...(setupCause ? { setupCause } : {}) });
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
       throw Object.assign(new Error(failure.message), { code: failure.code });
     }
