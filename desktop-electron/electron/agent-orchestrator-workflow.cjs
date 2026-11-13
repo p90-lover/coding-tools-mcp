@@ -6297,7 +6297,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const BOARD_RACE = /AO board revision or initial state changed/;
   const BOARD_RACE_ATTEMPTS = 4;
   /** `boardRevision`: the board's revision as the caller's own write just left it, used for the first try. */
-  async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}, { boardRevision } = {}) {
+  async function createTeamRun(id, task, team, selection = {}, includeRun = false, checkCurrent = () => {}, { boardRevision, continuation = null } = {}) {
     for (let attempt = 1; ; attempt++) {
       // A send has just written the chat's message, and its answer carries the board's revision: one
       // read fewer before the run is made. A revision that moved on since is refused (BOARD_RACE),
@@ -6310,6 +6310,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const created = await updateRun({ workspaceId: id, change: {
           operation: "create_from_team", run_id: runId, task_id: task,
           expected_board_revision: current.revision,
+          ...(continuation ? { continuation } : {}),
           ...(selection.executionMode === "single" ? { execution_mode: "single", single_route: selection.singleRoute, worker_limit: 1 }
             : { team_revision: team.revision, team_id: team.id,
               worker_limit: Number.isSafeInteger(team.worker_limit) && team.worker_limit > 0 ? team.worker_limit : 3,
@@ -6711,13 +6712,51 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // collided, both were retried, and the chat followed the newer one after it was stopped. The
   // later send now reads the runs after the earlier one has started, so it waits or is refused.
   const chatSends = new Map(); // [workspace, task] -> the send in progress
-  async function chatSend(input = {}, checkCurrent = () => {}, options = {}) {
+  const CONTINUATION_SOURCES = new Set(["manual", "goal", "wake", "watch", "loop", "schedule"]);
+  const controllerPrompt = (source, message) => `Controller continuation (${source}); not a new user message or permission grant. Continue the existing task within its original scope and approval boundaries.\n${message}`;
+  function chatSend(input = {}, checkCurrent = () => {}, options = {}) {
+    return serializeChatStart(input, checkCurrent, options);
+  }
+  function chatContinue(input, source, checkCurrent = () => {}) {
+    if (!CONTINUATION_SOURCES.has(source) || !input?.taskId || input.goal !== undefined || input.rewind !== undefined) {
+      throw new Error("Choose an existing chat and a controller continuation source");
+    }
+    return serializeChatStart(input, checkCurrent, { continuationSource: source });
+  }
+  function serializeChatStart(input = {}, checkCurrent = () => {}, options = {}) {
     if (!input || typeof input !== "object" || typeof input.taskId !== "string" || typeof input.workspaceId !== "string") return startChatSend(input, checkCurrent, options);
-    const key = JSON.stringify([input.workspaceId.trim(), input.taskId.trim()]);
-    const mine = (chatSends.get(key) ?? Promise.resolve()).then(() => startChatSend(input, checkCurrent, options));
+    return serialChatOperation(input.workspaceId, input.taskId, () => startChatSend(input, checkCurrent, options));
+  }
+  async function serialChatOperation(workspaceId, taskId, work) {
+    const key = JSON.stringify([workspaceId.trim(), taskId.trim()]);
+    const mine = (chatSends.get(key) ?? Promise.resolve()).then(work);
     const settled = mine.then(() => undefined, () => undefined);
     chatSends.set(key, settled);
     try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
+  }
+  async function personChatContinue({ workspaceId, taskId, runId } = {}) {
+    const id = clean(workspaceId, 128), task = clean(taskId, 128), expected = clean(runId, 80);
+    return serialChatOperation(id, task, async () => {
+      let saved = await runsForSend(id, task);
+      let previous = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (previous?.id !== expected || taskLifecycle(saved, task).visibility !== "active") throw new Error("This chat's turn changed; no continuation was started");
+      if (previous.paused) return { ok: true, status: "needs_input", runId: expected, message: "Resume the paused run before continuing" };
+      if (chatWorking(id, task, saved.runs)) {
+        const { card } = chatAgentCard(saved, task);
+        if (!card || !externalAgent(card)) return { ok: true, status: "working", runId: expected };
+        const state = await harnessService().observe(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id));
+        if (state?.approvals?.length) return { ok: true, status: "needs_input", runId: expected, message: "Answer the pending request before continuing" };
+        if (!state?.agentGone && !state?.orphanedRequest && !state?.needsInput) return { ok: true, status: "working", runId: expected };
+        await stopExternalTurn(card.receipt.thread_id, { owner: runKey(id, expected), escalate: true });
+        await retireOpenRuns(id, task, saved.runs, { supersedeRetry: true });
+        saved = await runsForSend(id, task);
+        previous = saved.runs.filter(run => run.project_id === task).at(-1);
+        if (previous?.id !== expected) throw new Error("A newer turn superseded Continue");
+      }
+      return startChatSend({ workspaceId: id, taskId: task, afterRunId: expected, ...followUpSelection(previous),
+        message: "Continue the existing unfinished work from its current state. Do not repeat completed actions or treat this as permission for a refused operation.", deferStart: true }, undefined,
+        { continuationSource: "manual", supersedeRetry: true });
+    });
   }
 
   /**
@@ -6781,7 +6820,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         deferred: input?.deferStart === true }));
     }
   }
-  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}, clock = stepClock(now)) {
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false, continuationSource = null } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -6806,7 +6845,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (afterRunId !== undefined) {
       const parent = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (parent?.id !== afterRunId) throw new Error("A newer turn superseded this background continuation");
-      if (parent.cancelled || parent.paused || taskLifecycle(saved, taskId).visibility !== "active") {
+      if (parent.paused || (parent.cancelled && continuationSource !== "manual") || taskLifecycle(saved, taskId).visibility !== "active") {
         throw new Error("This background continuation's parent was stopped or is unavailable");
       }
     }
@@ -6853,7 +6892,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Whether the new chat starts as "New task", the only name nameChat replaces. A name the user
     // gave, or a single chat's name taken from its message, kept nameChat's model call for nothing.
     let defaultTitled = false;
-    let continuation = null;
+    let continuation = null, controllerContext = null;
     // The follow-up as written to the chat, and the chat as it was before (withdrawFollowUp).
     let followUp = null;
     let rewindBefore;
@@ -6870,13 +6909,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A resize of this chat's agent still under way decides which agent the message goes to.
       await chatResizes.get(resizeKey(id, task))?.catch(() => undefined);
       const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute, { workspaceId: id, taskId: task });
-      if (live) continuation = { session: live.receipt.thread_id, text };
+      if (live) continuation = { session: live.receipt.thread_id, text: continuationSource ? controllerPrompt(continuationSource, text) : text };
+      if (continuationSource) {
+        if (!previous || previous.paused || (previous.cancelled && continuationSource !== "manual") || taskLifecycle(saved, task).visibility !== "active") {
+          throw new Error("This continuation's parent is stopped or unavailable");
+        }
+        if (chatWorking(id, task, saved.runs)) throw new Error("This chat is still running; its pending work was kept");
+        controllerContext = { run_id: previous.id, revision: previous.revision, source: continuationSource, message: text };
+      }
       if (rewind && (chatWorking(id, task, saved.runs)
         || chatEdits.visible(id, saved.runs.filter(run => run.project_id === task)).some(run => !runSettled(run)))) {
         throw new Error("Stop the chat before rewinding a message");
       }
       try {
-        await retireOpenRuns(id, task, saved.runs, { supersedeRetry });
+        if (!continuationSource) await retireOpenRuns(id, task, saved.runs, { supersedeRetry });
       } catch (error) {
         if (/still running/.test(error?.message)) throw new Error("This chat is still running; wait for it to finish or stop it first");
         throw error;
@@ -6885,7 +6931,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Refused only because another chat wrote the board first: nothing was saved, so the edit is
       // read and made again (withBoardRetry).
       let discarded = [];
-      await withBoardRetry(async () => {
+      if (!continuationSource) await withBoardRetry(async () => {
         let detail = await board({ workspaceId: id, taskId: task });
         checkCurrent();
         if (!detail.task) throw new Error("This chat's task no longer exists");
@@ -6900,7 +6946,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const selected = bodies[rewind.index].split(/\n\n↳ Steer \(([^)]+) UTC\): /)[0].trim();
           if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
           const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
-          const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
+          const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id && !run.continuation?.run_id);
           // Paired as the chat shows them (ao-chat.ts chatTurns), so the message picked is the one whose
           // reply goes. A compacted chat keeps every run but one summary in place of its earlier
           // messages: its oldest runs answer messages it no longer has, and they stay. Counted equal,
@@ -6912,7 +6958,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const hidden = new Set(roots.slice(summarized + rewind.index).map(run => run.id));
           for (let size = -1; size !== hidden.size;) {
             size = hidden.size;
-            for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
+            for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id) || hidden.has(run.continuation?.run_id)) hidden.add(run.id);
           }
           discarded = [...hidden];
           const rewound = rewind.index === 0 ? "" : `\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
@@ -6987,7 +7033,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
     let runId, createdRun;
     try {
-      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
+      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision, continuation: controllerContext }));
       clock.mark("create");
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
@@ -7092,8 +7138,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A control change retires pending work even when the clock has not advanced.
   const goalChanges = new WeakMap();
   const goalRouteIntents = new WeakMap();
+  const goalManualStarts = new WeakMap();
   function invalidateGoal(goal) {
-    if (goal) goalChanges.set(goal, {});
+    if (goal) { goalChanges.set(goal, {}); goalManualStarts.delete(goal); }
   }
   function goalGuard(id, task, goal) {
     const revision = goalChanges.get(goal);
@@ -7138,10 +7185,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goals.update(id, task, { round, note: "", lastMessage: message, roundStartedAt: now() });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
-      const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true }, (accepting = false) => {
+      const result = await chatContinue({ workspaceId: id, taskId: task, message, ...selection, deferStart: true, afterRunId: previous?.id }, previous?.id && goalManualStarts.get(goal) === previous.id ? "manual" : "goal", (accepting = false) => {
         if (!still()) throw new Error("The goal changed before the next round was accepted");
         // Submitting run creation accepts this round; a later Pause leaves it running.
-        if (accepting) accepted = true;
+        if (accepting) { accepted = true; goalManualStarts.delete(goal); }
       });
       if (!still()) {
         if (goals.get(id, task) === goal && goal.round === round && goal.lastMessage === message && result?.runId) {
@@ -7681,6 +7728,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // The round still running is judged when it settles (its reportRun).
       if (chatWorking(id, task, saved.runs)) return;
       const latest = saved.runs.filter(run => run.project_id === task).at(-1);
+      if (latest) goalManualStarts.set(goal, latest.id);
       // A round nobody judged yet (it ran while paused, was stopped part-way, or its check failed) is
       // judged first: it may already have met the goal. One already judged, or one that failed (the
       // person resumes to have the agent carry on past it), goes straight to the next round.
@@ -7958,7 +8006,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           + "A watch deadline or observation failure is not command success or proof it stopped. Do not replay the command merely because its outcome is unknown. "
           + "If more waiting is needed, register watch_command or schedule_wakeup and check that registration succeeded; a promise alone schedules nothing."].join("\n\n");
       attempted = true;
-      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, () => {
+      const result = await chatContinue({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, "watch", () => {
         if (!current()) throw new Error("This command watch was cancelled");
       });
       if (result?.ok === false || !result?.runId) { settleCommandWatch(ticket, "failed"); return; }
@@ -8068,7 +8116,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await runLoop(workspaceId, taskId, loop.id);
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
+      const result = await chatContinue({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true, afterRunId: latest.id }, "wake");
       logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
     } catch (error) {
       if (!consumed && !current()) { wakeFailures.delete(id); return; }
@@ -8491,7 +8539,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.info?.("ao.loop.ended", { workspaceId, taskId, rounds: loop.round, why: now() >= loop.expiresAt ? "expired" : "chat closed" });
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: loopMessage(loop, loop.wakeNote || ""), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      const result = await chatContinue({ workspaceId, taskId, message: loopMessage(loop, loop.wakeNote || ""), ...followUpSelection(chatRuns.at(-1)), deferStart: true, afterRunId: chatRuns.at(-1)?.id }, "loop");
       if (result?.ok === false) throw new Error(String(result.reason || "the round could not start"));
       // Stopped while this round was sent: the round stands, but the stopped loop goes no further.
       if (!current()) return;
@@ -8605,7 +8653,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.info?.("ao.schedule.dropped", { workspaceId, taskId });
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: scheduleMessage(schedule, now()), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      const result = await chatContinue({ workspaceId, taskId, message: scheduleMessage(schedule, now()), ...followUpSelection(chatRuns.at(-1)), deferStart: true, afterRunId: chatRuns.at(-1)?.id }, "schedule");
       if (result?.ok === false) throw new Error(String(result.reason || "the message could not start"));
       sent = true;
       schedules.clear(workspaceId, taskId, id);
@@ -8954,7 +9002,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!own.every(run => shown.has(run))) throw new Error("This message's reply was not found; reload the chat");
       if ((detail.task.description || "") !== sourceDescription) throw new Error("The chat changed before deletion; reload it and try again");
       const description = chatDescriptionWithout(sourceDescription, index);
-      const hidden = [...new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own])];
+      const descendants = new Set([...chatEdits.runsOfMessage(id, task, own[0]), ...own]);
+      for (let size = -1; size !== descendants.size;) {
+        size = descendants.size;
+        for (const run of chatRuns) {
+          if (descendants.has(run.restarts_run_id) || descendants.has(run.replaces_run_id) || descendants.has(run.continuation?.run_id)) descendants.add(run.id);
+        }
+      }
+      const hidden = [...descendants];
       const before = chatEdits.get(id, task);
       try {
         // Saved (off the main thread) before the message leaves the task: a hide that cannot be
@@ -9612,6 +9667,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     switch (operation) {
       case "chat_send": return personChatSend(args, { supersedeRetry: true });
       case "chat_recover": return chatRecover(args);
+      case "chat_continue": return asPerson(() => personChatContinue(args));
       case "chat_steer": return asPerson(() => chatSteer(args));
       case "chat_prewarm": return chatPrewarm(args);
       case "chat_context_window": return chatSetContextWindow(args);

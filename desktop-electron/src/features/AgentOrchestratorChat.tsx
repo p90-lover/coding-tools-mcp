@@ -1209,7 +1209,7 @@ function useFarTurns(scroller: { current: HTMLElement | null }, column: { curren
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, sendBusy = busy, loadDescription, send, openStructure,
   approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
-  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover, resizeAgent,
+  projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover, resizeAgent, continueChat,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue,
 }: {
   /** The app's queue of this project's chats: a message typed while a turn runs waits there. */
@@ -1253,6 +1253,8 @@ export function AgentOrchestratorChat({
   recover?: (input: { taskId: string; runId: string; nodeId: string; requestKey: string; threadId: string }) => Promise<{ message: string }>;
   /** Resizes the chat's agent to a newly picked context window now, keeping its conversation (chat_context_window). */
   resizeAgent?: (input: { taskId: string; contextWindow: number | null }) => Promise<ChatAgentResize>;
+  /** Continues the chat silently with the dedicated chat_continue action, without adding a user message. */
+  continueChat?: (input: { taskId: string; runId?: string }) => Promise<void>;
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => Promise<void>;
@@ -2084,8 +2086,20 @@ export function AgentOrchestratorChat({
     dock.scrollIntoView({ behavior: "smooth", block: "nearest" });
     dock.querySelector<HTMLElement>("button:not(:disabled), textarea, input")?.focus({ preventScroll: true });
   } : undefined;
-  // Its Continue, when no request is shown: the agent is restarted with "Continue." (chat_steer's restart).
-  const continueTurn = selectedTaskId && steer ? () => { void deliver("Continue.", undefined, false, true); } : undefined;
+  // Its Continue, when no request is shown: call dedicated chat_continue silently without adding a user message.
+  const continueTurn = selectedTaskId && (continueChat || (typeof window !== "undefined" && Boolean(window.codexWebLauncher?.aoCall))) ? () => {
+    if (sendBusy || busy) return;
+    const runId = latest?.id;
+    if (continueChat) {
+      void continueChat({ taskId: selectedTaskId, runId }).catch(() => {});
+    } else {
+      void window.codexWebLauncher?.aoCall?.("chat_continue", {
+        ...(projectId ? { workspaceId: projectId } : {}),
+        taskId: selectedTaskId,
+        ...(runId ? { runId } : {}),
+      }).catch(() => {});
+    }
+  } : undefined;
 
   const submit = async () => {
     // Paste saves asynchronously. Enter in the same frame must not send only the text and leave

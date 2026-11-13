@@ -1978,6 +1978,35 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     const result = await moduleCall("chat_recover", { workspaceId, ...input });
     return { message: String(result.message || "The original work was kept; no message was sent.") };
   };
+  const continueChat = (input: { taskId: string; runId?: string }) => {
+    const owner = selection.current;
+    const current = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.taskId === owner.taskId;
+    return chatRun(input.taskId, async () => {
+      if (!workspaceId) throw new Error("Add a project first");
+      if (!(boardWorkspace.current === workspaceId && board?.tasks.some((task) => task.id === input.taskId))) {
+        throw new Error("This chat is in another project. Open it there, or start a new chat here.");
+      }
+      const runId = input.runId || selectedRunId || "";
+      const result = await moduleCall("chat_continue", {
+        workspaceId,
+        taskId: input.taskId,
+        ...(runId ? { runId } : {}),
+      });
+      if (result.cancelled) throw new Error("Continuation cancelled. The existing work was kept.");
+      if (result.ok === false) throw new Error(String(result.reason || "This chat could not continue"));
+      if (!current()) return;
+      if (result.run) {
+        const created = result.run as AoMission;
+        setMissions(previous => [...previous.filter(mission => mission.id !== created.id), created]);
+      }
+      if (typeof result.runId === "string" && result.runId) setSelectedRunId(result.runId);
+      if (result.status === "failed" && typeof result.detail === "string") setError(result.detail);
+      const notice = typeof result.message === "string" ? result.message : startNotice(result);
+      setChatNotices((previous) => ({ ...previous, [input.taskId]: notice }));
+      setAutoStatus(notice ? "idle" : typeof result.status === "string" ? result.status : "running");
+      void Promise.all([loadBoard(workspaceId), loadMissions(workspaceId)]).catch(cause => setError(cause instanceof Error ? cause.message : String(cause)));
+    });
+  };
   // A window picked for an open chat resizes its agent now, keeping the conversation (chat_context_window).
   const resizeChatAgent = async (input: { taskId: string; contextWindow: number | null }): Promise<ChatAgentResize> => {
     if (!workspaceId) throw new Error("Add a project first");
@@ -3202,7 +3231,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} resizeAgent={resizeChatAgent} queue={chatQueue} commands={chatCommands}
+                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} resizeAgent={resizeChatAgent} continueChat={continueChat} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && composerMode === "team" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>
