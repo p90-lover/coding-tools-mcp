@@ -57,23 +57,190 @@ test("the chat mounts the control outside the scroller, lifted over the approval
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
   assert.match(source, /<ChatScrollToBottom show=\{!atBottom\} working=\{anyWorking\} lift=\{dockHeight \? dockHeight \+ 20 : 0\}/);
   assert.doesNotMatch(source, /className="cx-to-bottom"/);
+  assert.match(source, /className="cx-scroll" ref=\{scroller\} role="region" aria-label="Chat messages" tabIndex=\{0\}/);
   const css = fs.readFileSync(path.resolve(__dirname, "../src/features/codex-chat.css"), "utf8");
   assert.match(css, /\.cx-scroll-bottom-anchor \{[^}]*height: 0/);
   assert.doesNotMatch(css, /\.cx-to-bottom \{[^}]*position: sticky/);
 });
 
-test("following stops only when the view moves up, as in Codex, and a send re-arms it", () => {
-  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
-  const scroller = source.slice(source.indexOf('<div className="cx-scroll" ref={scroller}'), source.indexOf("onScroll={(event) => {"));
-  // A wheel down (or any wheel at the bottom, which fires no scroll event) keeps following.
-  assert.match(scroller, /onWheel=\{\(event\) => \{[^}]*if \(event\.deltaY < 0\) following\.current = false;/);
-  // A touch or a click in the thread moves nothing; only the scrollbar itself stops following.
-  assert.match(scroller, /onTouchStart=\{\(\) => \{ jumpingToBottom\.current = false; \}\}/);
-  assert.match(scroller, /if \(event\.target === event\.currentTarget\) following\.current = false;/);
-  assert.equal((scroller.match(/following\.current = false/g) || []).length, 2);
-  // A send and a new request follow the thread again, not only set atBottom.
-  assert.match(source, /const followBottom = \(\) => \{\s*jumpingToBottom\.current = false;\s*following\.current = true;\s*setAtBottom\(true\);/);
-  assert.match(source, /if \(here\(\)\) followBottom\(\);/);
-  assert.match(source, /if \(!requestKeys\) return;\s*followBottom\(\);/);
-  assert.doesNotMatch(source, /if \(here\(\)\) setAtBottom\(true\);/);
+const chatSource = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+const chatAst = ts.createSourceFile("chat.tsx", chatSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+const scrollHandlers = {};
+let clickHandler = "() => {}";
+function visit(node) {
+  if (ts.isJsxOpeningElement(node)) {
+    const attributes = node.attributes.properties;
+    const className = attributes.find(a => a.name?.text === "className")?.initializer?.text;
+    if (className === "cx-scroll" || className === "cx-column") {
+      for (const a of attributes) {
+        if (!a.name?.text.startsWith("on") || !a.initializer?.expression) continue;
+        if (className === "cx-scroll") scrollHandlers[a.name.text] = a.initializer.expression.getText(chatAst);
+        else if (a.name.text === "onClickCapture") clickHandler = a.initializer.expression.getText(chatAst);
+      }
+    }
+  }
+  ts.forEachChild(node, visit);
+}
+visit(chatAst);
+const followCode = chatSource.slice(chatSource.indexOf("  // Following new output"), chatSource.indexOf("  useFarTurns(scroller, column);"));
+const compiledFollow = ts.transpileModule(`function install() {
+${followCode}
+return { following, followBottom, click: ${clickHandler}, handlers: {
+${Object.entries(scrollHandlers).map(([name, handler]) => `${name}: ${handler}`).join(",\n")}
+} }; }`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+
+function followFixture() {
+  let resize;
+  const effects = [];
+  const box = {
+    scrollHeight: 1200, clientHeight: 400, scrollTop: 800,
+    scrollTo({ top }) { this.scrollTop = Math.max(0, Math.min(top, this.scrollHeight - this.clientHeight)); },
+  };
+  const env = {
+    atBottom: true, jumpingToBottom: { current: false }, scroller: { current: box },
+    turns: [], stepCount: 0, selectedTaskId: "one",
+    useRef: value => ({ current: value === null ? {} : value }),
+    useEffect: fn => effects.push(fn),
+    setAtBottom: value => { env.atBottom = value; },
+    requestAnimationFrame() {},
+    ResizeObserver: class { constructor(fn) { resize = fn; } observe() {} disconnect() {} },
+  };
+  const controller = vm.runInNewContext(`${compiledFollow}\ninstall()`, env);
+  effects.forEach(fn => fn());
+  const scroll = () => controller.handlers.onScroll({ currentTarget: box });
+  return { box, controller, env, scroll, countChanged: effects[0],
+    grow: () => { box.scrollHeight += 120; resize(); },
+    bottom: () => { box.scrollTop = box.scrollHeight - box.clientHeight; scroll(); } };
+}
+
+test("transcript clicks never disable following the next model response", () => {
+  const f = followFixture();
+  f.controller.click();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+  assert.equal(f.controller.following.current, true);
+});
+
+test("layout scrolls do not masquerade as a user scrolling up", () => {
+  const f = followFixture();
+  f.scroll();
+  f.box.scrollTop -= 60;
+  f.scroll();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+});
+
+test("scrolling up pauses model output and reaching the latest message resumes it", () => {
+  const f = followFixture();
+  f.controller.handlers.onWheel({ deltaY: -200, currentTarget: f.box });
+  f.box.scrollTop -= 200;
+  f.scroll();
+  const top = f.box.scrollTop;
+  f.grow();
+  assert.equal(f.box.scrollTop, top);
+  assert.equal(f.env.atBottom, false);
+  f.bottom();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+  assert.equal(f.env.atBottom, true);
+});
+
+test("a new step cannot re-arm following between wheel input and its scroll event", () => {
+  const f = followFixture();
+  f.controller.handlers.onWheel({ deltaY: -200, currentTarget: f.box });
+  f.countChanged();
+  assert.equal(f.controller.following.current, false);
+});
+
+test("downward wheel input and a touch without movement keep following", () => {
+  const f = followFixture();
+  f.controller.handlers.onWheel({ deltaY: 100, currentTarget: f.box });
+  f.controller.handlers.onTouchStart({ touches: [{ clientY: 100 }] });
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+});
+
+test("scroll input that cannot move a short transcript does not disable following", () => {
+  const f = followFixture();
+  f.box.scrollHeight = 200;
+  f.box.scrollTop = 0;
+  f.controller.handlers.onWheel({ deltaY: -100, currentTarget: f.box });
+  f.controller.handlers.onTouchStart({ touches: [{ clientY: 100 }] });
+  f.controller.handlers.onTouchMove({ touches: [{ clientY: 180 }], currentTarget: f.box });
+  f.controller.handlers.onKeyDown({ key: "Home", target: { tagName: "DIV" }, currentTarget: f.box });
+  assert.equal(f.controller.following.current, true);
+  f.grow();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+});
+
+test("touch scrolling upward pauses until the latest message is reached", () => {
+  const f = followFixture();
+  f.controller.handlers.onTouchStart({ touches: [{ clientY: 100 }] });
+  f.controller.handlers.onTouchMove({ touches: [{ clientY: 180 }], currentTarget: f.box });
+  f.box.scrollTop -= 80;
+  f.scroll();
+  const top = f.box.scrollTop;
+  f.grow();
+  assert.equal(f.box.scrollTop, top);
+  f.bottom();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+});
+
+test("keyboard scrolling pauses, but typing inside transcript fields does not", () => {
+  const f = followFixture();
+  f.controller.handlers.onKeyDown({ key: "ArrowUp", target: { tagName: "TEXTAREA" }, currentTarget: f.box });
+  assert.equal(f.controller.following.current, true);
+  f.controller.handlers.onKeyDown({ key: "PageUp", target: { tagName: "DIV" }, currentTarget: f.box });
+  assert.equal(f.controller.following.current, false);
+  f.box.scrollTop -= 100;
+  f.scroll();
+  const top = f.box.scrollTop;
+  f.grow();
+  assert.equal(f.box.scrollTop, top);
+  f.bottom();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+});
+
+test("a scrollbar gesture pauses and a click without scrolling does not leave following stuck", () => {
+  const f = followFixture();
+  f.controller.handlers.onPointerDown({ target: f.box, currentTarget: f.box });
+  assert.equal(f.controller.following.current, false);
+  f.controller.handlers.onPointerUp({ currentTarget: f.box });
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+  f.controller.handlers.onPointerDown({ target: f.box, currentTarget: f.box });
+  f.box.scrollTop -= 200;
+  f.scroll();
+  f.controller.handlers.onPointerUp({ currentTarget: f.box });
+  const top = f.box.scrollTop;
+  f.grow();
+  assert.equal(f.box.scrollTop, top);
+  f.bottom();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+});
+
+test("a smooth jump catches up with model output that arrived during the animation", () => {
+  const f = followFixture();
+  f.env.jumpingToBottom.current = true;
+  f.grow();
+  f.scroll();
+  f.controller.handlers.onScrollEnd();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+  assert.equal(f.env.jumpingToBottom.current, false);
+});
+
+test("sending follows again while automatic requests respect a paused reader", () => {
+  const f = followFixture();
+  f.controller.handlers.onWheel({ deltaY: -200, currentTarget: f.box });
+  f.box.scrollTop -= 200;
+  f.scroll();
+  f.controller.followBottom();
+  f.grow();
+  assert.equal(f.box.scrollTop, f.box.scrollHeight - f.box.clientHeight);
+  assert.match(chatSource, /if \(here\(\)\) followBottom\(\);/);
+  assert.match(chatSource, /if \(!requestKeys \|\| !following\.current\) return;\s*followBottom\(\);/);
 });

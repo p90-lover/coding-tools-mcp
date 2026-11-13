@@ -1487,7 +1487,6 @@ export function AgentOrchestratorChat({
   }, [turns, pendingSteers, selectedTaskId]);
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
   const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
-  const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
   // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
   const workbenchKey = `coding-tools:ao:workbench:${JSON.stringify([projectId ?? "", selectedTaskId])}`;
@@ -1562,43 +1561,27 @@ export function AgentOrchestratorChat({
     .flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])) : null,
   // CHAT_WORK changes with the polls that change turns, or with a read back (the tick).
   [detailsOpen, turns, detailsWorkTick]);
-  // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
-  // stream and flashes the ↓ button. Only that button scrolls smoothly.
-  // A send or a chat switch sets atBottom: that re-arms following too.
+  // Following new output must be instant even when the theme enables smooth scrolling; only the ↓ button animates.
   useEffect(() => {
-    if (!atBottom || jumpingToBottom.current) return;
-    following.current = true;
+    if (!following.current || jumpingToBottom.current) return;
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
-  }, [turns.length, stepCount, atBottom]);
-  // A running step grows without a new turn or step (each tool call, each streamed line): the
-  // thread follows any growth of its content while it is read at the bottom.
+  }, [turns, atBottom]);
   const column = useRef<HTMLDivElement>(null);
-  // A click in the thread (opening "Worked", a group, a tool's output) grows it too, but that is the
-  // user reading: the view stays on what they opened and following stops if it left the bottom.
-  // As in Codex, only a person moving the view up ends following: a wheel up, dragging the scrollbar,
-  // or a scroll that leaves the bottom upward. A click, a touch or a wheel down that moves nothing
-  // keeps it (a wheel down at the bottom fires no scroll event, so it used to stop following for
-  // good). Reaching the bottom again, a send or a new request re-arms it.
-  const following = useRef(atBottom);
-  const lastScrollTop = useRef(0);
-  const clicked = useRef(false);
+  // Input handlers pause synchronously, before layout or React state updates can race the user's scroll.
+  const following = useRef(true);
+  const touchY = useRef<number | null>(null);
   const followBottom = () => {
     jumpingToBottom.current = false;
     following.current = true;
     setAtBottom(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
   };
-  useEffect(() => { jumpingToBottom.current = false; following.current = true; lastScrollTop.current = 0; }, [selectedTaskId]);
+  useEffect(() => { touchY.current = null; followBottom(); }, [selectedTaskId]);
   useEffect(() => {
     const box = scroller.current, content = column.current;
     if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => {
       if (jumpingToBottom.current) return;
-      if (clicked.current) { clicked.current = false; following.current = box.scrollHeight - box.scrollTop - box.clientHeight <= 24; setAtBottom(following.current); return; }
-      // Instant, like the follow above: setting scrollTop obeys the theme's smooth scrolling, and the
-      // animation's in-between scroll events read as "left the bottom" and ended following. Seen
-      // live: right after a send (the thread grows a lot at once) the view stopped on an older
-      // message and stayed there.
       if (following.current) box.scrollTo({ top: box.scrollHeight, behavior: "instant" });
     });
     observer.observe(content);
@@ -1666,10 +1649,9 @@ export function AgentOrchestratorChat({
   };
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
-  // A new request ends the thread: bring it into view even when the person had scrolled up to read.
   const requestKeys = approvals.map((approval) => `${approval.nodeId}\u0000${approval.approval_id}`).join("\u0001");
   useEffect(() => {
-    if (!requestKeys) return;
+    if (!requestKeys || !following.current) return;
     followBottom();
   }, [requestKeys]);
   // Each chat keeps its own unsent draft. A new composer belongs to its project and pane.
@@ -2992,35 +2974,51 @@ export function AgentOrchestratorChat({
           </FloatingLayer>;
         })() : null}
 
-        <div className="cx-scroll" ref={scroller}
+        <div className="cx-scroll" ref={scroller} role="region" aria-label="Chat messages" tabIndex={0}
           onWheel={(event) => {
             jumpingToBottom.current = false;
             // Upward only, and before the scroll lands, so a growing answer can't pull the view back.
-            if (event.deltaY < 0) following.current = false;
+            if (event.deltaY < 0 && event.currentTarget.scrollTop > 0) following.current = false;
           }}
-          onTouchStart={() => { jumpingToBottom.current = false; }}
+          onTouchStart={(event) => {
+            jumpingToBottom.current = false;
+            touchY.current = event.touches[0]?.clientY ?? null;
+          }}
+          onTouchMove={(event) => {
+            const y = event.touches[0]?.clientY;
+            if (y === undefined) return;
+            if (touchY.current !== null && y > touchY.current && event.currentTarget.scrollTop > 0) following.current = false;
+            touchY.current = y;
+          }}
+          onKeyDown={(event) => {
+            const target = event.target as HTMLElement;
+            if (event.defaultPrevented || target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+            if (event.currentTarget.scrollTop > 0 && (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey && target.tagName !== "BUTTON"))) {
+              jumpingToBottom.current = false;
+              following.current = false;
+            }
+          }}
           onPointerDown={(event) => {
             jumpingToBottom.current = false;
             // The scrollbar itself (the scroller is the target): a drag must not be pulled back down.
             if (event.target === event.currentTarget) following.current = false;
           }}
+          onPointerUp={(event) => {
+            const box = event.currentTarget;
+            if (box.scrollHeight - box.scrollTop - box.clientHeight <= 24) followBottom();
+          }}
+          onScrollEnd={() => {
+            if (jumpingToBottom.current && following.current) followBottom();
+          }}
           onScroll={(event) => {
             const box = event.currentTarget, bottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 24;
-            const movedUp = box.scrollTop < lastScrollTop.current - 1;
-            lastScrollTop.current = box.scrollTop;
             if (jumpingToBottom.current && !bottom) return;
             jumpingToBottom.current = false;
-            // Layout and scroll anchoring emit scroll events too. Only a person moving away
-            // ends following; a growing answer must not turn it off before ResizeObserver runs.
+            // Layout and scroll anchoring also emit scroll events; only input pauses following.
             if (bottom) following.current = true;
-            else if (movedUp) following.current = false;
             if (bottom || !following.current) setAtBottom(bottom);
           }}>
-          <div className="cx-column" ref={column} onClickCapture={() => {
-            // Only the growth a click causes (in its next frame or so) counts as the user's.
-            clicked.current = true;
-            requestAnimationFrame(() => requestAnimationFrame(() => { clicked.current = false; }));
-          }}>
+          <div className="cx-column" ref={column}>
             {!turns.length ? <div className="cx-empty">
               {deciding && !selectedTaskId ? <div role="status">
                 <p>{projectLoadError ? `Couldn't load chats: ${projectLoadError}` : "Loading project chats…"}</p>
