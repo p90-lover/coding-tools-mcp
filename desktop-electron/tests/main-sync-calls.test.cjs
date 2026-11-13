@@ -38,7 +38,7 @@ const ALLOWED = {
   // +1: the off-system-drive temporary folder is made once at startup, before any window or child
   // exists (system-drive.cjs): Chromium's helpers read TEMP as they start.
   "main.cjs": 25,
-  "managed-components.cjs": 48, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
+  "managed-components.cjs": 46, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9,
   // The saved accessibility mode is read once in start()'s first tick, before any window exists:

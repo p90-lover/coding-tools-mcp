@@ -4475,6 +4475,10 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     // bridge was already detached, with nothing logged. An overrun is logged and the quit goes on.
     const step = (name, work, ms) => boundedQuitStep(name, work, { ms,
       onTimeout: (stepName, limit) => quitLogger?.warn("launcher.quit_step_timeout", { step: stepName, ms: limit }) });
+    // A component's process record is saved off the main thread (managed-components.cjs): a CPA left
+    // running for the next app must be on disk before this one goes, or that app starts a second CPA.
+    // After dispose, so a start the CPA switch finished and every child exit since are included.
+    await step("component-records", () => externalServicesController?.processRecordsSaved?.(), 5_000);
     await step("headless", () => headlessHost?.shutdown("launcher-quit"));
     await step("register", () => registerHost?.shutdown());
     stopCatalogVerificationMonitor();

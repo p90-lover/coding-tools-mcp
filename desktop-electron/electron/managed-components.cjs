@@ -2327,8 +2327,10 @@ function createManagedComponentController({
     const context = launchContext(manifest);
     const existing = processes.get(id);
     if (existing && [...existing.values()].some((child) => child && child.exitCode === null && child.signalCode === null)) return project(id);
+    // The plugin bundle this CPA starts with goes into its record; read as a stream, off the main thread.
     const dependencyFingerprint = id === "cpa" && persistentIds.has(id)
-      ? sha256File(path.join(context.adapterRoot, "..", "vendor", "bundled", "cpa-plugins", "BUNDLE.json")) : undefined;
+      ? await sha256FileAsync(path.join(context.adapterRoot, "..", "vendor", "bundled", "cpa-plugins", "BUNDLE.json")) : undefined;
+    checkComponentStart(owner);
     const active = new Map();
     processes.set(id, active);
     try {
@@ -2365,7 +2367,8 @@ function createManagedComponentController({
           child = await spawnProcess(spec.executable, spec.args, persistent
             ? { ...spec.options, detached: true, stdio: "ignore" } : spec.options);
           try {
-            // Read before the check: a Stop during the read must still retire this late child.
+            // A start already canceled ends its late child at once; one canceled during the read, after it.
+            checkComponentStart(owner, persistent);
             const currentRecord = persistent ? await readPersistedRecord(id) : null;
             checkComponentStart(owner, persistent);
             if (JSON.stringify(currentRecord) !== JSON.stringify(previousRecord)) {
