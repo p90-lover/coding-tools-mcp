@@ -36,20 +36,55 @@ test("shimmer ticker pauses shimmers and steps them on one 30 Hz clock", () => {
   const first = element();
   const second = element();
   const shimmers = [animation("cx-shimmer", first), animation("cx-shimmer", second)];
-  const pulse = animation("cx-pulse", first);
-  start("cx-pulse", first);
-  assert.equal(timers.size, 0, "other animations never start the ticker");
+  const fade = animation("cx-fade-in", first);
+  start("cx-fade-in", first);
+  assert.equal(timers.size, 0, "a one-off animation never starts the ticker");
   start("cx-shimmer", first);
   assert.equal(timers.size, 1);
   assert.ok(Math.abs([...timers.values()][0].ms - 1000 / 30) < 0.01);
   assert.deepEqual([shimmers[0].playState, shimmers[0].currentTime], ["paused", 1000]);
-  assert.equal(pulse.playState, "running", "compositor animations are left alone");
+  assert.equal(fade.playState, "running", "and is left alone");
   start("cx-shimmer", second);
   assert.equal(timers.size, 1, "a second shimmer reuses the running ticker");
   assert.deepEqual([shimmers[1].playState, shimmers[1].currentTime], ["paused", 1000]);
   doc.timeline.currentTime = 1033;
   [...timers.values()][0].fn();
   assert.deepEqual(shimmers.map((shimmer) => shimmer.currentTime), [1033, 1033]);
+});
+
+test("pulsing dots and spinners are stepped 10 times a second on the same clock; a shimmer raises it to 30", () => {
+  // Live 2026-11-13: ~90 running pulses and spinners kept the GPU process at a core on a 157 Hz screen
+  // (99% of a core with them running, 33% paused), while the window was shown.
+  const { install, doc, timers, element, animation, start } = setup();
+  install(doc);
+  const host = element();
+  const pulse = animation("cx-pulse", host), spin = animation("cx-spin", host);
+  start("cx-pulse", host);
+  assert.equal(timers.size, 1);
+  assert.ok(Math.abs([...timers.values()][0].ms - 100) < 0.01, "marks alone: 10 steps a second");
+  assert.deepEqual([pulse.playState, pulse.currentTime, spin.playState, spin.currentTime], ["paused", 1000, "paused", 1000],
+    "every mark on the element, paused and in phase");
+  for (const name of ["cdx-spin", "cx-rplan-spin", "cx-scroll-dot-wave", "cx-receipt-sending", "ao-spin"]) {
+    const mark = element(), looping = animation(name, mark);
+    start(name, mark);
+    assert.equal(looping.playState, "paused", `${name} is stepped too`);
+  }
+  const shimmerHost = element();
+  animation("cx-shimmer", shimmerHost);
+  start("cx-shimmer", shimmerHost);
+  assert.equal(timers.size, 1, "one clock");
+  assert.ok(Math.abs([...timers.values()][0].ms - 1000 / 30) < 0.01, "a shimmer needs 30");
+  doc.timeline.currentTime = 1033;
+  [...timers.values()][0].fn();
+  assert.equal(pulse.currentTime, 1033, "marks ride the shimmer's clock");
+  shimmerHost.isConnected = false;
+  [...timers.values()][0].fn();
+  assert.equal(timers.size, 1);
+  assert.ok(Math.abs([...timers.values()][0].ms - 100) < 0.01, "back to 10 once the shimmer is gone");
+  doc.hidden = true;
+  doc.timeline.currentTime = 9000;
+  [...timers.values()][0].fn();
+  assert.equal(pulse.currentTime, 1033, "a hidden window does not step its marks");
 });
 
 test("shimmer ticker skips hidden windows and stops when no shimmer is left", () => {
