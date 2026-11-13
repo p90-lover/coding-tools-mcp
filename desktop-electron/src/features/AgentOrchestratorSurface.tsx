@@ -5,7 +5,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat, syncChatQueues, type ChatQueueActions } from "./AgentOrchestratorChat";
+import { AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatQueueActions } from "./AgentOrchestratorChat";
 import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
@@ -262,6 +262,23 @@ function startNotice(result: Record<string, unknown>): string {
 }
 /** The fields that decide how a route launches, in a fixed order (absent ones as null). */
 const routeIdentity = (route: AoRoute) => CHAT_ROUTE_FIELDS.map(name => (route as unknown as Record<string, unknown>)[name] ?? null);
+/**
+ * Whether `route` is the setup a single chat's step ran on: its saved route, or that route as the
+ * composer shows it when the chat opens (its permission choices applied, then fitted).
+ */
+function singleRouteMatches(route: AoRoute, mission: AoMission, card: AoMission["nodes"][number]): boolean {
+  const same = (other: AoRoute) => JSON.stringify(routeIdentity(other)) === JSON.stringify(routeIdentity(route));
+  if (same(card.route)) return true;
+  const intent = mission.team?.permission_selections?.[card.template_role_id || card.id];
+  const shown = { ...card.route };
+  if (intent?.permission_profile !== undefined) {
+    shown.native_permission_profile = intent.permission_profile;
+    if (shown.harness_id === NATIVE_HARNESS) shown.permission_profile = intent.permission_profile;
+  }
+  if (intent?.approval_policy !== undefined) shown.approval_policy = intent.approval_policy;
+  if (intent?.approvals_reviewer !== undefined) shown.approvals_reviewer = intent.approvals_reviewer;
+  return same(shown) || same(permissionsFitted(shown));
+}
 function lastChatRoute(): AoRoute | null {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(LAST_CHAT_ROUTE) || "null");
@@ -672,8 +689,17 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // composer fitting an opened chat's route to its model (`adjusted`) is that chat's, and keeping it
   // made a rewind or a new chat start on the old chat's model, effort and window.
   const composerIntent = useRef(0);
-  const pickComposerTeam = (id: string) => { composerIntent.current++; setComposerTeamId(id); };
-  const pickSingleRoute = (route: AoRoute, adjusted = false) => { composerIntent.current++; setSingleRoute(route); if (!adjusted) rememberChatRoute(route); };
+  // A pick the person makes (not the composer fitting a route, `adjusted`) ends a pending automatic
+  // retry of the open chat's failed step on another setup (endPendingRetry).
+  const pickComposerTeam = (id: string) => { composerIntent.current++; setComposerTeamId(id); if (composerMode === "team") endPendingRetry({ mode: "team" }); };
+  const pickSingleRoute = (route: AoRoute, adjusted = false) => {
+    composerIntent.current++; setSingleRoute(route);
+    if (!adjusted) { rememberChatRoute(route); if (composerMode === "single") endPendingRetry({ mode: "single", route }); }
+  };
+  const pickComposerMode = (mode: "single" | "team") => {
+    composerIntent.current++; setComposerMode(mode);
+    endPendingRetry(mode === "team" ? { mode } : { mode, route: singleRoute });
+  };
   const hydratedComposer = useRef("");
   // The New mission sheet's team choice (#254); the composer keeps its own (composerTeamId).
   const [missionTeamId, setMissionTeamId] = useState("");
@@ -901,8 +927,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           return;
         }
         // Read only where it decides anything: a single chat with a failed step.
+        // Asked for this run: one whose retry the person ended by changing the chat's setup is not
+        // retried here either (chat_retry_cancel), or the old harness and model ran after all.
         const autoRetry = held && mission.execution_mode === "single"
-          ? await moduleCall("chat_auto_retry", {}).then((result) => result.autoRetry === true, () => false) : false;
+          ? await moduleCall("chat_auto_retry", { workspaceId, runId: mission.id }).then((result) => result.autoRetry === true, () => false) : false;
         let nodes = running;
         let still: AoMission | undefined = mission;
         for (;;) {
@@ -936,9 +964,24 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
             const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
             if (now.driven !== false || ["starting", "running"].includes(String(now.status)) || resumedRuns.current.has(key)) return;
           }
+          // Focus can still leave between that check and the call. Seen live 2026-11-12 07:04: the retry
+          // passed, its start_run 1.2 s later was refused, and the chat said "Pursuing goal" with nothing
+          // running, as this resume was spent. A refused step waits for the next focus and is tried once
+          // more, unless something picked the chat up meanwhile; a step that passed is not repeated.
+          let retried = resume !== "retry";
+          const begin = async () => {
+            if (!retried) { await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() }); retried = true; }
+            await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
+          };
           resumedRuns.current.add(key);
-          if (resume === "retry") await moduleCall("control_run", { workspaceId, runId: mission.id, action: "retry", ...executableArg() });
-          await moduleCall("start_run", { workspaceId, runId: mission.id, ...executableArg() });
+          try { await begin(); }
+          catch (error) {
+            if (!/focused app window/.test(String((error as Error)?.message ?? error))) throw error;
+            await new Promise<void>((resolve) => window.addEventListener("focus", () => resolve(), { once: true }));
+            if (!mounted.current || selection.current.workspaceId !== workspaceId) throw error;
+            const now = await moduleCall("run_status", { workspaceId, runId: mission.id });
+            if (now.driven === false && !["starting", "running"].includes(String(now.status))) await begin();
+          }
         }
         if (mounted.current && selection.current.workspaceId === workspaceId) await loadMissions(workspaceId);
       })().catch(() => { settledRuns.current.delete(key); });
@@ -1471,6 +1514,21 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       setComposerTeamId(chatMission.team?.id || "");
     }
   }, [workspaceId, chatTaskId, chatMission]);
+  // "Retry automatically" relaunches a failed step on its saved route: a harness, model, effort or
+  // permission picked in the composer while the step waited out its retry pause was ignored, and the
+  // retry ran the old setup for up to half an hour (the user, 2026-11-12: "i switched harness model
+  // etc it doesnt allow to run on new config and stop the retry"). The person's pick, when it is not
+  // the failed step's setup, ends that retry (chat_retry_cancel); the next message, or Retry, runs on it.
+  const endPendingRetry = (pick: { mode: "single"; route: AoRoute } | { mode: "team" }) => {
+    const mission = chatMission, card = mission?.execution_mode === "single" ? mission.nodes[0] : undefined;
+    if (!workspaceId || !mission || !card || mission.cancelled || !mission.nodes.some((node) => node.state === "held")) return;
+    if (pick.mode === "single" && singleRouteMatches(pick.route, mission, card)) return;
+    const owner = workspaceId, runId = mission.id;
+    // A write, which the app takes only from its focused window (as the goal's route above).
+    const send = () => void moduleCall("chat_retry_cancel", { workspaceId: owner, runId }).catch(() => undefined);
+    if (document.hasFocus()) send();
+    else window.addEventListener("focus", send, { once: true });
+  };
   const permissionMission = composerMode === "single" ? chatMission?.execution_mode === "single" ? chatMission : undefined
     : chatMission?.execution_mode !== "single" && chatMission?.team?.id === selectedSetup?.id ? chatMission : undefined;
   const singleAttempt = permissionMission?.execution_mode === "single" ? permissionMission.nodes[0] : undefined;
@@ -1514,6 +1572,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       if (current()) {
         const route = { ...chosen.route };
         setSingleRoute(route); rememberChatRoute(route);
+        endPendingRetry({ mode: "single", route });
       }
       return "Applies from the next turn. A running turn keeps its permissions.";
     }
@@ -1897,6 +1956,13 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     if (!workspaceId) throw new Error("Add a project first");
     const result = await moduleCall("chat_recover", { workspaceId, ...input });
     return { message: String(result.message || "The original work was kept; no message was sent.") };
+  };
+  // A window picked for an open chat resizes its agent now, keeping the conversation (chat_context_window).
+  const resizeChatAgent = async (input: { taskId: string; contextWindow: number | null }): Promise<ChatAgentResize> => {
+    if (!workspaceId) throw new Error("Add a project first");
+    const result = await moduleCall("chat_context_window", { workspaceId, ...input });
+    return { ok: result.ok === true, ...(result.reason === "working" || result.reason === "no_agent" ? { reason: result.reason } : {}),
+      resized: result.resized === true, ...(typeof result.contextWindow === "number" ? { contextWindow: result.contextWindow } : {}), resumed: result.resumed === true };
   };
   // The chats' queued messages are the app's (chat_queue): it sends them when a chat's turn settles,
   // whichever chat is open. A queued message runs on the model or team picked when it was queued.
@@ -2341,12 +2407,35 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     setChatTaskId("");
     await Promise.all([loadBoard(id), loadMissions(id)]);
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  // A run whose message no agent has taken yet (Rewind on a chat whose last message still says
+  // "sending"): stopped, then waited on until nothing drives it, since main refuses a rewind while a
+  // run is open. It ran nothing, so nothing is lost.
+  const stopForRewind = async (owner: string, runId: string) => {
+    await moduleCall("control_run", { workspaceId: owner, runId, action: "stop" });
+    for (const started = Date.now(); Date.now() - started < 30_000;) {
+      const status = await moduleCall("run_status", { workspaceId: owner, runId });
+      if (status.driven === false && !["starting", "running"].includes(String(status.status))) return;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error("The chat's last message didn't stop in time; stop the chat, then rewind");
+  };
   // Rewind the conversation and run the selected message again; workspace files stay unchanged.
-  const rewindChat = (taskId: string, upTo: number) => (async () => {
+  const rewindChat = (taskId: string, upTo: number, stopRunId?: string) => (async () => {
+    if (stopRunId) {
+      const owner = workspaceId;
+      await stopForRewind(owner, stopRunId);
+      if (!mounted.current || selection.current.workspaceId !== owner) return;
+    }
     const description = await loadDescription(taskId);
     const messages = chatMessagesFromDescription(description);
     if (!Number.isInteger(upTo) || upTo < 0 || upTo >= messages.length) throw new Error("That message is no longer in this chat; reload it");
-    await sendChat({ taskId, message: messages[upTo].text, rewind: { index: upTo, description } });
+    const send = () => sendChat({ taskId, message: messages[upTo].text, rewind: { index: upTo, description } });
+    try { await send(); } catch (cause) {
+      // Main's read of the runs can trail the stop by a moment: one more try once it has caught up.
+      if (!stopRunId || !/Stop the chat before rewinding/.test(cause instanceof Error ? cause.message : String(cause))) throw cause;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await send();
+    }
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
@@ -2848,7 +2937,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       rename: (title: string) => chatHandlers.current.renameChat(chatTaskId, title),
       archive: () => chatHandlers.current.missionAction(chatTaskId, "archive"),
       fork: (turnIndex?: number | "first") => chatHandlers.current.forkChat(chatTaskId, turnIndex),
-      rewind: (turnIndex: number) => chatHandlers.current.rewindChat(chatTaskId, turnIndex),
+      rewind: (turnIndex: number, stopRunId?: string) => chatHandlers.current.rewindChat(chatTaskId, turnIndex, stopRunId),
       deleteMessage: (messageIndex: number, runIds: string[], sourceDescription: string, sourceWorkspaceId: string) => chatHandlers.current.deleteChatMessage(chatTaskId, messageIndex, runIds, sourceDescription, sourceWorkspaceId),
       copyConversation: () => chatHandlers.current.copyChat(chatTaskId, "conversation"),
       togglePin: () => chatHandlers.current.togglePin(chatTaskId),
@@ -3092,7 +3181,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                   onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
                   onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
                   onRemove={removeCard} canRemove={(nodeId) => Boolean(aoRemoveChange(selectedRun, nodeId))} /> : undefined}
-                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} queue={chatQueue} commands={chatCommands}
+                busy={Boolean(busy)} sendBusy={chatBusy.includes(chatTaskId || "new-chat")} loadDescription={loadDescription} send={sendChat} steer={steerChat} recover={recoverChat} resizeAgent={resizeChatAgent} queue={chatQueue} commands={chatCommands}
                 // A new chat's team sits in the header, as Codex keeps the page free of setting bars.
                 headerExtra={chatTaskId === "" && composerMode === "team" && savedTeams.length ? <label className="cx-head-team" title="Team for this chat">
                   <span>Team</span>
@@ -3107,7 +3196,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                 working={Boolean(selectedRun && chatTaskId && selectedRun.project_id === chatTaskId && ["starting", "running"].includes(autoStatus))}
                 openStructure={(runId) => { setSelectedRunId(runId); setView("overview"); }}
                 approvals={selectedRun && chatTaskId && selectedRun.project_id === chatTaskId ? shownApprovals : []}
-                composer={{ mode: composerMode, onModeChange: mode => { composerIntent.current++; setComposerMode(mode); }, route: singleRoute, onRouteChange: pickSingleRoute,
+                composer={{ mode: composerMode, onModeChange: pickComposerMode, route: singleRoute, onRouteChange: pickSingleRoute,
                   harnesses, loadModels, teams: savedTeams, teamId: composerTeamId, onTeamChange: pickComposerTeam }}
                 onOpenTeam={openTeam}
                 onOpenMissionBoard={() => { setSheet(""); setView("board"); }}

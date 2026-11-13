@@ -8,7 +8,9 @@
 // - Every command a chat agent runs through Coding Tools' terminal tool (any harness) is passed
 //   through `rtk rewrite` first (rewrite below).
 // - Claude Code's own Bash tool gets RTK's PreToolUse hook in its session settings: AO reads the
-//   hook command from CODING_TOOLS_RTK_CLAUDE_HOOK (daemonEnvironment below).
+//   hook command from CODING_TOOLS_RTK_CLAUDE_HOOK (daemonEnvironment below). Its PowerShell tool
+//   gets the same hook, minus rewrites PowerShell can't run, from
+//   CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK (claudePowerShellHook).
 // - Codex's own shell gets RTK's PreToolUse hook on its app-server command line, trusted for that
 //   process only: AO reads it from CODING_TOOLS_RTK_CODEX_HOOK.
 // - OpenCode's own bash tool gets a plugin that asks rtk about each command (OPENCODE_PLUGIN), which
@@ -95,6 +97,29 @@ const VERSION_LINE = /^rtk\s+(\d+)\.(\d+)\.(\d+)/m;
  * and the person that rtk wasn't set up when it had just compacted that very output.
  */
 const QUIET = Object.freeze({ RTK_SUPPRESS_HOOK_WARNING: "1" });
+
+/**
+ * rtk subcommands that run a Unix program of that name (`rtk ls` and `rtk tree` "proxy to native"
+ * ls and tree) or need one (grep, wc, wget). In Claude Code's PowerShell tool on Windows `ls` is
+ * Get-ChildItem, `tree` is tree.com and the rest are missing, so "rtk ls -Force" fails where
+ * "ls -Force" worked (rtk 1.2.0, 2026-11-12). The rest of what rtk rewrites there runs the same
+ * program (all 351 rewrites of 5,365 recorded PowerShell commands were git, gh, cargo or bun) or is
+ * rtk's own (read, find, diff).
+ */
+const POWERSHELL_MISSING = Object.freeze(["ls", "tree", "grep", "wc", "wget"]);
+
+/**
+ * The hook command for Claude Code's PowerShell tool built around `hook` (RTK's Claude hook), or "".
+ * rtk's Claude hook answers the same whichever tool asks, so its answer is dropped when the rewrite
+ * would run one of POWERSHELL_MISSING: the command then runs as written. Claude Code runs a hook
+ * command with Git Bash where there is one (its Bash tool needs it, and the Bash hook's quoted path
+ * already relies on it), so bash's own [[ =~ ]] does the check with no process besides rtk's; rtk's
+ * stdin and exit status pass through. Without Git Bash it fails to parse and nothing is rewritten.
+ */
+function powerShellHookFrom(hook) {
+  if (!hook) return "";
+  return `o=$(${hook}); s=$?; [[ $o =~ rtk\\ (${POWERSHELL_MISSING.join("|")})([^[:alnum:]_-]|$) ]] && o=; printf '%s' "$o"; exit $s`;
+}
 
 const atLeast = (version, minimum) => {
   for (let index = 0; index < 3; index += 1) {
@@ -266,6 +291,12 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     return tool ? `${quoted(tool.path)} hook claude` : "";
   };
   /**
+   * RTK's hook for Claude Code's PowerShell tool (powerShellHookFrom), or "" when rtk is off or
+   * missing. Agents moved to that tool: 6,283 of their 13,087 commands in three days, and 136 of
+   * 137 in two hours (2026-11-12), went through it, and a hook for Bash alone rewrote none of them.
+   */
+  const claudePowerShellHook = () => powerShellHookFrom(claudeHook());
+  /**
    * RTK's Codex hook command, or "" when rtk is off, missing or too old for it. Codex runs a hook
    * with the turn's own shell, PowerShell on Windows, where a quoted path followed by arguments is a
    * syntax error (every run failed with exit 1). So rtk is named bare: binDir puts its folder first
@@ -318,8 +349,8 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
   /** What AO's daemon passes to every chat agent. An empty hook or plugin turns it off. */
   const daemonEnvironment = () => {
     const hook = claudeHook();
-    return { CODING_TOOLS_RTK_CLAUDE_HOOK: hook, CODING_TOOLS_RTK_CODEX_HOOK: codexHook(),
-      CODING_TOOLS_RTK_OPENCODE_PLUGIN: opencodePlugin(), ...(hook ? QUIET : {}) };
+    return { CODING_TOOLS_RTK_CLAUDE_HOOK: hook, CODING_TOOLS_RTK_CLAUDE_POWERSHELL_HOOK: powerShellHookFrom(hook),
+      CODING_TOOLS_RTK_CODEX_HOOK: codexHook(), CODING_TOOLS_RTK_OPENCODE_PLUGIN: opencodePlugin(), ...(hook ? QUIET : {}) };
   };
 
   /** RTK's own savings report (`rtk gain`), as text and, when rtk can give it, JSON (resolves). */
@@ -445,7 +476,7 @@ function createRtk({ getEnabled = () => true, logger = null, env = process.env, 
     });
   }
 
-  return { locate, active, rewrite, unwrap, claudeHook, codexHook, opencodePlugin, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
+  return { locate, active, rewrite, unwrap, claudeHook, claudePowerShellHook, codexHook, opencodePlugin, binDir, commandEnvironment, daemonEnvironment, gain, status, install, upgrade, autoInstall, ready };
 }
 
-module.exports = { createRtk };
+module.exports = { createRtk, powerShellHookFrom, POWERSHELL_MISSING };

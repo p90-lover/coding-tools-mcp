@@ -61,3 +61,19 @@ test("the chat mounts the control outside the scroller, lifted over the approval
   assert.match(css, /\.cx-scroll-bottom-anchor \{[^}]*height: 0/);
   assert.doesNotMatch(css, /\.cx-to-bottom \{[^}]*position: sticky/);
 });
+
+test("following stops only when the view moves up, as in Codex, and a send re-arms it", () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const scroller = source.slice(source.indexOf('<div className="cx-scroll" ref={scroller}'), source.indexOf("onScroll={(event) => {"));
+  // A wheel down (or any wheel at the bottom, which fires no scroll event) keeps following.
+  assert.match(scroller, /onWheel=\{\(event\) => \{[^}]*if \(event\.deltaY < 0\) following\.current = false;/);
+  // A touch or a click in the thread moves nothing; only the scrollbar itself stops following.
+  assert.match(scroller, /onTouchStart=\{\(\) => \{ jumpingToBottom\.current = false; \}\}/);
+  assert.match(scroller, /if \(event\.target === event\.currentTarget\) following\.current = false;/);
+  assert.equal((scroller.match(/following\.current = false/g) || []).length, 2);
+  // A send and a new request follow the thread again, not only set atBottom.
+  assert.match(source, /const followBottom = \(\) => \{\s*jumpingToBottom\.current = false;\s*following\.current = true;\s*setAtBottom\(true\);/);
+  assert.match(source, /if \(here\(\)\) followBottom\(\);/);
+  assert.match(source, /if \(!requestKeys\) return;\s*followBottom\(\);/);
+  assert.doesNotMatch(source, /if \(here\(\)\) setAtBottom\(true\);/);
+});
