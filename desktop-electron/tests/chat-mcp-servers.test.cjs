@@ -169,3 +169,19 @@ test("preload reads the saved list off the main thread, so the first chat reads 
   assert.deepEqual(torn.list(), []);
   assert.deepEqual(warnings, [["chat_mcp_servers.unreadable", { reason: "invalid_json" }]]);
 });
+
+test("the person's GitHub MCP server is known by its URL, not by its name", (t) => {
+  // "Approve for me" lets this server's reads run unreviewed (agent-orchestrator-workflow.cjs githubRead).
+  const { servers, done } = store();
+  t.after(done);
+  servers.save({ name: "GitHub", type: "http", url: "https://api.githubcopilot.com/mcp/" });
+  servers.save({ name: "github-mirror", type: "http", url: "https://github.example.com/mcp/" });
+  servers.save({ name: "local", type: "stdio", command: "github-mcp-server" });
+  const off = servers.save({ name: "work-github", type: "http", url: "https://API.githubcopilot.com/mcp/x/repos" }).at(-1);
+  assert.equal(servers.isGithubServer("GitHub"), true);
+  assert.equal(servers.isGithubServer("github"), true, "Claude Code's tool names keep the name's case, the store ignores it");
+  assert.equal(servers.isGithubServer("work-github"), true, "any path on GitHub's host");
+  servers.setEnabled(off.id, false);
+  assert.equal(servers.isGithubServer("work-github"), false, "a turned-off server isn't handed to chats");
+  for (const name of ["github-mirror", "local", "coding-tools", "missing", "", undefined]) assert.equal(servers.isGithubServer(name), false, String(name));
+});
