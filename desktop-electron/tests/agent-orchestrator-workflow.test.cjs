@@ -12839,6 +12839,48 @@ for (const change of ["none", "clear", "edit", "replace", "dispose", "archive", 
   });
 }
 
+for (const [phase, inChat] of [["initial read", false], ["receipt read", false], ["receipt read", true]]) {
+  test(`queued restart recovery retries a failed ${phase} without guessing delivery (${inChat})`, async (t) => {
+    const dir = path.join(__dirname, "..", "..", "aiTemp", "chat-queue-tests", crypto.randomUUID());
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "chat-queue.json");
+    fs.writeFileSync(file, JSON.stringify({ version: 1, chats: { "ws-1:task-1": {
+      workspaceId: "ws-1", taskId: "task-1", delivered: [],
+      items: [{ id: "queued-recovery", message: "deploy it", at: 1, sending: 999_000 }],
+    } } }));
+    const { world, workflow, advance, queue } = queueChat({ state: "finished", chatQueueFile: file });
+    t.after(async () => {
+      workflow.dispose();
+      for (let pass = 0; pass < 5; pass += 1) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+    if (inChat) world.tasks[0].description += "\n\nFollow-up (2026-11-12 10:00 UTC):\ndeploy it";
+    const request = world.requestHeadless;
+    let unavailable = true, refused = false;
+    world.requestHeadless = async (endpoint, body, ...rest) => {
+      const targeted = phase === "initial read" ? endpoint === "/api/v1/ao/read"
+        : endpoint === "/api/v1/tools/call" && body.tool === "workflow_list" && body.arguments?.task_id;
+      if (unavailable && targeted && !refused) {
+        refused = true;
+        throw new Error("temporary recovery read failure");
+      }
+      return request(endpoint, body, ...rest);
+    };
+    await advance(30_000);
+    await goalSettle();
+    assert.equal(refused, true);
+    assert.equal(world.updates.length, 0, "an unreadable receipt never authorizes a replay");
+    assert.equal((await queue()).length, 1, "uncertain delivery stays recoverable");
+    unavailable = false;
+    await advance(60_000);
+    await goalSettle();
+    assert.equal(world.updates.length, inChat ? 0 : 1, "the timer retries without opening the chat");
+    assert.deepEqual(await queue(), []);
+  });
+}
+
 test("queued input stays saved when disposal happens during the initial runs read", async (t) => {
   const { world, workflow, queue } = queueChat({ state: "finished" });
   let release, entered = false;
