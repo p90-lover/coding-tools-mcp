@@ -9,7 +9,9 @@
   },
   "changes": [
     "Smart routing: within a Codex priority tier, the account with the most quota at risk per hour before its soonest reset (the least left in any window, over the hours to that reset) is used first; accounts within 1% share requests and a spent window skips the account",
-    "Managed account pools (OpenCode Go and other API-key accounts that fail over to each other) are ordered the same way from each account's cached quota reading; accounts without a fresh reading come next and spent ones last; pinned requests, the 429 cooldown and failover are unchanged"
+    "Managed account pools (OpenCode Go and other API-key accounts that fail over to each other) are ordered the same way from each account's cached quota reading; accounts without a fresh reading come next and spent ones last; pinned requests, the 429 cooldown and failover are unchanged",
+    "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
+    "Cline Pass, CommandCode Go, CommandCode and Grok accounts are provider-manager auth files with a kind; their models, logins and management routes are unchanged"
   ],
   "build": {
     "go": "1.27.3",
