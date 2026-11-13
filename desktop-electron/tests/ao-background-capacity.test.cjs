@@ -13,8 +13,9 @@ const ts = require("typescript");
 const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").replace(/\r\n/g, "\n");
 const FULL = "IPC_TRANSPORT_FAILED: apps.call failed: HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)";
 
-/** moduleCall and its helpers, with `call` as the app's apps.call and pauses that end at once. */
-function load(call) {
+/** moduleCall and its helpers, with `call` as the app's apps.call and pauses that end at once.
+ * `clock`, when given, stands in for Date ({ now }). */
+function load(call, clock) {
   const start = surface.indexOf("const SHARED_READS = ");
   const end = surface.indexOf("\n}\n", surface.indexOf("async function callModule(")) + 3;
   assert.ok(start > 0 && end > start, "moduleCall and its helpers are in AgentOrchestratorSurface.tsx");
@@ -23,9 +24,10 @@ function load(call) {
     Map, Set, Error, Promise, JSON, Math, String, Array,
     setTimeout: (resolve, ms) => { pauses.push(ms); return setImmediate(resolve); },
     getCodingToolsClient: () => ({ apps: { call } }),
+    ...(clock ? { Date: clock } : {}),
   };
   vm.runInNewContext(ts.transpileModule(`${surface.slice(start, end).replace(/^export /gm, "")}
-globalThis.api = { moduleCall, isCapacityError, spreadInterval };`, {
+globalThis.api = { moduleCall, isCapacityError, spreadInterval, readDependencyLinks };`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText, context);
   return { ...context.api, pauses };
@@ -86,6 +88,49 @@ test("panes reading the same run status or harness status at once share one call
   moduleCall("run_status", { workspaceId: "ws", runId: "run" });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 2);
+});
+
+// Seen 2026-11-12 14:59:43Z and 15:02:40Z: dependency_link_info timed out two and three times in the
+// same millisecond (one per mounted surface), and each approval poll asked again after a failure.
+test("the approval cards' dependency read is shared by every surface and kept a minute, even when it fails", async () => {
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  let now = 1_000_000;
+  let calls = 0;
+  let answer;
+  const { readDependencyLinks } = load(() => {
+    calls += 1;
+    return new Promise((resolve, reject) => { answer = { resolve, reject }; });
+  }, { now: () => now });
+
+  const reads = [readDependencyLinks("ws"), readDependencyLinks("ws"), readDependencyLinks("ws")];
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1, "three mounted surfaces share one read");
+  now += 30_000;
+  answer.reject(new Error("The operation was aborted due to timeout"));
+  assert.deepEqual(await Promise.all(reads), [null, null, null], "a failed read gives no links, and no error");
+
+  now += 59_000;
+  assert.equal(await readDependencyLinks("ws"), null);
+  assert.equal(calls, 1, "a failed read is not asked again within a minute of when it ended");
+
+  now += 2_000;
+  const again = readDependencyLinks("ws");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2, "after the minute it is read again");
+  answer.resolve(ok({ shared: ["node_modules", 3], farmed: [".venv"] }));
+  assert.deepEqual(plain(await again), { shared: ["node_modules"], farmed: [".venv"] });
+  now += 50_000;
+  assert.deepEqual(plain(await readDependencyLinks("ws")), { shared: ["node_modules"], farmed: [".venv"] });
+  assert.equal(calls, 2, "links that were read are kept for the minute too");
+
+  void readDependencyLinks("other");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 3, "each workspace has its own read");
+});
+
+test("the surface reads dependency links only through the shared read", () => {
+  assert.equal((surface.match(/"dependency_link_info"/g) ?? []).length, 1);
+  assert.match(surface, /void readDependencyLinks\(workspaceId\)\.then\(/);
 });
 
 test("capacity errors are told apart, and poll periods drift up to a fifth longer", () => {

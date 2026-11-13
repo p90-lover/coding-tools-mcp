@@ -1713,6 +1713,25 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         let session = await read();
         if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
         if (session.id !== key) throw uncertain();
+        // AO is still finding out whether it got this chat's agent back after it started ("checking":
+        // its startup recovery, up to 30 s a chat). A message sent meanwhile failed
+        // CHAT_CONTROLLER_NOT_READY, and the chat went on with a fresh agent that had only a summary.
+        // Seen live 2026-11-12 19:13Z, 54 s after an update restarted AO. Its verdict is waited for,
+        // up to 35 s; still "checking" after that, the message is sent as before.
+        const recoveryWaitStarted = Date.now();
+        let recoveryReads = 0;
+        while (session.status !== "exited" && session.statusReadiness === "checking"
+          && recoveryReads < 70 && Date.now() - recoveryWaitStarted < 35_000) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+          session = await read();
+          recoveryReads += 1;
+          if (invalid(session)) return refuse(session ? "invalid" : "not_found", session);
+          if (session.id !== key) throw uncertain();
+        }
+        if (recoveryReads) {
+          logger?.info?.("ao.continuable_awaited_recovery", { session: key, reads: recoveryReads,
+            ms: Date.now() - recoveryWaitStarted, readiness: session.statusReadiness ?? null });
+        }
         // A live chat AO could not reconnect when it started ("unavailable") has no controller, so a
         // message to it fails CHAT_CONTROLLER_NOT_READY. Seen live 2026-10-31: an update restarted AO
         // while the old one still held two chats' agents; the retries went to fresh agents and the old
