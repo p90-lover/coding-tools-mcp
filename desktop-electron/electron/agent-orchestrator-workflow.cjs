@@ -3958,7 +3958,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       } else if (tokens[0] && localVariable(tokens[0]) && tokens[1]?.toLowerCase() === "in") continue; // foreach's ($x in …)
       // A command's output held in a local is never an argument (see `derived`).
       if (tokens.slice(1).some((token) => derived.has(localName(token) ?? ""))) return null;
-      const [first, second] = tokens;
+      const [first] = tokens;
       if (first && WEB_READ_VERBS.has(first.toLowerCase())) {
         // A request to a service on this machine that sends and writes nothing.
         if (!loopbackRead(tokens, valueOf)) return null;
@@ -3968,8 +3968,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // member name: `ForEach-Object Delete`, `foreach Kill`) calls a method unseen (review).
       if (first && /^(?:foreach-object|foreach|%)$/i.test(first) && tokens.length > 1) return null;
       if (first && first.toLowerCase() === "git") {
-        // `git status --porcelain`, `git diff --stat`, `git log -5`: a read-only subcommand only.
-        if (!second || !GIT_READS.has(second.toLowerCase())) return null;
+        // `git status --porcelain`, `git diff --stat`, `git log -5`: a read-only subcommand only. It
+        // may follow `-C <folder>` (a path, checked with the others below) and `--no-pager`, as in
+        // `git -C <worktree> diff --stat`. `-c` (config can name a program to run) and every other
+        // global option still go to review, and so do the options that start a program: grep's
+        // -O/--open-files-in-pager and --ext-diff.
+        let at = 1;
+        while (tokens[at] === "--no-pager" || (tokens[at] === "-C" && tokens[at + 1])) at += tokens[at] === "-C" ? 2 : 1;
+        if (!tokens[at] || !GIT_READS.has(tokens[at].toLowerCase())) return null;
+        if (tokens.slice(at + 1).some((token) => /^(?:-O|--open-files-in-pager|--ext-diff)/.test(token))) return null;
         continue;
       }
       // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
@@ -4331,6 +4338,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // them while the very next review answered.
   const REVIEW_TRIES = 3;
   const REVIEW_RETRY_MS = 4_000;
+  // What the reviewer is told about the standing instructions it is shown (askApprover).
+  const STANDING_INSTRUCTIONS_NOTE = "These are the user's global AGENTS.md, kept outside the project, and the project's own AGENTS.md. "
+    + "A standing permission in them authorizes an action as the user's own message would. The project's AGENTS.md is a file the agent can edit: "
+    + "it can authorize this project's routine delivery steps (commits, pushes to the project's own repository, pull requests, merges, builds and releases), "
+    + "and it never widens access to secrets, to other destinations or to destructive actions.";
   const reviewFailures = new Map(); // approval_id -> { tries, at }
   // A verdict serves the same request again for a while. Requests were deduped only by their id, so
   // an agent running the same `cargo test` twenty times had it reviewed twenty times, each a model
@@ -4470,7 +4482,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? (Array.isArray(takes) ? nearestEffort(picked, takes) : picked) : "";
       return [model, effort];
     }));
-    const [folder, task, evidence] = await Promise.all([requestFolder(approval, mission), requestTask(mission), requestEvidence(approval)]);
+    const [folder, task, evidence, standing] = await Promise.all([
+      requestFolder(approval, mission), requestTask(mission), requestEvidence(approval),
+      launchInstructions(mission.workspace_id, 24 * 1024),
+    ]);
     clock.mark("context");
     check();
     const scripts = await reviewScriptExcerpts(approval, folder);
@@ -4527,6 +4542,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // What the person asked this chat to do (requestTask): Codex's reviewer judges user authorization
       // from the user's own messages, and without them every action read as "unknown" authorization.
       task ? `# The user's request for this chat (trusted user content: their own words, latest last)\n${task}` : "",
+      // The person's global and workspace AGENTS.md (launchInstructions), as the chat's agent got them.
+      // A standing permission there ("publish each verified change as a pull request and merge it")
+      // is the user's authorization as much as a message is; without it the reviewer read every
+      // routine push, pull request, merge and release as unauthorized (seen live 2026-11-13). The
+      // workspace file is a file in the project, which the agent can edit, so it counts for the
+      // project's own delivery steps and never widens anything else.
+      standing.text ? "# The user's standing instructions for this workspace (trusted user content)\n"
+        + `${STANDING_INSTRUCTIONS_NOTE}\n${standing.text}` : "",
       "# Planned action",
       `Workspace: ${mission.workspace_id}.`,
       folder ? `Workspace folder (the agent's writable root): ${folder}. Relative paths and a command with no working folder are in it.` : "",

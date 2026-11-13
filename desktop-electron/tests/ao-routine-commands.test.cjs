@@ -38,6 +38,10 @@ test("the shell reads agents really send pass without the paid reviewer", () => 
     // A local holding a checked literal may be passed on; curl's read-only options are fine.
     "$p = \"F:\\clash of clan macro\\models\"; Get-ChildItem $p", "curl.exe -s --max-time 5 http://127.0.0.1:7373/api/health",
     "(Invoke-WebRequest -Uri \"http://127.0.0.1:7413/api/screenshot\" -TimeoutSec 15 -UseBasicParsing).StatusCode",
+    // Seen live (2026-11-13): git told its folder with -C, as agents do from another folder. These
+    // were denied unjudged while the reviewer was out of quota.
+    "git -C \"F:\\clash of clan macro\" status --short", "git -C scripts log --oneline -5", "git --no-pager diff --stat",
+    "git --no-pager -C \"F:\\clash of clan macro\\scripts\" show HEAD --stat", "git -C 'F:\\clash of clan macro' diff --stat; git -C 'F:\\clash of clan macro' rev-parse HEAD",
   ]) assert.ok(readOnlyInspection(command, FOLDER), `inspection: ${command}`);
 });
 
@@ -67,6 +71,10 @@ test("anything that writes, runs code, reads outside the folder or reads the env
     "foreach ($f in (Get-Content list.txt)) { Get-Content $f }", "$d = (Get-Item x).FullName; Get-ChildItem -Path $d",
     "Get-Item README.md | ForEach-Object -MemberName Delete", "Get-Process notepad | ForEach-Object -MemberName Kill",
     "Get-Item README.md | ForEach-Object Delete", "Get-Process notepad | foreach Kill", "Get-Item x | % Delete",
+    // git -C: a folder outside the project, a write after it, config that can name a program (-c),
+    // an option with no subcommand, and the read options that start a program.
+    "git -C \"F:\\other project\" status", "git -C scripts push", "git -C . checkout -- x.py", "git -c core.pager=calc log", "git -C", "git --no-pager",
+    "git -C scripts -c core.fsmonitor=calc status", "git grep -Ocalc TODO", "git grep --open-files-in-pager=notepad TODO", "git -C scripts diff --ext-diff",
   ]) assert.equal(readOnlyInspection(command, FOLDER), null, `not inspection: ${JSON.stringify(command)}`);
   // No folder known, or a command run outside the project: the reviewer decides.
   assert.equal(readOnlyInspection("Get-ChildItem", null), null);
