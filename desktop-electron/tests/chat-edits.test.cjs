@@ -70,7 +70,7 @@ test("the only message, or one that is not there, is refused", () => {
   assert.throws(() => chatDescriptionWithout(description, 1.5), /no longer in this chat/);
 });
 
-test("the store hides deleted messages' runs per project, flags a fresh session, and survives a restart", () => {
+test("the store hides deleted messages' runs per project, flags a fresh session, and survives a restart", async () => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-edits-"));
   try {
     const file = path.join(folder, "integrations", "chat-edits.json");
@@ -82,10 +82,12 @@ test("the store hides deleted messages' runs per project, flags a fresh session,
     assert.deepEqual(store.visible("ws-2", runs).map(run => run.id), ["r1", "r2", "r3"], "another project is untouched");
     assert.equal(store.fresh("ws-1", "task-1"), true);
     assert.equal(store.fresh("ws-1", "task-2"), false);
+    await store.saved();
     const reopened = createChatEditStore({ file });
     assert.deepEqual(reopened.visible("ws-1", runs).map(run => run.id), ["r1", "r3"]);
     assert.equal(reopened.fresh("ws-1", "task-1"), true);
     reopened.clearFresh("ws-1", "task-1");
+    await reopened.saved();
     assert.equal(createChatEditStore({ file }).fresh("ws-1", "task-1"), false);
     assert.deepEqual(createChatEditStore({ file }).visible("ws-1", runs).map(run => run.id), ["r1", "r3"], "the run stays hidden");
     // A delete whose task edit failed is put back as it was.
@@ -94,6 +96,47 @@ test("the store hides deleted messages' runs per project, flags a fresh session,
     reopened.restore("ws-1", "task-1", before);
     assert.deepEqual(reopened.visible("ws-1", runs).map(run => run.id), ["r1", "r3"]);
     assert.equal(reopened.fresh("ws-1", "task-1"), false);
+    await reopened.saved();
+  } finally {
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+// Seen live 2026-11-13 00:24Z: a chat send's deleteMessage held the main process 496 ms in
+// renameSync on the busy disk, so every window froze with it.
+test("a change is saved off the main thread: the call returns before the file is written", async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-edits-"));
+  const warnings = [];
+  try {
+    const file = path.join(folder, "integrations", "chat-edits.json");
+    const store = createChatEditStore({ file, logger: { warn: (event) => warnings.push(event) } });
+    store.deleteMessage("ws-1", "task-1", ["r2"]);
+    store.restarted("ws-1", "task-1", "r1", "r1b");
+    assert.equal(fs.existsSync(file), false, "nothing was written while the call ran");
+    assert.equal(store.fresh("ws-1", "task-1"), true, "what the app reads changed at once");
+    await store.saved();
+    const reopened = createChatEditStore({ file });
+    assert.deepEqual(reopened.get("ws-1", "task-1"), { deletedRuns: ["r2"], fresh: true, restarts: { r1b: "r1" } },
+      "both changes of the burst are on disk");
+    assert.deepEqual(warnings, []);
+  } finally {
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a change's save says when it failed, and the failure is logged even when nobody waits for it", async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "chat-edits-"));
+  const warnings = [];
+  try {
+    const blocked = path.join(folder, "blocked");
+    fs.writeFileSync(blocked, "a file where the store's folder should be");
+    const store = createChatEditStore({ file: path.join(blocked, "chat-edits.json"), logger: { warn: (event, fields) => warnings.push([event, fields]) } });
+    await assert.rejects(store.deleteMessage("ws-1", "task-1", ["r2"]), (error) => error.code === "EEXIST");
+    assert.equal(store.fresh("ws-1", "task-1"), true, "memory changed; the caller decides whether to put it back");
+    store.restarted("ws-1", "task-1", "r1", "r1b"); // not waited for: no unhandled rejection
+    await store.saved();
+    assert.deepEqual(warnings.map(([event]) => event), ["chat_edits.save_failed", "chat_edits.save_failed"]);
+    assert.match(warnings[0][1].message, /EEXIST/);
   } finally {
     fs.rmSync(folder, { recursive: true, force: true });
   }

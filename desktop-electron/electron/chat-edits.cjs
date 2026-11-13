@@ -8,8 +8,7 @@
 // out of what the chat is shown. The agent's session still remembers the deleted exchange, so the
 // chat's next follow-up starts a fresh session.
 
-const fs = require("node:fs");
-const path = require("node:path");
+const { readStateFile, writeStateFileAsync } = require("./durable-state.cjs");
 
 // The same follow-up marker ao-chat.ts (chatMessagesFromDescription) reads.
 const FOLLOW_UP = /\n\nFollow-up \(([^)]+) UTC\):\n/;
@@ -65,39 +64,54 @@ function chatDescriptionWithSteer(description, messages, steer) {
  * mission adds a run without a message, so the chat must not pair it with the next message). Kept
  * in a small JSON file so all of it survives an app restart; without a file (tests) it lives in memory.
  */
-function createChatEditStore({ file = null } = {}) {
+function createChatEditStore({ file = null, logger = null } = {}) {
   let chats = {};
   if (file) {
-    try {
-      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
-      if (saved && typeof saved === "object" && !Array.isArray(saved)) chats = saved;
-    } catch { /* Nothing deleted yet. */ }
+    // Read once, when the workflow is created; a torn file falls back to its backup copy.
+    const read = readStateFile(file, (raw) => {
+      const saved = JSON.parse(raw);
+      if (!saved || typeof saved !== "object" || Array.isArray(saved)) throw new Error("not a chat edits file");
+      return saved;
+    });
+    if (read.value) chats = read.value;
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
+  // Saved on a pool thread (writeStateFileAsync). Written and renamed on the main thread, a save
+  // held every window: renameSync took 496 ms during a chat send on the busy disk (2026-11-13
+  // 00:24Z). What the app reads is `chats` in memory, changed at once; the file carries it across
+  // a restart. Each change returns its own save, which rejects when it failed: a delete is saved
+  // before the chat's record changes and is refused, and put back, when it can't be. A failure is
+  // logged too, so a caller that doesn't wait (a restart mark) never leaves it unhandled.
+  let lastSave = Promise.resolve();
   const persist = () => {
-    if (!file) return;
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const temporary = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporary, JSON.stringify(chats, null, 2));
-    fs.renameSync(temporary, file);
+    if (!file) return Promise.resolve();
+    const saving = writeStateFileAsync(file, JSON.stringify(chats, null, 2), { protectDirectory: false });
+    saving.catch((error) => logger?.warn?.("chat_edits.save_failed", { message: String(error?.message || error).slice(0, 200) }));
+    lastSave = saving.catch(() => undefined);
+    return saving;
   };
   const projectChats = (workspaceId) => {
     const prefix = `${workspaceId}:`;
     return Object.entries(chats).filter(([name]) => name.startsWith(prefix)).map(([, chat]) => chat);
   };
   return {
+    /** Resolves once every change made so far is saved, or failed to be. */
+    saved: async () => { await lastSave; },
     get: (workspaceId, taskId) => chats[key(workspaceId, taskId)] ?? null,
-    /** A message was deleted: hide its runs (the one it started and any restarts of it) and start the next follow-up afresh. */
+    /**
+     * A message was deleted: hide its runs (the one it started and any restarts of it) and start the
+     * next follow-up afresh. Returns the save, which rejects when it failed (see persist).
+     */
     deleteMessage(workspaceId, taskId, runIds) {
       const chat = chats[key(workspaceId, taskId)] ?? { deletedRuns: [] };
       chats[key(workspaceId, taskId)] = { ...chat, deletedRuns: [...new Set([...(chat.deletedRuns ?? []), ...runIds.filter(Boolean)])], fresh: true };
-      persist();
+      return persist();
     },
     /** Restart mission: `runId` is a fresh run of the same message as `previousRunId`. */
     restarted(workspaceId, taskId, previousRunId, runId) {
       const chat = chats[key(workspaceId, taskId)] ?? {};
       chats[key(workspaceId, taskId)] = { ...chat, restarts: { ...(chat.restarts ?? {}), [runId]: previousRunId } };
-      persist();
+      return persist();
     },
     /** Every run of one message: the run it started, then each restart of it (and of those). */
     runsOfMessage(workspaceId, taskId, runId) {
@@ -108,18 +122,18 @@ function createChatEditStore({ file = null } = {}) {
       }
       return found;
     },
-    /** Puts a chat's entry back as it was (a failed delete). */
+    /** Puts a chat's entry back as it was (a failed delete). Returns the save, as deleteMessage does. */
     restore(workspaceId, taskId, saved) {
       if (saved) chats[key(workspaceId, taskId)] = saved; else delete chats[key(workspaceId, taskId)];
-      persist();
+      return persist();
     },
     /** Whether the chat's next follow-up must start a fresh session. */
     fresh: (workspaceId, taskId) => chats[key(workspaceId, taskId)]?.fresh === true,
     clearFresh(workspaceId, taskId) {
       const chat = chats[key(workspaceId, taskId)];
-      if (!chat?.fresh) return;
+      if (!chat?.fresh) return Promise.resolve();
       chats[key(workspaceId, taskId)] = { ...chat, fresh: false };
-      persist();
+      return persist();
     },
     /**
      * The runs a chat shows: those of deleted messages are left out, and a restart says which run it

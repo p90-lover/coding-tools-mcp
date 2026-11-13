@@ -24,6 +24,17 @@ function writeStateFile(filePath, content, options = {}) {
 }
 
 /**
+ * writeStateFile off the main thread, for a change whose caller must know it reached the disk (a
+ * chat's deleted message is saved before the chat's record changes, and refused when it can't be).
+ * Rejects with the main copy's error; the copy beside it is best effort. Writes to one file run in
+ * call order (writePrivateFileAtomicAsync queues them), so the last call's content ends up on disk.
+ */
+async function writeStateFileAsync(filePath, content, options = {}) {
+  await writePrivateFileAtomicAsync(filePath, content, { ...options, durable: true });
+  await writePrivateFileAtomicAsync(`${filePath}${BACKUP_SUFFIX}`, content, options).catch(() => { /* the main copy is in place */ });
+}
+
+/**
  * writeStateFile for a file saved as the app is used (a chat queue change, a scored round): the
  * flush waits on a pool thread, not the main one. Synchronously it held every window 0.5-2.4 s on
  * the hard disk (2026-10-31). A burst of saves is one write plus at most one more with the latest
@@ -115,4 +126,4 @@ function readStateFile(filePath, parse, { now = Date.now, preserveUnreadable = f
   return { value: undefined, source: main.missing && backup.missing ? "none" : "unreadable", error, setAside };
 }
 
-module.exports = { BACKUP_SUFFIX, createStateFileWriter, readStateFile, removeStateFile, writeStateFile };
+module.exports = { BACKUP_SUFFIX, createStateFileWriter, readStateFile, removeStateFile, writeStateFile, writeStateFileAsync };
