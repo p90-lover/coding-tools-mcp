@@ -4307,8 +4307,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const quota = QUOTA_EXHAUSTED.test(text);
     const reset = /regain access on (\d{4}-\d{2}-\d{2})(?: at (\d{2}:\d{2}) UTC)?/i.exec(text);
     const quotaResetAt = reset ? Date.parse(`${reset[1]}T${reset[2] ?? "00:00"}:00Z`) : 0;
-    return Object.assign(new Error(quota ? `${message} (its quota is used up${reset ? ` until ${reset[1]}` : ""})` : message),
-      { status: response.status, quota, quotaResetAt });
+    return Object.assign(new Error(quota ? `${message} (its quota is used up${reset ? ` until ${reset[1]}` : ""})`
+      : answerReason(text) ? `${message}: ${answerReason(text)}` : message), { status: response.status, quota, quotaResetAt });
+  }
+  /**
+   * The reason inside a refused model call's JSON answer, short and safe to show. On 2026-11-13 CPA
+   * Auto Review answered 503 "None of the 2 review accounts could complete the review" for 1.75 h,
+   * and the log said only "returned HTTP 503". It reaches the log, the card and the agent, so only
+   * the error's message is kept: no keys, no account addresses, nothing that isn't JSON.
+   */
+  function answerReason(text) {
+    let said = "";
+    try {
+      const body = JSON.parse(text);
+      said = typeof body?.error === "string" ? body.error : String(body?.error?.message ?? body?.message ?? "");
+    } catch { return ""; }
+    return publicText(said.replace(/[^\s@()<>"'[\]]+@[^\s@()<>"'[\]]+\.[A-Za-z]{2,}/g, "[account]").replace(/\s+/g, " "), 160).trim();
   }
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
@@ -4856,7 +4870,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
     let advice = resend ? { ...resend.decided }
       : exhausted
-      ? judges ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
+      ? judges ? { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
@@ -4919,9 +4933,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       // "Let the model judge" leaves nothing to the person: a reviewer that never answered denies,
       // in doubt. The agent hears that the request was not judged, so it tries again rather than
-      // giving up on it: told "try a safer way", agents dropped harmless steps for good.
+      // giving up on it: told "try a safer way", agents dropped harmless steps for good. Its log line
+      // says no model judged it (reason_code fell back to "model_decision", so an outage read as verdicts).
       advice = judges
-        ? { action: "deny", unavailable: true, reason: `The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
+        ? { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason:`The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
     reviewFailures.delete(approval.approval_id);
