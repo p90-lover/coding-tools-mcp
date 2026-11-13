@@ -4865,6 +4865,39 @@ test("a model the evaluator gets a 404 for sits out for hours; one that was down
   }
 });
 
+test("a refusing model endpoint's own words reach the failure, never a key or an address", async () => {
+  // 2026-11-13: codex-auto-review answered 503 in bursts and the log said only "returned HTTP 503".
+  const { failureDetail, decidedReason } = require("../electron/agent-orchestrator-workflow.cjs");
+  assert.equal(failureDetail(JSON.stringify({ error: { code: "auth_unavailable", type: "server_error", message: "no auth available" } })),
+    "auth_unavailable server_error no auth available");
+  assert.equal(failureDetail(JSON.stringify({ error: "plugin not ready" })), "plugin not ready");
+  assert.equal(failureDetail(JSON.stringify({ message: "upstream overloaded" })), "upstream overloaded");
+  assert.equal(failureDetail("<html><head><style>p{}</style></head><body><h1>503</h1> Service <b>Unavailable</b></body></html>"),
+    "503 Service Unavailable", "a page's text without its tags");
+  assert.equal(failureDetail(JSON.stringify({ error: { message: "account owner@example.com Bearer abc.def sk-abcdefgh12345 api_key=xyz" } })),
+    "account [address] [redacted] [redacted] api_key=[redacted]");
+  assert.equal(failureDetail(""), "");
+  assert.equal(failureDetail("{}"), "");
+  assert.equal(failureDetail("x".repeat(500)).length, 140);
+  // The approver's log names a reviewer that never answered for what it was.
+  assert.equal(decidedReason({ action: "deny", unavailable: true }), "reviewer_unavailable");
+  assert.equal(decidedReason({ action: "deny" }), "model_decision");
+  assert.equal(decidedReason({ action: "allow", reason_code: "routine_command" }), "routine_command");
+
+  // Through a goal check: the evaluator's 503 note carries the endpoint's words.
+  const round = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", parents: [], state: "finished", receipt: { answer: "not yet" } }] };
+  const refusal = { status: 503, text: JSON.stringify({ error: { code: "auth_unavailable", message: "no auth available (owner@example.com)" } }) };
+  const { world, workflow } = await goalChat({ refuse: () => refusal, timers: [], now: () => 1_000_000 });
+  try {
+    world.runs.push(round);
+    await workflow.goalAfterRun("ws-1", "r1", "finished", null);
+    const note = (await goalOf(workflow)).note;
+    assert.match(note, /returned HTTP 503 for deepseek-v4: auth_unavailable no auth available \(\[address\]\)/);
+    assert.doesNotMatch(note, /owner@example\.com/);
+  } finally { workflow.dispose(); }
+});
+
 test("a model whose quota is used up sits out until the reset its answer names", async () => {
   // Seen live 2026-10-29: the Anthropic API key behind Claude Haiku answered 400 with its spend limit,
   // and every goal check tried it first again ten minutes later.

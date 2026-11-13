@@ -298,6 +298,34 @@ function aoWebCatalogForModel(catalog, model) {
  * later does get through ("Retry automatically" waits up to half an hour for that).
  */
 const QUOTA_EXHAUSTED = /insufficient_quota|usage_limit_reached|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)/i;
+/**
+ * What a refusing model endpoint said, in a few words: the JSON error's code, type and message, or
+ * a page's text without its tags. CPA and its plugins answer 503 with the reason (no account free,
+ * a plugin not ready), and "returned HTTP 503" alone hid it while codex-auto-review refused in
+ * bursts (2026-11-13 16:07, 16:24, 16:38). Addresses and keys are masked here, as publicText
+ * does, since not every place that shows a failure runs it through publicText. Empty when the
+ * body says nothing.
+ */
+function failureDetail(text) {
+  let detail = "";
+  try {
+    const json = JSON.parse(text);
+    const error = json?.error && typeof json.error === "object" ? json.error
+      : { message: typeof json?.error === "string" ? json.error : json?.message };
+    detail = [...new Set([error.code, error.type, error.message].filter((value) => typeof value === "string" && value.trim()))].join(" ");
+  } catch {
+    detail = String(text ?? "").replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ").replace(/<[^>]*>/g, " ");
+  }
+  return detail.replace(/Bearer\s+\S+|(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{8,}/gi, "[redacted]")
+    .replace(/((?:api[_-]?key|access[_-]?token|authorization)\s*[:=]\s*)[^\s,;]+/gi, "$1[redacted]")
+    .replace(/[^\s@<>"'(),;]+@[^\s@<>"'(),;]+\.[A-Za-z]{2,}/g, "[address]").replace(/\s+/g, " ").trim().slice(0, 140);
+}
+/**
+ * The log's reason_code for an answer the approver sent. A reviewer that never answered (its deny
+ * with Let the model judge on) is no model's decision: logged as one, a CPA outage read as the
+ * model refusing harmless commands (2026-11-13).
+ */
+const decidedReason = (advice) => advice.reason_code ?? (advice.unavailable ? "reviewer_unavailable" : "model_decision");
 /** " (it resets in 5d 8h)" from a quota error, for a note (empty when it says nothing). */
 function quotaResets(error) {
   const when = /resets? (in [0-9][0-9dhms ]*[dhms]|at [^.\n]{1,40})/i.exec(String(error || ""))?.[1];
@@ -4279,8 +4307,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const quota = QUOTA_EXHAUSTED.test(text);
     const reset = /regain access on (\d{4}-\d{2}-\d{2})(?: at (\d{2}:\d{2}) UTC)?/i.exec(text);
     const quotaResetAt = reset ? Date.parse(`${reset[1]}T${reset[2] ?? "00:00"}:00Z`) : 0;
-    return Object.assign(new Error(quota ? `${message} (its quota is used up${reset ? ` until ${reset[1]}` : ""})` : message),
-      { status: response.status, quota, quotaResetAt });
+    const detail = quota ? "" : failureDetail(text);
+    return Object.assign(new Error(quota ? `${message} (its quota is used up${reset ? ` until ${reset[1]}` : ""})`
+      : detail ? `${message}: ${detail}` : message), { status: response.status, quota, quotaResetAt });
   }
   // A review no model answered is tried again on the next passes, REVIEW_RETRY_MS apart, before the
   // request goes to the person: one 502 from the card's model put a routine command in front of
@@ -4882,7 +4911,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     } else if (advice.reviewed && advice.action === "allow") reviewDenials.delete(approval.thread_id);
     if (advice.action === "failed") {
       const tries = (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1;
-      const why = publicText(advice.error?.message || advice.error, 160);
+      // Room for the endpoint's own words after "Command approver <model> returned HTTP 503: " (failureDetail).
+      const why = publicText(advice.error?.message || advice.error, 220);
       logger?.warn?.("ao.approval_review_failed", { tries, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80), reason: why });
       if (tries < REVIEW_TRIES) {
         reviewFailures.set(approval.approval_id, { tries, at: now() });
@@ -4922,7 +4952,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       check();
       if (sent) {
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
-        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action, ...(sends > 1 ? { sends } : {}) });
+        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: decidedReason(advice), decision: advice.action, ...(sends > 1 ? { sends } : {}) });
         return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
       keepAdvice(unsentAnswer(advice, sends, false, `The reviewer's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}`));
@@ -4937,7 +4967,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }).then(result => result?.ok === true && result.result?.ok === true, () => false);
       check();
       if (sent) {
-        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action, ...(sends > 1 ? { sends } : {}) });
+        logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: decidedReason(advice), decision: advice.action, ...(sends > 1 ? { sends } : {}) });
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
         return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
@@ -9742,4 +9772,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, failureDetail, decidedReason, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
