@@ -905,7 +905,11 @@ function memoryUpdate(faults = {}) {
     unlinkSync(file) { owned(file); files.delete(file); },
     renameSync(from, to) {
       owned(from); owned(to);
-      if (faults.swap && from === stagedApp && to === appPath) throw Object.assign(new Error("fixture placement failed"), { code: "EIO" });
+      if (faults.swap && from === stagedApp && to === appPath) {
+        // `loseOldCopy`: something deleted that file's old copy while the swap ran (2026-11-13).
+        if (faults.loseOldCopy) files.delete(path.join(installRoot, ...faults.loseOldCopy.split("/")) + ".old-1000");
+        throw Object.assign(new Error("fixture placement failed"), { code: "EIO" });
+      }
       if (faults.restore && from === `${appPath}.old-1000` && to === appPath) throw Object.assign(new Error("fixture restore denied"), { code: "EACCES" });
       if (faults.journal && to === journalPath && JSON.parse(files.get(from)).state === "restoring") throw new Error("fixture journal rewrite failed");
       if (!files.has(from)) throw missing(from);
@@ -927,6 +931,7 @@ function memoryUpdate(faults = {}) {
   class Clock extends Date { static now() { return clock; } }
   const fakeProcess = { pid: 42, ppid: 1, platform: "win32", arch: "x64", env: {}, execPath: path.join(installRoot, "Coding Tools.exe"),
     kill() {
+      faults.onParentCheck?.();
       if (faults.parentAliveMs && clock - 1000 < faults.parentAliveMs) return true;
       throw Object.assign(new Error("fixture parent exited"), { code: "ESRCH" });
     } };
@@ -992,8 +997,55 @@ test("an app that never closes is left running: nothing is applied or started, a
   assert.equal(f.read("resources/app.asar"), "v1");
   assert.equal(f.launches.length, 0, "a second app would only bring the running one forward");
   assert.equal(f.io.existsSync(f.stageRoot), false);
+  assert.equal(f.files.has(path.join(f.installRoot, "_update", "applying.json")), false, "no start waits on an update that gave up");
   assert.deepEqual([f.result().ok, f.result().stage, f.result().failures], [false, "wait", 0], "not the version's fault: no back-off");
   assert.match(f.result().message, /did not close/);
+});
+
+test("the swap marker is down while the worker waits for the app to close, so an app started before the swap waits for it", async () => {
+  // 2026-11-13: an app started from Explorer 5 s after the old one closed and before the swap began.
+  // No marker yet, so it did not wait, and its start-up sweep deleted the old copies the swap set aside.
+  const markers = [];
+  const f = memoryUpdate({
+    parentAliveMs: 2_000,
+    onParentCheck: () => markers.push(f.files.get(path.join(f.installRoot, "_update", "applying.json"))),
+  });
+  await f.worker.applyJob(f.jobPath);
+  assert.ok(markers.length > 1, "the worker checked the closing app");
+  assert.ok(markers.every(Boolean), "every check found the marker down");
+  assert.equal(JSON.parse(markers[0]).pid, 42, "it names the worker, which a start waits for (waitForUpdateApply)");
+  assert.equal(f.read("resources/app.asar"), "v2");
+  assert.equal(f.files.has(path.join(f.installRoot, "_update", "applying.json")), false, "and it goes once the swap is done");
+});
+
+test("a rollback whose old copy has gone keeps the new file instead of leaving its path empty", async () => {
+  const f = memoryUpdate({ swap: true, loseOldCopy: "resources/runtime/manifest.json" });
+  await f.worker.applyJob(f.jobPath);
+  assert.equal(f.read("resources/runtime/manifest.json"), runtimeManifest("0.8.0"), "the new file stays: something beats nothing");
+  assert.equal(f.read("resources/app.asar"), "v1", "files with their old copies are put back");
+  assert.equal(f.read("resources/new.js"), undefined, "a file the update added goes back with the stage");
+  assert.ok(f.result().message.includes("old copies missing, new files kept: resources/runtime/manifest.json"), f.result().message);
+  assert.ok(f.logs.some((line) => line.includes("kept the new resources/runtime/manifest.json")));
+  assert.equal(f.launches.length, 1);
+});
+
+test("a journaled rollback keeps a replaced file whose old copy has gone", async () => {
+  const root = tempRoot();
+  try {
+    writeTree(root, { "install/resources/a.txt": "old a", "install/_update/stage/files/resources/a.txt": "new a" });
+    const installRoot = path.join(root, "install");
+    const filesRoot = path.join(installRoot, "_update", "stage", "files");
+    const job = { version: "0.8.0", installRoot, stageRoot: path.dirname(filesRoot), filesRoot, changed: ["resources/a.txt"], obsolete: [],
+      installedManifest: { files: [{ path: "resources/a.txt", size: 5, sha256: sha("new a") }] } };
+    const journal = createJournal(job, path.join(root, "job.json"), 7);
+    assert.equal(journal.changed[0].replaced, true, "the journal records that an old file stood there");
+    await swapIn(job, 7);
+    fs.rmSync(path.join(installRoot, "resources", "a.txt.old-7"));
+    assert.deepEqual(await rollBack(journal), []);
+    assert.equal(read(root, "install/resources/a.txt"), "new a", "not moved back to the stage, which would leave nothing");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a worker step that throws unexpectedly records why and starts the closed app again", async () => {
