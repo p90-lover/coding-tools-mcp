@@ -1047,6 +1047,72 @@ test("list_commands recovers accepted handles after a lost yield without relaunc
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("verification receipts retain observed results and never skip repeated sandbox checks", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  sandbox.snapshot = id => ({ ok: true, command_id: id, status: "exited", exit_code: 0, command_ok: true });
+  const { tools, confirmations } = fixture({ root: tree.root, terminal: () => true, sandbox,
+    catalog: { ...CATALOG, tools: [...CATALOG.tools.filter(item => item.name !== "exec_command"),
+      { name: "exec_command", inputSchema: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] } }] } });
+  try {
+    const client = await session(tools);
+    const catalog = await post(client.url, { jsonrpc: "2.0", id: 1, method: "tools/list" }, client.auth);
+    assert.ok(catalog.body.result.tools.find(item => item.name === "exec_command").inputSchema.properties.verification);
+    const args = { cmd: "node --test focused.test.cjs", verification: { inputs: ["src/a.txt"] }, yield_time_ms: 0 };
+    const first = await callTool(client.url, client.auth, "exec_command", args);
+    assert.equal(first.structuredContent.verification.outcome, "passed");
+    assert.equal(first.structuredContent.verification.input_status, "unchanged");
+    const second = await callTool(client.url, client.auth, "exec_command", args);
+    assert.equal(second.structuredContent.verification.duplicate_of, "sbx-1");
+    assert.equal(sandbox.started.length, 2, "a receipt never replaces execution");
+    assert.equal(confirmations.length, 2, "each command still receives its normal consent");
+    assert.ok(sandbox.started.every(item => !Object.hasOwn(item, "verification")));
+    fs.writeFileSync(path.join(tree.root, "src", "a.txt"), "changed");
+    const listed = await callTool(client.url, client.auth, "list_commands", { include_verification: true });
+    assert.ok(listed.structuredContent.commands.every(command => command.verification.input_status === "changed"));
+    assert.equal((await callTool(client.url, client.auth, "exec_command", { ...args, verification: { inputs: ["../secret"] } })).isError, true);
+    assert.equal(sandbox.started.length, 2);
+    const other = await session(tools, { id: "verification-other" });
+    assert.deepEqual((await callTool(other.url, other.auth, "list_commands", { include_verification: true })).structuredContent.commands, []);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("verification receipts observe headless completion through read_output", async () => {
+  const tree = tempTree();
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, results: {
+    exec_command: { state: "completed", result: { ok: true, command_id: "verified-headless", status: "running" } },
+    read_output: { state: "completed", result: { ok: true, command_id: "verified-headless", status: "exited", exit_code: 0, content: "passed" } },
+  }, catalog: { ...CATALOG, tools: [...CATALOG.tools, tool("read_output")] } });
+  try {
+    const client = await session(tools, { approvalMode: "bypass-permissions" });
+    const first = await callTool(client.url, client.auth, "exec_command", { cmd: "node --test focused.test.cjs", verification: { inputs: ["src/a.txt"] } });
+    assert.equal(first.structuredContent.verification.outcome, "running");
+    const result = await callTool(client.url, client.auth, "read_output", { output_ref: "command:verified-headless:stdout" });
+    assert.equal(result.structuredContent.verification.outcome, "passed");
+    const listed = await callTool(client.url, client.auth, "list_commands");
+    assert.equal(listed.structuredContent.commands[0].last_observed_status, "exited");
+    assert.ok(calls.filter(call => call.body?.tool === "exec_command").every(call => !Object.hasOwn(call.body.arguments, "verification")));
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("read-only HTTP batches overlap without overlapping their mutation barrier", async () => {
+  const tree = tempTree();
+  let started = 0, active = 0, peak = 0;
+  let release, allStarted;
+  const gate = new Promise(resolve => { release = resolve; });
+  const ready = new Promise(resolve => { allStarted = resolve; });
+  const { tools } = fixture({ root: tree.root, results: {
+    read_file: async () => { started++; active++; peak = Math.max(peak, active); if (started === 2) allStarted(); await gate; active--; return { state: "completed", result: { ok: true } }; },
+    update_plan: () => { assert.equal(active, 0); return { state: "completed", result: { ok: true } }; },
+  } });
+  try {
+    const client = await session(tools, { approvalMode: "bypass-permissions" });
+    const batch = post(client.url, ["read_file", "read_file", "update_plan"].map((name, id) => ({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: name === "read_file" ? { path: "src/a.txt" } : {} } })), client.auth);
+    await ready; assert.equal(peak, 2); release();
+    assert.deepEqual((await batch).body.map(answer => answer.id), [0, 1, 2]);
+  } finally { release?.(); await tools.close(); tree.cleanup(); }
+});
+
 test("list_commands validates pagination and reports headless handles without probing output", async () => {
   const tree = tempTree();
   const { tools, calls } = fixture({ root: tree.root, terminal: () => true, results: {
