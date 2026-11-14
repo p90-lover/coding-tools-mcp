@@ -4566,12 +4566,13 @@ async function start() {
   await app.whenReady();
   cdpPort = await browserDebuggingReady();
   session.defaultSession.setCertificateVerifyProc(caDistrust.verifyCertificate);
-  // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them.
+  // Remove agent executables an update set aside (in-use-files.cjs) once nothing runs them; not
+  // while an app update in flight still owns its old copies.
   if (process.platform === "win32" && app.isPackaged) {
     setImmediate(() => {
       try {
         const { sweepSetAside, agentRuntimeRoots } = require("./in-use-files.cjs");
-        sweepSetAside(agentRuntimeRoots(process.resourcesPath)).catch(() => { /* best-effort cleanup */ });
+        sweepSetAside(agentRuntimeRoots(process.resourcesPath), { installRoot: path.dirname(process.execPath) }).catch(() => { /* best-effort cleanup */ });
         sweepUpdateLeftovers(path.dirname(process.execPath));
       } catch { /* best-effort cleanup */ }
     });

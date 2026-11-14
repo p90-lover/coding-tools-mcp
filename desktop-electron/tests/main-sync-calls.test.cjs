@@ -19,7 +19,10 @@ const SYNC_CALL = /\b[A-Za-z]+Sync(?:\.native)?\s*\(/g;
 const ALLOWED = {
   "agent-orchestrator-accounting.cjs": 2, "agent-orchestrator-gateway.cjs": 4, "agent-orchestrator-upstream.cjs": 6,
   "agent-orchestrator-workflow.cjs": 7, "antigravity-cli.cjs": 11,
-  "ao-db-maintenance.cjs": 3, "ao-dependency-links.cjs": 7, "app-handler-paths.cjs": 1, "app-plugins.cjs": 10, "app-update-worker.cjs": 47,
+  // app-update-worker.cjs +4 (2026-11-14): the swap marker's removal on each early exit and the rollback's
+  // check for a lost old copy run in the detached update worker (applyStaged, recoverJournal, swapIn),
+  // never on Electron main, which uses only its recordResult, sweep and writeJsonDurable.
+  "ao-db-maintenance.cjs": 3, "ao-dependency-links.cjs": 7, "app-handler-paths.cjs": 1, "app-plugins.cjs": 10, "app-update-worker.cjs": 51,
   "app-update.cjs": 19, "atomic-file.cjs": 11, "autostart.cjs": 2, "backend-bundle.cjs": 18, "browser-accounts.cjs": 1,
   // createBrowserAccountMcpSync (#1089) is a factory named for the account MCP sync, not a synchronous call:
   // its one match here and its one in main.cjs (counted there) do no disk or process work.

@@ -12,13 +12,9 @@ on:
         default: true
         type: boolean
   pull_request:
-    paths:
-      - .github/workflows/electron-windows-release.yml
-      - desktop-electron/package.json
-  push:
     branches: [main]
     paths:
-      - desktop-electron/package.json
+      - .github/workflows/electron-windows-release.yml
 
 permissions:
   contents: read
