@@ -3,7 +3,7 @@ const fs = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
-const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+const { WINDOWS_RENAME_RETRY_DELAYS_MS, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { redactText } = require("./logging.cjs");
 const {
   DETACH_OWNED_CHILD,
@@ -145,6 +145,28 @@ function tunnelRuntimeStopped(health) {
 function stateKey(state) {
   const { updatedAt: _updatedAt, ...content } = state;
   return JSON.stringify(content);
+}
+
+/**
+ * The ownership marker's bytes, read on a pool thread. A marker another process is replacing at
+ * that moment reads as EPERM/EBUSY/EACCES on Windows; that read is retried on timers, as an
+ * atomic-file rename is. It fell back to a synchronous read before, which held every window
+ * 275-455 ms on the busy hard disk.
+ */
+async function readStateBytes(file, platform = process.platform) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fs.promises.readFile(file);
+    } catch (error) {
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+      if (platform !== "win32" || !["EBUSY", "EPERM", "EACCES"].includes(error?.code) || delay === undefined) throw error;
+      await sleep(delay);
+    }
+  }
+}
+
+function invalidStateError(statePath, error) {
+  return new Error(`Launcher runtime ownership state is invalid at ${statePath}: ${errorMessage(error)}`);
 }
 
 function runtimeOwnershipPredatesCurrentBoot(state) {
@@ -555,6 +577,12 @@ class RuntimeSupervisor {
     this.configPath = path.join(coreHome, "config.json");
     this.configCache = null; // { size, mtimeMs, value }: see readConfigJson
     this.statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
+    // The ownership marker's writes and removals run off the main thread, one at a time in the
+    // order asked for (queueStateOperation). requestedState is this process's latest request
+    // ({ key, state, settled, done }; state null for a removal), or null when only the disk knows.
+    this.stateQueue = Promise.resolve();
+    this.stateRequests = 0;
+    this.requestedState = null;
     this.daemon = null;
     this.tunnel = null;
     this.stopping = false;
@@ -754,37 +782,6 @@ class RuntimeSupervisor {
     return { ...config, mode };
   }
 
-  readState() {
-    if (!fs.existsSync(this.statePath)) {
-      this.writtenStateKey = null;
-      this.writtenState = null;
-      return null;
-    }
-    // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
-    // processes it named died with the machine. Failing on it stopped every watchdog restart until
-    // something rewrote the file; it is set aside as if it were missing, its bytes kept in Trash first.
-    let bytes = null;
-    try { bytes = fs.readFileSync(this.statePath); } catch { /* the parse below reports it */ }
-    if (bytes && bytes.every((byte) => byte === 0 || byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d)) {
-      let backup = null;
-      try {
-        const trash = path.join(this.coreHome, "Trash");
-        fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
-        backup = path.join(fs.mkdtempSync(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
-        fs.writeFileSync(backup, bytes, { flag: "wx", mode: 0o600 });
-      } catch { backup = null; /* a full disk must not keep the watchdog failing on the marker */ }
-      this.logger?.warn?.("runtime.state_torn", { bytes: bytes.length, backup });
-      this.clearState();
-      return null;
-    }
-    try {
-      return this.acceptState(JSON.parse((bytes ?? fs.readFileSync(this.statePath)).toString("utf8")));
-    } catch (error) {
-      if (bytes && this.setAsideUnreadableStateFromBeforeBoot(bytes, error)) return null;
-      throw new Error(`Launcher runtime ownership state is invalid at ${this.statePath}: ${errorMessage(error)}`);
-    }
-  }
-
   /** A parsed ownership marker, checked; throws when its shape is invalid. */
   acceptState(state) {
     const validPid = (value) => value === null || (Number.isInteger(value) && value > 0);
@@ -799,64 +796,78 @@ class RuntimeSupervisor {
       || Number.isNaN(Date.parse(state.updatedAt))) {
       throw new Error("state shape is invalid");
     }
-    if (this.writtenStateKey && stateKey(state) !== this.writtenStateKey) {
-      this.writtenStateKey = null;
-      this.writtenState = null;
-    }
+    // Another launcher's content: the next write of this process's state goes to disk again.
+    if (this.requestedState && stateKey(state) !== this.requestedState.key) this.requestedState = null;
     return state;
   }
 
   /**
-   * readState for a timer on the main thread: the marker is read off it. On the busy hard disk the
-   * MCP check's synchronous read (every 15 s while the browser waits) held every window (seen live
-   * 2026-11-09). A marker that is torn or does not parse goes through readState's repair, as rare as
-   * the power cut or crash that leaves one.
+   * The ownership marker (null when there is none), read off the main thread: the synchronous read
+   * held every window on the busy hard disk, from the MCP check every 15 s while the browser waits
+   * (2026-11-09) and, through this read's old synchronous fallback, 275-455 ms (2026-11-12/13).
+   * While a write or removal this process asked for is still on its way, that is the answer: a
+   * read right after a write sees it, as it did when the write was synchronous. A read that a write
+   * or removal overtakes answers with that one too.
    */
   async readStateAsync() {
+    const requested = this.requestedState;
+    if (requested && !requested.settled) return requested.state && { ...requested.state };
+    const requests = this.stateRequests;
+    const overtaken = () => this.stateRequests !== requests;
     let bytes;
     try {
-      bytes = await fs.promises.readFile(this.statePath);
+      bytes = await readStateBytes(this.statePath);
     } catch (error) {
-      if (error?.code !== "ENOENT") return this.readState();
-      this.writtenStateKey = null;
-      this.writtenState = null;
+      if (overtaken()) return this.readStateAsync();
+      if (error?.code !== "ENOENT") throw invalidStateError(this.statePath, error);
+      this.requestedState = null;
       return null;
     }
-    let state;
-    try { state = JSON.parse(bytes.toString("utf8")); } catch { return this.readState(); }
-    try { return this.acceptState(state); } catch { return this.readState(); }
+    if (overtaken()) return this.readStateAsync();
+    // A marker a power cut tore (empty, or its size in NUL bytes) holds no ownership to protect: the
+    // processes it named died with the machine. Failing on it stopped every watchdog restart until
+    // something rewrote the file; it is set aside as if it were missing, its bytes kept in Trash first.
+    const torn = bytes.every((byte) => byte === 0 || byte === 0x20 || byte === 0x09 || byte === 0x0a || byte === 0x0d);
+    if (torn) {
+      const backup = await this.keepStateBytes(bytes);
+      this.logger?.warn?.("runtime.state_torn", { bytes: bytes.length, backup });
+    } else {
+      let failure;
+      try { return this.acceptState(JSON.parse(bytes.toString("utf8"))); } catch (error) { failure = error; }
+      // A marker last written before this boot can name only processes the restart ended, which is
+      // why a readable one is cleared (stopStaleOwnedRuntime). One a crash left unreadable in another
+      // way than the torn check (JSON cut off mid-write) is set aside the same way, its bytes kept in
+      // Trash, instead of failing closed: that kept every chat from starting for over an hour after an
+      // unexpected Windows restart. One written since boot still fails closed, as its processes may
+      // be alive.
+      let modifiedAt = Infinity;
+      try { modifiedAt = (await fs.promises.stat(this.statePath)).mtimeMs; } catch { /* fails closed */ }
+      if (overtaken()) return this.readStateAsync();
+      if (!(modifiedAt < CURRENT_BOOT_STARTED_AT_MS - BOOT_TIME_CLOCK_TOLERANCE_MS)) throw invalidStateError(this.statePath, failure);
+      const backup = await this.keepStateBytes(bytes);
+      this.logger.warn("runtime.state_discarded", {
+        reason: "unreadable ownership marker from before this boot",
+        message: errorMessage(failure),
+        backup,
+      });
+    }
+    // A write asked for meanwhile replaces the marker anyway; removing it now would undo that write.
+    if (overtaken()) return this.readStateAsync();
+    await this.clearState();
+    return null;
   }
 
-  /**
-   * A marker last written before this boot can name only processes the restart ended, which is
-   * why a readable one is cleared (stopStaleOwnedRuntime). One a crash left unreadable in another
-   * way than the torn check above (JSON cut off mid-write) is set aside the same way, its bytes
-   * kept in Trash, instead of failing closed: that kept every chat from starting for over an hour
-   * after an unexpected Windows restart. One written since boot still fails closed, as its
-   * processes may be alive.
-   */
-  setAsideUnreadableStateFromBeforeBoot(bytes, error) {
-    let modifiedAt;
-    try {
-      modifiedAt = fs.statSync(this.statePath).mtimeMs;
-    } catch {
-      return false;
-    }
-    if (!(modifiedAt < CURRENT_BOOT_STARTED_AT_MS - BOOT_TIME_CLOCK_TOLERANCE_MS)) return false;
-    let backup = null;
+  /** Keeps a marker's bytes in Trash before it is set aside; null when they could not be kept. */
+  async keepStateBytes(bytes) {
     try {
       const trash = path.join(this.coreHome, "Trash");
-      fs.mkdirSync(trash, { recursive: true, mode: 0o700 });
-      backup = path.join(fs.mkdtempSync(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
-      fs.writeFileSync(backup, bytes, { flag: "wx", mode: 0o600 });
-    } catch { backup = null; /* a full disk must not keep the watchdog failing on the marker */ }
-    this.logger.warn("runtime.state_discarded", {
-      reason: "unreadable ownership marker from before this boot",
-      message: errorMessage(error),
-      backup,
-    });
-    this.clearState();
-    return true;
+      await fs.promises.mkdir(trash, { recursive: true, mode: 0o700 });
+      const backup = path.join(await fs.promises.mkdtemp(path.join(trash, "runtime-ownership-")), path.basename(this.statePath));
+      await fs.promises.writeFile(backup, bytes, { flag: "wx", mode: 0o600 });
+      return backup;
+    } catch {
+      return null; // a full disk must not keep the watchdog failing on the marker
+    }
   }
 
   snapshot(status = "idle", detail) {
@@ -872,29 +883,63 @@ class RuntimeSupervisor {
     };
   }
 
+  /**
+   * Records `status` in the ownership marker; resolves with the state once it is on disk, rejects
+   * when it could not be written. The state is taken, and its write queued, when this is called.
+   * The write runs on a pool thread: on the main thread it held every window 0.45-1.6 s on the hard
+   * disk at watchdog restarts, bridge reconnects and degrade/ready changes (launcher.main_blocked,
+   * about 7 times on 2026-11-12/13, the most frequent main-thread block then). What the synchronous
+   * write guaranteed still holds:
+   * - a read in this process right after it sees it (readStateAsync answers from memory meanwhile);
+   * - writes and removals land in the order asked for, so a removal never races an earlier write;
+   * - another process sees it once the caller's await returns: the next launcher adopting the bridge
+   *   after detach, a stop, and each start step await theirs before going on;
+   * - a failed write fails its caller, and tryWriteState still stops automatic restarts.
+   * The same content as this process's latest request is not written again (it held every window
+   * 0.4-1.5 s at each watchdog re-check of a bridge needing setup, 2026-11-08): that request is
+   * returned. It is forgotten when the marker is removed, when a read finds other content
+   * (another launcher's) or none, and when the write fails, so those are written again.
+   * Not flushed to disk: the flush held every window 1.1-2.5 s three times in 0.8.104's first
+   * minute (2026-11-09). Only a power cut or crash of Windows loses an unflushed write, and that
+   * ends every process the marker names; whatever it then holds is discarded at the next start
+   * (from before this boot), and a torn one is set aside (readStateAsync).
+   */
   writeState(status, detail) {
     const state = this.snapshot(status, detail);
-    // The write runs on the main thread, which held every window 0.4-1.5 s on the hard disk each time
-    // the watchdog re-checked a bridge that needs setup (every 20-40 min, 2026-11-08). Nothing in it
-    // had changed, so the same state this process last wrote is kept. It is forgotten
-    // when the file is cleared or set aside (clearState) and when a read finds other content in it
-    // (another launcher's), so those are written again; no extra disk call checks the file here.
-    const key = stateKey(state);
-    if (key === this.writtenStateKey && this.writtenState) return this.writtenState;
-    // Not flushed to disk: the flush held every window 1.1-2.5 s three times in 0.8.104's first
-    // minute (2026-11-09). Only a power cut or crash of Windows loses an unflushed write, and that
-    // ends every process the marker names; whatever it then holds is discarded at the next start
-    // (from before this boot), and a torn one is set aside (readState). It stays synchronous so a
-    // read right after a write, here or by the next launcher, sees it.
-    writePrivateFileAtomic(this.statePath, `${JSON.stringify(state, null, 2)}\n`);
-    this.writtenStateKey = key;
-    this.writtenState = state;
-    return state;
+    const latest = this.requestedState;
+    if (latest && latest.key === stateKey(state)) return latest.done;
+    return this.queueStateOperation(state, () => writePrivateFileAtomicAsync(this.statePath, `${JSON.stringify(state, null, 2)}\n`));
   }
 
-  tryWriteState(status, detail) {
+  /**
+   * Runs `operation` (a write or removal of the marker) after the ones already asked for, and makes
+   * `state` (null: no marker) what reads in this process see until it lands. Resolves with `state`;
+   * a failure rejects, and the next read goes back to the disk.
+   */
+  queueStateOperation(state, operation) {
+    const request = { key: state ? stateKey(state) : null, state, settled: false, done: null };
+    this.stateRequests += 1;
+    this.requestedState = request;
+    request.done = this.stateQueue.then(operation).then(() => {
+      request.settled = true;
+      return state;
+    }, (error) => {
+      request.settled = true;
+      if (this.requestedState === request) this.requestedState = null;
+      throw error;
+    });
+    this.stateQueue = request.done.catch(() => {});
+    return request.done;
+  }
+
+  /**
+   * writeState for callers that go on either way: resolves true once written, false (it never
+   * rejects) when it could not be, after stopping automatic restarts and publishing a failed
+   * operation. Callers that restart a child only once its state is recorded await it.
+   */
+  async tryWriteState(status, detail) {
     try {
-      this.writeState(status, detail);
+      await this.writeState(status, detail);
       return true;
     } catch (error) {
       const message = `Could not persist launcher runtime ownership: ${errorMessage(error)}`;
@@ -911,17 +956,16 @@ class RuntimeSupervisor {
     }
   }
 
+  /** Removes the marker, after any write already asked for; resolves once it is gone. */
   clearState() {
-    fs.rmSync(this.statePath, { force: true });
-    this.writtenStateKey = null;
-    this.writtenState = null;
+    return this.queueStateOperation(null, () => fs.promises.rm(this.statePath, { force: true }));
   }
 
-  prepareExternalMigration() {
+  async prepareExternalMigration() {
     if (this.daemon || this.tunnel) {
       throw new Error("Launcher-owned runtime children exist while an external installation is configured");
     }
-    const state = this.readState();
+    const state = await this.readStateAsync();
     if (state && !runtimeOwnershipPredatesCurrentBoot(state) && (
       processRunning(state.ownerPid)
       || processRunning(state.daemonPid)
@@ -929,17 +973,17 @@ class RuntimeSupervisor {
     )) {
       throw new Error("Launcher ownership processes are still alive while an external installation is configured");
     }
-    this.clearState();
+    await this.clearState();
   }
 
-  writeExternalState(detail) {
-    const existing = this.readState();
+  async writeExternalState(detail) {
+    const existing = await this.readStateAsync();
     const preservesLiveOwnership = existing && !runtimeOwnershipPredatesCurrentBoot(existing) && (
       processRunning(existing.ownerPid)
       || processRunning(existing.daemonPid)
       || processRunning(existing.tunnelPid)
     );
-    if (!preservesLiveOwnership) this.writeState("external", detail);
+    if (!preservesLiveOwnership) await this.writeState("external", detail);
   }
 
   async spawnChild(name, invocation) {
@@ -1007,12 +1051,14 @@ class RuntimeSupervisor {
         : `${name} exited (${signal || code})`
           + (this.lastChildOutput[name] ? `: ${this.lastChildOutput[name]}` : "");
       this.lastChildFailure[name] = detail;
+      // Queued now, so it lands before anything a stop writes after this exit. The restart waits for
+      // it: a write that fails stops automatic restarts (tryWriteState).
       const statePersisted = this.tryWriteState(expected ? "stopping" : "degraded", detail);
       this.logger[expected ? "info" : "error"](
         error ? `runtime.${name}_spawn_failed` : `runtime.${name}_exited`,
         error ? { message: error.message } : { code, signal },
       );
-      if (!expected && restartable && statePersisted) this.scheduleRecovery(name);
+      if (!expected && restartable) void statePersisted.then((persisted) => { if (persisted) this.scheduleRecovery(name); });
     };
     child.once("error", (error) => {
       if (!Number.isInteger(child.pid)) {
@@ -1023,7 +1069,7 @@ class RuntimeSupervisor {
     });
     child.once("exit", (code, signal) => handleTerminal({ code, signal }));
     this.logger.info(`runtime.${name}_started`, { pid: child.pid });
-    this.writeState("starting");
+    await this.writeState("starting");
     return child;
   }
 
@@ -1043,7 +1089,7 @@ class RuntimeSupervisor {
   async adoptRunningDaemon(config) {
     if (!this.persistentBridge || this.daemon || this.tunnel) return false;
     let state;
-    try { state = this.readState(); } catch { return false; }
+    try { state = await this.readStateAsync(); } catch { return false; }
     if (!state || runtimeOwnershipPredatesCurrentBoot(state)) return false;
     if (!Number.isInteger(state.daemonPid) || !processRunning(state.daemonPid)) return false;
     if (state.ownerPid !== process.pid && await this.launcherOwnerRunning(state.ownerPid)) return false;
@@ -1076,7 +1122,7 @@ class RuntimeSupervisor {
       this.lastChildFailure.daemon = detail;
       const statePersisted = this.tryWriteState(expected ? "stopping" : "degraded", detail);
       this.logger[expected ? "info" : "error"]("runtime.daemon_exited", { adopted: true });
-      if (!expected && restartable && statePersisted) this.scheduleRecovery("daemon");
+      if (!expected && restartable) void statePersisted.then((persisted) => { if (persisted) this.scheduleRecovery("daemon"); });
     });
     this.logger.info("runtime.daemon_adopted", { pid: state.daemonPid, previousOwner: state.ownerPid });
     return true;
@@ -1107,7 +1153,9 @@ class RuntimeSupervisor {
     if (daemon) this.expectedExits.add(daemon);
     daemon?.release?.();
     daemon?.unref?.();
-    const state = this.writeState("detached", reason);
+    // Awaited: the next launcher adopts the bridge from this marker, so it is on disk (after every
+    // write queued before it) before the app may exit.
+    const state = await this.writeState("detached", reason);
     this.logger.info("runtime.detached", { daemonPid: state.daemonPid, tunnelPid: state.tunnelPid, reason });
     return { status: "detached", daemonPid: state.daemonPid, tunnelPid: state.tunnelPid };
   }
@@ -1129,7 +1177,7 @@ class RuntimeSupervisor {
     }
     this.stopping = false;
     await this.startDaemon(config);
-    this.writeState("ready");
+    await this.writeState("ready");
     return { status: "restarted", pid: this.daemon?.pid ?? null };
   }
 
@@ -1144,7 +1192,7 @@ class RuntimeSupervisor {
       if (config.mode !== "full") throw new Error("MCP tunnel is not part of the browser-only setup");
       if (this.tunnel) await this.stopTunnelGracefully(config);
       await this.startTunnel(config, "runtime-restart", { forceRestart: true });
-      this.writeState("ready");
+      await this.writeState("ready");
       return { status: "restarted", pid: this.tunnel?.pid ?? null };
     })();
     this.recoveryTasks.add(restart);
@@ -1764,9 +1812,12 @@ class RuntimeSupervisor {
       this.lastChildFailure.tunnel = message;
       this.tunnel = null;
       this.stopTunnelMonitor();
-      if (!this.tryWriteState("degraded", message)) return;
-      this.publishOperation?.({ name: "runtime-recovery", status: "running", message });
-      this.scheduleRecovery("tunnel");
+      void this.tryWriteState("degraded", message).then((persisted) => {
+        // A stop that began while the state was written needs no recovery.
+        if (!persisted || this.stopping) return;
+        this.publishOperation?.({ name: "runtime-recovery", status: "running", message });
+        this.scheduleRecovery("tunnel");
+      });
     };
     this.tunnelMonitorTimer = setInterval(() => {
       if (this.stopping
@@ -1800,7 +1851,7 @@ class RuntimeSupervisor {
               signalCode: null,
               managed: true,
             };
-            this.tryWriteState("ready");
+            void this.tryWriteState("ready");
             notifyTunnelReady(this, true);
           }
           return;
@@ -1881,7 +1932,7 @@ class RuntimeSupervisor {
       return { status: "needs-setup", detail };
     }
     if (!config) {
-      const ownershipState = this.readState();
+      const ownershipState = await this.readStateAsync();
       if (ownershipState && !runtimeOwnershipPredatesCurrentBoot(ownershipState) && (
         processRunning(ownershipState.daemonPid)
         || processRunning(ownershipState.tunnelPid)
@@ -1890,48 +1941,48 @@ class RuntimeSupervisor {
         this.logger.warn("runtime.external_owner_detected", { detail });
         return { status: "external", detail };
       }
-      this.clearState();
+      await this.clearState();
       return { status: "not-configured" };
     }
     const tunnelOnly = this.launcherProfile === "development";
     if (tunnelOnly && config.mode !== "full") {
-      const ownershipState = this.readState();
+      const ownershipState = await this.readStateAsync();
       if (runtimeOwnershipMayBeLive(ownershipState)) {
         const detail = "A DEV MCP runtime is still owned while the profile is configured as browser-only";
-        this.writeExternalState(detail);
+        await this.writeExternalState(detail);
         return { status: "external", detail };
       }
-      this.clearState();
+      await this.clearState();
       return { status: "ready", daemonPid: null, tunnelPid: null };
     }
     const currentVersion = tunnelOnly ? this.app.getVersion() : runtimeReleaseVersion(this);
     if (!tunnelOnly && config.releaseVersion !== currentVersion) {
-      const ownershipState = this.readState();
+      const ownershipState = await this.readStateAsync();
       if ((!tunnelOnly && await this.proxyHealth(config)) || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
           const recovered = await this.stopStaleOwnedRuntime(config);
           if (!recovered) {
             const detail = "A runtime for another launcher version could not be safely recovered";
-            this.writeExternalState(detail);
+            await this.writeExternalState(detail);
             this.logger.warn("runtime.external_owner_detected", { port: config.port, detail });
             return { status: "external", detail };
           }
         } catch (error) {
           const detail = errorMessage(error);
-          this.writeExternalState(detail);
+          await this.writeExternalState(detail);
           this.logger.warn("runtime.external_owner_detected", { port: config.port, detail });
           return { status: "external", detail };
         }
       }
       const detail = `Config requires bridge ${config.releaseVersion}; bundled bridge is ${currentVersion}`;
-      this.writeState("needs-setup", detail);
+      await this.writeState("needs-setup", detail);
       this.logger.warn("runtime.setup_required", { detail });
       return { status: "needs-setup", detail };
     }
     const adopted = !tunnelOnly && await this.adoptRunningDaemon(config);
     if (!adopted && !this.daemon && !this.tunnel) {
       const healthyRuntime = tunnelOnly ? false : await this.proxyHealth(config);
-      const ownershipState = this.readState();
+      const ownershipState = await this.readStateAsync();
       if (healthyRuntime || runtimeOwnershipMayBeLive(ownershipState)) {
         try {
           const recovered = await this.stopStaleOwnedRuntime(config);
@@ -1939,13 +1990,13 @@ class RuntimeSupervisor {
             const detail = healthyRuntime
               ? "An external runtime already owns the configured port"
               : "Existing launcher runtime ownership could not be safely recovered";
-            this.writeExternalState(detail);
+            await this.writeExternalState(detail);
             this.logger.warn("runtime.external_owner_detected", { port: config.port, detail });
             return { status: "external", detail };
           }
         } catch (error) {
           const detail = errorMessage(error);
-          this.writeExternalState(detail);
+          await this.writeExternalState(detail);
           this.logger.warn("runtime.external_owner_detected", { port: config.port, detail });
           return { status: "external", detail };
         }
@@ -1969,7 +2020,7 @@ class RuntimeSupervisor {
         } catch (error) {
           const detail = `MCP tunnel is not ready yet: ${errorMessage(error)}`;
           this.restartHistory.daemon = [];
-          this.tryWriteState("degraded", detail);
+          await this.tryWriteState("degraded", detail);
           this.logger.warn("runtime.tunnel_deferred", { detail });
           this.publishOperation?.({ name: "runtime-start", status: "warning", message: detail });
           this.startExtraTunnels(config);
@@ -1981,7 +2032,7 @@ class RuntimeSupervisor {
       }
       this.restartHistory.daemon = [];
       this.restartHistory.tunnel = [];
-      this.writeState("ready");
+      await this.writeState("ready");
       this.publishOperation?.({
         name: "runtime-start",
         status: "completed",
@@ -2003,7 +2054,7 @@ class RuntimeSupervisor {
       const message = cleanupError
         ? appendFailure(primary, "runtime startup cleanup failed", cleanupError)
         : primary;
-      this.tryWriteState("failed", message);
+      await this.tryWriteState("failed", message);
       this.publishOperation?.({ name: "runtime-start", status: "failed", message });
       throw new Error(message);
     }
@@ -2025,17 +2076,18 @@ class RuntimeSupervisor {
       const cause = this.lastChildFailure[name];
       const message = `${name} stopped more than ${MAX_RESTARTS_PER_WINDOW} times in 60 seconds; automatic restart is disabled`
         + (cause ? `; last failure: ${cause}` : "");
-      this.tryWriteState("failed", message);
+      void this.tryWriteState("failed", message);
       this.publishOperation?.({ name: "runtime-recovery", status: "failed", message });
       return;
     }
     const delay = Math.min(attempts * 1_000, 5_000);
     this.restartTimers[name] = setTimeout(() => {
       this.restartTimers[name] = null;
-      const recovery = this.recover(name).catch((error) => {
+      // The failed state's write is part of the recovery task, so a stop or detach waits for it.
+      const recovery = this.recover(name).catch(async (error) => {
         const message = errorMessage(error);
         this.logger.error(`runtime.${name}_recovery_failed`, { message });
-        if (this.tryWriteState("failed", message)) this.scheduleRecovery(name);
+        if (await this.tryWriteState("failed", message)) this.scheduleRecovery(name);
       });
       this.recoveryTasks.add(recovery);
       void recovery.finally(() => this.recoveryTasks.delete(recovery));
@@ -2061,7 +2113,7 @@ class RuntimeSupervisor {
     if (config.mode === "full") {
       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, "runtime-recovery");
     }
-    if (!this.tryWriteState("ready")) {
+    if (!(await this.tryWriteState("ready"))) {
       let cleanupError;
       try {
         await this.cleanupFailedStart(config);
@@ -2417,10 +2469,10 @@ class RuntimeSupervisor {
   }
 
   async stopStaleOwnedRuntime(config) {
-    const state = this.readState();
+    const state = await this.readStateAsync();
     if (!state) return false;
     if (runtimeOwnershipPredatesCurrentBoot(state)) {
-      this.clearState();
+      await this.clearState();
       return false;
     }
     const tunnelOnly = this.launcherProfile === "development";
@@ -2470,7 +2522,7 @@ class RuntimeSupervisor {
       );
     }
     if (!daemonRunning && !managedTunnelRunning) {
-      this.clearState();
+      await this.clearState();
       return true;
     }
     if (state.ownerPid !== process.pid && await this.launcherOwnerRunning(state.ownerPid)) {
@@ -2508,7 +2560,7 @@ class RuntimeSupervisor {
       }
       await this.waitForTunnelStopped(config, 10_000);
     }
-    this.clearState();
+    await this.clearState();
     this.logger.info("runtime.stale_owner_recovered");
     return true;
   }
@@ -2706,7 +2758,7 @@ class RuntimeSupervisor {
     let drained = false;
     let tunnelStopped = false;
     try {
-      const ownershipState = this.readState();
+      const ownershipState = await this.readStateAsync();
       const healthyRuntime = config && this.launcherProfile !== "development"
         ? await this.proxyHealth(config)
         : false;
@@ -2730,7 +2782,7 @@ class RuntimeSupervisor {
             throw new Error("an existing runtime could not be safely recovered");
           }
         }
-        this.clearState();
+        await this.clearState();
         return { status: "stopped" };
       }
       if (this.daemon && config) {
@@ -2752,7 +2804,7 @@ class RuntimeSupervisor {
         }
         await this.shutdownDaemon(config);
       }
-      this.clearState();
+      await this.clearState();
       return { status: "stopped" };
     } catch (error) {
       const compensationErrors = [];
@@ -2782,7 +2834,7 @@ class RuntimeSupervisor {
           restoredReady = false;
         }
       }
-      this.tryWriteState(restoredReady ? "ready" : "failed", message);
+      await this.tryWriteState(restoredReady ? "ready" : "failed", message);
       if (restoredReady) this.startExtraTunnels(config);
       throw new Error(message);
     } finally {
@@ -2831,8 +2883,8 @@ class RuntimeSupervisor {
       } catch (error) {
         failures.push(`daemon: ${errorMessage(error)}`);
       }
-      if (failures.length === 0) this.clearState();
-      else this.tryWriteState("failed", failures.join("; "));
+      if (failures.length === 0) await this.clearState();
+      else await this.tryWriteState("failed", failures.join("; "));
       this.logger.warn("runtime.forced_shutdown_completed", {
         message: errorMessage(reason),
         failures,

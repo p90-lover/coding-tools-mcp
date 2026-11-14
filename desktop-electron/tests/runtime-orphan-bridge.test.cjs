@@ -32,7 +32,7 @@ function fixture(info) {
     runtimeInvocationFactory: ({ args }) => ({ executable, args: [entry, ...args], cwd: root }),
     processInfo: () => (typeof info === "function" ? info({ executable, entry }) : info),
   });
-  supervisor.readState = () => ({ ownerPid: DEAD_PID, daemonPid: DEAD_PID - 1, tunnelPid: null, updatedAt: new Date().toISOString() });
+  supervisor.readStateAsync = async () => ({ ownerPid: DEAD_PID, daemonPid: DEAD_PID - 1, tunnelPid: null, updatedAt: new Date().toISOString() });
   supervisor.clearState = () => calls.push(["clearState"]);
   supervisor.proxyHealthPayload = async () => ({ service: "codex-chatgpt-web", mode: "browser", version: "1.0.0", pid: 4242 });
   supervisor.acquireDrain = async () => true;

@@ -184,7 +184,7 @@ test("a persistent launcher keeps the bridge up when the MCP tunnel is not ready
   supervisor.readConfig = () => started;
   supervisor.adoptRunningDaemon = async () => false;
   supervisor.proxyHealth = async () => false;
-  supervisor.readState = () => null;
+  supervisor.readStateAsync = async () => null;
   const order = [];
   supervisor.startDaemon = async () => { order.push("daemon"); supervisor.daemon = { pid: process.pid }; };
   supervisor.startTunnel = async () => { order.push("tunnel"); throw new Error("tunnel health discovery timed out"); };
@@ -205,10 +205,10 @@ test("timers read the ownership marker and the bridge's health off the main thre
   const { supervisor } = supervisorFor(root);
   assert.equal(await supervisor.readStateAsync(), null, "no marker yet");
   writeOwnership(root, { ownerPid: process.pid, daemonPid: 4242 });
-  assert.deepEqual(await supervisor.readStateAsync(), supervisor.readState(), "the same marker readState reads");
-  assert.equal((await supervisor.readStateAsync()).daemonPid, 4242);
-  // A marker a power cut tore goes through readState's repair: set aside, read as missing.
   const marker = path.join(root, "runtime", "launcher-supervisor.json");
+  assert.deepEqual(await supervisor.readStateAsync(), JSON.parse(fs.readFileSync(marker, "utf8")), "the marker on disk");
+  assert.equal((await supervisor.readStateAsync()).daemonPid, 4242);
+  // A marker a power cut tore is repaired off the main thread too: set aside, read as missing.
   fs.writeFileSync(marker, Buffer.alloc(64));
   assert.equal(await supervisor.readStateAsync(), null);
   assert.equal(fs.existsSync(marker), false, "the torn marker was cleared");

@@ -37,7 +37,7 @@ test('startup validates the bridge version instead of the desktop version', asyn
     app: f.app, logger: f.logger, coreHome: f.root, installedRuntimeRoot: f.root,
   });
   supervisor.readConfig = () => f.config;
-  supervisor.readState = () => null;
+  supervisor.readStateAsync = async () => null;
   supervisor.proxyHealth = async () => false;
   supervisor.writeState = () => {};
   let started = false;

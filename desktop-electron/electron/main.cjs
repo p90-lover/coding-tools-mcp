@@ -860,7 +860,7 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
   if (config?.mode !== "full") return false;
   if (health.version !== config.releaseVersion) return true;
   // Read off the main thread: this check repeats every 15 s while the browser is in use.
-  const ownership = await (runtimeSupervisor.readStateAsync ? runtimeSupervisor.readStateAsync() : runtimeSupervisor.readState());
+  const ownership = await runtimeSupervisor.readStateAsync();
   if (health.pid !== ownership?.daemonPid) return true;
   // A ChatGPT page without its composer is still loading; the blank page the browser parks on
   // between turns has nothing to keep (counted as a draft, it held the check off for good).
@@ -3951,7 +3951,7 @@ function registerIpc({ logger, stateStore }) {
     }
     if (runtimeStartups !== startups || host.currentOperation()) throw new Error("Runtime setup changed during reconnect. Retry when it finishes.");
     if (!extraTunnels.config || host.managedRuntimeUpgradeRequired() || (!health.ready && !primaryFailures.includes(health.failed))) {
-      throw new Error((lastOperation?.name === "runtime-start" && lastOperation.status === "failed" ? lastOperation.message : supervisor.readState()?.detail)
+      throw new Error((lastOperation?.name === "runtime-start" && lastOperation.status === "failed" ? lastOperation.message : (await supervisor.readStateAsync())?.detail)
         || "The MCP runtime did not become ready. Check Setup before reconnecting this tunnel.");
     }
     assertFocusedMainWindow(event, true);

@@ -106,7 +106,7 @@ function manualTunnelRestartFixture() {
     persistentBridge: true, expectedExits: new Set(), restartTimers: { daemon: null, tunnel: null }, tunnelMonitorGeneration: 0,
     childStarts: { daemon: null, tunnel: null },
     tunnel: null, daemon: null, launcherProfile: "development", extraTunnels: { detach() { events.push("extra-detached"); } },
-    logger: { info() {}, warn() {}, error() {} }, readConfig: () => f.config, readState: () => null,
+    logger: { info() {}, warn() {}, error() {} }, readConfig: () => f.config, readStateAsync: async () => null,
     clearState() { events.push("stopped-written"); }, writeState(status) { events.push(status + "-written"); return { daemonPid: this.daemon?.pid, tunnelPid: this.tunnel?.pid }; },
     assertTunnelClientReady() {}, waitForKnownTunnelStatus: async () => ({ ready: false, absent: true, statusKnown: true, state: "stopped", pid: null, processRunning: false }),
     waitForTunnelStopped: async () => {}, waitForTunnelMcpTransport: async () => {}, stopExtraTunnels: async () => {}, waitForIdleForSetup: async () => {},
@@ -2498,7 +2498,7 @@ for (const [label, content] of [["empty", Buffer.alloc(0)], ["zero-filled", Buff
     });
     fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
     fs.writeFileSync(supervisor.statePath, content);
-    assert.equal(supervisor.readState(), null);
+    assert.equal(await supervisor.readStateAsync(), null);
     // Set aside as missing (a power cut's torn marker), its bytes kept in Trash: checked below.
     assert.equal(fs.existsSync(supervisor.statePath), false);
     supervisor.readConfig = () => launcherConfig(descriptor);
@@ -2537,7 +2537,7 @@ test("a zero-filled marker never authorizes taking over a healthy unowned runtim
   assert.equal(supervisor.daemon, null);
 });
 
-test("launcher fails closed on a corrupt runtime ownership marker", () => {
+test("launcher fails closed on a corrupt runtime ownership marker", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-corrupt-runtime-state-"));
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
@@ -2549,13 +2549,13 @@ test("launcher fails closed on a corrupt runtime ownership marker", () => {
   fs.mkdirSync(path.dirname(supervisor.statePath), { recursive: true });
   fs.writeFileSync(supervisor.statePath, "{\"version\":1}\n");
   try {
-    assert.throws(() => supervisor.readState(), /ownership state is invalid/);
+    await assert.rejects(supervisor.readStateAsync(), /ownership state is invalid/);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cleared, not as corrupt", () => {
+test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cleared, not as corrupt", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-torn-runtime-state-"));
   const warnings = [];
   const supervisor = new RuntimeSupervisor({
@@ -2571,19 +2571,19 @@ test("a marker a power cut tore (NUL bytes, or empty) reads as missing and is cl
     // restart failed on it for 25 minutes.
     for (const torn of [Buffer.alloc(233), Buffer.alloc(0), Buffer.from("\n")]) {
       fs.writeFileSync(supervisor.statePath, torn);
-      assert.equal(supervisor.readState(), null);
+      assert.equal(await supervisor.readStateAsync(), null);
       assert.equal(fs.existsSync(supervisor.statePath), false, "it is set aside");
     }
     assert.deepEqual(warnings.map(([event]) => event), ["runtime.state_torn", "runtime.state_torn", "runtime.state_torn"]);
     assert.equal(warnings[0][1].bytes, 233);
-    supervisor.writeState("idle");
-    assert.equal(supervisor.readState().status, "idle");
+    await supervisor.writeState("idle");
+    assert.equal((await supervisor.readStateAsync()).status, "idle");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("an unchanged ownership state is not flushed to disk again; a changed, removed or replaced one is", () => {
+test("an unchanged ownership state is not flushed to disk again; a changed, removed or replaced one is", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-unchanged-runtime-state-"));
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
@@ -2597,38 +2597,39 @@ test("an unchanged ownership state is not flushed to disk again; a changed, remo
   try {
     // 2026-11-08: each watchdog check of a bridge needing setup flushed the same state on the main
     // thread, holding every window 0.4-1.5 s on the hard disk.
-    const first = supervisor.writeState("needs-setup", "Config requires bridge 5.0.6");
+    const onDisk = () => JSON.parse(fs.readFileSync(supervisor.statePath, "utf8")).status;
+    const first = await supervisor.writeState("needs-setup", "Config requires bridge 5.0.6");
     // An older modification time shows whether the file is written again.
     setBack(); const kept = written();
-    const again = supervisor.writeState("needs-setup", "Config requires bridge 5.0.6");
+    const again = await supervisor.writeState("needs-setup", "Config requires bridge 5.0.6");
     assert.equal(again, first, "the same state is kept");
     assert.equal(written(), kept, "and not written");
 
     setBack(); const before = written();
-    supervisor.writeState("ready");
+    await supervisor.writeState("ready");
     assert.notEqual(written(), before, "a new status is written");
-    assert.equal(supervisor.readState().status, "ready");
+    assert.equal((await supervisor.readStateAsync()).status, "ready");
 
     // Another launcher's state, seen by a read, is replaced by the next write.
-    fs.writeFileSync(supervisor.statePath, JSON.stringify({ ...supervisor.writtenState, status: "external" }));
-    assert.equal(supervisor.readState().status, "external");
-    supervisor.writeState("ready");
-    assert.equal(supervisor.readState().status, "ready", "a file another launcher replaced is written again");
+    fs.writeFileSync(supervisor.statePath, JSON.stringify({ ...first, status: "external" }));
+    assert.equal((await supervisor.readStateAsync()).status, "external");
+    await supervisor.writeState("ready");
+    assert.equal(onDisk(), "ready", "a file another launcher replaced is written again");
 
-    supervisor.clearState();
-    supervisor.writeState("ready");
-    assert.equal(supervisor.readState().status, "ready", "a cleared state is written again");
+    await supervisor.clearState();
+    await supervisor.writeState("ready");
+    assert.equal(onDisk(), "ready", "a cleared state is written again");
 
     fs.rmSync(supervisor.statePath);
-    assert.equal(supervisor.readState(), null);
-    supervisor.writeState("ready");
-    assert.equal(supervisor.readState().status, "ready", "a file removed under it is written again once a read misses it");
+    assert.equal(await supervisor.readStateAsync(), null);
+    await supervisor.writeState("ready");
+    assert.equal(onDisk(), "ready", "a file removed under it is written again once a read misses it");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("an unreadable marker is set aside only when it was written before this boot", () => {
+test("an unreadable marker is set aside only when it was written before this boot", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-preboot-runtime-state-"));
   const warnings = [];
   const supervisor = new RuntimeSupervisor({
@@ -2643,12 +2644,12 @@ test("an unreadable marker is set aside only when it was written before this boo
   fs.writeFileSync(supervisor.statePath, "{\n  \"version\": 1,\n  \"ownerPid\": 324");
   try {
     // Written since this boot: its processes may be alive, so it still fails closed.
-    assert.throws(() => supervisor.readState(), /ownership state is invalid/);
+    await assert.rejects(supervisor.readStateAsync(), /ownership state is invalid/);
     assert.equal(fs.existsSync(supervisor.statePath), true);
 
     const beforeBoot = new Date(Date.now() - os.uptime() * 1_000 - 60_000);
     fs.utimesSync(supervisor.statePath, beforeBoot, beforeBoot);
-    assert.equal(supervisor.readState(), null);
+    assert.equal(await supervisor.readStateAsync(), null);
     assert.equal(fs.existsSync(supervisor.statePath), false, "it is set aside, as a torn marker is");
     assert.deepEqual(warnings, ["runtime.state_discarded"]);
     const [backup] = fs.readdirSync(path.join(root, "Trash"));
@@ -2662,8 +2663,8 @@ test("the ownership marker is written without a flush; only flushed writes pay f
   // The flush held every window up to 2.5 s; a marker a power cut tears is set aside at the next
   // start instead (the torn and before-boot tests above), as every process it names died with it.
   const source = fs.readFileSync(path.join(__dirname, "..", "electron", "runtime-supervisor.cjs"), "utf8");
-  assert.match(source, /writePrivateFileAtomic\(this\.statePath, `\$\{JSON\.stringify\(state, null, 2\)\}\\n`\);/);
-  assert.doesNotMatch(source, /writePrivateFileAtomic\(this\.statePath, [^\n]*durable/);
+  assert.match(source, /writePrivateFileAtomicAsync\(this\.statePath, `\$\{JSON\.stringify\(state, null, 2\)\}\\n`\)\);/);
+  assert.doesNotMatch(source, /writePrivateFileAtomic(?:Async)?\(this\.statePath, [^\n]*durable/);
   const { writePrivateFileAtomic } = require("../electron/atomic-file.cjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-durable-write-"));
   const synced = [];
@@ -2762,7 +2763,7 @@ test("a failed full-runtime marker with no child evidence cannot block removal o
   }
 });
 
-test("external migration clears only stale launcher ownership evidence", () => {
+test("external migration clears only stale launcher ownership evidence", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-external-migration-"));
   const supervisor = new RuntimeSupervisor({
     app: { getVersion: () => "0.2.0", isPackaged: false },
@@ -2782,12 +2783,12 @@ test("external migration clears only stale launcher ownership evidence", () => {
   });
   try {
     fs.writeFileSync(supervisor.statePath, `${JSON.stringify(state(process.pid))}\n`);
-    assert.throws(
-      () => supervisor.prepareExternalMigration(),
+    await assert.rejects(
+      supervisor.prepareExternalMigration(),
       /ownership processes are still alive/,
     );
     fs.writeFileSync(supervisor.statePath, `${JSON.stringify(state(999_999_999))}\n`);
-    supervisor.prepareExternalMigration();
+    await supervisor.prepareExternalMigration();
     assert.equal(fs.existsSync(supervisor.statePath), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

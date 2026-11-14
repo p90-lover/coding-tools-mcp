@@ -776,7 +776,7 @@ class RuntimeHost {
     } catch (error) {
       restoreError = error;
     }
-    this.supervisor.clearState();
+    await this.supervisor.clearState();
     if (stopError || restoreError) {
       const failures = [
         stopError ? `stopping the incomplete runtime failed: ${stopError instanceof Error ? stopError.message : String(stopError)}` : null,
@@ -1168,7 +1168,7 @@ class RuntimeHost {
     this.lifecycleOperation = name;
     try {
       try {
-        if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
+        if (previousRuntime.owner === "external") await this.supervisor.prepareExternalMigration();
         else await this.supervisor.stopForSetup();
       } catch (error) {
         try {
@@ -1627,7 +1627,7 @@ class RuntimeHost {
         await this.supervisor.waitForIdleForSetup?.(name, options.timeoutMs);
       }
       runtimeTransitionStarted = true;
-      if (previousRuntime.owner === "external") this.supervisor.prepareExternalMigration();
+      if (previousRuntime.owner === "external") await this.supervisor.prepareExternalMigration();
       else await this.supervisor.stopForSetup();
       setupCommandStarted = true;
       const result = await this.run(name, args, options);
