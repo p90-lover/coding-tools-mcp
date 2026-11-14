@@ -152,7 +152,7 @@ function AllowedApps({ onError }: { onError: (message: string) => void }) {
 const COMPACT_CHOICES = [50, 60, 70, 80, 90, 95, 100];
 
 /** The chat's own preferences, kept by the bridge (agent-orchestrator-workflow.cjs), as Claude Code's settings. */
-type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; questionTimeout: number };
+type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; meteredReviews: boolean; questionTimeout: number };
 // "Agent questions": how long a question waits before it is answered for you (chat_question_timeout).
 // 0 keeps it, and the agent paused on it, until you answer.
 const QUESTION_TIMEOUT_DEFAULT = 30;
@@ -273,7 +273,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
     let live = true;
     void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges"), chatCall("chat_question_timeout")])
       .then(([compact, retry, judges, questions]) => {
-        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true,
+        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true, meteredReviews: judges.meteredReviews === true,
           questionTimeout: questionSeconds(questions.seconds) });
       }, () => undefined);
     return () => { live = false; };
@@ -294,7 +294,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
       ...current,
       ...(operation === "chat_auto_compact" ? { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || current.percent } : {}),
       ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
-      ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true } : {}),
+      ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true, meteredReviews: result.meteredReviews === true } : {}),
       ...(operation === "chat_question_timeout" ? { questionTimeout: questionSeconds(result.seconds) } : {}),
     })));
   };
@@ -424,7 +424,11 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
               </Row>
-              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead. When Auto Review can't answer, the chat's own model judges, on that model's quota">
+              <Row label="Allow quota-based reviews" description="Off by default. External command and screen reviews through CPA consume account quota, even with Codex CLI login. When off, safe rules still run and other actions wait for you. Native Codex Auto-review is separate.">
+                <Toggle label="Allow quota-based reviews" checked={chat?.meteredReviews === true} disabled={!chat}
+                  onChange={(next) => setChatPreference("chat_model_judges", { meteredReviews: next })} />
+              </Row>
+              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead. External action reviews also require Allow quota-based reviews">
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
               </Row>

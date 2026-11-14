@@ -42,6 +42,7 @@ function chat({ command, outcome = "allow", keepListing = false, clock = () => D
     },
     confirm: async () => true,
   });
+  void workflow.call("chat_model_judges", { meteredReviews: true });
   return { workflow, mission, resolved, prompts, interrupts, quiet: (ms) => { lastActivityAt = clock() - ms; } };
 }
 
