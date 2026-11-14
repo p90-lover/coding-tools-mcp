@@ -215,7 +215,7 @@ function yamlString(value) {
 // account kinds. CPA gives a plugin one auth identifier, so those accounts are provider-manager auth
 // files with a "kind" (migrateAuthFiles).
 const COMMANDCODE_PLUGINS = [
-  { id: "cpa-provider-manager", file: "cpa-provider-manager-v0.7.0.dll", sha256: "c5b47f39878791119b1c1dfd996cc88a3bb0c8d5a4e1426932287ed8d4ebd231" },
+  { id: "cpa-provider-manager", file: "cpa-provider-manager-v0.7.1.dll", sha256: "b0fdcf134eb39e5d72bea2e0dfbb7a7b3f2cde3974f8e78ea97a00d3829b49b3" },
 ];
 
 // The plugins Provider Manager replaced. Their DLLs and config blocks are removed: a stale plugin
