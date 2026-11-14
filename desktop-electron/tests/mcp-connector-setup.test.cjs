@@ -893,7 +893,7 @@ for (const previouslySeen of [false, true]) test(`observed Tunnel form ${previou
 test("account IPC preserves legacy arbitration and records only the requested, still-existing account", async () => {
   const fs = require("node:fs");
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  const snippet = source.slice(source.indexOf('  const connectAccountMcp ='), source.indexOf('  let accountMcpConfig ='));
+  const snippet = source.slice(source.indexOf('  const connectAccountMcp ='), source.indexOf('  handle("launcher:doctor",'));
   let handler, failure = null, signedIn = true, removeDuringSetup = false, removeDuringSave = false;
   const accounts = new Set(["main", "other"]), calls = [], records = [];
   const tunnels = [{ id: "extra", accountId: "other", tunnelId: "tunnel_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", state: "stopped" }];
