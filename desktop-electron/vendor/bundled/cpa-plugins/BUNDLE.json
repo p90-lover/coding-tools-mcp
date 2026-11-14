@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "86c5784e2c11094c0aed08ca7db4c0b8d7fd6908",
+    "commit": "c7cab2088b9c491a8d04536c72b625cbe81116ab",
     "license": "MIT"
   },
   "changes": [
-    "Smart routing: within a Codex priority tier, the account with the most quota at risk per hour before its soonest reset (the least left in any window, over the hours to that reset) is used first; accounts within 1% share requests and a spent window skips the account",
-    "Managed account pools (OpenCode Go and other API-key accounts that fail over to each other) are ordered the same way from each account's cached quota reading; accounts without a fresh reading come next and spent ones last; pinned requests, the 429 cooldown and failover are unchanged",
+    "Auto Review: a Codex fallback account can take the default route (codex-auto-review, as the first account does) with no model to pick; other providers still name a model, and no fallback repeats an earlier route",
+    "Smart routing (0.7.0): within a Codex priority tier and across a managed account pool, the account with the most quota at risk per hour before its soonest reset is used first",
     "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
     "Cline Pass, CommandCode Go, CommandCode and Grok accounts are provider-manager auth files with a kind; their models, logins and management routes are unchanged"
   ],
@@ -20,9 +20,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/cpa-provider-manager-v0.7.0.dll",
-      "sha256": "c5b47f39878791119b1c1dfd996cc88a3bb0c8d5a4e1426932287ed8d4ebd231",
-      "size": 27131904
+      "path": "windows/amd64/cpa-provider-manager-v0.7.1.dll",
+      "sha256": "b0fdcf134eb39e5d72bea2e0dfbb7a7b3f2cde3974f8e78ea97a00d3829b49b3",
+      "size": 27136000
     }
   }
 }
