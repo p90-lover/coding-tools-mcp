@@ -8486,13 +8486,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function queueAfterRun(workspaceId, runId, outcome) {
     const steers = outcome ? chatQueue.deliveredTo(workspaceId, runId) : [];
     if (steers.length) {
-      // A finished turn read them all (its receipts say "Read"). One the person stopped keeps its
-      // stop: sending them again would start the turn they ended.
-      const timelines = ["finished", "stopped"].includes(outcome) ? null : await runTimelines(workspaceId, runId).catch(() => null);
+      // Explicit Stop must not start another turn. Successful turns only replay input the timeline
+      // shows still unread; a missing or unavailable timeline is not evidence for sending it twice.
+      const timelines = outcome === "stopped" ? null : await runTimelines(workspaceId, runId).catch(() => null);
       for (const taskId of new Set(steers.map(steer => steer.taskId))) {
         const mine = steers.filter(steer => steer.taskId === taskId);
-        const unread = ["finished", "stopped"].includes(outcome) ? []
-          : mine.filter(steer => !(timelines ?? []).some(timeline => steerReadIn(timeline, steer.message) === true));
+        const unread = outcome === "stopped" ? [] : mine.filter(steer => {
+          const receipts = (timelines ?? []).map(timeline => steerReadIn(timeline, steer.message, { finished: outcome === "finished" }));
+          return !receipts.includes(true) && (outcome !== "finished" || receipts.includes(false));
+        });
         chatQueue.forgetDelivered(workspaceId, taskId, mine.map(steer => steer.id));
         for (const steer of unread.reverse()) {
           chatQueue.add(workspaceId, taskId, steer.goal ? { what: "Goal", message: steer.goal, goal: steer.goal } : { what: "Message", message: steer.message }, { front: true });

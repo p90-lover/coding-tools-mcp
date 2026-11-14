@@ -13307,6 +13307,49 @@ test("a steer the agent never read (its turn died first) comes back and goes as 
   for (const chat of [{ workflow }, again, stopped]) chat.workflow.dispose();
 });
 
+test("a finished short turn sends its unread steers in order without replaying read messages", async (t) => {
+  const timeline = [
+    { id: "t1", kind: "command", status: "completed", text: "check" },
+    { id: "t2", kind: "steer", status: "completed", text: "already read" },
+    { id: "t3", kind: "message", status: "completed", text: "done" },
+    { id: "t4", kind: "steer", status: "completed", text: "first unread" },
+    { id: "t5", kind: "steer", status: "completed", text: "second unread" },
+  ];
+  const { world, workflow, queue } = queueChat({ aoHarness: { steer: async () => ({ steered: true }), timeline: async () => timeline } });
+  t.after(() => workflow.dispose());
+  for (const message of ["already read", "first unread", "second unread"]) {
+    assert.equal((await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message })).steered, true);
+  }
+  await goalSettle();
+  world.runs[0].nodes[0].state = "finished";
+  await workflow.queueAfterRun("ws-1", "r1", "finished");
+  assert.equal(world.updates.length, 1, "the first unread message starts a new turn without the chat view");
+  assert.match(world.edits.at(-1).description, /Follow-up \([^)]+\):\nfirst unread$/);
+  assert.deepEqual((await queue()).map(item => item.message), ["second unread"], "the remaining unread message keeps its place");
+});
+
+for (const observation of ["read", "text-only", "missing", "unavailable", "stopped"]) {
+  test(`finished-steer recovery never invents unread input: ${observation}`, async (t) => {
+    const timeline = [{ kind: "command", text: "check" }, { kind: "steer", text: "follow-up" }, { kind: "message", text: "done" }];
+    const { world, workflow, queue } = queueChat({ aoHarness: {
+      steer: async () => ({ steered: true }),
+      timeline: async () => {
+        if (observation === "unavailable") throw new Error("timeline unavailable");
+        if (observation === "missing") return [];
+        if (observation === "text-only") return timeline.slice(1);
+        return observation === "stopped" ? timeline.slice(0, 2) : timeline;
+      },
+    } });
+    t.after(() => workflow.dispose());
+    await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "follow-up" });
+    await goalSettle();
+    world.runs[0].nodes[0].state = observation === "stopped" ? "cancelled" : "finished";
+    await workflow.queueAfterRun("ws-1", "r1", observation === "stopped" ? "stopped" : "finished");
+    assert.equal(world.updates.length, 0);
+    assert.deepEqual(await queue(), []);
+  });
+}
+
 test("after a restart the app resumes interrupted chats in every project, with no window or chat open", async () => {
   const now = Date.now();
   const restarted = "the agent's process ended before it finished (the app restarted)";
