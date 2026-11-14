@@ -215,7 +215,7 @@ test("a Connect the user asked for holds the sync: none starts, and one connecti
   assert.deepEqual(f.connected, ["one", "one", "two"], "once released, the account it gave way on is tried again");
 });
 
-test("main's account Connect holds the automatic sync, waits for the browser, and always lets go", async () => {
+test("main's explicit account Connect waits for the browser and retains focus and failure behavior", async () => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf('  handle("launcher:mcp-create-connector",');
   const close = /\r?\n {2}\}\);\r?\n/g;
@@ -230,17 +230,16 @@ test("main's account Connect holds the automatic sync, waits for the browser, an
     browserHost: { manualOperation: "MCP connector creation" },
     assertFocusedMainWindow: () => order.push("focus"),
     mcpConnectorCommand: { request: async () => order.push("settings") },
-    automaticAccountMcp: { hold: () => { order.push("hold"); return () => order.push("release"); } },
     waitForManualOperation: async (host, timeoutMs) => { order.push(`wait ${timeoutMs}`); assert.equal(host, context.browserHost); },
     connectAccountMcp: async id => { order.push(`connect ${id}`); if (id === "bad") throw new Error("busy"); return { connected: true }; },
     handle: (channel, fn) => { assert.equal(channel, "launcher:mcp-create-connector"); handler = fn; },
   };
   vm.runInNewContext(source.slice(start, end), settledFocus(context));
   assert.deepEqual(await handler({}, "one"), { connected: true });
-  assert.deepEqual(order, ["focus", "hold", "wait 60000", "connect one", "release"]);
+  assert.deepEqual(order, ["focus", "wait 60000", "connect one"]);
   order.length = 0;
   await assert.rejects(handler({}, "bad"), /busy/);
-  assert.deepEqual(order, ["focus", "hold", "wait 60000", "connect bad", "release"], "a failed Connect releases the hold too");
+  assert.deepEqual(order, ["focus", "wait 60000", "connect bad"], "a failed Connect propagates its error");
   order.length = 0;
   await handler({}, undefined);
   assert.deepEqual(order, ["focus", "settings"], "the Settings connector is unchanged");
@@ -378,58 +377,12 @@ test("an automatic setup that gave way is told apart from one that failed", () =
   assert.equal(automaticSetupGaveWay(refused, () => false), true, "it lost admission (focus, a switch, a turn)");
 });
 
-test("production wiring uses owned native sessions and actual focus; it leaves active Browser unchanged", async () => {
+test("production wiring never instantiates or schedules the automatic account coordinator", () => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  const start = source.indexOf("  let accountMcpConfig = null;");
-  const end = source.indexOf('\n  handle("launcher:doctor",', start);
-  assert(start > 0 && end > start);
-  const state = { autoConnectExistingMcp: true, coreSetupComplete: true, browserInteractionMode: "automatic" };
-  let focused = false, nativeFocus = false, mode = null, coreReads = 0;
-  const probes = [], routes = [], connections = [], callbacks = {};
-  const accounts = [{ id: "one" }, { id: "two" }];
-  const config = { browserHost: "launcher", mode: "full", appName: "Coding Tools Native2", automaticTunnel: { tunnelId: "configured" } };
-  const context = {
-    createBrowserAccountMcpSync, readChatGptAuthSession,
-    stateStore: { read: () => state }, logger: { warn() {} },
-    IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false,
-    browserHost: { partition: "persist:shown", activeTraceId: null, currentOperation: () => mode },
-    browserAccounts: { status: () => ({ accounts }), partitionOf: id => `persist:${id}` },
-    browserAccountsStatus: () => ({ switching: false }),
-    mainWindow: { isDestroyed: () => false, isVisible: () => true, isMinimized: () => false,
-      isFocused: () => focused, webContents: { isFocused: () => nativeFocus },
-      on: (event, fn) => { callbacks[event] = fn; }, once: (event, fn) => { callbacks[event] = fn; } },
-    runtimeHost: { currentOperation: () => null, mcpCredentialsConfiguredAsync: async () => true },
-    runtimeSupervisor: { readConfigAsync: async () => { coreReads++; return config; }, extraTunnels: { status: () => [] } },
-    routeIdleAccountPartition: async partition => routes.push(partition),
-    session: { fromPartition: partition => ({ cookies: { get: async () => cookie(partition) } }) },
-    fetchThroughLauncherNetwork: async (url, options, scope) => {
-      assert.equal(scope.useSessionCookies, true);
-      probes.push([scope.partition, url]); assert.equal(options.redirect, "error"); assert.equal(options.cache, "no-store");
-      return { ok: true, headers: { get: () => "application/json" }, json: async () => ({ user: { id: scope.partition } }) };
-    },
-    connectAccountMcp: async (id, current) => { mode = "MCP connector creation"; current(); connections.push(id); mode = null; return { connected: true }; },
-    setInterval: fn => { callbacks.timer = fn; return { unref() {} }; }, clearInterval() {},
-  };
-  vm.runInNewContext(source.slice(start, end), settledFocus(context));
-  await context.automaticAccountMcp.sync();
-  assert.equal(coreReads, 0, "no background reads or setup before genuine app focus");
-  focused = true;
-  await context.automaticAccountMcp.sync();
-  assert.equal(probes.length, 0, "native window focus alone cannot replace renderer focus");
-  nativeFocus = true; state.coreSetupComplete = false;
-  await context.automaticAccountMcp.sync();
-  assert.equal(probes.length, 0);
-  state.coreSetupComplete = true; state.browserInteractionMode = "manual";
-  await context.automaticAccountMcp.sync();
-  assert.equal(probes.length, 0);
-  state.browserInteractionMode = "automatic";
-  await context.automaticAccountMcp.sync();
-  assert.deepEqual(connections, ["one", "two"]);
-  assert.deepEqual(routes, ["persist:one", "persist:two"]);
-  assert.deepEqual(probes, [["persist:one", "https://chatgpt.com/api/auth/session"], ["persist:two", "https://chatgpt.com/api/auth/session"]]);
-  assert.equal(context.browserHost.partition, "persist:shown");
-  await context.automaticAccountMcp.sync();
-  assert.equal(connections.length, 2);
+  for (const symbol of ["createBrowserAccountMcpSync", "automaticAccountMcp", "accountMcpTimer", "syncAccountMcp"]) {
+    assert.equal(source.includes(symbol), false, `${symbol} is not wired into production`);
+  }
+  assert.match(source, /handle\("launcher:mcp-create-connector", async \(event, accountId\)/);
 });
 
 test("launcher transport pins owned session reads to the bound proxy and keeps native defaults", async t => {

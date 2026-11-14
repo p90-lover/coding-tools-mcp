@@ -2465,20 +2465,6 @@ function SettingsSurface({
           mode={snapshot.state.browserInteractionMode}
           onChange={(mode) => void setInteractionMode(mode)}
         />
-        {!devProfile ? <SettingRow
-          body={copy.autoConnectExistingMcpBody}
-          label={copy.autoConnectExistingMcp}
-        >
-          <Switch
-            checked={snapshot.state.autoConnectExistingMcp}
-            disabled={snapshot.state.browserInteractionMode !== "automatic"
-              || snapshot.state.mcpRuntimeInstalled !== true
-              || !snapshot.mcpCredentialsConfigured}
-            onChange={(checked) => void api!.setPreference("autoConnectExistingMcp", checked)
-              .then(updateState)
-              .catch((cause) => setError(messageOf(cause)))}
-          />
-        </SettingRow> : null}
         <SettingRow body={devProfile ? copy.devKeepRunningBody : copy.keepRunningOnCloseBody} label={copy.keepRunningOnClose}>
           <Switch
             checked={snapshot.state.keepRunningOnClose}

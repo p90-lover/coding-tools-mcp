@@ -161,7 +161,7 @@ test("main records a signed-in account's email only once its copied sign-in is c
   const body = source.slice(start, source.indexOf("\n}\n", start));
   const gate = body.indexOf("signInVerificationFor");
   assert.ok(gate > 0, "the sign-in waits on the host's verification");
-  assert.ok(gate < body.indexOf("automaticAccountMcp?.sync()") && gate < body.indexOf("setEmail("),
-    "before MCP setup or the email are touched");
+  assert.ok(gate < body.indexOf("setEmail("), "before the email is touched");
+  assert.equal(body.includes("automaticAccountMcp"), false, "sign-in must not trigger MCP setup");
   assert.match(source, /signInConflict: \(partition, user\) => browserAccounts\.otherAccountWithLogin\(partition, user\)/);
 });

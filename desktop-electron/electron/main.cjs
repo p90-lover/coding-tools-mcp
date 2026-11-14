@@ -40,8 +40,7 @@ const { cleanUserAgent } = require("./browser-url.cjs");
 const { mergeGptBrowserAccounts } = require("./gpt-browser-merge.cjs");
 const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
-const { automaticSetupGaveWay, createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
-const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
+const { automaticSetupGaveWay } = require("./browser-account-mcp.cjs");
 const { isDecodoProfile } = require("./decodo-proxies.cjs");
 const { createEmailHost } = require("./email-host.cjs");
 const { createActionTimes, timeIpcHandler, watchPageTimes, partitionGroup, partitionOf } = require("./action-times.cjs");
@@ -310,16 +309,7 @@ let lastOperation = null;
 let catalogVerificationTimer = null;
 let catalogVerificationInFlight = false;
 let codexModelCacheWatch = null;
-// The automatic MCP check for the running bridge: { pid, failures, retryAt }, retryAt null once it
-// passed or ran out of retries. A failed check retries after each delay below, then waits for a new
-// round (a tunnel restart, a sign-in, an account switch, the setting); one try per bridge left MCP
-// unconnected for the whole session after one slow ChatGPT page.
-let automaticMcpAttempt = null;
-let automaticAccountMcp = null;
-// How long an account's Connect waits for the browser's current operation (the background setup
-// giving way, a page's account check) before it is refused as busy.
 const MANUAL_MCP_CONNECT_WAIT_MS = 60_000;
-const AUTOMATIC_MCP_RETRY_DELAYS_MS = [60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000, 15 * 60_000];
 let mcpVerificationInFlight = null;
 let verifyMcpConnection = null;
 let mcpConnectorCommand = null;
@@ -827,92 +817,12 @@ function stopCatalogVerificationMonitor() {
   catalogVerificationTimer = null;
 }
 
-async function autoConnectExistingMcpIfReady({ logger, stateStore, health, config: knownConfig }) {
-  const state = stateStore.read();
-  if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
-    || state.browserInteractionMode !== "automatic") return false;
-  // What is in memory comes first. This waits for as long as the browser is in use (asked every
-  // 15 s), and the checks after the idle browser read files synchronously: on the app's busy hard
-  // disk one such read froze every window for 3 s (a main-process profile, 2026-10-24). The
-  // catalog monitor hands over the config it read asynchronously.
-  if (knownConfig !== undefined && knownConfig?.mode !== "full") return false;
-  if (!health || health.service !== "codex-chatgpt-web" || health.status !== "ok"
-    || health.mode !== "full" || health.accepting_turns !== true
-    || !Number.isInteger(health.pid) || !(health.successful_model_catalog_requests > 0)) return true;
-  const attempt = automaticMcpAttempt?.pid === health.pid ? automaticMcpAttempt : null;
-  if (attempt && (attempt.retryAt === null || Date.now() < attempt.retryAt)) return attempt.retryAt !== null;
-  const browser = browserHost?.snapshot();
-  // The browser is what the check uses, so only browser work defers it. Open HTTP turns do not:
-  // Codex keeps its bridge connections open between turns, so they never reached zero while any
-  // chat was open and the check never ran (seen live 2026-11-02: 9-12 open, none in the browser).
-  if (!verifyMcpConnection || browser?.authenticated !== true || browser.surfaceActive
-    || health.active_browser_turns !== 0
-    || browserHost.activeTraceId || browserHost.currentOperation() || runtimeHost.currentOperation()) return true;
-  const contents = browserHost.view?.webContents;
-  if (!contents || contents.isDestroyed()) return true;
-  // With the monitor's config, the saved credentials are checked without a synchronous call: reading
-  // config.json again here froze every window for up to 26 s (statSync, seen live 2026-10-31).
-  const credentials = knownConfig !== undefined && runtimeHost?.mcpCredentialsConfiguredAsync
-    ? await runtimeHost.mcpCredentialsConfiguredAsync(knownConfig)
-    : runtimeHost?.mcpCredentialsConfigured();
-  if (!credentials) return false;
-  const config = knownConfig !== undefined ? knownConfig : runtimeSupervisor?.readConfig();
-  if (config?.mode !== "full") return false;
-  if (health.version !== config.releaseVersion) return true;
-  // Read off the main thread: this check repeats every 15 s while the browser is in use.
-  const ownership = await (runtimeSupervisor.readStateAsync ? runtimeSupervisor.readStateAsync() : runtimeSupervisor.readState());
-  if (health.pid !== ownership?.daemonPid) return true;
-  // A ChatGPT page without its composer is still loading; the blank page the browser parks on
-  // between turns has nothing to keep (counted as a draft, it held the check off for good).
-  const hasDraft = await contents.executeJavaScript(`(() => {
-    const composer = document.querySelector('#prompt-textarea');
-    if (!composer) return location.hostname === 'chatgpt.com';
-    return Boolean((composer.innerText || composer.value || '').trim())
-      || [...document.querySelectorAll('input[type="file"]')].some(input => input.files.length > 0)
-      || [...document.querySelectorAll('button[aria-label]')].some(button => /^Remove\\b/i.test(button.getAttribute('aria-label')));
-  })()`);
-  if (hasDraft || browserHost.currentOperation() || browserHost.activeTraceId) return true;
-  const failures = attempt?.failures ?? 0;
-  automaticMcpAttempt = { pid: health.pid, failures, retryAt: null };
-  await verifyMcpConnection();
-  const ready = stateStore.read().mcpSetupComplete === true;
-  // A new round that began during the check (the tunnel restarted) runs a fresh check next.
-  const restarted = automaticMcpAttempt?.pid !== health.pid;
-  const retryInMs = ready || restarted ? undefined : AUTOMATIC_MCP_RETRY_DELAYS_MS[failures];
-  if (retryInMs !== undefined) {
-    automaticMcpAttempt = { pid: health.pid, failures: failures + 1, retryAt: Date.now() + retryInMs };
-  }
-  logger.info("mcp.automatic_verification_finished", { ready, attempt: failures + 1, ...(retryInMs !== undefined ? { retryInMs } : {}) });
-  return restarted || retryInMs !== undefined;
-}
-
-/**
- * Starts a new round of automatic MCP checks: after the MCP tunnel restarts, a sign-in, or an
- * account switch, ChatGPT's connector list can be out of date until the check reloads the page.
- */
-function restartAutomaticMcpVerification({ logger, stateStore, reason }) {
-  automaticMcpAttempt = null;
-  automaticAccountMcp?.invalidate();
-  void automaticAccountMcp?.sync();
-  const state = stateStore.read();
-  if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
-    || state.coreSetupComplete !== true) return;
-  logger.info("mcp.automatic_verification_restarted", { reason });
-  if (!catalogVerificationTimer) startCatalogVerificationMonitor({ logger, stateStore });
-}
-
 function startCatalogVerificationMonitor({ logger, stateStore }) {
   stopCatalogVerificationMonitor();
   let reportedFailure = null;
-  // Once the catalog is verified, the monitor only waits for an idle, signed-in browser to connect
-  // MCP. That can take as long as the browser is in use, and asking the bridge's health every 2 s
-  // the whole time cost the main process a connection and a config read each time; it asks every
-  // 15 s while waiting.
-  let nextCheckAt = 0;
   const check = async () => {
-    if (Date.now() < nextCheckAt) return;
     const current = stateStore.read();
-    if (current.coreSetupComplete !== true || (current.codexCatalogVerified === true && !current.autoConnectExistingMcp)) {
+    if (current.coreSetupComplete !== true || current.codexCatalogVerified === true) {
       stopCatalogVerificationMonitor();
       return;
     }
@@ -962,10 +872,6 @@ function startCatalogVerificationMonitor({ logger, stateStore }) {
       if (lastOperation?.name === "catalog-verification" && lastOperation.status === "failed") {
         publishOperation({ name: "catalog-verification", status: "completed", message: "Codex model catalog loaded" });
       }
-      }
-      if (await autoConnectExistingMcpIfReady({ logger, stateStore, health, config })) {
-        nextCheckAt = Date.now() + 15_000;
-        return;
       }
       stopCatalogVerificationMonitor();
     } catch (error) {
@@ -1116,8 +1022,6 @@ async function connectCodexBridgeAfterAuthentication({ logger, stateStore, reaso
       return { runtime: started, route: await runtimeHost.connectBridgeRoute() };
     });
     if (!route) return { skipped: true, reason: runtime.status, runtime };
-    // A sign-in or an account switch checks the connector again, in that account's ChatGPT.
-    if (/^(browser-|setup-signin)/.test(reason)) automaticMcpAttempt = null;
     applyReadyRuntimeAfterBridge({ logger, stateStore, bridgeRouteChanged: route.changed === true });
     logger.info("bridge.auto_connected", { reason, changed: route.changed === true });
     const workflow = activeAoWorkflow;
@@ -1546,7 +1450,6 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   const verifying = host.signInVerificationFor?.(browserAccounts.partitionOf(accountId));
   if (verifying && !(await verifying)) return;
   if (browserHost !== host || !browserAccounts.has(accountId)) return;
-  void automaticAccountMcp?.sync();
   try {
     // The account's own partition: the host may already show another account.
     if (browserAccounts.setEmail(accountId, await readChatGptAccountEmail(browserAccounts.partitionOf(accountId)))) publishBrowserAccounts();
@@ -3507,13 +3410,10 @@ function registerIpc({ logger, stateStore }) {
         await extraTunnels.setConnector(accountTunnel.id, result.href, result.binding);
         assertCurrent();
       } else {
-        const state = stateStore.update({
-          autoConnectExistingMcp: true,
-          ...(result.created ? { mcpSetupComplete: false } : {}),
-        });
-        automaticMcpAttempt = null;
-        send("launcher:state-changed", state);
-        startCatalogVerificationMonitor({ logger, stateStore });
+        if (result.created) {
+          const state = stateStore.update({ mcpSetupComplete: false });
+          send("launcher:state-changed", state);
+        }
       }
       publishOperation({ name: "mcp-connector-create", status: "completed", message: result.created ? "ChatGPT connector created" : "ChatGPT connector already exists" });
       return result;
@@ -3651,70 +3551,9 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:mcp-create-connector", async (event, accountId) => {
     await assertFocusedMainWindowSettled(event, true);
     if (accountId === undefined) return mcpConnectorCommand.request("create", "settings");
-    // A Connect the user asked for comes first. On 2026-11-09 a Connect for every account was refused
-    // for all 22 in 8 s ("Finish the active browser or setup operation…") because the background
-    // setup held the browser. Now that setup gives way at its next step, and the page's own account
-    // checks end in seconds; other operations are waited for up to a minute, a Codex turn not at all.
-    const release = automaticAccountMcp?.hold();
-    try {
-      if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
-      return await connectAccountMcp(accountId);
-    } finally {
-      release?.();
-    }
+    if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+    return await connectAccountMcp(accountId);
   });
-
-  let accountMcpConfig = null;
-  automaticAccountMcp = createBrowserAccountMcpSync({
-    logger,
-    accounts: () => browserAccounts.status().accounts.map(account => ({
-      ...account, partition: browserAccounts.partitionOf(account.id),
-    })),
-    canRun: ({ connecting = false } = {}) => {
-      const state = stateStore.read();
-      const operation = browserHost?.currentOperation();
-      return !IS_DEV_PROFILE && !quitting && !shutdownInProgress
-        && state.autoConnectExistingMcp === true && state.coreSetupComplete === true
-        && state.browserInteractionMode === "automatic"
-        && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()
-        && mainWindow.isFocused() && mainWindow.webContents.isFocused()
-        && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
-        && (!operation || (connecting && operation === "MCP connector creation"))
-        && runtimeHost && !runtimeHost.currentOperation();
-    },
-    prepare: async () => {
-      // Timers must not synchronously read configuration/credential files on the main thread.
-      const config = await runtimeSupervisor.readConfigAsync();
-      accountMcpConfig = config?.browserHost === "launcher" && config.mode === "full"
-        && config.browserInteractionMode !== "manual"
-        && await runtimeHost.mcpCredentialsConfiguredAsync(config, "automatic") ? config : null;
-    },
-    target: accountId => {
-      if (!accountMcpConfig) return null;
-      const tunnel = runtimeSupervisor?.extraTunnels?.status().find(entry => entry.accountId === accountId);
-      const primary = accountMcpConfig.automaticTunnel || (!accountMcpConfig.manualTunnel ? accountMcpConfig.tunnel : null);
-      const tunnelId = tunnel?.tunnelId ?? primary?.tunnelId;
-      return tunnelId ? JSON.stringify([accountMcpConfig.appName, tunnelId,
-        browserAccounts.status().accounts.find(entry => entry.id === accountId)?.proxyProfileId]) : null;
-    },
-    readCookies: partition => session.fromPartition(partition).cookies.get({ url: "https://chatgpt.com/" }),
-    verifySignIn: async partition => {
-      await routeIdleAccountPartition(partition, logger);
-      return readChatGptAuthSession((url, options) => fetchThroughLauncherNetwork(url, options, { partition, useSessionCookies: true }),
-        "https://chatgpt.com", 10_000);
-    },
-    connect: (accountId, current) => connectAccountMcp(accountId, () => {
-      if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
-    }),
-  });
-  const syncAccountMcp = () => void automaticAccountMcp.sync().catch(error => logger.warn("browser_accounts.automatic_mcp_pending", {
-    message: error instanceof Error ? error.message : String(error),
-  }));
-  mainWindow.on("focus", syncAccountMcp);
-  const accountMcpTimer = setInterval(syncAccountMcp, 60_000);
-  accountMcpTimer.unref?.();
-  mainWindow.once("closed", () => clearInterval(accountMcpTimer));
-  syncAccountMcp();
 
   handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
   handle("launcher:cancel-turns", () => {
@@ -4174,12 +4013,11 @@ function registerIpc({ logger, stateStore }) {
       || ((key === "confirmAgentToolRequests" || key === "computerReviewSteps") && value === false)) {
       assertFocusedMainWindow(_event, true);
     }
-    const state = stateStore.update({ [key]: value === true });
-    if (key === "autoConnectExistingMcp") {
-      automaticMcpAttempt = null;
-      send("launcher:state-changed", state);
-      if (state.autoConnectExistingMcp) startCatalogVerificationMonitor({ logger, stateStore });
+    if (key === "autoConnectExistingMcp" && value === true) {
+      throw new Error("Automatic MCP account checks are disabled. Use Connect or Verify explicitly.");
     }
+    const state = stateStore.update({ [key]: value === true });
+    if (key === "autoConnectExistingMcp") send("launcher:state-changed", state);
     return state;
   });
   // What chat agents hide in the user's messages (redact_message): one kind per line; an empty
@@ -4286,20 +4124,16 @@ function registerIpc({ logger, stateStore }) {
 function installAppUpdate() {
   if (!updateController) throw new Error("Launcher updates are unavailable");
   updateInstallInFlight ??= (async () => {
-    const release = automaticAccountMcp?.hold();
     try {
       return await updateController.beginInstall({ beforeAppInstall: prepareBrowserForUpdate });
     } finally {
-      release?.();
       updateInstallInFlight = null;
     }
   })();
   return updateInstallInFlight;
 }
 
-// Before a whole-app install: the background connector setup's account in progress gets up to a
-// minute to finish (the Update handler's hold keeps it from starting another), then a running
-// ChatGPT turn is offered to stop. Whatever still holds the browser refuses the install, as before.
+// An update must wait for a manual browser operation and get consent before stopping a chat turn.
 async function prepareBrowserForUpdate() {
   if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
   await stopBrowserTurnsForUpdate();
@@ -5700,9 +5534,6 @@ async function start() {
     // Settings → Updates: a tunnel left running by another build is restarted, not adopted.
     reuseTunnelOnlyWhenMatching: () => resolveUpdateSettings(stateStore.read()).updateReuseMatchingOnly,
     onExtraTunnelsChange: tunnels => send("launcher:mcp-tunnels-changed", tunnels),
-    onTunnelReady: ({ adopted }) => restartAutomaticMcpVerification({
-      logger, stateStore, reason: adopted ? "tunnel-adopted" : "tunnel-started",
-    }),
     watchConfigFile: true,
   });
   runtimeHost = new RuntimeHost({

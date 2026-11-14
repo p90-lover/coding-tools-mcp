@@ -24,8 +24,7 @@ const ALLOWED = {
   // never on Electron main, which uses only its recordResult, sweep and writeJsonDurable.
   "ao-db-maintenance.cjs": 3, "ao-dependency-links.cjs": 7, "app-handler-paths.cjs": 1, "app-plugins.cjs": 10, "app-update-worker.cjs": 51,
   "app-update.cjs": 19, "atomic-file.cjs": 11, "autostart.cjs": 2, "backend-bundle.cjs": 18, "browser-accounts.cjs": 1,
-  // createBrowserAccountMcpSync (#1089) is a factory named for the account MCP sync, not a synchronous call:
-  // its one match here and its one in main.cjs (counted there) do no disk or process work.
+  // createBrowserAccountMcpSync is a factory, not a synchronous disk or process call.
   "browser-account-mcp.cjs": 1,
   // The prior port record is captured before the first await; ready apps are rejected before IO.
   "browser-debugging.cjs": 1,
@@ -43,7 +42,7 @@ const ALLOWED = {
   "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1,
   // +1: the off-system-drive temporary folder is made once at startup, before any window or child
   // exists (system-drive.cjs): Chromium's helpers read TEMP as they start.
-  "main.cjs": 25,
+  "main.cjs": 24,
   "managed-components.cjs": 46, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9,

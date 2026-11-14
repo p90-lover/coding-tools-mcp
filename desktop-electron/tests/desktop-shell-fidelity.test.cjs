@@ -191,7 +191,7 @@ test("MCP setup refreshes root metadata, a reopened wizard and Settings without 
   ui.remountWizard(); wizard = ui.wizard();
   ui.nodes(wizard).find(node => node.type === "button" && node.props.children === "previous").props.onClick(); await new Promise(setImmediate);
   assert.ok(ui.nodes(ui.wizard()).some(node => node.props.className === "saved-credentials"));
-  assert.equal(ui.autoConnect().props.disabled, false);
+  assert.equal(ui.autoConnect(), undefined, "automatic MCP checks are not offered");
   assert.match(read("src/App.tsx"), /function InstantMcpToolsSurface[\s\S]*?<WorkspacePanel/);
   assert.match(read("src/App.tsx"), /surface === "instant-mcp"/);
 });
@@ -217,7 +217,7 @@ test("successful mode commits refresh authoritative metadata while missing crede
     assert.equal(ui.reads(), outcome === "committed" ? 1 : 0);
     assert.equal(ui.current().snapshot.mcpCredentialsConfigured, outcome === "committed");
     assert.equal(ui.current().snapshot.state.browserInteractionMode, outcome === "committed" ? "automatic" : "manual");
-    if (outcome === "committed") assert.equal(ui.autoConnect().props.disabled, false);
+    if (outcome === "committed") assert.equal(ui.autoConnect(), undefined, "automatic MCP checks are not offered");
     if (outcome === "credentials-required") assert.deepEqual(ui.configuredModes, ["automatic"]);
     if (outcome === "failed") assert.equal(ui.errors.at(-1), "mode change failed");
   });
@@ -230,7 +230,7 @@ test("failed setup and failed metadata reads preserve backend-derived flags", as
     else ui.api.snapshot = async () => { throw new Error("snapshot failed"); };
     ui.nodes(ui.wizard()).find(node => node.type === "PrimaryButton").props.onClick(); await new Promise(setImmediate);
     assert.equal(ui.current().snapshot.mcpCredentialsConfigured, false); assert.equal(ui.current().snapshot.connectorName, "old-connector");
-    assert.equal(ui.errors.at(-1), failure + " failed"); assert.equal(ui.autoConnect().props.disabled, true);
+    assert.equal(ui.errors.at(-1), failure + " failed"); assert.equal(ui.autoConnect(), undefined, "automatic MCP checks are not offered");
   });
 });
 
@@ -238,7 +238,7 @@ test("state-only updates and preferences retain metadata without fetching or gue
   const ui = mcpUi();
   ui.current().updateState({ ...ui.current().snapshot.state, mcpRuntimeInstalled: true, mcpSetupComplete: true });
   assert.equal(ui.current().snapshot.mcpCredentialsConfigured, false); assert.equal(ui.reads(), 0);
-  assert.equal(ui.autoConnect().props.disabled, true);
+  assert.equal(ui.autoConnect(), undefined, "automatic MCP checks are not offered");
   ui.nodes(ui.settings()).find(node => node.type === "SettingRow" && node.props.label === "keepRunningOnClose").props.children.props.onChange(true);
   await new Promise(setImmediate);
   assert.equal(ui.current().snapshot.state.keepRunningOnClose, true); assert.equal(ui.current().snapshot.connectorName, "old-connector"); assert.equal(ui.reads(), 0);

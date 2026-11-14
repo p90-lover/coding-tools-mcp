@@ -176,17 +176,17 @@ test("persisted sidebar corruption is repaired without changing the rest of laun
   }
 });
 
-test("existing MCP auto-connect is opt-in and persists only booleans", async () => {
+test("legacy automatic MCP settings always reload disabled without changing other preferences", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-auto-mcp-state-"));
   const file = path.join(root, "state.json");
   try {
-    const store = createStateStore(file);
-    assert.equal(store.read().autoConnectExistingMcp, false);
-    store.update({ autoConnectExistingMcp: true });
-    await store.saved();
-    assert.equal(createStateStore(file).read().autoConnectExistingMcp, true);
-    fs.writeFileSync(file, JSON.stringify({ version: 1, autoConnectExistingMcp: "yes" }));
-    assert.equal(createStateStore(file).read().autoConnectExistingMcp, false);
+    for (const value of [true, false, "yes", null, undefined]) {
+      fs.writeFileSync(file, JSON.stringify({ version: 1, autoConnectExistingMcp: value, language: "ja", keepRunningOnClose: false }));
+      const state = createStateStore(file).read();
+      assert.equal(state.autoConnectExistingMcp, false);
+      assert.equal(state.language, "ja");
+      assert.equal(state.keepRunningOnClose, false);
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -921,32 +921,12 @@ test("a completed operation clears only the error its own earlier failure raised
   assert.match(appSource, /lastOperationRef\.current = next\.operation \?\? null/);
 });
 
-test("settings expose an opt-in existing MCP auto-connect without provisioning credentials", () => {
+test("settings no longer expose automatic MCP account checks while retaining legacy API types", () => {
   assert.match(typesSource, /autoConnectExistingMcp:\s*boolean/);
-  assert.match(
-    typesSource,
-    /key:\s*"keepRunningOnClose"\s*\|\s*"showBrowserDuringTurns"\s*\|\s*"autoConnectExistingMcp"/,
-  );
-  assert.match(
-    appSource,
-    /body=\{copy\.autoConnectExistingMcpBody\}[\s\S]*?label=\{copy\.autoConnectExistingMcp\}[\s\S]*?checked=\{snapshot\.state\.autoConnectExistingMcp\}/,
-  );
-  assert.match(
-    appSource,
-    /disabled=\{snapshot\.state\.browserInteractionMode !== "automatic"[\s\S]*?snapshot\.state\.mcpRuntimeInstalled !== true[\s\S]*?!snapshot\.mcpCredentialsConfigured\}/,
-  );
-  assert.match(
-    appSource,
-    /api!\.setPreference\("autoConnectExistingMcp", checked\)/,
-  );
-  assert.match(
-    i18nSource,
-    /autoConnectExistingMcp:\s*"Auto-connect existing MCP harness"/,
-  );
-  assert.match(
-    i18nSource,
-    /autoConnectExistingMcpBody:\s*"After Codex reaches the ready bridge, verify and connect the saved MCP harness\. This never creates a connector, tunnel, or key\."/,
-  );
+  assert.equal(appSource.includes("copy.autoConnectExistingMcp"), false);
+  assert.equal(appSource.includes('setPreference("autoConnectExistingMcp"'), false);
+  assert.match(appSource, /api!\.verifyMcp\(\)/);
+  assert.match(appSource, /api!\.createMcpConnector\(\)/);
 });
 
 test("the sidebar's attention dot pulses a few times, not forever", () => {

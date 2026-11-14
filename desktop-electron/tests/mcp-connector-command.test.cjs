@@ -353,7 +353,8 @@ test("the real main action selects the captured account's tunnel and waits for r
     }
     const usesPrimary = scenario.extra === false;
     assert.equal(stateUpdates.length, usesPrimary ? 1 : 0, "extra tunnel creation cannot mark the main connector state");
-    assert.equal(monitors, usesPrimary ? 1 : 0, "extra tunnel creation cannot start main connector verification");
+    assert.equal(monitors, 0, "manual creation never starts background verification");
+    assert.ok(stateUpdates.every(patch => patch.autoConnectExistingMcp !== true), "manual creation cannot enable automatic checks");
     assert.deepEqual(reconnected, scenario.state === "ready" ? [] : [tunnel.id]);
   });
 });
@@ -400,7 +401,7 @@ test("the explicit tunnel action forwards scoped proof and retains current host 
 test("account setup keeps its captured account and tunnel across awaited workspace setup", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf('  const connectAccountMcp =');
-  const end = source.indexOf('\n  let accountMcpConfig =', start);
+  const end = source.indexOf('\n  handle("launcher:doctor",', start);
   for (const scenario of [
     { name: "an unconfigured primary cannot be borrowed", missing: true },
     { name: "a global switch during readiness aborts", readySwitch: true },
@@ -474,7 +475,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
 test("account setup verifies the configured main tunnel without an extra assignment", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf('  const connectAccountMcp =');
-  const end = source.indexOf('\n  let accountMcpConfig =', start);
+  const end = source.indexOf('\n  handle("launcher:doctor",', start);
   assert(start >= 0 && end > start);
   const { currentConnectorSettings, connectorCredentials } = require("../electron/mcp-connector-setup.cjs");
   for (const scenario of [
