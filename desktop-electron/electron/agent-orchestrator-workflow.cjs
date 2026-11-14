@@ -449,6 +449,7 @@ function createChatPreferences(file) {
   const flushed = async () => { while (saving) await saving; };
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
+      meteredReviews: saved.meteredReviews === true,
       autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
       questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
     /** Takes effect at once; resolves when the change is on disk, so a restart right after keeps it. */
@@ -4460,8 +4461,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
     }
   }
+  const quotaReviewBlocked = () => chatPreferences.get().meteredReviews ? null : {
+    action: "ask", unresolved: true, quotaBlocked: true,
+    reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Enable Allow quota-based reviews in Settings > Chat, or answer this request yourself. Native Codex Auto-review is separate.",
+  };
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
+    if (quotaReviewBlocked()) return quotaReviewBlocked();
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -4587,6 +4593,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let failure = null;
     for (const model of candidates) {
+      if (quotaReviewBlocked()) return quotaReviewBlocked();
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
@@ -4607,6 +4614,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
         check();
+        if (quotaReviewBlocked()) return quotaReviewBlocked();
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -4633,6 +4641,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reviewerFailed(model, error);
       }
     }
+    if (quotaReviewBlocked()) return quotaReviewBlocked();
     throw failure;
   }
 
@@ -4684,7 +4693,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT, check, signal, verifyCurrent });
         await verifyCurrent();
         check();
-        return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
+        return judges && verdict.action === "ask" && !verdict.quotaBlocked ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
       }, () => owned && !sessionStops.has(thread) && !backgroundRuns.get(sessionOwners.get(thread))?.stopped);
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: toolName, message: publicText(error?.message || error, 200) });
@@ -4935,7 +4944,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
     // doubt), so a request it could read whole no longer waits for the person for want of a decision.
     check();
-    if (advice.action === "ask" && advice.reviewed) {
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked) {
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal, verifyCurrent }).catch(() => null);
       check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
@@ -5358,7 +5367,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * waiting me to judge, add a setting that allow the model to judge it … until end and it can
    * safety kill the goal". Off by default: on 2026-10-20 they wanted unjudged requests to wait.
    */
-  async function chatModelJudges({ enabled } = {}) {
+  async function chatModelJudges({ enabled, meteredReviews } = {}) {
+    if (meteredReviews !== undefined) {
+      if (typeof meteredReviews !== "boolean") throw new Error("Choose on or off for quota-based reviews");
+      await chatPreferences.set({ meteredReviews });
+      for (const [id, advice] of approverAdvice) {
+        if (advice.quotaBlocked && !advice.unsent) {
+          approverAdvice.delete(id);
+          reviewStarted.set(id, now());
+        }
+      }
+    }
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
       // In effect at once; the save to disk is awaited after.
@@ -5377,7 +5396,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       await saving;
     }
-    return { ok: true, modelJudges: chatPreferences.get().modelJudges };
+    return { ok: true, modelJudges: chatPreferences.get().modelJudges, meteredReviews: chatPreferences.get().meteredReviews };
   }
   /**
    * chat_question_timeout: reads "Agent questions", or sets it with `seconds`: how long a question

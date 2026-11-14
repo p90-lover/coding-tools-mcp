@@ -10,7 +10,11 @@ const { createAgentOrchestratorWorkflow: createWorkflow, resolveAoNativeConnecti
 // A fixture never looks for the machine's own Codex CLI: without this, tests passed only where
 // `codex` was installed (a developer's PC) and failed on a clean CI runner. A test that is about
 // finding Codex passes its own findCodexExecutable.
-const createAgentOrchestratorWorkflow = (options = {}) => createWorkflow({ findCodexExecutable: () => "C:/codex.exe", ...options });
+const createAgentOrchestratorWorkflow = (options = {}) => {
+  const workflow = createWorkflow({ findCodexExecutable: () => "C:/codex.exe", ...options });
+  void workflow.call("chat_model_judges", { meteredReviews: true });
+  return workflow;
+};
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 
@@ -7181,8 +7185,8 @@ test("with \"Let the model judge\" on, a request too long to review whole is jud
     },
     confirm: async () => true,
   });
-  assert.deepEqual(await workflow.call("chat_model_judges", {}), { ok: true, modelJudges: false }, "off unless the person turns it on");
-  assert.deepEqual(await workflow.call("chat_model_judges", { enabled: true }), { ok: true, modelJudges: true });
+  assert.deepEqual(await workflow.call("chat_model_judges", {}), { ok: true, modelJudges: false, meteredReviews: true }, "off unless the person turns it on");
+  assert.deepEqual(await workflow.call("chat_model_judges", { enabled: true }), { ok: true, modelJudges: true, meteredReviews: true });
   await assert.rejects(workflow.call("chat_model_judges", { enabled: "yes" }), /on or off/);
   try {
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
