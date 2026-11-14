@@ -5824,6 +5824,57 @@ for (const change of ["cancel", "stop", "new turn", "delete", "dispose"]) {
   });
 }
 
+// monitor (chat-command-monitors.cjs): Claude Code's Monitor. Events reach the chat as follow-ups,
+// batched for a few seconds, held while the chat works, and never after the workflow is closed.
+const monitorInput = { workspaceId: "ws-1", session: "sess-1", monitorId: "monitor-1", description: "deploy steps" };
+
+test("a monitor's events reach the chat as one batched follow-up, on the same model route", async (t) => {
+  const { workflow, world, route, advance } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const ticket = await workflow.registerCommandMonitor(monitorInput);
+  const before = world.updates.length;
+  ticket.emit(["build ok"]);
+  ticket.emit(["publish FAILED: 503"]);
+  await advance(1000);
+  assert.equal(world.updates.length, before, "events wait out the batch window");
+  await advance(3000);
+  assert.equal(world.updates.length, before + 1, "both events go out in one follow-up");
+  assert.deepEqual(world.updates.at(-1).single_route, route);
+  assert.match(world.edits.at(-1).description, /Monitor events\. This is a tool notification[\s\S]*Monitor "deploy steps" \(monitor-1\):\n {2}build ok\n {2}publish FAILED: 503/);
+});
+
+test("a monitor holds its events while the chat works and sends them, with its end, once the turn settles", async (t) => {
+  const { workflow, world, advance } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  world.runs[0].nodes[0].state = "running";
+  const ticket = await workflow.registerCommandMonitor(monitorInput);
+  const before = world.updates.length;
+  ticket.emit(["step 1"]);
+  await advance(4000);
+  ticket.emit(["step 2"]);
+  ticket.end({ kind: "exited", status: "exited", exit_code: 0 });
+  await advance(20_000);
+  assert.equal(world.updates.length, before, "nothing is sent into a working chat");
+  world.runs[0].nodes[0].state = "finished";
+  await advance(15_000);
+  assert.equal(world.updates.length, before + 1);
+  assert.match(world.edits.at(-1).description, /step 1\n {2}step 2\n {2}The monitor ended: \{"kind":"exited","status":"exited","exit_code":0\}/);
+  ticket.emit(["late line"]);
+  await advance(20_000);
+  assert.equal(world.updates.length, before + 1, "an ended monitor sends nothing more");
+});
+
+test("a monitor sends nothing after the workflow is closed", async (t) => {
+  const { workflow, world, advance } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const ticket = await workflow.registerCommandMonitor(monitorInput);
+  const before = world.updates.length;
+  workflow.dispose();
+  ticket.emit(["after close"]);
+  await advance(20_000);
+  assert.equal(world.updates.length, before);
+});
+
 test("cancel during a pending completion read wins before a follow-up is written", async (t) => {
   const { workflow, world, advance, gate } = wakeChat({ hold: true });
   t.after(() => workflow.dispose());

@@ -7,6 +7,7 @@ const path = require("node:path");
 const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore } = require("./chat-goals.cjs");
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
+const { createChatDraftStore } = require("./chat-drafts.cjs");
 const { restartResume } = require("./chat-resume.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 // CPA requests (model lists, goal checks, reviews) go from a worker thread: a connect or write on
@@ -460,7 +461,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -531,6 +532,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const schedules = createScheduleStore({ file: schedulesFile, now });
   // Messages waiting for their chat's turn, and steers waiting to be read (chat-queue.cjs).
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
+  // Each composer's unsent draft (chat-drafts.cjs): a crash or restart no longer loses a prompt being written.
+  const chatDrafts = createChatDraftStore({ file: chatDraftsFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile, logger });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
@@ -4045,6 +4048,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (group === "chats") return "Reads the app's chats, read-only; other projects' chats only after you allow them";
     // The chat's own follow-up timer: it sends this chat a note later, and runs nothing.
     if (short === "schedule_wakeup") return "A reminder the chat sends itself later; it runs nothing";
+    if (short === "push_notification") return "A desktop notification to you from this chat; it runs nothing and sends nothing elsewhere";
+    if (short === "sleep") return "Waits in this turn for at most 100 seconds; it runs nothing";
     if (short === "rename_chat") return "Names this chat after the task it works on; it runs nothing";
     if (short === "redact_message") return "Hides secrets you pasted in this chat's messages; it runs nothing and changes no files";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
@@ -8028,6 +8033,116 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     };
   }
 
+  // ---- Monitors (monitor, chat-command-monitors.cjs) ----
+  // Claude Code's Monitor for the app's chats: each stdout line of the monitored command is an event,
+  // and events reach the chat as follow-ups once its turn has ended. Unlike a command watch, a monitor
+  // outlives the turn that started it and sends any number of follow-ups until its command ends.
+
+  const monitorTickets = new Map();
+  const monitorTimers = new Map();
+  const monitorSending = new Set();
+  const MONITOR_BATCH_MS = 3000;
+  const MONITOR_BUSY_RETRY_MS = 15_000;
+  const MONITOR_HELD_EVENTS = 500;
+  function settleMonitor(ticket) { if (monitorTickets.get(ticket.id) === ticket) monitorTickets.delete(ticket.id); }
+  const monitorDue = ticket => ticket.events.length > 0 || Boolean(ticket.outcome);
+  function armMonitors(workspaceId, taskId, delay = 1) {
+    const key = JSON.stringify([workspaceId, taskId]);
+    if (wakeupsDisposed || monitorTimers.has(key) && delay > 1) return;
+    if (monitorTimers.has(key)) clearTimer(monitorTimers.get(key));
+    const timer = setTimer(() => {
+      monitorTimers.delete(key);
+      void fireMonitors(workspaceId, taskId);
+    }, delay);
+    timer?.unref?.();
+    monitorTimers.set(key, timer);
+  }
+  /** One follow-up with every due monitor's events (and endings) for a chat whose turn has ended. */
+  async function fireMonitors(workspaceId, taskId) {
+    const key = JSON.stringify([workspaceId, taskId]);
+    if (wakeupsDisposed || monitorSending.has(key)) return;
+    const mine = () => [...monitorTickets.values()].filter(ticket => ticket.workspaceId === workspaceId && ticket.taskId === taskId);
+    for (const ticket of mine()) if (!ticket.isCurrent()) settleMonitor(ticket);
+    const due = mine().filter(monitorDue);
+    if (!due.length) return;
+    monitorSending.add(key);
+    let retry = 0;
+    try {
+      runReads.delete(JSON.stringify([workspaceId, ""]));
+      const saved = await runs({ workspaceId });
+      const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
+      if (!latest || latest.cancelled || latest.paused || backgroundRuns.get(runKey(workspaceId, latest.id))?.stopped
+        || due.every(ticket => sessionStops.has(ticket.session)) || taskLifecycle(saved, taskId).visibility !== "active") {
+        for (const ticket of due) { ticket.cancelled = true; settleMonitor(ticket); }
+        return;
+      }
+      if (chatWorking(workspaceId, taskId, saved.runs)) { retry = MONITOR_BUSY_RETRY_MS; return; }
+      // A snapshot: what is sent is removed only once the follow-up is confirmed, so a failed send loses nothing.
+      const taken = due.map(ticket => ({ ticket, count: ticket.events.length, dropped: ticket.dropped, ended: Boolean(ticket.outcome) }));
+      const sections = taken.map(({ ticket, count, dropped, ended }) => {
+        const lines = [`Monitor "${ticket.description}" (${ticket.monitorId}):`, ...ticket.events.slice(0, count).map(line => `  ${line}`)];
+        if (dropped) lines.push(`  (${dropped} earlier event${dropped === 1 ? " was" : "s were"} dropped while this chat was busy)`);
+        if (ended) lines.push(`  The monitor ended: ${JSON.stringify(ticket.outcome)}`);
+        return lines.join("\n");
+      });
+      const message = ["Monitor events. This is a tool notification, not a new user request or approval.", ...sections,
+        "Act on these events only as far as your earlier task needs. A monitor that ended sends nothing more: start a new monitor "
+          + "if you still need to watch. Silence from a running monitor is not success; verify results before reporting them."].join("\n\n");
+      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: latest.id }, () => {
+        if (wakeupsDisposed) throw new Error("Monitors were closed");
+      });
+      if (result?.ok === false || !result?.runId) throw new Error("The monitor follow-up was not sent");
+      for (const { ticket, count, dropped, ended } of taken) {
+        ticket.events.splice(0, count);
+        ticket.dropped -= dropped;
+        ticket.failures = 0;
+        if (ended) settleMonitor(ticket);
+      }
+    } catch {
+      // Not sent: the next try carries whatever is still held, up to three failures per monitor.
+      for (const ticket of due) if (++ticket.failures >= 3) settleMonitor(ticket);
+      retry = 60_000;
+    } finally {
+      monitorSending.delete(key);
+      if (!wakeupsDisposed && mine().some(monitorDue)) armMonitors(workspaceId, taskId, retry || MONITOR_BATCH_MS);
+    }
+  }
+  async function registerCommandMonitor({ workspaceId, session, monitorId, description, isCurrent = () => true } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    const label = publicText(clean(description, 200, false), 200);
+    if (!label.trim() || wakeupsDisposed || !isCurrent()) throw new Error("This monitor is unavailable");
+    runReads.delete(JSON.stringify([id, ""]));
+    const { run } = await sessionChat(id, thread, "start a monitor");
+    if (run.cancelled || run.paused || sessionStops.has(thread) || !isCurrent() || wakeupsDisposed) throw new Error("Stop superseded this monitor");
+    if (monitorTickets.size >= 128) throw new Error("Too many running monitors");
+    const ticket = { id: randomUUID(), workspaceId: id, taskId: run.project_id, session: thread, monitorId: clean(monitorId, 128),
+      description: label, events: [], dropped: 0, isCurrent, failures: 0 };
+    monitorTickets.set(ticket.id, ticket);
+    const gone = () => monitorTickets.get(ticket.id) !== ticket || wakeupsDisposed;
+    return {
+      emit(lines) {
+        if (gone() || !Array.isArray(lines)) return;
+        ticket.events.push(...lines.map(line => publicText(String(line), 600)));
+        if (ticket.events.length > MONITOR_HELD_EVENTS) ticket.dropped += ticket.events.splice(0, ticket.events.length - MONITOR_HELD_EVENTS).length;
+        armMonitors(id, run.project_id, MONITOR_BATCH_MS);
+      },
+      end(outcome) {
+        if (gone()) return;
+        ticket.outcome = outcome && typeof outcome === "object" ? outcome : { kind: "ended" };
+        armMonitors(id, run.project_id, MONITOR_BATCH_MS);
+      },
+      cancel() { settleMonitor(ticket); },
+    };
+  }
+
+  /** For sleep: once this session's chat is found, whether the person has queued a message for it. */
+  async function chatInputCheck({ workspaceId, session } = {}) {
+    const id = clean(workspaceId, 128), thread = clean(session, 256);
+    const { run } = await sessionChat(id, thread, "sleep");
+    const taskId = run.project_id;
+    return () => !wakeupsDisposed && chatQueue.list(id, taskId).length > 0;
+  }
+
   // ---- Wake-ups (schedule_wakeup, chat-wakeups.cjs) ----
 
   // A wake-up that could not fire (AO not ready yet after a restart) is tried again a while later.
@@ -8115,6 +8230,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function wakeupAfterRun(workspaceId, runId) {
     for (const ticket of commandWatchTickets.values()) {
       if (ticket.workspaceId === workspaceId && ticket.runId === runId && ticket.outcome) armCommandWatches(workspaceId, ticket.taskId);
+    }
+    // Monitor events held while the turn ran go out now (a monitor is not tied to one run).
+    for (const ticket of monitorTickets.values()) {
+      if (ticket.workspaceId === workspaceId && monitorDue(ticket)) armMonitors(workspaceId, ticket.taskId);
     }
     const due = Object.values(wakeups.forWorkspace(workspaceId)).filter(wakeup => wakeup.due || wakeup.dueAt <= now());
     for (const wakeup of due) {
@@ -8388,6 +8507,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const saved = await runs({ workspaceId });
     const run = saved.runs.find(entry => entry.id === runId);
     if (run?.project_id && tasks.includes(run.project_id)) await drainQueue(workspaceId, run.project_id, { known: saved });
+  }
+  /**
+   * chat_draft: a composer's unsent draft (chat-drafts.cjs). `get` reads it back when the composer
+   * opens; `set` saves it a moment after each change, and an empty one removes it.
+   */
+  async function chatDraftCall({ workspaceId, key, action, draft } = {}) {
+    const id = clean(workspaceId, 128), name = typeof key === "string" ? key.slice(0, 512) : "";
+    if (!id || !name) throw new Error("A draft needs its project and chat");
+    if (action === "get") return { ok: true, draft: chatDrafts.get(id, name) };
+    if (action === "set") return { ok: true, kept: chatDrafts.set(id, name, draft) };
+    throw new Error("Unknown draft action");
   }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
   async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {
@@ -9602,6 +9732,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const timer of commandWatchTimers.values()) clearTimer(timer);
     commandWatchTimers.clear();
     for (const ticket of commandWatchTickets.values()) settleCommandWatch(ticket, "dropped");
+    for (const timer of monitorTimers.values()) clearTimer(timer);
+    monitorTimers.clear();
+    monitorTickets.clear();
     for (const timer of wakeTimers.values()) clearTimer(timer);
     wakeTimers.clear();
     for (const timer of loopTimers.values()) clearTimer(timer);
@@ -9679,6 +9812,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           queues: chatQueue.forWorkspace(clean(args.workspaceId, 128)) };
       }
       case "chat_queue": return chatQueueCall(args);
+      case "chat_draft": return chatDraftCall(args);
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
@@ -9807,9 +9941,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const schedulesSaved = () => schedules.saved();
   /** Resolves once every wake-up and /loop change so far is on disk (saved off the main thread too). */
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
-  /** Resolves once every deleted-message and archive change so far is on disk (saved off the main thread too). */
-  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
+  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

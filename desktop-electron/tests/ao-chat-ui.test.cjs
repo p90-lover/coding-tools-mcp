@@ -1414,3 +1414,32 @@ test("two subagent avatars never share a gradient id, so one on a hidden chat pa
   const look = (svg) => svg.replace(/id="[^"]+"|url\(#[^)]+\)|width="\d+" height="\d+"/g, "");
   assert.equal(new Set(svgs.map(look)).size, 1, "same tints and petals at every size");
 });
+test("an unsent draft is saved by the app: read back first, saved after each change, kept while a message is going out", () => {
+  // The user, 2026-11-14: "any of typed message/image/files/etc that waiting to send out should be saved
+  // in chat log just like claude code, codex etc to prevent any crashed etc that will loss the prompt".
+  const draft = ui.savedDraftOf("Refactor the drain", [
+    { name: "shot.png", path: "G:\a\shot.png", image: true, preview: "blob:app/1", markup: "1. here" },
+    { name: "notes.md", text: "# notes", preview: "blob:app/2" },
+    { name: "still reading" },
+  ], [{ id: 4, quote: "drain", note: "why", anchor: { answer: 1, start: 0, end: 5 } }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(draft)), {
+    text: "Refactor the drain",
+    attachments: [{ name: "shot.png", path: "G:\a\shot.png", image: true, markup: "1. here" }, { name: "notes.md", text: "# notes" }],
+    annotations: [{ quote: "drain", note: "why", anchor: { answer: 1, start: 0, end: 5 } }],
+  }, "a file by its path or text, no thumbnail URL, no window-local id; a file still being read is not kept");
+  assert.equal(ui.savedDraftOf("  ", [], []), null, "an empty composer saves nothing (its copy is removed)");
+
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  assert.match(source, /if \(!draftsNow\.current \|\| !LOADED_DRAFTS\.has\(draftKey\)\) return;/, "nothing is saved before the saved copy was read back");
+  assert.match(source, /if \(value === null && sendsInFlight\.current > 0\) return;/, "a message going out keeps its copy");
+  assert.match(source, /current\.timer = window\.setTimeout\(flushDraft, 400\);/, "saved a moment after each change");
+  assert.match(source, /window\.addEventListener\("pagehide", flushDraft\);/, "and at once when the window goes");
+  assert.match(source, /if \(latest\.draft\.trim\(\) \|\| latest\.attachments\.length \|\| latest\.annotations\.length\) \{\s*writeDraft\(key/, "something typed since wins over the saved copy");
+  const deliver = source.slice(source.indexOf("const deliver = async"), source.indexOf("const recoverMessage ="));
+  assert.equal((deliver.match(/handedOff = true; return true;/g) || []).length, 4, "every way the app takes the message settles the copy");
+  assert.match(deliver, /\} finally \{\s*setSending\(false\);\s*if \(fromComposer\) settleSavedDraft\(owner, handedOff\);/);
+  assert.match(source, /void enqueue\(selectedTaskId, \{ what: "Message", message: text \}\)\.then\(\(\) => settleSavedDraft\(owner, true\)/, "and so does a queued one");
+  const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.match(surface, /moduleCall\("chat_draft", \{ workspaceId, key, action: "get" \}\)/);
+  assert.match(surface, /queue=\{chatQueue\} drafts=\{chatDrafts\}/);
+});

@@ -47,6 +47,8 @@ const BACKEND_MODULES = Object.freeze([
   "chat-verification.cjs",
   "chat-images.cjs",
   "chat-command-watches.cjs",
+  // chat-agent-tools.cjs requires it for monitor (Claude Code's Monitor).
+  "chat-command-monitors.cjs",
   // chat-agent-tools.cjs requires it for computer_guide.
   "computer-guides.cjs",
   // chat-agent-tools.cjs requires it for the file tools a GPT session gets instead of its own.
@@ -86,6 +88,7 @@ const BACKEND_MODULES = Object.freeze([
   // agent-orchestrator-workflow.cjs keeps each chat's queued messages and read steers, and resumes
   // chats after a restart (#706).
   "chat-queue.cjs",
+  "chat-drafts.cjs",
   "chat-resume.cjs",
   // main.cjs gives chat agents computer control through it: the window picker and the control bar.
   "computer-control.cjs",
