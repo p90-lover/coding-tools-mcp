@@ -1171,12 +1171,16 @@ function createProviderNetworkController({
   function onRelayEvent(profileId, entry, event) {
     if (event?.type === "authenticated") {
       logger.info("proxy.relay_authenticated", { profileId });
+      // The relay signs every request, so Chromium is never asked and the app's own requests cannot
+      // tell: the relay's word is what shows on the Proxy page.
+      noteProxySignInAccepted(profileId);
     } else if (event?.type === "rejected") {
       const now = Date.now();
       if (!entry.rejectedAt || now - entry.rejectedAt >= RELAY_REJECTED_LOG_MS) {
         entry.rejectedAt = now;
         logger.warn("proxy.relay_signin_rejected", { profileId, note: "The proxy refused this profile's saved username and password" });
       }
+      noteProxySignInRefused(profileId, { log: false });
     } else if (event?.type === "stopped" && relays.get(profileId) === entry) {
       relays.delete(profileId);
       const quick = Date.now() - entry.startedAt < RELAY_QUICK_STOP_MS;
@@ -1800,13 +1804,14 @@ function createProviderNetworkController({
   // refused. It is recorded on the proxy as a failed check, so the Proxy page shows "Sign-in refused"
   // without anyone pressing Test: on 2026-11-15 every update check failed this way for hours and the
   // page showed the proxy as healthy. Written once per refusal (a sign-in saved since clears it) and
-  // logged at most once in SIGN_IN_REFUSAL_LOG_MS. True when it recorded a change.
+  // logged at most once in SIGN_IN_REFUSAL_LOG_MS (`log: false` for the relay, which logs its own
+  // line). True when it recorded a change.
   const signInRefusalLogged = new Map();
-  function noteProxySignInRefused(profileId) {
+  function noteProxySignInRefused(profileId, { log = true } = {}) {
     const profile = store.activeProxy(profileId);
     if (!profile) return false;
     const now = Date.now();
-    if (now - (signInRefusalLogged.get(profile.id) ?? -Infinity) >= SIGN_IN_REFUSAL_LOG_MS) {
+    if (log && now - (signInRefusalLogged.get(profile.id) ?? -Infinity) >= SIGN_IN_REFUSAL_LOG_MS) {
       signInRefusalLogged.set(profile.id, now);
       logger.warn("proxy.sign_in_refused", { profileId: profile.id, host: profile.endpoint.host, port: profile.endpoint.port });
     }

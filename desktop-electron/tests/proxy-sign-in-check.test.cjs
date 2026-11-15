@@ -211,6 +211,34 @@ test("a refusal seen on the app's own request shows on the proxy and clears when
   await controller.store.saved();
 });
 
+test("the app's own relay signs every request, so its word on the sign-in is what the proxy shows", async (t) => {
+  const root = scratch(t);
+  const logged = [], published = [];
+  let relayEvent = null;
+  const proxied = { proxy: null, async setProxy(config) { this.proxy = config; }, async closeAllConnections() {} };
+  const controller = providerNetwork.createProviderNetworkController({ app: {}, browserPartition: "fixture",
+    getBrowserHost: () => ({ partition: "fixture" }), logger: { info: (event) => logged.push(event), warn: (event) => logged.push(event) },
+    onChanged: (snapshot) => published.push(snapshot.proxyProfiles.find((item) => item.id === "global").signInRefused),
+    safeStorage: null, session: { defaultSession: proxied, fromPartition: () => proxied }, shell: {}, userData: root,
+    startSignedRelay: async ({ onEvent }) => { relayEvent = onEvent; return { port: 53000, proxyRules: "http://127.0.0.1:53000", close: async () => {} }; } });
+  controller.store.saveProxyProfile({ id: "global", name: "Global", endpoint: { protocol: "http", host: "proxy.example.test", port: 10000 },
+    username: USER, password: PASSWORD });
+  controller.store.setGlobalRouting({ enabled: true, profileId: "global" });
+  await controller.applyGlobalRouting();
+  assert.equal(proxied.proxy.proxyRules, "http://127.0.0.1:53000", "the window goes through the relay");
+  const shown = () => controller.store.snapshot().proxyProfiles.find((item) => item.id === "global");
+
+  relayEvent({ type: "rejected" });
+  relayEvent({ type: "rejected" });
+  assert.deepEqual([shown().signInRefused, shown().lastError], [true, "The proxy refused the saved sign-in (HTTP 407)"]);
+  // The relay's own line is the log's; the refusal is not logged a second time under another name.
+  assert.deepEqual(logged.filter((event) => /sign|rejected/.test(event)), ["proxy.relay_signin_rejected"]);
+  relayEvent({ type: "authenticated" });
+  assert.deepEqual([shown().signInRefused, shown().lastError], [undefined, undefined]);
+  assert.deepEqual(published, [true, undefined]);
+  await controller.store.saved();
+});
+
 test("an update the proxy answers 407 says the proxy's sign-in is the problem", async (testContext) => {
   const https = require("node:https");
   const update = require("../electron/update.cjs");
