@@ -15,7 +15,7 @@ Follow **GitHub delivery** and **Delivery** in `AGENTS.md`. Keep verified task c
 
 ## Required delivery: batch, merge and publish
 
-Read and follow `AGENTS.md`, especially **GitHub delivery** and **Delivery: every change ships as a release**. The user has standing authorization for verified commits, pushes, a coordinated batch PR, merges and a published build. Deliver the task through its shared release rather than opening one PR and installer build per task. Preserve explicit opt-outs, failed gates and permission boundaries; report actual blockers. Docs/instructions/CI-only changes need no redundant installer. Installing, patching or restarting the running app still needs the user's separate request.
+Read and follow `AGENTS.md`, especially **GitHub delivery** and **Delivery: every change ships as a release**. The user has standing authorization for verified commits, pushes, a coordinated batch PR, merges and a published build. Deliver the task through its shared release rather than opening one PR and installer build per task. Preserve explicit opt-outs, failed gates and permission boundaries; report actual blockers. Docs/instructions/CI-only changes need no redundant installer or local restart. For packaged app changes, the user's standing request includes the matching supported local update and necessary controlled restart, followed by verification of the loaded version and changed behavior. Follow `AGENTS.md` for checkpoints, preserving active work, one update owner, explicit opt-outs and real permission boundaries; do not ask for repeated routine permission or bypass a denial.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
