@@ -762,9 +762,11 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
 
 /**
  * The panel page script that puts each account's usage on its Auth Files card (#/auth-files): the
- * requests, tokens and estimated cost since each account's short-hour and weekly limit reset,
- * under the card's size and date line. No confirmed active reset means no total. The numbers come from
- * the app through the CPA usage bridge (cpa-provider-usage-bridge.ts, which answers this frame and
+ * requests, tokens and estimated cost under the card's size and date line. A Codex card counts from
+ * its 5-hour and weekly limit resets; while a reset is unconfirmed or has passed, that line shows the
+ * rolling "Last 5 h" / "Last 7 days" history under its own label instead ("Pending reset" when there
+ * is none), so rolling totals are never shown as since-reset ones. Other cards show rolling history.
+ * The numbers come from the app through the CPA usage bridge (cpa-provider-usage-bridge.ts, which answers this frame and
  * sends no key or account id), matched to a card by its auth file name. They refresh every 2
  * minutes while the page is open and shown, and the last answer is kept (localStorage) so a reload
  * shows it at once. "running" when the page already has it, "unseeded" before the panel session.
@@ -871,9 +873,16 @@ function authFilesUsageScript(marker) {
         const card = nameNode.closest('article') || nameNode.parentElement;
         const file = nameNode.textContent.trim().replace(/[.]json$/i, '');
         const codex = /^codex-/.test(file) || ['session', 'week'].some((range) => byRange[range]?.some((row) => row.file === file && row.provider === 'codex'));
-        const ranges = codex ? RANGES.slice(2) : RANGES.slice(0, 2);
-        const rows = ranges.map(([range]) => byRange[range]?.find((row) => row.file === file));
-        const key = file + '|' + loadedAt + '|' + rows.map(active).join('|');
+        const ranges = (codex ? RANGES.slice(2) : RANGES.slice(0, 2)).map(([range, label], index) => {
+          const row = byRange[range]?.find((row) => row.file === file);
+          if (codex && !active(row)) {
+            const [rollingRange, rollingLabel] = RANGES[index];
+            const rollingRow = byRange[rollingRange]?.find((row) => row.file === file);
+            if (rollingRow) return [rollingRange, rollingLabel, rollingRow];
+          }
+          return [range, label, row];
+        });
+        const key = file + '|' + loadedAt + '|' + ranges.map(([range, , row]) => range + ':' + active(row)).join('|');
         let box = card.querySelector(':scope > [data-coding-tools-usage]');
         if (box?.dataset.codingToolsUsage === key) continue;
         if (!box) {
@@ -883,7 +892,7 @@ function authFilesUsageScript(marker) {
           anchor.after(box);
         }
         box.dataset.codingToolsUsage = key;
-        box.replaceChildren(...ranges.map(([range, label], index) => line(range, label, rows[index])));
+        box.replaceChildren(...ranges.map(([range, label, row]) => line(range, label, row)));
       }
     }
 
