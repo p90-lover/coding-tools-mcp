@@ -4310,6 +4310,59 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     })().finally(() => { benchSaving = null; });
   }
+  // Settings the app's own model calls send that a model may refuse, and can do without. Seen live
+  // 2026-11-15: with the Codex accounts out of quota, CPA served gpt-6-astra from an OpenAI API key,
+  // which answered HTTP 400 "Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens'
+  // instead", then "'temperature' does not support 0 with this model". So "Let the model judge"
+  // could not judge, and every request was denied unjudged. CPA turns max_completion_tokens back
+  // into max_tokens for that provider, so the two are one setting here: a refused limit is left out.
+  const OPTIONAL_MODEL_PARAMS = new Map([["max_tokens", ["max_tokens", "max_completion_tokens"]],
+    ["max_completion_tokens", ["max_tokens", "max_completion_tokens"]], ["temperature", ["temperature"]],
+    ["top_p", ["top_p"]], ["reasoning_effort", ["reasoning_effort"]]]);
+  const refusedModelParams = new Map(); // model -> the optional settings it refused
+  /** The optional setting a model's HTTP 400 answer says it refuses, or null. */
+  function refusedModelParam(text) {
+    let param = "";
+    try {
+      const error = JSON.parse(text)?.error;
+      if (/^unsupported_(?:parameter|value)$/.test(String(error?.code ?? ""))) param = String(error?.param ?? "");
+    } catch { /* not JSON: read the message form below */ }
+    if (!param) param = /Unsupported (?:parameter|value): '([a-z_]+)'/i.exec(text)?.[1] ?? "";
+    return OPTIONAL_MODEL_PARAMS.has(param) ? param : null;
+  }
+  /**
+   * One of the app's own chat-completions calls through CPA. A model that answers HTTP 400 naming
+   * an optional setting it refuses (OPTIONAL_MODEL_PARAMS) is asked again without it, and later
+   * calls to it leave the setting out from the start. Any other answer is returned as it came; a
+   * 400 whose body was read to check is handed back with that body.
+   */
+  async function chatCompletion(baseUrl, key, body, signal) {
+    const model = String(body?.model ?? "");
+    for (let attempt = 0; ; attempt += 1) {
+      const sent = { ...body };
+      for (const param of refusedModelParams.get(model) ?? []) delete sent[param];
+      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(sent),
+        signal,
+      });
+      if (response.status !== 400 || typeof response.text !== "function") return response;
+      const text = await response.text().then((value) => String(value), () => "");
+      const param = refusedModelParam(text);
+      // Only a setting that was sent and can go: anything else, or no progress, is the caller's failure.
+      if (!param || !(param in sent) || attempt >= OPTIONAL_MODEL_PARAMS.size) {
+        return { ok: false, status: response.status, headers: response.headers, text: async () => text,
+          json: async () => JSON.parse(text) };
+      }
+      const refused = new Set(refusedModelParams.get(model) ?? []);
+      for (const name of OPTIONAL_MODEL_PARAMS.get(param)) refused.add(name);
+      refusedModelParams.delete(model);
+      refusedModelParams.set(model, refused);
+      if (refusedModelParams.size > 200) refusedModelParams.delete(refusedModelParams.keys().next().value);
+      logger?.info?.("ao.model_param_refused", { model: publicText(model, 80), param });
+    }
+  }
   /**
    * The error for a model call CPA refused: its status, and whether the answer says the model's
    * quota is used up (an API key's spend limit comes back as 400, not 429) with the reset it names.
@@ -4597,19 +4650,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
-        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        const response = await chatCompletion(baseUrl, key,
           // Codex's policy first, then this request (Codex puts the policy in the session's developer message).
           // Room for a reasoning model to think first: at 400 a fallback reviewer (OpenCode Go's GPT-6
           // Luna spends ~250 tokens thinking on a short request) ran out before its answer and
           // returned nothing, "Unexpected end of JSON input" three times over, and the request went
           // to the person. The answer itself is one short JSON line.
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 2000,
+          { model, temperature: 0, max_tokens: 2000,
             ...(reviewEfforts[model] ? { reasoning_effort: reviewEfforts[model] } : {}),
-            messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
-          signal: signal ?? AbortSignal.timeout(left),
-        });
+            messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }, signal ?? AbortSignal.timeout(left));
         check();
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
@@ -5188,12 +5237,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       "retry: the failure looks transient or fixable by running the step again.",
       "wait: a person must act first (approval, sign-in, missing input). stop: retrying cannot help.",
     ].join("\n");
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
-      signal: AbortSignal.timeout(45_000),
-    });
+    const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(45_000));
     if (!response.ok) throw new Error(`Recovery helper returned HTTP ${response.status}`);
     const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
     const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -6138,13 +6182,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A name is not worth the person's Codex quota (freeModels); with no other model, the message names it.
       const model = freeModels(catalog.models ?? [], catalog.hidden ?? [])[0];
       if (!model) throw new Error("No model outside the Codex quota");
-      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, temperature: 0, max_tokens: 30, messages: [{ role: "user", content:
-          `Name this coding task in at most 6 words. Reply with the name only, no quotes.\n\n${String(message).slice(0, 2000)}` }] }),
-        signal: AbortSignal.timeout(30_000),
-      });
+      const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 30, messages: [{ role: "user", content:
+          `Name this coding task in at most 6 words. Reply with the name only, no quotes.\n\n${String(message).slice(0, 2000)}` }] }, AbortSignal.timeout(30_000));
       if (response.ok) name = String((await response.json())?.choices?.[0]?.message?.content ?? "");
     } catch { /* CPA unavailable: fall back to the message itself. */ }
     name = name.replace(/["'`*#]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || fallbackChatTitle(message);
@@ -7260,12 +7299,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let failure = null;
     for (const model of candidates) {
       try {
-        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
-          signal: AbortSignal.timeout(60_000),
-        });
+        const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(60_000));
         // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
         // the note names it.
         if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
@@ -7400,12 +7434,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const prompt = gradePrompt(message, mission, cards);
     for (const model of freeModels(catalog.models ?? [], catalog.hidden ?? [])) {
       try {
-        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 900, messages: [{ role: "user", content: prompt }] }),
-          signal: AbortSignal.timeout(90_000),
-        });
+        const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 900, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(90_000));
         if (!response.ok) throw await modelCallFailure(response, `the grader returned HTTP ${response.status} for ${publicText(model, 80)}`);
         const grade = parseGrade((await response.json())?.choices?.[0]?.message?.content, cards.length);
         reviewerAnswered(model);
@@ -8845,13 +8874,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const prompt = [COMPACT_PROMPT,
       ...(maxChars ? [`Keep the summary under ${maxChars.toLocaleString("en-US")} characters.`] : []),
       ...(instructions ? [`Additional instructions from the user:\n${instructions}`] : [])].join("\n\n");
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: maxChars ? Math.min(1600, Math.ceil(maxChars / 3)) : 1600, messages: [
-        { role: "system", content: prompt }, { role: "user", content: text }] }),
-      signal: AbortSignal.timeout(120_000),
-    });
+    const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: maxChars ? Math.min(1600, Math.ceil(maxChars / 3)) : 1600, messages: [
+        { role: "system", content: prompt }, { role: "user", content: text }] }, AbortSignal.timeout(120_000));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
   }
