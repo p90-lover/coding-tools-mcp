@@ -124,6 +124,15 @@ async function withRetries(download) {
   }
 }
 
+// A 407 is the proxy's answer, not GitHub's: it refused the sign-in the app has saved for it, or has
+// none. "Update download failed with HTTP 407" named neither the proxy nor what to do; seen
+// 2026-11-15, every check for hours, while the proxy's own Test showed it as healthy.
+function httpFailure(status) {
+  return new Error(status === 407
+    ? "The proxy refused its sign-in (HTTP 407). Check the proxy's sign-in on the Proxy page."
+    : `Update download failed with HTTP ${status}`);
+}
+
 /** A 200 response body as a Node stream, following redirects. */
 function request(url) { return requestOnce(url, 0); }
 
@@ -185,7 +194,7 @@ async function requestOnce(url, redirects) {
       if (response.status !== 200) {
         guard.stop();
         await response.body?.cancel?.().catch?.(() => {});
-        throw new Error(`Update download failed with HTTP ${response.status}`);
+        throw httpFailure(response.status);
       }
       return guardedBody(response.body, guard);
     }
@@ -218,7 +227,7 @@ function nodeRequest(parsed, headers, redirects) {
       }
       if (response.statusCode !== 200) {
         response.resume();
-        reject(new Error(`Update download failed with HTTP ${response.statusCode}`));
+        reject(httpFailure(response.statusCode));
         return;
       }
       resolve(response);
