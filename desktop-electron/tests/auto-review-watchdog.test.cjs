@@ -73,6 +73,7 @@ function world(stage = "response", { alwaysBroken = false, verdict = "allow" } =
     },
     confirm: async () => true,
   });
+  void workflow.call("chat_model_judges", { meteredReviews: true });
   const observe = () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
   const status = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "one" })).status?.pending_approvals?.[0];
   return { workflow, node, mission, models, signals, resolved, deliveries, events, observe, status, timers,

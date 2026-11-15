@@ -53,7 +53,15 @@ function writeJson(response, status, body) {
   response.end(encoded);
 }
 
-function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, getProxyCredentials, useSessionCookies = false }) {
+/**
+ * `onProxySignInRefused(authInfo)`, when given, hears that the proxy asked for a sign-in again after
+ * this request had answered with the saved one: the proxy refused it. Chromium then delivers the
+ * proxy's 407. Without it a refused sign-in looked like any HTTP error of the site's.
+ * `onProxySignInAccepted()` hears the opposite: the proxy asked, got the saved sign-in and let the
+ * request through. A refusal empties Chromium's remembered sign-in, so the next request is asked
+ * again and this is how a proxy that refuses only at times (seen 2026-11-15) is known to be back.
+ */
+function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, getProxyCredentials, onProxySignInRefused = null, onProxySignInAccepted = null, useSessionCookies = false }) {
   return new Promise((resolve, reject) => {
     const sessionRead = useSessionCookies === true;
     if (sessionRead) {
@@ -84,16 +92,30 @@ function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, g
     }
     options.signal?.addEventListener("abort", abort, { once: true });
     let proxyLoginAttempted = false;
+    let proxySignInOffered = false;
     request.on("login", (authInfo, callback) => {
       let credentials = null;
       if (authInfo.isProxy && !proxyLoginAttempted) {
         proxyLoginAttempted = true;
         try { credentials = getProxyCredentials(authInfo); } catch {}
+      } else if (authInfo.isProxy && proxySignInOffered) {
+        // Asked again after the saved sign-in was given: the proxy refused it. Said once.
+        proxySignInOffered = false;
+        try { onProxySignInRefused?.(authInfo); } catch {}
       }
-      if (credentials?.username && credentials?.password) callback(credentials.username, credentials.password);
-      else callback();
+      if (credentials?.username && credentials?.password) {
+        proxySignInOffered = true;
+        callback(credentials.username, credentials.password);
+      } else callback();
     });
+    // An answer from past the proxy to a request that had to give its sign-in: the proxy took it.
+    const signInAccepted = (status) => {
+      if (!proxySignInOffered || status === 407) return;
+      proxySignInOffered = false;
+      try { onProxySignInAccepted?.(); } catch {}
+    };
     request.on("redirect", (status, _method, location, responseHeaders) => {
+      signInAccepted(status);
       try {
         const redirected = new Headers(responseHeaders);
         redirected.set("location", location);
@@ -102,6 +124,7 @@ function fetchNativeWithProxyAuth({ electronNet, browserSession, url, options, g
       request.abort();
     });
     request.on("response", (incoming) => {
+      signInAccepted(incoming.statusCode);
       try {
         const body = [204, 205, 304].includes(incoming.statusCode) ? null : Readable.toWeb(incoming);
         resolve(new Response(body, { status: incoming.statusCode, headers: incoming.headers }));

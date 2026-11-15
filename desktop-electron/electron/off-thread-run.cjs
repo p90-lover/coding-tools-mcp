@@ -570,8 +570,15 @@ function connectErrorText(error) {
 /**
  * The one implementation, run in the worker (as its source) or here as the fallback. Calls `done`
  * once with { ok: true, latencyMs } or { ok: false, code, message }.
+ *
+ * With `proxy` ({ protocol: "http" | "socks5", target, username, password }) the connect is followed
+ * by the proxy's own sign-in: an HTTP CONNECT to `target`, or SOCKS5's username and password. A proxy
+ * that answers the connect but refuses its sign-in tested as healthy: on 2026-11-15 the proxy Global
+ * Routing named showed "64 ms" while it answered every request of the app's with HTTP 407. A refused
+ * or missing sign-in is { ok: false, code: "PROXY_SIGN_IN_REFUSED" }; any other answer from the
+ * proxy means the sign-in passed. `latencyMs` stays the connect's.
  */
-function probeTcp({ host, port, timeoutMs }, net, describe, done) {
+function probeTcp({ host, port, timeoutMs, proxy }, net, describe, done) {
   const started = Date.now();
   let settled = false;
   let socket = null;
@@ -588,8 +595,57 @@ function probeTcp({ host, port, timeoutMs }, net, describe, done) {
     return;
   }
   socket.setTimeout(timeoutMs, () => finish({ ok: false, code: "ETIMEDOUT", message: "Connection timed out" }));
-  socket.once("connect", () => finish({ ok: true, latencyMs: Date.now() - started }));
   socket.once("error", (error) => finish({ ok: false, code: error?.code || error?.errors?.[0]?.code || "ECONNREFUSED", message: describe(error) }));
+  if (!proxy) {
+    socket.once("connect", () => finish({ ok: true, latencyMs: Date.now() - started }));
+    return;
+  }
+  const username = String(proxy.username ?? ""), password = String(proxy.password ?? "");
+  const offered = Boolean(username || password);
+  const refused = (suffix) => finish({ ok: false, code: "PROXY_SIGN_IN_REFUSED",
+    message: `${offered ? "The proxy refused the saved sign-in" : "The proxy asks for a sign-in and none is saved"}${suffix}` });
+  const unanswered = () => finish({ ok: false, code: "PROXY_NO_ANSWER", message: "The proxy closed the connection without answering" });
+  const unexpected = () => finish({ ok: false, code: "PROXY_BAD_ANSWER", message: `The proxy did not answer as ${proxy.protocol === "socks5" ? "a SOCKS5" : "an HTTP"} proxy` });
+  let latencyMs = 0;
+  let received = Buffer.alloc(0);
+  let signingIn = false;
+  socket.once("end", unanswered);
+  socket.once("close", unanswered);
+  socket.once("connect", () => {
+    latencyMs = Date.now() - started;
+    if (proxy.protocol === "socks5") {
+      socket.write(Buffer.from(offered ? [5, 2, 0, 2] : [5, 1, 0]));
+      return;
+    }
+    const authorization = offered ? `Proxy-Authorization: Basic ${Buffer.from(`${username}:${password}`).toString("base64")}\r\n` : "";
+    socket.write(`CONNECT ${proxy.target} HTTP/1.1\r\nHost: ${proxy.target}\r\n${authorization}\r\n`);
+  });
+  socket.on("data", (chunk) => {
+    received = Buffer.concat([received, chunk]);
+    if (proxy.protocol === "socks5") {
+      if (received.length < 2) return;
+      const [version, answer] = received;
+      received = received.subarray(2);
+      if (signingIn) {
+        if (answer === 0) finish({ ok: true, latencyMs });
+        else refused("");
+      } else if (version !== 5) unexpected();
+      else if (answer === 0) finish({ ok: true, latencyMs });
+      else if (answer === 2 && offered) {
+        signingIn = true;
+        const user = Buffer.from(username, "utf8").subarray(0, 255), pass = Buffer.from(password, "utf8").subarray(0, 255);
+        socket.write(Buffer.concat([Buffer.from([1, user.length]), user, Buffer.from([pass.length]), pass]));
+      } else if (answer === 2 || answer === 0xff) refused("");
+      else unexpected();
+      return;
+    }
+    const end = received.indexOf("\r\n");
+    if (end < 0) { if (received.length > 8_192) unexpected(); return; }
+    const status = /^HTTP\/1\.[01] (\d{3})\b/.exec(received.subarray(0, end).toString("latin1"));
+    if (!status) unexpected();
+    else if (status[1] === "407") refused(" (HTTP 407)");
+    else finish({ ok: true, latencyMs });
+  });
 }
 
 const PROBE_WORKER_SOURCE = `
@@ -631,10 +687,11 @@ function startProbeWorker(createWorker) {
 
 /**
  * Connects to `host`:`port` from the probe worker and resolves { ok: true, latencyMs } or
- * { ok: false, code, message } within `timeoutMs` and a second's grace; it never rejects.
+ * { ok: false, code, message } within `timeoutMs` and a second's grace; it never rejects. `proxy`
+ * adds the proxy's sign-in to the probe (probeTcp).
  */
-function probeTcpOffThread({ host, port, timeoutMs = 3_000 }, { createWorker = (source, options) => new Worker(source, options) } = {}) {
-  const request = { host, port, timeoutMs, deadline: Date.now() + timeoutMs };
+function probeTcpOffThread({ host, port, timeoutMs = 3_000, proxy = null }, { createWorker = (source, options) => new Worker(source, options) } = {}) {
+  const request = { host, port, timeoutMs, deadline: Date.now() + timeoutMs, ...(proxy ? { proxy } : {}) };
   if (probeWorkerBroken) return probeHere(request);
   try {
     probeWorker ??= startProbeWorker(createWorker);

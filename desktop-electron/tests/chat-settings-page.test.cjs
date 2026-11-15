@@ -75,6 +75,14 @@ test("Settings › Chat holds Claude Code's auto-compact and the chat's own swit
   assert.match(read("electron/main.cjs"), /\["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"\]\.includes\(input\.operation\) && input\.arguments\?\.enabled === undefined && input\.arguments\?\.percent === undefined && input\.arguments\?\.seconds === undefined/);
 });
 
+test("Settings › Chat requires explicit quota consent for external reviews", () => {
+  const page = read("src/features/ChatSettingsPage.tsx");
+  assert.match(page, /<Toggle label="Allow quota-based reviews" checked=\{chat\?\.meteredReviews === true\}/);
+  assert.match(page, /setChatPreference\("chat_model_judges", \{ meteredReviews: next \}\)/);
+  assert.match(page, /External command and screen reviews through CPA consume account quota/);
+  assert.match(read("electron/main.cjs"), /input\.arguments\?\.meteredReviews === undefined/);
+});
+
 test("Settings › Chat › Agent questions: wait for the answer (the agent pauses) or answer for me after N seconds, 30 by default", () => {
   const page = read("src/features/ChatSettingsPage.tsx");
   assert.match(page, /const QUESTION_TIMEOUT_DEFAULT = 30;/);

@@ -155,6 +155,8 @@ export interface ProxyProfileRecord {
   lastCheckedAt?: string;
   latencyMs?: number;
   lastError?: string;
+  /** The last check reached the proxy and it refused the saved sign-in (or wanted one); `lastError` says which. */
+  signInRefused?: boolean;
   archivedAt?: string;
   /** Set on a ProxyBridge Nova proxy (or its gateway): read-only here, changed on the Proxy page. */
   source?: "nova";

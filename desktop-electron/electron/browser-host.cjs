@@ -409,7 +409,8 @@ function navigationFailurePage({ url = "", errorCode, errorDescription = "", pro
   const host = (() => { try { return new URL(retry).host; } catch { return "the page"; } })();
   const named = proxyLabel(proxy);
   const hint = proxied
-    ? `The app reaches the internet through the proxy ${named ? `<b>${escapeHtml(named)}</b>` : "set for this route"}, and nothing is answering there. Start your proxy app (ProxyBridge), then retry.`
+    // The app signs in to its proxy itself (signed-proxy-relay.cjs): no outside proxy app to start.
+    ? `The app reaches the internet through the proxy ${named ? `<b>${escapeHtml(named)}</b>` : "set for this route"}, and the connection through it failed. Check that proxy and its sign-in on the Proxy page, then retry.`
     : "Check your connection, then retry.";
   const html = `<!doctype html><html><head><meta charset="utf-8"><title>Can't reach ${escapeHtml(host)}</title><style>
 body{margin:0;height:100vh;display:grid;place-items:center;font:14px/1.5 system-ui,sans-serif;background:#fff;color:#1f1f1f}
