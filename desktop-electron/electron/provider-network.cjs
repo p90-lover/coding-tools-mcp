@@ -10,6 +10,7 @@ const {
 } = require("./cpa-oauth-adapter.cjs");
 const { fetchDecodoEndpoints, normalizeDecodoSettings } = require("./decodo-proxies.cjs");
 const { createChromeLoginProxy } = require("./chrome-login-proxy.cjs");
+const { startSignedProxyRelay } = require("./signed-proxy-relay.cjs");
 
 const STORE_VERSION = 1;
 const ACCOUNT_AUTH = new Set(["oauth", "api_key", "browser_session", "local_proxy"]);
@@ -1105,6 +1106,7 @@ function createProviderNetworkController({
   oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
   oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
   requestTimeoutMs = DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS,
+  startSignedRelay = startSignedProxyRelay,
 }) {
   const directory = path.join(userData, "providers");
   const store = createProviderNetworkStore({
@@ -1147,6 +1149,78 @@ function createProviderNetworkController({
     return profileId ? store.activeProxy(profileId) : null;
   }
 
+  // One signed relay per proxy profile in use (signed-proxy-relay.cjs), keyed by its endpoint and
+  // sign-in so a changed password starts a new one.
+  const relays = new Map(); // profileId -> { key, ready: Promise<relay | null>, startedAt, rejectedAt }
+  const RELAY_REJECTED_LOG_MS = 60_000;
+  const RELAY_QUICK_STOP_MS = 30_000;
+
+  function relayKey(profile, secret) {
+    return crypto.createHash("sha256")
+      .update(JSON.stringify([profile.endpoint, secret?.username || "", secret?.password || ""]))
+      .digest("hex");
+  }
+
+  function closeRelay(profileId) {
+    const entry = relays.get(profileId);
+    if (!entry) return;
+    relays.delete(profileId);
+    void entry.ready.then((relay) => relay?.close()).catch(() => {});
+  }
+
+  function onRelayEvent(profileId, entry, event) {
+    if (event?.type === "authenticated") {
+      logger.info("proxy.relay_authenticated", { profileId });
+    } else if (event?.type === "rejected") {
+      const now = Date.now();
+      if (!entry.rejectedAt || now - entry.rejectedAt >= RELAY_REJECTED_LOG_MS) {
+        entry.rejectedAt = now;
+        logger.warn("proxy.relay_signin_rejected", { profileId, note: "The proxy refused this profile's saved username and password" });
+      }
+    } else if (event?.type === "stopped" && relays.get(profileId) === entry) {
+      relays.delete(profileId);
+      const quick = Date.now() - entry.startedAt < RELAY_QUICK_STOP_MS;
+      logger.warn("proxy.relay_stopped", { profileId, restart: !quick });
+      // Re-applied, the sessions get a new relay; one that dies at once is not restarted in a loop.
+      if (!quick) void applyGlobalRouting().catch((error) => logger.warn("proxy.global_routing_failed", { error: error?.message }));
+    }
+  }
+
+  /**
+   * The proxy rule a Chromium session takes for `profile`: its signed relay when it is an HTTP(S)
+   * proxy with a saved sign-in, else the proxy itself. Chromium would sign in only after a 407,
+   * which Decodo stopped sending (signed-proxy-relay.cjs). A relay that cannot start leaves the
+   * proxy itself, as before.
+   */
+  async function chromiumProxyRules(profile) {
+    const direct = proxyUrl(profile);
+    if (!["http", "https"].includes(profile.endpoint.protocol)) return { proxyRules: direct, relay: false };
+    const secret = store.proxySecret(profile.id);
+    if (!secret?.username && !secret?.password) return { proxyRules: direct, relay: false };
+    const key = relayKey(profile, secret);
+    let entry = relays.get(profile.id);
+    if (entry && entry.key !== key) { closeRelay(profile.id); entry = null; }
+    if (!entry) {
+      entry = { key, ready: null, startedAt: Date.now(), rejectedAt: 0 };
+      const current = entry;
+      current.ready = startSignedRelay({
+        endpoint: profile.endpoint,
+        credentials: { username: secret.username || "", password: secret.password || "" },
+        onEvent: (event) => onRelayEvent(profile.id, current, event),
+      }).then((relay) => {
+        logger.info("proxy.relay_started", { profileId: profile.id, port: relay.port });
+        return relay;
+      }, (error) => {
+        logger.warn("proxy.relay_failed", { profileId: profile.id, error: error?.message || String(error) });
+        if (relays.get(profile.id) === current) relays.delete(profile.id);
+        return null;
+      });
+      relays.set(profile.id, current);
+    }
+    const relay = await entry.ready;
+    return relay ? { proxyRules: relay.proxyRules, relay: true } : { proxyRules: direct, relay: false };
+  }
+
   /** Routes a Browser-tab account's partition: its bound proxy, else Global Routing's, else direct. */
   async function routeBrowserPartition(partition) {
     const target = session.fromPartition(partition);
@@ -1154,7 +1228,7 @@ function createProviderNetworkController({
     const profile = boundBrowserProxy(partition)
       ?? (snapshot.routing.globalEnabled ? store.activeProxy(snapshot.routing.globalProfileId) : null);
     if (!profile) await target.setProxy({ mode: "direct" });
-    else await target.setProxy({ mode: "fixed_servers", proxyRules: proxyUrl(profile), proxyBypassRules: profile.bypass.join(",") });
+    else await target.setProxy({ mode: "fixed_servers", proxyRules: (await chromiumProxyRules(profile)).proxyRules, proxyBypassRules: profile.bypass.join(",") });
     // Open connections keep the route they were made on; drop them so every request takes this one.
     if (typeof target.closeAllConnections === "function") await target.closeAllConnections().catch(() => {});
     return profile?.id ?? null;
@@ -1246,6 +1320,9 @@ function createProviderNetworkController({
         .map((partition) => session.fromPartition(partition)),
     ].filter((value, index, list) => value && list.indexOf(value) === index);
     await Promise.all(boundPartitions.map((partition) => routeBrowserPartition(partition)));
+    // Relays only for the proxies still in use: Global Routing's and the bound accounts'.
+    const inUse = new Set([profile?.id, ...boundPartitions.map((partition) => boundBrowserProxy(partition)?.id)].filter(Boolean));
+    for (const profileId of [...relays.keys()]) if (!inUse.has(profileId)) closeRelay(profileId);
 
     if (!profile) {
       await Promise.all(targets.map((target) => target.setProxy({ mode: "direct" })));
@@ -1253,11 +1330,11 @@ function createProviderNetworkController({
       return snapshot;
     }
 
-    const route = proxyUrl(profile);
+    const { proxyRules, relay } = await chromiumProxyRules(profile);
     const bypass = profile.bypass.join(",");
     await Promise.all(targets.map((target) => target.setProxy({
       mode: "fixed_servers",
-      proxyRules: route,
+      proxyRules,
       proxyBypassRules: bypass,
     })));
     logger.info("proxy.global_routing_applied", {
@@ -1265,6 +1342,7 @@ function createProviderNetworkController({
       protocol: profile.endpoint.protocol,
       host: profile.endpoint.host,
       port: profile.endpoint.port,
+      relay,
       scopes: profile.scopes,
     });
     return snapshot;

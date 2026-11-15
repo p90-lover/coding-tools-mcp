@@ -285,7 +285,7 @@ test("a services snapshot reads CPA's config off the main thread, again only aft
   assert.equal(syncReads, 0, "never on the main thread");
 });
 
-test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets the bare route", async (t) => {
+test("the programs the app starts get a signed-in proxy's sign-in; Chromium goes through the app's signed relay", async (t) => {
   const { createProviderNetworkController } = require("../electron/provider-network.cjs");
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/global-env-proxy-"));
   const saved = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"].map((name) => [name, process.env[name]]));
@@ -295,11 +295,17 @@ test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets
   });
   const applied = [];
   const target = { setProxy: async (config) => { applied.push(config); } };
+  const relays = [];
   const controller = createProviderNetworkController({
     app: {}, browserPartition: "persist:env-proxy-test", getBrowserHost: () => null,
     logger: { info() {}, warn() {} }, safeStorage: { isEncryptionAvailable: () => false },
     session: { defaultSession: target, fromPartition: () => target }, shell: {}, userData: root,
     fetchImpl: async () => { throw new Error("no network in this test"); },
+    startSignedRelay: async ({ endpoint, credentials }) => {
+      const relay = { endpoint, credentials, port: 52000, proxyRules: "http://127.0.0.1:52000", close: async () => {} };
+      relays.push(relay);
+      return relay;
+    },
   });
   controller.store.saveProxyProfile({ id: "decodo", name: "HTTP decodo", enabled: true,
     endpoint: { protocol: "http", host: "proxy.example.test", port: 10000 },
@@ -322,7 +328,11 @@ test("the programs the app starts get a signed-in proxy's sign-in; Chromium gets
   assert.equal(decodeURIComponent(environment.password), "p@ss:word");
   assert.equal(process.env.HTTP_PROXY, process.env.HTTPS_PROXY);
   assert.equal(process.env.ALL_PROXY, process.env.HTTPS_PROXY);
-  assert.deepEqual(applied.map((config) => config.proxyRules), ["http://proxy.example.test:10000"]);
+  // Chromium would sign in only after a 407, which Decodo stopped sending: its sessions go through
+  // the app's relay, which carries the sign-in (signed-proxy-relay.cjs).
+  assert.deepEqual(applied.map((config) => config.proxyRules), ["http://127.0.0.1:52000"]);
+  assert.deepEqual(relays.map((relay) => [relay.endpoint.host, relay.endpoint.port, relay.credentials]),
+    [["proxy.example.test", 10000, { username: "account", password: "p@ss:word" }]]);
 
   controller.store.setGlobalRouting({ enabled: false, profileId: null });
   await controller.applyGlobalRouting();
