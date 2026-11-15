@@ -421,6 +421,21 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     }
   }
 
+  // The username of a proxy's saved sign-in, shown on the Proxy page so proxies on one address can
+  // be told apart; never the password. Remembered per saved secret: a snapshot is built on every
+  // change, and each would otherwise decrypt every sign-in again on the main thread.
+  const proxyUsernames = new Map();
+  function proxyUsername(profileId) {
+    const envelope = state.secrets.proxies[profileId];
+    if (typeof envelope?.data !== "string") return undefined;
+    if (!proxyUsernames.has(envelope.data)) {
+      if (proxyUsernames.size >= 64) proxyUsernames.clear();
+      const username = codec.decrypt(envelope)?.username;
+      proxyUsernames.set(envelope.data, typeof username === "string" ? username.trim().slice(0, 160) : "");
+    }
+    return proxyUsernames.get(envelope.data) || undefined;
+  }
+
   function publicSnapshot() {
     recoverState();
     return {
@@ -430,7 +445,10 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
         ...clone(account),
         hasCredential: Boolean(state.secrets.accounts[account.id]),
       })),
-      proxyProfiles: state.proxyProfiles.map((profile) => ({ ...clone(profile) })),
+      proxyProfiles: state.proxyProfiles.map((profile) => {
+        const username = proxyUsername(profile.id);
+        return { ...clone(profile), ...(username ? { username } : {}) };
+      }),
       routing: clone(state.routing),
       decodo: { ...clone(state.decodo), hasPassword: Boolean(state.secrets.decodo) },
     };

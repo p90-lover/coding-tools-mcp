@@ -106,7 +106,31 @@ test("a new proxy keeps its custom name when a complete proxy URL is pasted", as
 test("cards and both route selectors identify profiles by name", () => {
   const view = surface();
   assert.equal(view.find(node => node.props.className === "px-name").props.children, "Office proxy");
-  assert.match(source, /<option key=\{profile\.id\} value=\{profile\.id\}>\{profile\.name\} · \{profile\.endpoint\.host\}:\{profile\.endpoint\.port\}<\/option>/);
-  const options = source.match(/<option key=\{profile\.id\} value=\{profile\.id\}>\{profile\.name\} ·/g);
+  assert.equal(view.find(node => node.type === "option" && node.key === "office").props.children, "Office proxy · proxy.example.test:8080");
+  const options = source.match(/<option key=\{profile\.id\} value=\{profile\.id\}>\{profileLabel\(profile\)\}<\/option>/g);
   assert.equal(options.length, 2);
+});
+
+test("a proxy that signs in shows its username on the card, in the route pickers and when edited", async () => {
+  const view = surface();
+  view.profile.username = "office-user";
+  const card = view.find(node => node.props.className === "px-user");
+  assert.equal(card.props.children[1].props.children, "office-user");
+  assert.match(card.props.title, /office-user/);
+  assert.equal(view.find(node => node.type === "option" && node.key === "office").props.children,
+    "Office proxy · proxy.example.test:8080 · office-user");
+  edit(view);
+  assert.equal(view.field("Username").props.value, "office-user");
+  assert.equal(view.field("Password").props.value, "", "the saved password is never shown");
+  await view.submit();
+  assert.equal(view.saved[0].username, "office-user");
+  assert.ok(!("password" in view.saved[0]), "an untouched password is kept, not resent");
+});
+
+test("a proxy with no sign-in shows no username line", () => {
+  const view = surface();
+  view.profile.hasAuthentication = false;
+  const walk = node => !node || typeof node !== "object" ? false
+    : Array.isArray(node) ? node.some(walk) : node.props?.className === "px-user" || walk(node.props?.children);
+  assert.equal(walk(view.find(node => node.props.className === "px-list")), false);
 });
