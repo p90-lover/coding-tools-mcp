@@ -88,8 +88,7 @@ In memory only, worker → main: per target `{open, total, lastOkAt, lastError, 
 desktop-electron/
 ├── electron/egress-router.cjs          (new: the worker router; HTTP/HTTPS/SOCKS upstreams, tokens, stats)
 ├── electron/egress-routes.cjs          (new: route resolution, tokens, router URLs, NO_PROXY)
-├── electron/routed-agent.cjs           (new: https.Agent through the router for the app's own Node requests)
-├── electron/signed-proxy-relay.cjs     (kept; re-exports from egress-router for old callers)
+├── electron/signed-proxy-relay.cjs     (removed: the router replaces it; its controller tests moved to tests/proxy-routing-controller.test.cjs)
 ├── electron/provider-network.cjs       (routing model, credentials policy, lifecycle, controller wiring)
 ├── electron/provider-bootstrap.cjs     (IPC, startup order: router before consumers)
 ├── electron/managed-external-services.cjs, electron/cpa-managed.cjs (CPA proxy-url, per-credential proxy_url)

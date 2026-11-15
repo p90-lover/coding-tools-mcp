@@ -10,7 +10,6 @@ const {
 } = require("./cpa-oauth-adapter.cjs");
 const { fetchDecodoEndpoints, normalizeDecodoSettings } = require("./decodo-proxies.cjs");
 const { createChromeLoginProxy } = require("./chrome-login-proxy.cjs");
-const { startSignedProxyRelay } = require("./signed-proxy-relay.cjs");
 const { startEgressRouter, newRouterKey } = require("./egress-router.cjs");
 const { normalizeCredentialPolicy, resolveEgressRoutes, routerUrl, routeToken, noProxyList, publicRoute, providerType } = require("./egress-routes.cjs");
 
@@ -1241,7 +1240,6 @@ function createProviderNetworkController({
   oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
   oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
   requestTimeoutMs = DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS,
-  startSignedRelay = startSignedProxyRelay,
   startRouter = startEgressRouter,
 }) {
   const directory = path.join(userData, "providers");
@@ -2127,7 +2125,7 @@ function createProviderNetworkController({
   // refused. It is recorded on the proxy as a failed check, so the Proxy page shows "Sign-in refused"
   // without anyone pressing Test: on 2026-11-15 every update check failed this way for hours and the
   // page showed the proxy as healthy. Written once per refusal (a sign-in saved since clears it) and
-  // logged at most once in SIGN_IN_REFUSAL_LOG_MS (`log: false` for the relay, which logs its own
+  // logged at most once in SIGN_IN_REFUSAL_LOG_MS (`log: false` for a caller that logs its own
   // line). True when it recorded a change.
   const signInRefusalLogged = new Map();
   function noteProxySignInRefused(profileId, { log = true } = {}) {
