@@ -5,7 +5,7 @@
   display: grid;
   gap: 18px;
   min-width: 0;
-  width: min(640px, 100%);
+  width: min(760px, 100%);
   box-sizing: border-box;
   container-type: inline-size;
   margin: 0 auto;
@@ -16,6 +16,20 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.px-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* One sentence: where the app's traffic goes right now. */
+.px-summary {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
 }
 
 .px-head h1 {
@@ -540,7 +554,7 @@
 
 .px-route {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 130px minmax(0, 170px);
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 190px);
   align-items: center;
   gap: 8px;
   min-height: 38px;
@@ -577,6 +591,234 @@
   background: var(--color-background-control);
   color: inherit;
   font-size: var(--text-xs);
+}
+
+/* ---- the rewrite: status, facts, routes, programs (docs/specs/rewrite-the-proxy) ---- */
+
+/* The tools are always there, not only on hover: a keyboard or touch user needs them too. */
+.px-tools {
+  opacity: 0.8;
+}
+
+.px-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-text-error);
+  border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.px-alert.is-warn {
+  border-left-color: var(--color-text-warning);
+}
+
+.px-alert .px-ghost {
+  height: 26px;
+  margin-left: auto;
+  padding: 0 10px;
+}
+
+/* A proxy's last test, inline: no hover needed to read why it failed. */
+.px-facts {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.px-facts.is-bad {
+  color: var(--color-text-error);
+  white-space: normal;
+}
+
+.px-used {
+  align-self: center;
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: var(--radius-round);
+  background: var(--color-background-control);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.px-replace {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px 34px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+  font-size: var(--text-sm);
+  animation: px-rise var(--duration-panel) var(--ease-enter);
+}
+
+.px-replace select {
+  min-width: 0;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: inherit;
+  font-size: var(--text-xs);
+}
+
+.px-danger {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--color-text-error);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-error);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.px-empty,
+.px-note {
+  margin: 4px 4px 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+/* What a route resolves to now, and its live counters. */
+.px-effective {
+  display: grid;
+  overflow: hidden;
+  font-size: var(--text-sm);
+}
+
+.px-effective small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.px-hint {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.px-route.is-head {
+  background: var(--color-background-control);
+}
+
+.px-sub {
+  margin-top: 10px;
+}
+
+.px-sub summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.px-sub summary span {
+  padding: 0 6px;
+  border-radius: var(--radius-round);
+  background: var(--color-background-control);
+  font-size: var(--text-xs);
+}
+
+.px-sub summary em {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  font-style: normal;
+}
+
+.px-search {
+  box-sizing: border-box;
+  width: 100%;
+  height: 30px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: inherit;
+  font-size: var(--text-sm);
+}
+
+/* What follows the routes: one line per program group, its dot says whether it does. */
+.px-programs {
+  display: grid;
+  gap: 4px;
+}
+
+.px-programs h2 {
+  margin: 6px 4px 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.px-prog {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.px-prog > i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+}
+
+.px-prog.is-up > i {
+  background: var(--color-text-success);
+}
+
+.px-prog.is-slow > i {
+  background: var(--color-text-warning);
+}
+
+.px-prog.is-down > i {
+  background: var(--color-text-error);
+}
+
+.px-prog > span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  min-width: 0;
+  color: var(--color-text-secondary);
+}
+
+.px-prog strong {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.px-prog .px-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  margin-left: auto;
+  padding: 0 10px;
 }
 
 @container (max-width: 500px) {
