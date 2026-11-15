@@ -244,6 +244,8 @@ export function NetworkProxySurface({
 
   const health = (profile: ProxyProfileRecord) => {
     if (testing.has(profile.id)) return { tone: "is-testing", text: "" };
+    // The proxy answered and refused its sign-in: "Unreachable" sent people to check the address.
+    if (profile.signInRefused) return { tone: "is-down", text: t("Sign-in refused", "登入被拒", "登录被拒", "サインイン拒否") };
     if (profile.lastError) return { tone: "is-down", text: t("Unreachable", "連唔到", "无法连接", "接続不可") };
     if (profile.latencyMs !== undefined) return { tone: profile.latencyMs > 800 ? "is-slow" : "is-up", text: `${profile.latencyMs} ms` };
     return { tone: "", text: "" };

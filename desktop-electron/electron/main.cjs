@@ -568,6 +568,10 @@ async function fetchThroughLauncherNetwork(url, options, { partition, useSession
         === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
         ? credentials : null
     ),
+    // The proxy refused the sign-in saved for it, or took it again after refusing: the Proxy page
+    // shows which (noteProxySignInRefused, noteProxySignInAccepted).
+    onProxySignInRefused: () => { if (profile) network.noteProxySignInRefused(profile.id); },
+    onProxySignInAccepted: () => { if (profile) network.noteProxySignInAccepted(profile.id); },
   });
 }
 

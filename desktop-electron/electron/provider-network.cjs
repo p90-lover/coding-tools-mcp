@@ -185,6 +185,9 @@ function normalizeProxyProfile(profile) {
         ? Math.round(profile.latencyMs)
         : undefined,
       lastError: optionalText(profile.lastError, 500),
+      // The last check reached the proxy and it refused the saved sign-in (or wanted one): not
+      // "unreachable". Only ever true alongside lastError.
+      ...(profile.signInRefused === true && optionalText(profile.lastError, 500) ? { signInRefused: true } : {}),
       archivedAt: profile.archivedAt ? timestamp(profile.archivedAt, undefined) : undefined,
       // Set on a proxy another app owns (ProxyBridge Nova): it is kept in step with that app and
       // only changed there.
@@ -606,6 +609,8 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
         password: password ?? saved.password ?? "",
       });
     }
+    // A refusal was of the sign-in saved then: a new one starts unchecked.
+    const refusalStands = previous?.signInRefused === true && username === undefined && password === undefined;
     const profile = normalizeProxyProfile({
       id,
       name: input.name,
@@ -618,7 +623,8 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
       updatedAt: now,
       lastCheckedAt: previous?.lastCheckedAt,
       latencyMs: previous?.latencyMs,
-      lastError: previous?.lastError,
+      lastError: previous?.signInRefused && !refusalStands ? undefined : previous?.lastError,
+      signInRefused: refusalStands,
       archivedAt: previous?.archivedAt,
     });
     if (!profile) throw new Error("Proxy profile is invalid");
@@ -719,17 +725,22 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
       if (previous && !previous.source) throw new Error(`Proxy profile ${entry.id} is not a ${source} proxy`);
       const credentials = entry.username || entry.password ? { username: entry.username || "", password: entry.password || "" } : null;
       const saved = codec.decrypt(state.secrets.proxies[entry.id]);
-      if (JSON.stringify(saved ?? null) !== JSON.stringify(credentials)) {
+      const newSignIn = JSON.stringify(saved ?? null) !== JSON.stringify(credentials);
+      if (newSignIn) {
         if (credentials) state.secrets.proxies[entry.id] = codec.encrypt(credentials);
         else delete state.secrets.proxies[entry.id];
         changed = true;
       }
+      // As in saveProxyProfile: a refusal was of the sign-in saved then.
+      const refusalStands = previous?.signInRefused === true && !newSignIn;
       const profile = normalizeProxyProfile({
         id: entry.id, name: entry.name, enabled: true, endpoint: entry.endpoint,
         scopes: previous?.scopes ?? ["all"], bypass: previous?.bypass ?? DEFAULT_BYPASS,
         hasAuthentication: Boolean(credentials), createdAt: previous?.createdAt ?? now,
         updatedAt: previous?.updatedAt ?? now, lastCheckedAt: previous?.lastCheckedAt,
-        latencyMs: previous?.latencyMs, lastError: previous?.lastError,
+        latencyMs: previous?.latencyMs,
+        lastError: previous?.signInRefused && !refusalStands ? undefined : previous?.lastError,
+        signInRefused: refusalStands,
         source, sourceKey: entry.sourceKey,
       });
       if (!profile) throw new Error(`Proxy ${entry.name} is invalid`);
@@ -845,7 +856,20 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     profile.lastCheckedAt = new Date().toISOString();
     profile.latencyMs = result.reachable ? Math.max(0, Math.round(result.latencyMs || 0)) : undefined;
     profile.lastError = result.reachable ? undefined : optionalText(result.error, 500) || "Connection failed";
+    if (!result.reachable && result.signInRefused === true) profile.signInRefused = true;
+    else delete profile.signInRefused;
     profile.updatedAt = profile.lastCheckedAt;
+    write();
+    return publicSnapshot();
+  }
+
+  /** Drops a recorded sign-in refusal and its error; the proxy's other fields stay. */
+  function clearProxySignInRefusal(profileId) {
+    const profile = findProxy(profileId);
+    if (!profile?.signInRefused) return publicSnapshot();
+    delete profile.signInRefused;
+    profile.lastError = undefined;
+    profile.updatedAt = new Date().toISOString();
     write();
     return publicSnapshot();
   }
@@ -922,6 +946,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     setProviderPolicy,
     setAccountPolicy,
     recordProxyHealth,
+    clearProxySignInRefusal,
     accountSecret,
     mergeAccountSecret,
     proxySecret,
@@ -953,6 +978,27 @@ function proxyUrl(profile, credentials = null) {
 async function testTcpEndpoint(profile, timeoutMs = 7_000) {
   const result = await probeTcpOffThread({ host: profile.endpoint.host, port: profile.endpoint.port, timeoutMs });
   return result.ok ? { reachable: true, latencyMs: result.latencyMs } : { reachable: false, error: result.message };
+}
+
+// Where a proxy test asks the proxy to connect: the host the app's own update checks go to, so the
+// test contacts nobody the app does not already.
+const SIGN_IN_TEST_TARGET = "github.com:443";
+// What a refusal seen on one of the app's own requests is recorded as: the words the test itself uses.
+const SIGN_IN_REFUSED_TEXT = "The proxy refused the saved sign-in (HTTP 407)";
+const SIGN_IN_REFUSAL_LOG_MS = 10 * 60_000;
+
+/**
+ * The Proxy page's Test: the connect, then the proxy's sign-in with the saved credentials (HTTP and
+ * SOCKS5 proxies; the others are a connect only). A connect alone called a proxy healthy whose
+ * sign-in it refused, which fails every request sent through it (off-thread-run.cjs probeTcp).
+ */
+async function testProxyEndpoint(profile, credentials = null, timeoutMs = 7_000) {
+  const protocol = profile.endpoint.protocol;
+  if (protocol !== "http" && protocol !== "socks5") return testTcpEndpoint(profile, timeoutMs);
+  const result = await probeTcpOffThread({ host: profile.endpoint.host, port: profile.endpoint.port, timeoutMs,
+    proxy: { protocol, target: SIGN_IN_TEST_TARGET, username: credentials?.username || "", password: credentials?.password || "" } });
+  if (result.ok) return { reachable: true, latencyMs: result.latencyMs };
+  return { reachable: false, ...(result.code === "PROXY_SIGN_IN_REFUSED" ? { signInRefused: true } : {}), error: result.message };
 }
 
 
@@ -1047,6 +1093,9 @@ function createProviderNetworkController({
   getBrowserProxyBinding = null,
   getCpaConnection = null,
   logger,
+  // Hears the new snapshot after a change the controller makes by itself (noteProxySignInRefused),
+  // which no page asked for and so no reply carries.
+  onChanged = null,
   safeStorage,
   session,
   shell,
@@ -1657,15 +1706,50 @@ function createProviderNetworkController({
   async function testProxyProfile(profileId) {
     const profile = store.activeProxy(profileId);
     if (!profile) throw new Error("Proxy profile was not found or is disabled");
-    const result = await testTcpEndpoint(profile);
+    const result = await testProxyEndpoint(profile, store.proxySecret(profile.id));
     const snapshot = store.recordProxyHealth(profileId, result);
     logger[result.reachable ? "info" : "warn"]("proxy.profile_tested", {
       profileId,
       reachable: result.reachable,
       latencyMs: result.latencyMs,
       error: result.error,
+      ...(result.signInRefused ? { signInRefused: true } : {}),
     });
     return { ...result, snapshot };
+  }
+
+  // A request of the app's own (an update check, a plugin download) whose saved sign-in the proxy
+  // refused. It is recorded on the proxy as a failed check, so the Proxy page shows "Sign-in refused"
+  // without anyone pressing Test: on 2026-11-15 every update check failed this way for hours and the
+  // page showed the proxy as healthy. Written once per refusal (a sign-in saved since clears it) and
+  // logged at most once in SIGN_IN_REFUSAL_LOG_MS. True when it recorded a change.
+  const signInRefusalLogged = new Map();
+  function noteProxySignInRefused(profileId) {
+    const profile = store.activeProxy(profileId);
+    if (!profile) return false;
+    const now = Date.now();
+    if (now - (signInRefusalLogged.get(profile.id) ?? -Infinity) >= SIGN_IN_REFUSAL_LOG_MS) {
+      signInRefusalLogged.set(profile.id, now);
+      logger.warn("proxy.sign_in_refused", { profileId: profile.id, host: profile.endpoint.host, port: profile.endpoint.port });
+    }
+    if (profile.signInRefused) return false;
+    const snapshot = store.recordProxyHealth(profile.id, { reachable: false, signInRefused: true, error: SIGN_IN_REFUSED_TEXT });
+    try { onChanged?.(snapshot); } catch {}
+    return true;
+  }
+
+  // The same proxy letting a later request through with the saved sign-in: the refusal no longer
+  // holds. On 2026-11-15 the proxy refused Global Routing's sign-in for 20 minutes and then took it
+  // again with nothing changed; left recorded, the page would have said "Sign-in refused" until
+  // someone pressed Test. The proxy then shows as not checked: no latency was measured.
+  function noteProxySignInAccepted(profileId) {
+    const profile = store.activeProxy(profileId);
+    if (!profile?.signInRefused) return false;
+    const snapshot = store.clearProxySignInRefusal(profile.id);
+    signInRefusalLogged.delete(profile.id);
+    logger.info("proxy.sign_in_accepted", { profileId: profile.id, host: profile.endpoint.host, port: profile.endpoint.port });
+    try { onChanged?.(snapshot); } catch {}
+    return true;
   }
 
   function handleProxyLogin(event, authInfo, callback, webContents = null) {
@@ -1702,6 +1786,8 @@ function createProviderNetworkController({
     openProviderLogin,
     probeProviderAccount,
     testProxyProfile,
+    noteProxySignInRefused,
+    noteProxySignInAccepted,
     handleProxyLogin,
   };
 }
@@ -1717,5 +1803,6 @@ module.exports = {
   createProviderNetworkStore,
   normalizeProviderBaseUrl,
   proxyUrl,
+  testProxyEndpoint,
   testTcpEndpoint,
 };

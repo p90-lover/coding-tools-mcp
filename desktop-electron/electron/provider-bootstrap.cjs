@@ -122,6 +122,7 @@ function installProviderNetwork({
         }
       },
       logger,
+      onChanged: publish,
       safeStorage,
       session,
       shell,
