@@ -476,7 +476,14 @@ function getChatGptDesktop(logger) {
       logger,
       dataRoot: path.join(CORE_HOME, "chatgpt-desktop"),
       resolveCpaAuthDir: cpaAuthDirectory,
-      getProxyRoute: async () => proxyRouteFromEnvironment(),
+      // Its own loopback port on the app's egress router, on the App route: a separate Chromium whose
+      // --proxy-server can't carry a sign-in. The environment's route (the router itself) only when
+      // that port can't be opened, which fails closed rather than going direct.
+      getProxyRoute: async () => {
+        const network = await providerNetworkReady().catch(() => null);
+        const port = network ? await network.openRouterPort("app") : null;
+        return port ? { url: `http://127.0.0.1:${port}`, bypass: ["localhost", "127.0.0.1", "::1"] } : proxyRouteFromEnvironment();
+      },
       onChange: (status) => send("launcher:chatgpt-desktop-changed", status),
     });
     chatgptDesktop.ready = chatgptDesktop.initialize().catch((error) => {
@@ -554,24 +561,14 @@ async function fetchThroughLauncherNetwork(url, options, { partition, useSession
     throw new Error("Session checks require a registered account partition");
   }
   const network = await providerNetworkReady();
-  const routing = network.store.snapshot().routing;
-  const boundId = sessionRead ? browserAccounts.proxyForPartition(partition) : null;
-  const profile = (boundId ? network.store.activeProxy(boundId) : null)
-    ?? (routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null);
-  const credentials = profile ? network.store.proxySecret(profile.id) : null;
+  // Everything the app fetches for itself takes the App route (Global Routing), not the route of
+  // whichever Browser-tab account is on screen; a session read takes its own account's route.
+  const target = sessionRead ? `browser:${partition}` : "app";
   return fetchNativeWithProxyAuth({
-    electronNet, browserSession: session.fromPartition(sessionRead ? partition : browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    electronNet, browserSession: sessionRead ? session.fromPartition(partition) : session.defaultSession, url, options,
     useSessionCookies: sessionRead,
-    getProxyCredentials: (authInfo) => (
-      profile && authInfo.port === profile.endpoint.port
-      && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
-        === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
-        ? credentials : null
-    ),
-    // The proxy refused the sign-in saved for it, or took it again after refusing: the Proxy page
-    // shows which (noteProxySignInRefused, noteProxySignInAccepted).
-    onProxySignInRefused: () => { if (profile) network.noteProxySignInRefused(profile.id); },
-    onProxySignInAccepted: () => { if (profile) network.noteProxySignInAccepted(profile.id); },
+    // The egress router asks every session to sign in once; only it is answered (routerSignIn).
+    getProxyCredentials: (authInfo) => network.routerSignIn(authInfo, target),
   });
 }
 
@@ -586,7 +583,8 @@ function getRegisterHost(logger) {
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
     }),
     prepareSession: async (browserSession, origin) => {
-      await browserSession.setProxy({ mode: "direct" });
+      // On the App route, through the egress router, like every session the app opens.
+      await (await providerNetworkReady()).routeAppSession(browserSession);
       const sync = createRegisterCpaSync({
         browserSession, origin, getConnection: () => externalServicesController?.cpaConnection(),
         onError: (message) => logger?.warn?.("launcher.register_cpa_sync_failed", { message }),

@@ -157,6 +157,9 @@ export interface ProxyProfileRecord {
   lastError?: string;
   /** The last check reached the proxy and it refused the saved sign-in (or wanted one); `lastError` says which. */
   signInRefused?: boolean;
+  /** Where the last good test left the internet (Cloudflare's trace through this proxy). */
+  exitIp?: string;
+  exitCountry?: string;
   archivedAt?: string;
   /** Set on a ProxyBridge Nova proxy (or its gateway): read-only here, changed on the Proxy page. */
   source?: "nova";
@@ -315,8 +318,41 @@ export interface ProviderNetworkSnapshot {
     globalProfileId: string | null;
     providers: ProviderProxyPolicyRecord[];
     accounts: AccountProxyPolicyRecord[];
+    /** One CPA credential's own route (egress-routes.cjs); a credential without one follows its provider. */
+    credentials?: CredentialProxyPolicyRecord[];
   };
   decodo?: DecodoSettings;
+  /** Set when the saved settings could not be read. */
+  error?: string;
+}
+
+export interface CredentialProxyPolicyRecord {
+  authName: string;
+  provider?: string;
+  mode: "follow" | "direct" | "profile";
+  profileId?: string;
+}
+
+/** A route as the egress router resolves it now, without its sign-in. */
+export type EgressRoute =
+  | { mode: "direct" }
+  | { mode: "broken"; reason: string }
+  | { mode: "proxy"; profileId: string; protocol: ProxyProtocol; host: string; port: number };
+
+export interface EgressTargetStatus {
+  /** app, cpa, provider:<type>, credential:<name> or browser:<partition>. */
+  target: string;
+  policy: { mode: "follow" | "direct" | "profile"; profileId?: string | null };
+  /** The target whose route it takes: itself, or the level it follows. */
+  from: string;
+  route: EgressRoute;
+  stats: { open: number; total: number; lastOkAt: number; lastError: string; lastErrorAt: number; via: string } | null;
+}
+
+export interface EgressStatus {
+  router: { running: boolean; port: number; error: string | null; portMovedAt: number | null };
+  targets: EgressTargetStatus[];
+  credentials: Array<{ name: string; provider: string; label: string | null }>;
 }
 
 /** Decodo's sticky proxy list, read in-app (decodo-proxies.cjs); the password never comes back. */
@@ -1270,11 +1306,15 @@ export interface LauncherApi {
   }>;
   probeProviderAccount(accountId: string): Promise<ProviderNetworkSnapshot>;
   saveProxyProfile(input: ProxyProfileInput): Promise<ProviderNetworkSnapshot>;
-  archiveProxyProfile(profileId: string): Promise<ProviderNetworkSnapshot>;
+  archiveProxyProfile(profileId: string, options?: { replacement?: string }): Promise<ProviderNetworkSnapshot>;
   testProxyProfile(profileId: string): Promise<{
     reachable: boolean;
     latencyMs?: number;
     error?: string;
+    signInRefused?: boolean;
+    exitIp?: string;
+    exitCountry?: string;
+    exitError?: string;
     snapshot: ProviderNetworkSnapshot;
   }>;
   setGlobalProxyRouting(input: {
@@ -1291,6 +1331,9 @@ export interface LauncherApi {
     mode: ProxyPolicyMode;
     profileId?: string;
   }): Promise<ProviderNetworkSnapshot>;
+  setCredentialProxyPolicy(input: { authName: string; provider?: string; mode: "follow" | "direct" | "profile"; profileId?: string }): Promise<ProviderNetworkSnapshot>;
+  egressStatus(): Promise<EgressStatus>;
+  reconnectProxyTarget(target?: string | null): Promise<{ closed: number }>;
   novaState(): Promise<NovaState>;
   novaStart(): Promise<NovaState>;
   novaShutdown(): Promise<NovaState>;
