@@ -69,6 +69,13 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 
 <!-- gitnexus:end -->
 
+## Proceed without repeated confirmation
+
+- **User rule (2026-11-15): “always approve, don't ask.”** Proceed with requested, task-scoped work and its already authorized verification/delivery without asking for permission again at each step. Do not ask “may I push?”, “merge now?”, “release it?” or “install this update?” when the standing authorization covers it.
+- For verified changes, the normal sequence is commit, push the task branch to this project's existing configured repository, create or join the coordinated PR, merge after applicable checks, publish the release, and update the matching installed app through its supported updater or installer, including the necessary controlled restart. Preserve accounts, settings and unrelated work; honor explicit opt-outs and one release owner. Documentation-only changes need no installer or local patch.
+- Verify the configured repository and current access with tools rather than asking the user to reconfirm an established destination. Do not mistake authorized task-source publication for a lack of user consent. Choose sensible implementation defaults; ask only for a genuinely missing decision that changes scope or authorization.
+- These instructions do not auto-approve tool prompts or override actual refusals, failing checks or repository protections. Do not weaken permission settings or use another tool/session to evade a refusal. Save and report a real blocker without repeatedly requesting the same permission the user already gave.
+
 ## GitHub delivery
 
 - **Batch changes on branches; one coordinated PR and GitHub build per release (user rule, 2026-11-14).** This replaces the older one-PR-per-task and separate-version-bump-PR defaults. Keep each task's implementation and related follow-ups on one reusable branch. Verify locally, then push the ready commits once; do not open a new PR or dispatch Actions for every small fix, notes update or version edit.
