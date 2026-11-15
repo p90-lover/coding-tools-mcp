@@ -22,7 +22,8 @@ test("a ChatGPT page that fails to load shows why instead of a blank view", () =
   assert.ok(page.startsWith("data:text/html;charset=utf-8,"));
   const body = html(page);
   assert.match(body, /Can't reach chatgpt\.com/);
-  assert.match(body, /proxy <b>http:\/\/127\.0\.0\.1:17891<\/b>, and nothing is answering there\. Start your proxy app \(ProxyBridge\)/);
+  assert.match(body, /proxy <b>http:\/\/127\.0\.0\.1:17891<\/b>, and the connection through it failed\. Check that proxy and its sign-in on the Proxy page/);
+  assert.doesNotMatch(body, /ProxyBridge/, "the app needs no outside proxy app");
   assert.match(body, /ERR_PROXY_CONNECTION_FAILED \(-130\)/);
   assert.match(body, /<a class="retry" href="https:\/\/chatgpt\.com\/\?temporary-chat=true">Retry<\/a>/);
 });
