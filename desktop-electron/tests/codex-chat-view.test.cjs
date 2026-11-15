@@ -54,7 +54,7 @@ let workbenchStorage = null;
 // A stuck turn's recovery: its Provider stays in the tree (so a test can read the value the chat
 // gives it), and its value is what TurnRunning reads.
 const turnRestart = { Provider: "TurnRestartProvider", value: { restarting: false } };
-function mount(props, { effects = false, objectUrls } = {}) {
+function mount(props, { effects = false, objectUrls, responseEvents } = {}) {
   // Hook state per component, as React keeps it: by the component's name and its place among
   // components of that name. One shared list shifted every later component's state whenever a
   // component appeared earlier in the tree (a steer's bubble turned the stuck footer's clock back).
@@ -114,6 +114,7 @@ function mount(props, { effects = false, objectUrls } = {}) {
       setItem: (key, value) => workbenchStorage?.set(key, value),
       removeItem: (key) => workbenchStorage?.delete(key),
     } };
+  if (responseEvents) Object.assign(timers, responseEvents);
   const changedFiles = transpile("ChatChangedFiles.tsx", name => name === "react" ? { ...react, useId: () => "changed-files", useLayoutEffect() {} }
     : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {}, { window: { ...timers, addEventListener() {}, removeEventListener() {} }, clearTimeout() {},
       // An open file list listens for outside clicks, Escape and scrolls while it is shown.
@@ -125,7 +126,12 @@ function mount(props, { effects = false, objectUrls } = {}) {
   // The reply's steps (chat-reply-plan) and their views, real too.
   const replyPlan = transpile("chat-reply-plan.ts", (name) => name === "./ao-chat" ? chat : {});
   const replyPlanView = transpile("ChatReplyPlan.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {});
+  const responseStyles = transpile("chat-response-style.ts", name => name === "./chat-reply-plan" ? replyPlan : {},
+    { localStorage: timers.localStorage, window: timers, structuredClone, Event });
+  const responseMenu = transpile("response-style-menu.ts", name => name === "./chat-response-style" ? responseStyles : {});
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
+    : name === "./chat-response-style" ? responseStyles : name === "./response-style-menu" ? responseMenu
+    : name === "./ResponseStyleSettings" ? { ResponseStyleSettings: () => null }
     : name === "./chat-transcript" ? transpile("chat-transcript.ts", name => name === "./ao-chat" ? chat : {})
     // Settings › Chat's mission switch reads this mount's storage: "off" in workbenchStorage turns it off.
     : name === "./chat-view-settings" ? transpile("chat-view-settings.ts", () => ({}), { localStorage: timers.localStorage, window: timers })
@@ -133,7 +139,7 @@ function mount(props, { effects = false, objectUrls } = {}) {
       : name === "./ChatMenu" ? { ChatMenu: "ChatMenu", ChatGlyph: "Glyph", FloatingLayer: "FloatingLayer" } : name === "./AgentOrchestratorComposerControls" ? { AgentOrchestratorComposerControls: "Controls" }
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
-          : name === "./AgentOrchestratorRoleEditor" ? { modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
+          : name === "./AgentOrchestratorRoleEditor" ? { cpaProviderOf: () => null, modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
           : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
           : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: (text) => text }
           : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
@@ -1945,12 +1951,41 @@ test("Focus mode keeps its joined answer without repeating the same commentary a
     currentTarget: { closest: () => null, getBoundingClientRect: () => ({ right: 600, bottom: 100 }) },
   });
   const menu = walk(page.render()).find(row => row.type === "ChatMenu").props.menu;
-  menu.items.find(row => row.label === "Reply style").items.find(row => row.label === "Focus").run();
+  menu.items.find(row => row.label === "Response style").items.find(row => row.label === "Global default").items.find(row => row.label === "Focus").run();
   page.render();
   await new Promise(setImmediate);
   const view = page.render();
   assert.equal(walk(view).filter(row => row.props?.text === answer).length, 1);
   assert.equal(walk(view).filter(row => row.props?.text === commentary).length, 0);
+});
+
+test("global Response style changes update other mounted panes and explicit styles override model heuristics", t => {
+  const previous = workbenchStorage;
+  workbenchStorage = new Map();
+  const listeners = new Map();
+  const responseEvents = {
+    addEventListener(name, fn) { const set = listeners.get(name) ?? new Set(); set.add(fn); listeners.set(name, set); },
+    removeEventListener(name, fn) { listeners.get(name)?.delete(fn); },
+    dispatchEvent(event) { for (const fn of listeners.get(event.type) ?? []) fn(event); },
+  };
+  const props = model => base({ selectedTaskId: "t", runs: [run(`style:${model}`, "t", [node("p", "planner", "finished", {
+    route: { harness_id: "ao:codex", model }, receipt: { answer: "Result" },
+  })], { execution_mode: "single" })] }).props;
+  const one = mount(props("cpa/deepseek-flash"), { effects: true, responseEvents });
+  const two = mount(props("gpt-6"), { effects: true, responseEvents });
+  t.after(() => { one.unmount(); two.unmount(); workbenchStorage = previous; });
+  one.render(); two.render();
+  const choose = (page, choice) => {
+    walk(page.render()).find(row => row.props?.["aria-label"] === "More chat actions").props.onClick({
+      currentTarget: { closest: () => null, getBoundingClientRect: () => ({ right: 600, bottom: 100 }) },
+    });
+    const menu = walk(page.render()).find(row => row.type === "ChatMenu").props.menu;
+    menu.items.find(row => row.label === "Response style").items.find(row => row.label === "Global default").items.find(row => row.label === choice).run();
+  };
+  choose(two, "Transcript");
+  assert.ok(walk(one.render()).some(row => row.props?.["data-transcript"] === "codex"), "an open DeepSeek pane follows the global choice");
+  choose(one, "DeepSeek");
+  assert.ok(walk(two.render()).some(row => row.props?.className === "cx-turn is-dsh"), "an ordinary-model pane follows explicit DeepSeek style");
 });
 
 test("team summary scopes repeated tool IDs to their actual worker", async t => {

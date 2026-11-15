@@ -6,6 +6,7 @@ import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
 import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
+import { ResponseStyleSettings } from "./ResponseStyleSettings";
 import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
 
@@ -29,16 +30,17 @@ const LIST_SHORTCUTS: { label: string; keys: string }[] = [
  * sidebar's Settings row or Ctrl+, (pressed again, it closes, as in Codex).
  */
 
-type Section = "general" | "chat" | "instructions" | "computer-use" | "updates";
+type Section = "general" | "chat" | "response-style" | "instructions" | "computer-use" | "updates";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "general", label: "General" },
   { id: "chat", label: "Chat" },
+  { id: "response-style", label: "Response style" },
   { id: "instructions", label: "Instructions" },
   { id: "computer-use", label: "Computer use" },
   { id: "updates", label: "Updates" },
 ];
-const SECTION_GLYPHS = { general: "gear", chat: "compose", instructions: "edit", "computer-use": "monitor", updates: "update" } as const;
+const SECTION_GLYPHS = { general: "gear", chat: "compose", "response-style": "spark", instructions: "edit", "computer-use": "monitor", updates: "update" } as const;
 
 /** What agent_instructions answers: both AGENTS.md files and the projects that can have one. */
 type InstructionFiles = { global: string; globalFile: string; workspace: string | null; workspaceFile: string | null;
@@ -450,7 +452,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <kbd className="cxs-kbd">{item.keys}</kbd>
               </Row>)}
             </Group>
-          </div> : section === "instructions" ? <div className="cxs-sections">
+          </div> : section === "response-style" ? <ResponseStyleSettings /> : section === "instructions" ? <div className="cxs-sections">
             <InstructionsSection workspaceId={workspaceId} onError={setError} />
           </div> : section === "computer-use" ? <div className="cxs-sections">
             <Group title="Always-allowed apps">
