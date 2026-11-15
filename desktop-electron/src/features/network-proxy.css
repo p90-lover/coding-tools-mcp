@@ -4,7 +4,10 @@
 .px-page {
   display: grid;
   gap: 18px;
+  min-width: 0;
   width: min(640px, 100%);
+  box-sizing: border-box;
+  container-type: inline-size;
   margin: 0 auto;
   padding: 36px 20px 48px;
 }
@@ -53,7 +56,8 @@
 }
 
 .px-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   min-height: 52px;
@@ -132,7 +136,9 @@
 
 .px-proto {
   flex: none;
+  width: 52px;
   padding: 2px 6px;
+  text-align: center;
   border-radius: var(--radius-sm);
   background: var(--color-background-control);
   color: var(--color-text-secondary);
@@ -142,8 +148,24 @@
   letter-spacing: 0.04em;
 }
 
+.px-identity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 8px 0;
+}
+
+.px-name {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .px-addr {
   overflow: hidden;
+  color: var(--color-text-secondary);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   text-overflow: ellipsis;
@@ -153,6 +175,32 @@
 .px-addr em {
   color: var(--color-text-tertiary);
   font-style: normal;
+}
+
+/* The saved sign-in's username: proxies on one address differ only by it. */
+.px-user {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* Ellipsis works on the text's own box, not on a flex container's loose text. */
+.px-user span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.px-user svg {
+  flex: none;
+  width: 11px;
+  height: 11px;
 }
 
 .px-lock {
@@ -229,6 +277,7 @@
 /* Tools show on hover or focus; the delete button turns red for its second click. */
 .px-tools {
   display: flex;
+  flex: none;
   gap: 2px;
   opacity: 0;
   transition: opacity var(--duration-micro) ease;
@@ -242,6 +291,7 @@
 
 .px-tools button {
   display: grid;
+  flex: none;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -300,6 +350,8 @@
 
 .px-protocols {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   justify-self: start;
   padding: 2px;
   border-radius: var(--radius-md);
@@ -323,13 +375,29 @@
   box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
 }
 
+.px-name-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
 .px-fields {
   display: grid;
-  grid-template-columns: 1fr 96px;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
-.px-fields input {
+.px-endpoint-fields {
+  grid-template-columns: minmax(0, 1fr) 96px;
+}
+
+.px-fields input,
+.px-name-field input {
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
   height: 34px;
   padding: 0 10px;
@@ -342,7 +410,8 @@
   transition: border-color var(--duration-micro) ease;
 }
 
-.px-fields input:focus {
+.px-fields input:focus,
+.px-name-field input:focus {
   border-color: var(--blue-300);
   outline: none;
 }
@@ -471,7 +540,7 @@
 
 .px-route {
   display: grid;
-  grid-template-columns: 1fr 130px 170px;
+  grid-template-columns: minmax(0, 1fr) 130px minmax(0, 170px);
   align-items: center;
   gap: 8px;
   min-height: 38px;
@@ -510,13 +579,40 @@
   font-size: var(--text-xs);
 }
 
-@media (max-width: 560px) {
+@container (max-width: 500px) {
   .px-route {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 6px 10px;
+  }
+
+  .px-route strong {
+    grid-column: 1 / -1;
   }
 
   .px-tools {
     opacity: 1;
+  }
+}
+
+@container (max-width: 360px) {
+  .px-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 8px;
+    padding: 4px 8px 4px 4px;
+  }
+
+  .px-pick {
+    grid-row: 1 / 3;
+  }
+
+  .px-health,
+  .px-tools {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .px-credential-fields {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

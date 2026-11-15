@@ -148,6 +148,8 @@ export interface ProxyProfileRecord {
   scopes: ProxyScope[];
   bypass: string[];
   hasAuthentication: boolean;
+  /** The saved sign-in's username (never its password), so proxies on one address can be told apart. */
+  username?: string;
   createdAt: string;
   updatedAt: string;
   lastCheckedAt?: string;

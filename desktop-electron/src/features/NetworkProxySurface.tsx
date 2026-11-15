@@ -22,6 +22,7 @@ const LOOPBACK_BYPASS = ["localhost", "127.0.0.1", "::1", "*.localhost"];
 
 interface Draft {
   id?: string;
+  name: string;
   protocol: ProxyProtocol;
   host: string;
   port: string;
@@ -30,11 +31,16 @@ interface Draft {
   hasAuthentication: boolean;
 }
 
-const emptyDraft = (): Draft => ({ protocol: "http", host: "", port: "", username: "", password: "", hasAuthentication: false });
+const emptyDraft = (): Draft => ({ name: "", protocol: "http", host: "", port: "", username: "", password: "", hasAuthentication: false });
+// Editing shows the saved username; the password stays blank and is kept unless one is typed.
 const draftOf = (profile: ProxyProfileRecord): Draft => ({
-  id: profile.id, protocol: profile.endpoint.protocol, host: profile.endpoint.host, port: String(profile.endpoint.port),
-  username: "", password: "", hasAuthentication: profile.hasAuthentication,
+  id: profile.id, name: profile.name, protocol: profile.endpoint.protocol, host: profile.endpoint.host, port: String(profile.endpoint.port),
+  username: profile.username ?? "", password: "", hasAuthentication: profile.hasAuthentication,
 });
+
+/** A proxy as one line, for the route pickers: name, address and, when it signs in, its username. */
+const profileLabel = (profile: ProxyProfileRecord) =>
+  [profile.name, `${profile.endpoint.host}:${profile.endpoint.port}`, profile.username].filter(Boolean).join(" · ");
 
 /** "http://user:pass@host:port", "host:port:user:pass" or "host:port" pasted into Host fills the form. */
 function pastedProxy(text: string, draft: Draft): Draft | null {
@@ -79,6 +85,7 @@ const PULSE = "M3 12h4l3-8 4 16 3-8h4";
 const PEN = "M4 20h4L19 9l-4-4L4 16v4z";
 const BIN = "M5 7h14M10 7V4h4v3m-7 0 1 13h8l1-13";
 const PLUS = "M12 5v14M5 12h14";
+const PERSON = "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zm-7 8a7 7 0 0 1 14 0";
 
 export function NetworkProxySurface({
   language,
@@ -173,7 +180,7 @@ export function NetworkProxySurface({
     const existing = profiles.find((profile) => profile.id === draft.id);
     const input: ProxyProfileInput = {
       ...(draft.id ? { id: draft.id } : {}),
-      name: `${draft.protocol.toUpperCase()} ${draft.host.trim()}:${port}`,
+      name: draft.name.trim() || `${draft.protocol.toUpperCase()} ${draft.host.trim()}:${port}`,
       enabled: true,
       endpoint: { protocol: draft.protocol, host: draft.host.trim(), port },
       scopes: existing?.scopes ?? ["all"],
@@ -257,11 +264,19 @@ export function NetworkProxySurface({
             onClick={() => setDraft({ ...draft, protocol })} role="radio" type="button">{protocol.toUpperCase()}</button>
         ))}
       </div>
-      <div className="px-fields">
+      <label className="px-name-field">
+        <span>{t("Proxy name", "代理名稱", "代理名称", "プロキシ名")}</span>
+        <input autoComplete="off" aria-label={t("Proxy name", "代理名稱", "代理名称", "プロキシ名")} maxLength={160}
+          placeholder={t("Optional name", "名稱（可選）", "名称（可选）", "名前（任意）")} value={draft.name}
+          onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+      </label>
+      <div className="px-fields px-endpoint-fields">
         <input aria-label={t("Host", "主機", "主机", "ホスト")} autoFocus className="px-host" placeholder="host" value={draft.host}
           onChange={(event) => setDraft(pastedProxy(event.target.value, draft) ?? { ...draft, host: event.target.value })} />
         <input aria-label={t("Port", "連接埠", "端口", "ポート")} className="px-port" inputMode="numeric" placeholder="port" value={draft.port}
           onChange={(event) => setDraft({ ...draft, port: event.target.value.replace(/\D/g, "").slice(0, 5) })} />
+      </div>
+      <div className="px-fields px-credential-fields">
         <input aria-label={t("Username", "使用者名稱", "用户名", "ユーザー名")} autoComplete="off"
           placeholder={draft.hasAuthentication ? "••••••••" : t("username", "使用者名稱", "用户名", "ユーザー名")}
           value={draft.username} onChange={(event) => setDraft({ ...draft, username: event.target.value })} />
@@ -299,7 +314,15 @@ export function NetworkProxySurface({
                     onClick={() => route(globalOn, profile.id)}>
                     <span className="px-radio" />
                     <span className="px-proto">{profile.endpoint.protocol}</span>
-                    <span className="px-addr">{profile.endpoint.host}<em>:{profile.endpoint.port}</em></span>
+                    <span className="px-identity">
+                      <span className="px-name" title={profile.name}>{profile.name}</span>
+                      <span className="px-addr" title={`${profile.endpoint.host}:${profile.endpoint.port}`}>{profile.endpoint.host}<em>:{profile.endpoint.port}</em></span>
+                      {profile.username ? (
+                        <span className="px-user" title={`${t("Username", "使用者名稱", "用户名", "ユーザー名")}: ${profile.username}`}>
+                          <Glyph d={PERSON} /><span>{profile.username}</span>
+                        </span>
+                      ) : null}
+                    </span>
                     {profile.hasAuthentication ? <span className="px-lock" title={t("Signs in", "需要登入", "需要登录", "認証あり")}>●</span> : null}
                   </button>
                   <span className={`px-health ${state.tone}`} title={profile.lastError ?? undefined}><i />{state.text}</span>
@@ -347,7 +370,7 @@ export function NetworkProxySurface({
                   </select>
                   {mode === "profile" ? (
                     <select disabled={busy} value={policy?.profileId ?? ""} onChange={(event) => setProviderPolicy(providerId, "profile", event.target.value)}>
-                      {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.endpoint.host}:{profile.endpoint.port}</option>)}
+                      {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profileLabel(profile)}</option>)}
                     </select>
                   ) : null}
                 </div>
@@ -364,7 +387,7 @@ export function NetworkProxySurface({
                   </select>
                   {mode === "profile" ? (
                     <select disabled={busy} value={policy?.profileId ?? account.proxyProfileId ?? ""} onChange={(event) => setAccountPolicy(account.id, "profile", event.target.value)}>
-                      {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.endpoint.host}:{profile.endpoint.port}</option>)}
+                      {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profileLabel(profile)}</option>)}
                     </select>
                   ) : null}
                 </div>

@@ -421,6 +421,35 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     }
   }
 
+  // The username of a proxy's saved sign-in, for the Proxy page to tell proxies on one address
+  // apart; never the password. Only the window's copy of a snapshot carries it
+  // (withProxyUsernames): saves, routing and the snapshot itself never decrypt, so an edit doesn't
+  // need the saved key. Remembered per saved secret, so a page update decrypts nothing new; a
+  // sign-in that can't be read now is tried again next time.
+  const proxyUsernames = new Map();
+  function proxyUsername(profileId) {
+    const envelope = state.secrets.proxies[profileId];
+    if (typeof envelope?.data !== "string") return undefined;
+    if (!proxyUsernames.has(envelope.data)) {
+      const secret = codec.decrypt(envelope);
+      if (!secret) return undefined;
+      if (proxyUsernames.size >= 64) proxyUsernames.clear();
+      proxyUsernames.set(envelope.data, typeof secret.username === "string" ? secret.username.trim().slice(0, 160) : "");
+    }
+    return proxyUsernames.get(envelope.data) || undefined;
+  }
+
+  function withProxyUsernames(snapshot) {
+    if (!Array.isArray(snapshot?.proxyProfiles)) return snapshot;
+    return {
+      ...snapshot,
+      proxyProfiles: snapshot.proxyProfiles.map((profile) => {
+        const username = profile.hasAuthentication ? proxyUsername(profile.id) : undefined;
+        return username ? { ...profile, username } : profile;
+      }),
+    };
+  }
+
   function publicSnapshot() {
     recoverState();
     return {
@@ -906,6 +935,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
 
   return {
     snapshot: publicSnapshot,
+    withProxyUsernames,
     saved,
     saveAccount,
     setDefaultAccount,
