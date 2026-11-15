@@ -102,9 +102,16 @@ function installProviderNetwork({
     }
   }
 
+  // The window's copy names each proxy's sign-in username, so the Proxy page can tell proxies on one
+  // address apart. Only this copy: saves and routing never decrypt a sign-in.
+  function shown(snapshot) {
+    return controller?.store?.withProxyUsernames?.(snapshot) ?? snapshot;
+  }
+
   function publish(snapshot) {
-    sendAll("launcher:provider-network-changed", snapshot);
-    return snapshot;
+    const visible = shown(snapshot);
+    sendAll("launcher:provider-network-changed", visible);
+    return visible;
   }
 
   providerNetworkControllerPromise = app.whenReady().then(async () => {
@@ -214,7 +221,7 @@ function installProviderNetwork({
     return publish(snapshot);
   }
 
-  handle("launcher:provider-snapshot", (active) => active.store.snapshot());
+  handle("launcher:provider-snapshot", (active) => shown(active.store.snapshot()));
   handle("launcher:provider-execution-plan", (active, _event, input) => (
     createProviderExecutionPlan(active.store.snapshot(), input)
   ));
@@ -258,8 +265,7 @@ function installProviderNetwork({
   ), "network");
   handle("launcher:proxy-profile-test", async (active, _event, profileId) => {
     const result = await active.testProxyProfile(profileId);
-    publish(result.snapshot);
-    return result;
+    return { ...result, snapshot: publish(result.snapshot) };
   }, "network");
   // Decodo's sticky proxy list (decodo-proxies.cjs), read in-app instead of through Nova.
   handle("launcher:decodo-save", (active, _event, input) => publishMutation(
@@ -269,8 +275,7 @@ function installProviderNetwork({
   handle("launcher:decodo-sync", async (active) => {
     try {
       const result = await active.syncDecodo();
-      publish(result.snapshot);
-      return result;
+      return { ...result, snapshot: publish(result.snapshot) };
     } catch (error) {
       publish(active.store.snapshot());
       throw error;
