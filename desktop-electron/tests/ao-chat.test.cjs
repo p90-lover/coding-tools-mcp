@@ -589,8 +589,17 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatReplyPlan.tsx"), "utf8"),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText,
   { exports: replyPlanView, require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" } : {} });
+  const responseStyles = {}, responseMenu = {};
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/chat-response-style.ts"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+    { exports: responseStyles, structuredClone, require: name => name === "./chat-reply-plan" ? replyPlan : {} });
+  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/response-style-menu.ts"), "utf8"),
+    { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
+    { exports: responseMenu, require: name => name === "./chat-response-style" ? responseStyles : {} });
   vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, {
     exports: component, require: name => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : name === "./ao-chat" ? chat
+      : name === "./chat-response-style" ? responseStyles : name === "./response-style-menu" ? responseMenu
+      : name === "./AgentOrchestratorRoleEditor" ? { cpaProviderOf: () => null }
       : name === "./ChatReplyHead" ? replyHead
       : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
       : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
