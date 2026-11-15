@@ -103,7 +103,49 @@ test("each Auth Files card shows its own current windows, matched by auth file n
   assert.doesNotMatch(first.textContent, /Last|Current|failed|reset/);
   assert.deepEqual(second.innerLines, ["5-hourPending reset", "Weekly1 request · 900 tokens · ≈$0.004+"]);
   assert.deepEqual(quiet.innerLines, ["Last 5 h0 requests", "Last 7 days0 requests"], "non-Codex cards retain rolling history");
-  assert.ok(p.storage.has("coding-tools-card-usage-v2"), "only reset-aligned answers are kept for the next page load");
+  const cached = JSON.parse(p.storage.get("coding-tools-card-usage-v2"));
+  assert.deepEqual(Object.keys(cached.byRange).sort(), ["5h", "7d", "session", "week"], "rolling and confirmed-reset ranges are cached separately");
+});
+
+test("missing reset windows show available rolling tokens with their own labels", async () => {
+  const p = page(["codex-known", "custom-account"], (range) => ({ available: true, range, accounts:
+    ["codex-known", "custom-account"].map((file) => row(file, { provider: "codex", window: null,
+      requests: range === "5h" ? 12 : range === "7d" ? 40 : 0,
+      totalTokens: range === "5h" ? 1200 : range === "7d" ? 4000 : 0,
+      usageAvailable: range === "5h" || range === "7d" })) }));
+  p.run(); await settle();
+  assert.deepEqual(p.asked.sort(), ["5h", "7d", "session", "week"], "fallback needs no extra reads");
+  for (const card of p.cards) {
+    const box = card.children.find((child) => "codingToolsUsage" in child.dataset);
+    assert.deepEqual(box.innerLines, ["Last 5 h12 requests · 1.2K tokens · ≈$0.000", "Last 7 days40 requests · 4.0K tokens · ≈$0.000"]);
+    assert.match(box.children[0].title, /Rolling history/);
+    assert.doesNotMatch(card.textContent + box.children[0].title, /Pending reset|Since last limit reset/);
+  }
+});
+
+test("confirmed resets take priority and expired totals fall back to labelled cached history", async () => {
+  let confirmed = false;
+  const answer = (range) => ({ available: true, range, accounts: [row("codex-a", {
+    window: range === "session" ? confirmed ? { from: NOW + 5 * 60_000 - 5 * HOUR, to: NOW + 5 * 60_000 } : null
+      : range === "week" ? { from: NOW - HOUR, to: NOW + 7 * HOUR } : null,
+    requests: range === "session" ? 2 : range === "week" ? 3 : 9, totalTokens: 900,
+  })] });
+  const p = page(["codex-a"], answer);
+  p.run(); await settle();
+  const box = p.cards[0].children.find((child) => "codingToolsUsage" in child.dataset);
+  assert.match(box.innerLines[0], /^Last 5 h9 requests/);
+  assert.match(box.innerLines[1], /^Weekly3 requests/);
+  confirmed = true;
+  p.clock(NOW + 3 * 60_000); p.tick(); await settle();
+  assert.match(box.innerLines[0], /^5-hour2 requests/);
+  assert.match(box.children[0].title, /Since last limit reset/);
+  p.clock(NOW + 5 * 60_000); p.tick();
+  assert.match(box.innerLines[0], /^Last 5 h9 requests/);
+  assert.match(box.innerLines[1], /^Weekly3 requests/);
+  const reloaded = page(["codex-a"], () => ({ available: false }), { storage: p.storage });
+  reloaded.clock(NOW + 5 * 60_000); reloaded.run();
+  assert.match(reloaded.cards[0].textContent, /Last 5 h9 requests/);
+  assert.doesNotMatch(reloaded.cards[0].textContent, /5-hour2 requests/);
 });
 
 test("unavailable usage adds nothing, and an unseeded or already running page is left alone", async () => {
@@ -128,7 +170,7 @@ test("an active window with unknown price displays Null, and a failed history re
 });
 
 test("cached totals expire at each reset even before the next scheduled refresh and after reload", async () => {
-  const p = page(["codex-a"], (range) => ({ available: true, range, accounts: [row("codex-a", { requests: 7,
+  const p = page(["codex-a"], (range) => ({ available: range === "session" || range === "week", range, accounts: [row("codex-a", { requests: 7,
     window: { from: NOW - HOUR, to: range === "session" ? NOW + 1000 : NOW + 7 * HOUR } })] }));
   p.run(); await settle();
   assert.match(p.cards[0].textContent, /7 requests/);
