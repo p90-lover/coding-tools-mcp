@@ -2859,13 +2859,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (!entry.pending) {
         const since = now(), steps = {};
-        Object.assign(entry, { since, steps, step: "starting", stallLogged: false });
-        // Each awaited step is timed; the one in flight is what the stall log above names.
-        const timed = async (step, work) => {
-          entry.step = step;
-          const began = now();
-          try { return await work(); } finally { steps[step] = (steps[step] ?? 0) + now() - began; }
-        };
+        Object.assign(entry, { since, steps, step: null, stallLogged: false });
+        // Each awaited step is named while in flight (what the stall log above reports) and timed when it
+        // ends. Plain marks around the awaits, not an async wrapper: a wrapper adds microtask turns, so a
+        // frame landed after the chat's next read and that read showed the frame before it.
+        let stepAt = since;
+        const begin = (name) => { entry.step = name; stepAt = now(); };
+        const end = () => { if (entry.step) steps[entry.step] = (steps[entry.step] ?? 0) + now() - stepAt; entry.step = null; };
         let failed = false;
         entry.pending = (async () => {
           let frame, observedTurn;
@@ -2877,7 +2877,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 // A queued follow-up can be the session's newest turn while this card still owns
                 // another one. Read that turn, as the run loop does, rather than dropping its reply.
                 const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session) || entry.turnId;
-                const observed = await timed("observe", () => harnessService().observe(session, expectedTurn));
+                begin("observe");
+                const observed = await harnessService().observe(session, expectedTurn);
+                end();
                 const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
                 if (currentTurn && observed.turnState === "running" && typeof observed.turnId === "string" && observed.turnId) observedTurn = observed.turnId;
                 // Started: an agent took the message (AO starts the turn only then; see describeTurn).
@@ -2893,7 +2895,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                   error: publicText(observed.error, 500) };
               }
             } else {
-              const status = (await timed("harness status", () => harnessStatus({ workspaceId: id, runId: run, nodeId: node.id }))).status || {};
+              begin("harness status");
+              const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
+              end();
               const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
               const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
               const output = publicText(status.live_output || thread?.answer || thread?.output);
@@ -2909,7 +2913,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step, thread?.notes)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
-            const latest = await timed("saved run", () => savedNode(id, run, node.id));
+            begin("saved run");
+            const latest = await savedNode(id, run, node.id);
+            end();
             if (!latest.node || !["reserved", "running"].includes(latest.node.state)
               || activityAttempt(id, run, latest.node) !== key) {
               entry.retired = true; entry.frame = null; return;
@@ -2921,7 +2927,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               entry.frame = { ...frame, pending: false };
             }
           } catch (error) {
-            failed = true;
+            failed = true; end();
             if (!entry.retired) entry.frame = { ...(entry.frame || base), pending: false,
               activity: "unknown", error: publicText(error?.message || error, 300) };
           }
