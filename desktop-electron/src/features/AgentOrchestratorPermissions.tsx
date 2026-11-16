@@ -6,6 +6,7 @@ import { CheckGlyph, FolderGlyph, GlobeGlyph, HandGlyph, ShieldAlertGlyph, Shiel
 import type { KeyboardEvent, ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 import { NATIVE_HARNESS, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
+import { knownQuotaReviews, onQuotaReviews, refreshQuotaReviews } from "./quota-reviews";
 
 export type PermissionCapability = {
   supported: boolean; reason?: string;
@@ -46,6 +47,15 @@ export function livePermissionRoute(mission: AoMission, node: AoNode): AoNode["r
     ...(intent?.approval_policy !== undefined ? { approval_policy: intent.approval_policy } : {}),
     ...(intent?.approvals_reviewer !== undefined ? { approvals_reviewer: intent.approvals_reviewer } : {}) };
 }
+/**
+ * Whether this app itself reviews a card's requests under "Approve for me": the agent asks the app
+ * (`launched`) and the pick it follows (`live`) is Approve for me. These are the reviews "Allow
+ * quota-based reviews" gates (quotaReviewBlocked); Codex's own auto-review is separate.
+ */
+export function appReviewsRequests(launched: AoNode["route"] | undefined, live = launched): boolean {
+  return appAnswersRequests(launched) && live?.approvals_reviewer === "auto_review";
+}
+export const QUOTA_REVIEWS_PAUSED = "Approve for me is paused: quota-based reviews are off, so requests wait for you. Turn on Allow quota-based reviews in Settings > Chat to resume it.";
 /** What a saved permission change does to the chat's running turn. */
 export function permissionChangeNotice(mission: AoMission | undefined, selection: PermissionSelection): string {
   const running = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)) ?? [];
@@ -166,6 +176,13 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const [failed, setFailed] = useState(false);
   /** Full access waiting on the dialog, and whether the chat it opened from is dark. */
   const [confirming, setConfirming] = useState<{ selection: PermissionSelection; dark: boolean } | null>(null);
+  /** "Allow quota-based reviews" in Settings > Chat: while it is off, the requests this app reviews wait for you. */
+  const [quotaReviews, setQuotaReviews] = useState<boolean | null>(knownQuotaReviews);
+  useEffect(() => onQuotaReviews(setQuotaReviews), []);
+  // Read once per window, and again whenever the menu opens, since it is switched on another page.
+  useEffect(() => {
+    if (popup.open || knownQuotaReviews() === null) void refreshQuotaReviews().then(setQuotaReviews, () => undefined);
+  }, [popup.open]);
   const nodes = team?.nodes ?? [];
   const supported = nodes.filter(node => metadata[node.id]?.supported);
   const key = nodes.map(node => node.id).join("|");
@@ -191,15 +208,20 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const active = PERMISSION_MODES.find(mode => nodes.length > 0 && nodes.every(node =>
     nativePermission(node.route) === mode.profile && node.route.approval_policy === mode.policy && node.route.approvals_reviewer === mode.reviewer));
   const running = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)) ?? [];
+  // Approve for me answered by this app, in the running turn or from the next one, stops while
+  // quota-based reviews are off: the chip says so instead of "Active now".
+  const pausedHere = (launched: AoNode["route"], live = launched) => quotaReviews === false && appReviewsRequests(launched, live);
+  const paused = nodes.some(node => pausedHere(node.route)) || running.some(node => pausedHere(node.route, livePermissionRoute(mission!, node)));
   const effective = running.map(node => {
     const status = runtimePolicies?.[mission!.id + ":" + node.id];
     if (status?.policy_acknowledged && status.effective_policy) return "Active: " + Object.values(status.effective_policy).join(" · ");
     if (node.route.harness_id === NATIVE_HARNESS) return "Active permissions not confirmed yet";
     // An agent that asks this app about each request runs by the chat's newest pick at once; one
     // that answers for itself keeps what it launched with until its next turn.
-    const live = permissionSummary([{ ...node, route: livePermissionRoute(mission!, node) }]);
+    const route = livePermissionRoute(mission!, node);
+    const live = permissionSummary([{ ...node, route }]);
     const launched = permissionSummary([node]);
-    return appAnswersRequests(node.route) ? "Active now: " + live
+    return appAnswersRequests(node.route) ? (pausedHere(node.route, route) ? "Paused now: " : "Active now: ") + live
       : live === launched ? "Active: " + launched : `This turn: ${launched} · your change applies from the next turn`;
   }).join("; ");
   // A pick reaches the running turn at once when every running agent asks this app about its requests.
@@ -233,8 +255,11 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   // access is tinted, so the risky level still stands out without its words.
   return <div className="ao-permissions ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
     <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
-      aria-controls="ao-permissions-panel" aria-label={`Permissions: ${active?.label || "Custom"}`} data-danger={active?.danger ? "" : undefined}
-      disabled={busy || saving} title={(active?.label || "Custom") + "\n" + permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
+      aria-controls="ao-permissions-panel" aria-label={`Permissions: ${active?.label || "Custom"}${paused ? " (paused)" : ""}`}
+      data-danger={active?.danger ? "" : undefined} data-paused={paused ? "" : undefined}
+      // While paused, the save notice ("Active now: …") would contradict the line that explains it.
+      disabled={busy || saving} title={(active?.label || "Custom") + (paused ? " · paused\n" + QUOTA_REVIEWS_PAUSED : "") + "\n" + permissionSummary(nodes)
+        + (effective ? " · " + effective : "") + (notice && !failed && !paused ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
       {ChipGlyph ? <ChipGlyph width="16" height="16" /> : <Icon name="shield" width="16" height="16" />}
     </button>
