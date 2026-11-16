@@ -20,14 +20,14 @@ One loopback **egress router** becomes the only way the app and everything it st
 | Chromium sessions | `session.setProxy` to the router; `app.on("login")` answers the router's 407 with the session's token | Chromium cannot put credentials in proxy rules | FR-2, FR-3 |
 | Programs the app starts | `HTTP(S)_PROXY`/`ALL_PROXY=http://<token>:<key>@127.0.0.1:<port>`, `NO_PROXY` loopback list, `NODE_USE_ENV_PROXY=1` | Constant URL: route changes need no restart; no password in the environment | FR-2, FR-4, FR-5 |
 | CPA | global `proxy-url` = router with the `cpa` token; each credential's `proxy_url` = router with its credential token; API-key groups and the Provider Manager plugin get provider tokens | CPA's own per-credential proxy, so the router knows whose traffic it is | FR-3 |
-| App's own Node requests | an `https.Agent` whose `createConnection` opens a CONNECT through the router (`routed-agent.cjs`) | Works in workers and on Node versions without env-proxy support | FR-2, FR-8 |
+| App's own Node requests | `HTTP(S)_PROXY` = router with the `app` token and `NODE_USE_ENV_PROXY=1` in main's environment, which workers and children inherit (Electron 45's Node 24 honours it in workers; checked) | No custom agent to keep in step with each HTTP client; `routed-agent.cjs` turned out unnecessary | FR-2, FR-8 |
 | Exit check | `https://www.cloudflare.com/cdn-cgi/trace` through the profile | Plain text `ip=` and `loc=`, no account, already used for diagnosis | FR-7 |
 
 ### 架构设计
 
 ```
  Chromium sessions ──(setProxy, 407 → app.on("login") token)──┐
- App Node requests ──(routed https.Agent, app token)──────────┤
+ App Node requests ──(env URL in workers, app token)──────────┤
  AO, agents, tools, bridge, tunnel, MCP servers ──(env URL)───┤
  ChatGPT Desktop instances ──(per-instance open port, app)────┤      ┌────────────── route table (pushed by main)
  CPA default ──(proxy-url, cpa token)─────────────────────────┤      │ token → target
