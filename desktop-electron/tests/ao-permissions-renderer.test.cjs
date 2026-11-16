@@ -465,6 +465,38 @@ test("runtime policy is labelled effective only after actual acknowledgement", (
   assert.match(elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title, /Active: runtime\/actual · on-request · auto_review/);
 });
 
+test("a permission picked while an AO agent works is active now when the agent asks the app, else from the next turn", () => {
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const chip = (launched, harness = "ao:claude-code") => {
+    const lead = { ...node("lead", harness, ":ao-default"), route: { harness_id: harness, permission_profile: ":ao-default", native_permission_profile: ":workspace", ...launched } };
+    // The chat picked Approve for me after the turn started: AO records it, the running card keeps its launch route.
+    const mission = { id: "chat", team: { permission_selections: { lead: { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" } } },
+      nodes: [{ ...lead, id: "attempt", template_role_id: "lead", state: "running" }] };
+    const props = { team: { id: "team", nodes: [lead] }, mission, busy: false, loadProfiles: async () => ({}), save: async () => "", shared: null };
+    const capability = { supported: true, profiles: [":read-only", ":workspace", ":danger-full-access"].map(id => ({ id, allowed: true })),
+      approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"] };
+    const tree = view.render("AgentOrchestratorPermissions", props, [true, { lead: capability }, "", false]);
+    return { title: elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title,
+      option: elements(tree, item => item.props?.role === "menuitemradio")[0].props.title, mission };
+  };
+  // Launched to ask (reviewer: you): every request reaches the app, which follows the new pick now.
+  const asks = chip({ approval_policy: "on-request", approvals_reviewer: "user" });
+  assert.match(asks.title, /Active now: :workspace · on-request · auto_review/);
+  assert.doesNotMatch(asks.title, /not confirmed/);
+  assert.equal(asks.option, "Applies now, to the running turn's requests too");
+  assert.equal(view.exports.permissionChangeNotice(asks.mission, { profile: ":workspace", policy: "on-request", reviewer: "auto_review" }),
+    "Active now: the running turn's requests follow it.");
+  // Codex launched with its own auto-review answers for itself until its next turn.
+  const own = chip({ approval_policy: "on-request", approvals_reviewer: "auto_review" }, "ao:codex");
+  own.mission.team.permission_selections.lead = { approval_policy: "on-request", approvals_reviewer: "user" };
+  const ownTree = view.render("AgentOrchestratorPermissions", { team: { id: "team", nodes: [own.mission.nodes[0]] }, mission: own.mission, busy: false,
+    loadProfiles: async () => ({}), save: async () => "", shared: null }, [true, { attempt: { supported: true, profiles: [] } }, "", false]);
+  assert.match(elements(ownTree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title, /This turn: .*auto_review · your change applies from the next turn/);
+  assert.equal(view.exports.permissionChangeNotice(own.mission, { reviewer: "user" }), "Applies from the next turn. A running turn keeps its permissions.");
+  // No running turn: the next one uses it.
+  assert.equal(view.exports.permissionChangeNotice({ id: "chat", nodes: [] }, { reviewer: "auto_review" }), "Applies from the next turn. A running turn keeps its permissions.");
+});
+
 test("successful permission save announces exact scope without a visible footer; errors remain visible", async () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   const message = "Selected for next attempt; shared grants unchanged; runtime acknowledgement required.";

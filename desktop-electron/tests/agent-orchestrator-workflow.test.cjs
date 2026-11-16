@@ -6709,6 +6709,57 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
 });
 
+test("Approve for me picked while a turn runs reviews that turn's requests at once, not from its next turn", async () => {
+  // Seen 2026-11-16: Auto Review answered 500 for a while; picked again once it was back, "Approve
+  // for me" was saved for the next turn only, and a turn ten hours in kept waiting on the person.
+  const run = async (selection) => {
+    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+      permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+    const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+    const requests = [{ approval_id: "safe", source: "ao", kind: "command", command: "npm test", tool: "Bash", summary: "Bash", decisions }];
+    // apply_team keeps the running card's route as it launched and records the pick for the chat.
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+      team: { id: "mission:run", nodes: [], permission_selections: selection ? { one: selection } : {} },
+      nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const resolved = [], advised = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        advised.push(JSON.parse(init.body).model);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: "{\"action\":\"allow\",\"reason\":\"fixture\"}" } }] }) };
+      },
+      requestHeadless: async endpoint => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        return { ok: true, run: mission };
+      },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+          approvals: requests.filter(request => !resolved.some(([, id]) => id === request.approval_id)) }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push([session, requestId, decisionId]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 150 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return { resolved: JSON.parse(JSON.stringify(resolved)), advised };
+  };
+  const picked = await run({ approval_policy: "on-request", approvals_reviewer: "auto_review" });
+  // npm test is one of the routine commands Approve for me runs unasked; anything a model reviews goes to codex-auto-review.
+  assert.deepEqual(picked.resolved, [["session-1", "safe", "yes"]], "the running turn's request is answered by Approve for me");
+  assert.ok(picked.advised.every(model => model === "codex-auto-review"));
+  const unpicked = await run(null);
+  assert.deepEqual(unpicked.resolved, [], "launched to ask, with nothing picked since, the request stays the person's");
+  assert.equal(unpicked.advised.length, 0, "and no reviewer is asked");
+});
+
 test("Approve for me is reviewed by codex-auto-review only, and the person decides when it cannot answer", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
