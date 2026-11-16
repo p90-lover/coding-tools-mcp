@@ -1878,6 +1878,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
               await new Promise(resolve => setTimeout(resolve, 500));
               continue;
             }
+            // A session AO has ended or no longer has holds no agent: the idle sweep need not ask
+            // again. AO's list still shows some ended chats as live ("exited", not terminated), and
+            // each sweep asked about every one of them again (six warnings a minute after a start,
+            // 2026-11-16, once the sweep could read the list at all). Other callers get the refusal.
+            if (["SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error?.code)) {
+              exitedReleased.add(key);
+              if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
+            }
             if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
             // AO stopped any host the exited session still had; the idle sweep need not ask again.
             exitedReleased.add(key);
@@ -1942,7 +1950,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       // 1.4 GB on 2026-10-21). Exiting it again stops that host (AO's ExitAgent), once per app run.
       const candidates = sessions.filter(session => session?.mode === "chat" && !session.isTerminated
         && !exitingAgents.has(String(session.id)) && (session.status === "idle" || (session.status === "exited" && !exitedReleased.has(String(session.id)))));
-      const idle = await Promise.all(candidates.map(async session => {
+      const idleSince = async session => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
         const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
         const last = turns[turns.length - 1];
@@ -1951,6 +1959,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const used = Math.max(...[last.completedAt, last.startedAt, last.requestedAt, session.lastUserMessageAt]
           .map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
         return Number.isFinite(used) && now - used >= idleMs ? String(session.id) : null;
+      };
+      // A few at a time. All at once was one conversation read per idle or exited chat in the same
+      // moment: 355 of them 20 s after the app started, again at 60 s and at 3 min, while AO was still
+      // bringing its chats back on a cold disk (2026-11-16: reads of 28 s there, and timeouts).
+      const READS_AT_ONCE = 4;
+      const idle = [];
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(READS_AT_ONCE, candidates.length) }, async () => {
+        while (next < candidates.length) {
+          const session = candidates[next++];
+          idle.push(await idleSince(session));
+        }
       }));
       return idle.filter(Boolean);
     },
