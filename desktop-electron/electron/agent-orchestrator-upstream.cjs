@@ -1245,6 +1245,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new Error("A valid AO session ID is required");
     return value;
   };
+  // The sessions AO has not terminated, which is all the sweeps and busy checks below look at.
+  // They used to read the whole list. AO keeps every terminated session (815 of 1,176 on
+  // 2026-11-16), and at 946 KB the list passed requestApi's 900 KB default, so every read failed
+  // with "AO response exceeds the handler limit". Idle, stranded and old sessions were then never
+  // released (which kept the list growing), and "is any agent mid-turn?" could not answer, which
+  // the auto-installer and the CPA-key restart both count as busy: no update installed itself.
+  // AO filters on `active`; the larger budget keeps a long list of live sessions readable.
+  const LIVE_SESSIONS = "/api/v1/sessions?active=true";
+  const LIVE_SESSIONS_READ = { maxBytes: 8 * 1024 * 1024 };
+  const liveSessions = async () => {
+    const list = await internalApi("GET", LIVE_SESSIONS, undefined, LIVE_SESSIONS_READ);
+    return [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+  };
   // The window each session was launched with, including a blank card's resolved full limit
   // (defaultContextWindow), which no route records and AO does not read back. The context meter
   // shows it over the agent's own report (Claude Code over ACP says 200K for any unknown model).
@@ -1923,8 +1936,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * ago. Sessions that never ran a turn (pre-warmed ones) and terminal sessions are left out.
      */
     async idleChatSessions(idleMs, now = Date.now()) {
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       // An "exited" chat can still have its agent running: AO marks it exited when the daemon
       // restarts, but its chat host lives on for a reattach that never comes (five such agents held
       // 1.4 GB on 2026-10-21). Exiting it again stops that host (AO's ExitAgent), once per app run.
@@ -1953,8 +1965,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * status, so it is released after the shorter `unavailableMs`; its next message resumes it.
      */
     async quietWorkingChatSessions(quietMs, now = Date.now(), unavailableMs = quietMs) {
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       // One the exit worker already waits on (releaseAgent) is not stopped again by the sweep.
       return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && !exitingAgents.has(String(session.id))
         && (session.status === "working" || session.statusReadiness === "unavailable"))
@@ -1975,8 +1986,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async staleSessions(workspaceIds, idleMs, now = Date.now()) {
       const projects = new Set((await Promise.all(workspaceIds.map(id => projectFor(id).catch(() => null)))).filter(Boolean));
       if (!projects.size) return [];
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       const lastUse = session => Math.max(...[session.lastUserMessageAt, session.createdAt].map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
       return sessions.filter(session => session && projects.has(session.projectId) && !session.isTerminated && session.isPinned !== true
         && !["working", "spawning", "starting"].includes(session.status) && Number.isFinite(lastUse(session)) && now - lastUse(session) >= idleMs)
@@ -2049,7 +2059,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           && Number.isInteger(owner?.pid) && owner.pid > 0 && daemonPort === port
           && Number.isInteger(port) && port > 0 && port <= 65535;
         if (!sameOwner()) throw new Error("AO session activity is unavailable without starting its runtime");
-        const result = await requestApi("GET", "/api/v1/sessions");
+        const result = await requestApi("GET", LIVE_SESSIONS, undefined, LIVE_SESSIONS_READ);
         if (!sameOwner() || result?.ok !== true) throw new Error("AO session activity could not be confirmed");
         const list = result.data;
         const fields = ["sessions", "items"].filter(key => list && Object.hasOwn(list, key));
@@ -2068,8 +2078,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         }
         return sessions.some(session => session.status === "working" && !session.isTerminated);
       }
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       return sessions.some(session => session?.status === "working" && !session.isTerminated);
     },
     /**
@@ -2077,8 +2086,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * e.g. left from an earlier run. One that took a chat keeps the name but has turns.
      */
     async warmSessions(name) {
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       const candidates = sessions.filter(session => session?.displayName === name && !session.isTerminated && session.status !== "working");
       const unused = await Promise.all(candidates.map(async session => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
