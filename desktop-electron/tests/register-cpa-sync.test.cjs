@@ -153,13 +153,15 @@ test("launcher wires native session setup, ready notifications and lease disposa
   const ast = ts.createSourceFile("main.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "getRegisterHost");
   let options, syncOptions, synced = 0, disposed = 0;
-  const native = {}, events = [], proxy = [];
+  const native = {}, events = [], proxy = [], routed = [];
   const connection = { baseUrl: "http://127.0.0.1:8317", managementKey: "private-fixture" };
   const scope = {
     registerHost: null, path, app: { getPath: name => "G:/fixture/" + name }, quitting: false,
     createRegisterHost: value => { options = value; return native; },
     createRegisterCpaSync: value => { syncOptions = value; return { sync: async () => { synced++; }, dispose: () => { disposed++; } }; },
     externalServicesController: { cpaConnection: () => connection },
+    // Since the egress router (0.8.123), the Register session takes the App route like every app session.
+    providerNetworkReady: async () => ({ routeAppSession: async session => { routed.push(session); } }),
     send: (...args) => events.push(args),
   };
   vm.runInNewContext(fn.getText(ast), scope);
@@ -167,7 +169,8 @@ test("launcher wires native session setup, ready notifications and lease disposa
   assert.equal(scope.getRegisterHost({}), native);
   const browserSession = { setProxy: async value => proxy.push(value.mode) };
   const cleanup = await options.prepareSession(browserSession, origin);
-  assert.deepEqual(proxy, ["direct"]);
+  assert.deepEqual(routed, [browserSession], "the Register session is routed through the egress router's App route");
+  assert.deepEqual(proxy, [], "no direct proxy setting bypasses the router");
   assert.equal(syncOptions.browserSession, browserSession); assert.equal(syncOptions.origin, origin);
   assert.equal(syncOptions.getConnection(), connection); assert.equal(synced, 1);
   options.onChange({ ready: false }); assert.equal(synced, 1);
