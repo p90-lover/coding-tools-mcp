@@ -2827,6 +2827,46 @@ test("a refresh that found nothing new keeps the runs and activity objects alrea
   assert.equal(chat.mergeActivityFrames(frames, {})["r:n"], undefined, "a card that stopped working drops out");
 });
 
+test("a run's activity read that never answers no longer freezes the chat's poll", async () => {
+  // 2026-11-16: one read that never came back stopped every later poll, and the chat said
+  // "reconnecting to the chat's agent" for 8 minutes while a fresh read answered at once.
+  const timers = [];
+  const reads = [];
+  const poll = chat.createActivityPoller((runId) => new Promise((resolve) => reads.push({ runId, resolve })),
+    { waitMs: 10, setTimer: (run) => timers.push(run), clearTimer: () => {} });
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  const first = poll(["r"]);
+  timers.at(-1)(); // the read's wait runs out; the read itself never answers
+  assert.deepEqual(plain(await first), { frames: {}, unanswered: ["r"] }, "the poll returns without it");
+
+  const second = poll(["r"]);
+  assert.equal(reads.length, 2, "the next tick asks again");
+  reads[1].resolve({ n: { activity: "waiting for approval: resume_plan" } });
+  assert.deepEqual(plain(await second), { frames: { "r:n": { activity: "waiting for approval: resume_plan" } }, unanswered: [] });
+
+  const third = poll(["r"]);
+  timers.at(-1)();
+  await third;
+  assert.equal(reads.length, 3);
+  assert.deepEqual(plain(await poll(["r"])), { frames: {}, unanswered: ["r"] }, "two reads of a run hanging: no third is sent");
+  assert.equal(reads.length, 3);
+  reads[0].resolve({ n: { activity: "late" } });
+  await settle();
+  const fifth = poll(["r"]);
+  assert.equal(reads.length, 4, "once one ends the run is asked again");
+  reads[3].resolve({});
+  assert.deepEqual(plain(await fifth), { frames: {}, unanswered: [] }, "a late answer to an abandoned read is never shown");
+});
+
+test("the cards of a run whose read did not answer keep their frames; the others take the new ones", () => {
+  const current = { "r:n": { activity: "reconnecting to the chat's agent" }, "s:m": { activity: "old" }, "r2:x": { activity: "gone" } };
+  const next = { "s:m": { activity: "new" } };
+  assert.deepEqual(plain(chat.keepUnanswered(current, next, ["r"])),
+    { "r:n": { activity: "reconnecting to the chat's agent" }, "s:m": { activity: "new" } }, "only run r's cards are kept, not r2's");
+  assert.equal(chat.keepUnanswered(current, next, []), next, "everyone answered: the poll's frames as they are");
+});
+
 test("a card's timeline keeps the steps that fell out of the newest poll, and a new attempt starts over", () => {
   const item = (id) => ({ id, kind: "tool", status: "completed", text: `call ${id}` });
   const seen = [item("1"), item("2"), item("3")];
