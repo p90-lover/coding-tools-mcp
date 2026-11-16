@@ -7877,6 +7877,66 @@ test("retrying a chat whose grant is spent gets a fresh grant and continues the 
   assert.match(sent[0]?.[1] ?? "", /interrupted before it finished.*Continue the same task/s);
 });
 
+test("a turn that ends on the provider error the agent printed is saved with that error, so a refusal is not retried", async () => {
+  // Seen 2026-11-16: Claude Code said "API Error: 400 Function tools with reasoning_effort are not
+  // supported for gpt-6-astra in /v1/chat/completions" and exited. AO saved the turn as failed with
+  // no error of its own, the card read "The agent exited before it gave a final answer", and
+  // "Retry automatically" ran the refused request eight times, with waits up to 15 minutes.
+  const { agentApiError, REQUEST_REFUSED, QUOTA_EXHAUSTED } = require("../electron/agent-orchestrator-workflow.cjs");
+  const refusal = "API Error: 400 Function tools with reasoning_effort are not supported for gpt-6-astra in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.";
+  assert.equal(agentApiError(refusal), refusal);
+  assert.equal(agentApiError(`I ran the build.\n\n${refusal}`), refusal, "the last thing the turn said");
+  assert.equal(agentApiError("API Error: 500 quota_exceeded: All eligible Codex accounts have exhausted their reported quota"),
+    "API Error: 500 quota_exceeded: All eligible Codex accounts have exhausted their reported quota");
+  // An answer that quotes an error, or goes on after one, did not end on it.
+  for (const answer of ["", "Done.", "The log shows `API Error: 400 bad request` twice.", `${refusal}\n\nI switched model and finished the task.`,
+    "API Error:"]) assert.equal(agentApiError(answer), "", JSON.stringify(answer));
+
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-astra",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  async function failureFor(observed) {
+    const run = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 3, cancelled: false,
+      grant: { executable_sha256: "a".repeat(64), max_turns: 1, turns_started: 1, granted_at_ms: Date.now() - 1000, expires_at_ms: Date.now() + 3_600_000 },
+      nodes: [{ id: "one", role: "planner", state: "failed", parents: [], route, history: [], receipt: { thread_id: "sess-1", error: "controller ended before the turn completed" } }] };
+    const terminal = [];
+    const request = async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [run], worker_capacity: { r1: 1 } };
+      if (endpoint === "/api/v1/ao/control") { const card = run.nodes[0]; card.history = [...card.history, card.receipt]; card.receipt = null; card.state = "pending"; return { ok: true, run }; }
+      if (endpoint === "/api/v1/ao/grant") { run.grant = { ...run.grant, max_turns: 3, turns_started: 0 }; return { ok: true, run, grant: run.grant }; }
+      if (endpoint === "/api/v1/ao/external/reserve") { run.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "the task" }; }
+      if (endpoint === "/api/v1/ao/external/submitted") { run.nodes[0].state = "running"; run.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run }; }
+      if (endpoint === "/api/v1/ao/external/terminal") { terminal.push(body); run.nodes[0].state = "failed"; run.cancelled = true; return { ok: true, run }; }
+      if (endpoint === "/api/v1/tools/call") return { operation: { state: "completed", result: { ok: true, revision: 1, workspace_id: "ws-1", steps: [], task: { id: "task-1", title: "T", description: "d" } } } };
+      throw new Error(`unexpected ${endpoint}`);
+    };
+    const workflow = createAgentOrchestratorWorkflow({
+      requestHeadless: request, findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      aoHarness: {
+        spawn: async () => "new-session", continuable: async id => id === "sess-1",
+        send: async () => ({ turnId: "turn-2", state: "running" }),
+        observe: async (_id, expected) => ({ turnId: expected, approvals: [], timeline: [], ...observed }),
+      },
+    });
+    await workflow.call("start_run", { workspaceId: "ws-1", runId: "r1" });
+    for (let tries = 0; tries < 300 && !terminal.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    workflow.dispose();
+    assert.equal(terminal.length, 1, "the turn's end was saved");
+    return terminal[0].failure;
+  }
+  const exited = await failureFor({ status: "exited", turnState: "failed", exited: true, answer: refusal });
+  assert.equal(exited, refusal, "the provider's refusal, not \"The agent exited before it gave a final answer\"");
+  assert.equal(REQUEST_REFUSED.test(exited), true, "so the card's retry and its goal see a refusal");
+  const idle = await failureFor({ status: "idle", turnState: "failed", exited: false, answer: "API Error: 400 Invalid 'tools': array too long. Expected an array with maximum length 128, but got an array with length 152 instead." });
+  assert.match(idle, /^API Error: 400 Invalid 'tools': array too long/, "the same for an agent that stayed up, not \"AO turn failed\"");
+  const quota = await failureFor({ status: "exited", turnState: "failed", exited: true, answer: "API Error: 500 quota_exceeded: All eligible Codex accounts have exhausted their reported quota; retry after 2026-11-15T06:14:29.000Z." });
+  assert.equal(QUOTA_EXHAUSTED.test(quota), true, "a spent quota the agent reported is recognised too");
+  // AO's own error stays first, and a turn that said nothing reads as before.
+  assert.equal(await failureFor({ status: "exited", turnState: "failed", exited: true, error: "the agent crashed", answer: refusal }), "the agent crashed");
+  assert.equal(await failureFor({ status: "exited", turnState: "failed", exited: true, answer: "" }), "The agent exited before it gave a final answer");
+  assert.equal(await failureFor({ status: "idle", turnState: "interrupted", exited: false, answer: "Half an answer" }), "AO turn interrupted");
+});
+
 test("a follow-up that cannot continue its agent says which session and why before it starts fresh", async () => {
   // Seen 2026-10-22: "ao.continuation_lost {reason: session_gone}", then a 52 s fresh start; the
   // reason covered both a session that could not be continued and a send that failed.
@@ -9528,7 +9588,7 @@ test("idle agents are released on a timer, never a pre-warmed one, and the timer
   assert.ok(timers.at(-1).cleared, "dispose stops it");
 });
 
-test("the idle sweep stops agents stranded as working, never one a run being driven still uses", async () => {
+test("the idle sweep stops agents stranded as working, never one a run being driven still uses", async (t) => {
   // Seen 2026-10-22: two chat hosts ran on for 8 hours and a day, their sessions "working" for good.
   const timers = [], released = [], quietAsked = [];
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
@@ -9554,6 +9614,9 @@ test("the idle sweep stops agents stranded as working, never one a run being dri
     },
     confirm: async () => true,
   });
+  // Also when an assertion fails: the driven run's loop otherwise runs on, and the test process
+  // never exits (a failing check here hung the whole file for good, 2026-11-17).
+  t.after(() => { workflow.dispose(); mission.nodes[0].state = "finished"; });
   await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
   const sweep = async () => {
     const timer = timers.filter(entry => [20_000, 60_000, 3 * 60_000, 10 * 60_000].includes(entry.delay) && !entry.ran)[0];
@@ -9575,8 +9638,13 @@ test("the idle sweep stops agents stranded as working, never one a run being dri
   assert.deepEqual(released, ["idle-1"]);
   assert.deepEqual(warnings.filter(([event]) => event === "ao.idle_release_failed").map(([, fields]) => fields),
     [{ session: "stranded", stale: true, code: "INTERFACE_TRANSITION_IN_PROGRESS", message: "exit agent stranded: interface transition in progress" }]);
-  workflow.dispose();
-  mission.nodes[0].state = "finished";
+  // A session AO has ended holds no agent to release: nothing failed, and nothing is logged for it
+  // (2026-11-16: six such warnings a minute after a start, one per ended chat AO still listed).
+  released.length = 0; warnings.length = 0;
+  refuse = { stranded: Object.assign(new Error("Session is terminated (SESSION_TERMINATED)"), { code: "SESSION_TERMINATED" }) };
+  await sweep();
+  assert.deepEqual(released, ["idle-1"]);
+  assert.deepEqual(warnings.filter(([event]) => event === "ao.idle_release_failed"), []);
 });
 
 test("an open chat pre-warms only when its next message cannot continue its agent, and at most two wait", async () => {

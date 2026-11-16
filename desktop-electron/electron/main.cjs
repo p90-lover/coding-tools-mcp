@@ -340,6 +340,8 @@ let rendererAccessibilityLaunch = { mode: "auto", blocked: false };
 let rendererAccessibility = null;
 // The Update click being prepared; clicks meanwhile join it (launcher:update-install).
 let updateInstallInFlight = null;
+// True from that click until its install has ended or reports its own progress (shownUpdateState).
+let updatePreparing = false;
 let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
 let rendererLoaded = false;
@@ -2177,7 +2179,7 @@ function launcherSnapshotPayload(stateStore, logger) {
       { version: 1, services: [] },
       logger,
     ),
-    update: updateController?.getState() ?? { status: "disabled" },
+    update: shownUpdateState(),
   };
 }
 
@@ -4291,21 +4293,44 @@ function installAppUpdate() {
   if (!updateController) throw new Error("Launcher updates are unavailable");
   updateInstallInFlight ??= (async () => {
     const release = automaticAccountMcp?.hold();
+    updatePreparing = true;
+    send("launcher:update-state", shownUpdateState());
     try {
       return await updateController.beginInstall({ beforeAppInstall: prepareBrowserForUpdate });
     } finally {
       release?.();
       updateInstallInFlight = null;
+      // What the install itself says from here: installing, or available again after a refusal.
+      updatePreparing = false;
+      send("launcher:update-state", shownUpdateState());
     }
   })();
   return updateInstallInFlight;
 }
 
-// Before a whole-app install: the background connector setup's account in progress gets up to a
-// minute to finish (the Update handler's hold keeps it from starting another), then a running
+/**
+ * The update state the window shows. An Update click reads as updating at once: before anything
+ * downloads, the click stops or waits for whatever holds the browser and may ask about a running
+ * turn. Until then the button still read "Update to v…" and took more clicks, each joining the first
+ * with nothing to show for it (the user, 2026-11-17: "it doesn't allow me to click and upgrade it").
+ */
+function shownUpdateState() {
+  const state = updateController?.getState() ?? { status: "disabled" };
+  return updatePreparing && state.status === "available" ? { ...state, status: "downloading", progress: 0 } : state;
+}
+
+// Before a whole-app install: the background connector setup is stopped (it works in hidden windows
+// of its own and runs again after the update; the Update handler's hold keeps it from starting
+// another account), any other browser operation gets up to a minute to finish, then a running
 // ChatGPT turn is offered to stop. Whatever still holds the browser refuses the install, as before.
+// The setup was waited for instead until 2026-11-17: an account whose connector creation was timing
+// out held the browser for minutes, so the click waited its minute and was then refused, every time.
 async function prepareBrowserForUpdate() {
-  if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+  if (browserHost) {
+    // One that does not stop in time is left to the wait and the refusal below.
+    await Promise.resolve(browserHost.stopOperationFor?.("the app update")).catch(() => false);
+    await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+  }
   await stopBrowserTurnsForUpdate();
 }
 
@@ -4777,7 +4802,7 @@ async function start() {
   // Updates install inside the app: a whole-app update (app-update.cjs) swaps the changed files
   // in after the app closes the way "Restart app (keep Codex bridge, MCP, CPA)" does; a GUI-only
   // update reloads the renderer in place. Neither runs an installer.
-  const publishUpdateState = () => { if (updateController) send("launcher:update-state", updateController.getState()); };
+  const publishUpdateState = () => { if (updateController) send("launcher:update-state", shownUpdateState()); };
   // Update checks and downloads use the launcher's network (proxy, Chromium's resolver), as the
   // ChatGPT browser does; Node's https alone failed with "getaddrinfo ENOTFOUND github.com".
   useNativeUpdateTransport(fetchThroughLauncherNetwork);

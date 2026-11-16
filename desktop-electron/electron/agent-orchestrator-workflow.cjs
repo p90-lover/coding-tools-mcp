@@ -317,6 +317,19 @@ function quotaResets(error) {
  * error without them ("Connection error.", "Request timed out.") is still left to the retries.
  */
 const REQUEST_REFUSED = /API Error: (?:400|404|422)\b|API Error:(?!\s*\d{3}\b)[^\n]{0,300}?\b(?:not supported|unsupported|invalid_request_error)\b/i;
+/**
+ * The provider error Claude Code printed as the last thing its turn said ("API Error: 400 …"), or "".
+ * AO saves such a turn as failed with no error of its own when the error arrived as a message, so
+ * the card read "The agent exited before it gave a final answer" (or "AO turn failed") and every
+ * check above saw only that: a request the provider had refused was retried all eight times, half
+ * an hour of waits (seen 2026-11-16: "API Error: 400 Function tools with reasoning_effort are not
+ * supported for gpt-6-astra in /v1/chat/completions", and "Invalid 'tools': array too long").
+ * Only the last paragraph counts: an answer that quotes an API error earlier is not one.
+ */
+function agentApiError(answer) {
+  const last = String(answer || "").trim().split(/\n{2,}/).at(-1) ?? "";
+  return /^API Error:\s*\S/.test(last) ? last.replace(/\s+/g, " ").slice(0, 600) : "";
+}
 /** The provider's own reason from a refused request ("400: This Go model requires …"), for a note. */
 function refusedReason(error) {
   const text = String(error || "").replace(/^[\s\S]*?API Error: (\d{3})\s*/i, "$1: ").replace(/^[\s\S]*?API Error:\s*/i, "")
@@ -1001,6 +1014,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // Why a stop failed is logged: seen live 2026-10-31, a chat left unreachable by an update was
       // tried every sweep for hours ("count": 0), and nothing said what AO answered.
       const stopped = await harnessService().exitAgent?.(id).then(() => true, (error) => {
+        // A session AO has ended, or no longer has, holds no agent to release: nothing failed.
+        if (["SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error?.code)) return false;
         logger?.warn?.("ao.idle_release_failed", { session: id, stale: stale.includes(id),
           code: error?.code ?? null, message: publicText(error?.message || error, 200) });
         return false;
@@ -2250,6 +2265,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session, ...(quiet ? { quiet: true } : {}) };
     }
     const completed = observed.turnState === "completed";
+    // What the provider told the agent, when AO itself recorded no error for the turn (agentApiError):
+    // the card's retry and goal checks read the failure text, and without it they retried a refusal.
+    const said = !completed && !observed.error ? agentApiError(observed.answer) : "";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
       workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
@@ -2257,7 +2275,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       completed,
       // A start the launch watchdog ended says so, not AO's "Session start was cancelled".
       ...(!completed ? { failure: (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
-        || observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
+        || observed.error || said || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
     if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
     return { ...result, pending_approvals: [] };
@@ -10088,4 +10106,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
