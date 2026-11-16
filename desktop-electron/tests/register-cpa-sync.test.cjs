@@ -153,13 +153,15 @@ test("launcher wires native session setup, ready notifications and lease disposa
   const ast = ts.createSourceFile("main.cjs", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const fn = ast.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "getRegisterHost");
   let options, syncOptions, synced = 0, disposed = 0;
-  const native = {}, events = [], proxy = [];
+  const native = {}, events = [], proxy = [], routed = [];
   const connection = { baseUrl: "http://127.0.0.1:8317", managementKey: "private-fixture" };
   const scope = {
     registerHost: null, path, app: { getPath: name => "G:/fixture/" + name }, quitting: false,
     createRegisterHost: value => { options = value; return native; },
     createRegisterCpaSync: value => { syncOptions = value; return { sync: async () => { synced++; }, dispose: () => { disposed++; } }; },
     externalServicesController: { cpaConnection: () => connection },
+    // 0.8.123's egress router: every session the app opens goes out on the App route.
+    providerNetworkReady: async () => ({ routeAppSession: async session => { routed.push(session); } }),
     send: (...args) => events.push(args),
   };
   vm.runInNewContext(fn.getText(ast), scope);
@@ -167,7 +169,8 @@ test("launcher wires native session setup, ready notifications and lease disposa
   assert.equal(scope.getRegisterHost({}), native);
   const browserSession = { setProxy: async value => proxy.push(value.mode) };
   const cleanup = await options.prepareSession(browserSession, origin);
-  assert.deepEqual(proxy, ["direct"]);
+  assert.deepEqual(routed, [browserSession], "Register's session is routed by the egress router, like every app session");
+  assert.deepEqual(proxy, [], "not pinned to a direct connection around the router");
   assert.equal(syncOptions.browserSession, browserSession); assert.equal(syncOptions.origin, origin);
   assert.equal(syncOptions.getConnection(), connection); assert.equal(synced, 1);
   options.onChange({ ready: false }); assert.equal(synced, 1);
