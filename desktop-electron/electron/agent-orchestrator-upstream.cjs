@@ -131,6 +131,8 @@ const AGENT_RECHECK_MS = 60_000;
 const AO_READY_TIMEOUT_MS = 90_000;
 // A daemon still running at that limit is waited for this many limits longer before it is ended.
 const AO_READY_PATIENCE = 10;
+// While a start is slow, ao.start_slow reports it this often, with AO's latest output.
+const AO_START_SLOW_REPORT_MS = 60_000;
 // After a start that failed, how long before AO is started again; doubled per failure in a row.
 const AO_START_COOLDOWN_MS = 5_000;
 const AO_START_COOLDOWN_MAX_MS = 5 * 60_000;
@@ -2440,26 +2442,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        // A daemon that exits fails at once (checkStartup); one still starting is waited for. 30 s
-        // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
-        // database compaction running), the first start was given up as "AO readiness timed out",
-        // its daemon killed and a new one started from nothing, and the chats that outlived the
-        // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
-        // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
+        // A daemon that exits fails at once (checkStartup); one still running is waited for, up to
+        // readyHardMs (see failedStarts). Killing a slow one only made AO slower: on 2026-10-22
+        // (30 s limit) AO stayed down 12 minutes over 16 starts, on 2026-10-24 (90 s) five starts in
+        // eight minutes, and on 2026-11-11 (90/180/360 s) about 25 minutes, each new daemon beginning
+        // again what the killed one had nearly done. ao.start_slow reports a slow start every
+        // minute, with AO's latest output, so the log shows how long a real one takes and what it
+        // was doing.
         const startedAt = Date.now();
         const limitMs = Math.max(readyLimitMs, readyHardMs);
-        let slowLogged = false;
+        let slowReportAt = readySlowMs;
         let patientLogged = false;
         while (Date.now() - startedAt < limitMs) {
           checkStartup();
+          const waitedMs = Date.now() - startedAt;
           // Past the old limit and still running (checkStartup threw otherwise): waited for, not ended.
-          if (!patientLogged && Date.now() - startedAt >= readyLimitMs) {
+          if (!patientLogged && waitedMs >= readyLimitMs) {
             patientLogged = true;
-            logger.warn?.("ao.start_waiting", { waitedMs: Date.now() - startedAt, untilMs: limitMs, output: logTail.slice(-300) });
+            logger.warn?.("ao.start_waiting", { waitedMs, untilMs: limitMs, output: logTail.slice(-300) });
           }
-          if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
-            slowLogged = true;
-            logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
+          if (waitedMs >= slowReportAt) {
+            slowReportAt = waitedMs + AO_START_SLOW_REPORT_MS;
+            logger.warn?.("ao.start_slow", { waitedMs, output: logTail.slice(-300) });
           }
           try {
             const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(3000) });
