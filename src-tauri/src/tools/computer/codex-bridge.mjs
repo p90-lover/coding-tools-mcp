@@ -110,9 +110,30 @@ export async function loadEngine(config, onUnexpectedExit = () => {}) {
   const transport = new WindowsHelperTransport({ helperCommand: helper, helperArgs: ['--parent-pid', String(process.pid)], timeoutMs: 10000 });
   const client = new WindowsComputerUseClient({ transport: {
     close: () => transport.close(),
-    request: (method, params, options) => transport.request(method, params, {
-      ...options, createElicitation: request => bridge.approve(request),
-    }),
+    async request(method, params, options) {
+      let terminal = false;
+      try {
+        return await transport.request(method, params, {
+          ...options, createElicitation: request => bridge.approve(request),
+        });
+      } catch (error) {
+        terminal = failureReply(error, bridge.closed).fatal;
+        throw error;
+      } finally {
+        // The helper outlives a tool call; its cursor/interaction state must not own the desktop while idle.
+        // Never send cleanup after Escape, a policy stop, or helper loss: the SDK could restart it.
+        if (!terminal && !bridge.closed) {
+          try {
+            await transport.request('end_turn', {}, {
+              codexTurnMetadata: options?.codexTurnMetadata, skipTurnTransition: true, timeoutMs: 1000,
+            });
+          } catch {
+            void bridge.close().catch(() => {});
+            fail('CODEX_ENGINE_CLOSED');
+          }
+        }
+      }
+    },
   } });
   if (client.target !== 'windows' || METHODS.some(method => typeof client[method] !== 'function')) {
     await client.close(); fail('INCOMPATIBLE_CODEX_RUNTIME');
