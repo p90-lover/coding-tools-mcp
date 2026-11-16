@@ -2754,6 +2754,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   const activityFrames = new Map();
+  // Where a card's frame spends its time. A frame this slow is logged with each step's share when it
+  // lands (ao.activity_frame_slow); one still on its way after ACTIVITY_STALL_MS is logged once with
+  // the step it waits on (ao.activity_frame_stalled), since a step that never returns logs nothing
+  // else. On 2026-11-16 a resumed chat's frame stayed "checking" for 8 minutes while its agent waited
+  // on an approval nobody could see, and nothing said which read held it.
+  const ACTIVITY_SLOW_MS = 15_000;
+  const ACTIVITY_STALL_MS = 30_000;
   const activityAttempt = (workspace, run, node) => JSON.stringify([
     workspace, run, node.id, node.receipt?.request_key || node.request_key || null,
     node.receipt?.thread_id || null, node.receipt?.turn_id || null,
@@ -2813,7 +2820,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
 
   async function activity({ workspaceId, runId } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80);
+    // The chat's poll waits for this read itself (the cards' frames come from the cache below).
+    const readStarted = now();
     const saved = await runs({ workspaceId: id, runId: run });
+    const readMs = now() - readStarted;
+    if (readMs >= ACTIVITY_SLOW_MS) logger?.warn?.("ao.activity_read_slow", { run, readMs });
     const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run not found");
     const working = mission.nodes.filter(node => ["reserved", "running"].includes(node.state));
@@ -2841,7 +2852,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         entry = { scope, pending: null, frame: null, retired: false };
         activityFrames.set(key, entry);
       }
+      if (entry.pending && !entry.stallLogged && now() - entry.since >= ACTIVITY_STALL_MS) {
+        entry.stallLogged = true;
+        logger?.warn?.("ao.activity_frame_stalled", { run, node: node.id, session: node.receipt?.thread_id || null,
+          step: entry.step, waitedMs: now() - entry.since, steps: { ...entry.steps } });
+      }
       if (!entry.pending) {
+        const since = now(), steps = {};
+        Object.assign(entry, { since, steps, step: "starting", stallLogged: false });
+        // Each awaited step is timed; the one in flight is what the stall log above names.
+        const timed = async (step, work) => {
+          entry.step = step;
+          const began = now();
+          try { return await work(); } finally { steps[step] = (steps[step] ?? 0) + now() - began; }
+        };
+        let failed = false;
         entry.pending = (async () => {
           let frame, observedTurn;
           try {
@@ -2852,7 +2877,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 // A queued follow-up can be the session's newest turn while this card still owns
                 // another one. Read that turn, as the run loop does, rather than dropping its reply.
                 const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session) || entry.turnId;
-                const observed = await harnessService().observe(session, expectedTurn);
+                const observed = await timed("observe", () => harnessService().observe(session, expectedTurn));
                 const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
                 if (currentTurn && observed.turnState === "running" && typeof observed.turnId === "string" && observed.turnId) observedTurn = observed.turnId;
                 // Started: an agent took the message (AO starts the turn only then; see describeTurn).
@@ -2868,7 +2893,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                   error: publicText(observed.error, 500) };
               }
             } else {
-              const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
+              const status = (await timed("harness status", () => harnessStatus({ workspaceId: id, runId: run, nodeId: node.id }))).status || {};
               const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
               const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
               const output = publicText(status.live_output || thread?.answer || thread?.output);
@@ -2884,7 +2909,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step, thread?.notes)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
-            const latest = await savedNode(id, run, node.id);
+            const latest = await timed("saved run", () => savedNode(id, run, node.id));
             if (!latest.node || !["reserved", "running"].includes(latest.node.state)
               || activityAttempt(id, run, latest.node) !== key) {
               entry.retired = true; entry.frame = null; return;
@@ -2896,11 +2921,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               entry.frame = { ...frame, pending: false };
             }
           } catch (error) {
+            failed = true;
             if (!entry.retired) entry.frame = { ...(entry.frame || base), pending: false,
               activity: "unknown", error: publicText(error?.message || error, 300) };
           }
         })().finally(() => {
-          entry.pending = null;
+          entry.pending = null; entry.step = null;
+          const tookMs = now() - since;
+          if (tookMs >= ACTIVITY_SLOW_MS) logger?.warn?.("ao.activity_frame_slow", { run, node: node.id,
+            session: node.receipt?.thread_id || null, tookMs, steps, ok: !failed });
           if (entry.retired && activityFrames.get(key) === entry) activityFrames.delete(key);
         });
       }

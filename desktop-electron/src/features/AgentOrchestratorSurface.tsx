@@ -16,7 +16,7 @@ import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, createActivityPoller, keepUnanswered, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, type PageOpen } from "./chat-pages";
@@ -2739,20 +2739,18 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     if (!workspaceId || !workingRunIds) return;
     let live = true;
     let reading = false;
+    // A run's read that does not answer in time no longer holds the poll (createActivityPoller): its
+    // cards keep their frames and the next tick asks again.
+    const pollActivity = createActivityPoller(async runId =>
+      (await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> }).nodes);
     const poll = async () => {
       if (reading || surfaceHidden()) return;
       reading = true;
       try {
-        const frames = await Promise.all(workingRunIds.split(",").map(async runId => {
-          try {
-            const result = await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> };
-            return Object.entries(result.nodes ?? {}).map(([nodeId, value]) => [`${runId}:${nodeId}`, value] as const);
-          } catch { return []; }
-        }));
+        const { frames: next, unanswered } = await pollActivity(workingRunIds.split(","));
         // Unchanged frames and items keep their objects (mergeActivityFrames), so neither the surface
         // nor an unchanged row re-renders.
-        const next = Object.fromEntries(frames.flat());
-        if (live) setChatActivity(current => mergeActivityFrames(current, next));
+        if (live) setChatActivity(current => mergeActivityFrames(current, keepUnanswered(current, next, unanswered)));
       } finally { reading = false; }
     };
     void poll();
