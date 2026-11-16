@@ -386,6 +386,24 @@ function mergePluginConfigs(savedConfigs, managedConfigs) {
   return { ...configs, ...managedConfigs, "cpa-provider-manager": manager };
 }
 
+/**
+ * OpenAI's own API refuses max_tokens for its reasoning models and accepts max_completion_tokens
+ * for every chat model. CPA sends max_tokens unless a model sets use-max-completion-tokens, and
+ * models fetched from OpenAI's model list never set it, so every request to them got HTTP 400.
+ * Only providers at api.openai.com are changed: other OpenAI-compatible hosts expect max_tokens.
+ */
+function withOpenAICompletionTokens(apiKeys) {
+  const providers = apiKeys["openai-compatibility"];
+  if (!Array.isArray(providers)) return apiKeys;
+  return { ...apiKeys, "openai-compatibility": providers.map((provider) => {
+    let host = "";
+    try { host = new URL(String(provider?.["base-url"] ?? "")).hostname.toLowerCase(); } catch { /* not a URL: leave it */ }
+    if (host !== "api.openai.com" || !Array.isArray(provider.models)) return provider;
+    return { ...provider, models: provider.models.map((model) =>
+      isPlainObject(model) ? { ...model, "use-max-completion-tokens": true } : model) };
+  }) };
+}
+
 function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
   let savedSource = "";
   try { savedSource = fs.readFileSync(path.join(state, "config.yaml"), "utf8"); }
@@ -502,7 +520,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
       configs: mergePluginConfigs(saved.plugins?.configs, managed.plugins.configs) },
   };
   // In v8 api-keys is the upstream provider map; legacy arrays are client keys, now managed above.
-  if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = saved["api-keys"];
+  if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = withOpenAICompletionTokens(saved["api-keys"]);
   if (saved.oauth) merged.oauth = { ...saved.oauth, "auth-dir": authDirectory };
   // CPA 8 saves the route as requests.proxy-url. Kept beside the managed one above, an old route
   // outlived every change (and a removed one stayed on).
