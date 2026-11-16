@@ -65,7 +65,17 @@ export function installShimmerTicker(doc: Document = document): () => void {
     const name = event.animationName;
     if (!SHIMMERS.has(name) && !LOOPS.has(name)) return;
     const target = event.target as Element | null;
-    for (const animation of target?.getAnimations?.() ?? []) {
+    // A ::before/::after animation fires on its element, but the element's getAnimations() leaves it out.
+    // Most status dots are pseudo-elements, so they kept the compositor drawing every refresh (2026-11-16:
+    // 6 of 24 marks still running, all ::before). subtree also returns descendants', so keep only this pseudo's.
+    const pseudo = event.pseudoElement;
+    const found = pseudo
+      ? (target?.getAnimations?.({ subtree: true }) ?? []).filter((animation) => {
+        const effect = animation.effect as KeyframeEffect | null;
+        return effect?.target === target && effect?.pseudoElement === pseudo;
+      })
+      : target?.getAnimations?.() ?? [];
+    for (const animation of found) {
       const started = (animation as CSSAnimation).animationName;
       if (SHIMMERS.has(started)) shimmers.add(animation);
       else if (LOOPS.has(started)) loops.add(animation);
