@@ -1174,7 +1174,7 @@ test("an idle agent is found by its last turn, released with exit-agent, and res
       }
       if (endpoint.endsWith("/resume-agent") && resumeTimesOut) throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
       if (endpoint.endsWith("/resume-agent") && signInRefused) throw Object.assign(new Error(signInRefused.message), { status: 409, code: signInRefused.code });
-      if (endpoint === "/api/v1/sessions") return { sessions };
+      if (endpoint === "/api/v1/sessions?active=true") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
       if (endpoint.endsWith("/exit-agent")) {
@@ -1288,7 +1288,7 @@ test("a chat AO could not reconnect after a restart is resumed before a message,
     Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(), logger: null, setTimeout: (resolve) => { resolve(); return 0; },
     internalApi: async (method, endpoint) => {
-      if (endpoint === "/api/v1/sessions") return { sessions };
+      if (endpoint === "/api/v1/sessions?active=true") return { sessions };
       if (method === "POST") posts.push(endpoint.split("/").at(-1));
       if (endpoint.endsWith("/resume-agent")) { readiness = "ready"; return { ok: true }; }
       return { session: { id: endpoint.split("/")[4], mode: "chat", status: "working", statusReadiness: readiness, activity: { state: "active" } } };
@@ -1375,7 +1375,7 @@ test("stale sessions are this project's live, unpinned, idle ones with no messag
     exitedReleased: new Set(),
     projectFor: async workspaceId => { if (workspaceId === "ws") return "proj"; throw new Error("not a git repository"); },
     internalApi: async (method, endpoint) => {
-      assert.deepEqual([method, endpoint], ["GET", "/api/v1/sessions"]);
+      assert.deepEqual([method, endpoint], ["GET", "/api/v1/sessions?active=true"]);
       return { sessions };
     },
   });
@@ -2331,7 +2331,7 @@ test("AO activity safety reads accept authoritative session lists and reject unk
   ]) {
     const fixture = sessionActivityHarness(); fixture.data(data);
     assert.equal(await fixture.upstream.anySessionWorking({ start: false }), expected);
-    assert.deepEqual(fixture.calls, [["GET", "/api/v1/sessions"]]);
+    assert.deepEqual(fixture.calls, [["GET", "/api/v1/sessions?active=true"]]);
   }
   for (const data of [null, [], {}, { sessions: null }, { sessions: [], items: {} }, { sessions: [null] },
     { sessions: [{}] }, { sessions: [{ ...idle, isTerminated: "false" }] },
@@ -2356,7 +2356,7 @@ test("AO activity safety reads discard replies from a retired owner", async () =
     change(fixture.context);
     finish({ ok: true, data: { sessions: [] } });
     await assert.rejects(reading);
-    assert.deepEqual(fixture.calls, [["GET", "/api/v1/sessions"]]);
+    assert.deepEqual(fixture.calls, [["GET", "/api/v1/sessions?active=true"]]);
   }
 });
 
@@ -2429,7 +2429,7 @@ test("an exited chat whose agent may live on is exited again once, so AO stops i
     Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, agentTools: null,
     exitedReleased: new Set(),
     internalApi: async (method, endpoint) => {
-      if (endpoint === "/api/v1/sessions") return { sessions };
+      if (endpoint === "/api/v1/sessions?active=true") return { sessions };
       const id = endpoint.split("/")[4];
       if (endpoint.endsWith("/conversation?limit=1")) return { turns: turns[id] ?? [] };
       if (endpoint.endsWith("/exit-agent")) { exits.push(id); throw new Error("AO: AGENT_EXITED: the agent has already exited"); }
@@ -2463,10 +2463,31 @@ test("chats AO still calls working with no agent activity for long are listed, s
     // The exit worker already waits on this one (releaseAgent).
     { id: "handed", mode: "chat", status: "working", activity: { state: "active", lastActivityAt: ago(24 * 60) } },
   ];
-  const upstream = vm.runInNewContext("({" + method + "})", { Date, Number, Array, String, exitingAgents: new Map([["handed", Promise.resolve(true)]]),
-    internalApi: async (method, endpoint) => { assert.equal(endpoint, "/api/v1/sessions"); return { sessions }; } });
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  // The window each session"));
+  const upstream = vm.runInNewContext(identity + "({" + method + "})", { Date, Number, Array, String, exitingAgents: new Map([["handed", Promise.resolve(true)]]),
+    internalApi: async (method, endpoint) => { assert.equal(endpoint, "/api/v1/sessions?active=true"); return { sessions }; } });
   assert.deepEqual([...await upstream.quietWorkingChatSessions(2 * 60 * 60_000, now)], ["stranded"],
     "only a live chat quiet past the limit: not a busy one, an idle or ended one, a non-chat, or one with no activity time");
+});
+
+test("session sweeps and busy checks ask AO for its live sessions only, with room for a long list", async () => {
+  // 2026-11-16: AO held 1,176 sessions, 815 of them terminated. The whole list was 946 KB, past the
+  // transport's 900 KB default, so every sweep and every "is any agent mid-turn?" read failed with
+  // "AO response exceeds the handler limit". Idle and old sessions were never released, and no
+  // update installed itself, because a busy check that cannot answer counts as busy.
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  // The window each session"));
+  const calls = [];
+  const { liveSessions, LIVE_SESSIONS_READ } = vm.runInNewContext(identity + "({ liveSessions, LIVE_SESSIONS_READ })", {
+    internalApi: async (...args) => { calls.push(args); return { sessions: [{ id: "a" }], items: [{ id: "b" }] }; } });
+  assert.deepEqual([...await liveSessions()].map(session => session.id), ["a", "b"]);
+  assert.deepEqual(calls, [["GET", "/api/v1/sessions?active=true", undefined, LIVE_SESSIONS_READ]]);
+  assert.ok(LIVE_SESSIONS_READ.maxBytes > 900000, "a list of live sessions alone must not hit the default limit again");
+  // No reader in the harness asks for the unfiltered list any more.
+  const readers = source.slice(source.indexOf("    async idleChatSessions("), source.indexOf("    async resolveInput("));
+  assert.doesNotMatch(readers, /"GET", "\/api\/v1\/sessions"\)/);
+  assert.match(readers, /requestApi\("GET", LIVE_SESSIONS, undefined, LIVE_SESSIONS_READ\)/);
 });
 
 test("mission accounting reads the conversation only when normalized usage has no usable counters", async t => {
