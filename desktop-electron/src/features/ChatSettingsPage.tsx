@@ -6,6 +6,7 @@ import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
 import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
+import { publishQuotaReviews } from "./quota-reviews";
 import { ResponseStyleSettings } from "./ResponseStyleSettings";
 import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
@@ -275,6 +276,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
     let live = true;
     void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges"), chatCall("chat_question_timeout")])
       .then(([compact, retry, judges, questions]) => {
+        publishQuotaReviews(judges.meteredReviews === true);
         if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true, meteredReviews: judges.meteredReviews === true,
           questionTimeout: questionSeconds(questions.seconds) });
       }, () => undefined);
@@ -292,7 +294,11 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
 
   // Like the update settings, a chat preference shows what the bridge kept.
   const setChatPreference = (operation: string, args: JsonObject) => {
-    run(chatCall(operation, args).then((result) => setChat((current) => current && {
+    run(chatCall(operation, args).then((result) => {
+      // Open chats' permission chips say whether Approve for me is paused by this switch.
+      if (operation === "chat_model_judges") publishQuotaReviews(result.meteredReviews === true);
+      return result;
+    }).then((result) => setChat((current) => current && {
       ...current,
       ...(operation === "chat_auto_compact" ? { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || current.percent } : {}),
       ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
