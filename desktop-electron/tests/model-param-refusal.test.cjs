@@ -14,6 +14,10 @@ const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator",
   permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
 const decisions = [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }];
 const pause = () => new Promise(resolve => setTimeout(resolve, 10));
+// Waits by the clock, not by a count of pauses: a review no model answers is tried 3 times, 4 s apart
+// (REVIEW_TRIES, REVIEW_RETRY_MS), so the denial comes about 8 s in. 600 pauses lasted 9.4 s on
+// Windows' coarse timers but 7.9 s on a CI runner, which gave up just before the third try.
+const until = async (done, ms = 20_000) => { for (const end = Date.now() + ms; !done() && Date.now() < end;) await pause(); };
 // The OpenAI API's own answers, as CPA passed them on.
 const refusals = {
   max_tokens: { error: { message: "Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.",
@@ -66,7 +70,7 @@ test("the judge leaves out the settings the chat's model refuses, judges, and re
   await workflow.call("chat_model_judges", { enabled: true, meteredReviews: true }); // reviews through CPA are opt-in since 0.8.122
   try {
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
-    for (let tries = 0; tries < 600 && resolved.length < 2; tries++) await pause();
+    await until(() => resolved.length >= 2);
     assert.deepEqual(resolved, [["request-0", "yes"], ["request-1", "yes"]], "both requests were judged, not denied unjudged");
     // The first review learned the model's limits one refusal at a time; the second asked once.
     const shapes = bodies.map((body) => ["max_tokens", "max_completion_tokens", "temperature"].filter((name) => name in body).join("+") || "none");
@@ -82,7 +86,7 @@ test("a 400 that names no optional setting is not retried: the judge reports it 
   await workflow.call("chat_model_judges", { enabled: true, meteredReviews: true }); // reviews through CPA are opt-in since 0.8.122
   try {
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
-    for (let tries = 0; tries < 600 && !resolved.length; tries++) await pause();
+    await until(() => resolved.length > 0);
     assert.deepEqual(resolved, [["request-0", "no"]], "with the judge on, an unanswerable review still denies, unjudged");
     assert.ok(bodies.length >= 1 && bodies.every((body) => "max_tokens" in body && "temperature" in body), "nothing was left out");
     assert.ok(bodies.length <= 3, `one call per review try, not a loop (${bodies.length})`);
