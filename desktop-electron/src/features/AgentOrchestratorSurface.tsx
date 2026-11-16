@@ -13,7 +13,7 @@ import {
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
-import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, permissionChangeNotice, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
@@ -1595,7 +1595,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         setSingleRoute(route); rememberChatRoute(route);
         endPendingRetry({ mode: "single", route });
       }
-      return "Applies from the next turn. A running turn keeps its permissions.";
+      // A running agent that asks this app about each request follows the pick at once
+      // (liveRoute in agent-orchestrator-workflow); one that answers for itself, from its next turn.
+      return permissionChangeNotice(permissionMission, permission);
     }
     if (!selectedSetup) throw new Error("This team isn't available. Refresh and try again.");
     const latest = await moduleCall("runs", { workspaceId });

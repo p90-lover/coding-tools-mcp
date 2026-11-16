@@ -4146,7 +4146,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
       // A question this chat answers for the person says when (autoAnswerStale), so its card can
       // count down; one the person chose to keep has no deadline, and the agent waits on it.
-      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node) ? questionWaitMs() : null;
+      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node, card.mission) ? questionWaitMs() : null;
       const opened = wait ? Math.min(pendingSeen.get(item.approval_id) ?? now(), Date.parse(item.since ?? "") || Infinity) : NaN;
       const advised = Number.isFinite(opened) ? { ...recommended, auto_answer_at: opened + wait } : recommended;
       // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
@@ -4749,12 +4749,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
     }
   }
+  /**
+   * How a card's requests are answered now: its route, with the permissions the person picked for
+   * this chat since its turn started laid over it. "apply_team" keeps a running card's route as it
+   * launched and records the pick (team.permission_selections), which AO binds to the route only
+   * when the next turn starts. The requests of the running turn reach this app as they come, so
+   * the app follows the pick at once: seen 2026-11-16, Auto Review answered 500 for a while, and
+   * "Approve for me" picked again once it was back did nothing for a turn ten hours in. The
+   * sandbox (permission_profile) is the running process's own and still changes with the next turn.
+   */
+  function liveRoute(mission, node) {
+    const intent = mission?.team?.permission_selections?.[node?.template_role_id || node?.id];
+    if (!node?.route || !intent || typeof intent !== "object") return node?.route;
+    const policy = ["on-request", "never"].includes(intent.approval_policy) ? intent.approval_policy : undefined;
+    const reviewer = ["user", "auto_review"].includes(intent.approvals_reviewer) ? intent.approvals_reviewer : undefined;
+    if (policy === undefined && reviewer === undefined) return node.route;
+    return { ...node.route, ...(policy !== undefined ? { approval_policy: policy } : {}), ...(reviewer !== undefined ? { approvals_reviewer: reviewer } : {}) };
+  }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
   function cardApprover(mission, own) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
     const teamHasApprover = mission.nodes.some((node) => node.role === "approver");
-    return teamApprover ?? (!teamHasApprover && own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
-      ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
+    const route = liveRoute(mission, own);
+    return teamApprover ?? (!teamHasApprover && route?.approvals_reviewer === "auto_review" && externalAgent(own)
+      ? { route, settings: { instructions: "", auto_decide: true } } : null);
   }
   function reviewAttempt(mission, node) {
     const approver = cardApprover(mission, node);
@@ -5103,7 +5121,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       + "Run the same request again in a minute; if it is still not judged, tell the user the command reviewer is unavailable."
     : `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
       + "Try a safer way to reach the goal, or ask the user if only this will do.";
-  const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
+  /** Whether this chat answers a card's requests for the person: by its permissions as they are now (liveRoute). */
+  const answersForPerson = (node, mission) => {
+    const route = mission ? liveRoute(mission, node) : node?.route;
+    return route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
+  };
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
     if (approval.mode === "url") return { action: "decline" };
@@ -5118,10 +5140,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return { action: "accept", content };
   }
-  /** The offered decision that accepts a plan: keep editing without asking, as the card was launched. */
-  function planDecision(approval, node) {
+  /** The offered decision that accepts a plan: keep editing without asking, as the card's permissions are now. */
+  function planDecision(approval, node, mission) {
     const decisions = (approval.decisions || []).filter((decision) => !decision.kind.startsWith("reject"));
-    const prefer = node?.route?.approval_policy === "never" ? [/bypass/i, /acceptEdits/i] : [/acceptEdits/i, /^auto$/i];
+    const prefer = (mission ? liveRoute(mission, node) : node?.route)?.approval_policy === "never" ? [/bypass/i, /acceptEdits/i] : [/acceptEdits/i, /^auto$/i];
     for (const pattern of prefer) {
       const found = decisions.find((decision) => pattern.test(decision.id));
       if (found) return found.id;
@@ -5158,7 +5180,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!id) continue;
         live.add(id);
         if (!pendingSeen.has(id)) pendingSeen.set(id, at);
-        if (!answersForPerson(node) || autoAnswered.has(id)) continue;
+        if (!answersForPerson(node, mission) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
         // A question or a plan is the person's: a plan waits AUTO_ANSWER_MS for them, a question the
@@ -5191,7 +5213,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             note = `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
           } else if (approval.source === "ao") {
             const blocked = verdict === "deny";
-            const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
+            const decision = approval.kind === "plan" ? planDecision(approval, node, mission) : aoDecision(approval, !blocked);
             if (!decision) continue;
             await harnessService().resolveApproval(approval.thread_id, id, decision, blocked ? reviewerDenial(why, denial ? {} : advice) : "");
             note = blocked ? `Denied: ${publicText(why, 160)}`
