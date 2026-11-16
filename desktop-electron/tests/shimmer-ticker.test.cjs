@@ -20,13 +20,22 @@ function setup() {
     getAnimations() { throw new Error("document.getAnimations walks every element"); },
     addEventListener: (type, fn) => listeners.set(type, fn),
     removeEventListener: (type, fn) => listeners.get(type) === fn && listeners.delete(type) };
-  const element = () => ({ isConnected: true, animations: [], getAnimations() { return this.animations; } });
-  const animation = (animationName, target) => {
-    const created = { animationName, playState: "running", currentTime: 0, effect: { target }, pause() { this.playState = "paused"; } };
+  // Like Chromium: an element's own getAnimations() leaves out its ::before/::after animations;
+  // { subtree: true } adds them, and its descendants' too.
+  const element = () => ({ isConnected: true, animations: [], children: [],
+    getAnimations(options) {
+      return options?.subtree
+        ? [...this.animations, ...this.children.flatMap((child) => child.getAnimations(options))]
+        : this.animations.filter((created) => !created.effect.pseudoElement);
+    } });
+  const animation = (animationName, target, pseudoElement = null) => {
+    const created = { animationName, playState: "running", currentTime: 0, effect: { target, pseudoElement },
+      pause() { this.playState = "paused"; } };
     target.animations.push(created);
     return created;
   };
-  const start = (animationName, target) => listeners.get("animationstart")?.({ animationName, target });
+  const start = (animationName, target, pseudoElement = "") =>
+    listeners.get("animationstart")?.({ animationName, target, pseudoElement });
   return { install: exports.installShimmerTicker, doc, timers, listeners, element, animation, start };
 }
 
@@ -85,6 +94,36 @@ test("pulsing dots and spinners are stepped 10 times a second on the same clock;
   doc.timeline.currentTime = 9000;
   [...timers.values()][0].fn();
   assert.equal(pulse.currentTime, 1033, "a hidden window does not step its marks");
+});
+
+test("pulsing dots drawn by ::before/::after are stepped too; their element's getAnimations() leaves them out", () => {
+  // Live 2026-11-16 on 0.8.121: 6 of 24 status marks still ran freely, every one a span::before
+  // (.cx-turn-stats, .cx-reply-status, .cx-ctx-state), so the compositor still drew every refresh.
+  const { install, doc, timers, element, animation, start } = setup();
+  install(doc);
+  const host = element(), child = element();
+  host.children.push(child);
+  const before = animation("cx-pulse", host, "::before");
+  const after = animation("cx-spin", host, "::after");
+  const own = animation("cx-fade-in", host);
+  const inner = animation("cx-pulse", child);
+  start("cx-pulse", host, "::before");
+  assert.equal(timers.size, 1);
+  assert.deepEqual([before.playState, before.currentTime], ["paused", 1000], "the ::before dot is paused and in phase");
+  assert.equal(after.playState, "running", "::after fires its own animationstart");
+  assert.equal(own.playState, "running", "the element's own one-off animation is left alone");
+  assert.equal(inner.playState, "running", "a descendant's mark is collected from its own event, not this one");
+  start("cx-spin", host, "::after");
+  start("cx-pulse", child);
+  assert.deepEqual([after.playState, inner.playState], ["paused", "paused"]);
+  doc.timeline.currentTime = 1100;
+  [...timers.values()][0].fn();
+  assert.deepEqual([before.currentTime, after.currentTime, inner.currentTime], [1100, 1100, 1100], "one clock");
+  host.isConnected = false;
+  [...timers.values()][0].fn();
+  doc.timeline.currentTime = 1200;
+  [...timers.values()][0].fn();
+  assert.deepEqual([before.currentTime, inner.currentTime], [1100, 1200], "a removed element's pseudo marks are dropped");
 });
 
 test("shimmer ticker skips hidden windows and stops when no shimmer is left", () => {

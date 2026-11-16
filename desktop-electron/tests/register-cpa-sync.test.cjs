@@ -160,7 +160,7 @@ test("launcher wires native session setup, ready notifications and lease disposa
     createRegisterHost: value => { options = value; return native; },
     createRegisterCpaSync: value => { syncOptions = value; return { sync: async () => { synced++; }, dispose: () => { disposed++; } }; },
     externalServicesController: { cpaConnection: () => connection },
-    // 0.8.123's egress router: every session the app opens goes out on the App route.
+    // Since the egress router (0.8.123), the Register session takes the App route like every app session.
     providerNetworkReady: async () => ({ routeAppSession: async session => { routed.push(session); } }),
     send: (...args) => events.push(args),
   };
@@ -169,8 +169,8 @@ test("launcher wires native session setup, ready notifications and lease disposa
   assert.equal(scope.getRegisterHost({}), native);
   const browserSession = { setProxy: async value => proxy.push(value.mode) };
   const cleanup = await options.prepareSession(browserSession, origin);
-  assert.deepEqual(routed, [browserSession], "Register's session is routed by the egress router, like every app session");
-  assert.deepEqual(proxy, [], "not pinned to a direct connection around the router");
+  assert.deepEqual(routed, [browserSession], "the Register session is routed through the egress router's App route");
+  assert.deepEqual(proxy, [], "no direct proxy setting bypasses the router");
   assert.equal(syncOptions.browserSession, browserSession); assert.equal(syncOptions.origin, origin);
   assert.equal(syncOptions.getConnection(), connection); assert.equal(synced, 1);
   options.onChange({ ready: false }); assert.equal(synced, 1);
