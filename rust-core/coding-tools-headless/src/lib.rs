@@ -794,6 +794,8 @@ struct AoReadRequest {
 #[derive(Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum AoMutation {
+    AcceptChatInput { input: Box<integrations::chat_input::Accept> },
+    ReadChatInputReceipt { input_id: String },
     Lifecycle { change: integrations::ao_lifecycle::LifecycleChange },
     CreateFromTeam {
         run_id: String, task_id: String, expected_board_revision: u64, worker_limit: u8,
@@ -6644,6 +6646,8 @@ async fn ao_update(
             .policy_execution_guard()
             .map_err(|error| error.message().to_string())?;
         let mut result = coding_tools_core::data::DataStore::update_file(|data| match body.change {
+            AoMutation::AcceptChatInput { input } => integrations::chat_input::accept(data, &workspace_id, *input),
+            AoMutation::ReadChatInputReceipt { input_id } => integrations::chat_input::lookup(data, &workspace_id, &input_id),
             AoMutation::Lifecycle { change } => integrations::ao_lifecycle::apply_change(data, &workspace_id, change, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(0)),
             AoMutation::MoveChat { task_id, target_workspace_id, expected_board_revision } => integrations::ao_lifecycle::move_chat(data, &workspace_id, &target_workspace_id, &task_id, expected_board_revision, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|time| time.as_millis() as u64).unwrap_or(0)),
             AoMutation::CreateFromTeam { run_id, task_id, expected_board_revision, team_revision, team_id, execution_mode, single_route, worker_limit } =>

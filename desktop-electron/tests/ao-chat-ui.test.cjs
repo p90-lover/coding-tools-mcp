@@ -51,6 +51,7 @@ const viewSettings = (saved = null) => load("chat-view-settings.ts", {}, { local
 const uiImports = { "./ao-chat": chat, "./chat-transcript": load("chat-transcript.ts", { "./ao-chat": chat }), "./chat-view-settings": viewSettings(), "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./image-markup": load("image-markup.ts"),
+  "./chat-input-client": load("chat-input-client.ts", {}, { setTimeout, clearTimeout }),
   "./ChatPet": pet, "../PartErrorBoundary": load("../PartErrorBoundary.tsx"), "./ChatScrollToBottom": load("ChatScrollToBottom.tsx"),
   "./ChatTurnStats": load("ChatTurnStats.tsx", { "./ao-chat": chat, "../api/client": client, "./page-visibility": visibility }),
   "./codex-prompts": load("codex-prompts.ts"),
@@ -1427,19 +1428,21 @@ test("an unsent draft is saved by the app: read back first, saved after each cha
     attachments: [{ name: "shot.png", path: "G:\a\shot.png", image: true, markup: "1. here" }, { name: "notes.md", text: "# notes" }],
     annotations: [{ quote: "drain", note: "why", anchor: { answer: 1, start: 0, end: 5 } }],
   }, "a file by its path or text, no thumbnail URL, no window-local id; a file still being read is not kept");
-  assert.equal(ui.savedDraftOf("  ", [], []), null, "an empty composer saves nothing (its copy is removed)");
+  assert.equal(ui.savedDraftOf("", [], []), null, "an empty composer saves nothing");
+  assert.equal(ui.savedDraftOf("  ", [], []).text, "  ", "typed whitespace is not silently discarded");
 
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
-  assert.match(source, /if \(!draftsNow\.current \|\| !LOADED_DRAFTS\.has\(draftKey\)\) return;/, "nothing is saved before the saved copy was read back");
+  assert.match(source, /if \(!binding\.loaded\) \{ if \(value\) binding\.pendingUnloaded = value; return; \}/, "nothing overwrites storage before the draft receipt loads");
   assert.match(source, /if \(value === null && sendsInFlight\.current > 0\) return;/, "a message going out keeps its copy");
-  assert.match(source, /current\.timer = window\.setTimeout\(flushDraft, 400\);/, "saved a moment after each change");
-  assert.match(source, /window\.addEventListener\("pagehide", flushDraft\);/, "and at once when the window goes");
-  assert.match(source, /if \(latest\.draft\.trim\(\) \|\| latest\.attachments\.length \|\| latest\.annotations\.length\) \{\s*writeDraft\(key/, "something typed since wins over the saved copy");
+  assert.match(source, /new DraftCoalescer\(/, "one tested coalescer owns each composer's revisions");
+  assert.match(source, /window\.addEventListener\("pagehide", flushDraft\);/, "flush on page exit");
+  assert.match(source, /binding\.writer\.pauseForAcceptance\(\)/, "typing waits for the acceptance revision");
   const deliver = source.slice(source.indexOf("const deliver = async"), source.indexOf("const recoverMessage ="));
-  assert.equal((deliver.match(/handedOff = true; return true;/g) || []).length, 4, "every way the app takes the message settles the copy");
-  assert.match(deliver, /\} finally \{\s*setSending\(false\);\s*if \(fromComposer\) settleSavedDraft\(owner, handedOff\);/);
-  assert.match(source, /void enqueue\(selectedTaskId, \{ what: "Message", message: text \}\)\.then\(\(\) => settleSavedDraft\(owner, true\)/, "and so does a queued one");
+  assert.ok(deliver.indexOf("await acceptMessage(") < deliver.indexOf('setDraft("")'), "acceptance precedes clearing the composer");
+  assert.match(deliver, /sameAttachmentSnapshot\(composing\.current\.attachments, owner\.attachments, acceptedAttachments\)/, "new attachments are not cleared");
+  assert.match(deliver, /if \(fromComposer\) settleSavedDraft\(owner, handedOff\);/);
+  assert.match(source, /const accepted = await acceptMessage\(text, "queue", owner, true\);\s*await enqueue/, "queued input is durably accepted before enqueue");
   const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
-  assert.match(surface, /moduleCall\("chat_draft", \{ workspaceId, key, action: "get" \}\)/);
+  assert.match(surface, /draftGet: key => chatInputDraftGet\(inputCall, workspaceId!, key\)/);
   assert.match(surface, /queue=\{chatQueue\} drafts=\{chatDrafts\}/);
 });

@@ -5,7 +5,8 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatDraftActions, type ChatQueueActions, type SavedChatDraft } from "./AgentOrchestratorChat";
+import { AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatDraftActions, type ChatQueueActions } from "./AgentOrchestratorChat";
+import { chatInputDraftGet, chatInputDraftSave, chatInputAccept, chatInputPending, readDraftReceipt, type ModuleCallFn } from "./chat-input-client";
 import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
 import {
@@ -1892,7 +1893,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     await loadMissions(workspaceId);
   });
 
-  const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string; rewind?: { index: number; description: string } }) => new Promise<void>((resolve, reject) => {
+  const sendChat = (input: { taskId?: string; title?: string; message: string; goal?: string; rewind?: { index: number; description: string }; inputId?: string }) => new Promise<void>((resolve, reject) => {
     const owner = selection.current;
     const current = () => mounted.current && selection.current.workspaceId === workspaceId && selection.current.taskId === owner.taskId;
     void chatRun(input.taskId || "new-chat", async () => {
@@ -1912,7 +1913,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         // status says why (run_status detail), as the chat's notice.
         const result = await moduleCall("chat_send", { workspaceId, message: input.message,
           ...(input.taskId ? { taskId: input.taskId } : input.title ? { title: input.title } : {}),
-          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}), ...(input.rewind ? { rewind: input.rewind } : {}), deferStart: true });
+          ...execution, ...executableArg(), ...(input.goal ? { goal: input.goal } : {}), ...(input.rewind ? { rewind: input.rewind } : {}),
+          ...(input.inputId ? { inputId: input.inputId } : {}),
+          deferStart: true });
         if (result.cancelled) throw new Error("Message not sent. The start was cancelled.");
         if (!current()) { resolve(); return; }
         // The route is not kept here: picks are kept as they are made, and a follow-up in an older
@@ -1955,10 +1958,12 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   });
   // Steering goes straight to the running agent, outside run()'s one-action-at-a-time lock: it must
   // not wait behind another action, and it changes no run state the surface tracks.
-  const steerChat = async (input: { taskId: string; message: string; restart?: boolean; goal?: string }) => {
+  const steerChat = async (input: { taskId: string; message: string; restart?: boolean; goal?: string; inputId?: string }) => {
     if (!workspaceId) throw new Error("Add a project first");
     try {
-      const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message, ...(input.restart ? { restart: true } : {}), ...(input.goal ? { goal: input.goal } : {}) });
+      const result = await moduleCall("chat_steer", { workspaceId, taskId: input.taskId, message: input.message,
+        ...(input.restart ? { restart: true } : {}), ...(input.goal ? { goal: input.goal } : {}),
+        ...(input.inputId ? { inputId: input.inputId } : {}) });
       if (result.steered) void loadBoard(workspaceId).catch(() => undefined);
       // The agent waits on a request of its own (or its hung turn, or a long command, was just
       // stopped): the message waits for the turn instead.
@@ -1997,23 +2002,34 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     add: async (taskId, item, front = false) => {
       let selection: JsonObject | undefined;
       try { selection = aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId); } catch { selection = undefined; }
-      await queueCall(taskId, { action: "add", front, item: { ...item, ...(selection ? { selection } : {}), ...executableArg() } });
+      await queueCall(taskId, { action: "add", front, item: { ...item, ...(selection ? { selection } : {}), ...executableArg(), ...(item.inputId ? { inputId: item.inputId } : {}) } });
     },
     update: async (taskId, id, message) => (await queueCall(taskId, { action: "update", itemId: id, message })).updated === true,
-    remove: async (taskId, ids) => { await queueCall(taskId, ids === null ? { action: "clear" } : { action: "remove", ids }); },
+    remove: async (taskId, ids) => {
+      try {
+        await queueCall(taskId, ids === null ? { action: "clear" } : { action: "remove", ids });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        throw err;
+      }
+    },
   };
-  // Each composer's unsent draft is saved by the app too (chat_draft), so a crash or restart keeps
-  // what was typed, attached and annotated, as Claude Code and Codex keep an unsent prompt.
+  const inputCall: ModuleCallFn = async (operation, args) => {
+    if (!workspaceId) throw new Error("Add a project first");
+    return moduleCall(operation, args as JsonObject);
+  };
   const chatDrafts: ChatDraftActions = {
-    load: async (key) => {
-      if (!workspaceId) return null;
-      const result = await moduleCall("chat_draft", { workspaceId, key, action: "get" });
-      return result.draft && typeof result.draft === "object" ? result.draft as unknown as SavedChatDraft : null;
+    draftGet: key => chatInputDraftGet(inputCall, workspaceId!, key),
+    draftSave: (key, revision, mutationId, draft) => chatInputDraftSave(inputCall, workspaceId!, key, revision, mutationId, draft),
+    accept: args => chatInputAccept(inputCall, workspaceId!, args),
+    pending: key => chatInputPending(inputCall, workspaceId!, key),
+    cancel: async inputId => { await inputCall("chat_input", { workspaceId, action: "cancel", inputId }); },
+    restore: async (key, inputId, expectedRevision, mutationId, draft) => {
+      const result = await inputCall("chat_input", { workspaceId, action: "restore_draft", key, inputId, expectedRevision, mutationId, draft });
+      if (result.ok !== true || result.restored !== true) throw new Error("The saved input could not be moved into the draft");
+      return readDraftReceipt(result.draft);
     },
-    save: async (key, draft) => {
-      if (!workspaceId) return;
-      await moduleCall("chat_draft", { workspaceId, key, action: "set", draft: draft as unknown as JsonObject | null });
-    },
+    getExecutionSelection: () => ({ execution: aoChatExecution(composerMode, singleRoute, savedTeams, composerTeamId), executable: executableArg() }),
   };
   // Have the agent the next message needs running before it is sent, so sending does not wait half
   // a minute for a launch: the selected model's (or the team's orchestrator) on a new chat, and on an

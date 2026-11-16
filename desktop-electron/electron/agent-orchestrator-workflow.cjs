@@ -8,6 +8,7 @@ const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAn
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
 const { createChatDraftStore } = require("./chat-drafts.cjs");
+const { createChatInputService } = require("./chat-input-service.cjs");
 const { restartResume } = require("./chat-resume.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 // CPA requests (model lists, goal checks, reviews) go from a worker thread: a connect or write on
@@ -461,7 +462,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, inputJournal = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -534,6 +535,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
   // Each composer's unsent draft (chat-drafts.cjs): a crash or restart no longer loses a prompt being written.
   const chatDrafts = createChatDraftStore({ file: chatDraftsFile, now, logger });
+  const chatInputs = inputJournal ?? (chatDraftsFile && chatAttachmentsDir ? createChatInputService({
+    file: path.join(path.dirname(chatDraftsFile), "chat-inputs.sqlite"),
+    attachmentsRoot: path.join(chatAttachmentsDir, "owned"), legacyDraftsFile: chatDraftsFile,
+  }) : null);
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile, logger });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
@@ -2182,7 +2187,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * to it").
    */
   function handBackSteers(workspaceId, runId, session) {
-    const steers = chatQueue.deliveredTo(workspaceId, runId).filter(steer => steer.session === session);
+    const steers = chatQueue.deliveredTo(workspaceId, runId).filter(steer => steer.session === session && !steer.inputId);
     for (const taskId of new Set(steers.map(steer => steer.taskId))) {
       const mine = steers.filter(steer => steer.taskId === taskId);
       chatQueue.forgetDelivered(workspaceId, taskId, mine.map(steer => steer.id));
@@ -6580,7 +6585,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal, inputId } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -6593,7 +6598,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
     // This turn already took the same message moments ago: it is not handed over (or noted) again,
     // unless the agent has asked a question since that what was typed answers (below).
-    const repeat = !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
+    const repeat = !inputId && !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
       .some(steer => steer.taskId === task && steer.message === text && now() - steer.at < STEER_REPEAT_MS);
     const skipRepeat = () => {
       logger?.info?.("ao.steer_repeat_skipped", { workspaceId: id, taskId: task });
@@ -6614,7 +6619,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       const response = await requestHeadless("/api/v1/ao/harness/steer", { workspace_id: id, run_id: run.id, node_id: card.id, text });
       if (response?.ok !== true || response.steered !== true) return { ok: true, steered: false, reason: "The agent's turn already ended" };
-      return steered(id, task, run, card, text, objective);
+      return steered(id, task, run, card, text, objective, inputId);
     }
     // Steering a turn that waits on an approval or a question cancelled that request ("Tool use
     // aborted"), and the agent lost the step it asked about. While one waits, the steer waits for it
@@ -6690,7 +6695,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits
     // for the turn like a queued one instead of failing.
-    const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`).catch((error) => {
+    const result = await harnessService().steer(card.receipt.thread_id, text, inputId || `steer-${randomUUID()}`).catch((error) => {
       if (/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return { steered: false, starting: true };
       throw error;
     });
@@ -6698,18 +6703,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { ok: true, steered: false, waiting: true, starting: true, reason: "The agent is still starting. Your message is sent after its turn." };
     }
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
-    return steered(id, task, run, card, text, objective);
+    return steered(id, task, run, card, text, objective, inputId);
   }
 
   /** A steer that reached the card's turn: its goal and its note in the chat's transcript. */
-  function steered(id, task, run, card, text, objective) {
+  function steered(id, task, run, card, text, objective, inputId) {
     // The goal is judged when the steered run settles (goalAfterRun), like a goal sent as a new turn.
     if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: run.id }); }
     // Kept until the turn shows the agent read it: a turn that dies first (its agent never answered,
     // or never really started) hands it back to the chat's queue as the next turn (queueAfterRun).
     // Before, such a steer was simply gone.
     try {
-      chatQueue.delivered(id, task, { message: text, runId: run.id, session: card.receipt?.thread_id, ...(objective ? { goal: objective } : {}) });
+      chatQueue.delivered(id, task, { message: text, runId: run.id, session: card.receipt?.thread_id, ...(inputId ? { inputId } : {}), ...(objective ? { goal: objective } : {}) });
     } catch { /* best effort */ }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
     // `messages`: how many messages the chat had when the steer went in; it belongs under the last.
@@ -6809,7 +6814,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         deferred: input?.deferStart === true }));
     }
   }
-  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}, clock = stepClock(now)) {
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId, inputId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -6886,7 +6891,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let followUp = null;
     let rewindBefore;
     // The board's revision as this send's own write left it (createTeamRun's first try needs no read).
-    let boardRevision;
+    let boardRevision, acceptedInput;
+    const acceptTaskAndRun = async (revision, taskTitle, description, existingTask) => {
+      const response = await requestHeadless("/api/v1/ao/update", { workspace_id: id, confirm: true, change: {
+        operation: "accept_chat_input", input: { input_id: clean(inputId, 128), expected_board_revision: revision,
+          ...(existingTask ? { task_id: existingTask } : {}), title: taskTitle, description, message: text, run_id: randomUUID(),
+          ...(executionMode === "single" ? { execution_mode: "single", single_route: singleRoute, worker_limit: 1 }
+            : { team_id: team.id, team_revision: team.revision, worker_limit: team.worker_limit || 3,
+              ...(executionMode === "team" ? { execution_mode: "team" } : {}) }) },
+      } }, { localConfirmation: true });
+      if (response?.ok !== true || response.input_id !== inputId || !response.task_id || response.run?.workspace_id !== id
+        || response.run_id !== response.run.id || response.task_id !== response.run.project_id) throw new Error("Chat input acceptance returned an invalid receipt; do not resend");
+      return response;
+    };
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -6978,10 +6995,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         const saidBefore = String(detail.task.description || "");
         checkCurrent();
-        const written = await write(id, { expected_revision: detail.revision,
-          change: { operation: "edit", id: task, title: detail.task.title, description } });
-        boardRevision = written?.revision;
-        followUp = { before: saidBefore, description };
+        if (inputId && !rewind) {
+          acceptedInput = await acceptTaskAndRun(detail.revision, detail.task.title, description, task);
+        } else {
+          const written = await write(id, { expected_revision: detail.revision,
+            change: { operation: "edit", id: task, title: detail.task.title, description } });
+          boardRevision = written?.revision;
+          followUp = { before: saidBefore, description };
+        }
       });
       clock.mark("write");
       if (rewind) {
@@ -6999,10 +7020,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       let created;
       await withBoardRetry(async () => {
         const before = await board({ workspaceId: id });
-        created = await write(id, { expected_revision: before.revision, change: {
-          operation: "create", title: startTitle, description: text,
-        } });
-        boardRevision = created?.revision;
+        if (inputId) {
+          acceptedInput = await acceptTaskAndRun(before.revision, startTitle, text);
+          created = { task: { id: acceptedInput.task_id } };
+        } else {
+          created = await write(id, { expected_revision: before.revision, change: {
+            operation: "create", title: startTitle, description: text,
+          } });
+          boardRevision = created?.revision;
+        }
       });
       clock.mark("write");
       // The service answers a create with the task it made (board_sync::apply_scoped). The send used
@@ -7015,7 +7041,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
     let runId, createdRun;
     try {
-      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
+      if (acceptedInput) { runId = acceptedInput.run_id; createdRun = acceptedInput.run; }
+      else ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
       clock.mark("create");
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
@@ -8405,6 +8432,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Take the current head after every read: edits and replacement adds keep their order.
       const [next] = chatQueue.list(workspaceId, taskId);
       if (!next) return;
+      if (next.inputId) {
+        const input = await chatInputs?.get(workspaceId, next.inputId);
+        if (!input) throw new Error("Durable chat input storage is unavailable");
+        if (["unknown", "dispatching"].includes(input.state)) {
+          chatQueue.update(workspaceId, taskId, next.id, { note: "Delivery is unknown. The input is saved and will not be sent again automatically." });
+          return;
+        }
+        if (["accepted", "completed", "cancelled"].includes(input.state)) {
+          chatQueue.remove(workspaceId, taskId, [next.id]);
+          armQueue(workspaceId, taskId, QUEUE_FREED_MS);
+          return;
+        }
+      }
       const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
         if (!next.steer) {
@@ -8413,7 +8453,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return;
         }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
-        const result = await chatSteer({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}) })
+        const result = await dispatchChatInput({ workspaceId, taskId, message: next.message, ...(next.inputId ? { inputId: next.inputId } : {}), ...(next.goal ? { goal: next.goal } : {}) }, true)
           .catch(error => ({ steered: false, waiting: true, error }));
         if (result.steered === true) {
           chatQueue.remove(workspaceId, taskId, [next.id]);
@@ -8431,7 +8471,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       // A `sending` mark seen here is an earlier app session's, whose send never answered (this
       // session's sends hold `draining`): it went if the chat already ends with it.
-      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next)) {
+      if (!next.inputId && next.sending && await queuedMessageInChat(workspaceId, taskId, next)) {
         chatQueue.remove(workspaceId, taskId, [next.id]);
         logger?.info?.("ao.chat_queue.sent_before_restart", { workspaceId, taskId });
         armQueue(workspaceId, taskId, QUEUE_FREED_MS);
@@ -8442,7 +8482,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       chatQueue.update(workspaceId, taskId, next.id, { sending: now() });
       steerTries.delete(next.id);
       try {
-        const result = await personChatSend({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}),
+        const result = await dispatchChatInput({ workspaceId, taskId, message: next.message, ...(next.inputId ? { inputId: next.inputId } : {}), ...(next.goal ? { goal: next.goal } : {}),
           ...queuedSelection(next, latest), ...(next.executable ? { executable: next.executable } : {}), deferStart: true });
         if (result?.ok === false) throw new Error(String(result.reason || "The queued message could not be sent"));
         chatQueue.remove(workspaceId, taskId, [next.id]);
@@ -8484,7 +8524,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * of its chat's queue, and the queue's next message is sent.
    */
   async function queueAfterRun(workspaceId, runId, outcome) {
-    const steers = outcome ? chatQueue.deliveredTo(workspaceId, runId) : [];
+    const steers = outcome ? chatQueue.deliveredTo(workspaceId, runId).filter(entry => !entry.inputId) : [];
     if (steers.length) {
       // A finished turn read them all (its receipts say "Read"). One the person stopped keeps its
       // stop: sending them again would start the turn they ended.
@@ -8519,6 +8559,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action === "set") return { ok: true, kept: chatDrafts.set(id, name, draft) };
     throw new Error("Unknown draft action");
   }
+  function dispatchChatInput(args, steer = false, options = {}) {
+    const execute = input => steer ? asPerson(() => chatSteer(input)) : personChatSend(input, options);
+    if (!args.inputId) return execute(args);
+    if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+    return chatInputs.dispatch(args, execute, { steer, reconcile: ({ workspaceId, inputId }) => asPerson(() =>
+      requestHeadless("/api/v1/ao/update", { workspace_id: workspaceId, confirm: true,
+        change: { operation: "read_chat_input_receipt", input_id: inputId } }, { localConfirmation: true })) });
+  }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
   async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
@@ -8528,11 +8576,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!text.trim()) throw new Error("Type a message to queue");
       // One already going out takes nothing more: what was joined to it would be lost with its send.
       const target = clean(itemId, 80);
-      if (chatQueue.list(id, task).find(entry => entry.id === target)?.sending) return { ok: true, updated: false, queue: chatQueue.list(id, task) };
+      if (chatQueue.list(id, task).some(entry => entry.id === target && (entry.sending || entry.inputId))) return { ok: true, updated: false, queue: chatQueue.list(id, task) };
       const updated = chatQueue.update(id, task, target, { message: text });
       return { ok: true, updated: Boolean(updated), queue: chatQueue.list(id, task) };
     }
     if (action === "add") {
+      if (item?.inputId) {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        const saved = await chatInputs.get(id, item.inputId);
+        if (saved.destination.taskId !== task || saved.destination.message !== item.message) throw new Error("The saved input belongs to a different chat or message");
+        if (saved.state !== "queued") throw new Error("This input is not queued; reconcile its saved delivery receipt");
+        item = { ...item, id: saved.inputId, message: saved.destination.message,
+          selection: saved.destination, ...(saved.destination.goal ? { goal: saved.destination.goal } : {}) };
+      }
       const added = chatQueue.add(id, task, item, { front: front === true });
       // Queued while the chat was free (its send was refused for now): it goes as soon as it can.
       void drainQueue(id, task).catch(() => undefined);
@@ -8540,9 +8596,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     if (action === "remove") {
       if (!Array.isArray(ids) || ids.some(entry => typeof entry !== "string")) throw new Error("Choose the queued messages to remove");
+      for (const entry of chatQueue.list(id, task).filter(entry => ids.includes(entry.id) && entry.inputId)) {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        const saved = await chatInputs.get(id, entry.inputId);
+        if (!["accepted", "completed", "failed", "cancelled"].includes(saved.state)) await chatInputs.cancel(id, entry.inputId);
+      }
       return { ok: true, removed: chatQueue.remove(id, task, ids), queue: chatQueue.list(id, task) };
     }
-    if (action === "clear") return { ok: true, removed: chatQueue.remove(id, task, null), queue: [] };
+    if (action === "clear") {
+      for (const entry of chatQueue.list(id, task).filter(entry => entry.inputId)) {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        const saved = await chatInputs.get(id, entry.inputId);
+        if (!["accepted", "completed", "failed", "cancelled"].includes(saved.state)) await chatInputs.cancel(id, entry.inputId);
+      }
+      return { ok: true, removed: chatQueue.remove(id, task, null), queue: [] };
+    }
     if (action === "list") return { ok: true, queue: chatQueue.list(id, task) };
     throw new Error("Choose add, remove, clear or list");
   }
@@ -8586,6 +8654,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const { workspaceId, taskId } of chatQueue.chats()) {
       if (typeof workspaceId === "string" && typeof taskId === "string") armQueue(workspaceId, taskId, QUEUE_RESTORE_MS);
     }
+    if (chatInputs) void (async () => {
+      let after = 0;
+      do {
+        const page = await chatInputs.pending(after);
+        if (wakeupsDisposed) return;
+        for (const entry of page.items) {
+          const taskId = entry.destination.taskId;
+          if (!taskId || chatQueue.list(entry.workspaceId, taskId).some(item => item.inputId === entry.inputId)) continue;
+          try {
+            chatQueue.add(entry.workspaceId, taskId, { id: entry.inputId, inputId: entry.inputId, message: entry.destination.message,
+              selection: entry.destination, steer: entry.mode === "steer", ...(entry.destination.goal ? { goal: entry.destination.goal } : {}),
+              ...(entry.state === "queued" ? {} : { note: "Delivery is unknown. This input will not be replayed automatically." }) });
+            if (entry.state === "queued") armQueue(entry.workspaceId, taskId, QUEUE_RESTORE_MS);
+          } catch (error) { logger?.warn?.("chat_input.queue_restore_failed", { code: error.code ?? "QUEUE_FULL" }); }
+        }
+        if (!page.hasMore) return;
+        after = page.cursor;
+      } while (!wakeupsDisposed);
+    })().catch(error => logger?.warn?.("chat_input.restore_failed", { code: error.code ?? "INPUT_STORE_FAILED" }));
   }
 
   // ---- /loop (chat-loops.cjs) ----
@@ -9708,6 +9795,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return ended;
   }
   function dispose() {
+    if (!inputJournal) void chatInputs?.close().catch(error => logger?.warn?.("chat_input.close_failed", { code: error.code ?? "INPUT_STORE_FAILED" }));
     archiveSweep.disposed = true;
     for (const timer of coldStarts.values()) if (timer) clearTimer(timer);
     coldStarts.clear();
@@ -9766,9 +9854,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function call(operation, args = {}) {
     switch (operation) {
-      case "chat_send": return personChatSend(args, { supersedeRetry: true });
+      case "chat_send": return dispatchChatInput(args, false, { supersedeRetry: true });
       case "chat_recover": return chatRecover(args);
-      case "chat_steer": return asPerson(() => chatSteer(args));
+      case "chat_steer": return dispatchChatInput(args, true);
       case "chat_prewarm": return chatPrewarm(args);
       case "chat_context_window": return chatSetContextWindow(args);
       case "turn_timeline": return turnTimeline(args);
@@ -9813,6 +9901,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       case "chat_queue": return chatQueueCall(args);
       case "chat_draft": return chatDraftCall(args);
+      case "chat_input": {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        return chatInputs.call(args);
+      }
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
@@ -9942,7 +10034,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Resolves once every wake-up and /loop change so far is on disk (saved off the main thread too). */
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
-  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
+  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved(), chatInputs?.saved()]);
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
