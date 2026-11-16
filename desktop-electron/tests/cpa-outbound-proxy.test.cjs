@@ -285,7 +285,7 @@ test("a services snapshot reads CPA's config off the main thread, again only aft
   assert.equal(syncReads, 0, "never on the main thread");
 });
 
-test("the programs the app starts get a signed-in proxy's sign-in; Chromium goes through the app's signed relay", async (t) => {
+test("the programs the app starts and every Chromium session go through the egress router, never holding the proxy's sign-in", async (t) => {
   const { createProviderNetworkController } = require("../electron/provider-network.cjs");
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/global-env-proxy-"));
   const saved = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "NODE_USE_ENV_PROXY"].map((name) => [name, process.env[name]]));
@@ -295,16 +295,15 @@ test("the programs the app starts get a signed-in proxy's sign-in; Chromium goes
   });
   const applied = [];
   const target = { setProxy: async (config) => { applied.push(config); } };
-  const relays = [];
+  const tables = [];
   const controller = createProviderNetworkController({
     app: {}, browserPartition: "persist:env-proxy-test", getBrowserHost: () => null,
-    logger: { info() {}, warn() {} }, safeStorage: { isEncryptionAvailable: () => false },
+    logger: { info() {}, warn() {}, error() {} }, safeStorage: { isEncryptionAvailable: () => false },
     session: { defaultSession: target, fromPartition: () => target }, shell: {}, userData: root,
     fetchImpl: async () => { throw new Error("no network in this test"); },
-    startSignedRelay: async ({ endpoint, credentials }) => {
-      const relay = { endpoint, credentials, port: 52000, proxyRules: "http://127.0.0.1:52000", close: async () => {} };
-      relays.push(relay);
-      return relay;
+    startRouter: async ({ port, table }) => {
+      tables.push(table);
+      return { port, running: true, setRoutes: (next) => tables.push(next), reconnect: async () => ({ closed: 0 }), stats: async () => ({}), close: async () => {} };
     },
   });
   controller.store.saveProxyProfile({ id: "decodo", name: "HTTP decodo", enabled: true,
@@ -313,31 +312,31 @@ test("the programs the app starts get a signed-in proxy's sign-in; Chromium goes
   controller.store.setGlobalRouting({ enabled: true, profileId: "decodo" });
   // App start sets the variables before anything awaits, so programs main starts next inherit them.
   controller.applyGlobalEnvironment();
-  assert.equal(new URL(process.env.HTTPS_PROXY).host, "proxy.example.test:10000");
+  const environment = new URL(process.env.HTTPS_PROXY);
+  assert.equal(environment.hostname, "127.0.0.1", "the router, on loopback");
+  assert.equal(environment.username, "app", "the App route's token");
+  assert.equal(environment.password.length, 64, "the router key, not the proxy's password");
+  assert.doesNotMatch(process.env.HTTPS_PROXY, /account|p%40ss|p@ss|proxy\.example/, "nothing of the proxy reaches a program");
+  assert.equal(process.env.HTTP_PROXY, process.env.HTTPS_PROXY);
+  assert.equal(process.env.ALL_PROXY, process.env.HTTPS_PROXY);
   assert.equal(applied.length, 0);
-  // Node programs follow the variables only with this set; loopback stays direct even when the
-  // profile's own bypass list leaves it out.
+  // Node programs follow the variables only with this set; loopback stays direct.
   assert.equal(process.env.NODE_USE_ENV_PROXY, "1");
   for (const host of ["localhost", "127.0.0.1", "::1"]) assert.ok(process.env.NO_PROXY.split(",").includes(host), host);
   await controller.applyGlobalRouting();
 
-  // Without the sign-in every agent, curl and git call through this proxy was refused with 407.
-  const environment = new URL(process.env.HTTPS_PROXY);
-  assert.equal(environment.host, "proxy.example.test:10000");
-  assert.equal(decodeURIComponent(environment.username), "account");
-  assert.equal(decodeURIComponent(environment.password), "p@ss:word");
-  assert.equal(process.env.HTTP_PROXY, process.env.HTTPS_PROXY);
-  assert.equal(process.env.ALL_PROXY, process.env.HTTPS_PROXY);
-  // Chromium would sign in only after a 407, which Decodo stopped sending: its sessions go through
-  // the app's relay, which carries the sign-in (signed-proxy-relay.cjs).
-  assert.deepEqual(applied.map((config) => config.proxyRules), ["http://127.0.0.1:52000"]);
-  assert.deepEqual(relays.map((relay) => [relay.endpoint.host, relay.endpoint.port, relay.credentials]),
-    [["proxy.example.test", 10000, { username: "account", password: "p@ss:word" }]]);
+  // The router signs in: it holds the proxy and its sign-in, and the session points at the router.
+  const app = tables[tables.length - 1].targets.app;
+  assert.deepEqual([app.endpoint.host, app.endpoint.port, app.credentials], ["proxy.example.test", 10000, { username: "account", password: "p@ss:word" }]);
+  assert.deepEqual(applied.map((config) => config.proxyRules), [`http://127.0.0.1:${environment.port}`]);
 
+  // Global Routing off: the programs keep the router's address (so turning it on again is live)
+  // and the router goes direct.
+  const before = process.env.HTTPS_PROXY;
   controller.store.setGlobalRouting({ enabled: false, profileId: null });
   await controller.applyGlobalRouting();
-  assert.equal(process.env.HTTPS_PROXY, undefined);
-  assert.equal(process.env.NODE_USE_ENV_PROXY, undefined);
+  assert.equal(process.env.HTTPS_PROXY, before);
+  assert.deepEqual(tables[tables.length - 1].targets.app, { mode: "direct" });
 });
 
 // 0.8.110, 2026-11-11: each start read provider-network.json synchronously, and one such read froze

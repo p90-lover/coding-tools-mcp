@@ -63,7 +63,7 @@ function strictModel(body) {
 
 test("the judge leaves out the settings the chat's model refuses, judges, and remembers them for that model", async () => {
   const { workflow, mission, resolved, bodies, logged } = chat(["git -C ../one push origin feat/a", "git -C ../two push origin feat/b"], strictModel);
-  await workflow.call("chat_model_judges", { enabled: true });
+  await workflow.call("chat_model_judges", { enabled: true, meteredReviews: true }); // reviews through CPA are opt-in since 0.8.122
   try {
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     for (let tries = 0; tries < 600 && resolved.length < 2; tries++) await pause();
@@ -79,7 +79,7 @@ test("the judge leaves out the settings the chat's model refuses, judges, and re
 test("a 400 that names no optional setting is not retried: the judge reports it as before", async () => {
   const refuse = () => answer(400, { error: { message: "Unsupported parameter: 'messages' is malformed", param: "messages", code: "unsupported_parameter" } });
   const { workflow, mission, resolved, bodies } = chat(["git -C ../one push origin feat/a"], refuse);
-  await workflow.call("chat_model_judges", { enabled: true });
+  await workflow.call("chat_model_judges", { enabled: true, meteredReviews: true }); // reviews through CPA are opt-in since 0.8.122
   try {
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     for (let tries = 0; tries < 600 && !resolved.length; tries++) await pause();

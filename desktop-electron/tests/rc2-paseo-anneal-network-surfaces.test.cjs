@@ -48,7 +48,10 @@ test("Network surface manages app-wide and per-provider proxy routing", () => {
     "testProxyProfile",
     "setGlobalProxyRouting",
     "setProviderProxyPolicy",
-    "setAccountProxyPolicy",
+    // Per CPA account (credential) routes, which the egress router enforces; the app-account rows it
+    // replaced routed nothing at runtime.
+    "setCredentialProxyPolicy",
+    "egressStatus",
     "onProviderNetworkChanged",
   ]) {
     assert.match(source, new RegExp(`\\.${api}\\(`), `missing proxy API ${api}`);

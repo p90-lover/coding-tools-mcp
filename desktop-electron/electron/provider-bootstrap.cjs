@@ -159,14 +159,13 @@ function installProviderNetwork({
     } catch (error) {
       logger.warn("proxy.nova_adopt_failed", { error: error instanceof Error ? error.message : String(error) });
     }
-    const snapshot = controller.store.snapshot();
-    if (snapshot.routing.globalEnabled && snapshot.routing.globalProfileId) {
-      void controller.applyGlobalRouting().catch((error) => {
-        logger.warn("proxy.global_routing_failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+    // Always, Direct included: the egress router starts here, and the programs main starts next are
+    // already pointed at it (applyGlobalEnvironment above).
+    void Promise.resolve().then(() => controller.applyGlobalRouting()).catch((error) => {
+      logger.warn("proxy.global_routing_failed", {
+        error: error instanceof Error ? error.message : String(error),
       });
-    }
+    });
     // Kept for its IPC (Nova's state reads as not running); app start no longer starts it. A quit
     // shuts down only a Nova this manager started, never one the user runs for other programs.
     nova = createNovaManager({
@@ -253,15 +252,16 @@ function installProviderNetwork({
     publish(await active.probeProviderAccount(accountId))
   ));
 
-  handle("launcher:proxy-profile-save", (active, _event, input) => {
-    const current = active.store.snapshot();
-    const refreshGlobal = current.routing.globalEnabled
-      && current.routing.globalProfileId === input?.id;
-    return publishMutation(active, () => active.store.saveProxyProfile(input), { refreshGlobal });
-  }, "network");
-  handle("launcher:proxy-profile-archive", (active, _event, profileId) => publishMutation(
+  // Every change below re-applies the routes (applyGlobalRouting): a proxy may back any route (the
+  // App, a provider, a CPA credential, a Browser-tab account), and the egress router takes the new
+  // table at once, without restarting anything.
+  handle("launcher:proxy-profile-save", (active, _event, input) => publishMutation(
+    active, () => active.store.saveProxyProfile(input), { refreshGlobal: true },
+  ), "network");
+  // A proxy a route still uses is removed only with what those routes take instead (a proxy, or "direct").
+  handle("launcher:proxy-profile-archive", (active, _event, profileId, options) => publishMutation(
     active,
-    () => active.store.archiveProxyProfile(profileId),
+    () => active.store.archiveProxyProfile(profileId, { replacement: typeof options?.replacement === "string" ? options.replacement : null }),
     { refreshGlobal: true },
   ), "network");
   handle("launcher:proxy-profile-test", async (active, _event, profileId) => {
@@ -276,6 +276,8 @@ function installProviderNetwork({
   handle("launcher:decodo-sync", async (active) => {
     try {
       const result = await active.syncDecodo();
+      // A synced proxy may back a route: its new sign-in reaches the router.
+      await active.applyGlobalRouting();
       return { ...result, snapshot: publish(result.snapshot) };
     } catch (error) {
       publish(active.store.snapshot());
@@ -290,11 +292,23 @@ function installProviderNetwork({
   handle("launcher:proxy-provider-policy", (active, _event, input) => publishMutation(
     active,
     () => active.store.setProviderPolicy(input),
+    { refreshGlobal: true },
   ), "network");
   handle("launcher:proxy-account-policy", (active, _event, input) => publishMutation(
     active,
     () => active.store.setAccountPolicy(input),
+    { refreshGlobal: true },
   ), "network");
+  // One CPA credential's route: follow its provider, Direct, or a proxy (egress-routes.cjs).
+  handle("launcher:proxy-credential-policy", (active, _event, input) => publishMutation(
+    active,
+    () => active.store.setCredentialPolicy(input),
+    { refreshGlobal: true },
+  ), "network");
+  // The egress router, each route as it resolves now, and its live counters (the Proxy page polls it).
+  handle("launcher:egress-status", (active) => active.egressStatus());
+  // Moves a route's open connections to its current proxy now, instead of when they next reconnect.
+  handle("launcher:proxy-reconnect", (active, _event, target) => active.reconnectTarget(typeof target === "string" ? target : null), "network");
 
   // ProxyBridge Nova (the Proxy page). Reads need the app's own page; changes also need it focused.
   const novaRead = (channel, read) => handle(channel, (_active, _event, ...args) => read(...args));

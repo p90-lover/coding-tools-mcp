@@ -10,7 +10,8 @@ const {
 } = require("./cpa-oauth-adapter.cjs");
 const { fetchDecodoEndpoints, normalizeDecodoSettings } = require("./decodo-proxies.cjs");
 const { createChromeLoginProxy } = require("./chrome-login-proxy.cjs");
-const { startSignedProxyRelay } = require("./signed-proxy-relay.cjs");
+const { startEgressRouter, newRouterKey } = require("./egress-router.cjs");
+const { normalizeCredentialPolicy, resolveEgressRoutes, routerUrl, routeToken, noProxyList, publicRoute, providerType } = require("./egress-routes.cjs");
 
 const STORE_VERSION = 1;
 const ACCOUNT_AUTH = new Set(["oauth", "api_key", "browser_session", "local_proxy"]);
@@ -60,13 +61,18 @@ function defaultState() {
       globalProfileId: null,
       providers: [],
       accounts: [],
+      credentials: [],
     },
+    // The egress router's loopback port, reused across restarts (egress-router.cjs); its key is
+    // secrets.router.
+    router: { port: null },
     // Decodo's sticky proxy list (decodo-proxies.cjs); its password lives in secrets.decodo.
     decodo: { ...normalizeDecodoSettings(), lastSyncAt: null, lastError: null },
     secrets: {
       accounts: {},
       proxies: {},
       decodo: null,
+      router: null,
     },
   };
 }
@@ -186,6 +192,9 @@ function normalizeProxyProfile(profile) {
         ? Math.round(profile.latencyMs)
         : undefined,
       lastError: optionalText(profile.lastError, 500),
+      // Where the last good check left the internet (testProxyProfile, Cloudflare's trace).
+      ...(optionalText(profile.exitIp, 64) ? { exitIp: optionalText(profile.exitIp, 64) } : {}),
+      ...(optionalText(profile.exitCountry, 8) ? { exitCountry: optionalText(profile.exitCountry, 8) } : {}),
       // The last check reached the proxy and it refused the saved sign-in (or wanted one): not
       // "unreachable". Only ever true alongside lastError.
       ...(profile.signInRefused === true && optionalText(profile.lastError, 500) ? { signInRefused: true } : {}),
@@ -263,12 +272,17 @@ function normalizeState(parsed) {
       accounts: Array.isArray(routing.accounts)
         ? routing.accounts.map(normalizeAccountPolicy).filter(Boolean)
         : [],
+      credentials: Array.isArray(routing.credentials)
+        ? routing.credentials.map(normalizeCredentialPolicy).filter(Boolean)
+        : [],
     },
+    router: { port: Number.isInteger(parsed.router?.port) && parsed.router.port >= 1024 && parsed.router.port <= 65535 ? parsed.router.port : null },
     decodo: normalizeDecodoState(parsed.decodo),
     secrets: {
       accounts: secrets.accounts && typeof secrets.accounts === "object" ? secrets.accounts : {},
       proxies: secrets.proxies && typeof secrets.proxies === "object" ? secrets.proxies : {},
       decodo: secrets.decodo && typeof secrets.decodo === "object" ? secrets.decodo : null,
+      router: secrets.router && typeof secrets.router === "object" ? secrets.router : null,
     },
   };
 }
@@ -396,7 +410,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     if (read.value) { stateRead = read; state = read.value; }
   }
   const codec = createSecretCodec({ safeStorage, keyPath, readText,
-    canCreateKey: () => stateRead.source !== "unreadable" && ![...Object.values(state.secrets.accounts), ...Object.values(state.secrets.proxies), state.secrets.decodo]
+    canCreateKey: () => stateRead.source !== "unreadable" && ![...Object.values(state.secrets.accounts), ...Object.values(state.secrets.proxies), state.secrets.decodo, state.secrets.router]
       .some(envelope => envelope?.scheme === "aes-256-gcm-v1"),
   });
 
@@ -664,10 +678,21 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     return publicSnapshot();
   }
 
-  function archiveProxyProfile(profileId) {
+  /**
+   * Removes a proxy (archived: its sign-in is kept). Routes that use it move to `replacement` (another
+   * proxy's id, or "direct"); a proxy in use without one is refused, so removing it never turns a
+   * route off by itself.
+   */
+  function archiveProxyProfile(profileId, { replacement = null } = {}) {
     const profile = findProxy(profileId);
     if (!profile) throw new Error("Proxy profile was not found");
-    if (profile.source) throw new Error("This proxy belongs to ProxyBridge Nova; remove it on the Proxy page");
+    if (profile.source) throw new Error("This proxy belongs to ProxyBridge Nova and can't be removed here");
+    const references = proxyReferences(profileId);
+    if (references.length && !replacement) {
+      throw Object.assign(new Error(`This proxy is used by ${references.length} route${references.length === 1 ? "" : "s"}; choose what they use instead`),
+        { code: "PROXY_IN_USE", references });
+    }
+    if (references.length) replaceProxyReferences(profileId, replacement);
     const now = new Date().toISOString();
     Object.assign(profile, { enabled: false, archivedAt: now, updatedAt: now });
     dropProxyReferences(profileId);
@@ -695,9 +720,39 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     state.routing.accounts = state.routing.accounts.map((policy) => (
       policy.profileId === fromId ? { ...policy, profileId: toId } : policy
     ));
+    state.routing.credentials = state.routing.credentials.map((policy) => (
+      policy.profileId === fromId ? { ...policy, profileId: toId } : policy
+    ));
     for (const account of state.accounts) {
       if (account.proxyProfileId === fromId) account.proxyProfileId = toId;
     }
+  }
+
+  /** The routes that name a proxy: the App route, providers and credentials. */
+  function proxyReferences(profileId) {
+    const references = [];
+    if (state.routing.globalEnabled && state.routing.globalProfileId === profileId) references.push({ kind: "app", id: "app" });
+    for (const policy of state.routing.providers) if (policy.profileId === profileId) references.push({ kind: "provider", id: policy.providerId });
+    for (const policy of state.routing.credentials) if (policy.profileId === profileId) references.push({ kind: "credential", id: policy.authName });
+    for (const policy of state.routing.accounts) if (policy.profileId === profileId) references.push({ kind: "account", id: policy.accountId });
+    return references;
+  }
+
+  // Every route that names a proxy takes another proxy, or Direct; never nothing (FR-6).
+  function replaceProxyReferences(profileId, replacement) {
+    if (replacement === "direct") {
+      if (state.routing.globalProfileId === profileId) { state.routing.globalEnabled = false; state.routing.globalProfileId = null; }
+      state.routing.providers = state.routing.providers.map((policy) => (
+        policy.profileId === profileId ? { providerId: policy.providerId, inheritGlobal: false } : policy));
+      state.routing.credentials = state.routing.credentials.map((policy) => (
+        policy.profileId === profileId ? { authName: policy.authName, mode: "direct" } : policy));
+      state.routing.accounts = state.routing.accounts.map((policy) => (
+        policy.profileId === profileId ? { ...policy, profileId: undefined, inheritProvider: false, inheritGlobal: false } : policy));
+      for (const account of state.accounts) if (account.proxyProfileId === profileId) account.proxyProfileId = undefined;
+      return;
+    }
+    if (!activeProxy(replacement) || replacement === profileId) throw new Error("Choose another enabled proxy, or Direct");
+    moveProxyReferences(profileId, replacement);
   }
 
   /**
@@ -804,6 +859,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     state.routing.accounts = state.routing.accounts.map((policy) => (
       policy.profileId === profileId ? { ...policy, profileId: undefined } : policy
     ));
+    state.routing.credentials = state.routing.credentials.filter((policy) => policy.profileId !== profileId);
     for (const account of state.accounts) {
       if (account.proxyProfileId === profileId) account.proxyProfileId = undefined;
     }
@@ -880,12 +936,56 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     return publicSnapshot();
   }
 
+  /** One CPA credential's route: follow its provider, Direct, or a proxy. */
+  function setCredentialPolicy(input) {
+    const policy = normalizeCredentialPolicy({ authName: input?.authName, provider: input?.provider, mode: input?.mode, profileId: input?.profileId });
+    if (!policy) throw new Error(input?.mode === "profile" ? "Choose a proxy for this account" : "Account name is invalid");
+    if (policy.mode === "profile" && !activeProxy(policy.profileId)) throw new Error("Proxy profile was not found");
+    state.routing.credentials = state.routing.credentials.filter((item) => item.authName !== policy.authName);
+    if (policy.mode !== "follow") state.routing.credentials.push(policy);
+    write();
+    return publicSnapshot();
+  }
+
+  /**
+   * The egress router's port and key, made once and kept (synchronous: app start sets every
+   * program's proxy variables from them before it spawns anything). A port taken at start is
+   * replaced by setRouterPort with the one the router got.
+   */
+  function routerSettings({ create = true } = {}) {
+    recoverState();
+    let changed = false;
+    let key = codec.decrypt(state.secrets.router)?.key;
+    // Another reader of the same file (CPA's start) never makes one: only the app's controller does.
+    if (!create) return typeof key === "string" && key.length >= 32 && state.router?.port ? { port: state.router.port, key } : null;
+    if (typeof key !== "string" || key.length < 32) {
+      key = newRouterKey();
+      state.secrets.router = codec.encrypt({ key });
+      changed = true;
+    }
+    if (!state.router?.port) {
+      state.router = { port: 17000 + crypto.randomInt(0, 2000) };
+      changed = true;
+    }
+    if (changed && stateRead.source !== "unreadable") write();
+    return { port: state.router.port, key };
+  }
+
+  function setRouterPort(port) {
+    if (!Number.isInteger(port) || port < 1024 || port > 65535 || state.router?.port === port) return;
+    state.router = { port };
+    write();
+  }
+
   function recordProxyHealth(profileId, result) {
     const profile = findProxy(profileId);
     if (!profile) throw new Error("Proxy profile was not found");
     profile.lastCheckedAt = new Date().toISOString();
     profile.latencyMs = result.reachable ? Math.max(0, Math.round(result.latencyMs || 0)) : undefined;
     profile.lastError = result.reachable ? undefined : optionalText(result.error, 500) || "Connection failed";
+    // Where traffic leaves through this proxy, as Cloudflare saw it (testProxyProfile).
+    profile.exitIp = result.reachable ? optionalText(result.exitIp, 64) : undefined;
+    profile.exitCountry = result.reachable ? optionalText(result.exitCountry, 8) : undefined;
     if (!result.reachable && result.signInRefused === true) profile.signInRefused = true;
     else delete profile.signInRefused;
     profile.updatedAt = profile.lastCheckedAt;
@@ -976,6 +1076,10 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     setGlobalRouting,
     setProviderPolicy,
     setAccountPolicy,
+    setCredentialPolicy,
+    proxyReferences,
+    routerSettings,
+    setRouterPort,
     recordProxyHealth,
     clearProxySignInRefusal,
     accountSecret,
@@ -1136,7 +1240,7 @@ function createProviderNetworkController({
   oauthPollIntervalMs = DEFAULT_OAUTH_POLL_INTERVAL_MS,
   oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
   requestTimeoutMs = DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS,
-  startSignedRelay = startSignedProxyRelay,
+  startRouter = startEgressRouter,
 }) {
   const directory = path.join(userData, "providers");
   const store = createProviderNetworkStore({
@@ -1179,93 +1283,140 @@ function createProviderNetworkController({
     return profileId ? store.activeProxy(profileId) : null;
   }
 
-  // One signed relay per proxy profile in use (signed-proxy-relay.cjs), keyed by its endpoint and
-  // sign-in so a changed password starts a new one.
-  const relays = new Map(); // profileId -> { key, ready: Promise<relay | null>, startedAt, rejectedAt }
-  const RELAY_REJECTED_LOG_MS = 60_000;
-  const RELAY_QUICK_STOP_MS = 30_000;
+  // ---- The egress router (egress-router.cjs, docs/specs/rewrite-the-proxy) -------------------
+  // The one way the app and everything it starts reaches the network: Chromium sessions, the
+  // programs it starts (their proxy variables name the router, never a proxy or its password) and
+  // CPA. A route change is a new table for the router; nothing restarts.
+  let router = null; // the running router
+  let routerStart = null; // its start, while it starts
+  let routerError = null; // why it is not running
+  let routerPortMovedAt = 0; // when it came back on a port the earlier programs weren't given
+  const knownPartitions = new Set(); // Browser-tab account partitions routed so far
+  const lastRouteKeys = new Map(); // target -> its route last applied, to reconnect what changed
+  const routeErrorLogged = new Map(); // target -> when its last route error was logged
+  let lastDescribe = {};
+  let cpaCredentials = []; // [{ name, provider, label }] CPA's credentials, for the Proxy page
+  const ROUTE_ERROR_LOG_MS = 60_000;
 
-  function relayKey(profile, secret) {
-    return crypto.createHash("sha256")
-      .update(JSON.stringify([profile.endpoint, secret?.username || "", secret?.password || ""]))
-      .digest("hex");
+  /** A proxy profile as a router route: its endpoint and sign-in, or broken (never direct). */
+  function profileRoute(profileId) {
+    const profile = profileId ? store.activeProxy(profileId) : null;
+    if (!profile) return { mode: "broken", reason: "This route's proxy was removed or turned off" };
+    let credentials = null;
+    if (profile.hasAuthentication) {
+      const secret = store.proxySecret(profile.id);
+      if (!secret?.username && !secret?.password) return { mode: "broken", reason: "This proxy's saved sign-in can't be read; enter it again" };
+      credentials = { username: secret.username || "", password: secret.password || "" };
+    }
+    return { mode: "proxy", profileId: profile.id, endpoint: { ...profile.endpoint }, credentials, bypass: [...profile.bypass] };
   }
 
-  function closeRelay(profileId) {
-    const entry = relays.get(profileId);
-    if (!entry) return;
-    relays.delete(profileId);
-    void entry.ready.then((relay) => relay?.close()).catch(() => {});
+  function resolvedRoutes() {
+    const snapshot = store.snapshot();
+    for (const partition of liveBrowserPartitions()) knownPartitions.add(partition);
+    const browserBindings = [...knownPartitions].map((partition) => ({ partition, profileId: getBrowserProxyBinding?.(partition) ?? null }));
+    // Credential routes the store holds name their provider, so they resolve before CPA's list is read.
+    const credentials = new Map(cpaCredentials.map((credential) => [credential.name, credential]));
+    for (const policy of snapshot.routing.credentials ?? []) {
+      if (!credentials.has(policy.authName)) credentials.set(policy.authName, { name: policy.authName, provider: policy.provider || "" });
+    }
+    const resolved = resolveEgressRoutes({ routing: snapshot.routing, profileRoute, credentials: [...credentials.values()],
+      browserBindings, extraProviders: ["provider-manager"] });
+    lastDescribe = resolved.describe;
+    return resolved;
   }
 
-  function onRelayEvent(profileId, entry, event) {
-    if (event?.type === "authenticated") {
-      logger.info("proxy.relay_authenticated", { profileId });
-      // The relay signs every request, so Chromium is never asked and the app's own requests cannot
-      // tell: the relay's word is what shows on the Proxy page.
-      noteProxySignInAccepted(profileId);
-    } else if (event?.type === "rejected") {
+  function routerAddress() {
+    const settings = store.routerSettings();
+    return { port: router?.port ?? settings.port, key: settings.key };
+  }
+
+  /** The proxy URL a program or CPA is given for `target`: the router with its token. */
+  function routerUrlFor(target = "app") {
+    const { port, key } = routerAddress();
+    return routerUrl({ port, key, target });
+  }
+
+  function ensureRouter() {
+    if (router) return Promise.resolve(router);
+    if (!routerStart) {
+      const settings = store.routerSettings();
+      routerStart = startRouter({ port: settings.port, key: settings.key, table: resolvedRoutes().table, onEvent: onRouterEvent })
+        .then((started) => {
+          router = started;
+          routerError = null;
+          if (started.port !== settings.port) {
+            store.setRouterPort(started.port);
+            routerPortMovedAt = Date.now();
+            logger.warn("proxy.router_port_moved", { from: settings.port, to: started.port });
+            applyGlobalEnvironment();
+          }
+          logger.info("proxy.router_started", { port: started.port });
+          return started;
+        }, (error) => {
+          routerError = error?.message || String(error);
+          logger.warn("proxy.router_failed", { error: routerError });
+          return null;
+        })
+        .finally(() => { routerStart = null; });
+    }
+    return routerStart;
+  }
+
+  function onRouterEvent(event) {
+    if (event?.type === "signin" && event.profileId) {
+      // The router signs every request in, so its word on the sign-in is what the Proxy page shows.
+      if (event.ok) noteProxySignInAccepted(event.profileId);
+      else noteProxySignInRefused(event.profileId);
+    } else if (event?.type === "route-error") {
       const now = Date.now();
-      if (!entry.rejectedAt || now - entry.rejectedAt >= RELAY_REJECTED_LOG_MS) {
-        entry.rejectedAt = now;
-        logger.warn("proxy.relay_signin_rejected", { profileId, note: "The proxy refused this profile's saved username and password" });
+      if (now - (routeErrorLogged.get(event.target) ?? -Infinity) >= ROUTE_ERROR_LOG_MS) {
+        routeErrorLogged.set(event.target, now);
+        logger.warn("proxy.route_error", { target: String(event.target).slice(0, 80), code: event.code, message: String(event.message).slice(0, 200) });
       }
-      noteProxySignInRefused(profileId, { log: false });
-    } else if (event?.type === "stopped" && relays.get(profileId) === entry) {
-      relays.delete(profileId);
-      const quick = Date.now() - entry.startedAt < RELAY_QUICK_STOP_MS;
-      logger.warn("proxy.relay_stopped", { profileId, restart: !quick });
-      // Re-applied, the sessions get a new relay; one that dies at once is not restarted in a loop.
-      if (!quick) void applyGlobalRouting().catch((error) => logger.warn("proxy.global_routing_failed", { error: error?.message }));
+    } else if (event?.type === "restarted") {
+      logger.warn("proxy.router_restarted", { port: event.port });
+      openPorts.clear();
+      if (event.port !== store.routerSettings().port) {
+        store.setRouterPort(event.port);
+        routerPortMovedAt = Date.now();
+        applyGlobalEnvironment();
+        void applyGlobalRouting().catch(() => {});
+      }
+    } else if (event?.type === "stopped") {
+      router = null;
+      routerError = "The app's proxy router stopped";
+      logger.error?.("proxy.router_stopped", { code: event.code, message: event.message });
     }
   }
 
-  /**
-   * The proxy rule a Chromium session takes for `profile`: its signed relay when it is an HTTP(S)
-   * proxy with a saved sign-in, else the proxy itself. Chromium would sign in only after a 407,
-   * which Decodo stopped sending (signed-proxy-relay.cjs). A relay that cannot start leaves the
-   * proxy itself, as before.
-   */
-  async function chromiumProxyRules(profile) {
-    const direct = proxyUrl(profile);
-    if (!["http", "https"].includes(profile.endpoint.protocol)) return { proxyRules: direct, relay: false };
-    const secret = store.proxySecret(profile.id);
-    if (!secret?.username && !secret?.password) return { proxyRules: direct, relay: false };
-    const key = relayKey(profile, secret);
-    let entry = relays.get(profile.id);
-    if (entry && entry.key !== key) { closeRelay(profile.id); entry = null; }
-    if (!entry) {
-      entry = { key, ready: null, startedAt: Date.now(), rejectedAt: 0 };
-      const current = entry;
-      current.ready = startSignedRelay({
-        endpoint: profile.endpoint,
-        credentials: { username: secret.username || "", password: secret.password || "" },
-        onEvent: (event) => onRelayEvent(profile.id, current, event),
-      }).then((relay) => {
-        logger.info("proxy.relay_started", { profileId: profile.id, port: relay.port });
-        return relay;
-      }, (error) => {
-        logger.warn("proxy.relay_failed", { profileId: profile.id, error: error?.message || String(error) });
-        if (relays.get(profile.id) === current) relays.delete(profile.id);
-        return null;
-      });
-      relays.set(profile.id, current);
-    }
-    const relay = await entry.ready;
-    return relay ? { proxyRules: relay.proxyRules, relay: true } : { proxyRules: direct, relay: false };
+  const ROUTER_BYPASS = "localhost,127.0.0.1,::1";
+  /** Points one Chromium session at the router (or Direct while the router is down and its route is direct). */
+  async function routeSession(target, name, route) {
+    if (!router && route?.mode === "direct") await target.setProxy({ mode: "direct" });
+    // A router that is down fails a proxied route closed: its port has no listener.
+    else await target.setProxy({ mode: "fixed_servers", proxyRules: `http://127.0.0.1:${routerAddress().port}`, proxyBypassRules: ROUTER_BYPASS });
+    const key = JSON.stringify(publicRoute(route));
+    const changed = lastRouteKeys.has(name) && lastRouteKeys.get(name) !== key;
+    lastRouteKeys.set(name, key);
+    // Open connections keep the route they were made on; drop them so every request takes this one.
+    if (changed && typeof target.closeAllConnections === "function") await target.closeAllConnections().catch(() => {});
+    return changed;
   }
 
   /** Routes a Browser-tab account's partition: its bound proxy, else Global Routing's, else direct. */
   async function routeBrowserPartition(partition) {
-    const target = session.fromPartition(partition);
-    const snapshot = store.snapshot();
-    const profile = boundBrowserProxy(partition)
-      ?? (snapshot.routing.globalEnabled ? store.activeProxy(snapshot.routing.globalProfileId) : null);
-    if (!profile) await target.setProxy({ mode: "direct" });
-    else await target.setProxy({ mode: "fixed_servers", proxyRules: (await chromiumProxyRules(profile)).proxyRules, proxyBypassRules: profile.bypass.join(",") });
-    // Open connections keep the route they were made on; drop them so every request takes this one.
-    if (typeof target.closeAllConnections === "function") await target.closeAllConnections().catch(() => {});
-    return profile?.id ?? null;
+    knownPartitions.add(partition);
+    await ensureRouter();
+    const { table } = resolvedRoutes();
+    router?.setRoutes(table);
+    const name = `browser:${partition}`;
+    const route = table.targets[name] ?? table.targets.app;
+    await routeSession(session.fromPartition(partition), name, route);
+    if (typeof session.fromPartition(partition).closeAllConnections === "function") {
+      await session.fromPartition(partition).closeAllConnections().catch(() => {});
+    }
+    return route?.mode === "proxy" ? route.profileId : null;
   }
 
   async function withBrowserLoginProxy(partition, route, action) {
@@ -1311,75 +1462,203 @@ function createProviderNetworkController({
     }
   }
 
-  // The variables every program the app starts inherits. Synchronous, so app start sets them before
-  // main spawns anything: applied only after the Chromium route's await, AO, the Codex bridge and
-  // the MCP tunnel could start in between and run without the proxy until the next restart.
+  // The variables every program the app starts inherits: the router's URL with the App token, set
+  // synchronously at app start before main spawns anything, and constant afterwards, so a route
+  // change reaches running programs (AO and every agent, the Codex bridge, the MCP tunnel) without a
+  // restart and none of them holds a proxy's password. Loopback stays direct. Only a router that
+  // could not start, with the App route Direct, leaves them without a proxy.
   function applyGlobalEnvironment() {
-    const snapshot = store.snapshot();
-    const profile = snapshot.routing.globalEnabled
-      ? store.activeProxy(snapshot.routing.globalProfileId)
-      : null;
     clearOwnedEnvironment();
-    if (!profile) return null;
-    const special = environmentRoute?.(profile) ?? null;
-    // Chromium takes the bare route and answers the proxy's 407 through handleProxyLogin. The
-    // programs the app starts (chat agents and every tool they run) read these variables and have
-    // no such handler: a bare route to a signed-in proxy (Nova's Decodo profiles, adopted in #655)
-    // failed every request of theirs with 407, so the variables carry the saved sign-in, as CPA's do.
-    const environmentUrl = special?.url || proxyUrl(profile, store.proxySecret(profile.id));
-    setOwnedEnvironment("HTTP_PROXY", environmentUrl);
-    setOwnedEnvironment("HTTPS_PROXY", environmentUrl);
-    setOwnedEnvironment("ALL_PROXY", environmentUrl);
-    // Loopback always stays direct for programs: AO, the bridge and CPA talk to each other on it.
-    setOwnedEnvironment("NO_PROXY", [...new Set([...profile.bypass, ...DEFAULT_BYPASS])].join(","));
-    // Node ignores the variables above unless this is set; Node programs (MCP servers, CLIs and the
-    // tunnel's codex.js) went direct. Node's own proxy support takes HTTP(S) proxies only.
-    if (/^https?:/i.test(environmentUrl)) setOwnedEnvironment("NODE_USE_ENV_PROXY", "1");
-    for (const [name, value] of Object.entries(special?.extra ?? {})) {
-      if (typeof value === "string" && value) setOwnedEnvironment(name, value);
-    }
-    return profile;
+    const { table } = resolvedRoutes();
+    const appRoute = table.targets.app;
+    if (!router && routerError && appRoute.mode === "direct") return null;
+    const url = routerUrlFor("app");
+    setOwnedEnvironment("HTTP_PROXY", url);
+    setOwnedEnvironment("HTTPS_PROXY", url);
+    setOwnedEnvironment("ALL_PROXY", url);
+    setOwnedEnvironment("NO_PROXY", noProxyList());
+    // Node programs, and the app's own worker threads (off-thread-run.cjs), follow these only with it.
+    setOwnedEnvironment("NODE_USE_ENV_PROXY", "1");
+    return appRoute.mode === "proxy" ? store.activeProxy(appRoute.profileId) : null;
   }
 
+  /**
+   * Applies the saved routes: the router's table, every Chromium session, the environment. Run at
+   * app start and after every route or proxy change; a changed route's open tunnels are closed so
+   * long-lived connections move too.
+   */
   async function applyGlobalRouting() {
     const snapshot = store.snapshot();
-    const profile = applyGlobalEnvironment();
-    // The Browser tab's active account may have its own partition (browser-accounts.cjs); one bound
-    // to a proxy of its own keeps that proxy (routeBrowserPartition) instead of this route.
-    const browserPartitions = liveBrowserPartitions();
-    const boundPartitions = browserPartitions.filter((partition) => boundBrowserProxy(partition));
+    applyGlobalEnvironment();
+    const started = await ensureRouter();
+    const { table } = resolvedRoutes();
+    started?.setRoutes(table);
     const targets = [
-      session.defaultSession,
-      ...browserPartitions.filter((partition) => !boundPartitions.includes(partition))
-        .map((partition) => session.fromPartition(partition)),
-    ].filter((value, index, list) => value && list.indexOf(value) === index);
-    await Promise.all(boundPartitions.map((partition) => routeBrowserPartition(partition)));
-    // Relays only for the proxies still in use: Global Routing's and the bound accounts'.
-    const inUse = new Set([profile?.id, ...boundPartitions.map((partition) => boundBrowserProxy(partition)?.id)].filter(Boolean));
-    for (const profileId of [...relays.keys()]) if (!inUse.has(profileId)) closeRelay(profileId);
-
-    if (!profile) {
-      await Promise.all(targets.map((target) => target.setProxy({ mode: "direct" })));
-      logger.info("proxy.global_routing_disabled", {});
-      return snapshot;
+      { name: "app", target: session.defaultSession },
+      ...[...knownPartitions].map((partition) => ({ name: `browser:${partition}`, target: session.fromPartition(partition) })),
+    ].filter((entry, index, list) => entry.target && list.findIndex((other) => other.target === entry.target) === index);
+    const changed = await Promise.all(targets.map(({ name, target }) => routeSession(target, name, table.targets[name] ?? table.targets.app)));
+    // Programs keep their tunnels open for minutes: a target whose route changed starts over.
+    if (started) {
+      for (const [target, route] of Object.entries(table.targets)) {
+        const key = JSON.stringify(publicRoute(route));
+        const previous = lastRouteKeys.get(`router:${target}`);
+        lastRouteKeys.set(`router:${target}`, key);
+        if (previous !== undefined && previous !== key) void started.reconnect(target).catch(() => {});
+      }
     }
-
-    const { proxyRules, relay } = await chromiumProxyRules(profile);
-    const bypass = profile.bypass.join(",");
-    await Promise.all(targets.map((target) => target.setProxy({
-      mode: "fixed_servers",
-      proxyRules,
-      proxyBypassRules: bypass,
-    })));
-    logger.info("proxy.global_routing_applied", {
-      profileId: profile.id,
-      protocol: profile.endpoint.protocol,
-      host: profile.endpoint.host,
-      port: profile.endpoint.port,
-      relay,
-      scopes: profile.scopes,
+    if (started) void syncCpaCredentialRoutes();
+    const app = table.targets.app;
+    logger.info("proxy.routing_applied", {
+      router: started ? started.port : null,
+      app: app.mode === "proxy" ? app.profileId : app.mode,
+      targets: Object.keys(table.targets).length,
+      sessionsChanged: changed.filter(Boolean).length,
     });
     return snapshot;
+  }
+
+  /** For the Proxy page: the router, each target's effective route and live counters. */
+  async function egressStatus() {
+    if (Date.now() - credentialSyncAt > 60_000) await syncCpaCredentialRoutes();
+    const resolved = resolvedRoutes();
+    let stats = {};
+    if (router) { try { stats = await router.stats(); } catch { stats = {}; } }
+    const targets = Object.values(resolved.describe).map((entry) => ({ ...entry, stats: stats[entry.target] ?? null }));
+    return {
+      router: { running: Boolean(router), port: routerAddress().port, error: routerError, portMovedAt: routerPortMovedAt || null },
+      targets,
+      credentials: cpaCredentials.map(({ name, provider, label }) => ({ name, provider, label: label || null })),
+    };
+  }
+
+  /**
+   * The router's sign-in for `target` when `authInfo` is the router asking (its loopback port), else
+   * null: no other proxy ever gets it. For the app's own native requests (main.cjs launcher fetch).
+   */
+  function routerSignIn(authInfo, target = "app") {
+    const bare = (value) => String(value ?? "").trim().replace(/^\[|\]$/g, "").toLowerCase();
+    const { port, key } = routerAddress();
+    if (!authInfo?.isProxy || !["127.0.0.1", "localhost"].includes(bare(authInfo.host)) || Number(authInfo.port) !== port) return null;
+    return { username: routeToken(target), password: key };
+  }
+
+  /** Points a session the app opens for itself (the register host) at the router, on the App route. */
+  async function routeAppSession(target) {
+    await ensureRouter();
+    const { table } = resolvedRoutes();
+    await routeSession(target, `session:${Date.now()}`, table.targets.app);
+  }
+
+  // A program that can't answer the router's 407 (a ChatGPT Desktop instance: a separate Chromium whose
+  // --proxy-server can't carry a sign-in) gets a loopback port of its own for one target. One per
+  // target, kept while the router runs; a restarted router opens them again on request.
+  const openPorts = new Map(); // target -> Promise<port | null>
+  function openRouterPort(target = "app") {
+    if (!openPorts.has(target)) {
+      openPorts.set(target, ensureRouter().then((running) => (running ? running.openPort(target) : null)).catch((error) => {
+        logger.warn("proxy.router_open_port_failed", { target, error: String(error?.message || error) });
+        openPorts.delete(target);
+        return null;
+      }));
+    }
+    return openPorts.get(target);
+  }
+
+  /** Closes a target's open connections (all of them when `target` is empty) so they reconnect on its current route. */
+  async function reconnectTarget(target = null) {
+    if (!router) return { closed: 0 };
+    return router.reconnect(target || null);
+  }
+
+  // ---- CPA's credentials on the router ----------------------------------------------------
+  // CPA takes a proxy per credential (its `proxy_url`, set through PATCH /v0/management/auth-files/
+  // fields, which applies and saves it). A credential with a route of its own gets its own token; every
+  // other one its provider's, which the router resolves even before this list is read (a provider with
+  // no route of its own follows All model providers). Route changes after that need no new stamp:
+  // the router resolves the token live. A 401 stops it for half an hour: CPA locks its management API
+  // after repeated ones.
+  const stampedProxyUrls = new Map(); // credential name -> the proxy_url this app run gave it
+  let credentialSync = null;
+  let credentialSyncBlockedAt = 0;
+  let credentialSyncAt = 0;
+  const CREDENTIAL_SYNC_BLOCK_MS = 30 * 60_000;
+
+  async function cpaManagement(pathname, { method = "GET", body = undefined } = {}) {
+    const managed = getCpaConnection?.();
+    const managementKey = String(managed?.managementKey || "").trim();
+    if (!managementKey) throw Object.assign(new Error("CPA isn't running"), { code: "CPA_UNAVAILABLE" });
+    const baseUrl = normalizeProviderBaseUrl(managed.baseUrl || DEFAULT_CPA_BASE_URL);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(1, requestTimeoutMs));
+    timeout.unref?.();
+    try {
+      const response = await fetchImpl(new URL(pathname, `${baseUrl}/`).toString(), {
+        method,
+        headers: { Accept: "application/json", Authorization: `Bearer ${managementKey}`, "X-Management-Key": managementKey,
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal,
+      });
+      let value = {};
+      try { value = await response.json(); } catch { value = {}; }
+      if (response.status === 401 || response.status === 403) throw Object.assign(new Error("CPA refused the management key"), { code: "UNAUTHORIZED" });
+      if (!response.ok) throw Object.assign(new Error(`CPA answered HTTP ${response.status}${typeof value?.error === "string" ? `: ${value.error.slice(0, 160)}` : ""}`), { status: response.status });
+      return value;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /** Lists CPA's credentials and points each at its route token on the router. */
+  function syncCpaCredentialRoutes() {
+    if (credentialSync) return credentialSync;
+    if (credentialSyncBlockedAt && Date.now() - credentialSyncBlockedAt < CREDENTIAL_SYNC_BLOCK_MS) return Promise.resolve(null);
+    credentialSync = (async () => {
+      const listing = await cpaManagement("/v0/management/auth-files");
+      const files = Array.isArray(listing?.files) ? listing.files : Array.isArray(listing) ? listing : [];
+      const list = files.map((entry) => ({
+        name: String(entry?.name ?? entry?.id ?? "").trim(),
+        provider: providerType(String(entry?.provider ?? entry?.type ?? "")),
+        label: String(entry?.label ?? entry?.email ?? "").trim(),
+      })).filter((entry) => entry.name);
+      setCpaCredentials(list);
+      if (!router) return list;
+      const own = new Set((store.snapshot().routing.credentials ?? []).map((policy) => policy.authName));
+      let routed = 0;
+      for (const credential of list) {
+        const target = own.has(credential.name) ? `credential:${credential.name}` : credential.provider ? `provider:${credential.provider}` : "cpa";
+        const url = routerUrlFor(target);
+        if (stampedProxyUrls.get(credential.name) === url) continue;
+        try {
+          await cpaManagement("/v0/management/auth-files/fields", { method: "PATCH", body: { name: credential.name, proxy_url: url } });
+          stampedProxyUrls.set(credential.name, url);
+          routed += 1;
+        } catch (error) {
+          if (error?.code === "UNAUTHORIZED") throw error;
+          // A credential CPA won't change this way (a plugin's virtual one) keeps CPA's default route.
+          stampedProxyUrls.set(credential.name, url);
+          logger.warn("proxy.cpa_credential_route_failed", { status: error?.status ?? null, error: String(error?.message || error).slice(0, 200) });
+        }
+      }
+      if (routed) logger.info("proxy.cpa_credentials_routed", { count: routed, of: list.length });
+      return list;
+    })().catch((error) => {
+      if (error?.code === "UNAUTHORIZED") credentialSyncBlockedAt = Date.now();
+      if (error?.code !== "CPA_UNAVAILABLE") logger.warn("proxy.cpa_credentials_sync_failed", { error: String(error?.message || error).slice(0, 200) });
+      return null;
+    }).finally(() => { credentialSync = null; credentialSyncAt = Date.now(); });
+    return credentialSync;
+  }
+  // New sign-ins land in CPA at any time: a light check (one list read) every two minutes.
+  const credentialSyncTimer = setInterval(() => { void syncCpaCredentialRoutes(); }, 2 * 60_000);
+  credentialSyncTimer.unref?.();
+
+  /** CPA's credentials as the Proxy page lists them: [{ name, provider, label }]. */
+  function setCpaCredentials(list) {
+    cpaCredentials = (Array.isArray(list) ? list : []).filter((item) => item && typeof item.name === "string" && item.name)
+      .map((item) => ({ name: item.name.slice(0, 300), provider: providerType(String(item.provider || item.type || "")), label: typeof item.label === "string" ? item.label.slice(0, 200) : "" }));
+    router?.setRoutes(resolvedRoutes().table);
   }
 
   function accountRecord(accountId) {
@@ -1819,6 +2098,18 @@ function createProviderNetworkController({
     const profile = store.activeProxy(profileId);
     if (!profile) throw new Error("Proxy profile was not found or is disabled");
     const result = await testProxyEndpoint(profile, store.proxySecret(profile.id));
+    // Where it leaves the internet, through the router's worker (Cloudflare's trace): an IP and a country.
+    if (result.reachable) {
+      const running = await ensureRouter();
+      const route = profileRoute(profile.id);
+      if (running && route.mode === "proxy") {
+        try {
+          const exit = await running.trace(route);
+          result.exitIp = exit.ip;
+          result.exitCountry = exit.country;
+        } catch (error) { result.exitError = error?.message || String(error); }
+      }
+    }
     const snapshot = store.recordProxyHealth(profileId, result);
     logger[result.reachable ? "info" : "warn"]("proxy.profile_tested", {
       profileId,
@@ -1834,7 +2125,7 @@ function createProviderNetworkController({
   // refused. It is recorded on the proxy as a failed check, so the Proxy page shows "Sign-in refused"
   // without anyone pressing Test: on 2026-11-15 every update check failed this way for hours and the
   // page showed the proxy as healthy. Written once per refusal (a sign-in saved since clears it) and
-  // logged at most once in SIGN_IN_REFUSAL_LOG_MS (`log: false` for the relay, which logs its own
+  // logged at most once in SIGN_IN_REFUSAL_LOG_MS (`log: false` for a caller that logs its own
   // line). True when it recorded a change.
   const signInRefusalLogged = new Map();
   function noteProxySignInRefused(profileId, { log = true } = {}) {
@@ -1865,26 +2156,20 @@ function createProviderNetworkController({
     return true;
   }
 
+  /**
+   * Chromium signs in to the router only after its 407: each session answers with its own route
+   * token (a Browser-tab account's partition its own, every other session the App's) and the router
+   * key. Nothing but the router on its loopback port gets an answer.
+   */
   function handleProxyLogin(event, authInfo, callback, webContents = null) {
-    if (!authInfo?.isProxy) return false;
-    // A Browser-tab account bound to its own proxy answers with that proxy's sign-in, on its own
-    // pages only; it never takes the global route's.
+    if (!routerSignIn(authInfo)) return false;
+    const { key } = routerAddress();
     const asking = webContents?.session;
-    const boundPartition = asking ? liveBrowserPartitions().find((partition) => session.fromPartition(partition) === asking) : null;
-    const bound = boundPartition ? boundBrowserProxy(boundPartition) : null;
-    const snapshot = store.snapshot();
-    if (!bound && (!snapshot.routing.globalEnabled || !snapshot.routing.globalProfileId)) return false;
-    // Answer only the proxy the route names: anything else on another host or port (a squatter
-    // on a loopback port, for one) never receives the saved credentials.
-    const profile = bound ?? store.activeProxy(snapshot.routing.globalProfileId);
-    const bare = (value) => String(value ?? "").trim().replace(/^\[|\]$/g, "").toLowerCase();
-    if (!profile || bare(authInfo.host) !== bare(profile.endpoint.host) || Number(authInfo.port) !== profile.endpoint.port) {
-      return false;
-    }
-    const secret = store.proxySecret(profile.id);
-    if (!secret || (!secret.username && !secret.password)) return false;
+    const partition = asking ? [...new Set([...liveBrowserPartitions(), ...knownPartitions])].find((name) => session.fromPartition(name) === asking) : null;
+    const target = partition ? `browser:${partition}` : "app";
+    if (partition && !knownPartitions.has(partition)) { knownPartitions.add(partition); router?.setRoutes(resolvedRoutes().table); }
     event.preventDefault();
-    callback(secret.username || "", secret.password || "");
+    callback(routeToken(target), key);
     return true;
   }
 
@@ -1896,6 +2181,14 @@ function createProviderNetworkController({
     withBrowserLoginProxy,
     syncDecodo,
     setEnvironmentRoute,
+    ensureRouter,
+    routerUrlFor,
+    routerSignIn,
+    routeAppSession,
+    openRouterPort,
+    egressStatus,
+    reconnectTarget,
+    setCpaCredentials,
     openProviderLogin,
     probeProviderAccount,
     testProxyProfile,
