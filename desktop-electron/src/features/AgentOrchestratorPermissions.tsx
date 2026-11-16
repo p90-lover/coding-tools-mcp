@@ -28,6 +28,31 @@ export function missionPermissionNodes(mission: AoMission): AoNode[] {
   }
   return nodes;
 }
+/**
+ * Whether a running card's agent asks this app about each request, so the chat answers them by its
+ * newest permission pick at once (liveRoute in agent-orchestrator-workflow). One launched to ask
+ * does, and so does Claude Code under "Approve for me" (this app reviews its requests); an agent
+ * launched with its own auto-review or with no approvals answers for itself until its next turn,
+ * and the native Codex bridge reports its own policy (RuntimePermissionPolicy).
+ */
+export function appAnswersRequests(route: AoNode["route"] | undefined): boolean {
+  if (!route || route.harness_id === NATIVE_HARNESS || route.approval_policy === "never") return false;
+  return route.approvals_reviewer !== "auto_review" || /claude-code/.test(route.harness_id ?? "");
+}
+/** A running card's approvals as they are answered now: the route it launched on, with the chat's newer pick laid over it. */
+export function livePermissionRoute(mission: AoMission, node: AoNode): AoNode["route"] {
+  const intent = mission.team?.permission_selections?.[node.template_role_id || node.id];
+  return { ...node.route,
+    ...(intent?.approval_policy !== undefined ? { approval_policy: intent.approval_policy } : {}),
+    ...(intent?.approvals_reviewer !== undefined ? { approvals_reviewer: intent.approvals_reviewer } : {}) };
+}
+/** What a saved permission change does to the chat's running turn. */
+export function permissionChangeNotice(mission: AoMission | undefined, selection: PermissionSelection): string {
+  const running = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)) ?? [];
+  if (!running.length || !running.every(node => appAnswersRequests(node.route))) return "Applies from the next turn. A running turn keeps its permissions.";
+  const sandbox = selection.profile !== undefined && running.some(node => nativePermission(node.route) !== selection.profile);
+  return "Active now: the running turn's requests follow it." + (sandbox ? " Its file access changes from the next turn." : "");
+}
 export function permissionSummary(nodes: AoNode[]): string {
   const values = new Set(nodes.map(node => [nativePermission(node.route), node.route.approval_policy ?? "Legacy", node.route.approvals_reviewer ?? "Legacy"].join(" · ")));
   return values.size > 1 ? "Mixed" : values.values().next().value || "Unknown";
@@ -165,11 +190,20 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const unavailableReason = (selection: PermissionSelection) => capabilities.map(capability => excludedMode(capability, selection)?.reason).find(Boolean) || reason;
   const active = PERMISSION_MODES.find(mode => nodes.length > 0 && nodes.every(node =>
     nativePermission(node.route) === mode.profile && node.route.approval_policy === mode.policy && node.route.approvals_reviewer === mode.reviewer));
-  const effective = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)).map(node => {
-    const status = runtimePolicies?.[mission.id + ":" + node.id];
-    return status?.policy_acknowledged && status.effective_policy ? "Active: " + Object.values(status.effective_policy).join(" · ")
-      : "Active permissions not confirmed yet";
+  const running = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)) ?? [];
+  const effective = running.map(node => {
+    const status = runtimePolicies?.[mission!.id + ":" + node.id];
+    if (status?.policy_acknowledged && status.effective_policy) return "Active: " + Object.values(status.effective_policy).join(" · ");
+    if (node.route.harness_id === NATIVE_HARNESS) return "Active permissions not confirmed yet";
+    // An agent that asks this app about each request runs by the chat's newest pick at once; one
+    // that answers for itself keeps what it launched with until its next turn.
+    const live = permissionSummary([{ ...node, route: livePermissionRoute(mission!, node) }]);
+    const launched = permissionSummary([node]);
+    return appAnswersRequests(node.route) ? "Active now: " + live
+      : live === launched ? "Active: " + launched : `This turn: ${launched} · your change applies from the next turn`;
   }).join("; ");
+  // A pick reaches the running turn at once when every running agent asks this app about its requests.
+  const liveNow = running.length > 0 && running.every(node => appAnswersRequests(node.route));
   const reason = nodes.map(node => metadata[node.id]?.reason).filter(Boolean).join("; ")
     || (!nodes.length ? "Choose a model or saved team first." : !nodes.every(node => metadata[node.id] !== undefined) ? "Checking permissions…" : !supported.length ? "This agent can't change permissions. Settings are unchanged." : "This agent or your policy doesn't allow this.");
   const apply = async (selection: PermissionSelection) => {
@@ -209,7 +243,7 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
       {PERMISSION_MODES.map(mode => {
         const Glyph = MODE_GLYPHS[mode.icon];
         return <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
-          className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? "Applies from the next turn" : unavailableReason(mode)}
+          className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? liveNow ? "Applies now, to the running turn's requests too" : "Applies from the next turn" : unavailableReason(mode)}
           onClick={() => choose({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
           <span className="ao-permission-symbol"><Glyph /></span>
           <span className="ao-permission-text"><strong>{mode.label}</strong><small>{mode.detail}</small></span>

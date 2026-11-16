@@ -458,6 +458,47 @@ test("a start that needs minutes gets them on its first try, with the real limit
   assert.ok(never.ms >= 900_000 && never.ms < 990_000, `one that never gets ready is ended at ten limits: ${never.ms} ms`);
 });
 
+test("a daemon that keeps running is waited for however slow its start, and reported every minute", async (context) => {
+  // Seen 2026-11-11: AO's first write copied a 483 MB write-ahead log before it listened. Killed
+  // at 90, 180 and 360 s, every new daemon began the copy again: five starts, about 25 minutes.
+  let clock = Date.now();
+  const started = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    // Each poll finds the daemon still starting and moves the clock 30 s, until it is 12 minutes old.
+    readyFetch: () => { clock += 30_000; if (clock - started < 12 * 60_000) throw new Error("connect ECONNREFUSED"); },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  assert.equal((await controller.start()).state, "ready");
+  assert.equal(harness.children.length, 1, "one daemon, never replaced");
+  assert.equal(harness.children[0].kills, 0, "the slow daemon was not killed");
+  const reports = harness.warnings.filter(([event]) => event === "ao.start_slow").map(([, detail]) => detail.waitedMs);
+  assert.ok(reports.length >= 10 && reports.length <= 12, `about one report a minute: ${reports}`);
+  assert.ok(reports[0] >= 30_000 && reports.every((ms, index) => index === 0 || ms - reports[index - 1] >= 60_000), `${reports}`);
+  assert.deepEqual(harness.warnings.filter(([event]) => event === "ao.start_failed"), []);
+});
+
+test("a daemon still not ready after 15 minutes is stopped, and the next start gets the same time", async (context) => {
+  let clock = Date.now();
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({ Date: SlowClock, readyFetch: () => { clock += 30_000; throw new Error("connect ECONNREFUSED"); } });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  const attempt = async () => {
+    const begun = clock;
+    await assert.rejects(controller.start(), /Agent Orchestrator timed out getting ready/);
+    return clock - begun;
+  };
+  const first = await attempt();
+  assert.ok(first >= 15 * 60_000 && first < 16 * 60_000, `gave up at ${first} ms`);
+  assert.ok(harness.children[0].exitCode !== null || harness.children[0].signalCode !== null, "a daemon past the limit is stopped");
+  const second = await attempt();
+  assert.ok(second >= 15 * 60_000 && second < 16 * 60_000, `the next start waited ${second} ms`);
+  assert.equal(harness.children.length, 2);
+});
+
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
   const closing = deferred();
   const release = deferred();

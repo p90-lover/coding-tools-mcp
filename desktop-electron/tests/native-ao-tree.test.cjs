@@ -60,6 +60,19 @@ test("AO links can be removed and any card but the orchestrator can be removed",
   assert.equal(surfaceExports.aoNodeWorking({ state: "pending" }), false);
 });
 
+test("a started Team graph card opens its conversation, a waiting one its role; Edit still opens the role", () => {
+  // As a teammate in Claude Code and a subagent in Codex: clicking an agent that has started shows its chat.
+  assert.equal(surfaceExports.cardOpensConversation({ state: "running" }), true);
+  assert.equal(surfaceExports.cardOpensConversation({ state: "finished" }), true);
+  assert.equal(surfaceExports.cardOpensConversation({ state: "pending", receipt: { thread_id: "t" } }), true, "restarted, it keeps its session");
+  assert.equal(surfaceExports.cardOpensConversation({ state: "pending" }), false, "nothing to show yet: its role editor");
+  // The board's canvas: a click opens the card (openCard), the card menu's Edit the role editor.
+  assert.match(source, /onSelect=\{openCard\} onEdit=\{inspectRole\}/);
+  assert.match(source, /<AgentConversation runId=\{selectedRun\.id\} nodeId=\{conversationNode\.id\} live=\{conversationNode\.state === "running"\} loadWork=\{loadChatWork\} \/>/);
+  const canvas = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorCanvas.tsx"), "utf8");
+  assert.match(canvas, /label: "Edit", icon: "edit", run: \(\) => \(onEdit \?\? onSelect\)\(node\.id\)/);
+});
+
 test("preview is scoped to the selected run and waits for all parents", () => {
   const tasks = [{ id: "a", title: "Repair app" }, { id: "b", title: "Verify connector" }];
   const run = { id: "only-b", nodes: [

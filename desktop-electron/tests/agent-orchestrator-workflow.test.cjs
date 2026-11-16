@@ -5753,10 +5753,23 @@ function wakeChat({ goal = false, hold = false, loopsFile = null, schedulesFile 
   const clock = { at: 1_000_000 };
   const timers = new Map();
   let next = 0;
-  const gate = { read: null, fail: 0 };
+  const gate = { read: null, boardRead: null, fail: 0, createFail: 0, failAfterWrite: 0, writeFail: 0 };
   const requestHeadless = async (endpoint, ...rest) => {
     if (endpoint === "/api/v1/ao/read" && gate.read) await gate.read;
+    if (endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list" && gate.boardRead) await gate.boardRead;
     if (endpoint === "/api/v1/tools/call" && gate.fail > 0) { gate.fail -= 1; throw new Error("board unavailable"); }
+    if (endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list" && world.edits.length && gate.failAfterWrite > 0) {
+      gate.failAfterWrite -= 1;
+      throw new Error("board unavailable after message write");
+    }
+    if (endpoint === "/api/v1/tools/call" && rest[0]?.arguments?.change?.operation === "edit" && gate.writeFail > 0) {
+      gate.writeFail -= 1;
+      throw new Error("message write outcome unknown");
+    }
+    if (endpoint === "/api/v1/ao/update" && rest[0]?.change?.operation === "create_from_team" && gate.createFail > 0) {
+      gate.createFail -= 1;
+      throw new Error("run creation outcome unknown");
+    }
     return world.requestHeadless(endpoint, ...rest);
   };
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => "C:/codex.exe", loopsFile, schedulesFile,
@@ -5917,7 +5930,7 @@ test("an uncertain continuation send is not automatically replayed", async (t) =
   const { workflow, world, advance, gate } = wakeChat({ hold: true });
   t.after(() => workflow.dispose());
   const ticket = await workflow.registerCommandWatch(watchInput);
-  gate.fail = 1;
+  gate.createFail = 1;
   const before = world.updates.length;
   const delivered = ticket.complete(watchOutcome);
   await advance(1);
@@ -6154,6 +6167,128 @@ test("a wake-up sends the chat the agent's note after its minutes, on the same S
   assert.deepEqual(world.updates.at(-1).single_route, route, "the same Single model, so the agent's session continues");
   assert.match(world.edits.at(-1).description, /Wake-up: 10 minutes ago you asked to be woken[\s\S]*Your note: see whether CI run 42 passed[\s\S]*schedule_wakeup again/);
   assert.equal(await wakeupOf(workflow), undefined, "it is spent");
+});
+
+for (const change of ["none", "new run", "new message", "dispose"]) {
+  test(`a failed follow-up cleanup retries safely after ${change}`, async (t) => {
+    const { workflow, world, advance, gate, route } = wakeChat({ hold: true });
+    t.after(() => workflow.dispose());
+    // The run is created against the revision the message write returned (no board read between
+    // them), so its creation fails by itself; the cleanup's first board read fails too.
+    gate.createFail = 1;
+    gate.failAfterWrite = 1;
+    const original = world.tasks[0].description;
+    await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "failed follow-up",
+      executionMode: "single", singleRoute: route }), /run creation outcome unknown/);
+    assert.equal(gate.failAfterWrite, 0, "the first cleanup attempt failed and was left to its retry");
+    assert.match(world.tasks[0].description, /failed follow-up/);
+    if (change === "new run") world.runs.push({ ...structuredClone(world.runs[0]), id: "late-created-run" });
+    if (change === "new message") world.tasks[0].description += "\n\nnew user message";
+    const current = world.tasks[0].description;
+    if (change === "dispose") workflow.dispose();
+    await advance(60_000);
+    assert.equal(world.tasks[0].description, change === "none" ? original : current,
+      "only an unchanged message with no new run may be withdrawn");
+  });
+}
+
+for (const kind of ["wake-up", "command watch"]) {
+  test(`an uncertain ${kind} message write is not automatically replayed`, async (t) => {
+    const { workflow, world, advance, gate } = wakeChat({ hold: true });
+    t.after(() => workflow.dispose());
+    let delivered;
+    if (kind === "wake-up") await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "check CI" });
+    else delivered = (await workflow.registerCommandWatch(watchInput)).complete(watchOutcome);
+    gate.writeFail = 1;
+    await advance(60_000);
+    if (delivered) assert.equal(await delivered, "unknown");
+    await advance(10 * 60_000);
+    assert.equal(world.updates.length, 0, "the first message write may already have committed");
+    assert.equal(world.edits.length, 0);
+  });
+}
+
+test("a wake-up retries a failed send preflight instead of losing the reminder", async (t) => {
+  const { workflow, world, advance, gate } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "finish CI verification" });
+  const pending = await wakeupOf(workflow);
+  gate.fail = 1;
+  await advance(60_000);
+  assert.equal(world.updates.length, 0);
+  assert.equal((await wakeupOf(workflow))?.id, pending.id, "a failed preflight has not delivered this wake-up");
+  await advance(60_000);
+  assert.equal(world.updates.length, 1);
+  assert.equal(await wakeupOf(workflow), undefined);
+  await advance(60_000);
+  assert.equal(world.updates.length, 1, "the successful retry is not replayed");
+});
+
+test("a command watch retries a failed send preflight without reporting unknown delivery", async (t) => {
+  const { workflow, world, advance, gate } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  const ticket = await workflow.registerCommandWatch(watchInput);
+  gate.fail = 1;
+  let status = "pending";
+  const delivered = ticket.complete(watchOutcome).then(value => { status = value; return value; });
+  await advance(1);
+  assert.equal(status, "pending", "no run creation was attempted, so delivery is still retryable");
+  assert.equal(world.updates.length, 0);
+  await advance(60_000);
+  assert.equal(await delivered, "delivered");
+  assert.equal(world.updates.length, 1);
+});
+
+for (const change of ["cancel", "postpone", "replace"]) {
+  test(`a wake-up honors ${change} during serialized send preflight`, async (t) => {
+    const { workflow, world, advance, gate } = wakeChat({ hold: true });
+    t.after(() => workflow.dispose());
+    await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "old note" });
+    const pending = await wakeupOf(workflow);
+    let release;
+    gate.boardRead = new Promise(resolve => { release = resolve; });
+    await advance(60_000);
+    if (change === "cancel") {
+      assert.equal((await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "cancel", id: pending.id })).cancelled, true);
+    } else if (change === "postpone") {
+      await workflow.call("chat_wakeup", { workspaceId: "ws-1", taskId: "task-1", action: "edit", id: pending.id, minutes: 2, reason: "new note" });
+    } else {
+      await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 2, reason: "new note" });
+    }
+    gate.boardRead = null;
+    release();
+    await settle();
+    assert.equal(world.updates.length, 0, "an obsolete wake-up cannot append its follow-up");
+    assert.equal(world.edits.length, 0);
+    if (change !== "cancel") {
+      await advance(2 * 60_000);
+      assert.equal(world.updates.length, 1);
+      assert.match(world.edits.at(-1).description, /Your note: new note/);
+    }
+  });
+}
+
+for (const state of ["cancelled", "paused"]) {
+  test(`a wake-up cannot revive its ${state} parent`, async (t) => {
+    const { workflow, world, advance } = wakeChat({ hold: true });
+    t.after(() => workflow.dispose());
+    await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "check CI" });
+    world.runs[0][state] = true;
+    await advance(60_000);
+    assert.equal(world.updates.length, 0);
+    assert.equal(await wakeupOf(workflow), undefined);
+  });
+}
+
+test("an uncertain wake-up run creation is not automatically replayed", async (t) => {
+  const { workflow, world, advance, gate } = wakeChat({ hold: true });
+  t.after(() => workflow.dispose());
+  await workflow.scheduleWakeup({ workspaceId: "ws-1", session: "sess-1", minutes: 1, reason: "check CI" });
+  gate.createFail = 1;
+  await advance(60_000);
+  assert.equal(await wakeupOf(workflow), undefined);
+  await advance(10 * 60_000);
+  assert.equal(world.updates.length, 0, "a run may have been created despite a lost reply");
 });
 
 test("a wake-up is dropped when the chat moved on, cancelled by the user, and refused for an unknown session", async () => {
@@ -6707,6 +6842,57 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.ok(advised.length >= 1 && advised.every(model => model === "codex-auto-review"), "Codex's review model reviews, never the chat's own model");
   // Its "ask" gets one more review that must choose allow or deny; still undecided, the write waits.
   assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
+});
+
+test("Approve for me picked while a turn runs reviews that turn's requests at once, not from its next turn", async () => {
+  // Seen 2026-11-16: Auto Review answered 500 for a while; picked again once it was back, "Approve
+  // for me" was saved for the next turn only, and a turn ten hours in kept waiting on the person.
+  const run = async (selection) => {
+    const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+      permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+    const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+    const requests = [{ approval_id: "safe", source: "ao", kind: "command", command: "npm test", tool: "Bash", summary: "Bash", decisions }];
+    // apply_team keeps the running card's route as it launched and records the pick for the chat.
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) },
+      team: { id: "mission:run", nodes: [], permission_selections: selection ? { one: selection } : {} },
+      nodes: [{ id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const resolved = [], advised = [];
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      fetchImpl: async (url, init) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        advised.push(JSON.parse(init.body).model);
+        return { ok: true, json: async () => ({ choices: [{ message: { content: "{\"action\":\"allow\",\"reason\":\"fixture\"}" } }] }) };
+      },
+      requestHeadless: async endpoint => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+        return { ok: true, run: mission };
+      },
+      aoHarness: {
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running",
+          approvals: requests.filter(request => !resolved.some(([, id]) => id === request.approval_id)) }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push([session, requestId, decisionId]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 150 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    mission.nodes[0].state = "finished";
+    for (let tries = 0; tries < 100; tries++) {
+      if ((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).status !== "running") break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return { resolved: JSON.parse(JSON.stringify(resolved)), advised };
+  };
+  const picked = await run({ approval_policy: "on-request", approvals_reviewer: "auto_review" });
+  // npm test is one of the routine commands Approve for me runs unasked; anything a model reviews goes to codex-auto-review.
+  assert.deepEqual(picked.resolved, [["session-1", "safe", "yes"]], "the running turn's request is answered by Approve for me");
+  assert.ok(picked.advised.every(model => model === "codex-auto-review"));
+  const unpicked = await run(null);
+  assert.deepEqual(unpicked.resolved, [], "launched to ask, with nothing picked since, the request stays the person's");
+  assert.equal(unpicked.advised.length, 0, "and no reviewer is asked");
 });
 
 test("Approve for me is reviewed by codex-auto-review only, and the person decides when it cannot answer", async () => {

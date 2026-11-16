@@ -2754,6 +2754,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   const activityFrames = new Map();
+  // Where a card's frame spends its time. A frame this slow is logged with each step's share when it
+  // lands (ao.activity_frame_slow); one still on its way after ACTIVITY_STALL_MS is logged once with
+  // the step it waits on (ao.activity_frame_stalled), since a step that never returns logs nothing
+  // else. On 2026-11-16 a resumed chat's frame stayed "checking" for 8 minutes while its agent waited
+  // on an approval nobody could see, and nothing said which read held it.
+  const ACTIVITY_SLOW_MS = 15_000;
+  const ACTIVITY_STALL_MS = 30_000;
   const activityAttempt = (workspace, run, node) => JSON.stringify([
     workspace, run, node.id, node.receipt?.request_key || node.request_key || null,
     node.receipt?.thread_id || null, node.receipt?.turn_id || null,
@@ -2813,7 +2820,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
 
   async function activity({ workspaceId, runId } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80);
+    // The chat's poll waits for this read itself (the cards' frames come from the cache below).
+    const readStarted = now();
     const saved = await runs({ workspaceId: id, runId: run });
+    const readMs = now() - readStarted;
+    if (readMs >= ACTIVITY_SLOW_MS) logger?.warn?.("ao.activity_read_slow", { run, readMs });
     const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run not found");
     const working = mission.nodes.filter(node => ["reserved", "running"].includes(node.state));
@@ -2841,7 +2852,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         entry = { scope, pending: null, frame: null, retired: false };
         activityFrames.set(key, entry);
       }
+      if (entry.pending && !entry.stallLogged && now() - entry.since >= ACTIVITY_STALL_MS) {
+        entry.stallLogged = true;
+        logger?.warn?.("ao.activity_frame_stalled", { run, node: node.id, session: node.receipt?.thread_id || null,
+          step: entry.step, waitedMs: now() - entry.since, steps: { ...entry.steps } });
+      }
       if (!entry.pending) {
+        const since = now(), steps = {};
+        Object.assign(entry, { since, steps, step: null, stallLogged: false });
+        // Each awaited step is named while in flight (what the stall log above reports) and timed when it
+        // ends. Plain marks around the awaits, not an async wrapper: a wrapper adds microtask turns, so a
+        // frame landed after the chat's next read and that read showed the frame before it.
+        let stepAt = since;
+        const begin = (name) => { entry.step = name; stepAt = now(); };
+        const end = () => { if (entry.step) steps[entry.step] = (steps[entry.step] ?? 0) + now() - stepAt; entry.step = null; };
+        let failed = false;
         entry.pending = (async () => {
           let frame, observedTurn;
           try {
@@ -2852,7 +2877,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 // A queued follow-up can be the session's newest turn while this card still owns
                 // another one. Read that turn, as the run loop does, rather than dropping its reply.
                 const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session) || entry.turnId;
+                begin("observe");
                 const observed = await harnessService().observe(session, expectedTurn);
+                end();
                 const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
                 if (currentTurn && observed.turnState === "running" && typeof observed.turnId === "string" && observed.turnId) observedTurn = observed.turnId;
                 // Started: an agent took the message (AO starts the turn only then; see describeTurn).
@@ -2868,7 +2895,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                   error: publicText(observed.error, 500) };
               }
             } else {
+              begin("harness status");
               const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
+              end();
               const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
               const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
               const output = publicText(status.live_output || thread?.answer || thread?.output);
@@ -2884,7 +2913,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step, thread?.notes)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
+            begin("saved run");
             const latest = await savedNode(id, run, node.id);
+            end();
             if (!latest.node || !["reserved", "running"].includes(latest.node.state)
               || activityAttempt(id, run, latest.node) !== key) {
               entry.retired = true; entry.frame = null; return;
@@ -2896,11 +2927,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               entry.frame = { ...frame, pending: false };
             }
           } catch (error) {
+            failed = true; end();
             if (!entry.retired) entry.frame = { ...(entry.frame || base), pending: false,
               activity: "unknown", error: publicText(error?.message || error, 300) };
           }
         })().finally(() => {
-          entry.pending = null;
+          entry.pending = null; entry.step = null;
+          const tookMs = now() - since;
+          if (tookMs >= ACTIVITY_SLOW_MS) logger?.warn?.("ao.activity_frame_slow", { run, node: node.id,
+            session: node.receipt?.thread_id || null, tookMs, steps, ok: !failed });
           if (entry.retired && activityFrames.get(key) === entry) activityFrames.delete(key);
         });
       }
@@ -4146,7 +4181,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
       // A question this chat answers for the person says when (autoAnswerStale), so its card can
       // count down; one the person chose to keep has no deadline, and the agent waits on it.
-      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node) ? questionWaitMs() : null;
+      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node, card.mission) ? questionWaitMs() : null;
       const opened = wait ? Math.min(pendingSeen.get(item.approval_id) ?? now(), Date.parse(item.since ?? "") || Infinity) : NaN;
       const advised = Number.isFinite(opened) ? { ...recommended, auto_answer_at: opened + wait } : recommended;
       // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
@@ -4749,12 +4784,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
     }
   }
+  /**
+   * How a card's requests are answered now: its route, with the permissions the person picked for
+   * this chat since its turn started laid over it. "apply_team" keeps a running card's route as it
+   * launched and records the pick (team.permission_selections), which AO binds to the route only
+   * when the next turn starts. The requests of the running turn reach this app as they come, so
+   * the app follows the pick at once: seen 2026-11-16, Auto Review answered 500 for a while, and
+   * "Approve for me" picked again once it was back did nothing for a turn ten hours in. The
+   * sandbox (permission_profile) is the running process's own and still changes with the next turn.
+   */
+  function liveRoute(mission, node) {
+    const intent = mission?.team?.permission_selections?.[node?.template_role_id || node?.id];
+    if (!node?.route || !intent || typeof intent !== "object") return node?.route;
+    const policy = ["on-request", "never"].includes(intent.approval_policy) ? intent.approval_policy : undefined;
+    const reviewer = ["user", "auto_review"].includes(intent.approvals_reviewer) ? intent.approvals_reviewer : undefined;
+    if (policy === undefined && reviewer === undefined) return node.route;
+    return { ...node.route, ...(policy !== undefined ? { approval_policy: policy } : {}), ...(reviewer !== undefined ? { approvals_reviewer: reviewer } : {}) };
+  }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
   function cardApprover(mission, own) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
     const teamHasApprover = mission.nodes.some((node) => node.role === "approver");
-    return teamApprover ?? (!teamHasApprover && own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
-      ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
+    const route = liveRoute(mission, own);
+    return teamApprover ?? (!teamHasApprover && route?.approvals_reviewer === "auto_review" && externalAgent(own)
+      ? { route, settings: { instructions: "", auto_decide: true } } : null);
   }
   function reviewAttempt(mission, node) {
     const approver = cardApprover(mission, node);
@@ -4945,7 +4998,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // read whole, a chat whose requests it kept denying) it decides itself, allow or deny.
     const judges = chatPreferences.get().modelJudges;
     // What this request's screening concluded; judged ones are not screened again (rescreen).
-    const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
+    const keepAdvice = (value) => approverAdvice.set(approval.approval_id, chatPreferences.get().modelJudges ? { ...value, judged: true } : value);
     // An answer that may not have reached AO goes again as it was decided (resendDue), unreviewed.
     // One not due (the judge turned off since) is left alone: a new review could send a different
     // answer to a request that may already have one.
@@ -4997,13 +5050,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal, verifyCurrent }).catch(() => null);
       check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
-      // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
-      // person's: the request sat on the card though the switch was on.
-      else if (judges) advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
       else advice = { ...advice, unresolved: true };
     }
     await verifyCurrent();
     check();
+    // The preference may change while the model or the owner check is in flight. "Let the model
+    // judge": a decide pass that failed or still said "ask" is a deny, never the person's: the
+    // request sat on the card though the switch was on. A review quota-based reviews kept from
+    // running (quotaBlocked) is not an undecided review, and still waits for the person.
+    const judgesNow = chatPreferences.get().modelJudges;
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && judgesNow) {
+      advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
+    }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
       reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
       if (reviewDenials.size > 500) reviewDenials.delete(reviewDenials.keys().next().value);
@@ -5021,7 +5079,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // in doubt. The agent hears that the request was not judged, so it tries again rather than
       // giving up on it: told "try a safer way", agents dropped harmless steps for good. Its log line
       // says no model judged it (reason_code fell back to "model_decision", so an outage read as verdicts).
-      advice = judges
+      advice = judgesNow
         ? { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason:`The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
@@ -5103,7 +5161,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       + "Run the same request again in a minute; if it is still not judged, tell the user the command reviewer is unavailable."
     : `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
       + "Try a safer way to reach the goal, or ask the user if only this will do.";
-  const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
+  /** Whether this chat answers a card's requests for the person: by its permissions as they are now (liveRoute). */
+  const answersForPerson = (node, mission) => {
+    const route = mission ? liveRoute(mission, node) : node?.route;
+    return route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
+  };
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
     if (approval.mode === "url") return { action: "decline" };
@@ -5118,10 +5180,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return { action: "accept", content };
   }
-  /** The offered decision that accepts a plan: keep editing without asking, as the card was launched. */
-  function planDecision(approval, node) {
+  /** The offered decision that accepts a plan: keep editing without asking, as the card's permissions are now. */
+  function planDecision(approval, node, mission) {
     const decisions = (approval.decisions || []).filter((decision) => !decision.kind.startsWith("reject"));
-    const prefer = node?.route?.approval_policy === "never" ? [/bypass/i, /acceptEdits/i] : [/acceptEdits/i, /^auto$/i];
+    const prefer = (mission ? liveRoute(mission, node) : node?.route)?.approval_policy === "never" ? [/bypass/i, /acceptEdits/i] : [/acceptEdits/i, /^auto$/i];
     for (const pattern of prefer) {
       const found = decisions.find((decision) => pattern.test(decision.id));
       if (found) return found.id;
@@ -5158,7 +5220,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!id) continue;
         live.add(id);
         if (!pendingSeen.has(id)) pendingSeen.set(id, at);
-        if (!answersForPerson(node) || autoAnswered.has(id)) continue;
+        if (!answersForPerson(node, mission) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
         // A question or a plan is the person's: a plan waits AUTO_ANSWER_MS for them, a question the
@@ -5191,7 +5253,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             note = `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
           } else if (approval.source === "ao") {
             const blocked = verdict === "deny";
-            const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
+            const decision = approval.kind === "plan" ? planDecision(approval, node, mission) : aoDecision(approval, !blocked);
             if (!decision) continue;
             await harnessService().resolveApproval(approval.thread_id, id, decision, blocked ? reviewerDenial(why, denial ? {} : advice) : "");
             note = blocked ? `Denied: ${publicText(why, 160)}`
@@ -6843,11 +6905,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * reply showed under the message before its own. A run that was made after all (the request
    * timed out, then went through) keeps the message, and so does a chat changed since.
    */
-  async function withdrawFollowUp(id, task, known, { before: description, description: written }) {
-    if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
-    const detail = await board({ workspaceId: id, taskId: task });
-    if (!detail.task || String(detail.task.description || "") !== written) return;
-    await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+  async function withdrawFollowUp(id, task, known, { before: description, description: written }, retries = 3) {
+    if (autoRetryDisposed) return;
+    try {
+      runReads.delete(JSON.stringify([id, ""]));
+      if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task || String(detail.task.description || "") !== written) return;
+      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+    } catch (error) {
+      // A second service failure during cleanup must not leave a run-less message "Sending" forever.
+      // Each retry checks for a late run and an unchanged description before removing anything.
+      if (!autoRetryDisposed && retries > 0) {
+        const timer = setTimer(() => {
+          autoRetryTimers.delete(timer);
+          void withdrawFollowUp(id, task, known, { before: description, description: written }, retries - 1).catch(() => undefined);
+        }, 2_000 * (4 - retries));
+        timer?.unref?.();
+        autoRetryTimers.add(timer);
+      }
+      logger?.warn?.("ao.follow_up_cleanup_failed", { taskId: task, retries, error: publicText(error?.message || error, 200) });
+      throw error;
+    }
   }
 
   /**
@@ -7035,7 +7114,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           throw new Error("This chat's record couldn't hold the message. Start a new chat and send it there.");
         }
         const saidBefore = String(detail.task.description || "");
-        checkCurrent();
+        checkCurrent(false, true);
         const written = await write(id, { expected_revision: detail.revision,
           change: { operation: "edit", id: task, title: detail.task.title, description } });
         boardRevision = written?.revision;
@@ -7046,7 +7125,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // The rewind stands only once its hidden replies are saved: unsaved, they came back on restart.
         try { await chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
-          await withdrawFollowUp(id, task, runsBefore, followUp);
+          await withdrawFollowUp(id, task, runsBefore, followUp, 0);
           await chatEdits.restore(id, task, rewindBefore).catch(() => undefined);
           throw error;
         }
@@ -7076,7 +7155,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
       clock.mark("create");
     } catch (error) {
-      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp, rewind ? 0 : 3).catch(() => undefined);
       if (rewind && followUp) {
         const detail = await board({ workspaceId: id, taskId: task });
         if (detail.task?.description === followUp.before) chatEdits.restore(id, task, rewindBefore);
@@ -8033,11 +8112,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         "Continue that pending next step now. Read the command's output and verify the actual result before reporting success. "
           + "A watch deadline or observation failure is not command success or proof it stopped. Do not replay the command merely because its outcome is unknown. "
           + "If more waiting is needed, register watch_command or schedule_wakeup and check that registration succeeded; a promise alone schedules nothing."].join("\n\n");
-      attempted = true;
-      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, () => {
+      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, (accepting = false, writing = false) => {
         if (!current()) throw new Error("This command watch was cancelled");
+        if (accepting || writing) attempted = true;
       });
-      if (result?.ok === false || !result?.runId) { settleCommandWatch(ticket, "failed"); return; }
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The command continuation was not accepted");
       const previousRunId = ticket.runId;
       for (const other of commandWatchTickets.values()) {
         if (other.workspaceId === workspaceId && other.taskId === taskId && other.runId === previousRunId) other.runId = result.runId;
@@ -8224,7 +8303,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (wakeupsDisposed || !wakeup || wakeup.id !== id || waking.has(key)) return;
     if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
     const current = () => !wakeupsDisposed && wakeups.get(workspaceId, taskId) === wakeup && wakeup.id === id;
-    let consumed = false;
+    let consumed = false, attempted = false;
     waking.add(key);
     try {
       const saved = await runs({ workspaceId });
@@ -8236,15 +8315,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const loop = wakeup.loop ? loops.get(workspaceId, taskId) : null;
       const loopOver = wakeup.loop && (!loop || loop.minutes !== null || now() >= loop.expiresAt);
       if (loopOver && loop) loops.clear(workspaceId, taskId, loop.id);
-      const action = loopOver ? "drop" : wakeupAction(wakeup, {
+      const stopped = latest?.cancelled || latest?.paused || backgroundRuns.get(runKey(workspaceId, latest?.id))?.stopped
+        || sessionStops.has(wakeup.session);
+      const action = loopOver || stopped ? "drop" : wakeupAction(wakeup, {
         active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
         latestRunId: latest?.id ?? null, working: chatWorking(workspaceId, taskId, saved.runs),
       });
       // It fires when that turn settles (wakeupAfterRun), or at the next look should the settle be missed.
       if (action === "wait") { wakeups.update(workspaceId, taskId, { due: true }); armWakeup(workspaceId, taskId, WAKE_RETRY_MS); return; }
-      consumed = true;
-      wakeups.clear(workspaceId, taskId, id);
-      wakeFailures.delete(id);
+      if (action !== "send" || loop) {
+        consumed = true;
+        wakeups.clear(workspaceId, taskId, id);
+        wakeFailures.delete(id);
+      }
       if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
       if (loop) {
         // The loop's round is the loop's own (runLoop): kept due, with the agent's note, until it starts,
@@ -8254,11 +8337,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await runLoop(workspaceId, taskId, loop.id);
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
-      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
+      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true,
+        afterRunId: latest.id }, (accepting = false, writing = false) => {
+        if (!current() || wakeup.dueAt > now()) throw new Error("This wake-up was cancelled, replaced or postponed");
+        if (accepting || writing) attempted = true;
+      });
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The wake-up was not accepted");
+      consumed = true;
+      wakeups.clear(workspaceId, taskId, id);
+      wakeFailures.delete(id);
+      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: true });
     } catch (error) {
       if (!consumed && !current()) { wakeFailures.delete(id); return; }
       if (!consumed && wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
+      // A message write or run creation may have committed despite a lost reply. Only read-only
+      // preflight failures are safe to retry without duplicating a message or its work.
+      if (attempted) {
+        consumed = true;
+        wakeups.clear(workspaceId, taskId, id);
+      }
       const failures = (wakeFailures.get(id) ?? 0) + 1;
       wakeFailures.set(id, failures);
       logger?.warn?.("ao.wakeup.failed", { workspaceId, taskId, failures, error: String(error?.message || error).slice(0, 200) });
