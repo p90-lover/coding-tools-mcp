@@ -3602,7 +3602,8 @@ function permissionSaveFixture({ mode = "single", gateAt = "apply_team", cancel 
     },
     inspect(taskId) {
       f.currentChat().props.onOpenTeam(); commit();
-      f.walk(f.render()).find(item => item.type === "Canvas" && item.props.onSelect).props.onSelect("node-" + taskId);
+      // The role editor opens through the card's Edit: since #1246 a click on a started card opens its conversation.
+      f.walk(f.render()).find(item => item.type === "Canvas" && item.props.onEdit).props.onEdit("node-" + taskId);
       commit();
       return f.walk(f.render()).find(item => item.props?.draft && item.props.node?.id === "node-" + taskId);
     },
