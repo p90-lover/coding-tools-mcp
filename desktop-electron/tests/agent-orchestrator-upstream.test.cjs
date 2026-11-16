@@ -2443,6 +2443,53 @@ test("an exited chat whose agent may live on is exited again once, so AO stops i
   assert.deepEqual([...await upstream.idleChatSessions(30 * 60_000, now)], [], "and it is not asked again this run");
 });
 
+test("the idle sweep asks about an ended chat once and reads a few chats at a time", async () => {
+  // Seen 2026-11-16, once the sweep could read AO's session list at all: AO still listed ended chats
+  // as live ("exited", not terminated) and refused each exit with SESSION_TERMINATED, so every sweep
+  // asked about all of them again; and one conversation read per idle or exited chat went out in the
+  // same moment (355 of them 20 s after the app started).
+  const vm = require("node:vm");
+  const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8");
+  const start = source.indexOf("    async continuable(id)");
+  const end = source.indexOf("    /** Sends a follow-up as a new turn", start);
+  const methods = source.slice(start, end).trim().replace(/,$/, "");
+  const helpers = source.slice(source.indexOf("  async function chatHostGone"), source.indexOf("  // Mission-owned AO calls."));
+  const identity = source.slice(source.indexOf("  const sessionId ="), source.indexOf("  async function projectFor"));
+  const states = source.match(/const TERMINAL_TURN_STATES = .*;/)[0];
+  const now = Date.parse("2026-11-16T18:00:00Z");
+  const old = new Date(now - 6 * 3600_000).toISOString();
+  const sessions = [{ id: "ended", mode: "chat", status: "exited" },
+    ...Array.from({ length: 20 }, (_, index) => ({ id: `idle-${index}`, mode: "chat", status: "idle" }))];
+  const exits = [];
+  let reading = 0, most = 0;
+  const upstream = vm.runInNewContext(states + timelineBounds(source) + helpers + identity + "({" + methods + "})", {
+    Buffer, fs, path, probeTcpOffThread, net: require("node:net"), dataRoot: path.join(os.tmpdir(), "ct-no-ao-data"), userMcpServers: null, fileTools: null, Date, Math, Number, Promise, Array, agentTools: null,
+    exitedReleased: new Set(), exitingAgents: new Map(), stoppingAgents: new Map(), setTimeout,
+    internalApi: async (method, endpoint) => {
+      if (endpoint === "/api/v1/sessions?active=true") return { sessions };
+      const id = endpoint.split("/")[4];
+      if (endpoint.endsWith("/conversation?limit=1")) {
+        most = Math.max(most, ++reading);
+        await new Promise(resolve => setTimeout(resolve, 5));
+        reading -= 1;
+        return { turns: [{ state: "completed", completedAt: old }] };
+      }
+      if (endpoint.endsWith("/exit-agent")) {
+        exits.push(id);
+        throw Object.assign(new Error("Session is terminated (SESSION_TERMINATED)"), { code: "SESSION_TERMINATED", status: 409 });
+      }
+      return { session: { id, mode: "chat", status: "exited" } };
+    },
+  });
+  const idle = [...await upstream.idleChatSessions(30 * 60_000, now)];
+  assert.equal(idle.length, 21, "every chat idle past the limit is still found");
+  assert.ok(idle.includes("ended") && idle.includes("idle-19"));
+  assert.ok(most >= 2 && most <= 4, `at most four conversation reads at a time, saw ${most}`);
+  await assert.rejects(upstream.exitAgent("ended"), /SESSION_TERMINATED/, "another caller still gets AO's refusal");
+  assert.deepEqual(exits, ["ended"]);
+  assert.equal([...await upstream.idleChatSessions(30 * 60_000, now)].includes("ended"), false, "and the ended chat is not asked about again this run");
+});
+
 test("chats AO still calls working with no agent activity for long are listed, so their stranded hosts can be stopped", async () => {
   // Seen 2026-10-22: two chat hosts and their agents ran on, quiet 8 hours and a day, their sessions
   // "working" for good after their turns died with a restart; nothing looked at working sessions.

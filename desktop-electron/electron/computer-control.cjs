@@ -182,6 +182,11 @@ const waitingLabel = (action) => `${action} · waiting for approval`;
 
 /** Calls that send pointer input: the pill lets clicks through while one runs (see activity). */
 const POINTER_TOOLS = new Set(["computer_action", "computer_sequence"]);
+// How long one pointer call lets clicks through the pill. Input itself takes well under a second;
+// a call still running after this waits on the engine (up to the chat's 120 s tool timeout), and
+// until 2026-11-16 Stop took no clicks for that long, so a hung call could not be stopped. A click
+// that call sends under the pill later is refused (TARGET_OCCLUDED), never lands on Stop.
+const POINTER_PASS_MS = 5_000;
 
 /** A model's route id as people know it: "cpa/gpt-6.1-sol" → "gpt-6.1-sol", "opencode-go/deepseek-v4.1-flash" → "deepseek-v4.1-flash". */
 function modelLabel(model) {
@@ -507,10 +512,25 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     const pointer = POINTER_TOOLS.has(tool);
     // Clicks pass through only once the call may act: while it waits for approval, Stop stays clickable.
     let passing = false;
+    let passTimer = null;
+    let passed = false;
+    /** This call stops letting clicks through: when it ends, or POINTER_PASS_MS after it began to. */
+    const takeBack = () => {
+      if (passTimer) clearTimeout(passTimer);
+      passTimer = null;
+      if (!passing) return;
+      passing = false;
+      // A closed pill reset the count (closeBar); a newer pill's count is not this call's.
+      if (bar !== own || own.isDestroyed()) return;
+      if (--pointing <= 0) { pointing = 0; own.setIgnoreMouseEvents?.(false); }
+    };
     const passThrough = () => {
-      if (!pointer || passing) return;
+      if (!pointer || passing || passed) return;
       passing = true;
+      passed = true;
       if (pointing++ === 0) own.setIgnoreMouseEvents?.(true);
+      passTimer = setTimeout(takeBack, POINTER_PASS_MS);
+      passTimer.unref?.();
     };
     running += 1;
     if (!waiting) passThrough();
@@ -530,11 +550,13 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
       ended = true;
       step.outcome = outcome === "failed" ? "failed" : "done";
       step.action = action;
+      if (passTimer) clearTimeout(passTimer);
+      passTimer = null;
       if (bar !== own || own.isDestroyed()) return;
       if (shown.action === label && label !== action) { shown = { ...shown, action }; paint(); }
       paintHistory();
       running = Math.max(0, running - 1);
-      if (passing && --pointing <= 0) { pointing = 0; own.setIgnoreMouseEvents?.(false); }
+      takeBack();
       if (running) return;
       idleTimer = setTimeout(() => {
         idleTimer = null;
