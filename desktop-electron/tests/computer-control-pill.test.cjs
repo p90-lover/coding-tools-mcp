@@ -226,6 +226,44 @@ test("overlapping pointer calls keep clicks passing through until the last one e
   } finally { control.dispose(); }
 });
 
+// Reported 2026-11-16: computer use hung and could not be stopped. A pointer call lets clicks
+// through the pill until it ends, and a call can wait up to 120 s (TOOL_CALL_TIMEOUT_MS) on the
+// engine, so for that long Stop took no clicks and nothing else ended control.
+test("a pointer call that has not ended within 5 s gives Stop back, and Stop then ends control", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const { control, made, requests } = pill();
+  try {
+    await control.start({ workspaceId: "ws", target: { window_id: 7, pid: 70, title: "Calculator", app: "calc.exe" } });
+    await settle();
+    const [window] = made;
+    const hung = control.activity({ tool: "computer_action", args: { step: { action: "click" } } });
+    t.mock.timers.tick(4_999);
+    assert.deepEqual(window.ignoring, [true], "the click itself still passes through");
+    t.mock.timers.tick(1);
+    assert.deepEqual(window.ignoring, [true, false], "a call still running after 5 s is waiting, not clicking: Stop takes clicks");
+
+    // Two overlapping calls: each gets its own 5 s; the pill turns back once both are past it.
+    const later = control.activity({ tool: "computer_sequence", args: { steps: [{ action: "click" }] } });
+    t.mock.timers.tick(3_000);
+    const last = control.activity({ tool: "computer_action", args: { step: { action: "click" } } });
+    t.mock.timers.tick(2_000);
+    assert.deepEqual(window.ignoring, [true, false, true], "the newer call is still within its 5 s");
+    t.mock.timers.tick(3_000);
+    assert.deepEqual(window.ignoring, [true, false, true, false]);
+    later();
+    last();
+    hung("failed");
+    assert.deepEqual(window.ignoring, [true, false, true, false], "calls ending after their 5 s change nothing more");
+
+    const again = control.activity({ tool: "computer_action", args: { step: { action: "click" } } });
+    assert.equal(window.retitle("stop-computer-control"), true, "Stop pressed while a call hangs");
+    await settle();
+    assert.ok(requests.includes("/api/v1/computer/stop"), "control is stopped");
+    assert.equal(window.destroyed, true, "and the pill is gone");
+    again("failed");
+  } finally { control.dispose(); }
+});
+
 test("the pill shows the controlled app's own icon left of its name, read once per program", async () => {
   const asked = [];
   const icon = "data:image/png;base64,iVBORw0KGgo=";
