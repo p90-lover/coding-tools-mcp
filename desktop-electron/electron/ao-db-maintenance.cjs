@@ -29,6 +29,12 @@ const DEFAULTS = Object.freeze({
   // over ten minutes and the disk froze the app. Free pages are reused anyway; the rest of the
   // space comes back over the next starts.
   incrementalMaxBytes: 32 * 1024 * 1024,
+  // A write-ahead log larger than this (AO's journal_size_limit) is a backlog not yet copied into
+  // the database, and the start does no maintenance. Opening the database reads the whole log, and
+  // the first write here copies all of it into the database: on 2026-11-11 a 483 MB log ran this
+  // past its 90 s limit, and AO then began the same copy again. AO copies a backlog in the
+  // background (CheckpointWAL); the space comes back at a later start.
+  walBacklogMaxBytes: 64 * 1024 * 1024,
   // AO starts only after this; past the limit the maintenance is stopped and AO starts without it.
   timeoutMs: 90_000,
 });
@@ -83,6 +89,9 @@ async function compactAoDatabase(dataRoot, options = {}) {
   // Both checks run before every AO start; made synchronously, the existence check alone held the
   // main process (every window) 1.85 s on the busy hard disk after a reboot (2026-10-30).
   try { await fs.promises.access(file); } catch { return { action: "none", reason: "no database yet" }; }
+  let walBytes = 0;
+  try { walBytes = (await fs.promises.stat(`${file}-wal`)).size; } catch { /* no log */ }
+  if (walBytes > settings.walBacklogMaxBytes) return { action: "skipped", reason: "write-ahead log backlog", walBytes };
   let diskFreeBytes = null;
   try { const stats = await fs.promises.statfs(dataRoot); diskFreeBytes = Number(stats.bavail) * Number(stats.bsize); } catch { /* unknown */ }
   const input = JSON.stringify({ file, diskFreeBytes, minFreeBytes: settings.minFreeBytes, minFreeRatio: settings.minFreeRatio,
