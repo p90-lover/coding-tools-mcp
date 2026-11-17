@@ -5578,6 +5578,8 @@ async function start() {
       .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
     // Goals carry on with the window minimized (its reads, which sweep them, stop then).
     if (!LAUNCHER_SMOKE_TEST) agentOrchestratorWorkflow.startGoalWatch();
+    // A turn a chat's agent starts by itself gets a card, so its requests are seen and screened.
+    if (!LAUNCHER_SMOKE_TEST) agentOrchestratorWorkflow.startAutonomousTurnWatch(listHeadlessWorkspaces);
     // Chats a restart interrupted resume now, in every project, without waiting for the window or
     // the ChatGPT bridge (whose connect observes their cards again): resumeInterrupted says which.
     if (!LAUNCHER_SMOKE_TEST) {

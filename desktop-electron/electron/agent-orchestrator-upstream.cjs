@@ -1975,6 +1975,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       return idle.filter(Boolean);
     },
     /**
+     * Chat sessions AO calls "working" or "needs_input": their agent is in a turn, sent by the app or
+     * started by the agent itself (the workflow's adoptAutonomousTurns tells them apart).
+     */
+    async busyChatSessions() {
+      const sessions = await liveSessions();
+      return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && !exitingAgents.has(String(session.id))
+        && ["working", "needs_input"].includes(session.status)).map(session => String(session.id));
+    },
+    /**
      * Chat sessions AO still calls "working" whose agent has done nothing for `quietMs`. A turn that
      * dies with an app or daemon restart leaves its session "working" for good, and its chat host
      * waits for a controller that never comes: neither the idle sweep (idle and exited only) nor AO's

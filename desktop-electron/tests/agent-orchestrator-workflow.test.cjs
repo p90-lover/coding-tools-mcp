@@ -8139,6 +8139,129 @@ test("Settings › Instructions start a new agent's first message, within AO's 1
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
 
+// ---- turns a chat's agent starts by itself (adoptAutonomousTurns) ----
+
+/**
+ * A Claude chat whose card r1 finished turn "turn-1" in AO session "sess-1". `newest` is what AO's
+ * conversation shows as the session's newest turn; `busy` is the sessions AO calls working or
+ * waiting for input; `agentUp` is whether the chat's agent can be continued.
+ */
+function autonomousChat({ newest, busy = ["sess-1"], agentUp = true, cardState = "finished" } = {}) {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const task = { id: "task-1", title: "Ship", description: "first ask", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: cardState, parents: [], route, receipt: { thread_id: "sess-1", turn_id: "turn-1", answer: "done" } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map();
+  const spawned = [], sent = [], observedWith = [], submitted = [];
+  // A card the chat makes is in the project's runs from then on, as the service keeps it.
+  const card = (id) => {
+    if (!created.has(id)) {
+      const run = { id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(id, run);
+      world.runs.push(run);
+    }
+    return created.get(id);
+  };
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) return { ok: true, runs: [card(body.run_id)], worker_capacity: { [body.run_id]: 1 } };
+    if (endpoint === "/api/v1/ao/update" && body.change?.operation === "create_from_team") {
+      const result = await world.requestHeadless(endpoint, body, options);
+      card(body.change.run_id);
+      return result;
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") {
+      submitted.push(body);
+      latest.nodes[0].state = body.session_id ? "running" : "held";
+      latest.nodes[0].receipt = { thread_id: body.session_id, ...(body.error ? { error: body.error } : {}) };
+      return { ok: true, run: latest };
+    }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      busyChatSessions: async () => busy,
+      spawn: async input => { spawned.push(input); return "new-session"; },
+      continuable: async id => agentUp && id === "sess-1",
+      send: async (...args) => { sent.push(args); return { turnId: "sent-turn", state: "running" }; },
+      observe: async (id, expected) => {
+        observedWith.push([id, expected ?? null]);
+        if (expected === "turn-1") return { status: "idle", turnId: "turn-1", turnState: "completed", answer: "done", approvals: [] };
+        return newest;
+      },
+    },
+  });
+  return { world, workflow, route, spawned, sent, observedWith, submitted };
+}
+const waitFor = async (ok) => { for (let tries = 0; tries < 300 && !ok(); tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+
+test("a turn a chat's agent starts by itself gets a card of its own, and nothing is sent to the agent", async (t) => {
+  // Another local Claude session messaged the agent: AO shows a newer turn that waits on a permission request.
+  const newest = { status: "needs_input", turnId: "autonomous-turn-9", turnState: "running", needsInput: true,
+    answer: "", liveOutput: "", timeline: [], approvals: [{ requestId: "req-1", kind: "approval", tool: "Bash", command: "git push" }] };
+  const { world, workflow, spawned, sent, observedWith, submitted } = autonomousChat({ newest });
+  t.after(() => workflow.dispose());
+  await workflow.call("runs", { workspaceId: "ws-1" }); // the window reads the project
+
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), ["sess-1"]);
+  await waitFor(() => observedWith.some(([, expected]) => expected === "autonomous-turn-9"));
+  assert.match(world.edits.at(-1).description, /Follow-up \([^)]+ UTC\):\nClaude continued on its own\.$/, "the chat shows where the turn came from");
+  assert.equal(world.updates.at(-1).operation, "create_from_team");
+  assert.equal(submitted.at(-1)?.session_id, "sess-1", "the card holds the chat's own agent");
+  assert.deepEqual(sent, [], "the agent is already working on the turn: nothing is sent");
+  assert.deepEqual(spawned, [], "and no new agent is started");
+  assert.ok(observedWith.some(([id, expected]) => id === "sess-1" && expected === "autonomous-turn-9"),
+    "the card watches that turn, so its requests are shown and screened and its answer is the card's");
+});
+
+test("a turn the agent started by itself is not adopted twice, nor one the chat already has or that ended", async (t) => {
+  const running = { status: "working", turnId: "autonomous-turn-9", turnState: "running", answer: "", liveOutput: "", timeline: [], approvals: [] };
+  const cases = [
+    ["AO calls no chat agent busy", { newest: running, busy: [] }],
+    ["the newest turn is the card's own", { newest: { ...running, turnId: "turn-1" } }],
+    ["the newest turn already ended", { newest: { ...running, turnState: "completed" } }],
+    ["the newest turn has not started", { newest: { ...running, turnState: "queued" } }],
+    ["the chat's card is still working", { newest: running, cardState: "running" }],
+  ];
+  for (const [why, setup] of cases) {
+    const { workflow, world, sent } = autonomousChat(setup);
+    t.after(() => workflow.dispose());
+    await workflow.call("runs", { workspaceId: "ws-1" });
+    assert.deepEqual(await workflow.adoptAutonomousTurns(), [], why);
+    assert.equal(world.updates.length, 0, `${why}: no card`);
+    assert.deepEqual(sent, [], why);
+  }
+
+  const { workflow, world } = autonomousChat({ newest: running });
+  t.after(() => workflow.dispose());
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), ["sess-1"]);
+  const cards = world.updates.length;
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), [], "its card now drives the session");
+  assert.equal(world.updates.length, cards);
+});
+
+test("an adopted turn whose agent is gone fails its card instead of starting a new agent on the placeholder", async (t) => {
+  const newest = { status: "working", turnId: "autonomous-turn-9", turnState: "running", answer: "", liveOutput: "", timeline: [], approvals: [] };
+  const { workflow, spawned, sent, submitted } = autonomousChat({ newest, agentUp: false });
+  t.after(() => workflow.dispose());
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), ["sess-1"]);
+  await waitFor(() => submitted.length > 0);
+  assert.match(String(submitted.at(-1)?.error), /stopped before the turn it started on its own could be shown/);
+  assert.equal(submitted.at(-1)?.session_id, undefined);
+  assert.deepEqual(spawned, [], "no fresh agent gets \"Claude continued on its own.\" as its task");
+  assert.deepEqual(sent, []);
+});
+
 test("a follow-up brings its chat's agent back while the card is reserved, not after", async () => {
   // Seen live 2026-11-09: the reservation and the launch settings took 1-18 s, and only then did a
   // released agent begin to resume, so the two waits added up on every follow-up.
