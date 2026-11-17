@@ -7,20 +7,48 @@ export const CHAT_PAGE_LIMIT = 12;
  * `keyboard`: Ctrl+1 … Ctrl+0 open pages 1 to 10. `wheel`: Alt+scroll (and a scroll over the page
  * tabs, or a touchpad's sideways swipe) turns pages.
  */
-export type ChatPagePreferences = { enabled: boolean; pageCount: number; keyboard: boolean; wheel: boolean };
+/**
+ * `pageIds`: the id of each page, in order, which its saved state is stored under (chatPageKey);
+ * `lastPageId`: the highest id a page ever had. Both are left out while page n is id n: they are
+ * saved only once a page was closed (closedChatPage).
+ */
+export type ChatPagePreferences = { enabled: boolean; pageCount: number; keyboard: boolean; wheel: boolean; pageIds?: number[]; lastPageId?: number };
 // Pages are on unless turned off in Settings. Off by default (#903) hid them all: the page tabs,
 // their keys, the wheel and a full page's New chat going to the next page (2026-11-08).
 export const DEFAULT_CHAT_PAGES: ChatPagePreferences = { enabled: true, pageCount: 1, keyboard: true, wheel: true };
+
+/**
+ * The id of each of the `pageCount` pages. A page keeps its id when one before it closes, so what
+ * it saved stays its own and nothing of the closed page moves onto it. A page added gets a new id,
+ * never a closed page's, whose unsent new-chat draft may still be kept.
+ */
+export function chatPageIds(preferences: Pick<ChatPagePreferences, "pageCount" | "pageIds" | "lastPageId">): number[] {
+  const saved = preferences.pageIds;
+  const ids = Array.isArray(saved) && saved.every((id) => Number.isInteger(id) && id >= 1) && new Set(saved).size === saved.length
+    ? saved.slice(0, preferences.pageCount) : Array.from({ length: preferences.pageCount }, (_, index) => index + 1);
+  let last = Math.max(Number.isInteger(preferences.lastPageId) ? preferences.lastPageId! : 0, preferences.pageCount, ...ids);
+  while (ids.length < preferences.pageCount) ids.push(++last);
+  return ids;
+}
+/** The page ids to save: none while page n is id n. */
+function withPageIds(preferences: ChatPagePreferences): ChatPagePreferences {
+  const { pageIds: _ids, lastPageId: _last, ...rest } = preferences;
+  const ids = chatPageIds(preferences);
+  const last = Math.max(Number.isInteger(preferences.lastPageId) ? preferences.lastPageId! : 0, ...ids);
+  return ids.every((id, index) => id === index + 1) && last === ids.length ? rest : { ...rest, pageIds: ids, lastPageId: last };
+}
 
 /** Saved preferences; the previous/next keys stores still hold (Shift+Q / Shift+R, 2026-11-09) are dropped. */
 export function parseChatPagePreferences(raw: string | null): ChatPagePreferences {
   let value: Partial<ChatPagePreferences> | null = null;
   try { value = JSON.parse(raw || "null"); } catch { /* Use the default layout. */ }
-  return {
+  return withPageIds({
     enabled: value?.enabled !== false,
     pageCount: Number.isInteger(value?.pageCount) && value!.pageCount! >= 1 && value!.pageCount! <= CHAT_PAGE_LIMIT ? value!.pageCount! : 1,
     keyboard: value?.keyboard !== false, wheel: value?.wheel !== false,
-  };
+    ...(Array.isArray(value?.pageIds) ? { pageIds: value!.pageIds } : {}),
+    ...(Number.isInteger(value?.lastPageId) ? { lastPageId: value!.lastPageId } : {}),
+  });
 }
 
 // Like log-store, Settings and the page host share one small renderer store.
@@ -49,17 +77,46 @@ function subscribe(listener: () => void) {
 export function useChatPagePreferences(): ChatPagePreferences {
   return useSyncExternalStore(subscribe, readPreferences, () => DEFAULT_CHAT_PAGES);
 }
-export function saveChatPagePreferences(patch: Partial<ChatPagePreferences>): void {
-  const next = { ...readPreferences(), ...patch };
-  if (!Number.isInteger(next.pageCount) || next.pageCount < 1 || next.pageCount > CHAT_PAGE_LIMIT) throw new Error(`Use between 1 and ${CHAT_PAGE_LIMIT} chat pages`);
+/** Saves `patch` and returns the preferences saved (a page added gets its id here). */
+export function saveChatPagePreferences(patch: Partial<ChatPagePreferences>): ChatPagePreferences {
+  const merged = { ...readPreferences(), ...patch };
+  if (!Number.isInteger(merged.pageCount) || merged.pageCount < 1 || merged.pageCount > CHAT_PAGE_LIMIT) throw new Error(`Use between 1 and ${CHAT_PAGE_LIMIT} chat pages`);
+  const next = withPageIds(merged);
   // A failed write leaves the published snapshot alone and is shown by the caller.
   localStorage.setItem(CHAT_PAGES_STORE, JSON.stringify(next));
   snapshot = next;
   for (const listener of listeners) listener();
+  return next;
 }
 
+/** `key` for the page with id `page`; id 1 keeps the key from before pages. */
 export function chatPageKey(key: string, page = 1): string {
   return page === 1 ? key : `${key}:page-${page}`;
+}
+/** The project a page last showed, kept under chatPageKey; page 1's is also every surface's fallback. */
+export const CHAT_PAGE_WORKSPACE = "coding-tools:ao:workspace";
+/**
+ * What a closed page leaves in localStorage: its chat selection, its project and its split layout
+ * (`splitStore`, chat-split's key). Page id 1's project is the key the Teams and Subagents
+ * surfaces read too, so it stays.
+ */
+export function closedPageKeys(id: number, splitStore: string): string[] {
+  return [`${CHAT_PAGES_STORE}:selection`, splitStore, ...(id === 1 ? [] : [CHAT_PAGE_WORKSPACE])].map((key) => chatPageKey(key, id));
+}
+/**
+ * Page `page` closed while page `active` is open: the page ids left, the closed page's id and the
+ * page to open, or null for the last page, which stays. The closed page open, the one before it
+ * opens (the next one, now first, when it was the first); another page stays open.
+ */
+export function closedChatPage(preferences: ChatPagePreferences, page: number, active: number) {
+  if (preferences.pageCount < 2 || !Number.isInteger(page) || page < 1 || page > preferences.pageCount) return null;
+  const ids = chatPageIds(preferences);
+  const pageIds = ids.filter((_, index) => index !== page - 1);
+  const open = active === page ? Math.max(1, page - 1) : active > page ? active - 1 : active;
+  return {
+    patch: { pageCount: pageIds.length, pageIds, lastPageId: Math.max(preferences.lastPageId ?? 0, ...ids) },
+    closedId: ids[page - 1], active: Math.min(Math.max(1, open), pageIds.length),
+  };
 }
 export type PageSelection = { workspaceId: string; taskId: string };
 export function readPageSelection(page: number): PageSelection | null {
@@ -140,9 +197,11 @@ export function createPageSwipe(distance = PAGE_SWIPE_DISTANCE, quiet = PAGE_SWI
 
 /** What the open page's tabs show and do (ChatPages provides it; null while pages are off). */
 export type ChatPager = {
-  /** `keys`: Ctrl+1 … Ctrl+0 open pages 1 to 10 (the tabs name them). */
-  active: number; count: number; canAdd: boolean; keys: boolean;
+  /** `keys`: Ctrl+1 … Ctrl+0 open pages 1 to 10 (the tabs name them). `canClose`: more than one page is open. */
+  active: number; count: number; canAdd: boolean; canClose: boolean; keys: boolean;
   select: (page: number) => void; add: () => void;
+  /** Takes the page off screen; its chats' runs and queues go on, and they stay in the chat list. */
+  close: (page: number) => void;
 };
 export const ChatPagerContext = createContext<ChatPager | null>(null);
 
@@ -168,8 +227,7 @@ export function overflowPage(from: number, count: number, hasRoom: (page: number
 export function chatPageLayout(latest: { current: ChatPagePreferences }, fail: (message: string) => void) {
   const change = (patch: Partial<ChatPagePreferences>) => {
     try {
-      saveChatPagePreferences(patch);
-      latest.current = { ...latest.current, ...patch };
+      latest.current = saveChatPagePreferences(patch);
       return true;
     } catch (cause) { fail(cause instanceof Error ? cause.message : String(cause)); return false; }
   };
@@ -178,6 +236,8 @@ export function chatPageLayout(latest: { current: ChatPagePreferences }, fail: (
     canAdd: () => latest.current.enabled && latest.current.pageCount < CHAT_PAGE_LIMIT,
     add: () => change({ pageCount: latest.current.pageCount + 1 }),
     enable: () => change({ enabled: true }),
+    /** Saves the pages left after closedChatPage. */
+    close: (patch: Pick<ChatPagePreferences, "pageCount" | "pageIds" | "lastPageId">) => change(patch),
   };
 }
 
@@ -250,6 +310,13 @@ export function createChatPageRegistry(selectPage: (page: number) => void,
       const open = waiting.get(page);
       waiting.delete(page);
       return open;
+    },
+    /** Page `page` closed: a chat waiting for it is dropped, and those waiting for later pages move with them. */
+    closed(page: number) {
+      const later = [...waiting].filter(([at]) => at > page).sort(([a], [b]) => a - b);
+      waiting.delete(page);
+      for (const [at] of later) waiting.delete(at);
+      for (const [at, open] of later) waiting.set(at - 1, { ...open, tried: open.tried.filter((tried) => tried !== page).map((tried) => tried > page ? tried - 1 : tried) });
     },
   };
 }
