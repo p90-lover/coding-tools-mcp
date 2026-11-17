@@ -62,7 +62,9 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport s
     assert.ok(result.capabilities, "every AO catalog exposes a truthful capability outcome");
     assert.deepEqual(result.capabilities["own-model"].efforts, [], id);
     assert.equal(result.capabilities["own-model"].contextWindow, undefined, id);
-    assert.match(result.capabilities["own-model"].contextReason, /support|verified|setter/i, id);
+    // The chip says why it is off for this agent (windowlessReason), not a generic "no setter".
+    assert.match(result.capabilities["own-model"].contextReason, /no setting for it|no context-window setting AO can pass|only on a CPA model/, id);
+    if (id === "agy") assert.match(result.capabilities["own-model"].contextReason, /^Antigravity sizes its own context window/);
   }
   // Claude Code lists only CPA models; a Claude model through CPA keeps CPA's advertised efforts and
   // takes a window up to its reported limit (its picker was off). A CPA alias with no reported limit
@@ -185,7 +187,7 @@ test("agy gets the bare model name and runs unattended only with Full access", a
   // is "not available for this account" through the gateway, so it falls back to asking: refused.
   for (const reviewer of ["user", "auto_review"]) {
     await assert.rejects(dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer }, catalog),
-      /asks for approval in its own terminal/, reviewer);
+      /asks for approval in its own terminal.*Choose Full access, the only mode it runs in\./, reviewer);
   }
 });
 

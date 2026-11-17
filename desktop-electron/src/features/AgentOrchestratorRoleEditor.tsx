@@ -112,26 +112,15 @@ export function workerRoute(harness: string, model: string, permission: NativePe
 }
 
 /**
- * AO harnesses whose adapter takes the three permission modes: the engine's PERMISSION_AGENTS
- * (electron/agent-orchestrator-workflow.cjs) as harness ids. Native Codex takes them on its own route.
+ * AO harnesses that run all three permission modes, because their agent asks the chat about each
+ * tool request: the engine's PERMISSION_AGENTS (electron/agent-orchestrator-workflow.cjs) as harness
+ * ids. Every other AO harness runs in Full access only; its permission menu lists Ask and Approve
+ * for me with the reason, and a chat keeps its mode when it moves there. Dropping that mode instead
+ * (until 0.8.134) left the chat on the agent's own permissions ("Custom"), which AO ran as its
+ * "auto": opencode then allowed every tool unasked, and Pi was refused with nothing left to pick.
+ * Native Codex takes the modes on its own route.
  */
-export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex", "ao:agy"]);
-/**
- * The route without a permission choice its harness can't honor. A mode picked on Claude Code or
- * Codex and carried to Pi or opencode (a model pick, the remembered last route, a saved chat) was
- * refused at every launch ("cannot honor the saved permission tuple"), and their permission menu
- * offers no mode to pick instead, so the chat could never start. Those agents run on their own
- * permissions, which the chip shows as Custom.
- */
-export function permissionsFitted(route: AoRoute): AoRoute {
-  if (!route.harness_id.startsWith("ao:") || PERMISSION_HARNESSES.has(route.harness_id)) return route;
-  if (route.native_permission_profile === undefined && route.approval_policy === undefined && route.approvals_reviewer === undefined) return route;
-  const fitted: AoRoute = { ...route };
-  delete fitted.native_permission_profile;
-  delete fitted.approval_policy;
-  delete fitted.approvals_reviewer;
-  return fitted;
-}
+export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex"]);
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
@@ -180,9 +169,8 @@ export function withTuning(next: AoRoute, previous: AoRoute, capabilities?: Reco
   const betweenAgents = next.harness_id.startsWith("ao:") && previous.harness_id.startsWith("ao:");
   if (previous.context_window && (betweenAgents || contextApplies(route))) route.context_window = previous.context_window;
   // An AO model the catalog does not describe keeps it (a legacy id list knows no range); Native
-  // Codex's range is known without one. A permission mode goes only where the harness takes one.
-  const fitted = permissionsFitted(route);
-  return capabilities && (capabilities[route.model] || route.harness_id === NATIVE_HARNESS) ? fitWindow(fitted, capabilities[route.model]) : fitted;
+  // Codex's range is known without one. The permission mode always goes along (PERMISSION_HARNESSES).
+  return capabilities && (capabilities[route.model] || route.harness_id === NATIVE_HARNESS) ? fitWindow(route, capabilities[route.model]) : route;
 }
 
 /** A route's window inside what its model takes: clamped into the range, or dropped where none can be set. */

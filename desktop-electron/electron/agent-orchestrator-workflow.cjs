@@ -184,11 +184,30 @@ const CPA_MODEL_PREFIX = "cpa/";
 const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy", "pi", "unreal-agent"]);
 // The Pi provider AO's managed Pi extension registers for a CPA session (AO ports.PiGatewayProvider).
 const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
-// Agents whose AO adapter honours the three permission modes. agy maps them onto its --mode
-// (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
-// and stopped at approvals in a terminal nobody saw, so its card never finished.
-const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
-const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.";
+// Agents whose AO driver hands each tool request it wants approved to the chat (an ACP
+// session/request_permission, or Codex's app-server approval), so all three permission modes run
+// there: Ask is the agent's accept-edits mode with the rest asked in the chat, Approve for me sends
+// those requests to this app's reviewer (Codex: its own auto-review), Full access is bypass.
+// Every other agent runs in Full access only, which each AO adapter maps onto its bypass flag:
+// in Ask or Approve for me it would never ask (Pi, Unreal Agent, opencode on its own default) or
+// ask in a terminal nobody sees (agy, Cline), and its card would run unchecked or wait for good.
+// Those two modes are refused at launch with the agent's reason (fullAccessOnly) and shown so in
+// its permission menu.
+const PERMISSION_AGENTS = new Set(["claude-code", "codex"]);
+// Why an agent outside PERMISSION_AGENTS can't run in Ask or Approve for me, by agent.
+const FULL_ACCESS_REASONS = {
+  agy: "Antigravity asks for approval in its own terminal, which the chat does not show, so it would wait for good",
+  cline: "Cline asks for approval in its own terminal, which the chat does not show, so it would wait for good",
+  // AO leaves opencode on its own rules in every mode but bypass, and those allow every tool.
+  opencode: "opencode allows every tool by its own default, so it would never ask the chat, and nothing would be reviewed",
+  pi: "Pi runs its tools without asking first (pi-acp sends no approval requests), so the chat can neither ask you nor review them for you",
+  "unreal-agent": "Unreal Agent has no approval channel, so the chat can neither ask you nor review its tools for you",
+};
+// The end of every such reason, which ROUTE_REFUSED matches: retrying never gets past it.
+const FULL_ACCESS_ONLY = "Choose Full access, the only mode it runs in.";
+/** Why `agent` takes only Full access, for its permission menu and a refused launch. */
+const fullAccessOnly = (agent) => `${FULL_ACCESS_REASONS[agent]
+  ?? `${agent} has no way to ask the chat before it runs a tool, so the chat can neither ask you nor review its tools for you`}. ${FULL_ACCESS_ONLY}`;
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
 const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 // Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
@@ -344,7 +363,8 @@ function refusedReason(error) {
  */
 // One distinctive phrase of each refusal aoLaunchArgs throws, not "Launch failed:" as a whole: a
 // launch that timed out is what "Retry automatically" is for.
-const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
+// "Antigravity asks for approval in its own terminal" is how a card saved before 0.8.134 says it.
+const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Choose Full access, the only mode it runs in|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
 /**
  * AO could not run the agent's program at all: its version probe failed ("chat driver incompatible:
  * read Codex version: exit status 1", CHAT_DRIVER_INCOMPATIBLE). The program is missing, broken or
@@ -686,14 +706,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     let effort = node.route.effort === "auto" ? null : node.route.effort ?? effortDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
-    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!PERMISSION_AGENTS.has(agent)
-      || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
-        || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
+    const asking = profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user");
+    const fullAccess = profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user";
+    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && !asking && !fullAccess) {
       throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
     }
-    // A saved Ask or Approve-for-me route (a team template, an older chat) is refused rather than
-    // left waiting at an approval in agy's terminal that nobody sees.
-    if (agent === "agy" && node.route.approval_policy === "on-request") throw new Error(AGY_ASK_REASON);
+    // Ask or Approve for me on an agent that can't ask the chat (a moved chat, a team template) is
+    // refused with its reason, rather than left waiting at an approval nobody sees, or run unchecked.
+    if (asking && !PERMISSION_AGENTS.has(agent)) throw new Error(fullAccessOnly(agent));
     const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
     if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
       throw new Error(`${node.settings?.name || "This card"}: ${agent} can't use the CPA model ${node.route.model}. Choose one of its own models.`);
@@ -742,7 +762,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // "auto" mode exists only for Claude models and otherwise falls back to asking for every
       // edit. Claude Code therefore accepts edits and its tool requests go to our reviewer.
       ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
-        : node.route.approvals_reviewer === "auto_review" && agent !== "claude-code" ? "auto" : "accept-edits" } : {}),
+        : node.route.approvals_reviewer === "auto_review" && agent === "codex" ? "auto" : "accept-edits" } : {}),
       // The app's own terminal follows "Approve for me" too: routine project commands run unasked.
       ...(node.route.approvals_reviewer === "auto_review" ? { autoReview: true } : {}),
       ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
@@ -1555,8 +1575,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
         : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
     } else capabilities.contextReason = unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
-      : "This harness/model has no verified context-window setter.";
+      : windowlessReason(agent);
     return capabilities;
+  }
+  /**
+   * Why the window chip is off for an agent: the agent itself has no setting for it that AO can
+   * pass, so the chip names that instead of a generic "no verified setter" (the user, 2026-11-17:
+   * "fix why i cant set the context window"). Checked 2026-11-17: agy 1.5.10 has no flag, setting
+   * or gateway variable for it; Unreal Agent's UNREAL_HARNESS_LLM_* carry none.
+   */
+  function windowlessReason(agent) {
+    if (agent === "agy") return "Antigravity sizes its own context window and has no setting for it, so it can't be set here.";
+    if (agent === "unreal-agent") return "Unreal Agent sizes its own context window and has no setting for it, so it can't be set here.";
+    if (agent === "pi") return "Pi takes a window only on a CPA model, which AO declares to it; Pi's own models keep the window Pi gives them.";
+    return `${HARNESS_NAMES[agent] ?? agent} has no context-window setting AO can pass, so it can't be set here.`;
   }
 
   /**
@@ -2701,23 +2733,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (route.harness_id !== "codex-native") {
         const agent = externalAgent({ route });
-        if (!PERMISSION_AGENTS.has(agent)) return unavailable("This adapter does not support the three permission modes.");
+        if (!agent) return unavailable("Choose a valid model route");
         const catalog = await recentHarnessCatalog();
         const adapter = catalog.find(item => item.id === agent && item.installed);
         if (!adapter) return unavailable("This harness is not installed.");
-        // The bundled AO adapters accept approvalMode per session. This is not Native Codex
-        // metadata or an effective-policy acknowledgement, and grants no shared MCP/app rights.
+        // Every AO adapter takes approvalMode per session, Full access as its bypass flag. This is
+        // not Native Codex metadata or an effective-policy acknowledgement, and grants no shared
+        // MCP/app rights. An agent that can't ask the chat lists Ask and Approve for me as excluded,
+        // with its reason, rather than offering no mode at all: a chat moved onto Pi or Antigravity
+        // then had nothing it could pick, Full access included.
+        const asks = PERMISSION_AGENTS.has(agent);
         return { ok: true, capability: {
           supported: true, source: "ao-adapter", requested_only: true,
           profiles: [{ id: ":workspace", allowed: agent !== "codex" || adapter.chat === true }, { id: ":danger-full-access", allowed: true }],
           ...(agent === "codex" && !adapter.chat ? { reason: "Workspace presets require the Codex chat driver; TUI inherits unverified sandbox settings." } : {}),
           approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"],
-          // agy in its terminal asks there, which no chat or card shows: Ask (accept-edits still asks
-          // before shell commands) would wait for good, and Approve for me (--mode auto) is "not
-          // available for this account" through the CPA gateway, so it falls back to asking too.
-          // Only Full access runs unattended.
-          ...(agent === "agy" && !adapter.chat ? { excluded_modes: ["user", "auto_review"].map(reviewer =>
-            ({ profile: ":workspace", policy: "on-request", reviewer, reason: AGY_ASK_REASON })) } : {}),
+          ...(!asks ? { excluded_modes: ["user", "auto_review"].map(reviewer =>
+            ({ profile: ":workspace", policy: "on-request", reviewer, reason: fullAccessOnly(agent) })) } : {}),
         } };
       }
     }
