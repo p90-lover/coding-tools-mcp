@@ -465,6 +465,97 @@ test("runtime policy is labelled effective only after actual acknowledgement", (
   assert.match(elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title, /Active: runtime\/actual · on-request · auto_review/);
 });
 
+test("a permission picked while an AO agent works is active now when the agent asks the app, else from the next turn", () => {
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const chip = (launched, harness = "ao:claude-code") => {
+    const lead = { ...node("lead", harness, ":ao-default"), route: { harness_id: harness, permission_profile: ":ao-default", native_permission_profile: ":workspace", ...launched } };
+    // The chat picked Approve for me after the turn started: AO records it, the running card keeps its launch route.
+    const mission = { id: "chat", team: { permission_selections: { lead: { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" } } },
+      nodes: [{ ...lead, id: "attempt", template_role_id: "lead", state: "running" }] };
+    const props = { team: { id: "team", nodes: [lead] }, mission, busy: false, loadProfiles: async () => ({}), save: async () => "", shared: null };
+    const capability = { supported: true, profiles: [":read-only", ":workspace", ":danger-full-access"].map(id => ({ id, allowed: true })),
+      approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"] };
+    const tree = view.render("AgentOrchestratorPermissions", props, [true, { lead: capability }, "", false]);
+    return { title: elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title,
+      option: elements(tree, item => item.props?.role === "menuitemradio")[0].props.title, mission };
+  };
+  // Launched to ask (reviewer: you): every request reaches the app, which follows the new pick now.
+  const asks = chip({ approval_policy: "on-request", approvals_reviewer: "user" });
+  assert.match(asks.title, /Active now: :workspace · on-request · auto_review/);
+  assert.doesNotMatch(asks.title, /not confirmed/);
+  assert.equal(asks.option, "Applies now, to the running turn's requests too");
+  assert.equal(view.exports.permissionChangeNotice(asks.mission, { profile: ":workspace", policy: "on-request", reviewer: "auto_review" }),
+    "Active now: the running turn's requests follow it.");
+  // Codex launched with its own auto-review answers for itself until its next turn.
+  const own = chip({ approval_policy: "on-request", approvals_reviewer: "auto_review" }, "ao:codex");
+  own.mission.team.permission_selections.lead = { approval_policy: "on-request", approvals_reviewer: "user" };
+  const ownTree = view.render("AgentOrchestratorPermissions", { team: { id: "team", nodes: [own.mission.nodes[0]] }, mission: own.mission, busy: false,
+    loadProfiles: async () => ({}), save: async () => "", shared: null }, [true, { attempt: { supported: true, profiles: [] } }, "", false]);
+  assert.match(elements(ownTree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props.title, /This turn: .*auto_review · your change applies from the next turn/);
+  assert.equal(view.exports.permissionChangeNotice(own.mission, { reviewer: "user" }), "Applies from the next turn. A running turn keeps its permissions.");
+  // No running turn: the next one uses it.
+  assert.equal(view.exports.permissionChangeNotice({ id: "chat", nodes: [] }, { reviewer: "auto_review" }), "Applies from the next turn. A running turn keeps its permissions.");
+});
+
+test("Approve for me that this app reviews says paused while quota-based reviews are off, not Active now", () => {
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const approveForMe = { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const chip = ({ quota, harness = "ao:claude-code", launched = { approvals_reviewer: "user" }, running = true, notice = "" }) => {
+    const lead = { ...node("lead", harness, ":ao-default"), route: { harness_id: harness, permission_profile: ":ao-default", ...approveForMe } };
+    // Approve for me was picked mid-turn: the running card keeps its launch route, AO records the pick.
+    const mission = { id: "chat", team: { permission_selections: { lead: { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" } } },
+      nodes: running ? [{ ...lead, route: { ...lead.route, ...launched }, id: "attempt", template_role_id: "lead", state: "running" }] : [] };
+    const props = { team: { id: "team", nodes: [lead] }, mission, busy: false, loadProfiles: async () => ({}), save: async () => "", shared: null };
+    // State order: menu open, capabilities, notice, saving, failed, Full access dialog, quota-based reviews.
+    const tree = view.render("AgentOrchestratorPermissions", props, [false, { lead: { supported: true, profiles: [] } }, notice, false, false, null, quota]);
+    return elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props;
+  };
+  const { QUOTA_REVIEWS_PAUSED } = view.exports;
+  // Claude Code asks the app, which reviews nothing while the switch is off: every request waits for the person.
+  const off = chip({ quota: false, notice: "Active now: the running turn's requests follow it." });
+  assert.equal(off["aria-label"], "Permissions: Approve for me (paused)");
+  assert.equal(off["data-paused"], "");
+  assert.ok(off.title.startsWith("Approve for me · paused\n" + QUOTA_REVIEWS_PAUSED + "\n"), off.title);
+  assert.match(off.title, /Paused now: :workspace · on-request · auto_review/);
+  assert.doesNotMatch(off.title, /Active now/, "neither the running card nor the save notice claims it is active");
+  assert.match(QUOTA_REVIEWS_PAUSED, /Allow quota-based reviews in Settings > Chat/, "it names the switch that resumes it");
+  // On, it is active now; not read yet, the chip claims nothing about it.
+  for (const quota of [true, undefined, null]) {
+    const shown = chip({ quota });
+    assert.equal(shown["aria-label"], "Permissions: Approve for me"); assert.equal(shown["data-paused"], undefined);
+    assert.match(shown.title, /Active now: :workspace · on-request · auto_review/); assert.doesNotMatch(shown.title, /paused/i);
+  }
+  // Between turns, Claude Code's next turn is reviewed here too; Codex runs its own auto-review, which the switch doesn't gate.
+  assert.equal(chip({ quota: false, running: false })["aria-label"], "Permissions: Approve for me (paused)");
+  assert.equal(chip({ quota: false, running: false, harness: "ao:codex" })["data-paused"], undefined);
+  // A Codex card launched to ask is reviewed here once Approve for me is picked mid-turn.
+  assert.equal(chip({ quota: false, harness: "ao:codex" })["data-paused"], "");
+  const route = (harness_id, approvals_reviewer, approval_policy = "on-request") => ({ harness_id, approval_policy, approvals_reviewer });
+  assert.equal(view.exports.appReviewsRequests(route("ao:claude-code", "auto_review")), true);
+  assert.equal(view.exports.appReviewsRequests(route("ao:codex", "auto_review")), false);
+  assert.equal(view.exports.appReviewsRequests(route("ao:codex", "user"), route("ao:codex", "auto_review")), true);
+  assert.equal(view.exports.appReviewsRequests(route("ao:claude-code", "user")), false, "Ask for approval: the person answers, nothing is paused");
+  assert.equal(view.exports.appReviewsRequests(route("codex-native", "auto_review")), false);
+});
+
+test("quota-based reviews are read from main without changing them and published to open chats once per change", async () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/quota-reviews.ts"), "utf8");
+  const exports = {}, calls = [], window = new EventTarget();
+  const client = { apps: { call: async request => { calls.push(request); return { result: { ok: true, modelJudges: true, meteredReviews: false } }; } } };
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
+    { exports, window, Event, require: name => name === "../api/client" ? { getCodingToolsClient: () => client } : {} });
+  const seen = [];
+  const stop = exports.onQuotaReviews(value => seen.push(value));
+  assert.equal(exports.knownQuotaReviews(), null);
+  assert.equal(await exports.refreshQuotaReviews(), false);
+  assert.deepEqual(plain(calls), [{ moduleId: "agent-orchestrator", operation: "chat_model_judges", arguments: {} }], "a read: no meteredReviews argument, so nothing is switched");
+  exports.publishQuotaReviews(false); exports.publishQuotaReviews(true);
+  assert.deepEqual(seen, [false, true], "an unchanged value is not announced again");
+  stop(); exports.publishQuotaReviews(false);
+  assert.deepEqual(seen, [false, true]);
+  assert.equal(exports.knownQuotaReviews(), false);
+});
+
 test("successful permission save announces exact scope without a visible footer; errors remain visible", async () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   const message = "Selected for next attempt; shared grants unchanged; runtime acknowledgement required.";

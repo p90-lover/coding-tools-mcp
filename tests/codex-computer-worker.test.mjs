@@ -12,8 +12,8 @@ const executable = 'G:\\Apps\\Fixture\\fixture.exe';
 const window = { id: 17, app: 'process:' + executable, title: 'Worker fixture' };
 const bridgeSource = fs.readFileSync(new URL('../src-tauri/src/tools/computer/codex-bridge.mjs', import.meta.url), 'utf8');
 
-async function worker(t) {
-  const scratch = fileURLToPath(new URL('../aiTemp/codex-computer-worker-tests/', import.meta.url));
+async function worker(t, stateError = 'timeout') {
+  const scratch = process.env.CODEX_COMPUTER_TEST_SCRATCH || fileURLToPath(new URL('../aiTemp/codex-computer-worker-tests/', import.meta.url));
   fs.mkdirSync(scratch, { recursive: true });
   const root = fs.mkdtempSync(path.join(scratch, 'runtime-'));
   const base = path.join(root, 'dist/project/cua/sky_js/src/targets/windows/internal');
@@ -37,7 +37,7 @@ async function worker(t) {
         this.target = 'windows';
         for (const method of ${JSON.stringify(METHODS)}) this[method] = async () => null;
         this.get_window = async () => (${JSON.stringify(window)});
-        this.get_window_state = async () => { throw new Error('timeout'); };
+        this.get_window_state = async () => { throw new Error(${JSON.stringify(stateError)}); };
         this.activate_window = async () => { throw new Error('Computer Use was stopped by the user with the physical Escape key'); };
         this.type_text = async () => { process.exitCode = 99; };
         this.scroll = async () => {
@@ -98,6 +98,18 @@ test('the SDK timing out its helper ends the stdio worker, and the reply says so
   assert.deepEqual(await w.reply(), { ok: false, code: 'CODEX_ENGINE_TIMEOUT', fatal: true });
   const [code, signal] = await w.exited;
   assert.equal(code, 0, 'the worker ends on its fatal reply, not through the exit listener (130)');
+  assert.equal(signal, null);
+  assert.equal((await w.lines.next()).done, true);
+  assert.equal(w.stderr(), '');
+});
+
+test('a native browser policy stop ends the stdio worker before a queued input is dispatched', { timeout: 10000 }, async t => {
+  const w = await worker(t, 'Computer Use has been stopped for this turn because it could not verify whether the current browser URL is allowed. Stop your work and send a final message noting why Computer Use ended.');
+  w.write('get_window_state', { include_screenshot: false, include_text: true });
+  w.write('type_text', { text: 'must not be dispatched' });
+  assert.deepEqual(await w.reply(), { ok: false, code: 'CODEX_POLICY_STOPPED', fatal: true });
+  const [code, signal] = await w.exited;
+  assert.equal(code, 0, 'the fake type_text exits 99 if it was dispatched');
   assert.equal(signal, null);
   assert.equal((await w.lines.next()).done, true);
   assert.equal(w.stderr(), '');

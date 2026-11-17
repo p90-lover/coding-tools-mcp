@@ -11,11 +11,11 @@ const source = fs.readFileSync(
 );
 
 test("Network Proxy routes all visible controls through localization", () => {
-  for (const pattern of [/>Proxy</, />Add proxy</, />Save</, />Cancel</, />Apply</, />Routes</, />Unreachable</]) {
+  for (const pattern of [/>Proxy</, />Add proxy</, />Save</, />Cancel</, />Apply</, />Routes</, />Unreachable</, />Sign-in refused</]) {
     assert.doesNotMatch(source, pattern, `${pattern} bypasses the language catalogue`);
   }
 
-  for (const phrase of ["代理", "新增代理", "儲存", "取消", "套用", "路由", "連唔到", "通訊協定", "主機", "連接埠", "使用者名稱", "密碼"]) {
+  for (const phrase of ["代理", "新增代理", "儲存", "取消", "套用", "路由", "連唔到", "登入被拒", "通訊協定", "主機", "連接埠", "使用者名稱", "密碼"]) {
     assert.match(source, new RegExp(phrase), `missing Traditional Chinese copy: ${phrase}`);
   }
 

@@ -53,9 +53,10 @@ function cleanItem(item, makeId, at) {
  * Whether the agent read a steer in `timeline` (the turn's items, oldest first), the way the chat's
  * read receipt decides it (ao-chat.ts steerRead): the model went on past it. A steer that arrived
  * while the model waited on a tool call is read by its next output; otherwise the next request after
- * a tool call has it. Null when the timeline does not hold the steer at all.
+ * a tool call has it. Null when the timeline does not hold the steer at all. After successful
+ * completion, any later model output prevents replay: text-only answers have no tool boundary.
  */
-function steerReadIn(timeline, message) {
+function steerReadIn(timeline, message, { finished = false } = {}) {
   const items = Array.isArray(timeline) ? timeline : [];
   // The timeline keeps a steer's first 400 bytes only: a long one is matched by its beginning.
   const head = (value) => String(value ?? "").trim().slice(0, 200);
@@ -69,7 +70,7 @@ function steerReadIn(timeline, message) {
     break;
   }
   for (const item of items.slice(at + 1)) {
-    if (boundary && MODEL_OUTPUT_KINDS.has(item?.kind)) return true;
+    if ((finished || boundary) && MODEL_OUTPUT_KINDS.has(item?.kind)) return true;
     if (TOOL_KINDS.has(item?.kind)) boundary = true;
   }
   return false;

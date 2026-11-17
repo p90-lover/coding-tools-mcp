@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
-const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 
 function fakeMcpNetwork() {
@@ -346,6 +346,23 @@ test("the production connector action verifies fresh owner and workspace proof b
     { name: "a Platform page that leaves OpenAI's sign-in for another site stops and names it", change: "platform-elsewhere",
       error: error => /navigation changed/.test(error.message) && error.navigatedTo === "accounts.example.com/o/oauth2/auth"
         && mcpConnectorCommandFailure(error).message.endsWith(" It moved to accounts.example.com/o/oauth2/auth.") },
+    // Live 2026-11-12: this text twice in 20 minutes, with nothing logged to tell why.
+    { name: "a Personal tab that never shows carries the page state for the log, never into the user's text", tabMissing: true,
+      error: error => {
+        assert.equal(error.message, "ChatGPT did not expose one Personal plugins tab.");
+        assert.deepEqual(error.pageState, { tabs: 3, visibleTabs: 0, personalTabs: 0, directoryLoading: false,
+          personalPluginsLoaded: false, sawEmpty: false, path: "/plugins", view: true, visibilityState: "visible",
+          readyState: "complete", waitedMs: 10012, frameMs: null });
+        assert.deepEqual(mcpConnectorCommandFailure(error), { code: "creation_failed", message: error.message }, "the user's text is unchanged");
+        return true;
+      } },
+    { name: "a page state the setup cannot vouch for is dropped field by field", tabMissing: "untrusted",
+      error: error => {
+        assert.deepEqual(error.pageState, { tabs: null, visibleTabs: null, personalTabs: null, directoryLoading: null,
+          personalPluginsLoaded: null, sawEmpty: null, path: null, view: null, visibilityState: null, readyState: null,
+          waitedMs: null, frameMs: 3_600_000 });
+        return true;
+      } },
     { name: "a busy caller after preparing cannot submit", change: "busy", error: /busy/i },
     // Live 2026-11-13: an automatic setup refused Log out and Remove account for its whole run.
     { name: "the person's own logout stops the setup and closes its window, which is not a failure", change: "stopped",
@@ -425,9 +442,21 @@ test("the production connector action verifies fresh owner and workspace proof b
             accounts: scenario.mismatch ? {} : { [personalId]: entry(personalId), [businessId]: entry(businessId) } });
         }
         if (script.includes("globalThis.__codingToolsConnectorHelpers =")) return;
+        if (script.includes("pageFailureState")) {
+          assert(scenario.tabMissing, "page state is read only after a Personal plugins wait failed");
+          // What the page left, with fields no log may keep (a label, an account email, a query).
+          return scenario.tabMissing === "untrusted"
+            ? { tabs: -1, visibleTabs: 1.5, personalTabs: "2", directoryLoading: "no", personalPluginsLoaded: 1, sawEmpty: null,
+              path: "/plugins?view=personal&account=alice@example.test", view: "personal", visibilityState: "Personal",
+              readyState: "done", waitedMs: -5, frameMs: 9e9 }
+            : { tabs: 3, visibleTabs: 0, personalTabs: 0, directoryLoading: false, personalPluginsLoaded: false, sawEmpty: false,
+              path: "/plugins", view: true, visibilityState: "visible", readyState: "complete", waitedMs: 10012.4, frameMs: null,
+              label: "Personal", workspace: "Fixture workspace", email: "alice@example.test" };
+        }
         const phase = script.match(/__codingToolsConnectorHelpers\.(\w+)\(/)?.[1];
         if (phase === "selectWorkspace") { accountId = businessId; select(accountId); return { selected: true }; }
         if (phase === "prepareTunnelConnector") {
+          if (scenario.tabMissing) throw new Error("ChatGPT did not expose one Personal plugins tab.");
           if (scenario.change === "reuse-prepare-workspace-reject") {
             accountId = personalId; select(accountId);
             throw new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.");
@@ -969,6 +998,23 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   await assert.rejects(connectAccountMcp("other", admission), /refused/);
   assert.deepEqual(records, [{ id: "other", error: "ChatGPT refused this connector" }]);
   assert.equal(operations.at(-1).status, "failed");
+
+  // The page state a failed Personal plugins wait left survives the rewrap for the log; the account's
+  // recorded error and the operation line stay the fixed text.
+  const pageState = { tabs: 2, visibleTabs: 0, personalTabs: 0, frameMs: null };
+  const warnings = [];
+  context.logger.warn = (event, fields) => warnings.push({ event, ...fields });
+  records.length = 0;
+  context.createWorkspaceConnector = async options => {
+    options.assertCurrent();
+    throw Object.assign(new Error("ChatGPT did not expose one Personal plugins tab."), { pageState });
+  };
+  await assert.rejects(connectAccountMcp("other", admission),
+    error => error.message === "ChatGPT did not expose one Personal plugins tab." && error.pageState === pageState);
+  assert.deepEqual(records, [{ id: "other", error: "ChatGPT did not expose one Personal plugins tab." }]);
+  assert.equal(operations.at(-1).message, "ChatGPT did not expose one Personal plugins tab.");
+  // A Connect the person asked for has no automatic_mcp_failed record; this one names the page state too.
+  assert.deepEqual(warnings.find(entry => entry.event === "mcp.account_connect_failed")?.pageState, pageState);
 });
 
 test("a request the page cancels itself neither confirms nor fails the workspace", async t => {
@@ -1072,6 +1118,43 @@ test("an account with no personal plugins has no Personal tab; Connect goes on t
     }, 600));
     const reused = await outcome(late, "create");
     assert.deepEqual(reused, { value: { created: false, href: "/plugins/plugins~Plugin_managed" }, addClicks: 0 });
+  } finally {
+    await browser.close();
+  }
+});
+
+test("a Personal tab that never shows leaves the page state it gave up on, without a label in it", async () => {
+  // Live 2026-11-12: "ChatGPT did not expose one Personal plugins tab." twice in 20 minutes with the
+  // shared hard disk saturated, and nothing logged to tell a slow, a hidden or a missing tab bar apart.
+  const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    headless: true,
+    args: ["--no-proxy-server"],
+  });
+  try {
+    const page = await browser.newPage();
+    // view=personal is still set, so this is not ChatGPT's empty-list redirect; the Personal tab is
+    // in the tab bar but not laid out.
+    await page.route("https://chatgpt.com/plugins?view=personal", route => route.fulfill({ contentType: "text/html", body:
+      `<meta charset="utf-8"><title>Fixture workspace plugins</title><main><div role="tablist"><button role="tab" aria-selected="true">Public</button>
+      <button role="tab" aria-selected="false">Fixture workspace</button><button role="tab" style="display:none">Personal</button></div></main>` }));
+    await page.goto("https://chatgpt.com/plugins?view=personal");
+    await page.evaluate(extensionHelpersSource({ testLegacy: true }));
+    const settings = { name: "Coding Tools Native2", tunnelId: `tunnel_${"a".repeat(32)}`, authentication: "none" };
+    const outcome = await page.evaluate(async settings => {
+      const h = globalThis.__codingToolsConnectorHelpers;
+      if (h.pageFailureState?.() !== null) return { unavailable: true };
+      try { await h.createTunnelConnector(settings); return { created: true }; } catch (error) { return { error: error.message, state: h.pageFailureState() }; }
+    }, settings);
+    assert.equal(outcome.error, "ChatGPT did not expose one Personal plugins tab.", JSON.stringify(outcome));
+    const { waitedMs, frameMs, ...state } = outcome.state;
+    assert.deepEqual(state, { tabs: 3, visibleTabs: 2, personalTabs: 0, directoryLoading: false, personalPluginsLoaded: false,
+      sawEmpty: false, path: "/plugins", view: true, visibilityState: "visible", readyState: "complete" });
+    assert(waitedMs >= 10_000 && waitedMs < 15_000, `one 10 s wait when nothing was found: ${waitedMs}`);
+    assert(Number.isInteger(frameMs) && frameMs < 1000, `a drawing renderer answers within a frame: ${frameMs}`);
+    assert.doesNotMatch(JSON.stringify(outcome.state), /Public|Fixture|Personal|plugins\?/, "no label, title or query");
+    assert.deepEqual(connectorPageState(outcome.state), outcome.state, "every field the page records is one the log keeps");
   } finally {
     await browser.close();
   }

@@ -154,6 +154,51 @@ function navigationPlace(value) {
   return `${url.hostname}${url.pathname.replace(/[^A-Za-z0-9/_.-]/g, "").slice(0, 80)}`;
 }
 
+// The page's Personal plugins waits that leave their page state for the log (pageFailureState).
+const PAGE_STATE_FAILURES = new Set([
+  "ChatGPT did not expose one Personal plugins tab.",
+  "The Personal plugins tab did not finish loading.",
+  "The Personal plugins list did not finish loading, so the connector was not created.",
+]);
+
+/**
+ * The page state a failed Personal plugins wait left, reduced to what a log record may keep:
+ * counts, flags, two document states, timings and the path without its query or unusual characters.
+ * Nothing else the page returns is copied, so a tab label or an account name cannot reach the log.
+ */
+function connectorPageState(value) {
+  if (!value || typeof value !== "object") return null;
+  const count = item => Number.isInteger(item) && item >= 0 && item <= 100_000 ? item : null;
+  const ms = item => Number.isFinite(item) && item >= 0 ? Math.min(Math.round(item), 3_600_000) : null;
+  const flag = item => typeof item === "boolean" ? item : null;
+  const oneOf = (item, values) => values.includes(item) ? item : null;
+  return {
+    tabs: count(value.tabs), visibleTabs: count(value.visibleTabs), personalTabs: count(value.personalTabs),
+    directoryLoading: flag(value.directoryLoading), personalPluginsLoaded: flag(value.personalPluginsLoaded),
+    sawEmpty: flag(value.sawEmpty),
+    path: typeof value.path === "string" && /^\/[A-Za-z0-9/_.~-]{0,200}$/.test(value.path) ? value.path.slice(0, 80) : null,
+    view: flag(value.view),
+    visibilityState: oneOf(value.visibilityState, ["visible", "hidden", "prerender"]),
+    readyState: oneOf(value.readyState, ["loading", "interactive", "complete"]),
+    waitedMs: ms(value.waitedMs), frameMs: ms(value.frameMs),
+  };
+}
+
+/**
+ * Rethrows a page failure, with the state a failed Personal plugins wait left attached as
+ * `pageState` for the log. The error crosses executeJavaScript as its fixed text alone, so the
+ * state is read back separately; its message (what the user sees) is unchanged.
+ */
+async function withPageState(popup, error) {
+  if (error instanceof Error && PAGE_STATE_FAILURES.has(error.message) && !popup.isDestroyed()) {
+    const state = await popup.webContents.executeJavaScript(
+      "globalThis.__codingToolsConnectorHelpers?.pageFailureState?.() ?? null", true).catch(() => null);
+    const pageState = connectorPageState(state);
+    if (pageState) error.pageState = pageState;
+  }
+  throw error;
+}
+
 // Observe only the new setup window's normal requests. This never sends an API request or keeps
 // authentication headers/raw bodies; callers must still verify fresh context before mutations.
 async function observeMcpSetupContext(contents, tunnelId) {
@@ -538,6 +583,33 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     await sleep(1500);
     return personalListEmpty();
   }
+  // What the page showed when a Personal plugins wait gave up, kept for the setup's log only (read
+  // back by the main process; a thrown error crosses executeJavaScript as its message alone).
+  // "ChatGPT did not expose one Personal plugins tab." logged nothing else on 2026-11-12, so a slow
+  // tab bar, a hidden one and a missing one read the same. Counts, flags and the path only: no tab
+  // label, title, account or workspace name.
+  let pageFailureState = null;
+  async function personalPageFailure(message, started, sawEmpty = false) {
+    const tabs = [...document.querySelectorAll('main [role="tab"]')];
+    const shown = tabs.filter(tab => visible(tab));
+    let url = null;
+    try { url = new URL(location.href); } catch {}
+    const state = {
+      tabs: tabs.length, visibleTabs: shown.length,
+      personalTabs: shown.filter(tab => textMatches(tab, PERSONAL_VIEW_LABELS, true)).length,
+      directoryLoading: directoryLoading(), personalPluginsLoaded: personalPluginsLoaded(), sawEmpty,
+      path: url ? url.pathname : null, view: Boolean(url && url.searchParams.has('view')),
+      visibilityState: document.visibilityState, readyState: document.readyState, waitedMs: Date.now() - started,
+    };
+    // How long the next animation frame takes: a renderer that is not drawing shows as null.
+    state.frameMs = await new Promise(resolve => {
+      const begun = performance.now();
+      const timer = setTimeout(() => resolve(null), 1000);
+      requestAnimationFrame(() => { clearTimeout(timer); resolve(Math.round(performance.now() - begun)); });
+    });
+    pageFailureState = state;
+    return new Error(message);
+  }
   function findManagedAppCard(name) {
     if (!personalPluginsLoaded()) return null;
     const wanted = canonicalAppIdentity(name);
@@ -616,7 +688,9 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       || settings.authentication !== 'none') {
       throw new Error('The current ChatGPT connector settings are invalid.');
     }
-    let personal = null;
+    const started = Date.now();
+    pageFailureState = null;
+    let personal = null, sawEmpty = false;
     for (let tries = 0; tries < 2 && !personal; tries++) {
       const found = await waitFor(() => {
         const tabs = [...document.querySelectorAll('main [role="tab"]')]
@@ -627,14 +701,15 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       if (!found) break;
       // An empty list must still read empty a moment later; a Personal tab that was only late wins.
       personal = found !== 'empty' || await personalListSettledEmpty() ? found : null;
+      if (!personal) sawEmpty = true;
     }
-    if (!personal) throw new Error('ChatGPT did not expose one Personal plugins tab.');
+    if (!personal) throw await personalPageFailure('ChatGPT did not expose one Personal plugins tab.', started, sawEmpty);
     const empty = personal === 'empty';
     if (!empty) {
       // The URL can say view=personal while the rendered directory still selects Public.
       if (personal.getAttribute('aria-selected') !== 'true') personal.click();
       if (!await waitFor(() => personalPluginsLoaded(), 10_000)) {
-        throw new Error('The Personal plugins tab did not finish loading.');
+        throw await personalPageFailure('The Personal plugins tab did not finish loading.', started);
       }
     }
     await clearPluginSearch();
@@ -653,7 +728,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
         && allClickable(main).some(el => textMatches(el, ['Add'], true))) return { absent: true };
       return null;
     }, 40_000);
-    if (!listed) throw new Error('The Personal plugins list did not finish loading, so the connector was not created.');
+    if (!listed) throw await personalPageFailure('The Personal plugins list did not finish loading, so the connector was not created.', started);
     if (listed.card) {
       if (phase === 'prepare' || phase === 'existing') {
         const href = new URL(listed.card.getAttribute('href'), location.origin);
@@ -842,6 +917,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     prepareTunnelConnector: (settings, existingOnly = false) => createTunnelConnector(settings, existingOnly ? 'existing' : 'prepare'), submitPreparedTunnelConnector, inspectTunnelConnectorIdentity,
     prepareTunnelConnectorConnection, openTunnelConnectorConsent, confirmTunnelConnectorConsent,
     ${testLegacy ? "createTunnelConnector, ensureTunnelConnectorConnected," : ""}
+    pageFailureState: () => pageFailureState,
     findGridArticle, findInput, findManagedAppCard, isPersonalPluginsPage, observeAppConnection, personalPluginsLoaded,
     personalListEmpty, personalListSettledEmpty, openCreateFormStrict, pluginCardLinks, pointerActivate, setInputValue,
     textMatches, visible, waitFor, waitForPersonalPluginsPage, waitForPluginsPageReady, selectWorkspace
@@ -1062,7 +1138,8 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       await freshContext();
       await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
       const prepared = shared ? { prepared: true, existing: true, href: sharedProof.href }
-        : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)}, ${existingOnly})`, true);
+        : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)}, ${existingOnly})`, true)
+          .catch(error => withPageState(popup, error));
       if (prepared?.prepared !== true) throw new Error("ChatGPT did not prepare the exact tunnel connector.");
       if (existingOnly && prepared.existing !== true) throw new Error(UNVERIFIED_CONNECTOR);
       await freshContext();
@@ -1202,4 +1279,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, connectorSetupStopped, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, connectorSetupStopped, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

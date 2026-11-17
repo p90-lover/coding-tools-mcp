@@ -318,6 +318,19 @@ function quotaResets(error) {
  * error without them ("Connection error.", "Request timed out.") is still left to the retries.
  */
 const REQUEST_REFUSED = /API Error: (?:400|404|422)\b|API Error:(?!\s*\d{3}\b)[^\n]{0,300}?\b(?:not supported|unsupported|invalid_request_error)\b/i;
+/**
+ * The provider error Claude Code printed as the last thing its turn said ("API Error: 400 …"), or "".
+ * AO saves such a turn as failed with no error of its own when the error arrived as a message, so
+ * the card read "The agent exited before it gave a final answer" (or "AO turn failed") and every
+ * check above saw only that: a request the provider had refused was retried all eight times, half
+ * an hour of waits (seen 2026-11-16: "API Error: 400 Function tools with reasoning_effort are not
+ * supported for gpt-6-astra in /v1/chat/completions", and "Invalid 'tools': array too long").
+ * Only the last paragraph counts: an answer that quotes an API error earlier is not one.
+ */
+function agentApiError(answer) {
+  const last = String(answer || "").trim().split(/\n{2,}/).at(-1) ?? "";
+  return /^API Error:\s*\S/.test(last) ? last.replace(/\s+/g, " ").slice(0, 600) : "";
+}
 /** The provider's own reason from a refused request ("400: This Go model requires …"), for a note. */
 function refusedReason(error) {
   const text = String(error || "").replace(/^[\s\S]*?API Error: (\d{3})\s*/i, "$1: ").replace(/^[\s\S]*?API Error:\s*/i, "")
@@ -450,6 +463,7 @@ function createChatPreferences(file) {
   const flushed = async () => { while (saving) await saving; };
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
+      meteredReviews: saved.meteredReviews === true,
       autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
       questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
     /** Takes effect at once; resolves when the change is on disk, so a restart right after keeps it. */
@@ -1005,6 +1019,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // Why a stop failed is logged: seen live 2026-10-31, a chat left unreachable by an update was
       // tried every sweep for hours ("count": 0), and nothing said what AO answered.
       const stopped = await harnessService().exitAgent?.(id).then(() => true, (error) => {
+        // A session AO has ended, or no longer has, holds no agent to release: nothing failed.
+        if (["SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error?.code)) return false;
         logger?.warn?.("ao.idle_release_failed", { session: id, stale: stale.includes(id),
           code: error?.code ?? null, message: publicText(error?.message || error, 200) });
         return false;
@@ -2254,6 +2270,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session, ...(quiet ? { quiet: true } : {}) };
     }
     const completed = observed.turnState === "completed";
+    // What the provider told the agent, when AO itself recorded no error for the turn (agentApiError):
+    // the card's retry and goal checks read the failure text, and without it they retried a refusal.
+    const said = !completed && !observed.error ? agentApiError(observed.answer) : "";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
       workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
@@ -2261,7 +2280,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       completed,
       // A start the launch watchdog ended says so, not AO's "Session start was cancelled".
       ...(!completed ? { failure: (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
-        || observed.error || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
+        || observed.error || said || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
     if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
     return { ...result, pending_approvals: [] };
@@ -2758,6 +2777,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   const activityFrames = new Map();
+  // Where a card's frame spends its time. A frame this slow is logged with each step's share when it
+  // lands (ao.activity_frame_slow); one still on its way after ACTIVITY_STALL_MS is logged once with
+  // the step it waits on (ao.activity_frame_stalled), since a step that never returns logs nothing
+  // else. On 2026-11-16 a resumed chat's frame stayed "checking" for 8 minutes while its agent waited
+  // on an approval nobody could see, and nothing said which read held it.
+  const ACTIVITY_SLOW_MS = 15_000;
+  const ACTIVITY_STALL_MS = 30_000;
   const activityAttempt = (workspace, run, node) => JSON.stringify([
     workspace, run, node.id, node.receipt?.request_key || node.request_key || null,
     node.receipt?.thread_id || null, node.receipt?.turn_id || null,
@@ -2817,7 +2843,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
 
   async function activity({ workspaceId, runId } = {}) {
     const id = clean(workspaceId, 128), run = clean(runId, 80);
+    // The chat's poll waits for this read itself (the cards' frames come from the cache below).
+    const readStarted = now();
     const saved = await runs({ workspaceId: id, runId: run });
+    const readMs = now() - readStarted;
+    if (readMs >= ACTIVITY_SLOW_MS) logger?.warn?.("ao.activity_read_slow", { run, readMs });
     const mission = saved.runs.find(entry => entry.id === run && entry.workspace_id === id);
     if (!mission) throw new Error("AO run not found");
     const working = mission.nodes.filter(node => ["reserved", "running"].includes(node.state));
@@ -2845,7 +2875,21 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         entry = { scope, pending: null, frame: null, retired: false };
         activityFrames.set(key, entry);
       }
+      if (entry.pending && !entry.stallLogged && now() - entry.since >= ACTIVITY_STALL_MS) {
+        entry.stallLogged = true;
+        logger?.warn?.("ao.activity_frame_stalled", { run, node: node.id, session: node.receipt?.thread_id || null,
+          step: entry.step, waitedMs: now() - entry.since, steps: { ...entry.steps } });
+      }
       if (!entry.pending) {
+        const since = now(), steps = {};
+        Object.assign(entry, { since, steps, step: null, stallLogged: false });
+        // Each awaited step is named while in flight (what the stall log above reports) and timed when it
+        // ends. Plain marks around the awaits, not an async wrapper: a wrapper adds microtask turns, so a
+        // frame landed after the chat's next read and that read showed the frame before it.
+        let stepAt = since;
+        const begin = (name) => { entry.step = name; stepAt = now(); };
+        const end = () => { if (entry.step) steps[entry.step] = (steps[entry.step] ?? 0) + now() - stepAt; entry.step = null; };
+        let failed = false;
         entry.pending = (async () => {
           let frame, observedTurn;
           try {
@@ -2856,7 +2900,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 // A queued follow-up can be the session's newest turn while this card still owns
                 // another one. Read that turn, as the run loop does, rather than dropping its reply.
                 const expectedTurn = node.receipt?.turn_id || expectedTurns.get(session) || entry.turnId;
+                begin("observe");
                 const observed = await harnessService().observe(session, expectedTurn);
+                end();
                 const currentTurn = !expectedTurn || observed.turnId === expectedTurn;
                 if (currentTurn && observed.turnState === "running" && typeof observed.turnId === "string" && observed.turnId) observedTurn = observed.turnId;
                 // Started: an agent took the message (AO starts the turn only then; see describeTurn).
@@ -2872,7 +2918,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                   error: publicText(observed.error, 500) };
               }
             } else {
+              begin("harness status");
               const status = (await harnessStatus({ workspaceId: id, runId: run, nodeId: node.id })).status || {};
+              end();
               const thread = (Array.isArray(status.threads) ? status.threads : []).find(entry => entry.id === node.receipt?.thread_id);
               const turnStarted = Boolean(thread?.turn_id || node.receipt?.turn_id);
               const output = publicText(status.live_output || thread?.answer || thread?.output);
@@ -2888,7 +2936,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
                 timeline: publicTimeline(nativeStepTimeline(thread?.steps, output, thread?.answer_before_step, thread?.notes)),
                 started_at_ms: base.started_at_ms ?? (thread?.started_at_ms || null) };
             }
+            begin("saved run");
             const latest = await savedNode(id, run, node.id);
+            end();
             if (!latest.node || !["reserved", "running"].includes(latest.node.state)
               || activityAttempt(id, run, latest.node) !== key) {
               entry.retired = true; entry.frame = null; return;
@@ -2900,11 +2950,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               entry.frame = { ...frame, pending: false };
             }
           } catch (error) {
+            failed = true; end();
             if (!entry.retired) entry.frame = { ...(entry.frame || base), pending: false,
               activity: "unknown", error: publicText(error?.message || error, 300) };
           }
         })().finally(() => {
-          entry.pending = null;
+          entry.pending = null; entry.step = null;
+          const tookMs = now() - since;
+          if (tookMs >= ACTIVITY_SLOW_MS) logger?.warn?.("ao.activity_frame_slow", { run, node: node.id,
+            session: node.receipt?.thread_id || null, tookMs, steps, ok: !failed });
           if (entry.retired && activityFrames.get(key) === entry) activityFrames.delete(key);
         });
       }
@@ -4150,7 +4204,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         ? { ...scoped, recommendation: approverAdvice.get(item.approval_id) } : scoped;
       // A question this chat answers for the person says when (autoAnswerStale), so its card can
       // count down; one the person chose to keep has no deadline, and the agent waits on it.
-      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node) ? questionWaitMs() : null;
+      const wait = item?.kind === "question" && card?.node && answersForPerson(card.node, card.mission) ? questionWaitMs() : null;
       const opened = wait ? Math.min(pendingSeen.get(item.approval_id) ?? now(), Date.parse(item.since ?? "") || Infinity) : NaN;
       const advised = Number.isFinite(opened) ? { ...recommended, auto_answer_at: opened + wait } : recommended;
       // "Approve for me": a request the reviewer is still checking, or has answered and is sending,
@@ -4314,6 +4368,59 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     })().finally(() => { benchSaving = null; });
   }
+  // Settings the app's own model calls send that a model may refuse, and can do without. Seen live
+  // 2026-11-15: with the Codex accounts out of quota, CPA served gpt-6-astra from an OpenAI API key,
+  // which answered HTTP 400 "Unsupported parameter: 'max_tokens' ... Use 'max_completion_tokens'
+  // instead", then "'temperature' does not support 0 with this model". So "Let the model judge"
+  // could not judge, and every request was denied unjudged. CPA turns max_completion_tokens back
+  // into max_tokens for that provider, so the two are one setting here: a refused limit is left out.
+  const OPTIONAL_MODEL_PARAMS = new Map([["max_tokens", ["max_tokens", "max_completion_tokens"]],
+    ["max_completion_tokens", ["max_tokens", "max_completion_tokens"]], ["temperature", ["temperature"]],
+    ["top_p", ["top_p"]], ["reasoning_effort", ["reasoning_effort"]]]);
+  const refusedModelParams = new Map(); // model -> the optional settings it refused
+  /** The optional setting a model's HTTP 400 answer says it refuses, or null. */
+  function refusedModelParam(text) {
+    let param = "";
+    try {
+      const error = JSON.parse(text)?.error;
+      if (/^unsupported_(?:parameter|value)$/.test(String(error?.code ?? ""))) param = String(error?.param ?? "");
+    } catch { /* not JSON: read the message form below */ }
+    if (!param) param = /Unsupported (?:parameter|value): '([a-z_]+)'/i.exec(text)?.[1] ?? "";
+    return OPTIONAL_MODEL_PARAMS.has(param) ? param : null;
+  }
+  /**
+   * One of the app's own chat-completions calls through CPA. A model that answers HTTP 400 naming
+   * an optional setting it refuses (OPTIONAL_MODEL_PARAMS) is asked again without it, and later
+   * calls to it leave the setting out from the start. Any other answer is returned as it came; a
+   * 400 whose body was read to check is handed back with that body.
+   */
+  async function chatCompletion(baseUrl, key, body, signal) {
+    const model = String(body?.model ?? "");
+    for (let attempt = 0; ; attempt += 1) {
+      const sent = { ...body };
+      for (const param of refusedModelParams.get(model) ?? []) delete sent[param];
+      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(sent),
+        signal,
+      });
+      if (response.status !== 400 || typeof response.text !== "function") return response;
+      const text = await response.text().then((value) => String(value), () => "");
+      const param = refusedModelParam(text);
+      // Only a setting that was sent and can go: anything else, or no progress, is the caller's failure.
+      if (!param || !(param in sent) || attempt >= OPTIONAL_MODEL_PARAMS.size) {
+        return { ok: false, status: response.status, headers: response.headers, text: async () => text,
+          json: async () => JSON.parse(text) };
+      }
+      const refused = new Set(refusedModelParams.get(model) ?? []);
+      for (const name of OPTIONAL_MODEL_PARAMS.get(param)) refused.add(name);
+      refusedModelParams.delete(model);
+      refusedModelParams.set(model, refused);
+      if (refusedModelParams.size > 200) refusedModelParams.delete(refusedModelParams.keys().next().value);
+      logger?.info?.("ao.model_param_refused", { model: publicText(model, 80), param });
+    }
+  }
   /**
    * The error for a model call CPA refused: its status, and whether the answer says the model's
    * quota is used up (an API key's spend limit comes back as 400, not 429) with the reset it names.
@@ -4465,8 +4572,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
     }
   }
+  const quotaReviewBlocked = () => chatPreferences.get().meteredReviews ? null : {
+    action: "ask", unresolved: true, quotaBlocked: true,
+    reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Enable Allow quota-based reviews in Settings > Chat, or answer this request yourself. Native Codex Auto-review is separate.",
+  };
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
+    if (quotaReviewBlocked()) return quotaReviewBlocked();
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -4592,26 +4704,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let failure = null;
     for (const model of candidates) {
+      if (quotaReviewBlocked()) return quotaReviewBlocked();
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
-        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+        const response = await chatCompletion(baseUrl, key,
           // Codex's policy first, then this request (Codex puts the policy in the session's developer message).
           // Room for a reasoning model to think first: at 400 a fallback reviewer (OpenCode Go's GPT-6
           // Luna spends ~250 tokens thinking on a short request) ran out before its answer and
           // returned nothing, "Unexpected end of JSON input" three times over, and the request went
           // to the person. The answer itself is one short JSON line.
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 2000,
+          { model, temperature: 0, max_tokens: 2000,
             ...(reviewEfforts[model] ? { reasoning_effort: reviewEfforts[model] } : {}),
-            messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }),
-          signal: signal ?? AbortSignal.timeout(left),
-        });
+            messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }, signal ?? AbortSignal.timeout(left));
         check();
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
         check();
+        if (quotaReviewBlocked()) return quotaReviewBlocked();
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -4638,6 +4748,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reviewerFailed(model, error);
       }
     }
+    if (quotaReviewBlocked()) return quotaReviewBlocked();
     throw failure;
   }
 
@@ -4689,19 +4800,37 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           partial: approval.toolInput.length > REVIEW_REQUEST_LIMIT, check, signal, verifyCurrent });
         await verifyCurrent();
         check();
-        return judges && verdict.action === "ask" ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
+        return judges && verdict.action === "ask" && !verdict.quotaBlocked ? { action: "deny", reason: `The reviewer could not decide (Let the model judge is on): ${verdict.reason || "no reason given"}` } : verdict;
       }, () => owned && !sessionStops.has(thread) && !backgroundRuns.get(sessionOwners.get(thread))?.stopped);
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: toolName, message: publicText(error?.message || error, 200) });
       return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
     }
   }
+  /**
+   * How a card's requests are answered now: its route, with the permissions the person picked for
+   * this chat since its turn started laid over it. "apply_team" keeps a running card's route as it
+   * launched and records the pick (team.permission_selections), which AO binds to the route only
+   * when the next turn starts. The requests of the running turn reach this app as they come, so
+   * the app follows the pick at once: seen 2026-11-16, Auto Review answered 500 for a while, and
+   * "Approve for me" picked again once it was back did nothing for a turn ten hours in. The
+   * sandbox (permission_profile) is the running process's own and still changes with the next turn.
+   */
+  function liveRoute(mission, node) {
+    const intent = mission?.team?.permission_selections?.[node?.template_role_id || node?.id];
+    if (!node?.route || !intent || typeof intent !== "object") return node?.route;
+    const policy = ["on-request", "never"].includes(intent.approval_policy) ? intent.approval_policy : undefined;
+    const reviewer = ["user", "auto_review"].includes(intent.approvals_reviewer) ? intent.approvals_reviewer : undefined;
+    if (policy === undefined && reviewer === undefined) return node.route;
+    return { ...node.route, ...(policy !== undefined ? { approval_policy: policy } : {}), ...(reviewer !== undefined ? { approvals_reviewer: reviewer } : {}) };
+  }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
   function cardApprover(mission, own) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
     const teamHasApprover = mission.nodes.some((node) => node.role === "approver");
-    return teamApprover ?? (!teamHasApprover && own?.route?.approvals_reviewer === "auto_review" && externalAgent(own)
-      ? { route: own.route, settings: { instructions: "", auto_decide: true } } : null);
+    const route = liveRoute(mission, own);
+    return teamApprover ?? (!teamHasApprover && route?.approvals_reviewer === "auto_review" && externalAgent(own)
+      ? { route, settings: { instructions: "", auto_decide: true } } : null);
   }
   function reviewAttempt(mission, node) {
     const approver = cardApprover(mission, node);
@@ -4892,7 +5021,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // read whole, a chat whose requests it kept denying) it decides itself, allow or deny.
     const judges = chatPreferences.get().modelJudges;
     // What this request's screening concluded; judged ones are not screened again (rescreen).
-    const keepAdvice = (value) => approverAdvice.set(approval.approval_id, judges ? { ...value, judged: true } : value);
+    const keepAdvice = (value) => approverAdvice.set(approval.approval_id, chatPreferences.get().modelJudges ? { ...value, judged: true } : value);
     // An answer that may not have reached AO goes again as it was decided (resendDue), unreviewed.
     // One not due (the judge turned off since) is left alone: a new review could send a different
     // answer to a request that may already have one.
@@ -4940,17 +5069,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
     // doubt), so a request it could read whole no longer waits for the person for want of a decision.
     check();
-    if (advice.action === "ask" && advice.reviewed) {
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked) {
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal, verifyCurrent }).catch(() => null);
       check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
-      // "Let the model judge": a decide pass that failed or still said "ask" is a deny, never the
-      // person's: the request sat on the card though the switch was on.
-      else if (judges) advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
       else advice = { ...advice, unresolved: true };
     }
     await verifyCurrent();
     check();
+    // The preference may change while the model or the owner check is in flight. "Let the model
+    // judge": a decide pass that failed or still said "ask" is a deny, never the person's: the
+    // request sat on the card though the switch was on. A review quota-based reviews kept from
+    // running (quotaBlocked) is not an undecided review, and still waits for the person.
+    const judgesNow = chatPreferences.get().modelJudges;
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && judgesNow) {
+      advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
+    }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
       reviewDenials.set(approval.thread_id, { count: denialStreak(approval.thread_id) + 1, at: now() });
       if (reviewDenials.size > 500) reviewDenials.delete(reviewDenials.keys().next().value);
@@ -4968,7 +5102,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // in doubt. The agent hears that the request was not judged, so it tries again rather than
       // giving up on it: told "try a safer way", agents dropped harmless steps for good. Its log line
       // says no model judged it (reason_code fell back to "model_decision", so an outage read as verdicts).
-      advice = judges
+      advice = judgesNow
         ? { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason:`The command reviewer couldn't answer after ${tries} tries, so this request was not judged (Let the model judge is on): ${why}` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${tries} tries, so check it yourself: ${why}` };
     }
@@ -5050,7 +5184,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       + "Run the same request again in a minute; if it is still not judged, tell the user the command reviewer is unavailable."
     : `Denied by the command reviewer ("Approve for me"), not by the user: ${String(reason || "it raised a block").replace(/\.$/, "")}. `
       + "Try a safer way to reach the goal, or ask the user if only this will do.";
-  const answersForPerson = (node) => node?.route?.approvals_reviewer === "auto_review" || node?.route?.approval_policy === "never";
+  /** Whether this chat answers a card's requests for the person: by its permissions as they are now (liveRoute). */
+  const answersForPerson = (node, mission) => {
+    const route = mission ? liveRoute(mission, node) : node?.route;
+    return route?.approvals_reviewer === "auto_review" || route?.approval_policy === "never";
+  };
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {
     if (approval.mode === "url") return { action: "decline" };
@@ -5065,10 +5203,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return { action: "accept", content };
   }
-  /** The offered decision that accepts a plan: keep editing without asking, as the card was launched. */
-  function planDecision(approval, node) {
+  /** The offered decision that accepts a plan: keep editing without asking, as the card's permissions are now. */
+  function planDecision(approval, node, mission) {
     const decisions = (approval.decisions || []).filter((decision) => !decision.kind.startsWith("reject"));
-    const prefer = node?.route?.approval_policy === "never" ? [/bypass/i, /acceptEdits/i] : [/acceptEdits/i, /^auto$/i];
+    const prefer = (mission ? liveRoute(mission, node) : node?.route)?.approval_policy === "never" ? [/bypass/i, /acceptEdits/i] : [/acceptEdits/i, /^auto$/i];
     for (const pattern of prefer) {
       const found = decisions.find((decision) => pattern.test(decision.id));
       if (found) return found.id;
@@ -5105,7 +5243,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!id) continue;
         live.add(id);
         if (!pendingSeen.has(id)) pendingSeen.set(id, at);
-        if (!answersForPerson(node) || autoAnswered.has(id)) continue;
+        if (!answersForPerson(node, mission) || autoAnswered.has(id)) continue;
         const since = Date.parse(approval.since ?? "");
         const opened = Math.min(pendingSeen.get(id), Number.isFinite(since) ? since : Infinity);
         // A question or a plan is the person's: a plan waits AUTO_ANSWER_MS for them, a question the
@@ -5138,7 +5276,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             note = `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
           } else if (approval.source === "ao") {
             const blocked = verdict === "deny";
-            const decision = approval.kind === "plan" ? planDecision(approval, node) : aoDecision(approval, !blocked);
+            const decision = approval.kind === "plan" ? planDecision(approval, node, mission) : aoDecision(approval, !blocked);
             if (!decision) continue;
             await harnessService().resolveApproval(approval.thread_id, id, decision, blocked ? reviewerDenial(why, denial ? {} : advice) : "");
             note = blocked ? `Denied: ${publicText(why, 160)}`
@@ -5184,12 +5322,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       "retry: the failure looks transient or fixable by running the step again.",
       "wait: a person must act first (approval, sign-in, missing input). stop: retrying cannot help.",
     ].join("\n");
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }),
-      signal: AbortSignal.timeout(45_000),
-    });
+    const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 200, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(45_000));
     if (!response.ok) throw new Error(`Recovery helper returned HTTP ${response.status}`);
     const text = String((await response.json())?.choices?.[0]?.message?.content ?? "");
     const decision = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -5363,7 +5496,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * waiting me to judge, add a setting that allow the model to judge it … until end and it can
    * safety kill the goal". Off by default: on 2026-10-20 they wanted unjudged requests to wait.
    */
-  async function chatModelJudges({ enabled } = {}) {
+  async function chatModelJudges({ enabled, meteredReviews } = {}) {
+    if (meteredReviews !== undefined) {
+      if (typeof meteredReviews !== "boolean") throw new Error("Choose on or off for quota-based reviews");
+      await chatPreferences.set({ meteredReviews });
+      for (const [id, advice] of approverAdvice) {
+        if (advice.quotaBlocked && !advice.unsent) {
+          approverAdvice.delete(id);
+          reviewStarted.set(id, now());
+        }
+      }
+    }
     if (enabled !== undefined) {
       if (typeof enabled !== "boolean") throw new Error("Choose on or off");
       // In effect at once; the save to disk is awaited after.
@@ -5382,7 +5525,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       await saving;
     }
-    return { ok: true, modelJudges: chatPreferences.get().modelJudges };
+    return { ok: true, modelJudges: chatPreferences.get().modelJudges, meteredReviews: chatPreferences.get().meteredReviews };
   }
   /**
    * chat_question_timeout: reads "Agent questions", or sets it with `seconds`: how long a question
@@ -6124,13 +6267,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A name is not worth the person's Codex quota (freeModels); with no other model, the message names it.
       const model = freeModels(catalog.models ?? [], catalog.hidden ?? [])[0];
       if (!model) throw new Error("No model outside the Codex quota");
-      const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model, temperature: 0, max_tokens: 30, messages: [{ role: "user", content:
-          `Name this coding task in at most 6 words. Reply with the name only, no quotes.\n\n${String(message).slice(0, 2000)}` }] }),
-        signal: AbortSignal.timeout(30_000),
-      });
+      const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 30, messages: [{ role: "user", content:
+          `Name this coding task in at most 6 words. Reply with the name only, no quotes.\n\n${String(message).slice(0, 2000)}` }] }, AbortSignal.timeout(30_000));
       if (response.ok) name = String((await response.json())?.choices?.[0]?.message?.content ?? "");
     } catch { /* CPA unavailable: fall back to the message itself. */ }
     name = name.replace(/["'`*#]/g, "").replace(/\s+/g, " ").trim().slice(0, 80) || fallbackChatTitle(message);
@@ -6790,11 +6928,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * reply showed under the message before its own. A run that was made after all (the request
    * timed out, then went through) keeps the message, and so does a chat changed since.
    */
-  async function withdrawFollowUp(id, task, known, { before: description, description: written }) {
-    if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
-    const detail = await board({ workspaceId: id, taskId: task });
-    if (!detail.task || String(detail.task.description || "") !== written) return;
-    await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+  async function withdrawFollowUp(id, task, known, { before: description, description: written }, retries = 3) {
+    if (autoRetryDisposed) return;
+    try {
+      runReads.delete(JSON.stringify([id, ""]));
+      if ((await runs({ workspaceId: id })).runs.some(run => run.project_id === task && !known.has(run.id))) return;
+      const detail = await board({ workspaceId: id, taskId: task });
+      if (!detail.task || String(detail.task.description || "") !== written) return;
+      await write(id, { expected_revision: detail.revision, change: { operation: "edit", id: task, title: detail.task.title, description } });
+    } catch (error) {
+      // A second service failure during cleanup must not leave a run-less message "Sending" forever.
+      // Each retry checks for a late run and an unchanged description before removing anything.
+      if (!autoRetryDisposed && retries > 0) {
+        const timer = setTimer(() => {
+          autoRetryTimers.delete(timer);
+          void withdrawFollowUp(id, task, known, { before: description, description: written }, retries - 1).catch(() => undefined);
+        }, 2_000 * (4 - retries));
+        timer?.unref?.();
+        autoRetryTimers.add(timer);
+      }
+      logger?.warn?.("ao.follow_up_cleanup_failed", { taskId: task, retries, error: publicText(error?.message || error, 200) });
+      throw error;
+    }
   }
 
   /**
@@ -6994,7 +7149,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           throw new Error("This chat's record couldn't hold the message. Start a new chat and send it there.");
         }
         const saidBefore = String(detail.task.description || "");
-        checkCurrent();
+        checkCurrent(false, true);
         if (inputId && !rewind) {
           acceptedInput = await acceptTaskAndRun(detail.revision, detail.task.title, description, task);
         } else {
@@ -7009,7 +7164,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // The rewind stands only once its hidden replies are saved: unsaved, they came back on restart.
         try { await chatEdits.deleteMessage(id, task, discarded); }
         catch (error) {
-          await withdrawFollowUp(id, task, runsBefore, followUp);
+          await withdrawFollowUp(id, task, runsBefore, followUp, 0);
           await chatEdits.restore(id, task, rewindBefore).catch(() => undefined);
           throw error;
         }
@@ -7045,7 +7200,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       else ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
       clock.mark("create");
     } catch (error) {
-      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp).catch(() => undefined);
+      if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp, rewind ? 0 : 3).catch(() => undefined);
       if (rewind && followUp) {
         const detail = await board({ workspaceId: id, taskId: task });
         if (detail.task?.description === followUp.before) chatEdits.restore(id, task, rewindBefore);
@@ -7268,12 +7423,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let failure = null;
     for (const model of candidates) {
       try {
-        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }),
-          signal: AbortSignal.timeout(60_000),
-        });
+        const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 500, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(60_000));
         // A model CPA lists can still refuse (seen live 2026-10-23: HTTP 404, and the goal stalled);
         // the note names it.
         if (!response.ok) throw await modelCallFailure(response, `the evaluator returned HTTP ${response.status} for ${publicText(model, 80)}`);
@@ -7408,12 +7558,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const prompt = gradePrompt(message, mission, cards);
     for (const model of freeModels(catalog.models ?? [], catalog.hidden ?? [])) {
       try {
-        const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ model, temperature: 0, max_tokens: 900, messages: [{ role: "user", content: prompt }] }),
-          signal: AbortSignal.timeout(90_000),
-        });
+        const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: 900, messages: [{ role: "user", content: prompt }] }, AbortSignal.timeout(90_000));
         if (!response.ok) throw await modelCallFailure(response, `the grader returned HTTP ${response.status} for ${publicText(model, 80)}`);
         const grade = parseGrade((await response.json())?.choices?.[0]?.message?.content, cards.length);
         reviewerAnswered(model);
@@ -8012,11 +8157,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         "Continue that pending next step now. Read the command's output and verify the actual result before reporting success. "
           + "A watch deadline or observation failure is not command success or proof it stopped. Do not replay the command merely because its outcome is unknown. "
           + "If more waiting is needed, register watch_command or schedule_wakeup and check that registration succeeded; a promise alone schedules nothing."].join("\n\n");
-      attempted = true;
-      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, () => {
+      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, (accepting = false, writing = false) => {
         if (!current()) throw new Error("This command watch was cancelled");
+        if (accepting || writing) attempted = true;
       });
-      if (result?.ok === false || !result?.runId) { settleCommandWatch(ticket, "failed"); return; }
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The command continuation was not accepted");
       const previousRunId = ticket.runId;
       for (const other of commandWatchTickets.values()) {
         if (other.workspaceId === workspaceId && other.taskId === taskId && other.runId === previousRunId) other.runId = result.runId;
@@ -8203,7 +8348,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (wakeupsDisposed || !wakeup || wakeup.id !== id || waking.has(key)) return;
     if (wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
     const current = () => !wakeupsDisposed && wakeups.get(workspaceId, taskId) === wakeup && wakeup.id === id;
-    let consumed = false;
+    let consumed = false, attempted = false;
     waking.add(key);
     try {
       const saved = await runs({ workspaceId });
@@ -8215,15 +8360,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const loop = wakeup.loop ? loops.get(workspaceId, taskId) : null;
       const loopOver = wakeup.loop && (!loop || loop.minutes !== null || now() >= loop.expiresAt);
       if (loopOver && loop) loops.clear(workspaceId, taskId, loop.id);
-      const action = loopOver ? "drop" : wakeupAction(wakeup, {
+      const stopped = latest?.cancelled || latest?.paused || backgroundRuns.get(runKey(workspaceId, latest?.id))?.stopped
+        || sessionStops.has(wakeup.session);
+      const action = loopOver || stopped ? "drop" : wakeupAction(wakeup, {
         active: chatRuns.length > 0 && taskLifecycle(saved, taskId).visibility === "active",
         latestRunId: latest?.id ?? null, working: chatWorking(workspaceId, taskId, saved.runs),
       });
       // It fires when that turn settles (wakeupAfterRun), or at the next look should the settle be missed.
       if (action === "wait") { wakeups.update(workspaceId, taskId, { due: true }); armWakeup(workspaceId, taskId, WAKE_RETRY_MS); return; }
-      consumed = true;
-      wakeups.clear(workspaceId, taskId, id);
-      wakeFailures.delete(id);
+      if (action !== "send" || loop) {
+        consumed = true;
+        wakeups.clear(workspaceId, taskId, id);
+        wakeFailures.delete(id);
+      }
       if (action !== "send") { logger?.info?.("ao.wakeup.dropped", { workspaceId, taskId }); return; }
       if (loop) {
         // The loop's round is the loop's own (runLoop): kept due, with the agent's note, until it starts,
@@ -8233,11 +8382,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await runLoop(workspaceId, taskId, loop.id);
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true });
-      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: result?.ok !== false });
+      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true,
+        afterRunId: latest.id }, (accepting = false, writing = false) => {
+        if (!current() || wakeup.dueAt > now()) throw new Error("This wake-up was cancelled, replaced or postponed");
+        if (accepting || writing) attempted = true;
+      });
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The wake-up was not accepted");
+      consumed = true;
+      wakeups.clear(workspaceId, taskId, id);
+      wakeFailures.delete(id);
+      logger?.info?.("ao.wakeup.sent", { workspaceId, taskId, minutes: wakeup.minutes, ok: true });
     } catch (error) {
       if (!consumed && !current()) { wakeFailures.delete(id); return; }
       if (!consumed && wakeup.dueAt > now()) { armWakeup(workspaceId, taskId); return; }
+      // A message write or run creation may have committed despite a lost reply. Only read-only
+      // preflight failures are safe to retry without duplicating a message or its work.
+      if (attempted) {
+        consumed = true;
+        wakeups.clear(workspaceId, taskId, id);
+      }
       const failures = (wakeFailures.get(id) ?? 0) + 1;
       wakeFailures.set(id, failures);
       logger?.warn?.("ao.wakeup.failed", { workspaceId, taskId, failures, error: String(error?.message || error).slice(0, 200) });
@@ -8526,13 +8689,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function queueAfterRun(workspaceId, runId, outcome) {
     const steers = outcome ? chatQueue.deliveredTo(workspaceId, runId).filter(entry => !entry.inputId) : [];
     if (steers.length) {
-      // A finished turn read them all (its receipts say "Read"). One the person stopped keeps its
-      // stop: sending them again would start the turn they ended.
-      const timelines = ["finished", "stopped"].includes(outcome) ? null : await runTimelines(workspaceId, runId).catch(() => null);
+      // Explicit Stop must not start another turn. Successful turns only replay input the timeline
+      // shows still unread; a missing or unavailable timeline is not evidence for sending it twice.
+      const timelines = outcome === "stopped" ? null : await runTimelines(workspaceId, runId).catch(() => null);
       for (const taskId of new Set(steers.map(steer => steer.taskId))) {
         const mine = steers.filter(steer => steer.taskId === taskId);
-        const unread = ["finished", "stopped"].includes(outcome) ? []
-          : mine.filter(steer => !(timelines ?? []).some(timeline => steerReadIn(timeline, steer.message) === true));
+        const unread = outcome === "stopped" ? [] : mine.filter(steer => {
+          const receipts = (timelines ?? []).map(timeline => steerReadIn(timeline, steer.message, { finished: outcome === "finished" }));
+          return !receipts.includes(true) && (outcome !== "finished" || receipts.includes(false));
+        });
         chatQueue.forgetDelivered(workspaceId, taskId, mine.map(steer => steer.id));
         for (const steer of unread.reverse()) {
           chatQueue.add(workspaceId, taskId, steer.goal ? { what: "Goal", message: steer.goal, goal: steer.goal } : { what: "Message", message: steer.message }, { front: true });
@@ -8911,13 +9076,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const prompt = [COMPACT_PROMPT,
       ...(maxChars ? [`Keep the summary under ${maxChars.toLocaleString("en-US")} characters.`] : []),
       ...(instructions ? [`Additional instructions from the user:\n${instructions}`] : [])].join("\n\n");
-    const response = await fetchImpl(`${baseUrl}/v1/chat/completions`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model, temperature: 0, max_tokens: maxChars ? Math.min(1600, Math.ceil(maxChars / 3)) : 1600, messages: [
-        { role: "system", content: prompt }, { role: "user", content: text }] }),
-      signal: AbortSignal.timeout(120_000),
-    });
+    const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: maxChars ? Math.min(1600, Math.ceil(maxChars / 3)) : 1600, messages: [
+        { role: "system", content: prompt }, { role: "user", content: text }] }, AbortSignal.timeout(120_000));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
   }
@@ -10038,4 +10198,4 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

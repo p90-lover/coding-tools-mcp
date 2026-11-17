@@ -5,7 +5,7 @@ import type { JsonObject, WorkspaceSummary } from "../api/contracts";
 import type { Language } from "../types";
 import { AgentOrchestratorOriginalSurface } from "./AgentOrchestratorOriginalSurface";
 import { AgentOrchestratorCanvas, type CanvasNode } from "./AgentOrchestratorCanvas";
-import { AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatDraftActions, type ChatQueueActions } from "./AgentOrchestratorChat";
+import { AgentConversation, AgentOrchestratorChat, syncChatQueues, type ChatAgentResize, type ChatDraftActions, type ChatQueueActions } from "./AgentOrchestratorChat";
 import { chatInputDraftGet, chatInputDraftSave, chatInputAccept, chatInputPending, readDraftReceipt, type ModuleCallFn } from "./chat-input-client";
 import { ChatThreadList, type ArchivedChat, type ThreadActions, type ThreadWorkspace } from "./ChatThreadList";
 import { ChatSplit } from "./ChatSplit";
@@ -14,10 +14,10 @@ import {
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
-import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, permissionChangeNotice, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, createActivityPoller, keepUnanswered, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, type PageOpen } from "./chat-pages";
@@ -506,6 +506,14 @@ export function aoUnlinkChange(run: Pick<AoMission, "nodes">, nodeId: string, pa
   return { operation: "set_parents", node_id: nodeId, parents: node.parents.filter((id) => id !== parentId) };
 }
 
+/**
+ * A Team graph card that has started (it has an agent session, or has left "pending") opens its
+ * conversation when clicked; one still waiting has nothing to show yet, so it opens its role.
+ */
+export function cardOpensConversation(node: Pick<AoNode, "state" | "receipt">) {
+  return Boolean(node.receipt) || node.state !== "pending";
+}
+
 /** Removes a card; a worker's task passes to another worker (linked first, idle before busy). */
 export function aoRemoveChange(run: Pick<AoMission, "nodes">, nodeId: string) {
   const node = run.nodes.find((item) => item.id === nodeId);
@@ -701,6 +709,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       .catch(() => setDepSettings(previous));
   };
   const [inspectedId, setInspectedId] = useState("");
+  // The card whose conversation the Team graph shows (a card that has started opens it, as a
+  // teammate does in Claude Code and a subagent in Codex); its role editor stays one click away.
+  const [conversationId, setConversationId] = useState("");
   const [team, setTeam] = useState<AoTeam | null>(null);
   const [savedTeams, setSavedTeams] = useState<AoTeam[]>([]);
   const [composerTeamId, setComposerTeamId] = useState("");
@@ -1400,14 +1411,27 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const savedMissionTeam = savedTeams.find(item => item.id === selectedRun?.team?.id) ?? team;
   const missionTeam = missionTeamId ? savedTeams.find(item => item.id === missionTeamId) ?? null : team;
   const inspectedNode = selectedRun?.nodes.find(node => node.id === inspectedId);
-  useEffect(() => { if (configNavigation.current) configNavigation.current = false; else { setInspectedId(""); setDraftTeam(null); } setMissionLimit(selectedRun?.worker_limit || 3); }, [selectedRunId]);
-  const inspectRole = (id: string) => {
+  useEffect(() => { setConversationId(""); if (configNavigation.current) configNavigation.current = false; else { setInspectedId(""); setDraftTeam(null); } setMissionLimit(selectedRun?.worker_limit || 3); }, [selectedRunId]);
+  const conversationNode = selectedRun?.nodes.find(node => node.id === conversationId);
+  const anchorAt = (id: string) => {
     const area = graphRef.current?.getBoundingClientRect();
     const card = graphRef.current?.querySelector<HTMLElement>(`[data-ao-node="${CSS.escape(id)}"]`)?.getBoundingClientRect();
     setRoleAnchor(area && card ? { left: card.left - area.left, right: card.right - area.left, top: card.top - area.top } : undefined);
+  };
+  const inspectRole = (id: string) => {
+    anchorAt(id);
+    setConversationId("");
     inspectedRole.current = selectedRun?.nodes.find(node => node.id === id)?.template_role_id || id;
     setInspectedId(id);
     if (selectedRun && !draftTeam) setDraftTeam(teamForMission(selectedRun, savedMissionTeam));
+  };
+  // A click on a card: one that has started shows its conversation, one still waiting its role.
+  const openCard = (id: string) => {
+    const node = selectedRun?.nodes.find(item => item.id === id);
+    if (!node || !cardOpensConversation(node)) { inspectRole(id); return; }
+    anchorAt(id);
+    setInspectedId("");
+    setConversationId(id);
   };
   const persistTeam = async (draft: AoTeam, mission?: AoMission, expectedRevision?: number, permissionScope?: { selected_role_ids: string[]; permission_selection: JsonObject }, present = () => true) => {
     const { permission_selections: _missionPermissionSelections, ...reusableTeam } = draft;
@@ -1596,7 +1620,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         setSingleRoute(route); rememberChatRoute(route);
         endPendingRetry({ mode: "single", route });
       }
-      return "Applies from the next turn. A running turn keeps its permissions.";
+      // A running agent that asks this app about each request follows the pick at once
+      // (liveRoute in agent-orchestrator-workflow); one that answers for itself, from its next turn.
+      return permissionChangeNotice(permissionMission, permission);
     }
     if (!selectedSetup) throw new Error("This team isn't available. Refresh and try again.");
     const latest = await moduleCall("runs", { workspaceId });
@@ -2755,20 +2781,18 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     if (!workspaceId || !workingRunIds) return;
     let live = true;
     let reading = false;
+    // A run's read that does not answer in time no longer holds the poll (createActivityPoller): its
+    // cards keep their frames and the next tick asks again.
+    const pollActivity = createActivityPoller(async runId =>
+      (await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> }).nodes);
     const poll = async () => {
       if (reading || surfaceHidden()) return;
       reading = true;
       try {
-        const frames = await Promise.all(workingRunIds.split(",").map(async runId => {
-          try {
-            const result = await moduleCall("activity", { workspaceId, runId }) as { nodes?: Record<string, ChatActivity> };
-            return Object.entries(result.nodes ?? {}).map(([nodeId, value]) => [`${runId}:${nodeId}`, value] as const);
-          } catch { return []; }
-        }));
+        const { frames: next, unanswered } = await pollActivity(workingRunIds.split(","));
         // Unchanged frames and items keep their objects (mergeActivityFrames), so neither the surface
         // nor an unchanged row re-renders.
-        const next = Object.fromEntries(frames.flat());
-        if (live) setChatActivity(current => mergeActivityFrames(current, next));
+        if (live) setChatActivity(current => mergeActivityFrames(current, keepUnanswered(current, next, unanswered)));
       } finally { reading = false; }
     };
     void poll();
@@ -3278,7 +3302,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
             : <AgentOrchestratorCanvas key={selectedRun.id}
               nodes={visibleNodes}
               levels={aoLevels(selectedRun).map(level => level.filter(node => visibleNodes.includes(node)))}
-              selectedId={inspectedId} busy={Boolean(busy)} onSelect={inspectRole} onMove={moveCard} describe={describeNode}
+              selectedId={inspectedId || conversationId} busy={Boolean(busy)} onSelect={openCard} onEdit={inspectRole} onMove={moveCard} describe={describeNode}
               loop={missionLoop(selectedRun, visibleNodes)} points={selectedRun.team?.link_points}
               onConnect={addDependency} canConnect={(nodeId, parentId) => Boolean(aoDependencyChange(selectedRun, nodeId, parentId))}
               onUnlink={unlink} canUnlink={(nodeId, parentId) => Boolean(aoUnlinkChange(selectedRun, nodeId, parentId))}
@@ -3296,6 +3320,14 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
             className="ao-role-popup" closeLabel="Close role inspector" onClose={() => setInspectedId("")}>
             <AgentOrchestratorRoleEditor node={inspectedNode} mission={selectedRun} draft={draftTeam} harnesses={harnesses} loadModels={loadModels} busy={Boolean(busy)}
               status={configStatus} change={editTeam} activity={chatActivity} discard={() => editTeam(teamForMission(selectedRun, savedMissionTeam), true)} taskName={taskName} />
+          </FloatingSheet> : null}
+          {view === "overview" && !sheet && selectedRun && conversationNode ? <FloatingSheet key={`chat-${conversationNode.id}`} stage={graphRef}
+            title={`${conversationNode.settings?.name || conversationNode.role} · ${conversationNode.state}`} anchor={roleAnchor}
+            className="ao-agent-chat-popup" closeLabel="Close conversation" onClose={() => setConversationId("")}>
+            <div className="ao-agent-chat-actions">
+              <button type="button" className="button-secondary" onClick={() => inspectRole(conversationNode.id)}>Edit role</button>
+            </div>
+            <AgentConversation runId={selectedRun.id} nodeId={conversationNode.id} live={conversationNode.state === "running"} loadWork={loadChatWork} />
           </FloatingSheet> : null}
           </div>
           {/* Collapse native bounds during a drag without unmounting and reopening the board. */}

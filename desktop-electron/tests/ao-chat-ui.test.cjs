@@ -48,7 +48,10 @@ const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-p
 const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
 // Settings › Chat's mission switch, as this computer keeps it: on unless `saved` is "off".
 const viewSettings = (saved = null) => load("chat-view-settings.ts", {}, { localStorage: { getItem: () => saved, setItem() {} } });
-const uiImports = { "./ao-chat": chat, "./chat-transcript": load("chat-transcript.ts", { "./ao-chat": chat }), "./chat-view-settings": viewSettings(), "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
+const responseStyles = load("chat-response-style.ts", { "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }) });
+const responseMenu = load("response-style-menu.ts", { "./chat-response-style": responseStyles });
+const uiImports = { "./chat-response-style": responseStyles, "./response-style-menu": responseMenu,
+  "./ResponseStyleSettings": { ResponseStyleSettings: () => null }, "./ao-chat": chat, "./chat-transcript": load("chat-transcript.ts", { "./ao-chat": chat }), "./chat-view-settings": viewSettings(), "./ModelJudgesToggle": judges, "../icons": { Icon: () => null, Caret: () => null }, "./ChatMarkdown": markdown, "./ChatMenu": menu,
   "./ChatContextMeter": meter, "./DshTranscript": dsh, "./ChatToolParts": toolParts,
   "./image-markup": load("image-markup.ts"),
   "./chat-input-client": load("chat-input-client.ts", {}, { setTimeout, clearTimeout }),

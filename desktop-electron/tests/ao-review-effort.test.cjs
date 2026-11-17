@@ -42,6 +42,7 @@ async function reviewRequests({ model = "opencode-go/deepseek-v4.1-flash", effor
     confirm: async () => true,
   });
   try {
+    await workflow.call("chat_model_judges", { meteredReviews: true });
     await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
     for (let tries = 0; tries < 200 && !resolved.has(approvalID); tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(resolved.has(approvalID), answered, answered ? "the fixture review must finish" : "nothing is answered for the person");

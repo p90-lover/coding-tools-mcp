@@ -104,7 +104,7 @@ test("a chat style read back from storage falls back to the transcript", () => {
   assert.equal(plan.chatStyle("timeline"), "timeline");
   assert.equal(plan.chatStyle("nope"), "transcript");
   assert.equal(plan.chatStyle(null), "transcript");
-  assert.deepEqual(plain(plan.CHAT_STYLES.map((style) => style.id)), ["transcript", "plan", "timeline", "focus", "cascade"]);
+  assert.deepEqual(plain(plan.CHAT_STYLES.map((style) => style.id)), ["transcript", "plan", "timeline", "focus", "cascade", "deepseek"]);
 });
 
 test("the head lists the biggest changes first, lockfiles and build output last", () => {
