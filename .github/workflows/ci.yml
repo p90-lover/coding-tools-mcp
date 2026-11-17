@@ -238,8 +238,10 @@ jobs:
       - name: Run Node contract tests
         run: node --test tests/*.test.mjs tests/upstream/*.test.mjs
 
+      # npm audit --audit-level=low, failing on every advisory except the few scripts/npm-audit.mjs
+      # lists with their reason (each fails again once npm can fix it without a breaking change).
       - name: NPM audit
-        run: npm audit --audit-level=low
+        run: node scripts/npm-audit.mjs
 
   # The Electron app the installer ships: its own suite, which no job ran before (#702 and #707
   # merged with about 50 of its tests failing).
