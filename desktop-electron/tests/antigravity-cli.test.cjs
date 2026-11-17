@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
-const { createAntigravityCli, loadManifest, platformAsset, shimBody, shimProxyEnvironment, manualAuthEnvironment } = require("../electron/antigravity-cli.cjs");
+const { createAntigravityCli, loadManifest, platformAsset, shimBody, shimProxyEnvironment, manualAuthEnvironment, isolatedAuthAccountId, isolatedAuthHome, ensureIsolatedAuthHome, isolatedAuthEnvironment, EMPTY_AUTH_ACCOUNT } = require("../electron/antigravity-cli.cjs");
 const { createAntigravityReauth, needsAuth } = require("../electron/cpa-antigravity-reauth.cjs");
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 
@@ -336,7 +336,9 @@ test("managed CLI auth suppresses the external browser without changing other ha
   assert.deepEqual(inherited, { PATH: "untouched" });
   assert.equal(shimProxyEnvironment(proxy).SSH_CLIENT, undefined, "the AO daemon and other harnesses must not inherit fake SSH");
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  assert.match(main, /executable: antigravityCli\.executable\(\), env: manualAuthEnvironment\(env\)/);
+  assert.match(main, /env: manualAuthEnvironment\(env, process\.env, \{ home: await antigravityCli\.authHome\(args\.accountId\) \}\)/);
+  assert.match(main, /CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli\.authHome\(\)/);
+  assert.doesNotMatch(main, /USERPROFILE: antigravityCli/, "the AO daemon must not inherit a rewritten USERPROFILE");
 });
 
 test("the agy shim applies only the Coding Tools proxy and refuses to run without it", () => {
@@ -345,11 +347,82 @@ test("the agy shim applies only the Coding Tools proxy and refuses to run withou
   assert.match(windows, /if defined CODING_TOOLS_AGY_NO_PROXY set "NO_PROXY=%CODING_TOOLS_AGY_NO_PROXY%"/);
   assert.match(windows, /"C:\/tools\/antigravity\.exe" %\*/);
   assert.match(windows, /^@echo off\r\nsetlocal/);
+  assert.match(windows, /if defined CODING_TOOLS_AGY_AUTH_HOME \(/);
+  assert.match(windows, /set "USERPROFILE=%CODING_TOOLS_AGY_AUTH_HOME%"/);
+  assert.match(windows, /set "HOMEDRIVE=%%~dI"/);
+  assert.match(windows, /set "HOMEPATH=%%~pI%%~nI%%~xI"/);
   assert.match(windows, /if not defined SSH_CLIENT set "SSH_CLIENT=coding-tools"/);
+  assert.match(windows, /if not defined AGY_ACP_FORCE_FILE_STORAGE set "AGY_ACP_FORCE_FILE_STORAGE=1"/);
   const posix = shimBody("/opt/agy/antigravity", "linux");
   assert.match(posix, /if \[ -z "\$CODING_TOOLS_AGY_HTTPS_PROXY" \]; then/);
   assert.match(posix, /exec "\/opt\/agy\/antigravity" "\$@"/);
+  assert.ok(posix.includes('if [ -n "$CODING_TOOLS_AGY_AUTH_HOME" ]; then export HOME="$CODING_TOOLS_AGY_AUTH_HOME"; fi'));
   assert.ok(posix.includes('export SSH_CLIENT="${SSH_CLIENT:-coding-tools}"'));
+  assert.ok(posix.includes('export AGY_ACP_FORCE_FILE_STORAGE="${AGY_ACP_FORCE_FILE_STORAGE:-1}"'));
   assert.deepEqual(shimProxyEnvironment({ HTTPS_PROXY: "http://127.0.0.1:7890", no_proxy: "localhost", PATH: "x" }),
     { CODING_TOOLS_AGY_HTTPS_PROXY: "http://127.0.0.1:7890", CODING_TOOLS_AGY_NO_PROXY: "localhost" });
+});
+
+test("a different Antigravity account gets an empty isolated auth home, not the default CLI profile", async () => {
+  const toolsRoot = temp();
+  const inherited = { USERPROFILE: "C:\\Users\\signed-in", HOME: "/home/signed-in", PATH: "untouched" };
+  assert.equal(isolatedAuthAccountId(), EMPTY_AUTH_ACCOUNT);
+  assert.equal(isolatedAuthAccountId("  "), EMPTY_AUTH_ACCOUNT);
+  assert.equal(isolatedAuthAccountId("../evil"), EMPTY_AUTH_ACCOUNT);
+  assert.equal(isolatedAuthAccountId("matrena@example.test"), "matrena@example.test");
+
+  const emptyHome = isolatedAuthHome(toolsRoot);
+  const otherHome = isolatedAuthHome(toolsRoot, "matrena@example.test");
+  assert.equal(path.basename(emptyHome), "empty");
+  assert.notEqual(emptyHome, otherHome);
+  assert.ok(emptyHome.startsWith(path.join(toolsRoot, "antigravity-cli", "homes")));
+  assert.equal(fs.existsSync(emptyHome), false, "the home is not created until a launch asks for it");
+
+  await ensureIsolatedAuthHome(emptyHome);
+  await ensureIsolatedAuthHome(otherHome);
+  assert.deepEqual(fs.readdirSync(emptyHome), [], "a new account home starts empty");
+  assert.deepEqual(fs.readdirSync(otherHome), [], "a different account does not inherit another profile's files");
+  fs.writeFileSync(path.join(emptyHome, "leftover.json"), "{}");
+  assert.equal(fs.existsSync(path.join(otherHome, "leftover.json")), false);
+
+  const win = isolatedAuthEnvironment({
+    home: emptyHome, environment: { HTTPS_PROXY: "http://127.0.0.1:7890" }, inherited, platform: "win32",
+  });
+  assert.equal(win.USERPROFILE, path.win32.resolve(emptyHome));
+  assert.equal(win.CODING_TOOLS_AGY_AUTH_HOME, emptyHome);
+  assert.equal(win.SSH_CLIENT, "coding-tools");
+  assert.equal(win.AGY_ACP_FORCE_FILE_STORAGE, "1");
+  assert.notEqual(win.USERPROFILE, inherited.USERPROFILE);
+  assert.equal(win.HOME, undefined, "Windows launches must not set HOME; the CLI reads USERPROFILE");
+
+  const posix = isolatedAuthEnvironment({
+    home: otherHome, environment: { HTTPS_PROXY: "http://127.0.0.1:7890" }, inherited, platform: "linux",
+  });
+  assert.equal(posix.HOME, otherHome);
+  assert.equal(posix.USERPROFILE, undefined);
+  assert.notEqual(posix.HOME, inherited.HOME);
+
+  const withHome = manualAuthEnvironment({ HTTPS_PROXY: "http://127.0.0.1:7890" }, inherited, { home: emptyHome, platform: "linux" });
+  assert.equal(withHome.HOME, emptyHome);
+  assert.equal(inherited.HOME, "/home/signed-in", "the caller environment must stay unchanged");
+});
+
+test("the managed CLI exposes a per-account authHome that stays empty until sign-in", async () => {
+  const toolsRoot = path.join(temp(), "tools");
+  fs.mkdirSync(toolsRoot, { recursive: true });
+  const manifestPath = path.join(toolsRoot, "manifest.json");
+  fs.writeFileSync(manifestPath, JSON.stringify({
+    id: "antigravity-cli", version: "1.0.0", command: "agy",
+    repository: "google-antigravity/antigravity-cli", platforms: {},
+  }));
+  const cli = createAntigravityCli({
+    toolsRoot, confirm: async () => true, getWorkspaces: async () => [], logger: { info() {}, warn() {} },
+    platform: "linux", arch: "x64", manifestPath,
+  });
+  const first = await cli.authHome();
+  const other = await cli.authHome("other@example.test");
+  assert.equal(path.basename(first), "empty");
+  assert.notEqual(first, other);
+  assert.deepEqual(fs.readdirSync(first), []);
+  assert.deepEqual(fs.readdirSync(other), []);
 });

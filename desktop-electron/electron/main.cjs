@@ -93,6 +93,7 @@ const {
   setProviderBrowserHost,
   setProviderBrowserProxyBinding,
   setProviderCpaConnection,
+  setProviderAuthBrowser,
   setProviderLogger,
   stopProxyBridgeNova,
 } = require("./provider-bootstrap.cjs");
@@ -5329,6 +5330,7 @@ async function start() {
       BrowserWindow, sessionFor: partition => session.fromPartition(partition),
       proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,
     });
+    setProviderAuthBrowser(() => antigravityAuthBrowser);
     antigravityReauth = createAntigravityReauth({
       cpaConnection: () => externalServicesController?.cpaConnection(),
       openExternal: (url, options) => antigravityAuthBrowser(url, options),
@@ -5351,7 +5353,9 @@ async function start() {
           const env = await antigravityProxyEnvironment();
           if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
-            executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
+            executable: antigravityCli.executable(),
+            env: manualAuthEnvironment(env, process.env, { home: await antigravityCli.authHome(args.accountId) }),
+            workspaceId: args.workspaceId || undefined,
           });
           return { ok: true, ...terminal, title: "agy" };
         }
@@ -5390,6 +5394,9 @@ async function start() {
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(await antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
+        // Isolated empty/default auth home for managed agy only (the shim applies it to
+        // USERPROFILE/HOME). Never set USERPROFILE or HOME on the daemon itself.
+        env = { ...env, CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli.authHome() };
         // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
         // session's own settings, on each Codex app-server's command line and in each OpenCode
         // chat's inline config (empty: off). ready() above wrote the plugin's file.
