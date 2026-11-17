@@ -11,7 +11,7 @@ const { MAX_RESPONSE_BYTES } = require("./ipc-schema.cjs");
 const { readCpaCatalog, collectMissionAccounting, accountingMeasurements } = require("./agent-orchestrator-accounting.cjs");
 const { createAoSessionEvents } = require("./ao-session-events.cjs");
 const { createAoDependencyLinks } = require("./ao-dependency-links.cjs");
-const { createDaemonLogFilter, daemonLogEvent, createDaemonFailureEvents } = require("./ao-daemon-log.cjs");
+const { createDaemonLogFilter, daemonLogEvent, createDaemonFailureEvents, createStartProgress } = require("./ao-daemon-log.cjs");
 const { compactAoDatabase } = require("./ao-db-maintenance.cjs");
 const { readContextBreakdown } = require("./ao-context-breakdown.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
@@ -131,6 +131,13 @@ const AGENT_RECHECK_MS = 60_000;
 const AO_READY_TIMEOUT_MS = 90_000;
 // A daemon still running at that limit is waited for this many limits longer before it is ended.
 const AO_READY_PATIENCE = 10;
+// Past those 15 minutes, a daemon whose startup progress lines still show work (see
+// createStartProgress) is waited for until it shows none for AO_START_STALL_MS, up to
+// AO_START_PROGRESS_MAX_MS in all. On 2026-11-16 the first start after an update built an index
+// over a 4.7 GB database before it listened, was killed at 15 minutes, and the build rolled back;
+// a slower disk or a larger database would have repeated that at every start.
+const AO_START_STALL_MS = 5 * 60_000;
+const AO_START_PROGRESS_MAX_MS = 3 * 60 * 60_000;
 // While a start is slow, ao.start_slow reports it this often, with AO's latest output.
 const AO_START_SLOW_REPORT_MS = 60_000;
 // After a start that failed, how long before AO is started again; doubled per failure in a row.
@@ -273,6 +280,7 @@ function chatHostProcesses(dataRoot) {
 
 function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getWindow, WebContentsView, dialog, shell, openAuth, getWorkspaces, missionCall, getCpaPricesPath = () => null, extraPath = () => null, extraEnv = () => ({}), agentTools = null, userMcpServers = null, fileTools = null, cpaQuota = null, cpaUsage = null, logger = console,
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS, readyHardMs = readyLimitMs * AO_READY_PATIENCE,
+  readyStallMs = AO_START_STALL_MS, readyProgressMaxMs = AO_START_PROGRESS_MAX_MS,
   startCooldownMs = AO_START_COOLDOWN_MS, provisionResumeWaitsMs = PROVISION_RESUME_WAITS_MS,
   gatewayKey = async () => null, gatewayKeyChecksMs = GATEWAY_KEY_CHECKS_MS }) {
   let child = null;
@@ -2454,8 +2462,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         forgetProject();
         daemonLines = "";
         removeOldDaemonLogs();
+        // AO's startup progress lines: whether a start past its limit still works (the wait below).
+        const progress = createStartProgress({ now: () => Date.now() });
         const daemonOutput = [child.stdout, child.stderr].map((output) => {
-          const filter = createDaemonLogFilter(keepDaemonLines);
+          const filter = createDaemonLogFilter((text) => {
+            keepDaemonLines(text);
+            for (const line of text.split("\n")) progress.push(line);
+          });
           output.on("data", (chunk) => {
             logTail = (logTail + chunk.toString()).slice(-16384);
             filter.push(chunk);
@@ -2477,13 +2490,43 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // again what the killed one had nearly done. ao.start_slow reports a slow start every
         // minute, with AO's latest output, so the log shows how long a real one takes and what it
         // was doing.
+        //
+        // Past readyHardMs, a daemon is waited for only while its startup progress lines show work
+        // (AO_START_STALL_MS): a database migration can keep AO's port closed far longer, and
+        // killing it rolled its work back. A daemon that reports nothing (one older than those
+        // lines too), or no work for that long, is ended as before.
         const startedAt = Date.now();
         const limitMs = Math.max(readyLimitMs, readyHardMs);
+        const progressMaxMs = Math.max(limitMs, readyProgressMaxMs);
+        // What AO said it was doing, for the log: its stage, and how long ago it last did work.
+        const startStage = () => {
+          const latest = progress.latest();
+          if (!latest) return {};
+          return { stage: latest.stage, ...(latest.migration ? { migration: latest.migration } : {}), workAgoMs: Date.now() - progress.advancedAt() };
+        };
         let slowReportAt = readySlowMs;
         let patientLogged = false;
-        while (Date.now() - startedAt < limitMs) {
+        let workingLogged = false;
+        let stalled = "";
+        for (;;) {
           checkStartup();
           const waitedMs = Date.now() - startedAt;
+          if (waitedMs >= limitMs) {
+            const advancedAt = progress.advancedAt();
+            if (advancedAt === null) break;
+            if (Date.now() - advancedAt >= readyStallMs) {
+              stalled = ` It reported no work for ${Math.round((Date.now() - advancedAt) / 60_000)} min (stage ${progress.latest().stage}).`;
+              break;
+            }
+            if (waitedMs >= progressMaxMs) {
+              stalled = ` It was still working (stage ${progress.latest().stage}) after ${Math.round(waitedMs / 60_000)} min.`;
+              break;
+            }
+            if (!workingLogged) {
+              workingLogged = true;
+              logger.warn?.("ao.start_still_working", { waitedMs, ...startStage(), untilStallMs: readyStallMs, untilMs: progressMaxMs });
+            }
+          }
           // Past the old limit and still running (checkStartup threw otherwise): waited for, not ended.
           if (!patientLogged && waitedMs >= readyLimitMs) {
             patientLogged = true;
@@ -2491,7 +2534,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           }
           if (waitedMs >= slowReportAt) {
             slowReportAt = waitedMs + AO_START_SLOW_REPORT_MS;
-            logger.warn?.("ao.start_slow", { waitedMs, output: logTail.slice(-300) });
+            logger.warn?.("ao.start_slow", { waitedMs, ...startStage(), output: logTail.slice(-300) });
           }
           try {
             const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(3000) });
@@ -2517,7 +2560,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           checkStartup();
         }
         // "timed out" keeps TRANSIENT_CHAT_START treating it as a start to retry, not a failure.
-        throw new Error(`Agent Orchestrator timed out getting ready. ${logTail.slice(-1500)}`);
+        throw new Error(`Agent Orchestrator timed out getting ready.${stalled} ${logTail.slice(-1500)}`);
       } catch (cause) {
         // Do not call stop here: stop waits for this startup to settle.
         await cleanup();

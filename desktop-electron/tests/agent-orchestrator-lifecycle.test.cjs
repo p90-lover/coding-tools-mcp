@@ -499,6 +499,90 @@ test("a daemon still not ready after 15 minutes is stopped, and the next start g
   assert.equal(harness.children.length, 2);
 });
 
+// 2026-11-16, the first start after the 0.8.124 update: AO built migration 9009's index over a
+// 4.7 GB database before it listened, printed nothing for 15 minutes, and was killed; the build
+// rolled back. AO now writes a startup progress line every 15 s with the work it has done.
+const progressLine = (child, { stage = "migrate", migration = "9009_conversation_activity_page_keys_index.sql", elapsedMs, cpuMs, ioBytes }) =>
+  child.stderr.emit("data", Buffer.from(`time=2026-11-16T18:40:00.000+08:00 level=INFO msg="startup progress" stage=${stage}`
+    + `${migration ? ` migration=${migration} left=2` : ""} elapsed_ms=${elapsedMs} cpu_ms=${cpuMs} io_bytes=${ioBytes}\n`));
+
+test("a start past 15 minutes is waited for while AO reports work, until it is ready", async (context) => {
+  let clock = Date.now();
+  const started = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    // Each poll finds AO still migrating 2 minutes later, having read and written 120 MB more (a
+    // cold hard disk), until it listens 40 minutes after it began.
+    readyFetch: (child) => {
+      clock += 120_000;
+      const elapsedMs = clock - started;
+      progressLine(child, { elapsedMs, cpuMs: elapsedMs / 100, ioBytes: elapsedMs * 1000 });
+      if (elapsedMs < 40 * 60_000) throw new Error("connect ECONNREFUSED");
+    },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  assert.equal((await controller.start()).state, "ready");
+  assert.equal(harness.children.length, 1, "one daemon, never replaced");
+  assert.equal(harness.children[0].kills, 0, "the working daemon was not killed");
+  assert.deepEqual(harness.warnings.filter(([event]) => event === "ao.start_failed"), []);
+  const working = harness.warnings.filter(([event]) => event === "ao.start_still_working");
+  assert.equal(working.length, 1, "the wait past 15 minutes is logged once");
+  assert.equal(working[0][1].stage, "migrate");
+  assert.equal(working[0][1].migration, "9009_conversation_activity_page_keys_index.sql");
+  // Each minute's report says what AO is doing, not only how long it has taken.
+  const slow = harness.warnings.filter(([event]) => event === "ao.start_slow").at(-1)[1];
+  assert.equal(slow.stage, "migrate");
+  assert.ok(slow.workAgoMs <= 30_000, `AO did work within the last report: ${slow.workAgoMs} ms`);
+  assert.match(slow.output, /msg="startup progress" stage=migrate migration=9009_/);
+});
+
+test("a start that keeps reporting but does no work is ended five minutes after its last work", async (context) => {
+  let clock = Date.now();
+  const begun = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    // AO reads and writes until 20 minutes in, then only its report lines go on (a hung build).
+    readyFetch: (child) => {
+      clock += 60_000;
+      const elapsedMs = clock - begun;
+      const workedMs = Math.min(elapsedMs, 20 * 60_000);
+      progressLine(child, { elapsedMs, cpuMs: workedMs / 100, ioBytes: workedMs * 1000 + elapsedMs / 50 });
+      throw new Error("connect ECONNREFUSED");
+    },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  await assert.rejects(controller.start(), /Agent Orchestrator timed out getting ready\. It reported no work for 5 min \(stage migrate\)/);
+  const waited = clock - begun;
+  assert.ok(waited >= 25 * 60_000 && waited < 26 * 60_000, `ended five minutes after its last work: ${waited} ms`);
+  assert.ok(harness.children[0].exitCode !== null || harness.children[0].signalCode !== null, "the stuck daemon is stopped");
+  assert.equal(harness.warnings.filter(([event]) => event === "ao.start_failed").length, 1);
+});
+
+test("a start that still works after three hours is ended all the same", async (context) => {
+  let clock = Date.now();
+  const begun = clock;
+  class SlowClock extends Date { static now() { return clock; } }
+  const harness = createHarness({
+    Date: SlowClock,
+    // Polls 10 minutes apart; AO did work since each one.
+    readyFetch: (child) => {
+      clock += 10 * 60_000;
+      const elapsedMs = clock - begun;
+      progressLine(child, { elapsedMs, cpuMs: elapsedMs / 100, ioBytes: elapsedMs * 1000 });
+      throw new Error("connect ECONNREFUSED");
+    },
+  });
+  const { controller } = harness;
+  context.after(async () => { await controller.stop(); });
+  await assert.rejects(controller.start(), /timed out getting ready\. It was still working \(stage migrate\) after 180 min/);
+  const waited = clock - begun;
+  assert.ok(waited >= 180 * 60_000 && waited < 190 * 60_000, `ended at three hours: ${waited} ms`);
+});
+
 test("concurrent stops share cleanup and a new start waits for the old gateway", async (context) => {
   const closing = deferred();
   const release = deferred();
