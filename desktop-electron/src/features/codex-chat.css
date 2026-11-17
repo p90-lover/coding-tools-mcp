@@ -1344,8 +1344,6 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .ao-workflow .cx-composer :is(.cx-icon-button, .ao-permissions > .ao-composer-chip, .ao-composer-chip.is-logo) { justify-content: center; width: 28px; min-width: 28px; padding: 0; }
 /* The permission chip is its level's icon; Full access keeps its warning colour. */
 .ao-workflow .cx-composer .ao-permissions > .ao-composer-chip[data-danger] { color: var(--ao-red, #c0392b); }
-/* Approve for me paused while quota-based reviews are off: amber, and its tooltip says why. */
-.ao-workflow .cx-composer .ao-permissions > .ao-composer-chip[data-paused] { color: var(--ao-amber, #b7791f); }
 /* The model (or saved team) is what the row is about: full ink. Effort and window stay muted beside it. */
 .ao-workflow .cx-composer .ao-composer-chip:is([aria-label="Choose model"], [aria-label="Choose saved team"]) { color: var(--color-text-primary); }
 /* The effort and window chips are short words ("Extra high", "400K") and keep them whole; the

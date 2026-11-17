@@ -497,45 +497,27 @@ test("a permission picked while an AO agent works is active now when the agent a
   assert.equal(view.exports.permissionChangeNotice({ id: "chat", nodes: [] }, { reviewer: "auto_review" }), "Applies from the next turn. A running turn keeps its permissions.");
 });
 
-test("Approve for me that this app reviews says paused while quota-based reviews are off, not Active now", () => {
+// The user's call, 2026-11-17: Approve for me is the person's choice of a model review, so it runs
+// with Allow quota-based reviews off, and the chip has no paused state (0.8.125 showed one).
+test("Approve for me reads Active now, whatever the quota-based reviews switch says", () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   const approveForMe = { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
-  const chip = ({ quota, harness = "ao:claude-code", launched = { approvals_reviewer: "user" }, running = true, notice = "" }) => {
+  for (const harness of ["ao:claude-code", "ao:codex"]) {
+    const launched = { approvals_reviewer: "user" }, running = true;
     const lead = { ...node("lead", harness, ":ao-default"), route: { harness_id: harness, permission_profile: ":ao-default", ...approveForMe } };
     // Approve for me was picked mid-turn: the running card keeps its launch route, AO records the pick.
     const mission = { id: "chat", team: { permission_selections: { lead: { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" } } },
       nodes: running ? [{ ...lead, route: { ...lead.route, ...launched }, id: "attempt", template_role_id: "lead", state: "running" }] : [] };
     const props = { team: { id: "team", nodes: [lead] }, mission, busy: false, loadProfiles: async () => ({}), save: async () => "", shared: null };
-    // State order: menu open, capabilities, notice, saving, failed, Full access dialog, quota-based reviews.
-    const tree = view.render("AgentOrchestratorPermissions", props, [false, { lead: { supported: true, profiles: [] } }, notice, false, false, null, quota]);
-    return elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props;
-  };
-  const { QUOTA_REVIEWS_PAUSED } = view.exports;
-  // Claude Code asks the app, which reviews nothing while the switch is off: every request waits for the person.
-  const off = chip({ quota: false, notice: "Active now: the running turn's requests follow it." });
-  assert.equal(off["aria-label"], "Permissions: Approve for me (paused)");
-  assert.equal(off["data-paused"], "");
-  assert.ok(off.title.startsWith("Approve for me · paused\n" + QUOTA_REVIEWS_PAUSED + "\n"), off.title);
-  assert.match(off.title, /Paused now: :workspace · on-request · auto_review/);
-  assert.doesNotMatch(off.title, /Active now/, "neither the running card nor the save notice claims it is active");
-  assert.match(QUOTA_REVIEWS_PAUSED, /Allow quota-based reviews in Settings > Chat/, "it names the switch that resumes it");
-  // On, it is active now; not read yet, the chip claims nothing about it.
-  for (const quota of [true, undefined, null]) {
-    const shown = chip({ quota });
-    assert.equal(shown["aria-label"], "Permissions: Approve for me"); assert.equal(shown["data-paused"], undefined);
-    assert.match(shown.title, /Active now: :workspace · on-request · auto_review/); assert.doesNotMatch(shown.title, /paused/i);
+    // State order: menu open, capabilities, notice, saving, failed, Full access dialog.
+    const tree = view.render("AgentOrchestratorPermissions", props, [false, { lead: { supported: true, profiles: [] } }, "", false, false, null]);
+    const chip = elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props;
+    assert.equal(chip["aria-label"], "Permissions: Approve for me", harness);
+    assert.equal(chip["data-paused"], undefined);
+    assert.match(chip.title, /Active now: :workspace · on-request · auto_review/);
+    assert.doesNotMatch(chip.title, /paused/i);
   }
-  // Between turns, Claude Code's next turn is reviewed here too; Codex runs its own auto-review, which the switch doesn't gate.
-  assert.equal(chip({ quota: false, running: false })["aria-label"], "Permissions: Approve for me (paused)");
-  assert.equal(chip({ quota: false, running: false, harness: "ao:codex" })["data-paused"], undefined);
-  // A Codex card launched to ask is reviewed here once Approve for me is picked mid-turn.
-  assert.equal(chip({ quota: false, harness: "ao:codex" })["data-paused"], "");
-  const route = (harness_id, approvals_reviewer, approval_policy = "on-request") => ({ harness_id, approval_policy, approvals_reviewer });
-  assert.equal(view.exports.appReviewsRequests(route("ao:claude-code", "auto_review")), true);
-  assert.equal(view.exports.appReviewsRequests(route("ao:codex", "auto_review")), false);
-  assert.equal(view.exports.appReviewsRequests(route("ao:codex", "user"), route("ao:codex", "auto_review")), true);
-  assert.equal(view.exports.appReviewsRequests(route("ao:claude-code", "user")), false, "Ask for approval: the person answers, nothing is paused");
-  assert.equal(view.exports.appReviewsRequests(route("codex-native", "auto_review")), false);
+  assert.equal(view.exports.QUOTA_REVIEWS_PAUSED, undefined, "no paused text is left to show");
 });
 
 test("quota-based reviews are read from main without changing them and published to open chats once per change", async () => {
