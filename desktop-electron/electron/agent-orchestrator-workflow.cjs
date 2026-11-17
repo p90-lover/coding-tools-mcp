@@ -4593,13 +4593,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
     }
   }
-  const quotaReviewBlocked = () => chatPreferences.get().meteredReviews ? null : {
-    action: "ask", unresolved: true, quotaBlocked: true,
-    reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Enable Allow quota-based reviews in Settings > Chat, or answer this request yourself. Native Codex Auto-review is separate.",
+  // "Allow quota-based reviews" covers the reviews nobody chose: a screen action's review in a chat
+  // not on Approve for me (reviewToolCall's stand-in reviewer). Approve for me, a Team's approver
+  // and "Let the model judge" are the person's own choice of a model review, so they run with it
+  // off too. Until 2026-11-17 off stopped every review, and the judge with them (the user's call).
+  const quotaReviewBlocked = (approver) => {
+    const preferences = chatPreferences.get();
+    return preferences.meteredReviews || preferences.modelJudges || !approver?.standIn ? null : {
+      action: "ask", unresolved: true, quotaBlocked: true,
+      reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Turn on Allow quota-based reviews or Let the model judge in Settings > Chat, choose Approve for me for this chat, or answer this request yourself. Native Codex Auto-review is separate.",
+    };
   };
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
-    if (quotaReviewBlocked()) return quotaReviewBlocked();
+    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -4725,7 +4732,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let failure = null;
     for (const model of candidates) {
-      if (quotaReviewBlocked()) return quotaReviewBlocked();
+      if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
@@ -4742,7 +4749,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
         check();
-        if (quotaReviewBlocked()) return quotaReviewBlocked();
+        if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -4769,7 +4776,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reviewerFailed(model, error);
       }
     }
-    if (quotaReviewBlocked()) return quotaReviewBlocked();
+    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
     throw failure;
   }
 
@@ -4814,7 +4821,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const current = (latest.nodes || []).find(holds);
           if (!current || reviewAttempt(latest, current) !== owner) { owned = false; check(); }
         };
-        const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true } };
+        const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true }, standIn: true };
         const approval = { kind: "tool", tool: toolName, thread_id: thread,
           toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
         const verdict = await askApprover({ approver, mission: run, approval, decide: judges, judge: judges,
