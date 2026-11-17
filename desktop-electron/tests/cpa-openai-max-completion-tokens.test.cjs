@@ -29,7 +29,7 @@ test("models of an api.openai.com provider send max_completion_tokens; other pro
     name: "Chatgpt-api-key",
     "base-url": "https://api.openai.com/v1",
     "api-key-entries": [{ "api-key": "sk-fixture" }],
-    models: [{ name: "gpt-5-nano" }, { name: "gpt-6-astra", alias: "astra" }, { name: "gpt-5.1", "use-max-completion-tokens": true }],
+    models: [{ name: "gpt-4o-mini" }, { name: "gpt-4.1", alias: "four-one" }, { name: "chat-latest", "use-max-completion-tokens": true }],
   };
   const stepfun = { name: "stepfun", "base-url": "https://api.stepfun.ai/v1", models: [{ name: "step-3.5-flash" }] };
   const broken = { name: "broken", "base-url": "not a url", models: [{ name: "x" }] };
@@ -37,10 +37,12 @@ test("models of an api.openai.com provider send max_completion_tokens; other pro
 
   const providers = configure(state)["api-keys"]["openai-compatibility"];
 
+  // Its reasoning models (gpt-5 and later, o-series) go through /v1/responses, which takes
+  // max_output_tokens: cpa-openai-responses-route.test.cjs. These are the ones that stay here.
   assert.deepEqual(providers[0].models, [
-    { name: "gpt-5-nano", "use-max-completion-tokens": true },
-    { name: "gpt-6-astra", alias: "astra", "use-max-completion-tokens": true },
-    { name: "gpt-5.1", "use-max-completion-tokens": true },
+    { name: "gpt-4o-mini", "use-max-completion-tokens": true },
+    { name: "gpt-4.1", alias: "four-one", "use-max-completion-tokens": true },
+    { name: "chat-latest", "use-max-completion-tokens": true },
   ]);
   assert.deepEqual(providers[0]["api-key-entries"], openai["api-key-entries"]);
   assert.deepEqual(providers[1], stepfun);
