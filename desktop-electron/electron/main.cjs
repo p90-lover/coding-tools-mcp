@@ -340,6 +340,8 @@ let rendererAccessibilityLaunch = { mode: "auto", blocked: false };
 let rendererAccessibility = null;
 // The Update click being prepared; clicks meanwhile join it (launcher:update-install).
 let updateInstallInFlight = null;
+// True from that click until its install has ended or reports its own progress (shownUpdateState).
+let updatePreparing = false;
 let autoInstaller = null;
 // Set once the main window's renderer has loaded (the update health gate's window check).
 let rendererLoaded = false;
@@ -476,7 +478,14 @@ function getChatGptDesktop(logger) {
       logger,
       dataRoot: path.join(CORE_HOME, "chatgpt-desktop"),
       resolveCpaAuthDir: cpaAuthDirectory,
-      getProxyRoute: async () => proxyRouteFromEnvironment(),
+      // Its own loopback port on the app's egress router, on the App route: a separate Chromium whose
+      // --proxy-server can't carry a sign-in. The environment's route (the router itself) only when
+      // that port can't be opened, which fails closed rather than going direct.
+      getProxyRoute: async () => {
+        const network = await providerNetworkReady().catch(() => null);
+        const port = network ? await network.openRouterPort("app") : null;
+        return port ? { url: `http://127.0.0.1:${port}`, bypass: ["localhost", "127.0.0.1", "::1"] } : proxyRouteFromEnvironment();
+      },
       onChange: (status) => send("launcher:chatgpt-desktop-changed", status),
     });
     chatgptDesktop.ready = chatgptDesktop.initialize().catch((error) => {
@@ -554,20 +563,14 @@ async function fetchThroughLauncherNetwork(url, options, { partition, useSession
     throw new Error("Session checks require a registered account partition");
   }
   const network = await providerNetworkReady();
-  const routing = network.store.snapshot().routing;
-  const boundId = sessionRead ? browserAccounts.proxyForPartition(partition) : null;
-  const profile = (boundId ? network.store.activeProxy(boundId) : null)
-    ?? (routing.globalEnabled ? network.store.activeProxy(routing.globalProfileId) : null);
-  const credentials = profile ? network.store.proxySecret(profile.id) : null;
+  // Everything the app fetches for itself takes the App route (Global Routing), not the route of
+  // whichever Browser-tab account is on screen; a session read takes its own account's route.
+  const target = sessionRead ? `browser:${partition}` : "app";
   return fetchNativeWithProxyAuth({
-    electronNet, browserSession: session.fromPartition(sessionRead ? partition : browserHost?.partition ?? LAUNCHER_PROFILE.browserPartition), url, options,
+    electronNet, browserSession: sessionRead ? session.fromPartition(partition) : session.defaultSession, url, options,
     useSessionCookies: sessionRead,
-    getProxyCredentials: (authInfo) => (
-      profile && authInfo.port === profile.endpoint.port
-      && String(authInfo.host).replace(/^\[|\]$/g, "").toLowerCase()
-        === String(profile.endpoint.host).replace(/^\[|\]$/g, "").toLowerCase()
-        ? credentials : null
-    ),
+    // The egress router asks every session to sign in once; only it is answered (routerSignIn).
+    getProxyCredentials: (authInfo) => network.routerSignIn(authInfo, target),
   });
 }
 
@@ -582,7 +585,8 @@ function getRegisterHost(logger) {
       webPreferences: { partition, contextIsolation: true, nodeIntegration: false, sandbox: true },
     }),
     prepareSession: async (browserSession, origin) => {
-      await browserSession.setProxy({ mode: "direct" });
+      // On the App route, through the egress router, like every session the app opens.
+      await (await providerNetworkReady()).routeAppSession(browserSession);
       const sync = createRegisterCpaSync({
         browserSession, origin, getConnection: () => externalServicesController?.cpaConnection(),
         onError: (message) => logger?.warn?.("launcher.register_cpa_sync_failed", { message }),
@@ -2175,7 +2179,7 @@ function launcherSnapshotPayload(stateStore, logger) {
       { version: 1, services: [] },
       logger,
     ),
-    update: updateController?.getState() ?? { status: "disabled" },
+    update: shownUpdateState(),
   };
 }
 
@@ -2919,7 +2923,7 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. Layout still needs a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm", "chat_draft"].includes(input.operation)
-        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined));
+        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined && input.arguments?.meteredReviews === undefined));
     const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
     const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
@@ -3626,6 +3630,8 @@ function registerIpc({ logger, stateStore }) {
       return result;
     } catch (error) {
       const failure = mcpConnectorCommandFailure(error);
+      // The page state a failed Personal plugins wait left (connectorPageState) goes to the log only.
+      const logged = error?.pageState ? { pageState: error.pageState } : {};
       // An automatic setup that gave way (an account switch, the app left) did not fail: the account
       // keeps its connector state and the sync tries again later, with no error on screen. Neither did
       // one stopped for the person's own sign-in, logout or account removal (stopOperationFor).
@@ -3633,19 +3639,19 @@ function registerIpc({ logger, stateStore }) {
       if (stopped || automaticSetupGaveWay(assertAutomaticCurrent, () => browserHost !== operationBrowser || operationBrowser?.partition !== operationPartition)) {
         publishOperation({ name: "mcp-connector-create", status: "cancelled",
           message: stopped && typeof assertAutomaticCurrent !== "function" ? failure.message : "MCP connector setup will continue later" });
-        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true });
+        throw Object.assign(new Error(failure.message), { code: failure.code, gaveWay: true, ...logged });
       }
       // The card's words can be a category ("ChatGPT verification is required…") for several steps;
       // the log keeps the setup's own (mcpConnectorFailureCause), or nothing said which step stopped.
       const setupCause = mcpConnectorFailureCause(error, failure);
       logger.warn("mcp.account_connect_failed", { automatic: typeof assertAutomaticCurrent === "function", code: failure.code,
-        ...(setupCause ? { setupCause } : {}) });
+        ...(setupCause ? { setupCause } : {}), ...logged });
       try {
         if (browserAccounts.has(accountId) && browserAccounts.partitionOf(accountId) === partition
           && await browserAccounts.recordConnector(accountId, { error: failure.message })) publishBrowserAccounts();
       } catch {}
       publishOperation({ name: "mcp-connector-create", status: "failed", message: failure.message });
-      throw Object.assign(new Error(failure.message), { code: failure.code });
+      throw Object.assign(new Error(failure.message), { code: failure.code, ...logged });
     }
   };
   handle("launcher:mcp-create-connector", async (event, accountId) => {
@@ -4287,21 +4293,44 @@ function installAppUpdate() {
   if (!updateController) throw new Error("Launcher updates are unavailable");
   updateInstallInFlight ??= (async () => {
     const release = automaticAccountMcp?.hold();
+    updatePreparing = true;
+    send("launcher:update-state", shownUpdateState());
     try {
       return await updateController.beginInstall({ beforeAppInstall: prepareBrowserForUpdate });
     } finally {
       release?.();
       updateInstallInFlight = null;
+      // What the install itself says from here: installing, or available again after a refusal.
+      updatePreparing = false;
+      send("launcher:update-state", shownUpdateState());
     }
   })();
   return updateInstallInFlight;
 }
 
-// Before a whole-app install: the background connector setup's account in progress gets up to a
-// minute to finish (the Update handler's hold keeps it from starting another), then a running
+/**
+ * The update state the window shows. An Update click reads as updating at once: before anything
+ * downloads, the click stops or waits for whatever holds the browser and may ask about a running
+ * turn. Until then the button still read "Update to v…" and took more clicks, each joining the first
+ * with nothing to show for it (the user, 2026-11-17: "it doesn't allow me to click and upgrade it").
+ */
+function shownUpdateState() {
+  const state = updateController?.getState() ?? { status: "disabled" };
+  return updatePreparing && state.status === "available" ? { ...state, status: "downloading", progress: 0 } : state;
+}
+
+// Before a whole-app install: the background connector setup is stopped (it works in hidden windows
+// of its own and runs again after the update; the Update handler's hold keeps it from starting
+// another account), any other browser operation gets up to a minute to finish, then a running
 // ChatGPT turn is offered to stop. Whatever still holds the browser refuses the install, as before.
+// The setup was waited for instead until 2026-11-17: an account whose connector creation was timing
+// out held the browser for minutes, so the click waited its minute and was then refused, every time.
 async function prepareBrowserForUpdate() {
-  if (browserHost) await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+  if (browserHost) {
+    // One that does not stop in time is left to the wait and the refusal below.
+    await Promise.resolve(browserHost.stopOperationFor?.("the app update")).catch(() => false);
+    await waitForManualOperation(browserHost, MANUAL_MCP_CONNECT_WAIT_MS);
+  }
   await stopBrowserTurnsForUpdate();
 }
 
@@ -4773,7 +4802,7 @@ async function start() {
   // Updates install inside the app: a whole-app update (app-update.cjs) swaps the changed files
   // in after the app closes the way "Restart app (keep Codex bridge, MCP, CPA)" does; a GUI-only
   // update reloads the renderer in place. Neither runs an installer.
-  const publishUpdateState = () => { if (updateController) send("launcher:update-state", updateController.getState()); };
+  const publishUpdateState = () => { if (updateController) send("launcher:update-state", shownUpdateState()); };
   // Update checks and downloads use the launcher's network (proxy, Chromium's resolver), as the
   // ChatGPT browser does; Node's https alone failed with "getaddrinfo ENOTFOUND github.com".
   useNativeUpdateTransport(fetchThroughLauncherNetwork);

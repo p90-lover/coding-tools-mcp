@@ -4,7 +4,10 @@
 .px-page {
   display: grid;
   gap: 18px;
-  width: min(640px, 100%);
+  min-width: 0;
+  width: min(760px, 100%);
+  box-sizing: border-box;
+  container-type: inline-size;
   margin: 0 auto;
   padding: 36px 20px 48px;
 }
@@ -13,6 +16,20 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.px-title {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* One sentence: where the app's traffic goes right now. */
+.px-summary {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
 }
 
 .px-head h1 {
@@ -53,7 +70,8 @@
 }
 
 .px-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   min-height: 52px;
@@ -132,7 +150,9 @@
 
 .px-proto {
   flex: none;
+  width: 52px;
   padding: 2px 6px;
+  text-align: center;
   border-radius: var(--radius-sm);
   background: var(--color-background-control);
   color: var(--color-text-secondary);
@@ -142,8 +162,24 @@
   letter-spacing: 0.04em;
 }
 
+.px-identity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  padding: 8px 0;
+}
+
+.px-name {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .px-addr {
   overflow: hidden;
+  color: var(--color-text-secondary);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
   text-overflow: ellipsis;
@@ -153,6 +189,32 @@
 .px-addr em {
   color: var(--color-text-tertiary);
   font-style: normal;
+}
+
+/* The saved sign-in's username: proxies on one address differ only by it. */
+.px-user {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+/* Ellipsis works on the text's own box, not on a flex container's loose text. */
+.px-user span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.px-user svg {
+  flex: none;
+  width: 11px;
+  height: 11px;
 }
 
 .px-lock {
@@ -229,6 +291,7 @@
 /* Tools show on hover or focus; the delete button turns red for its second click. */
 .px-tools {
   display: flex;
+  flex: none;
   gap: 2px;
   opacity: 0;
   transition: opacity var(--duration-micro) ease;
@@ -242,6 +305,7 @@
 
 .px-tools button {
   display: grid;
+  flex: none;
   width: 28px;
   height: 28px;
   padding: 0;
@@ -300,6 +364,8 @@
 
 .px-protocols {
   display: inline-flex;
+  flex-wrap: wrap;
+  max-width: 100%;
   justify-self: start;
   padding: 2px;
   border-radius: var(--radius-md);
@@ -323,13 +389,29 @@
   box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
 }
 
+.px-name-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
 .px-fields {
   display: grid;
-  grid-template-columns: 1fr 96px;
+  min-width: 0;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
-.px-fields input {
+.px-endpoint-fields {
+  grid-template-columns: minmax(0, 1fr) 96px;
+}
+
+.px-fields input,
+.px-name-field input {
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
   height: 34px;
   padding: 0 10px;
@@ -342,7 +424,8 @@
   transition: border-color var(--duration-micro) ease;
 }
 
-.px-fields input:focus {
+.px-fields input:focus,
+.px-name-field input:focus {
   border-color: var(--blue-300);
   outline: none;
 }
@@ -471,7 +554,7 @@
 
 .px-route {
   display: grid;
-  grid-template-columns: 1fr 130px 170px;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 190px);
   align-items: center;
   gap: 8px;
   min-height: 38px;
@@ -510,13 +593,268 @@
   font-size: var(--text-xs);
 }
 
-@media (max-width: 560px) {
+/* ---- the rewrite: status, facts, routes, programs (docs/specs/rewrite-the-proxy) ---- */
+
+/* The tools are always there, not only on hover: a keyboard or touch user needs them too. */
+.px-tools {
+  opacity: 0.8;
+}
+
+.px-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-text-error);
+  border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.px-alert.is-warn {
+  border-left-color: var(--color-text-warning);
+}
+
+.px-alert .px-ghost {
+  height: 26px;
+  margin-left: auto;
+  padding: 0 10px;
+}
+
+/* A proxy's last test, inline: no hover needed to read why it failed. */
+.px-facts {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.px-facts.is-bad {
+  color: var(--color-text-error);
+  white-space: normal;
+}
+
+.px-used {
+  align-self: center;
+  margin-left: auto;
+  padding: 1px 7px;
+  border-radius: var(--radius-round);
+  background: var(--color-background-control);
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.px-replace {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px 34px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-elevated);
+  font-size: var(--text-sm);
+  animation: px-rise var(--duration-panel) var(--ease-enter);
+}
+
+.px-replace select {
+  min-width: 0;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: inherit;
+  font-size: var(--text-xs);
+}
+
+.px-danger {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--color-text-error);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-error);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.px-empty,
+.px-note {
+  margin: 4px 4px 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+/* What a route resolves to now, and its live counters. */
+.px-effective {
+  display: grid;
+  overflow: hidden;
+  font-size: var(--text-sm);
+}
+
+.px-effective small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.px-hint {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.px-route.is-head {
+  background: var(--color-background-control);
+}
+
+.px-sub {
+  margin-top: 10px;
+}
+
+.px-sub summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.px-sub summary span {
+  padding: 0 6px;
+  border-radius: var(--radius-round);
+  background: var(--color-background-control);
+  font-size: var(--text-xs);
+}
+
+.px-sub summary em {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  font-style: normal;
+}
+
+.px-search {
+  box-sizing: border-box;
+  width: 100%;
+  height: 30px;
+  margin-top: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-control);
+  color: inherit;
+  font-size: var(--text-sm);
+}
+
+/* What follows the routes: one line per program group, its dot says whether it does. */
+.px-programs {
+  display: grid;
+  gap: 4px;
+}
+
+.px-programs h2 {
+  margin: 6px 4px 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.px-prog {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+}
+
+.px-prog > i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+}
+
+.px-prog.is-up > i {
+  background: var(--color-text-success);
+}
+
+.px-prog.is-slow > i {
+  background: var(--color-text-warning);
+}
+
+.px-prog.is-down > i {
+  background: var(--color-text-error);
+}
+
+.px-prog > span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  min-width: 0;
+  color: var(--color-text-secondary);
+}
+
+.px-prog strong {
+  color: var(--color-text-primary);
+  font-weight: 500;
+}
+
+.px-prog .px-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  margin-left: auto;
+  padding: 0 10px;
+}
+
+@container (max-width: 500px) {
   .px-route {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 6px 10px;
+  }
+
+  .px-route strong {
+    grid-column: 1 / -1;
   }
 
   .px-tools {
     opacity: 1;
+  }
+}
+
+@container (max-width: 360px) {
+  .px-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 4px 8px;
+    padding: 4px 8px 4px 4px;
+  }
+
+  .px-pick {
+    grid-row: 1 / 3;
+  }
+
+  .px-health,
+  .px-tools {
+    grid-column: 2;
+    justify-self: end;
+  }
+
+  .px-credential-fields {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

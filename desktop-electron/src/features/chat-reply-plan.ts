@@ -8,7 +8,7 @@ import { dshActivity, dshToolName, goalFeedback, type ChatLiveItem, type ChatSte
  */
 
 /** How the chat draws a reply. `transcript` is the chat as it was (Claude Code's rows). */
-export type ChatStyle = "transcript" | "plan" | "timeline" | "focus" | "cascade";
+export type ChatStyle = "transcript" | "plan" | "timeline" | "focus" | "cascade" | "deepseek";
 export const CHAT_STYLE_KEY = "coding-tools:ao:chat-style";
 export const CHAT_STYLES: { id: ChatStyle; label: string; hint: string }[] = [
   { id: "transcript", label: "Transcript", hint: "Claude Code: every step and tool call in order" },
@@ -16,6 +16,7 @@ export const CHAT_STYLES: { id: ChatStyle; label: string; hint: string }[] = [
   { id: "timeline", label: "Step timeline", hint: "GitHub Copilot: one row per step with how it ended" },
   { id: "focus", label: "Focus", hint: "ChatGPT: the answer, a progress line, and work behind Show work" },
   { id: "cascade", label: "Cascade", hint: "Windsurf: each step with chips for what it did" },
+  { id: "deepseek", label: "DeepSeek", hint: "DeepSeek Harness: grouped actions and expanded live work" },
 ];
 export function chatStyle(value: unknown): ChatStyle {
   return CHAT_STYLES.some((style) => style.id === value) ? value as ChatStyle : "transcript";

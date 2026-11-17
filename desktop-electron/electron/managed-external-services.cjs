@@ -7,6 +7,7 @@ const { createExternalServicesController } = require("./external-services.cjs");
 const { createManagedComponentController } = require("./managed-components.cjs");
 const { peerEnvironmentFor } = require("./five-stack-cross-use.cjs");
 const { createProviderNetworkStore, proxyUrl } = require("./provider-network.cjs");
+const { resolveEgressRoutes, routerUrl, noProxyList } = require("./egress-routes.cjs");
 const { buildLoopbackMesh, loopbackMeshEnvironment, persistLoopbackMesh } = require("./loopback-mesh.cjs");
 const { BACKUP_SUFFIX } = require("./durable-state.cjs");
 
@@ -44,6 +45,16 @@ function resolveCpaProxyRoute(dataRoot, safeStorage, componentId = "cpa", { read
     filePath, keyPath: path.join(directory, "provider-network.key"), safeStorage, readText,
   });
   const routing = store.snapshot().routing;
+  // The app's egress router (egress-router.cjs): CPA and the Antigravity CLI get its URL with their
+  // route token, never a proxy or its password, and the router resolves the route live, so a route
+  // change needs no restart and Direct starts them too. `profileId` is the proxy the route takes now.
+  const router = store.routerSettings({ create: false });
+  if (router) {
+    const target = componentId === "antigravity-cli" ? "provider:antigravity" : "cpa";
+    const routeOf = (profileId) => (store.activeProxy(profileId) ? { mode: "proxy", profileId } : { mode: "broken", reason: "missing" });
+    const resolved = resolveEgressRoutes({ routing, profileRoute: routeOf, extraProviders: ["antigravity"] }).table.targets[target];
+    return { profileId: resolved?.mode === "proxy" ? resolved.profileId : null, url: routerUrl({ port: router.port, key: router.key, target }), router: true };
+  }
   const policy = componentId === "cpa"
     ? routing.providers.find((entry) => entry.providerId === "cpa")
     : null;
@@ -125,6 +136,15 @@ function routeForStart(cached, current, readFromDisk) {
 function resolveManagedProxyEnvironment(componentId, dataRoot, safeStorage, resolveRoute = resolveCpaProxyRoute) {
   if (!MANAGED_PROXY_COMPONENTS.has(componentId)) return {};
   const route = resolveRoute(dataRoot, safeStorage, componentId);
+  if (route.router) {
+    // The egress router: one HTTP URL that stays the same; loopback only stays direct.
+    return {
+      HTTP_PROXY: route.url, HTTPS_PROXY: route.url, ALL_PROXY: route.url,
+      http_proxy: route.url, https_proxy: route.url, all_proxy: route.url,
+      NO_PROXY: noProxyList(), no_proxy: noProxyList(), NODE_USE_ENV_PROXY: "1",
+      ...(componentId === "cpa" ? { CODING_TOOLS_CPA_OUTBOUND_PROXY_URL: route.url } : {}),
+    };
+  }
   if (!route.url) throw new Error(`Select a network proxy before starting ${componentId}`);
   const protocol = new URL(route.url).protocol;
   if (componentId !== "cpa" && protocol !== "http:" && protocol !== "https:") {

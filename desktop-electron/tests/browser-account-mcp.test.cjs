@@ -77,6 +77,22 @@ test("one failure continues to other accounts and does not retry its own recorde
   assert.deepEqual(f.connected, ["one", "two", "one"]);
 });
 
+test("a failed setup's log record names the page state it stopped on, beside the fixed message", async () => {
+  // Live 2026-11-12: "ChatGPT did not expose one Personal plugins tab." twice in 20 minutes, with
+  // nothing to tell a slow tab bar from a hidden or missing one.
+  const f = fixture();
+  const pageState = { tabs: 2, visibleTabs: 1, personalTabs: 0, directoryLoading: false, frameMs: 16 };
+  f.deps.connect = async id => {
+    if (id === "one") throw Object.assign(new Error("ChatGPT did not expose one Personal plugins tab."), { pageState });
+    throw new Error("ChatGPT did not confirm the exact connector state.");
+  };
+  await f.sync.sync();
+  assert.deepEqual(f.warnings, [
+    { event: "browser_accounts.automatic_mcp_failed", message: "ChatGPT did not expose one Personal plugins tab.", pageState },
+    { event: "browser_accounts.automatic_mcp_failed", message: "ChatGPT did not confirm the exact connector state." },
+  ]);
+});
+
 test("a failed setup is tried again later, longer after each failure; one only the person can clear waits an hour", async () => {
   // Live 2026-11-13: one failure ("ChatGPT verification is required…", on a signed-in account) left
   // that account's automatic setup stopped until its sign-in cookie changed, so it never connected.
@@ -432,33 +448,37 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
   assert.equal(connections.length, 2);
 });
 
-test("launcher transport pins owned session reads to the bound proxy and keeps native defaults", async t => {
+// The app's own requests take the App route (Global Routing) through the default session, never the
+// route of whichever Browser-tab account is on screen; a session read takes its own account's route.
+// Which proxy that is, is the egress router's business: main only answers the router's sign-in.
+test("launcher transport sends the app's own requests on the App route and session reads on their account's", async t => {
   const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const start = source.indexOf("async function fetchThroughLauncherNetwork(");
   const end = source.indexOf("\nfunction getRegisterHost", start);
   assert(start > 0 && end > start);
-  for (const mode of ["bound", "global", "native"]) await t.test(mode, async () => {
+  const ROUTER = { isProxy: true, host: "127.0.0.1", port: 17555 };
+  for (const mode of ["session", "native"]) await t.test(mode, async () => {
     const requests = [];
-    const profiles = { bound: { id: "bound", endpoint: { host: "bound.invalid", port: 9001 } }, global: { id: "global", endpoint: { host: "global.invalid", port: 9002 } } };
     const context = {
-      providerNetworkReady: async () => ({ store: { snapshot: () => ({ routing: { globalEnabled: true, globalProfileId: "global" } }),
-        activeProxy: id => profiles[id], proxySecret: id => ({ username: id, password: "fixture" }) } }),
-      browserAccounts: { accountIdOfPartition: p => p === "persist:selected" ? "selected" : null,
-        proxyForPartition: () => mode === "bound" ? "bound" : null },
+      providerNetworkReady: async () => ({
+        routerSignIn: (authInfo, target) => (authInfo?.isProxy && authInfo.host === ROUTER.host && authInfo.port === ROUTER.port
+          ? { username: target, password: "router-key" } : null),
+      }),
+      browserAccounts: { accountIdOfPartition: p => p === "persist:selected" ? "selected" : null },
       browserHost: { partition: "persist:shown" }, LAUNCHER_PROFILE: { browserPartition: "persist:default" },
-      session: { fromPartition: partition => ({ partition }) }, electronNet: {},
+      session: { fromPartition: partition => ({ partition }), defaultSession: { partition: "default" } }, electronNet: {},
       fetchNativeWithProxyAuth: async options => { requests.push(options); return { status: 200 }; },
     };
     vm.runInNewContext(source.slice(start, end), settledFocus(context));
     await context.fetchThroughLauncherNetwork(mode === "native" ? "https://github.com/update" : "https://chatgpt.com/api/auth/session", { method: "GET" },
       mode === "native" ? undefined : { partition: "persist:selected", useSessionCookies: true });
     assert.equal(requests.length, 1);
-    const request = requests[0], profile = profiles[mode === "bound" ? "bound" : "global"];
-    assert.equal(request.browserSession.partition, mode === "native" ? "persist:shown" : "persist:selected");
+    const request = requests[0];
+    assert.equal(request.browserSession.partition, mode === "native" ? "default" : "persist:selected", "never the account on screen");
     assert.equal(request.useSessionCookies, mode !== "native");
-    assert.equal(request.getProxyCredentials({ host: profile.endpoint.host, port: profile.endpoint.port }).username, profile.id);
-    assert.equal(request.getProxyCredentials({ host: "unexpected.invalid", port: profile.endpoint.port }), null);
-    assert.equal(request.getProxyCredentials({ host: profile.endpoint.host, port: 1234 }), null);
+    assert.equal(request.getProxyCredentials(ROUTER).username, mode === "native" ? "app" : "browser:persist:selected");
+    assert.equal(request.getProxyCredentials({ ...ROUTER, host: "isp.decodo.test" }), null, "no other proxy gets the router's sign-in");
+    assert.equal(request.getProxyCredentials({ ...ROUTER, port: 1234 }), null);
     await assert.rejects(context.fetchThroughLauncherNetwork("https://chatgpt.com/api/auth/session", { method: "GET" },
       { partition: "persist:unregistered", useSessionCookies: true }), /registered account/i);
     assert.equal(requests.length, 1);

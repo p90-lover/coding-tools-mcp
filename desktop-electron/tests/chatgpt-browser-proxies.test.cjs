@@ -47,6 +47,14 @@ function world(t, { body = decodoBody([10001, 10002, 10003]) } = {}) {
   const accounts = createBrowserAccounts({ dataRoot: path.join(userData, "browser-accounts"), profile: "production" });
   let activePartition = BASE;
   const requests = [];
+  // The app's egress router (egress-router.cjs): it holds each route's proxy and sign-in; the
+  // sessions point at it. This stand-in keeps the tables it is given.
+  const tables = [];
+  const startRouter = async ({ port, table }) => {
+    tables.push(table);
+    return { port, running: true, setRoutes: (next) => tables.push(next), reconnect: async () => ({ closed: 0 }), stats: async () => ({}), close: async () => {} };
+  };
+  const routeOf = (target) => tables[tables.length - 1]?.targets[target];
   const controller = network.createProviderNetworkController({
     app: {},
     browserPartition: BASE,
@@ -61,8 +69,9 @@ function world(t, { body = decodoBody([10001, 10002, 10003]) } = {}) {
       requests.push(url);
       return { ok: true, status: 200, text: async () => body };
     },
+    startRouter,
   });
-  return { controller, accounts, sessionFor, requests, setActive: (partition) => { activePartition = partition; } };
+  return { controller, accounts, sessionFor, requests, routeOf, setActive: (partition) => { activePartition = partition; } };
 }
 
 test("the Decodo request asks for sticky sessions from the proxy user, as ProxyBridge Nova did", () => {
@@ -116,8 +125,8 @@ test("one proxy per account: binding a proxy another account holds is refused", 
   assert.equal(accounts.proxyForPartition(BASE), null);
 });
 
-test("a bound account keeps its own proxy through Global Routing, and its 407 gets only its own sign-in", async (t) => {
-  const { controller, accounts, sessionFor, setActive } = world(t);
+test("a bound account keeps its own proxy through Global Routing, and its 407 gets only its own route token", async (t) => {
+  const { controller, accounts, sessionFor, routeOf, setActive } = world(t);
   controller.store.saveDecodoSettings({ username: "sp1", password: "secret" });
   await controller.syncDecodo();
   const [own, global] = controller.store.snapshot().proxyProfiles;
@@ -127,20 +136,27 @@ test("a bound account keeps its own proxy through Global Routing, and its 407 ge
   setActive(partition);
   controller.store.setGlobalRouting({ enabled: true, profileId: global.id });
   await controller.applyGlobalRouting();
-  assert.equal(sessionFor(partition).proxy.proxyRules, `http://gate.decodo.com:${own.endpoint.port}`);
-  assert.equal(sessionFor(BASE).proxy.proxyRules, `http://gate.decodo.com:${global.endpoint.port}`, "the unbound account follows Global Routing");
-  assert.ok(sessionFor(partition).closed >= 1, "old connections are dropped");
+  // Every session goes through the router; the router holds each route's proxy and sign-in.
+  const routerRule = sessionFor(BASE).proxy.proxyRules;
+  assert.match(routerRule, /^http:\/\/127\.0\.0\.1:\d+$/);
+  assert.equal(sessionFor(partition).proxy.proxyRules, routerRule);
+  assert.deepEqual(routeOf(`browser:${partition}`).credentials, { username: `user-sp1-session-${own.endpoint.port}`, password: "pa@ss" });
+  assert.equal(routeOf(`browser:${partition}`).profileId, own.id, "the bound account takes its own proxy");
+  assert.equal(routeOf(`browser:${BASE}`).profileId, global.id, "the unbound account follows Global Routing");
+  assert.equal(routeOf("app").profileId, global.id);
 
-  const answer = (contents, port) => {
+  const port = Number(new URL(routerRule).port);
+  const answer = (contents, host, asked) => {
     const replies = [];
-    const handled = controller.handleProxyLogin({ preventDefault() {} }, { isProxy: true, host: "gate.decodo.com", port },
+    const handled = controller.handleProxyLogin({ preventDefault() {} }, { isProxy: true, host, port: asked },
       (user, pass) => replies.push([user, pass]), contents);
     return { handled, replies };
   };
-  const boundPage = { session: sessionFor(partition) };
-  assert.deepEqual(answer(boundPage, own.endpoint.port).replies, [[`user-sp1-session-${own.endpoint.port}`, "pa@ss"]]);
-  assert.equal(answer(boundPage, global.endpoint.port).handled, false, "a bound page never receives the global proxy's sign-in");
-  assert.deepEqual(answer({ session: sessionFor("default") }, global.endpoint.port).replies, [[`user-sp1-session-${global.endpoint.port}`, "pa@ss"]]);
+  const bound = answer({ session: sessionFor(partition) }, "127.0.0.1", port);
+  const plain = answer({ session: sessionFor("default") }, "127.0.0.1", port);
+  assert.notEqual(bound.replies[0][0], plain.replies[0][0], "the bound page signs in to the router as its own account");
+  assert.equal(plain.replies[0][0], "app");
+  assert.equal(answer({ session: sessionFor(partition) }, "gate.decodo.com", own.endpoint.port).handled, false, "a proxy itself never gets a sign-in from a page");
 
   accounts.setProxy(second, null);
   assert.equal(await controller.routeBrowserPartition(partition), global.id, "unbound again, it takes Global Routing's");

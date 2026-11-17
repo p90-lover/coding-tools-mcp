@@ -44,6 +44,7 @@ function fixture({ standing = authorized, verdict, command } = {}) {
       },
     },
   });
+  void workflow.call("chat_model_judges", { meteredReviews: true });
   return { workflow, prompts, resolved, reads, instructions: value => { instructions = value; },
     review: async (extra = {}) => {
       const before = resolved.length;

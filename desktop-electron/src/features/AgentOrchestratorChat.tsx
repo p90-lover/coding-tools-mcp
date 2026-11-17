@@ -6,7 +6,10 @@ import { getCodingToolsClient } from "../api/client";
 import { Caret, Icon } from "../icons";
 import { ModelJudgesToggle } from "./ModelJudgesToggle";
 import { AgentOrchestratorComposerControls, type ComposerControlsProps } from "./AgentOrchestratorComposerControls";
-import { modelShortLabel } from "./AgentOrchestratorRoleEditor";
+import { cpaProviderOf, modelShortLabel } from "./AgentOrchestratorRoleEditor";
+import { onResponseStyles, readResponseStyles, resolveResponseStyle, responseStyleContext, saveResponseStyle } from "./chat-response-style";
+import { responseStyleMenu } from "./response-style-menu";
+import { ResponseStyleSettings } from "./ResponseStyleSettings";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { AgentOrchestratorApproval, type AoApproval as ChatApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import type { AoNode } from "./AgentOrchestratorSurface";
@@ -24,7 +27,7 @@ import { ChatTurnStats } from "./ChatTurnStats";
 import { ChatScrollToBottom } from "./ChatScrollToBottom";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
 import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
-import { CHAT_STYLE_KEY, CHAT_STYLES, chatStyle, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart, type ChatStyle } from "./chat-reply-plan";
+import { foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer, EarlierSteps, useWorkWindow } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
@@ -33,7 +36,7 @@ import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuSta
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
   chatAgentSessions, chatAgentSummary, chatDetailLinks, chatQueueAdd, chatRunsOfMessage, chatSlashMatches, chatSlashParse, chatSlashTyping, chatTurns, goalElapsed,
-  chatMessageParts, chatStatsSpan, isDeepSeekModel, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
+  chatMessageParts, chatStatsSpan, petMood, type ChatSentAttachment, type QueuedChatMessage, type ChatCommandCard, type ChatCommands, type ChatActivity, type ChatAttachment, type ChatDetailLink, type ChatLiveItem, type ChatNode, type ChatRun, type ChatStatus, type ChatStep, type ChatTurn,
   activitySummary, groupTimeline, workGroupRows, workSegmentSteps, type ChatLiveSegment, mergeTimeline, tidyTimeline, withoutReplied, wakeupLabel, dshItemDetail, dshLiveTitle, dshQuietNote, dshRetryNote, steerReader, steerReceipts, turnReceipt, waitsForPerson,
   cpaRefusalNote, type ChatGoal, type ChatWakeup, type CpaRefusal,
   subagentActive, subagentsSummary,
@@ -698,6 +701,33 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
       : <li key={segment.key} className="cx-live-item kind-group"><ActivityGroup id={segment.key} items={segment.items} live={live && index === drawn.length - 1}
         expanded={expanded} mission={mission} /></li>)}
   </ol>;
+}
+
+const AGENT_CONVERSATION_POLL_MS = 2000;
+
+/**
+ * One team agent's conversation, opened from its card on the Team graph as Claude Code and Codex
+ * open a teammate or subagent: what it was asked, its thinking, tool calls and replies (its turn's
+ * timeline, the chat's own renderer), read again every two seconds while it works.
+ */
+export function AgentConversation({ runId, nodeId, live, loadWork }: { runId: string; nodeId: string; live: boolean; loadWork: LoadWork }) {
+  const [items, setItems] = useState<ChatLiveItem[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let current = true;
+    const read = () => void loadWork(runId, nodeId).then(
+      (next) => { if (current) { setItems(next); setError(null); } },
+      (cause: unknown) => { if (current) setError(cause instanceof Error ? cause.message : String(cause)); });
+    read();
+    const timer = live ? window.setInterval(read, AGENT_CONVERSATION_POLL_MS) : 0;
+    return () => { current = false; if (timer) window.clearInterval(timer); };
+  }, [runId, nodeId, live, loadWork]);
+  return <div className="cx-agent-conversation">
+    {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
+    {items === null ? <p className="cx-workbench-empty">Reading its conversation…</p>
+      : items.length ? <LiveTimeline items={items} live={live} finished={!live} expanded />
+        : <p className="cx-workbench-empty">{live ? "It hasn't done anything yet." : "Its conversation could not be read back."}</p>}
+  </div>;
 }
 
 /**
@@ -1507,7 +1537,6 @@ export function AgentOrchestratorChat({
   }, [turns, pendingSteers, selectedTaskId]);
   // The stats line counts the latest turn and the unfinished attempts before it (chatStatsSpan).
   const statsSpan = useMemo(() => chatStatsSpan(turns, chatRuns), [turns, chatRuns]);
-  const stepCount = turns.reduce((total, turn) => total + turn.steps.length + (turn.final ? 1 : 0), 0);
   // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
   // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
   const workbenchKey = `coding-tools:ao:workbench:${JSON.stringify([projectId ?? "", selectedTaskId])}`;
@@ -1582,43 +1611,27 @@ export function AgentOrchestratorChat({
     .flatMap((step) => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? [])) : null,
   // CHAT_WORK changes with the polls that change turns, or with a read back (the tick).
   [detailsOpen, turns, detailsWorkTick]);
-  // Following new output jumps, even under a theme's smooth scrolling: an animated follow lags the
-  // stream and flashes the ↓ button. Only that button scrolls smoothly.
-  // A send or a chat switch sets atBottom: that re-arms following too.
+  // Following new output must be instant even when the theme enables smooth scrolling; only the ↓ button animates.
   useEffect(() => {
-    if (!atBottom || jumpingToBottom.current) return;
-    following.current = true;
+    if (!following.current || jumpingToBottom.current) return;
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
-  }, [turns.length, stepCount, atBottom]);
-  // A running step grows without a new turn or step (each tool call, each streamed line): the
-  // thread follows any growth of its content while it is read at the bottom.
+  }, [turns, atBottom]);
   const column = useRef<HTMLDivElement>(null);
-  // A click in the thread (opening "Worked", a group, a tool's output) grows it too, but that is the
-  // user reading: the view stays on what they opened and following stops if it left the bottom.
-  // As in Codex, only a person moving the view up ends following: a wheel up, dragging the scrollbar,
-  // or a scroll that leaves the bottom upward. A click, a touch or a wheel down that moves nothing
-  // keeps it (a wheel down at the bottom fires no scroll event, so it used to stop following for
-  // good). Reaching the bottom again, a send or a new request re-arms it.
-  const following = useRef(atBottom);
-  const lastScrollTop = useRef(0);
-  const clicked = useRef(false);
+  // Input handlers pause synchronously, before layout or React state updates can race the user's scroll.
+  const following = useRef(true);
+  const touchY = useRef<number | null>(null);
   const followBottom = () => {
     jumpingToBottom.current = false;
     following.current = true;
     setAtBottom(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: "instant" });
   };
-  useEffect(() => { jumpingToBottom.current = false; following.current = true; lastScrollTop.current = 0; }, [selectedTaskId]);
+  useEffect(() => { touchY.current = null; followBottom(); }, [selectedTaskId]);
   useEffect(() => {
     const box = scroller.current, content = column.current;
     if (!box || !content || typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(() => {
       if (jumpingToBottom.current) return;
-      if (clicked.current) { clicked.current = false; following.current = box.scrollHeight - box.scrollTop - box.clientHeight <= 24; setAtBottom(following.current); return; }
-      // Instant, like the follow above: setting scrollTop obeys the theme's smooth scrolling, and the
-      // animation's in-between scroll events read as "left the bottom" and ended following. Seen
-      // live: right after a send (the thread grows a lot at once) the view stopped on an older
-      // message and stayed there.
       if (following.current) box.scrollTo({ top: box.scrollHeight, behavior: "instant" });
     });
     observer.observe(content);
@@ -1635,12 +1648,13 @@ export function AgentOrchestratorChat({
   // Settings › Chat › "Keep work expanded on a mission" (chat-view-settings), followed at once.
   const [missionWork, setMissionWork] = useState(readMissionWork);
   useEffect(() => onMissionWork(setMissionWork), []);
-  // How a reply draws its steps (chat-reply-plan's styles), picked from the header menu.
-  const [replyStyle, setReplyStyle] = useState<ChatStyle>(() => { try { return chatStyle(localStorage.getItem(CHAT_STYLE_KEY)); } catch { return "transcript"; } });
-  const pickReplyStyle = (next: ChatStyle) => {
-    try { localStorage.setItem(CHAT_STYLE_KEY, next); } catch { /* applies now regardless */ }
-    setReplyStyle(next);
-  };
+  const [responseStyles, setResponseStyles] = useState(readResponseStyles);
+  useEffect(() => onResponseStyles(setResponseStyles), []);
+  const responseRoute = composer?.route ?? latest?.nodes.find(node => node.role === "planner")?.route;
+  const responseContext = responseStyleContext(responseRoute, selectedTaskId, cpaProviderOf(responseRoute?.model));
+  const activeResponseStyle = resolveResponseStyle(responseStyles, responseContext);
+  const [responseSettingsOpen, setResponseSettingsOpen] = useState(false);
+  const [responseStyleNotice, setResponseStyleNotice] = useState("");
   // Bit, the chat's pet (ChatPet), shown unless turned off from the header menu or its own right-click.
   const [petOn, setPetOn] = useState(() => { try { return localStorage.getItem(PET_KEY) !== "off"; } catch { return true; } });
   // In split view the panes share one pet: hiding it in one pane hides it in all of them.
@@ -1686,10 +1700,9 @@ export function AgentOrchestratorChat({
   };
   // A new chat starts at the bottom.
   useEffect(() => { setAtBottom(true); setShowStructure(false); setRenaming(null); }, [selectedTaskId]);
-  // A new request ends the thread: bring it into view even when the person had scrolled up to read.
   const requestKeys = approvals.map((approval) => `${approval.nodeId}\u0000${approval.approval_id}`).join("\u0001");
   useEffect(() => {
-    if (!requestKeys) return;
+    if (!requestKeys || !following.current) return;
     followBottom();
   }, [requestKeys]);
   // Each chat keeps its own unsent draft. A new composer belongs to its project and pane.
@@ -2694,8 +2707,12 @@ export function AgentOrchestratorChat({
     ] as ChatMenuItem[] : []),
     ...(steer ? [{ label: "Steer while working", checked: steerOn, run: toggleSteer } as ChatMenuItem] : []),
     { label: "Compact activity", checked: compactActivity, run: toggleCompact } as ChatMenuItem,
-    { label: "Reply style", detail: CHAT_STYLES.find((style) => style.id === replyStyle)?.label,
-      items: CHAT_STYLES.map((style) => ({ label: style.label, detail: style.hint, checked: style.id === replyStyle, run: () => pickReplyStyle(style.id) })) } as ChatMenuItem,
+    responseStyleMenu(responseStyles, responseContext, (scope, style) => {
+      const result = saveResponseStyle(scope, responseContext, style);
+      setResponseStyles(result.preferences);
+      setMenu(null);
+      setResponseStyleNotice(result.persisted ? "" : "Response style applied in this window only; storage is unavailable.");
+    }, () => { setMenu(null); setResponseSettingsOpen(true); }),
     { label: "Show pet", checked: petOn, run: togglePet } as ChatMenuItem,
     { label: workMode === "single" ? "Show work details" : "Show workers' activity", checked: showWork, run: toggleWork } as ChatMenuItem,
     { kind: "separator" },
@@ -2835,8 +2852,9 @@ export function AgentOrchestratorChat({
     const foldToggle = foldRow ? <FoldedRounds key={`fold:${foldRow.key}`} first={foldRow.first} last={foldRow.last}
       open={openRounds.has(foldRow.key)} onToggle={() => toggleRounds(foldRow.key)} /> : null;
     if (foldKey && !openRounds.has(foldKey)) return foldToggle;
-    // A turn on a DeepSeek model shows as DeepSeek Harness shows one (DshTranscript); others as Claude Code.
-    const dsh = isDeepSeekModel(chatRuns.find((run) => run.id === turn.runId)?.nodes.find((node) => node.role === "planner")?.route?.model);
+    const turnRoute = chatRuns.find(run => run.id === turn.runId)?.nodes.find(node => node.role === "planner")?.route;
+    const replyStyle = resolveResponseStyle(responseStyles, responseStyleContext(turnRoute, selectedTaskId, cpaProviderOf(turnRoute?.model))).style;
+    const dsh = replyStyle === "deepseek";
     let readWork = dshReaders.get(turn.runId);
     if (dsh && !readWork) {
       readWork = (step, wanted) => useStepWork(step, turn.runId, wanted, loadWork);
@@ -2935,7 +2953,7 @@ export function AgentOrchestratorChat({
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} data-transcript={!dsh && replyStyle === "transcript" ? "codex" : undefined} aria-label="Reply">
               {userMessage}{savedSteers}
               {headError ? <ReplyError team={teamAnswer} error={headError} /> : null}
-              <ReplyPlanView plan={plan} style={replyStyle} live={live} />
+              <ReplyPlanView plan={plan} style={dsh ? "transcript" : replyStyle} live={live} />
               {/* The reply's top says the error, so the DeepSeek turn leaves its own copy out. Turning
                   the mission setting off redraws the work, so nothing it opened stays open. */}
               {dsh && readWork
@@ -2972,7 +2990,7 @@ export function AgentOrchestratorChat({
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, rewindBlocked, notTaken, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,
-    replyStyle, roundFolds, openRounds, drawStart, missionWork, goalStart, agentSessionIds, selectedTaskId]);
+    responseStyles, roundFolds, openRounds, drawStart, missionWork, goalStart, agentSessionIds, selectedTaskId]);
 
   return (<Attachments.Provider value={attachmentAccess}><SentMessageView.Provider value={sentMessageView}><CompactActivity.Provider value={compactActivity}>
     <TurnRestart.Provider value={{ onRestart: restartTurn, restarting, onAnswer: answerRequest, onContinue: continueTurn }}>
@@ -3113,35 +3131,51 @@ export function AgentOrchestratorChat({
           </FloatingLayer>;
         })() : null}
 
-        <div className="cx-scroll" ref={scroller}
+        <div className="cx-scroll" ref={scroller} role="region" aria-label="Chat messages" tabIndex={0}
           onWheel={(event) => {
             jumpingToBottom.current = false;
             // Upward only, and before the scroll lands, so a growing answer can't pull the view back.
-            if (event.deltaY < 0) following.current = false;
+            if (event.deltaY < 0 && event.currentTarget.scrollTop > 0) following.current = false;
           }}
-          onTouchStart={() => { jumpingToBottom.current = false; }}
+          onTouchStart={(event) => {
+            jumpingToBottom.current = false;
+            touchY.current = event.touches[0]?.clientY ?? null;
+          }}
+          onTouchMove={(event) => {
+            const y = event.touches[0]?.clientY;
+            if (y === undefined) return;
+            if (touchY.current !== null && y > touchY.current && event.currentTarget.scrollTop > 0) following.current = false;
+            touchY.current = y;
+          }}
+          onKeyDown={(event) => {
+            const target = event.target as HTMLElement;
+            if (event.defaultPrevented || target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+            if (event.currentTarget.scrollTop > 0 && (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey && target.tagName !== "BUTTON"))) {
+              jumpingToBottom.current = false;
+              following.current = false;
+            }
+          }}
           onPointerDown={(event) => {
             jumpingToBottom.current = false;
             // The scrollbar itself (the scroller is the target): a drag must not be pulled back down.
             if (event.target === event.currentTarget) following.current = false;
           }}
+          onPointerUp={(event) => {
+            const box = event.currentTarget;
+            if (box.scrollHeight - box.scrollTop - box.clientHeight <= 24) followBottom();
+          }}
+          onScrollEnd={() => {
+            if (jumpingToBottom.current && following.current) followBottom();
+          }}
           onScroll={(event) => {
             const box = event.currentTarget, bottom = box.scrollHeight - box.scrollTop - box.clientHeight <= 24;
-            const movedUp = box.scrollTop < lastScrollTop.current - 1;
-            lastScrollTop.current = box.scrollTop;
             if (jumpingToBottom.current && !bottom) return;
             jumpingToBottom.current = false;
-            // Layout and scroll anchoring emit scroll events too. Only a person moving away
-            // ends following; a growing answer must not turn it off before ResizeObserver runs.
+            // Layout and scroll anchoring also emit scroll events; only input pauses following.
             if (bottom) following.current = true;
-            else if (movedUp) following.current = false;
             if (bottom || !following.current) setAtBottom(bottom);
           }}>
-          <div className="cx-column" ref={column} onClickCapture={() => {
-            // Only the growth a click causes (in its next frame or so) counts as the user's.
-            clicked.current = true;
-            requestAnimationFrame(() => requestAnimationFrame(() => { clicked.current = false; }));
-          }}>
+          <div className="cx-column" ref={column}>
             {!turns.length ? <div className="cx-empty">
               {deciding && !selectedTaskId ? <div role="status">
                 <p>{projectLoadError ? `Couldn't load chats: ${projectLoadError}` : "Loading project chats…"}</p>
@@ -3170,7 +3204,7 @@ export function AgentOrchestratorChat({
                 above the chat box. Docked under the box they took up to 420 px of the pane (2026-10-31);
                 at the thread's end they still pushed it up by their whole height (2026-11-03). The
                 anchor holds no room: it sticks to the scroller's foot and the cards rise from it. */}
-            {approvals.length || computerRequests.length ? <div className="cx-approval-anchor"><div ref={approvalDock} className={`cx-approval-dock${isDeepSeekModel(latest?.nodes.find((node) => node.role === "planner")?.route?.model) ? " is-dsh" : ""}`}>
+            {approvals.length || computerRequests.length ? <div className="cx-approval-anchor"><div ref={approvalDock} className={`cx-approval-dock${activeResponseStyle.style === "deepseek" ? " is-dsh" : ""}`}>
               {computerRequests.map((request) => <ComputerControlCard key={request.id} request={request} />)}
               {approvals.map(approval => {
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
@@ -3465,6 +3499,15 @@ export function AgentOrchestratorChat({
       </aside> : null}
       {workbench && selectedTaskId ? <ChatWorkbench key={workbenchKey} sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
         subagents={subagents} renderWork={renderSubagentWork} changesTarget={changesTarget?.taskId === selectedTaskId ? changesTarget : undefined} /> : null}
+      {responseStyleNotice ? <p role="status" className="cx-note">{responseStyleNotice}</p> : null}
+      {responseSettingsOpen ? <div className="cxs-root" role="dialog" aria-label="Response style settings" onKeyDown={event => {
+        if (event.key === "Escape") { event.stopPropagation(); setResponseSettingsOpen(false); }
+      }}>
+        <aside className="cxs-nav"><button type="button" className="cxs-nav-item" onClick={() => setResponseSettingsOpen(false)}>Back to chat</button></aside>
+        <main className="cxs-panel"><div className="cxs-scroll"><div className="cxs-column"><h1 className="cxs-title">Response style</h1>
+          <ResponseStyleSettings context={responseContext} />
+        </div></div></main>
+      </div> : null}
       <ChatMenu menu={menu} onClose={() => setMenu(null)} />
     </div>
   </TurnRestart.Provider></CompactActivity.Provider></SentMessageView.Provider></Attachments.Provider>);

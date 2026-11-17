@@ -6,6 +6,8 @@ import { ChatGlyph } from "./ChatMenu";
 import { CHAT_PAGE_LIMIT, saveChatPagePreferences, useChatPagePreferences, type ChatPagePreferences } from "./chat-pages";
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
 import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
+import { publishQuotaReviews } from "./quota-reviews";
+import { ResponseStyleSettings } from "./ResponseStyleSettings";
 import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
 
@@ -29,16 +31,17 @@ const LIST_SHORTCUTS: { label: string; keys: string }[] = [
  * sidebar's Settings row or Ctrl+, (pressed again, it closes, as in Codex).
  */
 
-type Section = "general" | "chat" | "instructions" | "computer-use" | "updates";
+type Section = "general" | "chat" | "response-style" | "instructions" | "computer-use" | "updates";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "general", label: "General" },
   { id: "chat", label: "Chat" },
+  { id: "response-style", label: "Response style" },
   { id: "instructions", label: "Instructions" },
   { id: "computer-use", label: "Computer use" },
   { id: "updates", label: "Updates" },
 ];
-const SECTION_GLYPHS = { general: "gear", chat: "compose", instructions: "edit", "computer-use": "monitor", updates: "update" } as const;
+const SECTION_GLYPHS = { general: "gear", chat: "compose", "response-style": "spark", instructions: "edit", "computer-use": "monitor", updates: "update" } as const;
 
 /** What agent_instructions answers: both AGENTS.md files and the projects that can have one. */
 type InstructionFiles = { global: string; globalFile: string; workspace: string | null; workspaceFile: string | null;
@@ -152,7 +155,7 @@ function AllowedApps({ onError }: { onError: (message: string) => void }) {
 const COMPACT_CHOICES = [50, 60, 70, 80, 90, 95, 100];
 
 /** The chat's own preferences, kept by the bridge (agent-orchestrator-workflow.cjs), as Claude Code's settings. */
-type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; questionTimeout: number };
+type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; meteredReviews: boolean; questionTimeout: number };
 // "Agent questions": how long a question waits before it is answered for you (chat_question_timeout).
 // 0 keeps it, and the agent paused on it, until you answer.
 const QUESTION_TIMEOUT_DEFAULT = 30;
@@ -273,7 +276,8 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
     let live = true;
     void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges"), chatCall("chat_question_timeout")])
       .then(([compact, retry, judges, questions]) => {
-        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true,
+        publishQuotaReviews(judges.meteredReviews === true);
+        if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true, meteredReviews: judges.meteredReviews === true,
           questionTimeout: questionSeconds(questions.seconds) });
       }, () => undefined);
     return () => { live = false; };
@@ -290,11 +294,15 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
 
   // Like the update settings, a chat preference shows what the bridge kept.
   const setChatPreference = (operation: string, args: JsonObject) => {
-    run(chatCall(operation, args).then((result) => setChat((current) => current && {
+    run(chatCall(operation, args).then((result) => {
+      // Open chats' permission chips say whether Approve for me is paused by this switch.
+      if (operation === "chat_model_judges") publishQuotaReviews(result.meteredReviews === true);
+      return result;
+    }).then((result) => setChat((current) => current && {
       ...current,
       ...(operation === "chat_auto_compact" ? { autoCompact: result.autoCompact !== false, percent: Number(result.percent) || current.percent } : {}),
       ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
-      ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true } : {}),
+      ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true, meteredReviews: result.meteredReviews === true } : {}),
       ...(operation === "chat_question_timeout" ? { questionTimeout: questionSeconds(result.seconds) } : {}),
     })));
   };
@@ -424,7 +432,11 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
               </Row>
-              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead. When Auto Review can't answer, the chat's own model judges, on that model's quota">
+              <Row label="Allow quota-based reviews" description="Off by default. External command and screen reviews through CPA consume account quota, even with Codex CLI login. When off, safe rules still run and other actions wait for you. Native Codex Auto-review is separate.">
+                <Toggle label="Allow quota-based reviews" checked={chat?.meteredReviews === true} disabled={!chat}
+                  onChange={(next) => setChatPreference("chat_model_judges", { meteredReviews: next })} />
+              </Row>
+              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead. External action reviews also require Allow quota-based reviews">
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
               </Row>
@@ -450,7 +462,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <kbd className="cxs-kbd">{item.keys}</kbd>
               </Row>)}
             </Group>
-          </div> : section === "instructions" ? <div className="cxs-sections">
+          </div> : section === "response-style" ? <ResponseStyleSettings /> : section === "instructions" ? <div className="cxs-sections">
             <InstructionsSection workspaceId={workspaceId} onError={setError} />
           </div> : section === "computer-use" ? <div className="cxs-sections">
             <Group title="Always-allowed apps">

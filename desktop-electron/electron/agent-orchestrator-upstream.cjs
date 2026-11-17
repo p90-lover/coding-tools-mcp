@@ -131,6 +131,8 @@ const AGENT_RECHECK_MS = 60_000;
 const AO_READY_TIMEOUT_MS = 90_000;
 // A daemon still running at that limit is waited for this many limits longer before it is ended.
 const AO_READY_PATIENCE = 10;
+// While a start is slow, ao.start_slow reports it this often, with AO's latest output.
+const AO_START_SLOW_REPORT_MS = 60_000;
 // After a start that failed, how long before AO is started again; doubled per failure in a row.
 const AO_START_COOLDOWN_MS = 5_000;
 const AO_START_COOLDOWN_MAX_MS = 5 * 60_000;
@@ -1243,6 +1245,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (typeof value !== "string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw new Error("A valid AO session ID is required");
     return value;
   };
+  // The sessions AO has not terminated, which is all the sweeps and busy checks below look at.
+  // They used to read the whole list. AO keeps every terminated session (815 of 1,176 on
+  // 2026-11-16), and at 946 KB the list passed requestApi's 900 KB default, so every read failed
+  // with "AO response exceeds the handler limit". Idle, stranded and old sessions were then never
+  // released (which kept the list growing), and "is any agent mid-turn?" could not answer, which
+  // the auto-installer and the CPA-key restart both count as busy: no update installed itself.
+  // AO filters on `active`; the larger budget keeps a long list of live sessions readable.
+  const LIVE_SESSIONS = "/api/v1/sessions?active=true";
+  const LIVE_SESSIONS_READ = { maxBytes: 8 * 1024 * 1024 };
+  const liveSessions = async () => {
+    const list = await internalApi("GET", LIVE_SESSIONS, undefined, LIVE_SESSIONS_READ);
+    return [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+  };
   // The window each session was launched with, including a blank card's resolved full limit
   // (defaultContextWindow), which no route records and AO does not read back. The context meter
   // shows it over the agent's own report (Claude Code over ACP says 200K for any unknown model).
@@ -1863,6 +1878,14 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
               await new Promise(resolve => setTimeout(resolve, 500));
               continue;
             }
+            // A session AO has ended or no longer has holds no agent: the idle sweep need not ask
+            // again. AO's list still shows some ended chats as live ("exited", not terminated), and
+            // each sweep asked about every one of them again (six warnings a minute after a start,
+            // 2026-11-16, once the sweep could read the list at all). Other callers get the refusal.
+            if (["SESSION_TERMINATED", "SESSION_NOT_FOUND"].includes(error?.code)) {
+              exitedReleased.add(key);
+              if (exitedReleased.size > 2000) exitedReleased.delete(exitedReleased.values().next().value);
+            }
             if (!/\bAGENT_EXITED\b/.test(String(error?.message))) throw error;
             // AO stopped any host the exited session still had; the idle sweep need not ask again.
             exitedReleased.add(key);
@@ -1921,14 +1944,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * ago. Sessions that never ran a turn (pre-warmed ones) and terminal sessions are left out.
      */
     async idleChatSessions(idleMs, now = Date.now()) {
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       // An "exited" chat can still have its agent running: AO marks it exited when the daemon
       // restarts, but its chat host lives on for a reattach that never comes (five such agents held
       // 1.4 GB on 2026-10-21). Exiting it again stops that host (AO's ExitAgent), once per app run.
       const candidates = sessions.filter(session => session?.mode === "chat" && !session.isTerminated
         && !exitingAgents.has(String(session.id)) && (session.status === "idle" || (session.status === "exited" && !exitedReleased.has(String(session.id)))));
-      const idle = await Promise.all(candidates.map(async session => {
+      const idleSince = async session => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
         const turns = Array.isArray(conversation?.turns) ? conversation.turns : [];
         const last = turns[turns.length - 1];
@@ -1937,6 +1959,18 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const used = Math.max(...[last.completedAt, last.startedAt, last.requestedAt, session.lastUserMessageAt]
           .map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
         return Number.isFinite(used) && now - used >= idleMs ? String(session.id) : null;
+      };
+      // A few at a time. All at once was one conversation read per idle or exited chat in the same
+      // moment: 355 of them 20 s after the app started, again at 60 s and at 3 min, while AO was still
+      // bringing its chats back on a cold disk (2026-11-16: reads of 28 s there, and timeouts).
+      const READS_AT_ONCE = 4;
+      const idle = [];
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(READS_AT_ONCE, candidates.length) }, async () => {
+        while (next < candidates.length) {
+          const session = candidates[next++];
+          idle.push(await idleSince(session));
+        }
       }));
       return idle.filter(Boolean);
     },
@@ -1951,8 +1985,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * status, so it is released after the shorter `unavailableMs`; its next message resumes it.
      */
     async quietWorkingChatSessions(quietMs, now = Date.now(), unavailableMs = quietMs) {
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       // One the exit worker already waits on (releaseAgent) is not stopped again by the sweep.
       return sessions.filter(session => session?.mode === "chat" && !session.isTerminated && !exitingAgents.has(String(session.id))
         && (session.status === "working" || session.statusReadiness === "unavailable"))
@@ -1973,8 +2006,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     async staleSessions(workspaceIds, idleMs, now = Date.now()) {
       const projects = new Set((await Promise.all(workspaceIds.map(id => projectFor(id).catch(() => null)))).filter(Boolean));
       if (!projects.size) return [];
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       const lastUse = session => Math.max(...[session.lastUserMessageAt, session.createdAt].map(stamp => Date.parse(stamp ?? "")).filter(Number.isFinite));
       return sessions.filter(session => session && projects.has(session.projectId) && !session.isTerminated && session.isPinned !== true
         && !["working", "spawning", "starting"].includes(session.status) && Number.isFinite(lastUse(session)) && now - lastUse(session) >= idleMs)
@@ -2047,7 +2079,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           && Number.isInteger(owner?.pid) && owner.pid > 0 && daemonPort === port
           && Number.isInteger(port) && port > 0 && port <= 65535;
         if (!sameOwner()) throw new Error("AO session activity is unavailable without starting its runtime");
-        const result = await requestApi("GET", "/api/v1/sessions");
+        const result = await requestApi("GET", LIVE_SESSIONS, undefined, LIVE_SESSIONS_READ);
         if (!sameOwner() || result?.ok !== true) throw new Error("AO session activity could not be confirmed");
         const list = result.data;
         const fields = ["sessions", "items"].filter(key => list && Object.hasOwn(list, key));
@@ -2066,8 +2098,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         }
         return sessions.some(session => session.status === "working" && !session.isTerminated);
       }
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       return sessions.some(session => session?.status === "working" && !session.isTerminated);
     },
     /**
@@ -2075,8 +2106,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
      * e.g. left from an earlier run. One that took a chat keeps the name but has turns.
      */
     async warmSessions(name) {
-      const list = await internalApi("GET", "/api/v1/sessions");
-      const sessions = [...(Array.isArray(list?.sessions) ? list.sessions : []), ...(Array.isArray(list?.items) ? list.items : [])];
+      const sessions = await liveSessions();
       const candidates = sessions.filter(session => session?.displayName === name && !session.isTerminated && session.status !== "working");
       const unused = await Promise.all(candidates.map(async session => {
         const conversation = await internalApi("GET", `/api/v1/sessions/${sessionId(session.id)}/conversation?limit=1`).catch(() => null);
@@ -2440,26 +2470,28 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             error = `AO exited (${code})${daemonLines ? `: ${daemonLines.trimEnd().slice(-600)}` : ""}`;
           }
         });
-        // A daemon that exits fails at once (checkStartup); one still starting is waited for. 30 s
-        // was too short on this machine's HDD: on 2026-10-22, right after an update (with the
-        // database compaction running), the first start was given up as "AO readiness timed out",
-        // its daemon killed and a new one started from nothing, and the chats that outlived the
-        // update were not reattached. Earlier that day AO stayed down 12 minutes (16 such starts).
-        // ao.start_slow records how long a slow start really takes, to tell whether the limit fits.
+        // A daemon that exits fails at once (checkStartup); one still running is waited for, up to
+        // readyHardMs (see failedStarts). Killing a slow one only made AO slower: on 2026-10-22
+        // (30 s limit) AO stayed down 12 minutes over 16 starts, on 2026-10-24 (90 s) five starts in
+        // eight minutes, and on 2026-11-11 (90/180/360 s) about 25 minutes, each new daemon beginning
+        // again what the killed one had nearly done. ao.start_slow reports a slow start every
+        // minute, with AO's latest output, so the log shows how long a real one takes and what it
+        // was doing.
         const startedAt = Date.now();
         const limitMs = Math.max(readyLimitMs, readyHardMs);
-        let slowLogged = false;
+        let slowReportAt = readySlowMs;
         let patientLogged = false;
         while (Date.now() - startedAt < limitMs) {
           checkStartup();
+          const waitedMs = Date.now() - startedAt;
           // Past the old limit and still running (checkStartup threw otherwise): waited for, not ended.
-          if (!patientLogged && Date.now() - startedAt >= readyLimitMs) {
+          if (!patientLogged && waitedMs >= readyLimitMs) {
             patientLogged = true;
-            logger.warn?.("ao.start_waiting", { waitedMs: Date.now() - startedAt, untilMs: limitMs, output: logTail.slice(-300) });
+            logger.warn?.("ao.start_waiting", { waitedMs, untilMs: limitMs, output: logTail.slice(-300) });
           }
-          if (!slowLogged && Date.now() - startedAt >= readySlowMs) {
-            slowLogged = true;
-            logger.warn?.("ao.start_slow", { waitedMs: Date.now() - startedAt, output: logTail.slice(-300) });
+          if (waitedMs >= slowReportAt) {
+            slowReportAt = waitedMs + AO_START_SLOW_REPORT_MS;
+            logger.warn?.("ao.start_slow", { waitedMs, output: logTail.slice(-300) });
           }
           try {
             const response = await fetchOffThread(`http://127.0.0.1:${daemonPort}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(3000) });

@@ -48,6 +48,7 @@ function fixture({ decisions, failSend = false, review = false } = {}) {
       resolveApproval: async () => { sent++; if (failSend) throw new Error("delivery failed"); return { ok: true }; },
     },
   });
+  void workflow.call("chat_model_judges", { meteredReviews: true });
   const input = { workspaceId: "ws", runId: "run", nodeId: "one" };
   return { workflow, input, sent: () => sent, advance: value => { clock += value; },
     pending: async () => (await workflow.call("harness_status", input)).status.pending_approvals };

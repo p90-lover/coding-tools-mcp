@@ -341,6 +341,52 @@ export function mergeActivityFrames(current: Record<string, ChatActivity>, next:
   return same ? current : merged;
 }
 
+/** How long one run's activity read may hold the chat's poll. */
+export const ACTIVITY_READ_WAIT_MS = 10_000;
+/** A run's reads in flight at most: once all of them hang, it is asked again only after one ends. */
+export const ACTIVITY_READS_PER_RUN = 2;
+type ActivityTimers = { setTimer: (run: () => void, ms: number) => unknown; clearTimer: (handle: unknown) => void };
+/**
+ * The chat's activity poll, one call per tick: each working run's frames, keyed `${runId}:${nodeId}`,
+ * and `unanswered`, the runs whose read did not answer within `waitMs` (keepUnanswered keeps their
+ * cards as they were). The poll waited for every run's read, so one read that never came back stopped
+ * every later poll and the chat froze on its last frame: on 2026-11-16 a resumed chat said
+ * "reconnecting to the chat's agent" for 8 minutes while its agent waited on an approval nobody saw,
+ * and a fresh read at the same time answered at once.
+ */
+export function createActivityPoller(
+  read: (runId: string) => Promise<Record<string, ChatActivity> | undefined>,
+  { waitMs = ACTIVITY_READ_WAIT_MS, perRun = ACTIVITY_READS_PER_RUN,
+    setTimer = (run, ms) => setTimeout(run, ms), clearTimer = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  }: Partial<ActivityTimers> & { waitMs?: number; perRun?: number } = {},
+) {
+  const inFlight = new Map<string, number>();
+  return async function poll(runIds: string[]): Promise<{ frames: Record<string, ChatActivity>; unanswered: string[] }> {
+    const unanswered: string[] = [];
+    const frames = await Promise.all(runIds.map(async (runId): Promise<(readonly [string, ChatActivity])[]> => {
+      if ((inFlight.get(runId) ?? 0) >= perRun) { unanswered.push(runId); return []; }
+      inFlight.set(runId, (inFlight.get(runId) ?? 0) + 1);
+      const reading = read(runId).finally(() => inFlight.set(runId, (inFlight.get(runId) ?? 1) - 1));
+      let timer: unknown;
+      const late = new Promise<"late">((resolve) => { timer = setTimer(() => resolve("late"), waitMs); });
+      try {
+        const nodes = await Promise.race([reading, late]);
+        if (nodes === "late") { unanswered.push(runId); return []; }
+        return Object.entries(nodes ?? {}).map(([nodeId, frame]) => [`${runId}:${nodeId}`, frame] as const);
+      } catch { return []; } finally { clearTimer(timer); }
+    }));
+    return { frames: Object.fromEntries(frames.flat()), unanswered };
+  };
+}
+
+/** `next`, with the cards of the runs in `unanswered` kept as `current` held them. */
+export function keepUnanswered(current: Record<string, ChatActivity>, next: Record<string, ChatActivity>,
+  unanswered: string[]): Record<string, ChatActivity> {
+  if (!unanswered.length) return next;
+  const kept = Object.entries(current).filter(([key]) => unanswered.some((runId) => key.startsWith(`${runId}:`)));
+  return kept.length ? { ...Object.fromEntries(kept), ...next } : next;
+}
+
 /**
  * A card's turn as the chat keeps it: a poll carries only the newest items, so the ones seen in
  * earlier polls that have since fallen out of that window stay in front of it, and a long turn
