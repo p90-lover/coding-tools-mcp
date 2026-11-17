@@ -1,13 +1,14 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "be1c634b212d167cf6c631995f933504e24f7549",
+    "commit": "4b20af1a2be4c7ee4e3ac1091cddce4a910c1de6",
     "license": "MIT"
   },
   "changes": [
+    "Auto Review: reviews run on the chosen accounts in order (primary, then Codex fallbacks), and no other; the page lists every review CPA served with each account's place in the chain",
     "Accounts: Codex cards show manual resets and the plan renewal with Reset quota, as CPA's panel does; quota as bar rows; credits 0 when none; each card shows 24 h / 7 d use with cache-hit tokens, cache rate and cost; All / Enabled / Disabled / Hold filter kept across restarts",
     "Fallbacks lists every API key and provider in CPA with its use and credits (DeepSeek balance, OpenRouter key budget); Providers > In CPA lists every provider; Auto Review keeps and lists its recent reviews across config reloads",
     "A key that answers that it has no credits (OpenAI insufficient_quota / credit_balance_exhausted, Anthropic, DeepSeek, HTTP 402) is left out of routing for 30 min, doubling to 12 h, and CPA's own selector is told to skip it; a request that succeeds on it, or Credits added, puts it back",
@@ -28,8 +29,8 @@
   "platforms": {
     "win32/x64": {
       "path": "windows/amd64/cpa-provider-manager-v0.9.0.dll",
-      "sha256": "d3818b1d414f5d997984752772d795261b44a92834bc19908891d6ee38b525f6",
-      "size": 27300864
+      "sha256": "5c982511a986c806c07bf09c995a8ee95dd0971ea43a986612e48ff64d891a6f",
+      "size": 27314176
     }
   }
 }
