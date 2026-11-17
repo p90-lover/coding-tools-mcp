@@ -144,7 +144,7 @@ test("a new chat's Team picker sits in the chat header, with no setting bar abov
 test("Chat mounts the AO chat surface and the original AO UI links back to it", () => {
   assert.match(appSource, /keepAlive\("agent-orchestrator", \(\) => \(\s*<section className="gpb-chat"[\s\S]*?<ChatPages language=\{language\} setError=\{setError\} \/>/);
   const pages = fs.readFileSync(path.join(launcherRoot, "src/features/ChatPages.tsx"), "utf8");
-  assert.match(pages, /<AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} \/>/);
+  assert.match(pages, /<AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} pageId=\{id\} \/>/);
   assert.match(appSource, /keepAlive\("agent-orchestrator-original", \(\) => \(\s*<AgentOrchestratorOriginalSurface openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
   assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });

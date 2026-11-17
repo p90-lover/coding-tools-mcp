@@ -186,6 +186,79 @@ test("page 1 keeps legacy workspace and split keys; other pages and saved select
   assert.equal(api.readPageSelection(2), null);
 });
 
+// ---- closing a page ----
+
+test("closing a page keeps the pages after it on their own saved state, and a new page never takes a closed page's id", () => {
+  const { api, values } = load();
+  api.saveChatPagePreferences({ pageCount: 4 });
+  assert.deepEqual(plain(api.chatPageIds(api.parseChatPagePreferences(values.get(api.CHAT_PAGES_STORE)))), [1, 2, 3, 4], "page n is id n");
+  assert.equal(JSON.parse(values.get(api.CHAT_PAGES_STORE)).pageIds, undefined, "nothing more is saved until a page closes");
+
+  const closing = api.closedChatPage(api.parseChatPagePreferences(values.get(api.CHAT_PAGES_STORE)), 2, 1);
+  assert.equal(closing.closedId, 2);
+  assert.deepEqual(plain(closing.patch), { pageCount: 3, pageIds: [1, 3, 4], lastPageId: 4 },
+    "pages 3 and 4 move up a place and keep ids 3 and 4, so their keys stay where they are");
+  const saved = api.saveChatPagePreferences(closing.patch);
+  assert.deepEqual(plain(api.chatPageIds(saved)), [1, 3, 4]);
+  // As after a restart: what was saved is read back.
+  const reread = api.parseChatPagePreferences(values.get(api.CHAT_PAGES_STORE));
+  assert.deepEqual(plain(api.chatPageIds(reread)), [1, 3, 4]);
+  assert.equal(api.chatPageKey("coding-tools:ao:split-view", api.chatPageIds(reread)[1]), "coding-tools:ao:split-view:page-3",
+    "page 2 is the old page 3, on page 3's split layout");
+
+  // A page added (+ or Settings' Add page) gets a new id, also after the last page closed.
+  assert.deepEqual(plain(api.chatPageIds(api.saveChatPagePreferences({ pageCount: 4 }))), [1, 3, 4, 5]);
+  const last = api.closedChatPage(api.parseChatPagePreferences(values.get(api.CHAT_PAGES_STORE)), 4, 4);
+  api.saveChatPagePreferences(last.patch);
+  assert.deepEqual(plain(api.chatPageIds(api.saveChatPagePreferences({ pageCount: 4 }))), [1, 3, 4, 6], "id 5 is not given out again");
+  // Corrupt ids fall back to page n = id n rather than to no pages.
+  assert.deepEqual(plain(api.chatPageIds(api.parseChatPagePreferences('{"pageCount":3,"pageIds":[1,1,"x"]}'))), [1, 2, 3]);
+});
+
+test("the last page cannot be closed, nor a page that is not open", () => {
+  const { api } = load();
+  const one = api.parseChatPagePreferences(null);
+  assert.equal(api.closedChatPage(one, 1, 1), null, "the last page stays");
+  const three = configured(api);
+  for (const page of [0, 4, 1.5, Number.NaN]) assert.equal(api.closedChatPage(three, page, 1), null, `page ${page}`);
+});
+
+test("closing the open page opens the one before it; closing another keeps the open page open", () => {
+  const { api } = load();
+  const five = { ...plain(api.DEFAULT_CHAT_PAGES), pageCount: 5 };
+  const opens = (page, active) => api.closedChatPage(five, page, active).active;
+  assert.equal(opens(3, 3), 2, "the open page closed: the previous page opens");
+  assert.equal(opens(1, 1), 1, "the first page closed while open: the next page, now first, opens");
+  assert.equal(opens(5, 5), 4);
+  assert.equal(opens(2, 4), 3, "a page before the open one: the open page moves up a place and stays open");
+  assert.equal(opens(4, 2), 2, "a page after the open one: nothing moves");
+});
+
+test("a closed page's saved selection, split layout and project are removed; page 1's project key is shared and stays", () => {
+  const { api } = load();
+  assert.deepEqual(plain(api.closedPageKeys(3, "coding-tools:ao:split-view")),
+    ["coding-tools:ao:chat-pages:selection:page-3", "coding-tools:ao:split-view:page-3", "coding-tools:ao:workspace:page-3"]);
+  assert.deepEqual(plain(api.closedPageKeys(1, "coding-tools:ao:split-view")),
+    ["coding-tools:ao:chat-pages:selection", "coding-tools:ao:split-view"], "the Teams and Subagents surfaces read coding-tools:ao:workspace too");
+});
+
+test("a chat waiting for a page is dropped with it, and one waiting for a later page follows that page", () => {
+  const { api } = load();
+  let count = 4;
+  const registry = api.createChatPageRegistry(() => {}, { count: () => count, canAdd: () => false, add: () => false });
+  // Pages 1 and 3 are full; the chats they hand on wait on pages 2 and 4 until those have loaded.
+  registry.register(1, [], () => {}, { room: () => false });
+  registry.register(3, [], () => {}, { room: () => false });
+  assert.equal(registry.openElsewhere(1, { workspaceId: "ws", taskId: "a", maxColumns: 2 }), true);
+  assert.equal(registry.openElsewhere(3, { workspaceId: "ws", taskId: "b", maxColumns: 2 }), true);
+  registry.closed(2);
+  count = 3;
+  assert.equal(registry.takeOpen(2), undefined, "page 2's chat went with page 2");
+  const moved = registry.takeOpen(3);
+  assert.equal(moved?.taskId, "b", "page 4's chat waits on that page, now page 3");
+  assert.deepEqual(plain(moved.tried), [2], "the page it came from (3) moved up to 2 with it");
+});
+
 test("an existing chat returns to its page and exact split pane, with project-scoped ownership", () => {
   const { api } = load();
   const seen = [];

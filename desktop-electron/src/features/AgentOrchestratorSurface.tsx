@@ -609,16 +609,22 @@ export type SplitPaneLink = {
   onClose: () => void;
 };
 
-export function AgentOrchestratorSurface({ language, setError, pane, pageNumber = 1 }: {
+/**
+ * `pageNumber`: the chat page this surface is on now (the registry and the page tabs go by it).
+ * `pageId`: what the page's own state is stored under (chatPageKey, its new-chat draft); it stays
+ * the same when a page before it closes and this one moves up a place.
+ */
+export function AgentOrchestratorSurface({ language, setError, pane, pageNumber = 1, pageId = pageNumber }: {
   language: Language;
   setError: (error: string | null) => void;
   pane?: SplitPaneLink;
   pageNumber?: number;
+  pageId?: number;
 }) {
   const copy = words[language];
   const surfaceHidden = useSurfaceHidden();
   const pageRegistry = useContext(ChatPagesContext);
-  const [initialPageSelection] = useState(() => !pane && pageRegistry ? readPageSelection(pageNumber) : null);
+  const [initialPageSelection] = useState(() => !pane && pageRegistry ? readPageSelection(pageId) : null);
   const attachmentPreview = useCallback((file: string) => window.codexWebLauncher?.attachmentPreview?.(file)
     ?? Promise.reject(new Error("Previews show in the desktop app")), []);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
@@ -633,12 +639,12 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [workspaceId, setWorkspaceId] = useState(() => {
     if (pane) return pane.workspaceId;
     if (initialPageSelection) return initialPageSelection.workspaceId;
-    try { return localStorage.getItem(chatPageKey("coding-tools:ao:workspace", pageNumber)) || localStorage.getItem("coding-tools:ao:workspace") || ""; }
+    try { return localStorage.getItem(chatPageKey("coding-tools:ao:workspace", pageId)) || localStorage.getItem("coding-tools:ao:workspace") || ""; }
     catch { return ""; }
   });
   // The chat a split pane is to show once its project has loaded (null: not a pane).
   const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId }
-    : initialPageSelection ?? (pageRegistry && pageNumber > 1 ? { workspaceId, taskId: "" } : null));
+    : initialPageSelection ?? (pageRegistry && pageId > 1 ? { workspaceId, taskId: "" } : null));
   const paneSelectionPending = useRef(false);
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
@@ -2147,7 +2153,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [splitMaxCols, setSplitMaxCols] = useState(2);
   const [splitWeightsSaved, setSplitWeightsSaved] = useState<number[] | undefined>(undefined);
   const [splitRow, setSplitRow] = useState(SPLIT_ROW.DEFAULT);
-  const splitStore = chatPageKey(SPLIT_STORE, pageNumber);
+  const splitStore = chatPageKey(SPLIT_STORE, pageId);
   // A chat another page had no screen for: taken once this page's saved split has loaded (splitReady).
   const [splitReady, setSplitReady] = useState(false);
   const [pageOpenAsked, setPageOpenAsked] = useState(0);
@@ -2166,9 +2172,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, splitPanes]);
   useEffect(() => {
     if (pane || !pageRegistry || chatTaskId === null || loadedWorkspace !== workspaceId) return;
-    try { localStorage.setItem(chatPageKey(`${CHAT_PAGES_STORE}:selection`, pageNumber), JSON.stringify({ workspaceId, taskId: chatTaskId })); }
+    try { localStorage.setItem(chatPageKey(`${CHAT_PAGES_STORE}:selection`, pageId), JSON.stringify({ workspaceId, taskId: chatTaskId })); }
     catch { /* Keep the selected chat for this session. */ }
-  }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, loadedWorkspace]);
+  }, [pane, pageRegistry, pageId, workspaceId, chatTaskId, loadedWorkspace]);
   /** The pane already showing a chat, so a chat is never open twice (both would send its queue). */
   const paneShowing = (id: string, taskId: string) => !taskId ? undefined : workspaceId === id && chatTaskId === taskId ? "main"
     : splitPanes.find((item) => item.workspaceId === id && item.taskId === taskId)?.id;
@@ -2642,7 +2648,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     setWorkspaceId(id);
     setChatTaskId(null);
     if (pane) return;
-    try { localStorage.setItem(chatPageKey("coding-tools:ao:workspace", pageNumber), id); } catch { /* Selection still works for this session. */ }
+    try { localStorage.setItem(chatPageKey("coding-tools:ao:workspace", pageId), id); } catch { /* Selection still works for this session. */ }
   };
   const chooseWorkspace = (id: string) => {
     // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
@@ -3199,7 +3205,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           maxColumns={splitMaxCols} onMaxColumns={setSplitMaxCols}
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
-          panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError} pageNumber={pageNumber}
+          panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError} pageNumber={pageNumber} pageId={pageId}
             pane={{ id: item.id, workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id, newScreen) => newScreen ? openNewChat(id, true) : newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
@@ -3209,7 +3215,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
-                draftScope={pane?.id ?? (pageNumber === 1 ? "main" : `page-${pageNumber}`)}
+                draftScope={pane?.id ?? (pageId === 1 ? "main" : `page-${pageId}`)}
                 projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}
