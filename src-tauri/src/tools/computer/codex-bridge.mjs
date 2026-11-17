@@ -55,8 +55,39 @@ export function validateCall(method, params) {
   if (JSON.stringify(params).length > 32768) fail('CODEX_REQUEST_TOO_LARGE');
 }
 
-export function createBridge({ client, windowId, executable }) {
-  let closed = false, nativeWindow = null;
+// The engine stops reading a window's accessibility text after 8 s (its UI Automation limit) and
+// then fails the whole read, screenshot included, saying to read the window again without text.
+// A window with about a thousand controls or more takes that long on every read (measured
+// 2026-11-17 on the installed engine: 500 controls 4.2 s, 900 6.8 s, 1500 past the limit), and on a
+// busy machine fewer do. computer_snapshot always asks for text, so it could not see such a window
+// at all: "The Codex engine refused this call (CODEX_CAPTURE_FAILED)". The read is done again as the
+// engine says, and the snapshot says why it has no text. For a minute after that, reads of the
+// window skip the text: it would most likely run out again, and the 8 s wait plus the reread
+// came close to the 12 s the app gives one call (codex.rs exchange).
+const TEXT_TIMEOUT = /UI Automation operation exceeded \d+ ?ms/i;
+export const TEXT_SKIP_MS = 60_000;
+export const TEXT_UNAVAILABLE = "This window's accessibility text took longer than the engine allows, so this snapshot has "
+  + 'the screenshot only and no element indexes. Use coordinates in the screenshot; the text is tried again a minute later.';
+
+export function createBridge({ client, windowId, executable, now = () => Date.now() }) {
+  let closed = false, nativeWindow = null, textSkippedUntil = -Infinity;
+  // A screenshot of the window without its text (see TEXT_TIMEOUT).
+  async function screenshotOnly(params, window) {
+    const result = await client.get_window_state({ ...params, include_text: false, include_screenshot: true, window });
+    return object(result) ? { ...result, accessibility: { unavailable: TEXT_UNAVAILABLE } } : result;
+  }
+  async function readState(params, window) {
+    // Only a read that wants a screenshot can do without the text.
+    const textOptional = params.include_text === true && params.include_screenshot !== false;
+    if (textOptional && now() < textSkippedUntil) return screenshotOnly(params, window);
+    try {
+      return await client.get_window_state({ ...params, window });
+    } catch (error) {
+      if (!textOptional || closed || !TEXT_TIMEOUT.test(String(error?.message ?? ''))) throw error;
+      textSkippedUntil = now() + TEXT_SKIP_MS;
+      return screenshotOnly(params, window);
+    }
+  }
   function approve(request) {
     const meta = request?.meta;
     if (closed || meta?.connector_id !== 'computer-use' || !sameExecutable(meta?.tool_params?.app, executable)) {
@@ -81,7 +112,7 @@ export function createBridge({ client, windowId, executable }) {
         return window;
       }
       if (params.window !== undefined && (!object(params.window) || params.window.id !== windowId || params.window.app !== window.app)) fail('CONTROL_SCOPE_MISMATCH');
-      const result = await client[method]({ ...params, window });
+      const result = method === 'get_window_state' ? await readState(params, window) : await client[method]({ ...params, window });
       if (closed) fail('CODEX_ENGINE_CLOSED');
       if (method === 'get_window_state') {
         if (!object(result) || result.window?.id !== windowId || result.window?.app !== window.app || !Array.isArray(result.screenshots)) fail('INVALID_CODEX_RESPONSE');
