@@ -34,13 +34,17 @@ function fixture(createConnector = async () => ({ created: true, connected: true
   };
   const jsx = (type, props, key) => ({ type, props: props ?? {}, key });
   const exports = {};
-  const code = ts.transpileModule(fs.readFileSync(path.join(__dirname, "../src/features/ChatGptBrowserManagement.tsx"), "utf8"), {
+  const transpile = file => ts.transpileModule(fs.readFileSync(path.join(__dirname, "../src/features", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText;
-  vm.runInNewContext(code, { exports, console, window: { setTimeout: () => 1, clearTimeout() {} },
+  // The card's Platform sign-in (2026-11-17) runs the real helper; its retry waits are not reached here.
+  const platform = {};
+  vm.runInNewContext(transpile("platform-in-browser.ts"), { exports: platform, setTimeout });
+  vm.runInNewContext(transpile("ChatGptBrowserManagement.tsx"), { exports, console, window: { setTimeout: () => 1, clearTimeout() {} },
     require(name) {
       if (name === "react") return react;
       if (name === "react/jsx-runtime") return { jsx, jsxs: jsx, Fragment: "fragment" };
+      if (name === "./platform-in-browser") return platform;
       if (name.endsWith(".css")) return {};
       throw new Error(`Unexpected UI import: ${name}`);
     },
@@ -116,6 +120,29 @@ test("an account MCP button sends its exact ID and does not retain another sign-
   assert(button(ui.card("second"), "Connect MCP"), "a different identity must be checked again");
   ui.accounts[1].signedIn = false;
   assert.equal(button(ui.card("second"), "Connect MCP").props.disabled, true);
+});
+
+// Live 2026-11-17: Connect MCP stopped at OpenAI Platform's sign-in, and the account had nowhere to finish it.
+test("a card stopped at Platform's sign-in opens it in the Browser tab on that account", async () => {
+  const { PLATFORM_SIGN_IN_UNFINISHED } = require("../electron/mcp-connector-setup.cjs");
+  const signIn = "Sign in to OpenAI Platform";
+  const offers = tree => nodes(tree).some(node => node.type === "button" && text(node) === signIn);
+  const ui = fixture(async () => { throw new Error(`${PLATFORM_SIGN_IN_UNFINISHED} It stopped at platform.openai.com/login.`); });
+  const opened = [];
+  ui.api.openBrowserUrl = async url => { opened.push(url); return {}; };
+  assert.equal(offers(ui.card("second")), false);
+  button(ui.card("second"), "Connect MCP").props.onClick();
+  await ui.flush();
+  button(ui.card("second"), signIn).props.onClick();
+  await ui.flush();
+  assert.deepEqual(ui.calls.switches, ["second"]);
+  assert.equal(ui.calls.browserOpened, 1);
+  assert.deepEqual(opened, ["https://platform.openai.com/login"]);
+  // The automatic setup's saved failure offers it too; other failures do not.
+  ui.accounts[2].connector = { okAt: null, error: `${PLATFORM_SIGN_IN_UNFINISHED} It stopped at auth.openai.com/log-in.`, errorAt: Date.now() };
+  assert.equal(offers(ui.card("third")), true);
+  ui.accounts[2].connector = { okAt: null, error: "MCP ownership metadata is unavailable or exceeded its bound.", errorAt: Date.now() };
+  assert.equal(offers(ui.card("third")), false);
 });
 
 test("bulk MCP setup is sequential, continues after failure, and requires connected true", async () => {

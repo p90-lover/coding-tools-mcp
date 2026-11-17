@@ -1113,6 +1113,7 @@ function LauncherShell({
                   setMcpTargetMode(null);
                   navigateSurface("browser");
                 }}
+                onOpenBrowser={() => navigateSurface("browser")}
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
@@ -1890,6 +1891,7 @@ function McpSurface({
   interactionMode,
   language,
   onDone,
+  onOpenBrowser,
   operation,
   setError,
   snapshot,
@@ -1901,6 +1903,8 @@ function McpSurface({
   interactionMode: BrowserInteractionMode;
   language: Language;
   onDone: () => void;
+  /** Shows the Browser tab, where a tunnel's Platform settings open. */
+  onOpenBrowser: () => void;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;
@@ -2089,7 +2093,7 @@ function McpSurface({
                     {copy.replaceCredentials}
                   </button>
                   {!devProfile && !configuringInactiveMode ? (
-                    <McpTunnelsPanel api={api!} initial={snapshot.mcpTunnels ?? []} setError={setError} />
+                    <McpTunnelsPanel api={api!} initial={snapshot.mcpTunnels ?? []} setError={setError} onOpenBrowser={onOpenBrowser} />
                   ) : null}
                 </div>
               ) : (

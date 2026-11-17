@@ -10,6 +10,7 @@ import type {
   ProviderNetworkSnapshot,
   ProxyProfileRecord,
 } from "../types";
+import { needsPlatformSignIn, openPlatformInBrowser, PLATFORM_SIGN_IN_URL } from "./platform-in-browser";
 import "./chatgpt-browser-management.css";
 
 const CONFIRM_WINDOW_MS = 4_000;
@@ -603,6 +604,10 @@ function AccountCard({
     onOpenBrowser?.();
     await api.openLogin();
   });
+  // Connect MCP stopped at OpenAI Platform's sign-in: it opens in the Browser tab, for the person to finish.
+  const platformSignIn = () => run(`platform:${account.id}`, () => openPlatformInBrowser({
+    api, accountId: account.id, url: PLATFORM_SIGN_IN_URL, showBrowser: onOpenBrowser,
+  }));
 
   const remove = () => {
     if (!confirmRemove) {
@@ -784,6 +789,12 @@ function AccountCard({
           onClick={() => void connect()} title={signedIn === true ? mcpAccess.detail : "Sign in to this account first"} type="button">
           {connectionCheck?.state === "connecting" ? "Connecting…" : connectionCheck?.state === "connected" ? "Check connection" : "Connect MCP"}
         </button>
+        {connector.tone === "error" && needsPlatformSignIn(connector.detail) ? (
+          <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void platformSignIn()}
+            title="Opens OpenAI Platform's sign-in for this account in the Browser tab" type="button">
+            {isRunning(`platform:${account.id}`) ? "Opening…" : "Sign in to OpenAI Platform"}
+          </button>
+        ) : null}
         {!inUse ? (
           <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void use()} type="button">
             {isRunning(`use:${account.id}`) ? "Switching…" : "Use in Browser tab"}
