@@ -363,7 +363,7 @@ function refusedReason(error) {
  */
 // One distinctive phrase of each refusal aoLaunchArgs throws, not "Launch failed:" as a whole: a
 // launch that timed out is what "Retry automatically" is for.
-// "Antigravity asks for approval in its own terminal" is how a card saved before 0.8.135 says it.
+// "Antigravity asks for approval in its own terminal" is how a card saved before 0.8.137 says it.
 const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Choose Full access, the only mode it runs in|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
 /**
  * AO could not run the agent's program at all: its version probe failed ("chat driver incompatible:

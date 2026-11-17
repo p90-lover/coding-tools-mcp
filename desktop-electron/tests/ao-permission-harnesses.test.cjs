@@ -56,7 +56,7 @@ test("a launch the app refused is a route refusal; a failure a later try can get
   const fullAccessOnly = engine.match(/const FULL_ACCESS_ONLY = "([^"]+)"/)?.[1];
   assert.ok(fullAccessOnly, "FULL_ACCESS_ONLY is still a literal");
   for (const refusal of [TUPLE_REFUSAL, `Launch failed: Pi runs its tools without asking first. ${fullAccessOnly}`,
-    // A card saved before 0.8.135 says it in agy's old words.
+    // A card saved before 0.8.137 says it in agy's old words.
     "Launch failed: Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.",
     "Launch failed: Single assistant: pi can't use the CPA model cpa/opencode-go/glm-5.3-flash. Choose one of its own models.",
     "Launch failed: Choose a supported CPA reasoning level"]) assert.match(refusal, ROUTE_REFUSED, refusal);
