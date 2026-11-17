@@ -3915,6 +3915,24 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
   }
 });
 
+test("API provider models missing from the enhanced catalog are discovered from the standard list", async () => {
+  for (const enhanced of [[], [{ slug: "gpt-fixture", context_window: 1000000, supported_reasoning_levels: ["high"] }]]) {
+    const workflow = createAgentOrchestratorWorkflow({
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+      fetchImpl: async (url) => ({ ok: true, json: async () => String(url).includes("/auth-files") ? { files: [] }
+        : String(url).includes("client_version") ? { models: enhanced } : { data: [
+          { id: "gpt-fixture", owned_by: "codex" }, { id: "custom/vendor-model", owned_by: "custom-api", context_length: 64000 },
+        ] } }),
+    });
+    const listed = await workflow.call("models", { harness: "ao:claude-code" });
+    assert.ok(listed.models.includes("cpa/custom/vendor-model"));
+    assert.equal(listed.capabilities["cpa/custom/vendor-model"].provider, "custom-api");
+    assert.equal(listed.capabilities["cpa/custom/vendor-model"].contextLimit, 64000);
+    assert.equal(listed.models.filter((id) => id === "cpa/gpt-fixture").length, 1);
+    if (enhanced.length) assert.equal(listed.capabilities["cpa/gpt-fixture"].contextLimit, 1000000);
+  }
+});
+
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;

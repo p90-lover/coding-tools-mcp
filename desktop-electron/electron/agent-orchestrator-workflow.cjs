@@ -1330,8 +1330,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const response = await fetchImpl(`${baseUrl}/v1/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5_000) });
       if (!response.ok) return null;
       const rows = (await response.json())?.data;
-      return Array.isArray(rows) ? new Map(rows.filter(row => typeof row?.id === "string" && typeof row.owned_by === "string")
-        .map(row => [row.id, row.owned_by.trim().toLowerCase()])) : null;
+      return Array.isArray(rows) ? { rows, owners: new Map(rows.filter(row => typeof row?.id === "string" && typeof row.owned_by === "string")
+        .map(row => [row.id, row.owned_by.trim().toLowerCase()])) } : null;
     } catch { return null; }
   }
 
@@ -1640,6 +1640,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const cpa = connection();
     const { baseUrl, key } = cpa;
     let rows;
+    let enhanced = false;
     // The classic OpenAI list contains only IDs; the enhanced catalog carries capabilities.
     for (const suffix of ["?client_version=pi", ""]) {
       try {
@@ -1649,7 +1650,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (!response.ok) throw new Error(`CPA model catalog returned HTTP ${response.status}`);
         const payload = await response.json();
         rows = Array.isArray(payload?.models) ? payload.models : Array.isArray(payload?.data) ? payload.data : null;
-        if (rows) break;
+        if (rows) { enhanced = Boolean(suffix); break; }
         throw new Error("CPA model catalog has an unsupported shape");
       } catch (error) { if (!suffix) throw error; }
     }
@@ -1661,9 +1662,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // Who serves each model, from the plain list's owned_by. The enhanced catalog names no provider,
     // so every model was filed by its name: Antigravity's claude-sonnet-4-6 under Claude and its
     // gemini-… under Gemini, as if Antigravity and a Claude sign-in or API key were one provider.
+    const plain = enhanced ? await modelOwners(cpa) : null;
+    if (plain) {
+      // Custom API providers can list IDs without enhanced capability metadata.
+      const listedIds = new Set(rows.map(entry => entry?.slug ?? entry?.id));
+      rows = [...rows, ...plain.rows.filter(entry => typeof entry?.id === "string" && !listedIds.has(entry.id))];
+    }
     const listed = rows?.some(entry => typeof entry?.owned_by === "string");
-    const owners = listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
-      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
+    const owners = plain?.owners ?? (listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
+      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : null);
     const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
     const disabled = (id, provider, live = false) => {
