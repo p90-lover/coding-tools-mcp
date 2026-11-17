@@ -549,6 +549,47 @@ test("a Provider Manager card names OpenCode and shows its windows; idle cards l
   assert.deepEqual([first.button.clicks, second.button.clicks], [2, 2], "pressed again after the refresh period, one per tick");
 });
 
+test("a Provider Manager API-key card shows the remaining balance from quota.balances", async () => {
+  const state = { providers: [
+    { id: "openai-api", kind: "openai", enabled: true, quota: { balances: [
+      { kind: "credit", currency: "USD", remaining: 12.5 },
+    ] } },
+    { id: "opencode-go", kind: "opencode-go", enabled: true, quota: { windows: {
+      rolling: { percent: 30, resetsAt: "2026-10-24T09:00:00Z", status: "ok" },
+    }, balances: [ { kind: "key-budget", currency: "USD", remaining: 3.25 } ] } },
+  ] };
+  const routes = {
+    "/v0/management/cpa-provider-manager/api/state": () => state,
+    "/v0/management/auth-files": () => ({ files: [] }),
+  };
+  const q = quotaPage({ hash: "#/auth-files", usage: { accounts: [] }, routes });
+  const api = authCard("cpa-provider-manager-openai-api", { badge: "Provider-manager", runtime: true });
+  const go = authCard("cpa-provider-manager-opencode-go", { badge: "Provider-manager", runtime: true });
+  q.page.append(api.card, go.card);
+  q.run();
+  for (let i = 0; i < 6; i++) await q.settle();
+  q.tick();
+
+  const apiBlock = api.card.children.at(-2);
+  assert.equal(apiBlock.dataset.codingTools, "provider-quota-openai-api");
+  assert.match(apiBlock.textContent, /Remaining balance/);
+  assert.match(apiBlock.textContent, /USD/);
+  assert.match(apiBlock.textContent, /12[.,]50/);
+
+  const goBlock = go.card.children.at(-2);
+  assert.equal(goBlock.dataset.codingTools, "provider-quota-opencode-go");
+  assert.match(goBlock.textContent, /Key budget/);
+  assert.match(goBlock.textContent, /3[.,]25/);
+  assert.match(goBlock.textContent, /70% left/);
+
+  // A failed quota read keeps the last remaining balance on screen.
+  state.providers[0].quota = { error: "usage answered HTTP 500" };
+  q.clock.now += 2 * 60e3 + 1;
+  q.tick();
+  for (let i = 0; i < 6; i++) await q.settle();
+  assert.match(api.card.children.at(-2).textContent, /12[.,]50/);
+});
+
 test("Auth Files cards get the Cline Pass windows and each Codex account's credit balance", async () => {
   const calls = [];
   const files = { files: [

@@ -139,6 +139,7 @@ test("the global proxy login handler leaves owned Antigravity authentication to 
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
     "./proxy-gateway-retire.cjs": { retireProxyGateway: async () => ({ retired: false }) },
     "./proxybridge-nova.cjs": { createNovaManager: () => ({ start: async () => {}, stopPolling() {} }) },
+    "./cpa-auth-inventory.cjs": require("../electron/cpa-auth-inventory.cjs"),
   };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
     module: loaded, require: name => dependencies[name], console,
@@ -196,6 +197,7 @@ test("provider and proxy IPC answer only a Coding Tools window's own page; netwo
     "./profile.cjs": { resolveLauncherProfile: () => ({ browserPartition: "test" }) },
     "./proxy-gateway-retire.cjs": { retireProxyGateway: async () => ({ retired: false }) },
     "./proxybridge-nova.cjs": { createNovaManager: () => ({ start: async () => {}, stopPolling() {}, state: () => ({ running: false }), routing: async (action) => ({ action }) }) },
+    "./cpa-auth-inventory.cjs": require("../electron/cpa-auth-inventory.cjs"),
   };
   require("node:vm").runInNewContext(fs.readFileSync(path.join(__dirname, "../electron/provider-bootstrap.cjs"), "utf8"), {
     module: loaded, require: name => dependencies[name], console,
