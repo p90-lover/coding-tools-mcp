@@ -3937,6 +3937,31 @@ test("API provider models missing from the enhanced catalog are discovered from 
   }
 });
 
+test("enabled CPA accounts automatically reload standard-list models after a catalog refresh", async () => {
+  let clock = 1_000_000;
+  let enabled = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async (url) => ({ ok: true, json: async () => String(url).includes("/auth-files")
+      ? { files: [{ name: "cline-account.json", provider: "cline", disabled: !enabled }] }
+      : String(url).includes("client_version") ? { models: [{ slug: "gpt-fixture" }] }
+        : { data: [{ id: "gpt-fixture", owned_by: "codex" }, { id: "cline-pass/custom-model", owned_by: "cline" }] } }),
+  });
+  const before = await workflow.call("models", {});
+  assert.ok(!before.models.includes("cline-pass/custom-model"));
+  enabled = true;
+  clock += 60_001;
+  const after = await workflow.call("models", {});
+  assert.ok(after.models.includes("cline-pass/custom-model"));
+  assert.equal(after.capabilities["cline-pass/custom-model"].provider, "cline");
+  enabled = false;
+  clock += 60_001;
+  const disabled = await workflow.call("models", {});
+  assert.ok(!disabled.models.includes("cline-pass/custom-model"));
+  assert.match(disabled.unavailable["cline-pass/custom-model"], /disabled in CPA/);
+});
+
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;
