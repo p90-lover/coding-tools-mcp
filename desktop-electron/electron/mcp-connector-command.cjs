@@ -4,7 +4,7 @@ const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { writePrivateFileAtomic, writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { SETUP_CHECK_MESSAGE } = require("./chatgpt-cloudflare-check.cjs");
-const { PLATFORM_SIGN_IN_UNFINISHED } = require("./mcp-connector-setup.cjs");
+const { PLATFORM_SIGN_IN_UNFINISHED, CHATGPT_SIGNED_OUT } = require("./mcp-connector-setup.cjs");
 
 const PREFLIGHT_FAILURES = new Map([
   ["manual_browser_inspection_disabled", "MCP connector setup is disabled in Zero Risk mode."],
@@ -37,6 +37,8 @@ const PREFLIGHT_FAILURES = new Map([
   ["creation_failed", "The account's MCP tunnel changed or is not ready."],
   ["verification_required", SETUP_CHECK_MESSAGE],
   ["platform_sign_in_required", PLATFORM_SIGN_IN_UNFINISHED],
+  // Only the person can sign in again: automatic setup waits for that instead of retrying.
+  ["verification_required", CHATGPT_SIGNED_OUT],
 ].map(([code, message]) => [message, { code, message }]));
 
 // The setup's own words for the ChatGPT page step that did not happen. Each names what to look at,
