@@ -1060,7 +1060,7 @@ test("composer execution binds only the explicit single route or a real saved-te
     "a team saved from another project runs here too");
   assert.throws(() => surface.aoChatExecution("team", route, teams, "deleted"), /saved team/i);
   // The chat's permission mode goes as picked on every harness. Dropping it on Pi and opencode
-  // (until 0.8.134) left them on AO's own "auto": opencode then allowed every tool unasked. A mode an
+  // (until 0.8.135) left them on AO's own "auto": opencode then allowed every tool unasked. A mode an
   // agent can't run in is refused at launch with the reason (aoLaunchArgs), never swapped here.
   const carried = { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
   for (const harness of ["ao:pi", "ao:opencode", "ao:claude-code"]) {

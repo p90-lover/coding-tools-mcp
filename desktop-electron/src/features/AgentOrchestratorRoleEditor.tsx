@@ -116,7 +116,7 @@ export function workerRoute(harness: string, model: string, permission: NativePe
  * tool request: the engine's PERMISSION_AGENTS (electron/agent-orchestrator-workflow.cjs) as harness
  * ids. Every other AO harness runs in Full access only; its permission menu lists Ask and Approve
  * for me with the reason, and a chat keeps its mode when it moves there. Dropping that mode instead
- * (until 0.8.134) left the chat on the agent's own permissions ("Custom"), which AO ran as its
+ * (until 0.8.135) left the chat on the agent's own permissions ("Custom"), which AO ran as its
  * "auto": opencode then allowed every tool unasked, and Pi was refused with nothing left to pick.
  * Native Codex takes the modes on its own route.
  */
