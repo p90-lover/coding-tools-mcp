@@ -22,6 +22,7 @@ let providerBrowserHostGetter = () => null;
 // Which proxy profile a Browser-tab account's partition is bound to (main's browser-accounts.cjs).
 let providerBrowserProxyBinding = () => null;
 let providerCpaConnectionGetter = () => null;
+let providerAuthBrowserGetter = () => null;
 // The launcher's own log (launcher.jsonl, which redacts proxy credentials and bearer tokens) once
 // main has created it. Provider Network starts first: its events until then are kept and written
 // when the log arrives.
@@ -65,6 +66,13 @@ function setProviderCpaConnection(getter) {
     throw new Error("Provider CPA connection getter must be a function");
   }
   providerCpaConnectionGetter = getter;
+}
+
+function setProviderAuthBrowser(getter) {
+  if (typeof getter !== "function") {
+    throw new Error("Provider auth browser getter must be a function");
+  }
+  providerAuthBrowserGetter = getter;
 }
 
 function providerNetworkReady() {
@@ -134,6 +142,11 @@ function installProviderNetwork({
       session,
       shell,
       userData: app.getPath("userData"),
+      openProviderLoginUrl: (url, options) => {
+        const opener = providerAuthBrowserGetter();
+        if (typeof opener === "function") return opener(url, options);
+        return shell.openExternal(url);
+      },
     });
     // Before anything awaits: this runs ahead of main's own whenReady code, so every program main
     // starts (AO, the Codex bridge, the MCP tunnel, chat agents) inherits the saved route.
@@ -361,4 +374,5 @@ module.exports = {
   setProviderBrowserHost,
   setProviderBrowserProxyBinding,
   setProviderCpaConnection,
+  setProviderAuthBrowser,
 };

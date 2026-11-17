@@ -311,3 +311,64 @@ test("renderer, preload, types, and IPC expose automatic Antigravity login and h
   assert.match(bootstrap, /active\.openProviderLogin\(accountId\)/);
   assert.match(bootstrap, /active\.probeProviderAccount\(accountId\)/);
 });
+
+test("Antigravity login opens the OAuth URL through an isolated opener instead of the system browser", async () => {
+  const opened = [];
+  const systemOpened = [];
+  const files = [{
+    name: "antigravity-isolated@example.test.json",
+    provider: "antigravity",
+    label: "isolated@example.test",
+    email: "isolated@example.test",
+    status: "ready",
+    status_message: "",
+    disabled: false,
+    unavailable: false,
+  }];
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/v0/management/antigravity-auth-url") {
+      return jsonResponse({
+        status: "ok",
+        url: "https://accounts.google.com/o/oauth2/v2/auth?client_id=isolated",
+        state: "isolated-state",
+      });
+    }
+    if (parsed.pathname === "/v0/management/get-auth-status") {
+      return jsonResponse({ status: "ok" });
+    }
+    if (parsed.pathname === "/v0/management/auth-files") {
+      return jsonResponse({ files });
+    }
+    if (parsed.pathname === "/v0/management/auth-files/models") {
+      return jsonResponse({ models: [{ id: "gemini-isolated" }] });
+    }
+    throw new Error(`Unexpected request: ${parsed.pathname}`);
+  };
+  const userData = fixtureRoot();
+  const controller = network.createProviderNetworkController({
+    app: {},
+    browserPartition: "persist:antigravity-isolated-test",
+    getBrowserHost: () => null,
+    logger: { info() {}, warn() {} },
+    safeStorage: { isEncryptionAvailable: () => false },
+    session: {
+      defaultSession: { setProxy: async () => undefined },
+      fromPartition: () => ({ setProxy: async () => undefined }),
+    },
+    shell: {
+      async openExternal(url) { systemOpened.push(url); },
+    },
+    userData,
+    fetchImpl,
+    sleepImpl: async () => undefined,
+    oauthPollIntervalMs: 0,
+    oauthTimeoutMs: 2_000,
+    openProviderLoginUrl: async (url) => { opened.push(url); },
+  });
+  const account = saveAntigravityAccount(controller);
+  const result = await controller.openProviderLogin(account.id);
+  assert.deepEqual(opened, ["https://accounts.google.com/o/oauth2/v2/auth?client_id=isolated"]);
+  assert.deepEqual(systemOpened, [], "the system browser must not receive the Google sign-in URL");
+  assert.equal(result.snapshot.accounts.find((item) => item.id === account.id).identity, "isolated@example.test");
+});

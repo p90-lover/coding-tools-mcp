@@ -1241,6 +1241,7 @@ function createProviderNetworkController({
   oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
   requestTimeoutMs = DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS,
   startRouter = startEgressRouter,
+  openProviderLoginUrl = null,
 }) {
   const directory = path.join(userData, "providers");
   const store = createProviderNetworkStore({
@@ -1823,7 +1824,15 @@ function createProviderNetworkController({
       const result = await startCpaAccountLogin({
         adapterId,
         requestJson: (pathname, options) => managementJson(account, pathname, options),
-        openExternal: (url) => shell.openExternal(safeProviderLoginUrl(url)),
+        openExternal: (url, options) => {
+          const target = safeProviderLoginUrl(url);
+          // Antigravity Google sign-in must not reuse the system browser's cookies
+          // (the ineligible default Google session). Other adapters keep openExternal.
+          if (adapterId === "cpa-antigravity" && typeof openProviderLoginUrl === "function") {
+            return openProviderLoginUrl(target, options);
+          }
+          return shell.openExternal(target);
+        },
         sleep: sleepImpl,
         timeoutMs: oauthTimeoutMs,
         pollIntervalMs: oauthPollIntervalMs,
