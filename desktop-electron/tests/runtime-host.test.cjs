@@ -489,6 +489,31 @@ test("an operation's program is started off the main thread, with its output rea
   assert.deepEqual(started, [[process.execPath, ["ignore", "pipe", "pipe"]]], "started once, the operation's own program");
 });
 
+// Live 2026-11-17: a chat's WebGPT model lookup (about 2 s) failed Connect MCP as "runtime setup".
+test("a read-only operation holds the runtime's slot but is no setup to wait for", async () => {
+  const { spawnOffThread } = require("../electron/off-thread-run.cjs");
+  const host = new RuntimeHost({
+    app: { getPath: () => os.tmpdir(), getVersion: () => "1.1.3" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {},
+    startProgram: (file, args, options) => spawnOffThread(file, args, options),
+  });
+  host.command = () => ({ executable: process.execPath, args: ["-e", "setTimeout(() => process.stdout.write('ok'), 150)"], cwd: os.tmpdir() });
+  const lookup = host.run("ao-web-model-catalog", [], { readOnly: true });
+  assert.equal(host.currentOperation(), "ao-web-model-catalog");
+  assert.equal(host.setupOperation(), null);
+  await assert.rejects(host.run("setup", []), /Another launcher operation is active/, "it still runs one at a time");
+  await lookup;
+  const setup = host.run("setup", []);
+  assert.equal(host.setupOperation(), "setup");
+  await setup;
+  assert.equal(host.setupOperation(), null);
+  host.lifecycleOperation = "update";
+  assert.equal(host.setupOperation(), "update");
+});
+
 test("production and DEV setup entrypoints reject the opposite launcher profile", async () => {
   await assert.rejects(hostFor(null).host.setupDevCore(), /isolated DEV launcher/);
   await assert.rejects(devHostFor(null).host.setupCore(), /unavailable in the isolated DEV launcher profile/);

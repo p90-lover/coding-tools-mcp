@@ -964,7 +964,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
       if (removeDuringSetup) accounts.delete("other");
       return { created: false, href: "/plugins/plugins~Plugin_managed", name: "Coding Tools", connected: true,
         binding: { userId: "user-fixture", workspaceId: "6d4774fd-0e67-4b5b-a3b7-4c0e61357122", tunnelId: tunnels[0].tunnelId } };
-    }, app: {}, BrowserWindow: {}, browserHost: { partition: "persist:main", ready: async () => {}, currentOperation: () => null }, runtimeHost: { currentOperation: () => null, runtimeConfigSnapshot: () => ({ configured: false }) }, publishBrowserAccounts() { assert(records.length > 0, "account persistence resolves before its update is published"); }, publishOperation() {},
+    }, app: {}, BrowserWindow: {}, browserHost: { partition: "persist:main", ready: async () => {}, currentOperation: () => null }, runtimeHost: { currentOperation: () => null, setupOperation: () => null, runtimeConfigSnapshot: () => ({ configured: false }) }, publishBrowserAccounts() { assert(records.length > 0, "account persistence resolves before its update is published"); }, publishOperation() {},
     currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
     connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
     mcpConnectorCommandFailure: error => ({ code: "fixture_failure", message: error.message }),
@@ -972,10 +972,10 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   };
   vm.runInNewContext(snippet, context);
   assert.equal(await handler({}), "legacy");
-  context.runtimeHost.currentOperation = () => "setupMcp";
+  context.runtimeHost.currentOperation = context.runtimeHost.setupOperation = () => "setupMcp";
   await assert.rejects(handler({}, "other"), /current runtime setup/);
   assert.equal(calls.some(entry => entry?.target), false);
-  context.runtimeHost.currentOperation = () => null;
+  context.runtimeHost.currentOperation = context.runtimeHost.setupOperation = () => null;
   calls.length = 0; records.length = 0;
   await handler({}, "other");
   assert.deepEqual(calls.find(entry => entry?.target)?.target, { partition: "persist:other", requireTunnelMatch: true, tunnelId: tunnels[0].tunnelId });
