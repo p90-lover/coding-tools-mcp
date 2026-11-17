@@ -30,7 +30,12 @@ export type CpaUsageAccount = CpaUsageCounts & {
   models: CpaUsageModel[]; quota: CpaCodexQuota | CpaClineQuota | null;
   window?: { from: number; to: number } | null; usageAvailable?: boolean;
 };
+export type CpaApiCredits = {
+  id: string; provider: string; service: string; label: string; kind: "credits" | "key-budget";
+  balances: { currency: string; amount: string }[]; reason?: string;
+};
 export type CpaUsage = {
+  apiCredits?: CpaApiCredits[];
   available: boolean; reason?: string; range?: CpaUsageRange; from?: number | null; refreshedAt?: number;
   accounts?: CpaUsageAccount[]; totals?: CpaUsageCounts & { cost: number | null; costSource: CpaCostSource; costPartial: boolean };
   models?: CpaUsageModel[];

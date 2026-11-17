@@ -3919,6 +3919,49 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
   }
 });
 
+test("API provider models missing from the enhanced catalog are discovered from the standard list", async () => {
+  for (const enhanced of [[], [{ slug: "gpt-fixture", context_window: 1000000, supported_reasoning_levels: ["high"] }]]) {
+    const workflow = createAgentOrchestratorWorkflow({
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+      fetchImpl: async (url) => ({ ok: true, json: async () => String(url).includes("/auth-files") ? { files: [] }
+        : String(url).includes("client_version") ? { models: enhanced } : { data: [
+          { id: "gpt-fixture", owned_by: "codex" }, { id: "custom/vendor-model", owned_by: "custom-api", context_length: 64000 },
+        ] } }),
+    });
+    const listed = await workflow.call("models", { harness: "ao:claude-code" });
+    assert.ok(listed.models.includes("cpa/custom/vendor-model"));
+    assert.equal(listed.capabilities["cpa/custom/vendor-model"].provider, "custom-api");
+    assert.equal(listed.capabilities["cpa/custom/vendor-model"].contextLimit, 64000);
+    assert.equal(listed.models.filter((id) => id === "cpa/gpt-fixture").length, 1);
+    if (enhanced.length) assert.equal(listed.capabilities["cpa/gpt-fixture"].contextLimit, 1000000);
+  }
+});
+
+test("enabled CPA accounts automatically reload standard-list models after a catalog refresh", async () => {
+  let clock = 1_000_000;
+  let enabled = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async (url) => ({ ok: true, json: async () => String(url).includes("/auth-files")
+      ? { files: [{ name: "cline-account.json", provider: "cline", disabled: !enabled }] }
+      : String(url).includes("client_version") ? { models: [{ slug: "gpt-fixture" }] }
+        : { data: [{ id: "gpt-fixture", owned_by: "codex" }, { id: "cline-pass/custom-model", owned_by: "cline" }] } }),
+  });
+  const before = await workflow.call("models", {});
+  assert.ok(!before.models.includes("cline-pass/custom-model"));
+  enabled = true;
+  clock += 60_001;
+  const after = await workflow.call("models", {});
+  assert.ok(after.models.includes("cline-pass/custom-model"));
+  assert.equal(after.capabilities["cline-pass/custom-model"].provider, "cline");
+  enabled = false;
+  clock += 60_001;
+  const disabled = await workflow.call("models", {});
+  assert.ok(!disabled.models.includes("cline-pass/custom-model"));
+  assert.match(disabled.unavailable["cline-pass/custom-model"], /disabled in CPA/);
+});
+
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;
@@ -12963,6 +13006,73 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
   await listed.look();
   assert.deepEqual(listed.calls, [], "a shown request is left for the person");
   listed.workflow.dispose();
+});
+
+// Seen 2026-11-16 (the user's screenshot): a chat's step failed with
+// `ACP session/prompt: {"code":-32800,"message":"Request cancelled","data":{"error":"context canceled"}}`.
+// The stall stop had shut a hung turn's agent down, and AO recorded the turn it had cancelled itself
+// as failed with the protocol's cancel error. An AO with the fix calls the turn interrupted, and
+// observe() then says "the app restarted" of it, which is not what happened either.
+test("a turn the stall stop ended says the agent stopped responding, not AO's cancel error", async () => {
+  const CANCELLED = 'ACP session/prompt: {"code":-32800,"message":"Request cancelled","data":{"error":"context canceled"}}';
+  const RESTARTED = "The agent's process ended before it finished (the app restarted); retry this card.";
+  const STALLED = "The agent stopped responding, so its turn was stopped.";
+  /** The card's failure once AO shows `ended`, after a look at the turn while it was quiet for `quietMinutes`. */
+  async function failureFor(ended, { quietMinutes = 15 } = {}) {
+    const clock = 2_000_000_000_000;
+    const calls = [], terminal = [];
+    let shown = null;
+    const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+      route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "turn-1" } };
+    const workflow = createAgentOrchestratorWorkflow({
+      now: () => clock,
+      // The 15 s settle window's 250 ms polls run at once; other timers keep their length.
+      setTimer: (resolve, ms) => setTimeout(resolve, ms === 250 ? 0 : ms),
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+        if (endpoint === "/api/v1/ao/external/terminal") { terminal.push(body); return { ok: true }; }
+        throw new Error(`Unexpected AO endpoint ${endpoint}`);
+      },
+      aoHarness: {
+        observe: async () => shown ?? { turnId: "turn-1", turnState: "running", status: "working",
+          lastActivityAt: clock - quietMinutes * 60_000, timeline: [], approvals: [] },
+        interrupt: async (session) => { calls.push(["interrupt", session]); },
+        exitAgent: async (session) => { calls.push(["exit", session]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    const look = () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" });
+    try {
+      await workflow.call("chat_auto_retry", { enabled: true });
+      await look();
+      shown = { turnId: "turn-1", approvals: [], timeline: [], ...ended };
+      await look();
+    } finally { workflow.dispose(); }
+    assert.equal(terminal.length, 1, "the turn's end was saved");
+    return { failure: terminal[0].failure, calls };
+  }
+
+  // The AO in 0.8.129 and before: the turn it cancelled itself is "failed" with the cancel error.
+  const old = await failureFor({ turnState: "failed", status: "exited", exited: true, error: CANCELLED });
+  assert.deepEqual(old.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "the hung turn's agent was shut down");
+  assert.equal(old.failure, STALLED);
+  // An AO with the fix: interrupted, no error of its own, and observe() reads its agent as gone.
+  assert.equal((await failureFor({ turnState: "interrupted", status: "exited", exited: true, error: RESTARTED })).failure, STALLED);
+  // The interrupt landed and the agent stayed up: "AO turn interrupted" said nothing either.
+  assert.equal((await failureFor({ turnState: "interrupted", status: "idle" })).failure, STALLED);
+  // A real error that reached the turn is still what the card says, and what its retry rules read.
+  assert.equal((await failureFor({ turnState: "failed", status: "idle", error: "API Error: 503 upstream unavailable" })).failure,
+    "API Error: 503 upstream unavailable");
+  // Another turn of the session, ended later, is not the one the stop went for.
+  assert.equal((await failureFor({ turnId: "turn-2", turnState: "interrupted", status: "idle" })).failure, "AO turn interrupted");
+
+  // No stall stop (the turn showed life a minute ago): something else shut the agent down.
+  const busy = await failureFor({ turnState: "failed", status: "exited", exited: true, error: CANCELLED }, { quietMinutes: 1 });
+  assert.deepEqual(busy.calls, [], "the stall stop left a working turn alone");
+  assert.equal(busy.failure, "The agent was stopped while it worked on this step.", "AO's cancel record is never shown as the step's error");
+  // A turn an app restart interrupted keeps its own text: the step's direct retry reads it.
+  assert.equal((await failureFor({ turnState: "interrupted", status: "exited", exited: true, error: RESTARTED }, { quietMinutes: 1 })).failure, RESTARTED);
 });
 
 // Seen live 2026-11-10: AO lost five chats' agents while their hosts lived on, and the turns read

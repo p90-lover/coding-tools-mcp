@@ -1346,8 +1346,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const response = await fetchImpl(`${baseUrl}/v1/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5_000) });
       if (!response.ok) return null;
       const rows = (await response.json())?.data;
-      return Array.isArray(rows) ? new Map(rows.filter(row => typeof row?.id === "string" && typeof row.owned_by === "string")
-        .map(row => [row.id, row.owned_by.trim().toLowerCase()])) : null;
+      return Array.isArray(rows) ? { rows, owners: new Map(rows.filter(row => typeof row?.id === "string" && typeof row.owned_by === "string")
+        .map(row => [row.id, row.owned_by.trim().toLowerCase()])) } : null;
     } catch { return null; }
   }
 
@@ -1656,6 +1656,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const cpa = connection();
     const { baseUrl, key } = cpa;
     let rows;
+    let enhanced = false;
     // The classic OpenAI list contains only IDs; the enhanced catalog carries capabilities.
     for (const suffix of ["?client_version=pi", ""]) {
       try {
@@ -1665,7 +1666,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (!response.ok) throw new Error(`CPA model catalog returned HTTP ${response.status}`);
         const payload = await response.json();
         rows = Array.isArray(payload?.models) ? payload.models : Array.isArray(payload?.data) ? payload.data : null;
-        if (rows) break;
+        if (rows) { enhanced = Boolean(suffix); break; }
         throw new Error("CPA model catalog has an unsupported shape");
       } catch (error) { if (!suffix) throw error; }
     }
@@ -1677,9 +1678,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // Who serves each model, from the plain list's owned_by. The enhanced catalog names no provider,
     // so every model was filed by its name: Antigravity's claude-sonnet-4-6 under Claude and its
     // gemini-… under Gemini, as if Antigravity and a Claude sign-in or API key were one provider.
+    const plain = enhanced ? await modelOwners(cpa) : null;
+    if (plain) {
+      // Custom API providers can list IDs without enhanced capability metadata.
+      const listedIds = new Set(rows.map(entry => entry?.slug ?? entry?.id));
+      rows = [...rows, ...plain.rows.filter(entry => typeof entry?.id === "string" && !listedIds.has(entry.id))];
+    }
     const listed = rows?.some(entry => typeof entry?.owned_by === "string");
-    const owners = listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
-      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
+    const owners = plain?.owners ?? (listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
+      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : null);
     const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
     const disabled = (id, provider, live = false) => {
@@ -2052,6 +2059,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const TOOL_STALL_MS = 30 * 60_000;
   const TOOL_STALL_MARGIN_MS = 5 * 60_000;
   const stalledStops = new Map(); // session -> when its stalled turn was stopped
+  // The turn each stall stop went for, so its card says why it ended (TURN_STALL_FAILURE).
+  const stalledTurns = new Map(); // session -> turn id
+  // What the card of a turn the stall stop ended says. When the interrupt does not land the stop
+  // shuts the agent down, and AO recorded that turn as failed with the protocol's own cancel error.
+  // The chat showed it as the step's failure (the user's screenshot, 2026-11-16):
+  // `ACP session/prompt: {"code":-32800,"message":"Request cancelled","data":{"error":"context canceled"}}`.
+  const TURN_STALL_FAILURE = "The agent stopped responding, so its turn was stopped.";
+  // AO's record of a turn whose agent was shut down under it (AO cancelling its own request): never
+  // an error of the step. An AO with the fix calls such a turn interrupted and records no error.
+  const AGENT_STOPPED_ERROR = /^ACP session\/prompt: \{"code":-32800\b/;
+  const AGENT_STOPPED_FAILURE = "The agent was stopped while it worked on this step.";
   function stalledTurnInfo(observed) {
     if (!Number.isFinite(observed?.lastActivityAt)) return null;
     // The stop interrupts the whole session, so the whole session is judged: a turn queued behind a
@@ -2134,10 +2152,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
     const release = observed.agentGone === true || previous !== undefined;
     const isStalled = current => nothingToAnswer(current) && Boolean(stalledTurnInfo(current));
+    // A stop that failed may still have sent its interrupt, so the turn counts as one it went for.
+    const wentFor = () => {
+      stalledTurns.set(session, turnId);
+      if (stalledTurns.size > 200) stalledTurns.delete(stalledTurns.keys().next().value);
+    };
     try {
       if (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId, isStalled, escalate: true, ...(release ? { releaseAgent: true } : {}) }) === false) return false;
     }
-    catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
+    catch (error) { wentFor(); logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
+    wentFor();
     logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release, orphaned });
     return true;
   }
@@ -2265,9 +2289,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session, ...(quiet ? { quiet: true } : {}) };
     }
     const completed = observed.turnState === "completed";
+    // A turn that ended because its agent was stopped under it has no error of its own. What AO or
+    // observe() wrote about the stop is not shown as the step's failure: AO's cancel record
+    // (AGENT_STOPPED_ERROR), or, for a turn the stall stop went for, "the app restarted" (observe()
+    // says that of any interrupted turn whose agent is gone). The card says what happened instead.
+    const stalledTurn = Boolean(observed.turnId) && stalledTurns.get(session) === observed.turnId;
+    const recorded = String(observed.error || "");
+    const stopRecord = AGENT_STOPPED_ERROR.test(recorded);
+    const error = stopRecord || (stalledTurn && RESTART_INTERRUPTED.test(recorded)) ? "" : observed.error;
     // What the provider told the agent, when AO itself recorded no error for the turn (agentApiError):
     // the card's retry and goal checks read the failure text, and without it they retried a refusal.
-    const said = !completed && !observed.error ? agentApiError(observed.answer) : "";
+    const said = !completed && !error ? agentApiError(observed.answer) : "";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
       workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
@@ -2275,7 +2307,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       completed,
       // A start the launch watchdog ended says so, not AO's "Session start was cancelled".
       ...(!completed ? { failure: (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
-        || observed.error || said || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
+        || error || said || (stalledTurn ? TURN_STALL_FAILURE : stopRecord ? AGENT_STOPPED_FAILURE : "")
+        || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
     if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
     return { ...result, pending_approvals: [] };
