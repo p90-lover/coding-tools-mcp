@@ -94,7 +94,7 @@ jobs:
           npm ci
           npm run check 2>&1 | tee aiTemp/native-evidence/frontend.txt
           node --test tests/*.test.mjs 2>&1 | tee aiTemp/native-evidence/contracts.txt
-          npm audit --audit-level=low
+          node scripts/npm-audit-gate.mjs
       - name: Native tests and strict Clippy
         shell: bash
         working-directory: src-tauri

@@ -239,7 +239,7 @@ jobs:
         run: node --test tests/*.test.mjs tests/upstream/*.test.mjs
 
       - name: NPM audit
-        run: npm audit --audit-level=low
+        run: node scripts/npm-audit-gate.mjs
 
   # The Electron app the installer ships: its own suite, which no job ran before (#702 and #707
   # merged with about 50 of its tests failing).
