@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "c7cab2088b9c491a8d04536c72b625cbe81116ab",
+    "commit": "06b49ea0fe398e25057aa8ccccc42758cc9142df",
     "license": "MIT"
   },
   "changes": [
-    "Auto Review: a Codex fallback account can take the default route (codex-auto-review, as the first account does) with no model to pick; other providers still name a model, and no fallback repeats an earlier route",
-    "Smart routing (0.7.0): within a Codex priority tier and across a managed account pool, the account with the most quota at risk per hour before its soonest reset is used first",
+    "Smart routing covers Claude and Antigravity sign-in accounts and mixed requests (a model several providers serve): quota is read per account (Antigravity per model group), and within a priority tier accounts with quota left come first, then unread sign-in accounts, then API keys; a spent account is never chosen while another can answer",
+    "Accounts gains Claude quota and Antigravity quota views; Auto Review keeps 0.7.1's default route for Codex fallbacks",
     "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
     "Cline Pass, CommandCode Go, CommandCode and Grok accounts are provider-manager auth files with a kind; their models, logins and management routes are unchanged"
   ],
@@ -20,9 +20,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/cpa-provider-manager-v0.7.1.dll",
-      "sha256": "b0fdcf134eb39e5d72bea2e0dfbb7a7b3f2cde3974f8e78ea97a00d3829b49b3",
-      "size": 27136000
+      "path": "windows/amd64/cpa-provider-manager-v0.8.0.dll",
+      "sha256": "36dba4646c823b693f69cbc0055d67bdd17a4ac02e7551e1dcea6a0ea9b1e346",
+      "size": 27170816
     }
   }
 }
