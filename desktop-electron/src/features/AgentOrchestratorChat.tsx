@@ -2072,6 +2072,7 @@ export function AgentOrchestratorChat({
         return false;
       }
     }
+    const durableRecovery = Boolean(inputId && draftsNow.current?.pending);
     // Its saved draft stays until the app has it (settleSavedDraft); handedOff once it does.
     if (fromComposer) sendsInFlight.current += 1;
     let handedOff = false;
@@ -2161,7 +2162,7 @@ export function AgentOrchestratorChat({
           // new chat has no queue, so it always comes back.
           if (shown) {
             setOutgoing((pending) => pending === outgoingMessage ? null : pending);
-            if (here() && !composing.current.draft && !(selectedTaskId && sendRefusedForNow(error))) {
+            if (!durableRecovery && here() && !composing.current.draft && !(selectedTaskId && sendRefusedForNow(error))) {
               setDraft(owner.draft); setAttachments(owner.attachments); setAnnotations(owner.annotations);
               restored = true;
             }
@@ -2199,6 +2200,7 @@ export function AgentOrchestratorChat({
         if (current()) { setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote(""); }
         handedOff = true; return true;
       }
+      if (durableRecovery) return false;
       // Keep the message so it can be sent again. A steer had cleared the composer at once, and so had
       // a follow-up refused only for now, left to the queue just above, which refused it too: the window
       // was still not in front (2026-11-12, chat_send and then chat_queue refused for focus, and the
@@ -3360,7 +3362,7 @@ export function AgentOrchestratorChat({
         {/* Queued messages always come first, above every other bar (a command's card, the goal, a
             loop or wake-up, notes, the subagents' line) and the branch picker, as Claude Code keeps its
             queued bar on top: under the goal bar it read as part of the goal (the user's ask). */}
-        {pendingInputs.filter(item => !selectedTaskId || item.state !== "queued").map(item => <section key={item.inputId} className="cx-command-card" aria-label="Saved input awaiting delivery">
+        {pendingInputs.filter(item => item.state !== "queued" || !queued.some(queuedItem => queuedItem.inputId === item.inputId)).map(item => <section key={item.inputId} className="cx-command-card" aria-label="Saved input awaiting delivery">
           <header><strong>{item.state === "queued" ? "Saved input" : "Delivery unknown"}</strong></header>
           <p>{chatMessageReadable(item.destination.message)}</p>
           <footer>
