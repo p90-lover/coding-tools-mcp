@@ -5,6 +5,7 @@ const {
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
 const { retireProxyGateway } = require("./proxy-gateway-retire.cjs");
+const { listCpaAuthAccounts, overlayCpaAccounts } = require("./cpa-auth-inventory.cjs");
 const { createNovaManager } = require("./proxybridge-nova.cjs");
 
 // Nova's profile carries proxy passwords; the page gets whether one is saved, never the value.
@@ -105,7 +106,13 @@ function installProviderNetwork({
   // The window's copy names each proxy's sign-in username, so the Proxy page can tell proxies on one
   // address apart. Only this copy: saves and routing never decrypt a sign-in.
   function shown(snapshot) {
-    return controller?.store?.withProxyUsernames?.(snapshot) ?? snapshot;
+    const withNames = controller?.store?.withProxyUsernames?.(snapshot) ?? snapshot;
+    try {
+      const directory = require("path").join(app.getPath("userData"), "integrations", "state", "cpa", "auth");
+      return overlayCpaAccounts(withNames, listCpaAuthAccounts({ directory }));
+    } catch {
+      return withNames;
+    }
   }
 
   function publish(snapshot) {

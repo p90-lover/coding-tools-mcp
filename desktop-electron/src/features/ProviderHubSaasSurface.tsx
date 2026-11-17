@@ -1126,6 +1126,16 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                     <span className="provider-account-tags">
                       {account.isDefault ? <em>{text(language, "Default", "預設")}</em> : null}
                       {account.hasCredential ? <em>{text(language, "Credential stored", "已儲存憑證")}</em> : null}
+                      {account.displayOnly ? <em>{text(language, "From CPA", "來自 CPA")}</em> : null}
+                      {account.remainingBalance
+                        ? (
+                          <em>
+                            {account.remainingBalance.remaining == null
+                              ? text(language, "No key limit", "無金鑰上限")
+                              : `${account.remainingBalance.currency || ""} ${Number(account.remainingBalance.remaining).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`.trim() + " " + text(language, "remaining", "餘額")}
+                          </em>
+                        )
+                        : null}
                     </span>
                     <span className="provider-account-health">
                       <strong>{statusLabel(language, account.status)}</strong>

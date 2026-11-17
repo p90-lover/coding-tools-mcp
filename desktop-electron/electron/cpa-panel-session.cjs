@@ -500,13 +500,14 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
         for (const upstream of (await response.json())?.providers || []) {
           if (!upstream?.id || !upstream.enabled) continue;
           const windows = upstream.quota?.windows && Object.keys(upstream.quota.windows).length ? upstream.quota.windows : null;
+          const balances = Array.isArray(upstream.quota?.balances) && upstream.quota.balances.length ? upstream.quota.balances : null;
           const error = upstream.quota?.error || '';
           if (/\\b429\\b/.test(error)) noteLimited();
           const kept = providers[upstream.id];
-          // A failed quota read keeps the last good windows on screen.
-          next[upstream.id] = windows ? { at: Date.now(), kind: upstream.kind, windows }
-            : kept?.windows ? { ...kept, kind: upstream.kind }
-            : { at: Date.now(), kind: upstream.kind, error };
+          // A failed quota read keeps the last good windows and remaining balance on screen.
+          if (windows || balances) next[upstream.id] = { at: Date.now(), kind: upstream.kind, windows, balances };
+          else if (kept?.windows || kept?.balances) next[upstream.id] = { ...kept, kind: upstream.kind };
+          else if (error || upstream.quota) next[upstream.id] = { at: Date.now(), kind: upstream.kind, error: error || 'Balance not reported' };
         }
         providers = next;
         write(PROVIDERS_SAVED, providers);
@@ -531,6 +532,15 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
       const prefix = 'AuthFileQuota-module__' + name + '___';
       const node = document.querySelector('[class*="' + prefix + '"]');
       return node ? String(node.className).split(' ').find((value) => value.startsWith(prefix)) || '' : '';
+    }
+    function balanceRow(balance) {
+      const amount = balance.remaining == null ? 'No key limit'
+        : [balance.currency, Number(balance.remaining).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })].filter(Boolean).join(' ');
+      const label = balance.kind === 'key-budget' ? 'Key budget' : 'Remaining balance';
+      const row = el('div', 'display:flex;justify-content:space-between;gap:8px;margin:0');
+      row.append(el('span', 'color:var(--text-primary);font-size:12px;font-weight:600', label),
+        el('span', 'color:var(--text-primary);font-size:12px', amount));
+      return row;
     }
     function quotaRow(limit) {
       if (!quotaClass('quotaRow')) return windowRow(limit);
@@ -565,9 +575,10 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
       section.dataset.codingTools = key;
       for (const entry of entries) {
         if (entries.length > 1) section.append(el('div', 'color:var(--text-primary);font-size:12px;font-weight:600', entry.name));
-        if (entry.error) section.append(el('div', 'color:var(--viz-failure);font-size:11.5px', entry.error));
-        else if (!entry.limits.length) section.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
-        else section.append(...entry.limits.map(quotaRow));
+        if (entry.error && !entry.limits.length && !(entry.balances || []).length) section.append(el('div', 'color:var(--viz-failure);font-size:11.5px', entry.error));
+        if (entry.balances && entry.balances.length) section.append(...entry.balances.map(balanceRow));
+        else if (!entry.error && !entry.limits.length) section.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
+        if (entry.limits.length) section.append(...entry.limits.map(quotaRow));
       }
       section.append(el('div', 'color:var(--text-tertiary);font-size:11px', ago(at)));
       held?.node.remove();
@@ -623,8 +634,8 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
         const badge = card.querySelector('[class*="AuthFileCard-module__providerBadge"]');
         const label = PROVIDER_BADGES[entry.kind];
         if (badge && label && badge.textContent !== label) badge.textContent = label;
-        if (!entry.windows && !entry.error) continue;
-        placeBlock(card, windowsBlock('provider-quota-' + id, [{ error: entry.windows ? '' : entry.error, limits: entry.windows ? providerLimits(entry.windows) : [] }], entry.at));
+        if (!entry.windows && !(entry.balances || []).length && !entry.error) continue;
+        placeBlock(card, windowsBlock('provider-quota-' + id, [{ error: (entry.windows || (entry.balances || []).length) ? '' : entry.error, limits: entry.windows ? providerLimits(entry.windows) : [], balances: entry.balances || [] }], entry.at));
       }
       pressIdleQuota(cards);
       for (const entry of Object.values(credits)) {

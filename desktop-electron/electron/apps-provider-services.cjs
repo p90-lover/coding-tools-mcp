@@ -1,5 +1,7 @@
 "use strict";
 
+const { mergeProviderAccounts } = require("./cpa-auth-inventory.cjs");
+
 function publicAccount(account) {
   if (!account || typeof account !== "object") return null;
   return {
@@ -18,6 +20,14 @@ function publicAccount(account) {
     archivedAt: account.archivedAt || null,
     error: account.error || null,
     hasCredential: account.hasCredential === true,
+    remainingBalance: account.remainingBalance && typeof account.remainingBalance === "object"
+      ? {
+        remaining: account.remainingBalance.remaining == null ? null : Number(account.remainingBalance.remaining),
+        currency: account.remainingBalance.currency || null,
+        kind: account.remainingBalance.kind || null,
+      }
+      : null,
+    displayOnly: account.displayOnly === true,
   };
 }
 
@@ -41,7 +51,7 @@ function isCpaAccount(account) {
     || account.providerId === "gemini-oauth";
 }
 
-function createAppsProviderServices({ providerNetworkReady }) {
+function createAppsProviderServices({ providerNetworkReady, listCpaAuthAccounts } = {}) {
   async function snapshotOrEmpty() {
     try {
       const active = await providerNetworkReady();
@@ -62,14 +72,21 @@ function createAppsProviderServices({ providerNetworkReady }) {
 
   async function listProviders() {
     const listed = await snapshotOrEmpty();
+    let cpaAccounts = [];
+    if (typeof listCpaAuthAccounts === "function") {
+      try { cpaAccounts = await listCpaAuthAccounts() || []; } catch { cpaAccounts = []; }
+    }
+    const accounts = mergeProviderAccounts(listed.accounts, cpaAccounts).map(publicAccount).filter(Boolean);
+    const summary = summarize(accounts);
+    const live = accounts.filter((account) => !account.archivedAt);
     return {
       ok: listed.ok,
-      accounts: listed.accounts,
-      summary: listed.summary,
+      accounts,
+      summary,
       reason: listed.ok
-        ? (listed.summary.total === 0
-          ? "no provider-network accounts"
-          : listed.summary.connected === 0
+        ? (summary.total === 0
+          ? "no provider-network or CPA accounts"
+          : summary.connected === 0 && live.length === 0
             ? "provider-network accounts are disabled or archived"
             : undefined)
         : listed.reason,
