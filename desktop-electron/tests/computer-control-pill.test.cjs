@@ -45,7 +45,7 @@ test("models are named as people know them", () => {
 });
 
 /** A control whose pill is a stand-in window recording what the app did to it. */
-function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3, 4, 5), fileIcon = undefined } = {}) {
+function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3, 4, 5), fileIcon = undefined, processAlive = () => true } = {}) {
   const made = [];
   class FakeWindow {
     constructor(options) {
@@ -97,7 +97,7 @@ function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3
     }
     return {};
   };
-  const control = createComputerControl({ request, BrowserWindow: FakeWindow, screen, ownPids: () => [1], now, ...(fileIcon ? { fileIcon } : {}) });
+  const control = createComputerControl({ request, BrowserWindow: FakeWindow, screen, ownPids: () => [1], now, processAlive, ...(fileIcon ? { fileIcon } : {}) });
   return { control, made, requests, agent };
 }
 
@@ -417,6 +417,48 @@ test("the pill previews what the agent saw: fetched once per new frame, shown sm
     await beat();
     assert.equal(frames().filter((endpoint) => endpoint.endsWith("s2")).length, 2, "a failed frame is asked for once, not every second");
   } finally { control.dispose(); }
+});
+
+test("once the app under control quits, control ends and the pill closes by itself", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const running = new Set([70]);
+  const checked = [];
+  const { control, made, requests, agent } = pill({ processAlive: (pid) => { checked.push(pid); return running.has(pid); } });
+  const beat = async () => { t.mock.timers.tick(1_000); for (let i = 0; i < 5; i += 1) await settle(); };
+  try {
+    await control.start({ workspaceId: "ws", agent: "Claude Code", target: { window_id: 7, pid: 70, title: "Fixture", app: "fixture.exe" } });
+    await settle();
+    const [window] = made;
+    await beat();
+    await beat();
+    assert.deepEqual([...new Set(checked)], [70], "each beat checks the controlled window's own process");
+    assert.notEqual(window.destroyed, true, "while the app runs, control stays on");
+    assert.equal(agent.armed, true);
+
+    // The agent closes the app (or it crashes): headless still reports control as on.
+    running.delete(70);
+    await beat();
+    assert.equal(window.destroyed, true, "the pill closes within a beat, without the person pressing Stop");
+    assert.equal(agent.armed, false, "headless is told to stop");
+    assert.equal(requests.filter((endpoint) => endpoint === "/api/v1/computer/stop").length, 1);
+    assert.equal(control.controlled(), null);
+    await beat();
+    assert.equal(made.length, 1, "nothing reopens it");
+  } finally { control.dispose(); }
+});
+
+test("a controlled process this app cannot inspect still counts as running", () => {
+  const { processRuns } = require("../electron/computer-control.cjs");
+  assert.equal(processRuns(process.pid), true);
+  assert.equal(processRuns(undefined), true, "no pid: control never ends on a guess");
+  assert.equal(processRuns(0), true);
+  const original = process.kill;
+  try {
+    process.kill = () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); };
+    assert.equal(processRuns(4242), true, "EPERM: it runs elevated or as another account");
+    process.kill = () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); };
+    assert.equal(processRuns(4242), false);
+  } finally { process.kill = original; }
 });
 
 test("asking for another window moves control there instead of failing on the one already controlled", async () => {
