@@ -1034,6 +1034,102 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
   if (releaseIdleAgents) scheduleIdleRelease(IDLE_FIRST_SWEEP_MS);
 
+  // Claude Code can start a turn with no message from the chat: another local Claude session sent it
+  // a message, or something it started finished. AO now takes such a turn as one the agent started
+  // (agent-orchestrator#54), but the chat showed nothing of it: its last card had finished, so nothing
+  // observed the session. The turn's first permission request waited unseen for hours while the chat
+  // read Done (2026-11-09, coding-tools-mcp-278). The sweep finds a chat agent AO calls working or
+  // waiting for input that no run of this app drives, and gives its newer turn a card of its own, as
+  // a wake-up's turn has: the chat shows it working, "Approve for me" screens its requests, and its
+  // answer is the card's result.
+  const AUTONOMOUS_FIRST_SWEEP_MS = 45_000;
+  const AUTONOMOUS_SWEEP_MS = 2 * 60_000;
+  const ADOPTED_TURN_LOST = "The chat's agent stopped before the turn it started on its own could be shown.";
+  const ADOPT_TRIES = 3;
+  const adoptTries = new Map(); // `${session}\n${turnId}` -> failed attempts
+  let autonomousTimer = null;
+  let autonomousStopped = false;
+  let listedWorkspaces = null; // the app's projects (startAutonomousTurnWatch), besides those the window read
+  /** Sessions whose newer turn got a card; tests call it directly, the app on a timer. */
+  async function adoptAutonomousTurns() {
+    const busy = await harnessService().busyChatSessions?.().catch(() => []) ?? [];
+    if (!busy.length) return [];
+    // Only when every driven run could be read: a session one of them uses is never taken from it.
+    const driven = await drivenSessions();
+    if (!driven) return [];
+    const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
+    const left = new Set(busy.map(String).filter(id => !driven.has(id) && !ours.has(id) && !sessionStops.has(id)));
+    if (!left.size) return [];
+    // A minimized window reads no project, so the app's own list is asked too.
+    const listed = listedWorkspaces ? await Promise.resolve().then(listedWorkspaces).catch(() => []) : [];
+    const workspaceIds = new Set([...lastSwept.keys(), ...(Array.isArray(listed) ? listed : [])
+      .map(item => typeof item === "string" ? item : item?.id).filter(id => typeof id === "string" && id).map(id => clean(id, 128))]);
+    const adopted = [];
+    for (const workspaceId of workspaceIds) {
+      if (!left.size || autonomousStopped) break;
+      const saved = await runs({ workspaceId }).catch(() => null);
+      if (!saved) continue;
+      for (const session of [...left]) {
+        const holds = node => node.receipt?.thread_id === session || (node.history || []).some(entry => entry?.thread_id === session);
+        const owner = saved.runs.filter(run => run.workspace_id === workspaceId && run.project_id && (run.nodes || []).some(holds)).at(-1);
+        if (!owner) continue;
+        left.delete(session);
+        if (await adoptTurnOf(workspaceId, saved, owner.project_id, session)) adopted.push(session);
+      }
+    }
+    return adopted;
+  }
+  async function adoptTurnOf(workspaceId, saved, taskId, session) {
+    const chatRuns = saved.runs.filter(run => run.project_id === taskId);
+    const latest = chatRuns.at(-1);
+    // The chat's newest card must be the settled card of this very agent: a newer card, or one still
+    // working, owns what the agent does, and a stopped or hidden chat is left alone.
+    const card = resumableChatCard(latest);
+    if (card?.receipt?.thread_id !== session || latest.cancelled || latest.paused
+      || backgroundRuns.get(runKey(workspaceId, latest.id))?.stopped || chatWorking(workspaceId, taskId, saved.runs)
+      || taskLifecycle(saved, taskId).visibility !== "active") return false;
+    const observed = await harnessService().observe(session).catch(() => null);
+    const turnId = observed?.turnId;
+    if (typeof turnId !== "string" || !turnId || observed.turnState === "queued" || TERMINAL_TURNS.has(observed.turnState)
+      || observed.agentGone || observed.exited) return false;
+    // A turn a card of this chat already had (its own, one it was retried from, one being sent) is no new turn.
+    const known = chatRuns.flatMap(run => run.nodes ?? []).some(node => [node.receipt, ...(node.history ?? [])].some(entry => entry?.turn_id === turnId))
+      || [...expectedTurns.values()].includes(turnId);
+    const key = `${session}\n${turnId}`;
+    if (known || (adoptTries.get(key) ?? 0) >= ADOPT_TRIES) return false;
+    const agent = externalAgent(card) === "claude-code" ? "Claude" : "The agent";
+    try {
+      const result = await chatSend({ workspaceId, taskId, message: `${agent} continued on its own.`, ...followUpSelection(latest),
+        deferStart: true, afterRunId: latest.id }, undefined, { adoptTurn: { session, turnId } });
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The card was not created");
+      adoptTries.delete(key);
+      logger?.info?.("ao.autonomous_turn_adopted", { session, needsInput: observed.needsInput === true, approvals: observed.approvals?.length ?? 0 });
+      return true;
+    } catch (error) {
+      adoptTries.set(key, (adoptTries.get(key) ?? 0) + 1);
+      if (adoptTries.size > 200) adoptTries.delete(adoptTries.keys().next().value);
+      logger?.warn?.("ao.autonomous_turn_adopt_failed", { session, message: publicText(error?.message || error, 200) });
+      return false;
+    }
+  }
+  /**
+   * Starts the sweep (the app does, once its backend runs; tests call adoptAutonomousTurns by hand).
+   * `listWorkspaces` lists the app's projects, as restoreSchedules takes them.
+   */
+  function startAutonomousTurnWatch(listWorkspaces = null) {
+    if (typeof listWorkspaces === "function") listedWorkspaces = listWorkspaces;
+    if (autonomousTimer || autonomousStopped) return;
+    const next = (delay) => {
+      autonomousTimer = setTimer(() => {
+        void adoptAutonomousTurns()
+          .catch(error => logger?.warn?.("ao.autonomous_turn_sweep_failed", { message: publicText(error?.message || error, 200) }))
+          .finally(() => { if (!autonomousStopped) next(AUTONOMOUS_SWEEP_MS); });
+      }, delay);
+      autonomousTimer?.unref?.();
+    };
+    next(AUTONOMOUS_FIRST_SWEEP_MS);
+  }
+
   /** chat_prewarm: keep an agent ready for the new chat's selected model, or its team's orchestrator. */
   async function chatPrewarm({ workspaceId, executionMode, singleRoute, teamId, taskId } = {}) {
     const id = clean(workspaceId, 128);
@@ -1899,7 +1995,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId));
           if (stopped?.ok !== true) throw unconfirmed;
         }
-        if (usable) {
+        if (usable && continued.adoptTurn) {
+          // A turn the agent started by itself (adoptAutonomousTurns): the card takes that turn as
+          // its own. Nothing is sent; the agent is already working on it.
+          sessionOwners.set(continued.session, runKey(workspaceId, runId));
+          if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
+          sent = { turnId: continued.adoptTurn };
+        } else if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
@@ -1938,6 +2040,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
             reason: unconfirmed ? "restore_unconfirmed" : !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused",
             ...(sendError ? { message: sendError } : {}) });
         }
+        // The turn is the agent's own: with that agent gone there is nothing to show, and a fresh agent
+        // must not be started on the card's placeholder message.
+        if (continued?.adoptTurn && !sent?.turnId) throw new Error(ADOPTED_TURN_LOST);
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
@@ -7004,7 +7109,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         deferred: input?.deferStart === true }));
     }
   }
-  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}, clock = stepClock(now)) {
+  /** `adoptTurn` ({ session, turnId }, internal callers only): the run takes that turn of the chat's
+   *  live agent instead of sending the message (adoptAutonomousTurns). */
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false, adoptTurn = null } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -7094,6 +7201,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await chatResizes.get(resizeKey(id, task))?.catch(() => undefined);
       const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute, { workspaceId: id, taskId: task });
       if (live) continuation = { session: live.receipt.thread_id, text };
+      if (adoptTurn) {
+        if (continuation?.session !== adoptTurn.session) throw new Error(ADOPTED_TURN_LOST);
+        continuation.adoptTurn = adoptTurn.turnId;
+      }
       if (rewind && (chatWorking(id, task, saved.runs)
         || chatEdits.visible(id, saved.runs.filter(run => run.project_id === task)).some(run => !runSettled(run)))) {
         throw new Error("Stop the chat before rewinding a message");
@@ -9948,6 +10059,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goalTimers.clear();
     if (goalWatchTimer) clearTimer(goalWatchTimer);
     goalWatchTimer = null;
+    autonomousStopped = true;
+    if (autonomousTimer) clearTimer(autonomousTimer);
+    autonomousTimer = null;
     autoRetryDisposed = true;
     for (const timer of autoRetryTimers) clearTimer(timer);
     autoRetryTimers.clear();
@@ -10143,7 +10257,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
+    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
