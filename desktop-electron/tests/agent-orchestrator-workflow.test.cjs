@@ -4047,6 +4047,80 @@ test("a chat on a model CPA no longer offers is refused before a task or run is 
   assert.ok(writes.length > 0, "a listed model is not refused");
 });
 
+test("a remembered model leaves the menu once only a disabled account served it, and stays through a cooldown", async () => {
+  // 2026-11-18: Gemini 4 Argon High came from one of ten Antigravity accounts. That account was
+  // disabled in CPA, CPA stopped listing the model, and the menu kept it from memory (30 days):
+  // each send failed "unknown provider for model gemini-4-argon-high".
+  let clock = 5_000_000;
+  let plain;
+  let accounts;
+  let registered; // account file -> the models CPA has registered to it, or null when unreadable
+  const asked = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async (url, init) => {
+      const target = new URL(String(url));
+      if (target.pathname === "/v0/management/auth-files/models") {
+        assert.equal(init.headers.Authorization, "Bearer manage");
+        const name = target.searchParams.get("name");
+        asked.push(name);
+        const models = registered[name];
+        return models ? { ok: true, json: async () => ({ models: models.map(id => ({ id, owned_by: "antigravity" })) }) }
+          : { ok: false, status: 500, json: async () => ({}) };
+      }
+      if (target.pathname === "/v0/management/auth-files") return { ok: true, json: async () => ({ files: accounts }) };
+      if (target.pathname.startsWith("/v0/management/")) return { ok: false, status: 404, json: async () => ({}) };
+      if (target.search) return { ok: true, json: async () => ({ models: plain.data.map(row => ({ slug: row.id, context_window: 200000 })) }) };
+      return { ok: true, json: async () => plain };
+    },
+  });
+  const read = async () => { clock += 2 * 60_000; return workflow.call("models", {}); };
+  const both = [{ name: "ag-1.json", provider: "antigravity" }, { name: "ag-6.json", provider: "antigravity" }];
+
+  plain = { data: [{ id: "gpt-5.5", owned_by: "openai" }, { id: "gemini-3-flash", owned_by: "antigravity" }, { id: "gemini-4-argon-high", owned_by: "antigravity" }] };
+  accounts = both;
+  registered = { "ag-1.json": ["gemini-3-flash"], "ag-6.json": ["gemini-3-flash", "gemini-4-argon-high"] };
+  assert.deepEqual((await read()).models, ["gpt-5.5", "gemini-3-flash", "gemini-4-argon-high"]);
+  assert.deepEqual(asked, [], "nothing missing: no account is asked");
+
+  // A cooldown: CPA hides the model, but the enabled account still has it. It stays, held.
+  plain = { data: [{ id: "gpt-5.5", owned_by: "openai" }, { id: "gemini-3-flash", owned_by: "antigravity" }] };
+  let listed = await read();
+  assert.ok(listed.models.includes("gemini-4-argon-high"));
+  assert.match(listed.held["gemini-4-argon-high"], /not listing it right now/);
+  assert.deepEqual(asked.sort(), ["ag-1.json", "ag-6.json"], "only the provider's enabled accounts are asked");
+
+  // An account whose models cannot be read: nothing is judged.
+  registered = { "ag-1.json": ["gemini-3-flash"], "ag-6.json": null };
+  accounts = [...both];
+  listed = await read();
+  assert.match(listed.held["gemini-4-argon-high"], /not listing it right now/, "unreadable: kept, as before");
+
+  // The account that served it is disabled: CPA unregisters its models, and the menu drops it.
+  accounts = [both[0], { ...both[1], disabled: true }];
+  registered = { "ag-1.json": ["gemini-3-flash"] };
+  asked.length = 0;
+  listed = await read();
+  assert.ok(!listed.models.includes("gemini-4-argon-high"), "gone from the menu");
+  assert.equal(listed.held?.["gemini-4-argon-high"], undefined);
+  assert.match(listed.unavailable["gemini-4-argon-high"], /No enabled Antigravity account in CPA serves it now: the account that did is disabled/);
+  assert.deepEqual(asked, ["ag-1.json"], "a disabled account is not asked");
+  assert.ok(listed.models.includes("gemini-3-flash"));
+
+  // A Codex model CPA stopped listing is still remembered: an API key in CPA's config may serve it.
+  plain = { data: [{ id: "gemini-3-flash", owned_by: "antigravity" }] };
+  listed = await read();
+  assert.match(listed.held["gpt-5.5"], /not listing it right now/);
+
+  // Turned back on: CPA lists it again, and so does the menu.
+  accounts = both;
+  plain = { data: [{ id: "gemini-3-flash", owned_by: "antigravity" }, { id: "gemini-4-argon-high", owned_by: "antigravity" }] };
+  listed = await read();
+  assert.ok(listed.models.includes("gemini-4-argon-high"));
+  assert.equal(listed.unavailable?.["gemini-4-argon-high"], undefined);
+});
+
 test("CPA's model list leaves out a provider plugin's models when nobody is signed in to that provider", async () => {
   const enhanced = { models: [
     { slug: "gpt-5.5", context_window: 272000 },

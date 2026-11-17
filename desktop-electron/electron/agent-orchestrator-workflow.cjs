@@ -1424,7 +1424,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // Why a provider has none: its accounts are all disabled in CPA, or none was added. The model
       // menu and a refused send say so, instead of only "not offered right now".
       const disabled = new Set(files.filter(entry => entry.status === "disabled" && !enabled.has(entry.provider)).map(entry => entry.provider));
-      return Object.assign(enabled, { disabled, upstreams });
+      return Object.assign(enabled, { disabled, upstreams, files });
     } catch { return null; }
   }
   const PLUGIN_NAMES = { cline: "Cline Pass", "commandcode-go": "CommandCode Go", commandcode: "CommandCode", grok: "Grok", kimi: "Kimi" };
@@ -1722,6 +1722,54 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** Resolves once the remembered models are on disk. */
   async function knownModelsSaved() { while (knownModelsSaving) await knownModelsSaving; }
   const HELD_NOTE = "CPA is not listing it right now (cooling down after upstream errors, or CPA is restarting); a message still goes to CPA, which answers for itself";
+
+  // A remembered model stays only while an enabled account still has it. CPA keeps a model
+  // registered to its account through quota cooldowns and errors, and unregisters every model of a
+  // disabled account. Until 2026-11-18 the models only a disabled account served (Gemini 4 Argon,
+  // Carbon and Hydrogen on one of ten Antigravity accounts) stayed in the menu for 30 days, and each
+  // send failed "unknown provider". Judged only for providers CPA serves through sign-in accounts
+  // alone: a Codex, Claude or Gemini model can also come from an API key in CPA's config, which no
+  // account in this list stands for.
+  const SIGN_IN_ONLY_PROVIDERS = new Map([["antigravity", "Antigravity"]]);
+  const ACCOUNT_MODELS_TTL_MS = 60_000;
+  const MAX_CHECKED_ACCOUNTS = 64;
+  let accountModelsCache = { key: "", at: 0, served: null };
+  /** The models CPA has registered to `provider`'s enabled accounts, or null when one could not be read. */
+  async function enabledAccountModels({ baseUrl, managementKey }, files, provider, at) {
+    const names = files.filter(entry => entry.provider === provider && entry.status !== "disabled").map(entry => entry.name).slice(0, MAX_CHECKED_ACCOUNTS);
+    const key = `${provider}\n${names.join("\n")}`;
+    if (accountModelsCache.key === key && at - accountModelsCache.at < ACCOUNT_MODELS_TTL_MS) return accountModelsCache.served;
+    const served = new Set();
+    for (let start = 0; start < names.length; start += 4) {
+      const lists = await Promise.all(names.slice(start, start + 4).map(async name => {
+        try {
+          const response = await fetchImpl(`${baseUrl}/v0/management/auth-files/models?name=${encodeURIComponent(name)}`, {
+            headers: { Authorization: `Bearer ${managementKey}` }, signal: AbortSignal.timeout(5_000),
+          });
+          const models = response.ok ? (await response.json())?.models : null;
+          return Array.isArray(models) ? models : null;
+        } catch { return null; }
+      }));
+      if (lists.some(list => !list)) return null;
+      for (const list of lists) for (const model of list) if (typeof model?.id === "string") served.add(model.id);
+    }
+    accountModelsCache = { key, at, served };
+    return served;
+  }
+  /** Remembered models CPA no longer lists that no enabled account has: id -> provider. */
+  async function modelsNoEnabledAccountServes(cpa, accountProviders, liveIds, at) {
+    const gone = new Map();
+    if (!cpa.managementKey || !Array.isArray(accountProviders?.files)) return gone;
+    const candidates = Object.entries(knownModels)
+      .map(([id, entry]) => [id, String(entry.capability?.provider ?? "").trim().toLowerCase()])
+      .filter(([id, provider]) => SIGN_IN_ONLY_PROVIDERS.has(provider) && !liveIds.includes(id));
+    for (const provider of new Set(candidates.map(([, owner]) => owner))) {
+      const served = await enabledAccountModels(cpa, accountProviders.files, provider, at);
+      if (!served) continue; // an account could not be read: nothing of this provider is judged
+      for (const [id, owner] of candidates) if (owner === provider && !served.has(id)) gone.set(id, provider);
+    }
+    return gone;
+  }
   /** The remembered models CPA did not list (ids already listed stay as CPA gave them). */
   function rememberedModels(ids, capabilities, plugins, held, note, at = now()) {
     for (const [id, entry] of Object.entries(knownModels)) {
@@ -1858,6 +1906,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const switchedOff = !ids.includes(id) && disabled(id);
       if (switchedOff) unavailable[id] = pluginUnavailable(owners?.get(id) || entry.capability.provider || id.split("/")[0], accountProviders);
       if (switchedOff || at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
+    }
+    for (const [id, provider] of await modelsNoEnabledAccountServes(cpa, accountProviders, ids, at)) {
+      unavailable[id] = `No enabled ${SIGN_IN_ONLY_PROVIDERS.get(provider)} account in CPA serves it now: the account that did is disabled. `
+        + "Turn it back on in CPA > Accounts, or choose another model";
+      delete knownModels[id];
+      changed = true;
     }
     rememberedModels(ids, capabilities, plugins, held, id => unavailable[id] || HELD_NOTE, at);
     for (const id of Object.keys(held)) delete unavailable[id];
