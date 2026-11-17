@@ -1,13 +1,18 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "8bceb7208c492a325afdcf24b4d8bc2ccf4f59e3",
+    "commit": "be1c634b212d167cf6c631995f933504e24f7549",
     "license": "MIT"
   },
   "changes": [
+    "Accounts: Codex cards show manual resets and the plan renewal with Reset quota, as CPA's panel does; quota as bar rows; credits 0 when none; each card shows 24 h / 7 d use with cache-hit tokens, cache rate and cost; All / Enabled / Disabled / Hold filter kept across restarts",
+    "Fallbacks lists every API key and provider in CPA with its use and credits (DeepSeek balance, OpenRouter key budget); Providers > In CPA lists every provider; Auto Review keeps and lists its recent reviews across config reloads",
+    "A key that answers that it has no credits (OpenAI insufficient_quota / credit_balance_exhausted, Anthropic, DeepSeek, HTTP 402) is left out of routing for 30 min, doubling to 12 h, and CPA's own selector is told to skip it; a request that succeeds on it, or Credits added, puts it back",
+    "For a model sign-in accounts serve, API keys and other providers are fallbacks the user turns on under Accounts > Fallbacks, used only after every sign-in account is spent; the usage log no longer keeps a configured key as a record's source",
+    "Smart routing covers Codex, Claude and Antigravity sign-in accounts and mixed requests (0.8.0): accounts with quota left come first, then unread sign-in accounts; a spent account is never chosen while another can answer",
     "A key that answers that it has no credits (OpenAI insufficient_quota / credit_balance_exhausted, Anthropic, DeepSeek, HTTP 402) is left out of routing for 30 min, doubling to 12 h, and CPA's own selector is told to skip it; a request that succeeds on it, or Credits added, puts it back",
     "For a model sign-in accounts serve, API keys and other providers are fallbacks the user turns on under Accounts > Fallbacks, used only after every sign-in account is spent; the usage log no longer keeps a configured key as a record's source",
     "Smart routing covers Codex, Claude and Antigravity sign-in accounts and mixed requests (0.8.0): accounts with quota left come first, then unread sign-in accounts; a spent account is never chosen while another can answer",
@@ -23,8 +28,8 @@
   "platforms": {
     "win32/x64": {
       "path": "windows/amd64/cpa-provider-manager-v0.9.0.dll",
-      "sha256": "8aedaced6c13cb1dfad6a59d64724fb1d3751c25c780956e8623bd000d7d934c",
-      "size": 27210752
+      "sha256": "d3818b1d414f5d997984752772d795261b44a92834bc19908891d6ee38b525f6",
+      "size": 27300864
     }
   }
 }
