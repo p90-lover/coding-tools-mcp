@@ -187,10 +187,10 @@ function isolatedAuthHome(toolsRoot, accountId) {
   return path.join(toolsRoot, "antigravity-cli", "homes", isolatedAuthAccountId(accountId));
 }
 
-function ensureIsolatedAuthHome(home) {
+async function ensureIsolatedAuthHome(home) {
   if (!home || !path.isAbsolute(home)) throw new Error("Antigravity isolated auth home must be absolute");
-  fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-  try { fs.chmodSync(home, 0o700); } catch { /* Windows may ignore mode */ }
+  await fs.promises.mkdir(home, { recursive: true, mode: 0o700 });
+  try { await fs.promises.chmod(home, 0o700); } catch { /* Windows may ignore mode */ }
   return home;
 }
 
@@ -495,7 +495,7 @@ function createAntigravityCli({
   }
 
   /** Empty or per-account auth home for a launched CLI session. Never the user's default profile. */
-  function authHome(accountId) {
+  async function authHome(accountId) {
     return ensureIsolatedAuthHome(isolatedAuthHome(toolsRoot, accountId));
   }
 

@@ -5350,7 +5350,7 @@ async function start() {
           if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
             executable: antigravityCli.executable(),
-            env: manualAuthEnvironment(env, process.env, { home: antigravityCli.authHome(args.accountId) }),
+            env: manualAuthEnvironment(env, process.env, { home: await antigravityCli.authHome(args.accountId) }),
             workspaceId: args.workspaceId || undefined,
           });
           return { ok: true, ...terminal, title: "agy" };
@@ -5392,7 +5392,7 @@ async function start() {
         try { env = shimProxyEnvironment(await antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // Isolated empty/default auth home for managed agy only (the shim applies it to
         // USERPROFILE/HOME). Never set USERPROFILE or HOME on the daemon itself.
-        env = { ...env, CODING_TOOLS_AGY_AUTH_HOME: antigravityCli.authHome() };
+        env = { ...env, CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli.authHome() };
         // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
         // session's own settings, on each Codex app-server's command line and in each OpenCode
         // chat's inline config (empty: off). ready() above wrote the plugin's file.

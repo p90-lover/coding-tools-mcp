@@ -336,8 +336,8 @@ test("managed CLI auth suppresses the external browser without changing other ha
   assert.deepEqual(inherited, { PATH: "untouched" });
   assert.equal(shimProxyEnvironment(proxy).SSH_CLIENT, undefined, "the AO daemon and other harnesses must not inherit fake SSH");
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  assert.match(main, /env: manualAuthEnvironment\(env, process\.env, \{ home: antigravityCli\.authHome\(args\.accountId\) \}\)/);
-  assert.match(main, /CODING_TOOLS_AGY_AUTH_HOME: antigravityCli\.authHome\(\)/);
+  assert.match(main, /env: manualAuthEnvironment\(env, process\.env, \{ home: await antigravityCli\.authHome\(args\.accountId\) \}\)/);
+  assert.match(main, /CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli\.authHome\(\)/);
   assert.doesNotMatch(main, /USERPROFILE: antigravityCli/, "the AO daemon must not inherit a rewritten USERPROFILE");
 });
 
@@ -363,7 +363,7 @@ test("the agy shim applies only the Coding Tools proxy and refuses to run withou
     { CODING_TOOLS_AGY_HTTPS_PROXY: "http://127.0.0.1:7890", CODING_TOOLS_AGY_NO_PROXY: "localhost" });
 });
 
-test("a different Antigravity account gets an empty isolated auth home, not the default CLI profile", () => {
+test("a different Antigravity account gets an empty isolated auth home, not the default CLI profile", async () => {
   const toolsRoot = temp();
   const inherited = { USERPROFILE: "C:\\Users\\signed-in", HOME: "/home/signed-in", PATH: "untouched" };
   assert.equal(isolatedAuthAccountId(), EMPTY_AUTH_ACCOUNT);
@@ -378,8 +378,8 @@ test("a different Antigravity account gets an empty isolated auth home, not the 
   assert.ok(emptyHome.startsWith(path.join(toolsRoot, "antigravity-cli", "homes")));
   assert.equal(fs.existsSync(emptyHome), false, "the home is not created until a launch asks for it");
 
-  ensureIsolatedAuthHome(emptyHome);
-  ensureIsolatedAuthHome(otherHome);
+  await ensureIsolatedAuthHome(emptyHome);
+  await ensureIsolatedAuthHome(otherHome);
   assert.deepEqual(fs.readdirSync(emptyHome), [], "a new account home starts empty");
   assert.deepEqual(fs.readdirSync(otherHome), [], "a different account does not inherit another profile's files");
   fs.writeFileSync(path.join(emptyHome, "leftover.json"), "{}");
@@ -407,7 +407,7 @@ test("a different Antigravity account gets an empty isolated auth home, not the 
   assert.equal(inherited.HOME, "/home/signed-in", "the caller environment must stay unchanged");
 });
 
-test("the managed CLI exposes a per-account authHome that stays empty until sign-in", () => {
+test("the managed CLI exposes a per-account authHome that stays empty until sign-in", async () => {
   const toolsRoot = path.join(temp(), "tools");
   fs.mkdirSync(toolsRoot, { recursive: true });
   const manifestPath = path.join(toolsRoot, "manifest.json");
@@ -419,8 +419,8 @@ test("the managed CLI exposes a per-account authHome that stays empty until sign
     toolsRoot, confirm: async () => true, getWorkspaces: async () => [], logger: { info() {}, warn() {} },
     platform: "linux", arch: "x64", manifestPath,
   });
-  const first = cli.authHome();
-  const other = cli.authHome("other@example.test");
+  const first = await cli.authHome();
+  const other = await cli.authHome("other@example.test");
   assert.equal(path.basename(first), "empty");
   assert.notEqual(first, other);
   assert.deepEqual(fs.readdirSync(first), []);
