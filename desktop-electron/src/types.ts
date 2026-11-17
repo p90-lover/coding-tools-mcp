@@ -114,6 +114,12 @@ export interface ProviderAccountRecord {
   lastUsedAt?: string;
   archivedAt?: string;
   error?: string;
+  remainingBalance?: {
+    remaining: number | null;
+    currency?: string | null;
+    kind?: string | null;
+  } | null;
+  displayOnly?: boolean;
 }
 
 export interface ProviderAccountInput {

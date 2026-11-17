@@ -117,6 +117,7 @@ function loadCreateCodingToolsAppsHost(appHandlerRoot) {
   }
 }
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
+const { listCpaAuthAccounts } = require("./cpa-auth-inventory.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
   KEEP_UI_RESPONSIVE_SKIP_REASON,
@@ -4936,7 +4937,10 @@ async function start() {
       powerSaveBlocker,
     },
   });
-  const providerServices = createAppsProviderServices({ providerNetworkReady });
+  const providerServices = createAppsProviderServices({
+    providerNetworkReady,
+    listCpaAuthAccounts: async () => listCpaAuthAccounts({ directory: cpaAuthDirectory() }),
+  });
   // MCP Events: incidents detected here are delivered by the headless service's event hub
   // to the webhook subscriptions ChatGPT created on the workspace MCP listeners. Reports
   // wait for an already-running headless service; they never start one.
