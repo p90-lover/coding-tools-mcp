@@ -105,20 +105,35 @@ function installProviderNetwork({
 
   // The window's copy names each proxy's sign-in username, so the Proxy page can tell proxies on one
   // address apart. Only this copy: saves and routing never decrypt a sign-in.
-  function shown(snapshot) {
-    const withNames = controller?.store?.withProxyUsernames?.(snapshot) ?? snapshot;
+  // CPA auth-dir accounts are overlaid from this cache so shown()/publish() stay
+  // synchronous (onChanged can run on the UI path). The cache is filled with
+  // fs.promises, never *Sync.
+  let cpaAccounts = [];
+
+  async function loadCpaAccounts() {
     try {
       const directory = require("path").join(app.getPath("userData"), "integrations", "state", "cpa", "auth");
-      return overlayCpaAccounts(withNames, listCpaAuthAccounts({ directory }));
+      cpaAccounts = await listCpaAuthAccounts({ directory });
     } catch {
-      return withNames;
+      cpaAccounts = [];
     }
+    return cpaAccounts;
+  }
+
+  function shown(snapshot) {
+    const withNames = controller?.store?.withProxyUsernames?.(snapshot) ?? snapshot;
+    return overlayCpaAccounts(withNames, cpaAccounts);
   }
 
   function publish(snapshot) {
     const visible = shown(snapshot);
     sendAll("launcher:provider-network-changed", visible);
     return visible;
+  }
+
+  async function publishFresh(snapshot) {
+    await loadCpaAccounts();
+    return publish(snapshot);
   }
 
   providerNetworkControllerPromise = app.whenReady().then(async () => {
@@ -188,6 +203,8 @@ function installProviderNetwork({
     });
     novaManager = nova;
     app.once("will-quit", () => nova?.stopPolling());
+    await loadCpaAccounts();
+    try { publish(controller.store.snapshot()); } catch {}
     return controller;
   });
   const controllerPromise = providerNetworkControllerPromise;
@@ -225,10 +242,10 @@ function installProviderNetwork({
     // reported to the page.
     await active.store.saved?.();
     if (refreshGlobal) snapshot = await active.applyGlobalRouting();
-    return publish(snapshot);
+    return publishFresh(snapshot);
   }
 
-  handle("launcher:provider-snapshot", (active) => shown(active.store.snapshot()));
+  handle("launcher:provider-snapshot", (active) => loadCpaAccounts().then(() => shown(active.store.snapshot())));
   handle("launcher:provider-execution-plan", (active, _event, input) => (
     createProviderExecutionPlan(active.store.snapshot(), input)
   ));

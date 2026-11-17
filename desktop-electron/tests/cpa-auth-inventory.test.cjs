@@ -23,7 +23,7 @@ function tempAuth(name, files) {
 
 const NOW = new Date("2026-11-18T00:00:00.000Z");
 
-test("listCpaAuthAccounts returns every CPA auth file as a public account and never copies secrets", () => {
+test("listCpaAuthAccounts returns every CPA auth file as a public account and never copies secrets", async () => {
   const directory = tempAuth("cpa-inv", {
     "antigravity-good@example.com.json": {
       type: "antigravity",
@@ -37,7 +37,7 @@ test("listCpaAuthAccounts returns every CPA auth file as a public account and ne
     "notes.txt": "ignore me",
     "broken.json": "{ not json",
   });
-  const accounts = listCpaAuthAccounts({
+  const accounts = await listCpaAuthAccounts({
     directory,
     now: NOW,
     quotas: {

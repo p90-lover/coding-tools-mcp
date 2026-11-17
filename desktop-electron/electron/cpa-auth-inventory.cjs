@@ -97,21 +97,19 @@ function toPublicAccount(meta, quotas, now) {
   };
 }
 
-function listCpaAuthAccounts({ directory, quotas = {}, now = new Date() } = {}) {
+async function listCpaAuthAccounts({ directory, quotas = {}, now = new Date() } = {}) {
   if (!directory) return [];
   let names;
-  try { names = fs.readdirSync(directory); } catch { return []; }
-  const accounts = [];
-  for (const name of names.sort()) {
-    if (!/\.json$/i.test(name)) continue;
+  try { names = await fs.promises.readdir(directory); } catch { return []; }
+  const accounts = await Promise.all(names.sort().map(async (name) => {
+    if (!/\.json$/i.test(name)) return null;
     let raw;
-    try { raw = JSON.parse(fs.readFileSync(path.join(directory, name), "utf8")); } catch { continue; }
+    try { raw = JSON.parse(await fs.promises.readFile(path.join(directory, name), "utf8")); } catch { return null; }
     const meta = safeMeta(name, raw);
-    if (!meta) continue;
-    const account = toPublicAccount(meta, quotas, now);
-    if (account) accounts.push(account);
-  }
-  return accounts;
+    if (!meta) return null;
+    return toPublicAccount(meta, quotas, now);
+  }));
+  return accounts.filter(Boolean);
 }
 
 function sameLiveAccount(storeAccount, cpaAccount) {
