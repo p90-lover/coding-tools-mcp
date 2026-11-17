@@ -4,7 +4,7 @@ const vm = require("node:vm");
 const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
-const { chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
+const { CHATGPT_SIGNED_OUT, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
 const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
 
 function fakeMcpNetwork() {
@@ -255,6 +255,24 @@ test("an ownership failure names the check that stopped it, in fixed words only"
   });
   assert.equal(denied.errorCause, "chatgpt:http_403");
   assert.match(denied.error, /HTTP 403/);
+  // Live 2026-11-17: ChatGPT's sign-in page still gave a token, and the list answered 401
+  // "token_revoked" labelled text/plain. That read as "not JSON", the ownership message, and a retry
+  // every few minutes; the person has to sign in again, and the card now says so.
+  for (const mimeType of ["text/plain", "application/json"]) {
+    const signedOut = await failure(null, ({ emit }) => {
+      sent(emit, "1", "GET", list, { "chatgpt-account-id": accountId });
+      emit("Network.responseReceived", { requestId: "1", response: { url: list, status: 401, mimeType } });
+    });
+    assert.equal(signedOut.error, CHATGPT_SIGNED_OUT, `a 401 labelled ${mimeType} is a sign-in ChatGPT refused`);
+    assert.equal(signedOut.errorCause, "chatgpt:signed_out");
+    assert.equal(signedOut.thrown.message, CHATGPT_SIGNED_OUT);
+    assert.equal(signedOut.activeAccountId, null, "no workspace is confirmed by a refused sign-in");
+  }
+  const tunnelsRefused = await failure(tunnelId, ({ emit }) => {
+    sent(emit, "1", "GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org });
+    emit("Network.responseReceived", { requestId: "1", response: { url: "https://api.openai.com/v1/tunnels", status: 401, mimeType: "application/json" } });
+  });
+  assert.equal(tunnelsRefused.errorCause, "tunnels:http_401", "Platform's own requests keep their HTTP status");
   assert.equal((await failure(tunnelId, ({ observed, bodies }) => {
     const id = observed("GET", "https://api.openai.com/v1/tunnels", { "openai-organization": org }, {});
     bodies.set(id, { body: "<html>", base64Encoded: false });

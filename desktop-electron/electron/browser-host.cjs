@@ -364,6 +364,22 @@ function signOutUrl(value) {
   return /(^|\/)(log-?out|sign-?out)(\/|$)/i.test(new URL(value).pathname);
 }
 
+/**
+ * Whether a sign-in a tab of the person's own goes to is ChatGPT's, which Windows hands to Chrome
+ * (requestChromeLogin). OpenAI Platform signs in through auth.openai.com too: handed to Chrome, its
+ * Log in only showed ChatGPT again, so no account could sign in to Platform (2026-11-17). A sign-in
+ * that another page started (Platform, or the sign-in pages it leads to) stays in the tab.
+ */
+function chatGptSignInNavigation(fromUrl, toUrl) {
+  if (!allowedAuthUrl(toUrl) || signOutUrl(toUrl)) return false;
+  if (new URL(toUrl).hostname === "chatgpt.com") return true;
+  try {
+    return new URL(fromUrl).hostname === "chatgpt.com";
+  } catch {
+    return true;
+  }
+}
+
 function navigationOriginForLog(value) {
   try {
     const parsed = new URL(value);
@@ -1729,7 +1745,7 @@ class BrowserHost {
       return { action: "deny" };
     });
     contents.on("will-navigate", (event, url) => {
-      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url) && !signOutUrl(url)) {
+      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && chatGptSignInNavigation(contents.getURL(), url)) {
         event.preventDefault();
         this.requestChromeLogin(contents);
       }

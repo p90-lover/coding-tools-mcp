@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { BrowserAccount, BrowserAccountsStatus, LauncherApi, McpTunnel } from "../types";
+import { openPlatformInBrowser, PLATFORM_TUNNELS_URL } from "./platform-in-browser";
 import "./mcp-tunnels.css";
 
 const CONFIRM_WINDOW_MS = 4_000;
@@ -19,10 +20,12 @@ const messageOf = (cause: unknown) => (cause instanceof Error ? cause.message : 
  * account and ChatGPT reaches Codex's tools only through a tunnel of its own account, so each Browser
  * account that should use the connector gets its own tunnel here; all of them reach the same bridge.
  */
-export function McpTunnelsPanel({ api, initial, setError }: {
+export function McpTunnelsPanel({ api, initial, setError, onOpenBrowser }: {
   api: LauncherApi;
   initial: McpTunnel[];
   setError: (error: string | null) => void;
+  /** Shows the Browser tab, where a tunnel's Platform settings open. */
+  onOpenBrowser?: () => void;
 }) {
   const [tunnels, setTunnels] = useState<McpTunnel[]>(initial);
   const [accounts, setAccounts] = useState<BrowserAccountsStatus | null>(null);
@@ -133,7 +136,11 @@ export function McpTunnelsPanel({ api, initial, setError }: {
                 <button
                   className="mtp-link"
                   disabled={Boolean(busy) || !accountList.some(account => account.id === tunnel.accountId)}
-                  onClick={() => void run(`settings:${tunnel.id}`, () => api.openMcpTunnelSettings(tunnel.id))}
+                  // In the Browser tab, where the person sees it and can sign in. It opened in a hidden
+                  // window before 2026-11-17 (the background command's, openMcpTunnelSettings).
+                  onClick={() => void run(`settings:${tunnel.id}`, () => openPlatformInBrowser({
+                    api, accountId: tunnel.accountId ?? "", url: PLATFORM_TUNNELS_URL, showBrowser: onOpenBrowser,
+                  }))}
                   title="Open Platform settings in this Browser account"
                   type="button"
                 >

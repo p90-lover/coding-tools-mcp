@@ -12,6 +12,11 @@ const WORKSPACE_OWNER_REQUIRED = "Only a verified owner of this ChatGPT workspac
 // Hosts Platform's own sign-in passes through while the setup reads tunnel ownership.
 const PLATFORM_SIGN_IN_HOSTS = ["platform.openai.com", "auth.openai.com", "auth0.openai.com"];
 const PLATFORM_SIGN_IN_UNFINISHED = "OpenAI Platform asked this account to sign in again, and the sign-in did not finish by itself. Sign in to OpenAI Platform with this ChatGPT account, then retry.";
+// ChatGPT's API refused the account's sign-in (HTTP 401) while its sign-in page still reports the
+// account as signed in. Seen 2026-11-17 on several accounts: /api/auth/session gave a token, and
+// every backend request answered 401 "token_revoked", as text/plain. That surfaced as "MCP ownership
+// metadata is unavailable or exceeded its bound." and Connect was retried every few minutes.
+const CHATGPT_SIGNED_OUT = "ChatGPT no longer accepts this account's sign-in. Sign in to it again in the Browser tab, then retry.";
 
 /**
  * What a setup stopped for the person's own sign-in, logout or account removal throws (the browser's
@@ -222,10 +227,11 @@ async function observeMcpSetupContext(contents, tunnelId) {
   };
   const scope = (values, pattern) => Array.isArray(values) && values.length <= 1024
     && values.every(id => typeof id === "string" && pattern.test(id)) ? [...new Set(values)] : null;
-  const failed = (fact, status = null, cause = "unavailable") => {
+  // `message` replaces the generic words with one of the setup's fixed messages (CHATGPT_SIGNED_OUT).
+  const failed = (fact, status = null, cause = "unavailable", message = null) => {
     if (disposed) return;
-    error = status === null ? "MCP ownership metadata is unavailable or exceeded its bound."
-      : `MCP ownership metadata request was denied or unavailable (HTTP ${status}).`;
+    error = message ?? (status === null ? "MCP ownership metadata is unavailable or exceeded its bound."
+      : `MCP ownership metadata request was denied or unavailable (HTTP ${status}).`);
     errorCause = `${fact.kind}:${status === null ? cause : `http_${status}`}`;
     metadataVersion++;
     if (fact.kind === "chatgpt") { activeAccountId = null; selectionVersion++; }
@@ -329,6 +335,13 @@ async function observeMcpSetupContext(contents, tunnelId) {
       try { url = new URL(params.response?.url); } catch { requests.delete(id); failed(fact, null, "bad_url"); return; }
       const status = params.response.status;
       const mimeType = String(params.response.mimeType || "").toLowerCase();
+      // ChatGPT refusing the account's sign-in, whatever type it labels its answer with (it sends
+      // its 401 "token_revoked" JSON as text/plain): the person has to sign in again.
+      if (fact.kind === "chatgpt" && status === 401 && url.origin === fact.origin && url.pathname === fact.path) {
+        requests.delete(id);
+        failed(fact, null, "signed_out", CHATGPT_SIGNED_OUT);
+        return;
+      }
       if (url.origin !== fact.origin || url.pathname !== fact.path || !Number.isInteger(status) || !mimeType.includes("application/json")) {
         requests.delete(id);
         failed(fact, null, url.origin !== fact.origin || url.pathname !== fact.path ? "redirected"
@@ -1279,4 +1292,4 @@ async function openConfiguredTunnelSettings({ BrowserWindow, browserHost, runtim
   });
 }
 
-module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, connectorSetupStopped, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };
+module.exports = { UNVERIFIED_CONNECTOR, WORKSPACE_OWNER_REQUIRED, PLATFORM_SIGN_IN_UNFINISHED, CHATGPT_SIGNED_OUT, connectorSetupStopped, requireMcpWorkspaceOwner, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource, extraConnectorSettings, readAccountConnectorBindings, accountConnectorBinding, requireAutomaticConnectorSetup, openConfiguredTunnelSettings };

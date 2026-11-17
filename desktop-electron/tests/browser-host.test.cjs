@@ -2427,6 +2427,39 @@ test("a sign-out address is not taken for a sign-in", () => {
     "not a url"]) assert.equal(signOutUrl(url), false, url);
 });
 
+// Live 2026-11-17: an account the MCP setup stopped at platform.openai.com/login could not sign in to
+// Platform in the Browser tab. Platform's own Continue buttons go to auth.openai.com, and the tab handed
+// that to Chrome's ChatGPT sign-in, which only showed ChatGPT again.
+test("a tab of the person's own keeps a sign-in Platform starts, and hands ChatGPT's to Chrome", () => {
+  const chrome = [];
+  const contents = Object.assign(new EventEmitter(), { page: "", getURL() { return this.page; }, setWindowOpenHandler() {} });
+  const tab = { id: "user-tab", view: { webContents: contents } };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    externalLogin: true,
+    userTabs: new Map([[tab.id, tab]]),
+    getBrowserInteractionMode: () => "automatic",
+    bindBrowserKeys() {},
+    requestChromeLogin: (from) => chrome.push(from),
+  });
+  host.bindUserTabContents(tab);
+  const navigate = (from, to) => {
+    contents.page = from;
+    let prevented = false;
+    contents.emit("will-navigate", { preventDefault: () => { prevented = true; } }, to);
+    return prevented;
+  };
+  assert.equal(navigate("https://platform.openai.com/login", "https://auth.openai.com/authorize?client_id=x"), false);
+  assert.equal(navigate("https://auth.openai.com/log-in", "https://accounts.google.com/o/oauth2/v2/auth"), false);
+  assert.equal(navigate("https://platform.openai.com/settings/organization/tunnels", "https://platform.openai.com/login"), false);
+  assert.equal(chrome.length, 0);
+  assert.equal(navigate("https://chatgpt.com/", "https://auth.openai.com/authorize?client_id=x"), true);
+  assert.equal(navigate("https://platform.openai.com/login", "https://chatgpt.com/auth/login"), true);
+  assert.equal(chrome.length, 2);
+  assert.equal(navigate("https://chatgpt.com/", "https://auth.openai.com/logout"), false);
+  host.getBrowserInteractionMode = () => "manual";
+  assert.equal(navigate("https://chatgpt.com/", "https://auth.openai.com/authorize?client_id=x"), false);
+});
+
 function operationFixture(states = []) {
   return Object.assign(Object.create(BrowserHost.prototype), {
     ready: async () => {},

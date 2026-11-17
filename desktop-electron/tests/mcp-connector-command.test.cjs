@@ -1079,4 +1079,12 @@ test("a signed-out session and a security check read as what they are, and the l
   assert.equal(owned("tunnels:load_failed:neterr_failed"), "ownership check tunnels:load_failed:neterr_failed");
   assert.equal(owned("chatgpt:Private Text"), null, "anything but the observer's own words stays out");
   assert.equal(owned(null), null, "an older error without a check says nothing more than before");
+
+  // ChatGPT refused the account's sign-in (401): the person signs in again, so automatic setup waits
+  // for them (verification_required) instead of failing again every few minutes.
+  const { CHATGPT_SIGNED_OUT } = require("../electron/mcp-connector-setup.cjs");
+  assert.deepEqual(mcpConnectorCommandFailure(Object.assign(new Error(CHATGPT_SIGNED_OUT), { ownershipCause: "chatgpt:signed_out" })),
+    { code: "verification_required", message: CHATGPT_SIGNED_OUT });
+  assert.equal(mcpConnectorFailureCause(Object.assign(new Error(CHATGPT_SIGNED_OUT), { ownershipCause: "chatgpt:signed_out" }),
+    mcpConnectorCommandFailure(new Error(CHATGPT_SIGNED_OUT))), "ownership check chatgpt:signed_out");
 });
