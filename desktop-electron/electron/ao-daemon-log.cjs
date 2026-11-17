@@ -157,4 +157,51 @@ function createDaemonFailureEvents({ now = Date.now } = {}) {
   };
 }
 
-module.exports = { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs, daemonLogEvent, createDaemonFailureEvents, SLOW_STAGE_MS };
+/**
+ * AO's "startup progress" line (AO's internal/startupprogress) as { stage, migration, elapsedMs,
+ * cpuMs, ioBytes }, or null. Until it listens, AO writes one when a stage of its start begins and
+ * one every 15 s while it lasts, with its CPU time and the bytes it read and wrote so far.
+ */
+function startupProgress(line) {
+  if (!String(line).includes(' msg="startup progress" ')) return null;
+  const fields = slogFields(line);
+  const count = (value) => (/^\d+$/.test(value ?? "") ? Number(value) : null);
+  return { stage: short(fields.stage, 40), migration: short(fields.migration, 120) || null,
+    elapsedMs: count(fields.elapsed_ms), cpuMs: count(fields.cpu_ms), ioBytes: count(fields.io_bytes) };
+}
+
+// The work AO must do between two moments of progress: far above what a stuck daemon adds (its
+// own report lines, about 13 bytes a second, and its runtime's housekeeping), far below what any
+// real start work adds. The index build of 2026-11-16 read a cold hard disk at about 1 MB/s.
+const START_WORK_IO_BYTES = 1024 * 1024;
+const START_WORK_CPU_MS = 2000;
+
+/**
+ * Follows one daemon's startup progress lines: `push(line)` takes each output line, and
+ * `advancedAt()` is when the start last moved on (null before its first line). It moved on when
+ * a stage began, or since the last time it moved on AO read and wrote START_WORK_IO_BYTES or used
+ * START_WORK_CPU_MS. A daemon that keeps writing lines but adds no work is stuck, not slow.
+ */
+function createStartProgress({ now = Date.now } = {}) {
+  let base = null;
+  let advancedAt = null;
+  let latest = null;
+  const grew = (key, by) => latest[key] !== null && base[key] !== null && latest[key] - base[key] >= by;
+  return {
+    push(line) {
+      const report = startupProgress(line);
+      if (!report) return;
+      latest = report;
+      if (!base || report.stage !== base.stage || report.migration !== base.migration
+        || grew("ioBytes", START_WORK_IO_BYTES) || grew("cpuMs", START_WORK_CPU_MS)) {
+        base = report;
+        advancedAt = now();
+      }
+    },
+    advancedAt: () => advancedAt,
+    latest: () => latest,
+  };
+}
+
+module.exports = { createDaemonLogFilter, keepsDaemonLogLine, goDurationMs, daemonLogEvent, createDaemonFailureEvents, SLOW_STAGE_MS,
+  startupProgress, createStartProgress, START_WORK_IO_BYTES, START_WORK_CPU_MS };

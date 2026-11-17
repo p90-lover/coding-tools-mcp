@@ -183,3 +183,49 @@ test("the launcher puts AO's failures in its log beside the writer and start-sta
   assert.match(source, /const daemonFailureEvent = createDaemonFailureEvents\(\);/);
   assert.match(source, /const found = daemonLogEvent\(line\) \?\? daemonFailureEvent\(line\);/);
 });
+
+// AO's startupprogress lines (2026-11-16: the first start after an update built an index for 15
+// minutes before it listened, printed nothing, and was killed at the launcher's limit).
+const progressLine = ({ stage = "migrate", migration = "9009_conversation_activity_page_keys_index.sql", elapsed = 60000, cpu = 1200, io = 5_000_000 } = {}) =>
+  `time=2026-11-16T18:40:00.000+08:00 level=INFO msg="startup progress" stage=${stage.includes(" ") ? `"${stage}"` : stage}${migration ? ` migration=${migration} left=2` : ""} elapsed_ms=${elapsed} cpu_ms=${cpu}${io === null ? "" : ` io_bytes=${io}`}`;
+
+test("AO's startup progress lines are read: the stage, the migration and the work done so far", () => {
+  const { startupProgress } = require("../electron/ao-daemon-log.cjs");
+  assert.deepEqual(startupProgress(progressLine()),
+    { stage: "migrate", migration: "9009_conversation_activity_page_keys_index.sql", elapsedMs: 60000, cpuMs: 1200, ioBytes: 5000000 });
+  // Linux and macOS daemons may not count I/O; a stage with no migration names none.
+  assert.deepEqual(startupProgress(progressLine({ stage: "open database", migration: "", io: null })),
+    { stage: "open database", migration: null, elapsedMs: 60000, cpuMs: 1200, ioBytes: null });
+  assert.equal(startupProgress('time=2026-11-16T18:40:00.000+08:00 level=INFO msg="supervisor: listening" addr=127.0.0.1:1'), null);
+  // The lines are kept in AO's in-memory tail, so ao.start_slow's output shows the latest one.
+  assert.equal(keepsDaemonLogLine(progressLine()), true);
+});
+
+test("a start moves on when a stage begins or when AO did real work, not when it only keeps reporting", () => {
+  const { createStartProgress, START_WORK_IO_BYTES, START_WORK_CPU_MS } = require("../electron/ao-daemon-log.cjs");
+  let clock = 0;
+  const progress = createStartProgress({ now: () => clock });
+  assert.equal(progress.advancedAt(), null, "nothing reported yet");
+  progress.push('time=2026-11-16T18:40:00.000+08:00 level=INFO msg="supervisor: listening" addr=127.0.0.1:1');
+  assert.equal(progress.advancedAt(), null, "other lines are not progress");
+
+  clock = 1000; progress.push(progressLine({ stage: "open database", migration: "", cpu: 100, io: 1000 }));
+  assert.equal(progress.advancedAt(), 1000, "the first line");
+  clock = 2000; progress.push(progressLine({ cpu: 110, io: 2000 }));
+  assert.equal(progress.advancedAt(), 2000, "a new stage");
+  // A stuck daemon still writes its lines (about 200 bytes each) and its runtime ticks over.
+  for (let report = 1; report <= 20; report++) {
+    clock = 2000 + report * 15_000;
+    progress.push(progressLine({ cpu: 110 + report * 5, io: 2000 + report * 200 }));
+  }
+  assert.equal(progress.advancedAt(), 2000, "lines without work are not progress");
+  assert.equal(progress.latest().elapsedMs, 60000);
+  // Work is counted from the last time the start moved on, so a slow trickle adds up.
+  clock = 400_000; progress.push(progressLine({ cpu: 300, io: 2000 + START_WORK_IO_BYTES }));
+  assert.equal(progress.advancedAt(), 400_000, "a megabyte read and written since");
+  clock = 415_000; progress.push(progressLine({ cpu: 300 + START_WORK_CPU_MS, io: 2000 + START_WORK_IO_BYTES }));
+  assert.equal(progress.advancedAt(), 415_000, "two seconds of CPU since (a daemon that counts no I/O)");
+  clock = 430_000; progress.push(progressLine({ migration: "9010_conversation_provider_events_chunks_index.sql", cpu: 300 + START_WORK_CPU_MS, io: 2000 + START_WORK_IO_BYTES }));
+  assert.equal(progress.advancedAt(), 430_000, "the next migration");
+  assert.equal(progress.latest().migration, "9010_conversation_provider_events_chunks_index.sql");
+});
