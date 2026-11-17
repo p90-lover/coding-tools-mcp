@@ -404,6 +404,112 @@ function withOpenAICompletionTokens(apiKeys) {
   }) };
 }
 
+const OPENAI_API = "https://api.openai.com/v1";
+// What marks a Responses twin the app wrote (its name ends with this), so it can be rebuilt.
+const RESPONSES_TWIN = " (Responses)";
+// OpenAI's reasoning chat models, and the ones among them that are not chat models at all.
+const RESPONSES_MODEL = /^(?:gpt-[5-9]|o[1-9])/i;
+const NOT_A_CHAT_MODEL = /audio|realtime|transcribe|tts|whisper|image|embedding|moderation|search|translate/i;
+// The two refusals /v1/chat/completions gives an agent's request (see withOpenAIResponsesRoute).
+const CHAT_COMPLETIONS_REFUSALS = ["Function tools with reasoning_effort are not supported", "array too long"];
+// A model's settings that both kinds of provider entry understand, besides its name and alias.
+const RESPONSES_MODEL_FIELDS = ["display-name", "max-context-length", "thinking"];
+
+const openAIHost = (provider) => {
+  try { return new URL(String(provider?.["base-url"] ?? "")).hostname.toLowerCase() === "api.openai.com"; } catch { return false; }
+};
+const providerKeys = (provider) => (Array.isArray(provider?.keys) ? provider.keys : Array.isArray(provider?.["api-key-entries"]) ? provider["api-key-entries"] : [])
+  .filter((entry) => isPlainObject(entry) && typeof entry["api-key"] === "string" && entry["api-key"]);
+
+/**
+ * Sends an OpenAI API key's reasoning models through /v1/responses.
+ *
+ * CPA calls an `openai-compatibility` provider on /v1/chat/completions only. For OpenAI's own
+ * reasoning models that endpoint refuses what every coding agent sends: tools together with a
+ * reasoning level ("Function tools with reasoning_effort are not supported for gpt-6.1-sol in
+ * /v1/chat/completions. To use function tools, use /v1/responses"), and more than 128 tools
+ * ("Invalid 'tools': array too long"; Claude Code sent 152). Seen 2026-11-16: every chat on
+ * GPT-6 Astra and GPT-6.1 Sol failed once the ChatGPT accounts' quota ran out and the key took
+ * over. Asked directly with that key, /v1/responses took both: 152 tools with a reasoning level,
+ * a reasoning summary and no stored response all answered 200.
+ *
+ * CPA's `codex` group calls {base-url}/responses with an API key. So for each enabled provider at
+ * api.openai.com the app writes a twin there with the same keys, and the provider's reasoning chat
+ * models move to it: one route per model, not a round robin between a route that works and one that
+ * refuses. Every other model (gpt-4o, speech, images, embeddings) stays where it was. Priority,
+ * prefix and headers are copied, so the key keeps its place among the other accounts.
+ *
+ * Each write starts by folding a twin's models back into its provider, then splits them again, so
+ * the result is the same however often it runs, and a provider that is disabled, moved to another
+ * host or left without keys gets its models back. The provider also gets a rule that lets a request
+ * refused in one of those two ways try the next credential: a model list fetched again in CPA's own
+ * panel puts the models back on both routes until the app next writes this file.
+ */
+function withOpenAIResponsesRoute(apiKeys) {
+  const providers = apiKeys["openai-compatibility"];
+  if (!Array.isArray(providers)) return apiKeys;
+  const codex = Array.isArray(apiKeys.codex) ? apiKeys.codex : [];
+  const isTwin = (entry) => isPlainObject(entry) && typeof entry.name === "string" && entry.name.includes(RESPONSES_TWIN) && openAIHost(entry);
+  const twinOf = (entry) => entry.name.slice(0, entry.name.indexOf(RESPONSES_TWIN));
+  // Fold each twin's models back into the provider it was split from (the first of that name,
+  // wherever it points now).
+  const restored = providers.map((provider) => {
+    if (!isPlainObject(provider) || typeof provider.name !== "string") return provider;
+    const first = providers.find((other) => isPlainObject(other) && other.name === provider.name) === provider;
+    const back = first ? codex.filter((entry) => isTwin(entry) && twinOf(entry) === provider.name).flatMap((entry) => (Array.isArray(entry.models) ? entry.models : [])) : [];
+    const models = Array.isArray(provider.models) ? provider.models : [];
+    const known = new Set(models.map((model) => model?.name));
+    const missing = back.filter((model) => isPlainObject(model) && typeof model.name === "string" && !known.has(model.name) && known.add(model.name));
+    return missing.length ? { ...provider, models: [...models, ...missing] } : provider;
+  });
+  const twins = [];
+  const names = new Set();
+  const compat = restored.map((provider) => {
+    if (!isPlainObject(provider) || !openAIHost(provider) || provider.disabled === true) return provider;
+    const keys = providerKeys(provider);
+    const models = Array.isArray(provider.models) ? provider.models : [];
+    const moving = models.filter((model) => isPlainObject(model) && typeof model.name === "string"
+      && RESPONSES_MODEL.test(model.name) && !NOT_A_CHAT_MODEL.test(model.name));
+    if (!keys.length || !moving.length) return provider;
+    // A codex entry has one outbound route, a compatibility provider one per key: a twin per route.
+    const routes = new Map();
+    for (const entry of keys) {
+      const route = typeof entry["proxy-url"] === "string" ? entry["proxy-url"] : "";
+      routes.set(route, [...(routes.get(route) ?? []), entry]);
+    }
+    for (const [route, entries] of routes) {
+      let name = `${provider.name ?? "openai"}${RESPONSES_TWIN}`;
+      for (let copy = 2; names.has(name); copy++) name = `${provider.name ?? "openai"}${RESPONSES_TWIN} ${copy}`;
+      names.add(name);
+      twins.push({
+        name, "base-url": OPENAI_API,
+        ...(Number.isInteger(provider.priority) ? { priority: provider.priority } : {}),
+        ...(typeof provider.prefix === "string" && provider.prefix ? { prefix: provider.prefix } : {}),
+        ...(isPlainObject(provider.headers) ? { headers: provider.headers } : {}),
+        ...(route ? { "proxy-url": route } : {}),
+        // Only what a codex model entry may carry: CPA refuses a config with any other field.
+        models: moving.map((model) => ({ name: model.name, alias: model.alias || model.name,
+          ...Object.fromEntries(RESPONSES_MODEL_FIELDS.filter((field) => field in model).map((field) => [field, model[field]])) })),
+        // Not dressed up as the Codex client: OpenAI refuses "Codex usage" from an API key whose
+        // organization has the ChatGPT API-credits benefit, and this is plain API traffic.
+        keys: entries.map((entry) => ({ "api-key": entry["api-key"], ...("weight" in entry ? { weight: entry.weight } : {}), "disable-codex-cloaking": true })),
+      });
+    }
+    const moved = new Set(moving);
+    const rules = Array.isArray(provider["request-scoped-errors"]) ? provider["request-scoped-errors"] : [];
+    const covered = rules.some((rule) => isPlainObject(rule) && rule.status === 400 && rule.action === "continue"
+      && CHAT_COMPLETIONS_REFUSALS.every((text) => Array.isArray(rule.match) && rule.match.includes(text)));
+    return {
+      ...provider,
+      models: models.filter((model) => !moved.has(model)),
+      "request-scoped-errors": covered ? rules : [...rules, { status: 400, match: CHAT_COMPLETIONS_REFUSALS, action: "continue" }],
+    };
+  });
+  const others = codex.filter((entry) => !isTwin(entry));
+  if (!twins.length && others.length === codex.length) return { ...apiKeys, "openai-compatibility": compat };
+  return { ...apiKeys, "openai-compatibility": compat, codex: [...others, ...twins] };
+}
+
 function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUrl = "") {
   let savedSource = "";
   try { savedSource = fs.readFileSync(path.join(state, "config.yaml"), "utf8"); }
@@ -520,7 +626,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
       configs: mergePluginConfigs(saved.plugins?.configs, managed.plugins.configs) },
   };
   // In v8 api-keys is the upstream provider map; legacy arrays are client keys, now managed above.
-  if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = withOpenAICompletionTokens(saved["api-keys"]);
+  if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = withOpenAICompletionTokens(withOpenAIResponsesRoute(saved["api-keys"]));
   if (saved.oauth) merged.oauth = { ...saved.oauth, "auth-dir": authDirectory };
   // CPA 8 saves the route as requests.proxy-url. Kept beside the managed one above, an old route
   // outlived every change (and a removed one stayed on).
@@ -727,6 +833,7 @@ module.exports = {
   refreshConfiguration,
   run,
   runtimeConfiguration,
+  withOpenAIResponsesRoute,
   removeOldMainLogs,
   installBundledCommandCodePlugin,
 };
