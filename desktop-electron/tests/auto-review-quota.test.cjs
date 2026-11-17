@@ -7,9 +7,10 @@ const os = require("node:os");
 const path = require("node:path");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
-function fixture(preferences) {
+/** A Claude Code chat; `reviewer` "auto_review" is Approve for me, "user" is Ask for approval. */
+function fixture(preferences, { reviewer = "auto_review" } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
-    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer };
   const node = { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session", request_key: "key" } };
   const run = { id: "run", workspace_id: "ws", project_id: "task", revision: 1, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [node] };
   const calls = [], resolved = [];
@@ -45,46 +46,55 @@ function fixture(preferences) {
   };
 }
 
-for (const judge of [false, true]) test(`external screen reviews spend no quota by default, model judge ${judge}`, async () => {
+// The user's call, 2026-11-17: with Allow quota-based reviews off, Approve for me and Let the model
+// judge did nothing ("auto review isn't working ... and let model judge not working too"). Choosing
+// either is choosing a model review, so it runs; the switch covers only reviews nobody chose.
+test("Approve for me reviews run with quota-based reviews off; routine rules still need no model", async () => {
   const state = fixture();
+  try {
+    assert.equal((await state.workflow.call("chat_model_judges")).meteredReviews, false);
+    const verdict = await state.screen();
+    assert.equal(verdict.action, "allow", "the chat's own Approve for me reviews its screen actions");
+    assert.ok(state.calls.some(url => url.endsWith("/chat/completions")));
+    await state.observe();
+    assert.deepEqual(state.resolved, [["python tools/migrate.py --apply", "yes"]], "a command the reviewer allowed is answered for the person");
+    assert.equal(state.route.approvals_reviewer, "auto_review", "the saved native reviewer selection is not rewritten");
+  } finally { state.workflow.dispose(); }
+  const routine = fixture();
+  try {
+    routine.command("npm test");
+    await routine.observe();
+    assert.deepEqual(routine.resolved, [["npm test", "yes"]]);
+    assert.deepEqual(routine.calls, [], "local rules need no model");
+  } finally { routine.workflow.dispose(); }
+});
+
+for (const judge of [false, true]) test(`a chat not on Approve for me: its screen reviews ${judge ? "run with Let the model judge on" : "spend no quota while both switches are off"}`, async () => {
+  const state = fixture(undefined, { reviewer: "user" });
   try {
     await state.workflow.call("chat_model_judges", { enabled: judge });
     const verdict = await state.screen();
+    if (judge) {
+      assert.equal(verdict.action, "allow", "Let the model judge is the person's choice of a model review");
+      assert.ok(state.calls.some(url => url.endsWith("/chat/completions")));
+      return;
+    }
     assert.equal(verdict.action, "ask");
     assert.equal(verdict.quotaBlocked, true);
     assert.match(verdict.reason, /CPA reviews use account quota/);
     assert.deepEqual(state.calls, [], "neither catalog nor review requests are sent");
-    assert.equal(state.route.approvals_reviewer, "auto_review", "the saved native reviewer selection is not rewritten");
   } finally { state.workflow.dispose(); }
 });
 
-test("unreviewed commands wait for the user even with model judge on; routine rules still run", async () => {
-  const state = fixture();
+test("the switch turns those reviews on, and off again, cached verdicts included", async () => {
+  const state = fixture(undefined, { reviewer: "user" });
   try {
-    await state.workflow.call("chat_model_judges", { enabled: true });
-    const [pending] = await state.observe();
-    assert.equal(pending.recommendation.action, "ask");
-    assert.equal(pending.recommendation.unresolved, true);
-    assert.equal(pending.recommendation.quotaBlocked, true);
-    assert.deepEqual(state.resolved, [], "no automatic allow or deny replaces a skipped review");
-    assert.deepEqual(state.calls, []);
-    state.command("npm test");
-    await state.observe();
-    assert.deepEqual(state.resolved, [["npm test", "yes"]]);
-    assert.deepEqual(state.calls, [], "local rules need no model");
-  } finally { state.workflow.dispose(); }
-});
-
-test("metered reviews require explicit opt-in, and turning them off blocks cached verdicts too", async () => {
-  const state = fixture();
-  try {
-    assert.equal((await state.workflow.call("chat_model_judges")).meteredReviews, false);
     await assert.rejects(state.workflow.call("chat_model_judges", { meteredReviews: "yes" }), /on or off/);
     await state.workflow.call("chat_model_judges", { meteredReviews: true });
     assert.equal((await state.screen()).action, "allow");
     assert.ok(state.calls.some(url => url.endsWith("/chat/completions")));
     const sent = state.calls.length;
-    await state.workflow.call("chat_model_judges", { meteredReviews: false, enabled: true });
+    await state.workflow.call("chat_model_judges", { meteredReviews: false });
     assert.equal((await state.screen()).action, "ask");
     assert.equal(state.calls.length, sent);
   } finally { state.workflow.dispose(); }
