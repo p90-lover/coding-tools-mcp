@@ -19,7 +19,7 @@ test("connector actions surface errors rather than silently opening another disp
 });
 test("packaged assets and exact preload/IPC wiring expose setup without modifying Chrome policy",()=>{
  const root=path.resolve(__dirname,".."),main=fs.readFileSync(path.join(root,"electron/main.cjs"),"utf8"),preload=fs.readFileSync(path.join(root,"electron/preload.cjs"),"utf8"),app=fs.readFileSync(path.join(root,"src/App.tsx"),"utf8"),pkg=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8"));
- assert(pkg.build.files.includes("assets/chrome-profile-connector/**"));assert.match(main,/loginWithPasskey: \(\) => runtimeHost\.captureCurrentChromeLogin\(\{ safeStorage \}\)/);
+ assert(pkg.build.files.includes("assets/chrome-profile-connector/**"));assert.match(main,/loginWithPasskey: \(_partition, options\) => runtimeHost\.captureCurrentChromeLogin\(\{ safeStorage, target: options\?\.target === "platform" \? "platform" : "chatgpt" \}\)/);
  for(const channel of["browser-chrome-profile-open","browser-chrome-profile-cancel","browser-chrome-connector-folder"]){assert(main.includes(`handle("launcher:${channel}"`));assert(preload.includes(`ipcRenderer.invoke("launcher:${channel}")`));}
  assert.match(app,/operation\?\.name === "chrome-profile-login"\) && chromeLoginPending/);assert.match(app,/installConnector=\{\(\) => api!\.showChromeProfileConnectorFolder\(\)\}/);
  const connector=fs.readFileSync(path.join(root,"electron/chrome-profile-login.cjs"),"utf8");assert(!/ExtensionInstallForcelist|reg(?:\.exe)?["']|chrome\.proxy/.test(connector));

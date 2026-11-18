@@ -85,6 +85,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   browserAccounts: () => ipcRenderer.invoke("launcher:browser-accounts"),
   addBrowserAccount: () => ipcRenderer.invoke("launcher:browser-account-add"),
   switchBrowserAccount: (id) => ipcRenderer.invoke("launcher:browser-account-switch", id),
+  openPlatformSignIn: (id) => ipcRenderer.invoke("launcher:browser-account-platform-login", id),
   renameBrowserAccount: (id, label) => ipcRenderer.invoke("launcher:browser-account-rename", { id, label }),
   removeBrowserAccount: (id) => ipcRenderer.invoke("launcher:browser-account-remove", id),
   removeBrowserAccounts: (ids) => ipcRenderer.invoke("launcher:browser-accounts-remove", ids),

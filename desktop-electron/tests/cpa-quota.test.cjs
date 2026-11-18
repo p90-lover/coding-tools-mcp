@@ -140,7 +140,7 @@ test("an account at its limit, a disabled one and one with an error are told apa
 
 test("without CPA, without the plugin or with a refused key it says why, and the key goes only to loopback", async () => {
   assert.deepEqual(await fixture({ connection: null }).quota.read(), { ok: true, available: false, reason: "CPA is not running" });
-  assert.match((await fixture({ status: 404 }).quota.read()).reason, /CPA Helper is not installed/);
+  assert.match((await fixture({ status: 404 }).quota.read()).reason, /Plan limits aren.t tracked: Provider Manager no longer reads account quota/);
   assert.match((await fixture({ status: 401 }).quota.read()).reason, /refused the management key/);
   const remote = fixture({ connection: { baseUrl: "http://cpa.example.com:8317", managementKey: KEY } });
   assert.equal((await remote.quota.read()).available, false);

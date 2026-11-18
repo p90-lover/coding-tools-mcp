@@ -43,6 +43,16 @@ test("only the Browser tab not showing yet is retried, and not forever", async (
   await assert.rejects(openPlatformInBrowser({ api: refused, accountId: "a", url: PLATFORM_TUNNELS_URL }), /Another account switch/);
 });
 
+test("Platform's sign-in goes through Chrome where it can, else opens in the Browser tab", async () => {
+  const { signInToPlatform } = await import("../src/features/platform-in-browser.ts");
+  const windows = { ...fakeApi(), openPlatformSignIn: async (id) => ({ inChrome: true, imported: 2, id }) };
+  assert.equal(await signInToPlatform({ api: windows, accountId: "acct-2", showBrowser: () => assert.fail("no Browser tab") }), true);
+  assert.deepEqual(windows.calls, [], "Chrome's sign-in neither switches here nor opens a tab");
+  const other = { ...fakeApi(), openPlatformSignIn: async () => ({ inChrome: false }) };
+  assert.equal(await signInToPlatform({ api: other, accountId: "acct-2", showBrowser: () => other.calls.push("show") }), false);
+  assert.deepEqual(other.calls, ["switch:acct-2", "show", "open:https://platform.openai.com/login"]);
+});
+
 test("the card's Platform sign-in button follows the setup's own message", async () => {
   const { needsPlatformSignIn } = await import("../src/features/platform-in-browser.ts");
   const { PLATFORM_SIGN_IN_UNFINISHED, CHATGPT_SIGNED_OUT, WORKSPACE_OWNER_REQUIRED } = require("../electron/mcp-connector-setup.cjs");

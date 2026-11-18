@@ -258,7 +258,7 @@ test("the per-account splits go to CPA three at a time, not all at once, and eve
 
 test("without CPA, without CPA Helper or with a refused key it says why, and the key goes only to loopback", async () => {
   assert.deepEqual(await fixture({ connection: null }).usage.read(), { ok: true, available: false, reason: "CPA is not running" });
-  assert.match((await fixture().usage.read()).reason, /CPA Helper is not installed/);
+  assert.match((await fixture().usage.read()).reason, /Provider Manager's usage history is not in CPA/);
   const refused = fixture({ routes: { "/v0/management/cpa-helper/rankings": { status: 401, body: null } } });
   assert.match((await refused.usage.read()).reason, /refused the management key/);
   const remote = fixture({ connection: { baseUrl: "http://cpa.example.com:8317", managementKey: KEY } });

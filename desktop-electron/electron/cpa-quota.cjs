@@ -118,7 +118,9 @@ function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.
     let response;
     try { response = await request(target, "GET", "/codex/accounts"); }
     catch { return { ok: true, available: false, reason: "CPA did not answer" }; }
-    if (response.status === 404) return { ok: true, available: false, reason: "CPA Helper is not installed in CPA" };
+    // Provider Manager 0.10.0 reads no account quota (CPA Helper's quota polling, removed 2026-11-18):
+    // this list is gone, and nothing asks for a refresh any more.
+    if (response.status === 404) return { ok: true, available: false, reason: "Plan limits aren't tracked: Provider Manager no longer reads account quota" };
     if (response.status === 401 || response.status === 403) return { ok: true, available: false, reason: "CPA refused the management key" };
     if (!response.ok) return { ok: true, available: false, reason: `CPA answered HTTP ${response.status}` };
     const payload = await response.json().catch(() => null);

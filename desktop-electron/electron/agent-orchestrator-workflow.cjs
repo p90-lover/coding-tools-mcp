@@ -4818,7 +4818,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
     // timeout left only the card's own model for ten minutes.
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
-    if (!candidates.length) throw new Error(`CPA does not serve ${AUTO_REVIEW_MODEL}: sign in to a Codex account in CPA and choose it in Plugins > Codex Auto Review`);
+    if (!candidates.length) throw new Error(`CPA does not serve ${AUTO_REVIEW_MODEL}: sign in to a Codex account in CPA and choose it in Provider Manager > Auto Review`);
     // This call bypasses the agent gateway: a same-model fallback still needs the card's effort.
     // A different reviewer (notably codex-auto-review) keeps its own default, not the worker's max.
     const route = approver.route ?? {};
