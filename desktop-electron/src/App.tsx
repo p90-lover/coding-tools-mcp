@@ -1061,7 +1061,7 @@ function LauncherShell({
                 active={surface === "chatgpt-browser-management"}
                 api={api!}
                 browser={browser}
-                onOpenBrowser={() => navigateSurface("browser")}
+                onOpenBrowser={() => activateBrowser(true)}
                 setError={setError}
                 setup={{ mcpReady: snapshot.state.mcpSetupComplete === true, bridgeReady: snapshot.state.coreSetupComplete === true,
                   inspectionDisabled: snapshot.state.browserInteractionMode === "manual",
@@ -1113,7 +1113,7 @@ function LauncherShell({
                   setMcpTargetMode(null);
                   navigateSurface("browser");
                 }}
-                onOpenBrowser={() => navigateSurface("browser")}
+                onOpenBrowser={() => activateBrowser(true)}
                 operation={operation}
                 setError={setError}
                 snapshot={snapshot}
@@ -1904,7 +1904,7 @@ function McpSurface({
   language: Language;
   onDone: () => void;
   /** Shows the Browser tab, where a tunnel's Platform settings open. */
-  onOpenBrowser: () => void;
+  onOpenBrowser: () => void | Promise<void>;
   operation: OperationState | null;
   setError: (error: string | null) => void;
   snapshot: LauncherSnapshot;

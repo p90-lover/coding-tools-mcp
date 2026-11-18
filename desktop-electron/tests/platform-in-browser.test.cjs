@@ -29,6 +29,22 @@ test("a Platform page opens on its account once the Browser tab shows", async ()
   assert.deepEqual(waits, [100, 100]);
 });
 
+test("showing the Browser tab finishes before the Platform page opens", async () => {
+  const { openPlatformInBrowser, PLATFORM_SIGN_IN_URL } = await import("../src/features/platform-in-browser.ts");
+  const api = fakeApi();
+  let release;
+  const shown = new Promise(resolve => { release = resolve; });
+  const opening = openPlatformInBrowser({
+    api, accountId: "acct-2", url: PLATFORM_SIGN_IN_URL,
+    showBrowser: async () => { api.calls.push("show-start"); await shown; api.calls.push("show-done"); },
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(api.calls, ["switch:acct-2", "show-start"]);
+  release();
+  await opening;
+  assert.deepEqual(api.calls, ["switch:acct-2", "show-start", "show-done", "open:https://platform.openai.com/login"]);
+});
+
 test("only the Browser tab not showing yet is retried, and not forever", async () => {
   const { openPlatformInBrowser, PLATFORM_TUNNELS_URL } = await import("../src/features/platform-in-browser.ts");
   const busy = fakeApi({ error: "Browser tabs cannot open during MCP connector creation" });

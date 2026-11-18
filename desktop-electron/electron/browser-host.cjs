@@ -369,14 +369,17 @@ function signOutUrl(value) {
  * (requestChromeLogin). OpenAI Platform signs in through auth.openai.com too: handed to Chrome, its
  * Log in only showed ChatGPT again, so no account could sign in to Platform (2026-11-17). A sign-in
  * that another page started (Platform, or the sign-in pages it leads to) stays in the tab.
+ * Platform's login also continues to chatgpt.com/auth (2026-11-18): treating any chatgpt.com
+ * destination as ChatGPT's sign-in cancelled that navigation, and for a signed-in account
+ * openPasskeyLogin only showed ChatGPT's home again.
  */
 function chatGptSignInNavigation(fromUrl, toUrl) {
   if (!allowedAuthUrl(toUrl) || signOutUrl(toUrl)) return false;
-  if (new URL(toUrl).hostname === "chatgpt.com") return true;
   try {
     return new URL(fromUrl).hostname === "chatgpt.com";
   } catch {
-    return true;
+    // No committed page yet (a new tab): only ChatGPT's own sign-in goes to Chrome.
+    return new URL(toUrl).hostname === "chatgpt.com";
   }
 }
 
@@ -1727,7 +1730,8 @@ class BrowserHost {
     this.bindBrowserKeys(contents, { shown: () => this.userTabs.get(tab.id) === tab });
     contents.setWindowOpenHandler(({ url }) => {
       if (allowedAuthUrl(url)) {
-        if (this.externalLogin && browserInteractionModeFor(this) === "automatic") {
+        if (this.externalLogin && browserInteractionModeFor(this) === "automatic"
+          && chatGptSignInNavigation(contents.getURL(), url)) {
           this.requestChromeLogin(contents);
           return { action: "deny" };
         }
