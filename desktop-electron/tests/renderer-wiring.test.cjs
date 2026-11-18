@@ -675,7 +675,8 @@ test("Windows and macOS Chrome sign-in uses the owned account route and existing
   assert.match(preloadSource, /openPasskeyLogin:[\s\S]*?launcher:browser-passkey-login/);
   assert.match(preloadSource, /continuePasskeyLogin:[\s\S]*?launcher:browser-passkey-login-continue/);
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
-  assert.match(electronMain, /loginWithPasskey: \(\) => runtimeHost\.captureCurrentChromeLogin\(\{ safeStorage \}\)/);
+  // The same approved current-profile capture; Platform's sign-in (2026-11-18) only names its target.
+  assert.match(electronMain, /loginWithPasskey: \(_partition, options\) => runtimeHost\.captureCurrentChromeLogin\(\{ safeStorage, target: options\?\.target === "platform" \? "platform" : "chatgpt" \}\)/);
   assert.match(browserHostSource, /\["chatgpt\.com", \.\.\.AUTH_PROVIDER_HOSTS\][\s\S]*?contents\.session\.resolveProxy/);
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000, \(\) => \{ transfer\.assertCurrent\?\.\(\); return false; \}\)[\s\S]*?runSessionInspection\(false\)/);
 });

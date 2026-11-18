@@ -2427,6 +2427,53 @@ test("a sign-out address is not taken for a sign-in", () => {
     "not a url"]) assert.equal(signOutUrl(url), false, url);
 });
 
+// Live 2026-11-18: "open the platform sign in on my chrome ... remember on its account related session".
+// Chrome's OpenAI cookies join the shown account's own session; its ChatGPT session stays untouched.
+function platformLoginFixture({ account = { id: "user-Account00000000000001", email: "a@example.test" }, chrome = account, origin = "https://platform.openai.com" } = {}) {
+  const set = [], calls = { targets: [], completed: [], cleaned: 0 };
+  const cookie = (domain, name, extra = {}) => ({ name, value: "fixture-only", domain, path: "/", secure: true, httpOnly: true, sameSite: "Lax", expires: 1_900_000_000, ...extra });
+  const transfer = {
+    storageState: { origins: [], cookies: [cookie("auth.openai.com", "__Host-usc_fixture"), cookie(".openai.com", "oai-sc"),
+      cookie(".chatgpt.com", "__Secure-next-auth.session-token"), cookie("chatgpt.com", "oai-chat")] },
+    expectedUser: chrome, origin, source: "approved-chrome-profile-connector",
+    assertCurrent() {}, complete: (verified) => calls.completed.push(verified), cleanup: async () => { calls.cleaned++; },
+  };
+  const contents = { isDestroyed: () => false, session: { resolveProxy: async () => "DIRECT",
+    cookies: { set: async (value) => { set.push(value); }, flushStore: async () => {} } } };
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    destroyed: false, partition: "persist:account", view: { webContents: contents }, logger: { info() {}, warn() {} },
+    readSessionUser: async () => account,
+    loginWithPasskey: async (partition, options) => { calls.targets.push([partition, options.target]); return transfer; },
+  });
+  return { host, set, calls };
+}
+
+test("Platform's sign-in from Chrome joins the account's own session, OpenAI cookies only", async () => {
+  for (const origin of ["https://platform.openai.com", "https://chatgpt.com"]) { // connector 1.2.0, and 1.1's ChatGPT capture
+    const { host, set, calls } = platformLoginFixture({ origin });
+    assert.deepEqual(await host.runPlatformChromeLogin(), { imported: 2 });
+    assert.deepEqual(calls.targets, [["persist:account", "platform"]]);
+    assert.deepEqual(set.map((cookie) => [cookie.name, cookie.domain ?? "(host only)"]),
+      [["__Host-usc_fixture", "(host only)"], ["oai-sc", ".openai.com"]], "ChatGPT's own session cookies are not replaced");
+    assert.deepEqual(calls.completed, [true]);
+    assert.equal(calls.cleaned, 1);
+  }
+});
+
+test("Platform's sign-in from Chrome is refused untouched for another ChatGPT login, or none", async () => {
+  for (const chrome of [{ id: "user-Other0000000000000002", email: "b@example.test" }, null]) {
+    const { host, set, calls } = platformLoginFixture({ chrome });
+    await assert.rejects(host.runPlatformChromeLogin(), chrome ? /Chrome is signed in to b@example\.test, not a@example\.test, so nothing was added/
+      : /Chrome did not say which ChatGPT account/);
+    assert.deepEqual(set, []);
+    assert.deepEqual(calls.completed, [false]);
+    assert.equal(calls.cleaned, 1);
+  }
+  const { host, calls } = platformLoginFixture({ account: null });
+  await assert.rejects(host.runPlatformChromeLogin(), /Sign in to this account's ChatGPT first/);
+  assert.deepEqual(calls.targets, [], "Chrome is not asked before the account is known");
+});
+
 // Live 2026-11-17: an account the MCP setup stopped at platform.openai.com/login could not sign in to
 // Platform in the Browser tab. Platform's own Continue buttons go to auth.openai.com, and the tab handed
 // that to Chrome's ChatGPT sign-in, which only showed ChatGPT again.

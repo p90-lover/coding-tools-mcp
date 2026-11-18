@@ -13,6 +13,21 @@ export function needsPlatformSignIn(detail: string | null | undefined) {
   return typeof detail === "string" && detail.includes(PLATFORM_SIGN_IN_ASKED);
 }
 
+/**
+ * An account's OpenAI Platform sign-in. On Windows it happens in the person's Chrome and is kept in the
+ * account's own saved session for later setups (2026-11-18): resolves true, signed in. Elsewhere
+ * Platform's login opens in the Browser tab for the person to finish: resolves false.
+ */
+export async function signInToPlatform({ api, accountId, showBrowser }: {
+  api: Pick<LauncherApi, "openPlatformSignIn" | "switchBrowserAccount" | "openBrowserUrl">;
+  accountId: string;
+  showBrowser?: () => void;
+}) {
+  if ((await api.openPlatformSignIn(accountId)).inChrome) return true;
+  await openPlatformInBrowser({ api, accountId, url: PLATFORM_SIGN_IN_URL, showBrowser });
+  return false;
+}
+
 // Main opens no tab until the Browser tab shows (BrowserHost.createUserTab), and showing it takes a render.
 const BROWSER_NOT_SHOWN = /Open the Browser tab before creating a tab/;
 

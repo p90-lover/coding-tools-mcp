@@ -2986,6 +2986,17 @@ function registerIpc({ logger, stateStore }) {
     await assertFocusedMainWindowSettled(event, true);
     return switchBrowserAccount(id, { logger, stateStore });
   });
+  // OpenAI Platform's sign-in for one account, in the person's Chrome (BrowserHost.openPlatformChromeLogin),
+  // where Windows signs in. The account is shown first: the sign-in joins that account's own saved session.
+  // Elsewhere `inChrome: false`, and the card opens Platform in the Browser tab.
+  handle("launcher:browser-account-platform-login", async (event, id) => {
+    await assertFocusedMainWindowSettled(event, true);
+    if (typeof id !== "string" || !id) throw new Error("Unknown ChatGPT account");
+    await switchBrowserAccount(id, { logger, stateStore });
+    if (browserAccounts.activeId() !== id || !browserHost) throw new Error("The browser account changed before the OpenAI Platform sign-in");
+    if (!browserHost.externalLogin) return { inChrome: false };
+    return { inChrome: true, ...(await browserHost.openPlatformChromeLogin()) };
+  });
   handle("launcher:browser-account-rename", async (event, input) => {
     await assertFocusedMainWindowSettled(event, true);
     browserAccounts.rename(input?.id, input?.label);
@@ -5823,7 +5834,8 @@ async function start() {
       logger,
       // The approved extension connects the current Chrome profile. App-side fresh verification
       // still uses this account's routed partition; ordinary Chrome's routing is never changed.
-      loginWithPasskey: () => runtimeHost.captureCurrentChromeLogin({ safeStorage }),
+      // `target: "platform"`: OpenAI Platform's sign-in (BrowserHost.openPlatformChromeLogin).
+      loginWithPasskey: (_partition, options) => runtimeHost.captureCurrentChromeLogin({ safeStorage, target: options?.target === "platform" ? "platform" : "chatgpt" }),
       signInConflict: (partition, user) => browserAccounts.otherAccountWithLogin(partition, user)?.label ?? null,
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,

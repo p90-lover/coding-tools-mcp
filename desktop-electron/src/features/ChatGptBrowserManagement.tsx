@@ -10,7 +10,7 @@ import type {
   ProviderNetworkSnapshot,
   ProxyProfileRecord,
 } from "../types";
-import { needsPlatformSignIn, openPlatformInBrowser, PLATFORM_SIGN_IN_URL } from "./platform-in-browser";
+import { needsPlatformSignIn, signInToPlatform } from "./platform-in-browser";
 import "./chatgpt-browser-management.css";
 
 const CONFIRM_WINDOW_MS = 4_000;
@@ -256,8 +256,10 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
     return () => { live = false; };
   }, [api, accounts, browser?.authenticated, setup.inspectionDisabled, inFlight, active]);
 
-  const connectAccounts = async (targets: BrowserAccount[]) => {
-    if (connectingMcp.current) return;
+  /** Connects each account in turn; resolves to why each account's setup failed, by account id. */
+  const connectAccounts = async (targets: BrowserAccount[]): Promise<Record<string, string>> => {
+    const failures: Record<string, string> = {};
+    if (connectingMcp.current) return failures;
     connectingMcp.current = true;
     try {
       await run("connect-mcp", async () => {
@@ -306,6 +308,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
               userId: result.binding?.userId, workspaceId: result.binding?.workspaceId } }));
           } catch (cause) {
             const detail = ipcErrorText(cause);
+            failures[account.id] = detail;
             setConnections(previous => ({ ...previous, [account.id]: { state: "failed", detail, checkedAt: Date.now(), email: account.email } }));
             // Main already waited for the browser; still busy (a Codex turn, a sign-in) refuses every
             // account the same way, so the rest are left as they were instead of each failing.
@@ -320,6 +323,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
     } finally {
       connectingMcp.current = false;
     }
+    return failures;
   };
 
   const proxies = useMemo(() => (network?.proxyProfiles ?? [])
@@ -560,7 +564,8 @@ function AccountCard({
   /** This account's own MCP tunnel (#674), if it has one. */
   tunnel: McpTunnel | undefined;
   connection: ConnectionResult | undefined;
-  connect: () => Promise<void>;
+  /** Resolves to why each account's setup failed, by account id. */
+  connect: () => Promise<Record<string, string>>;
   inspectionDisabled?: boolean;
 }) {
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -604,10 +609,17 @@ function AccountCard({
     onOpenBrowser?.();
     await api.openLogin();
   });
-  // Connect MCP stopped at OpenAI Platform's sign-in: it opens in the Browser tab, for the person to finish.
-  const platformSignIn = () => run(`platform:${account.id}`, () => openPlatformInBrowser({
-    api, accountId: account.id, url: PLATFORM_SIGN_IN_URL, showBrowser: onOpenBrowser,
-  }));
+  // Connect MCP stopped at OpenAI Platform's sign-in. On Windows it happens in the person's Chrome and stays
+  // in this account's session, then Connect runs again; elsewhere Platform's login opens in the Browser tab.
+  const platformSignIn = () => run(`platform:${account.id}`, async () => {
+    if (await signInToPlatform({ api, accountId: account.id, showBrowser: onOpenBrowser })) await connect();
+  });
+  // A Connect that stops there starts that sign-in at once (2026-11-18). Its own second Connect does not,
+  // so a sign-in that did not take is shown, not opened again.
+  const connectNow = async () => {
+    const failures = await connect();
+    if (needsPlatformSignIn(failures[account.id])) await platformSignIn();
+  };
 
   const remove = () => {
     if (!confirmRemove) {
@@ -786,13 +798,13 @@ function AccountCard({
 
       <footer className="cbm-card-actions">
         <button className="cbm-button" disabled={switching || removing || chatRunning || signedIn !== true || !canConnect || isRunning(`remove:${account.id}`)}
-          onClick={() => void connect()} title={signedIn === true ? mcpAccess.detail : "Sign in to this account first"} type="button">
+          onClick={() => void connectNow()} title={signedIn === true ? mcpAccess.detail : "Sign in to this account first"} type="button">
           {connectionCheck?.state === "connecting" ? "Connecting…" : connectionCheck?.state === "connected" ? "Check connection" : "Connect MCP"}
         </button>
         {connector.tone === "error" && needsPlatformSignIn(connector.detail) ? (
           <button className="cbm-button" disabled={switching || removing || isRunning(`remove:${account.id}`)} onClick={() => void platformSignIn()}
-            title="Opens OpenAI Platform's sign-in for this account in the Browser tab" type="button">
-            {isRunning(`platform:${account.id}`) ? "Opening…" : "Sign in to OpenAI Platform"}
+            title="Signs in to OpenAI Platform with this account in your Chrome, keeps it for this account, then connects again" type="button">
+            {isRunning(`platform:${account.id}`) ? "Signing in…" : "Sign in to OpenAI Platform"}
           </button>
         ) : null}
         {!inUse ? (
