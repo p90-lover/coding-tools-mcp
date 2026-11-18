@@ -123,6 +123,9 @@ test("an account MCP button sends its exact ID and does not retain another sign-
 });
 
 // Live 2026-11-17: Connect MCP stopped at OpenAI Platform's sign-in, and the account had nowhere to finish it.
+const settle = async ui => { for (let turn = 0; turn < 8; turn++) await ui.flush(); };
+
+// Where sign-in does not go through Chrome (not Windows), Platform's login opens in the Browser tab.
 test("a card stopped at Platform's sign-in opens it in the Browser tab on that account", async () => {
   const { PLATFORM_SIGN_IN_UNFINISHED } = require("../electron/mcp-connector-setup.cjs");
   const signIn = "Sign in to OpenAI Platform";
@@ -130,19 +133,42 @@ test("a card stopped at Platform's sign-in opens it in the Browser tab on that a
   const ui = fixture(async () => { throw new Error(`${PLATFORM_SIGN_IN_UNFINISHED} It stopped at platform.openai.com/login.`); });
   const opened = [];
   ui.api.openBrowserUrl = async url => { opened.push(url); return {}; };
+  ui.api.openPlatformSignIn = async () => ({ inChrome: false });
   assert.equal(offers(ui.card("second")), false);
   button(ui.card("second"), "Connect MCP").props.onClick();
-  await ui.flush();
-  button(ui.card("second"), signIn).props.onClick();
-  await ui.flush();
+  await settle(ui);
+  // The Connect that stopped there opened it at once; the card still offers it.
   assert.deepEqual(ui.calls.switches, ["second"]);
   assert.equal(ui.calls.browserOpened, 1);
   assert.deepEqual(opened, ["https://platform.openai.com/login"]);
+  button(ui.card("second"), signIn).props.onClick();
+  await settle(ui);
+  assert.deepEqual(opened, ["https://platform.openai.com/login", "https://platform.openai.com/login"]);
   // The automatic setup's saved failure offers it too; other failures do not.
   ui.accounts[2].connector = { okAt: null, error: `${PLATFORM_SIGN_IN_UNFINISHED} It stopped at auth.openai.com/log-in.`, errorAt: Date.now() };
   assert.equal(offers(ui.card("third")), true);
   ui.accounts[2].connector = { okAt: null, error: "MCP ownership metadata is unavailable or exceeded its bound.", errorAt: Date.now() };
   assert.equal(offers(ui.card("third")), false);
+});
+
+// Live 2026-11-18: "it should open the platform sign in on my chrome when it needs to sign in".
+test("on Windows a Connect stopped at Platform's sign-in signs in through Chrome, then connects again, once", async () => {
+  const { PLATFORM_SIGN_IN_UNFINISHED } = require("../electron/mcp-connector-setup.cjs");
+  const stopped = () => { throw new Error(`${PLATFORM_SIGN_IN_UNFINISHED} It stopped at platform.openai.com/login.`); };
+  for (const secondTry of ["connects", "stops again"]) {
+    let tries = 0;
+    const ui = fixture(async () => { tries++; if (tries === 1 || secondTry === "stops again") stopped(); return { created: false, connected: true }; });
+    const chrome = [];
+    ui.api.openPlatformSignIn = async id => { chrome.push(id); return { inChrome: true, imported: 3 }; };
+    ui.api.openBrowserUrl = async () => assert.fail("Chrome signs in; the Browser tab does not open");
+    button(ui.card("second"), "Connect MCP").props.onClick();
+    await settle(ui);
+    assert.deepEqual(chrome, ["second"], "Chrome is asked once, for this account");
+    assert.deepEqual(ui.calls.connector, ["second", "second"]);
+    assert.equal(ui.calls.browserOpened, 0);
+    if (secondTry === "connects") assert(button(ui.card("second"), "Check connection"));
+    else assert(button(ui.card("second"), "Sign in to OpenAI Platform"), "a sign-in that did not take is shown, not opened again");
+  }
 });
 
 test("bulk MCP setup is sequential, continues after failure, and requires connected true", async () => {

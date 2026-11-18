@@ -414,25 +414,29 @@ class RuntimeHost {
     return this.chromeProfileCapture?.cancel() ?? false;
   }
 
-  async captureCurrentChromeLogin({ safeStorage } = {}) {
+  /** `target: "platform"` asks Chrome for OpenAI Platform's sign-in instead of ChatGPT's (connector 1.2.0). */
+  async captureCurrentChromeLogin({ safeStorage, target = "chatgpt" } = {}) {
     if (this.browserInteractionMode() !== "automatic") throw new Error("Chrome session verification requires Automatic mode");
     if (this.currentOperation()) throw new Error("Another runtime operation is already in progress");
     const owner = Symbol("chrome-profile-login");
     this.chromeProfileOwner = owner; this.active = "chrome-profile-login";
     let capture;
     const publish = (status, message) => { if (this.chromeProfileOwner === owner) this.publishOperation?.({ name: "chrome-profile-login", status, message }); };
+    const platform = target === "platform";
     try {
       await this.prepareChromeProfileConnector();
       const identity = await chromeConnectorIdentity(this.app.getPath("userData"), safeStorage);
-      capture = await createChromeProfileCapture({ identity, onPhase: phase => {
+      capture = await createChromeProfileCapture({ identity, target, onPhase: phase => {
         if (this.chromeProfileOwner !== owner) return;
-        if (phase === "verifying") { publish("running", "Verifying the ChatGPT session from your Chrome profile"); return; }
+        if (phase === "verifying") { publish("running", platform ? "Copying the OpenAI Platform sign-in from your Chrome profile" : "Verifying the ChatGPT session from your Chrome profile"); return; }
         publish(phase === "verified" || phase === "cancelled" ? "completed" : "failed", phase === "verified"
           ? "Chrome profile sign-in verified" : phase === "cancelled" ? "Chrome profile sign-in cancelled" : "Chrome profile sign-in was not verified. Open a new connection to retry.");
         this.active = null; this.chromeProfileCapture = null; this.chromeProfileOwner = null;
       } });
       this.chromeProfileCapture = capture;
-      publish("running", `Approve pairing code ${capture.code} once in the Chrome connector, then sign in. Verification is automatic; keep Chrome open.`);
+      publish("running", platform
+        ? `Approve pairing code ${capture.code} once in the Chrome connector, then sign in to OpenAI Platform in the tab Chrome opens, with this account. Verification is automatic; keep Chrome open.`
+        : `Approve pairing code ${capture.code} once in the Chrome connector, then sign in. Verification is automatic; keep Chrome open.`);
       await this.openChromeProfileConnector();
       const transfer = await capture.result;
       if (this.chromeProfileOwner !== owner || this.browserInteractionMode() !== "automatic") {

@@ -26,6 +26,15 @@ test("current-profile launch opens a normal Chrome tab without a new profile, pr
  const f=await fixture(t),{pending,url}=await started(f);const {args,options}=f.launches[0];assert.equal(args[0],"--new-tab");assert.equal(args.length,2);assert.equal(url.hostname,"127.0.0.1");assert(!args.some(arg=>/user-data-dir|profile-directory|debugging|automation|proxy/.test(arg)));assert.equal(options.stdio,"ignore");assert.equal(options.detached,true);assert.equal(f.host.activeChild,null);assert.equal(f.unref(),1);
  const message=f.operations.at(-1).message;assert.match(message,/pairing code (?:[A-F0-9]{4}-){3}[A-F0-9]{4}/);assert(!message.includes(url.hash.slice(1)));f.host.cancelChromeProfileLogin();await assert.rejects(pending,/cancelled/);
 });
+// 2026-11-18: an account's OpenAI Platform sign-in goes through the same approved Chrome connection.
+test("a Platform request reaches Chrome's connection page and names Platform to the person",async t=>{
+ const f=await fixture(t),pending=f.host.captureCurrentChromeLogin({safeStorage:f.safeStorage,target:"platform"});pending.catch(()=>{});
+ const deadline=Date.now()+10000;while(!f.launches.length&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+ const url=new URL(f.launches[0].args[1]);
+ assert.match(await fetch(url.origin+"/connect.js").then(response=>response.text()),/target:'platform'/);
+ assert.match(f.operations.at(-1).message,/sign in to OpenAI Platform in the tab Chrome opens/);
+ f.host.cancelChromeProfileLogin();await assert.rejects(pending,/cancelled/);
+});
 test("capture is automatically handed to existing app verification and clears the operation only after completion",async t=>{
  const f=await fixture(t),{pending,url}=await started(f),response=send(url),transfer=await pending;
  assert.equal(f.host.currentOperation(),"chrome-profile-login");assert.match(f.operations.at(-1).message,/Verifying the ChatGPT session/);assert.equal(f.launches.length,1);transfer.assertCurrent();await transfer.cleanup();transfer.complete(true);

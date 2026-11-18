@@ -1,5 +1,10 @@
 "use strict";
 const CHATGPT = "https://chatgpt.com/";
+// A Platform pairing (1.2.0): the app needs this profile's OpenAI Platform sign-in, which lives on
+// auth.openai.com. Signed out, every Platform page goes to /login, so a Platform page anywhere else
+// has signed in.
+const PLATFORM = "https://platform.openai.com/";
+const PLATFORM_LOGIN = "https://platform.openai.com/login";
 let checking = false, debounce, queued = false, generation = 0;
 const bytes = value => Uint8Array.from(atob(value), char => char.charCodeAt(0));
 async function pairing() { return (await chrome.storage.session.get("pairing")).pairing; }
@@ -7,8 +12,18 @@ async function update(patch, token, revision = generation) { const current = awa
 async function startChecking() {
   const pair = await pairing();
   if (!pair?.approved || pair.expiresAt <= Date.now()) return;
-  if (!(await chrome.tabs.query({ url: ["https://chatgpt.com/*"] })).length) await chrome.tabs.create({ url: CHATGPT });
+  // Platform's sign-in always opens, so it is in front of the person; signed in, it moves on by itself.
+  if (pair.target === "platform") await chrome.tabs.create({ url: PLATFORM_LOGIN });
+  else if (!(await chrome.tabs.query({ url: ["https://chatgpt.com/*"] })).length) await chrome.tabs.create({ url: CHATGPT });
   schedule();
+}
+async function platformSignedIn() {
+  const tabs = await chrome.tabs.query({ url: ["https://platform.openai.com/*"] });
+  return tabs.some(tab => {
+    if (tab.status !== "complete" || typeof tab.url !== "string") return false;
+    const url = new URL(tab.url);
+    return url.origin === "https://platform.openai.com" && !/^\/(?:login|signup|auth)(?:\/|$)/.test(url.pathname);
+  });
 }
 async function request(pair, route, options = {}) {
   const response = await fetch(`http://127.0.0.1:${pair.port}${route}`, { ...options, cache: "no-store", redirect: "error", headers: { Authorization: `Bearer ${pair.token}`, ...options.headers } });
@@ -46,7 +61,9 @@ async function begin(message, sender) {
   const trusted = (await chrome.storage.local.get("trustedAppKey")).trustedAppKey;
   if (trusted && trusted !== hello.publicKey) throw new Error("This is a different app identity. Remove the connector's saved pairing before trusting a replacement.");
   generation++;
-  await chrome.storage.session.set({ pairing: { ...pair, ...hello, approved: Boolean(trusted), sent: false, status: trusted ? "Waiting for ChatGPT sign-in" : "Approve the matching code shown in Coding Tools" } });
+  const target = message.target === "platform" ? "platform" : "chatgpt";
+  await chrome.storage.session.set({ pairing: { ...pair, ...hello, target, approved: Boolean(trusted), sent: false,
+    status: !trusted ? "Approve the matching code shown in Coding Tools" : target === "platform" ? "Waiting for OpenAI Platform sign-in" : "Waiting for ChatGPT sign-in" } });
   if (!trusted) await chrome.tabs.create({ url: chrome.runtime.getURL("confirm.html") });
   else queueMicrotask(() => { void startChecking().catch(() => {}); });
   return { ok: true, approvalRequired: !trusted };
@@ -80,8 +97,19 @@ async function check() {
     const pair = await pairing();
     requestToken = pair?.token;
     if (!pair?.approved || pair.sent || pair.expiresAt <= Date.now()) return;
+    const platform = pair.target === "platform";
+    if (platform && !await platformSignedIn()) {
+      if (generation === revision) await update({ status: "Waiting for OpenAI Platform sign-in in this profile" }, pair.token);
+      return;
+    }
     let tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*"] });
     tabs = tabs.sort((a, b) => Number(b.active) - Number(a.active));
+    // Signed in to Platform: this profile's ChatGPT login says whose sign-in it is. One tab, opened once.
+    if (platform && !tabs.length && !pair.identityTab) {
+      await update({ identityTab: true, status: "Checking which ChatGPT account this profile is signed in to" }, pair.token);
+      if (generation === revision) await chrome.tabs.create({ url: CHATGPT, active: false });
+      return;
+    }
     if (!tabs.length) return; // The existing login tab may be on its identity provider; never open a tab per cookie event.
     let user = null;
     for (const tab of tabs) { if (Number.isInteger(tab.id) && (user = await signedInUser(tab.id))) break; }
@@ -90,7 +118,8 @@ async function check() {
     if (generation !== revision || !current || current.token !== pair.token || !current.approved || current.sent || current.expiresAt <= Date.now()) return;
     await verifyProof(pair, await request(pair, "/hello"));
     if (generation !== revision) return;
-    const found = [...await chrome.cookies.getAll({ domain: "chatgpt.com" }), ...await chrome.cookies.getAll({ domain: "openai.com" })];
+    // A Platform sign-in is OpenAI's own (auth.openai.com); the app keeps its account's ChatGPT session.
+    const found = [...platform ? [] : await chrome.cookies.getAll({ domain: "chatgpt.com" }), ...await chrome.cookies.getAll({ domain: "openai.com" })];
     const cookies = found.filter(cookie => !cookie.partitionKey && /^(?:[a-z0-9-]+\.)*(?:chatgpt\.com|openai\.com)$/i.test(cookie.domain.replace(/^\./, "")))
       .map(cookie => ({ name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path, secure: cookie.secure, httpOnly: cookie.httpOnly,
         sameSite: ({ strict: "Strict", lax: "Lax", no_restriction: "None", unspecified: "Lax" })[cookie.sameSite] || "Lax", expires: cookie.expirationDate ?? -1 }));
@@ -100,7 +129,7 @@ async function check() {
     // Mark before submission: an uncertain delivery is not permission to replay a credential import.
     await update({ sent: true, status: "Coding Tools is independently verifying this sign-in" }, pair.token);
     if (generation !== revision) return;
-    const encrypted = await encryptedCapture(pair, { version: 1, origin: "https://chatgpt.com", sessionAuthenticated: true, user, cookies });
+    const encrypted = await encryptedCapture(pair, { version: 1, origin: platform ? "https://platform.openai.com" : "https://chatgpt.com", sessionAuthenticated: true, user, cookies });
     if (generation !== revision) return;
     const result = await request(pair, "/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(encrypted) });
     const latest = await pairing();
@@ -135,5 +164,5 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
   if (message?.type === "check") { schedule(); reply({ ok: true }); }
   return false;
 });
-chrome.tabs.onUpdated.addListener((_id, change, tab) => { if (change.status === "complete" && tab.url?.startsWith(CHATGPT)) schedule(); });
+chrome.tabs.onUpdated.addListener((_id, change, tab) => { if (change.status === "complete" && (tab.url?.startsWith(CHATGPT) || tab.url?.startsWith(PLATFORM))) schedule(); });
 chrome.cookies.onChanged.addListener(({ cookie }) => { if (/^(?:[a-z0-9-]+\.)*(?:chatgpt\.com|openai\.com)$/i.test(cookie.domain.replace(/^\./, ""))) schedule(); });
