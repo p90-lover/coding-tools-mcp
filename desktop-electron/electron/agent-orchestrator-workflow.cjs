@@ -190,7 +190,10 @@ const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
 const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
 const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.";
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
-const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
+// agy too, by the user's choice (2026-11-18): its own models run on its Google sign-in, which Google
+// refused here ("not currently available in your location", "Verify your account to continue"), so
+// a chat on one never sent its first message, while the same Gemini models answered through CPA.
+const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode", "agy"]);
 // Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
 // by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
 // requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
@@ -1596,7 +1599,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
       // Claude Code's and opencode's own catalogs (fable/haiku/opus/opus[1m]/sonnet, provider
-      // aliases) are neither CPA nor WebGPT models, so those agents offer only the CPA pool. Codex
+      // aliases) are neither CPA nor WebGPT models, and agy's run on a Google sign-in that may be
+      // refused (CPA_ONLY_AGENTS), so those agents offer only the CPA pool. Codex
       // keeps its own ChatGPT-account models. For a CPA-only agent a CPA failure is reported,
       // never silently replaced by its aliases; the renderer drops a rejected catalog and retries.
       const cpaOnly = CPA_ONLY_AGENTS.has(agent);
