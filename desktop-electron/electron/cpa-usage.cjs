@@ -460,7 +460,7 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
     let byAuth;
     try { byAuth = await get(target, `/cpa-helper/rankings?${query({ group: "auth" })}`); }
     catch { return withoutUsage("CPA did not answer"); }
-    if (byAuth.status === 404) return withoutUsage("CPA Helper is not installed in CPA, and CPA keeps no usage history of its own");
+    if (byAuth.status === 404) return withoutUsage("Provider Manager's usage history is not in CPA, and CPA keeps no usage history of its own");
     if (byAuth.status === 401 || byAuth.status === 403) return withoutUsage("CPA refused the management key");
     if (!byAuth.ok) return withoutUsage(`CPA answered HTTP ${byAuth.status}`);
     const authRows = Array.isArray(byAuth.body?.items) ? byAuth.body.items.slice(0, MAX_ACCOUNTS) : [];
