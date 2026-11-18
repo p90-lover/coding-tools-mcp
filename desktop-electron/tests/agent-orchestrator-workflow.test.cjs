@@ -6,7 +6,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow: createWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow: createWorkflow, resolveAoNativeConnection, reviewScriptExcerpts, ROUTE_REFUSED } = require("../electron/agent-orchestrator-workflow.cjs");
 // A fixture never looks for the machine's own Codex CLI: without this, tests passed only where
 // `codex` was installed (a developer's PC) and failed on a clean CI runner. A test that is about
 // finding Codex passes its own findCodexExecutable.
@@ -1360,7 +1360,7 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.deepEqual(catalog.harnesses.map((item) => [item.id, item.runnable, item.chat]),
     [["codex-native", true, undefined], ["ao:claude-code", true, true], ["ao:aider", true, false]]);
   // An agent outside the CPA gateway lists its own models; "default" is never offered.
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
+  assert.deepEqual((await workflow.call("models", { harness: "ao:aider", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
   await workflow.call("advance", { workspaceId: "ws-1", runId: "run-1", executable: "C:\codex.exe" });
   assert.equal(spawned.length, 1);
   assert.equal(spawned[0].agent, "claude-code");
@@ -1490,13 +1490,11 @@ test("CPA models go only to agents that can use them through the gateway", async
   });
   // Aider has no gateway launch support: its own models only.
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
-  // agy runs CPA models through its gateway mode too: every harness offers every pool model but
-  // WebGPT (an agy with no Google sign-in listed nothing at all and fell back to WebGPT's tiers).
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models,
-    ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
   // Claude Code and opencode offer only CPA models: their own aliases (fable/haiku/opus/sonnet)
-  // are neither CPA nor WebGPT. Codex keeps its ChatGPT-account models next to CPA's.
-  for (const harness of ["ao:claude-code", "ao:opencode"]) {
+  // are neither CPA nor WebGPT. agy too: its own models run on its Google sign-in, which Google
+  // refused ("not currently available in your location"), so it runs every model through CPA's
+  // gateway mode. Codex keeps its ChatGPT-account models next to CPA's.
+  for (const harness of ["ao:claude-code", "ao:opencode", "ao:agy"]) {
     assert.deepEqual((await workflow.call("models", { harness })).models,
       ["cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"], harness);
   }
@@ -1513,6 +1511,8 @@ test("a CPA-only agent reports a CPA failure instead of falling back to its own 
     confirm: async () => true,
   });
   await assert.rejects(workflow.call("models", { harness: "ao:claude-code" }), /CPA model list is unavailable: CPA timed out/);
+  // agy never falls back to its own models, which run on its (refused) Google sign-in.
+  await assert.rejects(workflow.call("models", { harness: "ao:agy" }), /CPA model list is unavailable: CPA timed out/);
   // Codex still has its own ChatGPT-account models when CPA is down.
   assert.deepEqual((await workflow.call("models", { harness: "ao:codex" })).models, ["sonnet"]);
 });
@@ -3719,8 +3719,11 @@ test("team chat binds selected identity and rejects stale config before writing"
 
 test("external Codex-style permission tuples map to the real AO approval mode at spawn", async () => {
   // Claude Code's own "auto" mode exists only for Claude models, so its "Approve for me" accepts edits
-  // and leaves tool requests to our reviewer; Codex keeps its native auto-review.
-  for (const agent of ["codex", "claude-code"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review",agent === "codex" ? "auto" : "accept-edits"],["never","user","bypass-permissions"]]) {
+  // and leaves tool requests to our reviewer; Codex keeps its native auto-review. Full access is
+  // every agent's bypass.
+  for (const agent of ["codex", "claude-code", "opencode", "agy", "pi", "unreal-agent", "cline"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review",agent === "codex" ? "auto" : "accept-edits"],["never","user","bypass-permissions"]]) {
+    // An agent that can't ask the chat runs in Full access only (the next test refuses the rest).
+    if (policy === "on-request" && !["codex", "claude-code"].includes(agent)) continue;
     let launched;
     const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-6-luna",
       permission_profile: ":ao-default", native_permission_profile: policy === "never" ? ":danger-full-access" : ":workspace", approval_policy: policy, approvals_reviewer: reviewer };
@@ -4275,12 +4278,12 @@ test("permission capabilities use installed AO adapter modes without fabricating
     requestHeadless: async (endpoint) => { reads.push(endpoint); throw new Error("No native connection"); },
     aoHarness: { catalog: async () => [
       { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
-      { id: "agy", installed: true },
+      { id: "agy", installed: true }, { id: "pi", installed: true, chat: true },
     ], spawn: async (...args) => { launches.push(args); } },
   });
-  // agy takes the three modes too (AO maps them onto its --mode and --dangerously-skip-permissions):
-  // without one it waited at approvals in a terminal nobody saw and its card never finished.
-  for (const harness_id of ["ao:claude-code", "ao:agy"]) {
+  // Every installed AO harness offers the menu, Full access at least: a chat moved onto Pi or
+  // Antigravity had nothing it could pick before (2026-11-17), Full access included.
+  for (const harness_id of ["ao:claude-code", "ao:opencode", "ao:agy", "ao:pi"]) {
     const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } })).capability;
     assert.equal(capability.supported, true, harness_id);
     assert.equal(capability.source, "ao-adapter");
@@ -4288,12 +4291,17 @@ test("permission capabilities use installed AO adapter modes without fabricating
     assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
     assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
     assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
-    // agy in its terminal cannot bring an approval to the chat, and its auto mode is unavailable
-    // through the gateway, so Ask and Approve for me are excluded there; Full access remains.
+    // agy in its terminal cannot bring an approval to the chat, and Pi and opencode (on its own
+    // allow-all default) never ask, so Ask and Approve for me are excluded there with that reason;
+    // Full access remains.
+    const fullAccessOnly = harness_id !== "ao:claude-code";
     assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
-      harness_id === "ao:agy" ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
+      fullAccessOnly ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
+    if (fullAccessOnly) for (const mode of capability.excluded_modes) assert.match(mode.reason, /Choose Full access, the only mode it runs in\.$/);
   }
-  for (const harness_id of ["ao:opencode", "codex-native"]) {
+  assert.match((await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id: "ao:agy" } })).capability.excluded_modes[0].reason,
+    /^Antigravity asks for approval in its own terminal/);
+  for (const harness_id of ["ao:pi-not-installed", "codex-native"]) {
     const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
     assert.equal(unsupported.capability.supported, false);
   }
@@ -4356,6 +4364,26 @@ test("external dispatch refuses permission tuples the adapter cannot honor", asy
     });
     await assert.rejects(workflow.call("advance", {workspaceId:"ws",runId:"run"}), /cannot honor|permission tuple|unsupported.*permission/i);
     assert.equal(launched, false);
+  }
+  // Ask or Approve for me on an agent that can't ask the chat is refused with its reason, never
+  // launched to wait at an approval nobody sees (agy, Cline) or to run unchecked (Pi, Unreal Agent).
+  for (const [agent, why] of [["agy", /^Antigravity asks for approval in its own terminal/], ["pi", /^Pi runs its tools without asking/],
+    ["unreal-agent", /^Unreal Agent has no approval channel/], ["cline", /^Cline asks for approval in its own terminal/],
+    ["opencode", /^opencode allows every tool by its own default/], ["kimi", /^kimi has no way to ask the chat/]]) {
+    for (const reviewer of ["user", "auto_review"]) {
+      let launched = false;
+      const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "default", permission_profile: ":ao-default",
+        native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer };
+      const mission = { id:"run",workspace_id:"ws",revision:1,nodes:[{id:"one",role:"planner",state:"pending",parents:[],route}] };
+      const workflow = createAgentOrchestratorWorkflow({
+        requestHeadless: async endpoint => endpoint.endsWith("/read") ? {ok:true,runs:[mission],worker_capacity:{run:1}}
+          : endpoint.endsWith("/reserve") ? {ok:true,request_key:"key",prompt:"direct"} : {ok:true,run:mission},
+        aoHarness: { spawn: async () => { launched=true;return "session"; } }, confirm: async()=>true,
+      });
+      await assert.rejects(workflow.call("advance", {workspaceId:"ws",runId:"run"}), (error) => why.test(error.message)
+        && /Choose Full access, the only mode it runs in\.$/.test(error.message) && ROUTE_REFUSED.test(error.message));
+      assert.equal(launched, false, `${agent} ${reviewer}`);
+    }
   }
 });
 

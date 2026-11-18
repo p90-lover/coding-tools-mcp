@@ -3547,7 +3547,8 @@ function registerIpc({ logger, stateStore }) {
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       assertAutomaticCurrent?.();
-      if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
+      // A chat's WebGPT model lookup (read-only, about 2 s) is not a setup: it failed this check mid-Connect.
+      if (runtimeHost.setupOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
       if (!operationBrowser || operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
         || browserAccounts.partitionOf(accountId) !== partition || extraTunnels !== runtimeSupervisor?.extraTunnels
         || browserAccountsStatus().switching || quitting || shutdownInProgress) {
@@ -3688,7 +3689,7 @@ function registerIpc({ logger, stateStore }) {
         && mainWindow.isFocused() && mainWindow.webContents.isFocused()
         && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
         && (!operation || (connecting && operation === "MCP connector creation"))
-        && runtimeHost && !runtimeHost.currentOperation();
+        && runtimeHost && !runtimeHost.setupOperation();
     },
     prepare: async () => {
       // Timers must not synchronously read configuration/credential files on the main thread.
@@ -5080,7 +5081,8 @@ async function start() {
         executable,
         at: Date.now(),
         stdout: runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
-          embedded: true, timeoutMs: 45_000, message: "Checking the WebGPT model…",
+          // It only prints the catalog, so MCP setup does not wait for it (RuntimeHost.setupOperation).
+          embedded: true, readOnly: true, timeoutMs: 45_000, message: "Checking the WebGPT model…",
           successMessage: "WebGPT model checked",
         }).then((result) => result.stdout),
       };

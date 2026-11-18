@@ -23,7 +23,7 @@ import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, typ
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
-  cardMeta, harnessLabel, modelLabel, modelShortLabel, permissionsFitted, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
@@ -264,7 +264,7 @@ function startNotice(result: Record<string, unknown>): string {
 const routeIdentity = (route: AoRoute) => CHAT_ROUTE_FIELDS.map(name => (route as unknown as Record<string, unknown>)[name] ?? null);
 /**
  * Whether `route` is the setup a single chat's step ran on: its saved route, or that route as the
- * composer shows it when the chat opens (its permission choices applied, then fitted).
+ * composer shows it when the chat opens (its permission choices applied).
  */
 function singleRouteMatches(route: AoRoute, mission: AoMission, card: AoMission["nodes"][number]): boolean {
   const same = (other: AoRoute) => JSON.stringify(routeIdentity(other)) === JSON.stringify(routeIdentity(route));
@@ -277,7 +277,7 @@ function singleRouteMatches(route: AoRoute, mission: AoMission, card: AoMission[
   }
   if (intent?.approval_policy !== undefined) shown.approval_policy = intent.approval_policy;
   if (intent?.approvals_reviewer !== undefined) shown.approvals_reviewer = intent.approvals_reviewer;
-  return same(shown) || same(permissionsFitted(shown));
+  return same(shown);
 }
 function lastChatRoute(): AoRoute | null {
   try {
@@ -286,9 +286,8 @@ function lastChatRoute(): AoRoute | null {
     const route = Object.fromEntries(Object.entries(saved).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name)
       && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)))));
     const required = ["harness_id", "provider_id", "account_id", "model", "permission_profile"];
-    // A route remembered before Pi/opencode dropped a carried-over mode still holds one.
     return required.every(name => typeof route[name] === "string") && route.model && route.model !== AGENT_DEFAULT_MODEL
-      ? permissionsFitted(route as unknown as AoRoute) : null;
+      ? route as unknown as AoRoute : null;
   } catch { return null; }
 }
 function rememberChatRoute(route: AoRoute) {
@@ -576,8 +575,9 @@ export const CHAT_CONTEXT_LIMIT = 8192;
 export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
   if (mode === "single") {
     if (!route.model || route.model === "default") throw new Error("Choose a model first.");
-    // Every send and pre-warm comes through here: a mode Pi or opencode can't honor never leaves.
-    return { executionMode: "single", singleRoute: { ...permissionsFitted(route) } };
+    // Every send and pre-warm comes through here. The chat's permission mode goes as picked: a mode
+    // its agent can't run in is refused at launch with the reason, never dropped or swapped.
+    return { executionMode: "single", singleRoute: { ...route } };
   }
   const selected = teams.find(team => team.id === teamId);
   if (!selected || !Number.isSafeInteger(selected.revision)) throw new Error("This saved team changed. Refresh and choose it again.");
@@ -1557,8 +1557,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         }
         if (intent?.approval_policy !== undefined) route.approval_policy = intent.approval_policy;
         if (intent?.approvals_reviewer !== undefined) route.approvals_reviewer = intent.approvals_reviewer;
-        // A saved Pi/opencode chat whose launch was refused for a carried-over mode can go on.
-        setSingleRoute(permissionsFitted(route));
+        setSingleRoute(route);
       }
     } else {
       setComposerMode("team");

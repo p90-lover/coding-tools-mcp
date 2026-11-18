@@ -414,7 +414,7 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
     mainWindow: { isDestroyed: () => false, isVisible: () => true, isMinimized: () => false,
       isFocused: () => focused, webContents: { isFocused: () => nativeFocus },
       on: (event, fn) => { callbacks[event] = fn; }, once: (event, fn) => { callbacks[event] = fn; } },
-    runtimeHost: { currentOperation: () => null, mcpCredentialsConfiguredAsync: async () => true },
+    runtimeHost: { currentOperation: () => null, setupOperation: () => null, mcpCredentialsConfiguredAsync: async () => true },
     runtimeSupervisor: { readConfigAsync: async () => { coreReads++; return config; }, extraTunnels: { status: () => [] } },
     routeIdleAccountPartition: async partition => routes.push(partition),
     session: { fromPartition: partition => ({ cookies: { get: async () => cookie(partition) } }) },

@@ -227,6 +227,7 @@ class RuntimeHost {
     this.supervisor = supervisor;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.active = null;
+    this.activeReadOnly = false;
     this.activeChild = null;
     this.lifecycleOperation = null;
     this.cleanupEphemeralSecrets();
@@ -241,6 +242,17 @@ class RuntimeHost {
       && this.activeChild.exitCode === null
       && this.activeChild.signalCode === null;
     return this.lifecycleOperation || this.active || (stuckChild ? "previous runtime process shutdown" : null);
+  }
+
+  /**
+   * The runtime operation another setup must wait for, or null. A read-only one (the WebGPT model
+   * lookup chats repeat every 2 minutes, run with `readOnly`) holds the one-at-a-time slot for about
+   * 2 s but changes nothing. Counted as a setup, it failed Connect MCP whenever it overlapped one of
+   * the setup's checks, and made the automatic setup give way (2026-11-17).
+   */
+  setupOperation() {
+    const operation = this.currentOperation();
+    return operation !== null && operation === this.active && this.activeReadOnly ? null : operation;
   }
 
   browserInteractionMode() {
@@ -799,6 +811,7 @@ class RuntimeHost {
       throw new Error(`Another launcher operation is active: ${this.lifecycleOperation}`);
     }
     this.active = name;
+    this.activeReadOnly = options.readOnly === true;
     this.publishOperation?.({ name, status: "running", message: options.message || name });
     this.logger.info("runtime.operation_started", { name, args: args.map((arg) => /key|token/i.test(arg) ? "[redacted]" : arg) });
     try {
@@ -939,6 +952,7 @@ class RuntimeHost {
       // can report that after the caller already reads it back, so the next read checks the file.
       this.supervisor?.forgetConfig?.();
       this.active = null;
+      this.activeReadOnly = false;
     }
   }
 

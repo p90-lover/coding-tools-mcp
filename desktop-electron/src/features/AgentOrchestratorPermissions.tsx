@@ -5,13 +5,13 @@ import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 import { CheckGlyph, FolderGlyph, GlobeGlyph, HandGlyph, ShieldAlertGlyph, ShieldCodeGlyph, TerminalGlyph, WarningGlyph } from "./AgentOrchestratorPermissionGlyphs";
 import type { KeyboardEvent, ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
-import { NATIVE_HARNESS, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
+import { NATIVE_HARNESS, PERMISSION_HARNESSES, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
 
 export type PermissionCapability = {
   supported: boolean; reason?: string;
   profiles: { id: string; allowed: boolean; description?: string }[];
   approval_policies?: string[]; approvals_reviewers?: string[];
-  /** Whole modes the adapter cannot honour although each part is listed (agy's Ask: its approvals stay in its terminal). */
+  /** Whole modes the adapter cannot honour although each part is listed (Ask and Approve for me on an agent that can't ask the chat). */
   excluded_modes?: { profile: string; policy: string; reviewer: string; reason?: string }[];
   requirements?: Record<string, unknown>;
 };
@@ -30,14 +30,15 @@ export function missionPermissionNodes(mission: AoMission): AoNode[] {
 }
 /**
  * Whether a running card's agent asks this app about each request, so the chat answers them by its
- * newest permission pick at once (liveRoute in agent-orchestrator-workflow). One launched to ask
- * does, and so does Claude Code under "Approve for me" (this app reviews its requests); an agent
- * launched with its own auto-review or with no approvals answers for itself until its next turn,
- * and the native Codex bridge reports its own policy (RuntimePermissionPolicy).
+ * newest permission pick at once (liveRoute in agent-orchestrator-workflow). An agent that asks the
+ * chat (PERMISSION_HARNESSES) does, launched to ask or under "Approve for me" (this app reviews its
+ * requests), except Codex there, which runs its own auto-review. One in Full access, or one that
+ * can't ask the chat, answers for itself until its next turn, and the native Codex bridge reports
+ * its own policy (RuntimePermissionPolicy).
  */
 export function appAnswersRequests(route: AoNode["route"] | undefined): boolean {
-  if (!route || route.harness_id === NATIVE_HARNESS || route.approval_policy === "never") return false;
-  return route.approvals_reviewer !== "auto_review" || /claude-code/.test(route.harness_id ?? "");
+  if (!route || !PERMISSION_HARNESSES.has(route.harness_id) || route.approval_policy === "never") return false;
+  return route.approvals_reviewer !== "auto_review" || route.harness_id !== "ao:codex";
 }
 /** A running card's approvals as they are answered now: the route it launched on, with the chat's newer pick laid over it. */
 export function livePermissionRoute(mission: AoMission, node: AoNode): AoNode["route"] {

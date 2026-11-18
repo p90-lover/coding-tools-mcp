@@ -1188,11 +1188,13 @@ pub fn set_limits(
     Ok(())
 }
 
+/// Whether a role's route takes the chat's permission picks. Every AO harness does: the pick is
+/// saved here, and the launch (the workflow's aoLaunchArgs) maps it onto the agent or refuses a mode
+/// the agent cannot run in, with that mode's reason. Listing only Claude Code and Codex here refused
+/// every pick on the other harnesses, Full access included ("Select nonempty unique known supported
+/// mission role IDs" on an Antigravity chat told to choose Full access, 2026-11-17).
 pub fn policy_supported_route(route: &ao::Route) -> bool {
-    matches!(
-        route.harness_id.as_str(),
-        "codex-native" | "ao:claude-code" | "ao:codex"
-    )
+    route.harness_id == "codex-native" || ao::external_harness(route).is_some()
 }
 
 fn bind_future_permission(node: &mut Node, snapshot: Option<&Team>) {
@@ -1464,6 +1466,40 @@ mod tests {
         );
         assert_eq!(staged_route.approval_policy.as_deref(), Some("never"));
         assert_eq!(staged_route.permission_profile, ":ao-default");
+        // Every AO harness takes the pick: an Antigravity, Pi or Unreal chat told to choose Full
+        // access could not, since only Claude Code and Codex were listed.
+        for harness in [
+            "ao:agy",
+            "ao:pi",
+            "ao:opencode",
+            "ao:unreal-agent",
+            "ao:cline",
+        ] {
+            let mut other = data.clone();
+            let mut moved = route.clone();
+            moved.harness_id = harness.into();
+            other.ao_runs[0].nodes[0].route = moved;
+            let staged = apply_selected_config(
+                &mut other,
+                "qa",
+                "one",
+                created.revision,
+                ApplySelection {
+                    selected_role_ids: Some(vec![id.clone()]),
+                    permission_selection: Some(PermissionSelection {
+                        permission_profile: Some(":danger-full-access".into()),
+                        approval_policy: Some("never".into()),
+                        approvals_reviewer: Some("user".into()),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("{harness} refused Full access: {error}"));
+            assert_eq!(
+                staged.nodes[0].route.approval_policy.as_deref(),
+                Some("never")
+            );
+        }
         let sha = "a".repeat(64);
         let granted = ao::grant_run(&mut data, "qa", "one", created.revision, &sha, 100).unwrap();
         assert_eq!(granted.grant.as_ref().unwrap().max_turns, 1);
