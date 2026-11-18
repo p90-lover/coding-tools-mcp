@@ -50,7 +50,8 @@ test("classic CPA catalog remains usable but absent capabilities are not invente
 });
 
 test("all AO harnesses receive truthful tuning outcomes; unsupported transport stays unavailable and Claude models take a window", async () => {
-  const ids = ["aider", "grok", "droid", "agy", "crush", "cursor", "qwen", "copilot", "goose", "auggie", "continue",
+  // agy lists only CPA's models (CPA_ONLY_AGENTS), like Claude Code: checked below with them.
+  const ids = ["aider", "grok", "droid", "crush", "cursor", "qwen", "copilot", "goose", "auggie", "continue",
     "devin", "cline", "kimi", "muse", "kiro", "kilocode", "vibe", "kimchi", "prime-agent", "autohand", "omp", "amp", "pi", "unreal-agent"];
   const workflow = createAgentOrchestratorWorkflow({
     aoHarness: { models: async () => [{ id: "own-model", efforts: ["high"] }] },
@@ -64,7 +65,6 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport s
     assert.equal(result.capabilities["own-model"].contextWindow, undefined, id);
     // The chip says why it is off for this agent (windowlessReason), not a generic "no setter".
     assert.match(result.capabilities["own-model"].contextReason, /no setting for it|no context-window setting AO can pass|only on a CPA model/, id);
-    if (id === "agy") assert.match(result.capabilities["own-model"].contextReason, /^Antigravity sizes its own context window/);
   }
   // Claude Code lists only CPA models; a Claude model through CPA keeps CPA's advertised efforts and
   // takes a window up to its reported limit (its picker was off). A CPA alias with no reported limit
@@ -81,6 +81,11 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport s
   assert.deepEqual(caps.contextWindow, { min: 4096, max: 200000, kind: "context" });
   assert.deepEqual(catalog["cpa/Claude Opus 5.5"].contextWindow, { min: 4096, max: 2000000, kind: "context" });
   assert.match(catalog["cpa/Claude Opus 5.5"].contextReason, /unverified/);
+  // agy lists only CPA's models too, and takes no window on them: its gateway variables carry none,
+  // so the chip says why (windowlessReason).
+  const agy = (await claude.call("models", { harness: "ao:agy" })).capabilities["cpa/claude-sonnet-4-6"];
+  assert.equal(agy.contextWindow, undefined);
+  assert.match(agy.contextReason, /^Antigravity sizes its own context window/);
 });
 
 test("Native Codex lists WebGPT even without CPA and never reads AO catalogs", async () => {
