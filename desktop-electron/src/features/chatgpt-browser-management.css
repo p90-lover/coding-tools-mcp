@@ -448,14 +448,20 @@
 
 .cbm-switch input { accent-color: var(--color-text-accent); }
 
+/* Wraps rather than overflows: a card with four actions (Connect MCP, Sign in to OpenAI Platform,
+   Use in Browser tab, Remove) is wider than its column, and right-aligned buttons spilled out of
+   the card's left edge onto the card beside it. */
 .cbm-card-actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
   margin-top: auto;
   padding: 0 16px 14px;
 }
+
+.cbm-card-actions > * { white-space: nowrap; }
 
 .cbm-dot {
   width: 8px;
