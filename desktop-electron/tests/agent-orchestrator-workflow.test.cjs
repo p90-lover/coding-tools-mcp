@@ -1360,7 +1360,7 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.deepEqual(catalog.harnesses.map((item) => [item.id, item.runnable, item.chat]),
     [["codex-native", true, undefined], ["ao:claude-code", true, true], ["ao:aider", true, false]]);
   // An agent outside the CPA gateway lists its own models; "default" is never offered.
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
+  assert.deepEqual((await workflow.call("models", { harness: "ao:aider", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
   await workflow.call("advance", { workspaceId: "ws-1", runId: "run-1", executable: "C:\codex.exe" });
   assert.equal(spawned.length, 1);
   assert.equal(spawned[0].agent, "claude-code");
@@ -1490,13 +1490,11 @@ test("CPA models go only to agents that can use them through the gateway", async
   });
   // Aider has no gateway launch support: its own models only.
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
-  // agy runs CPA models through its gateway mode too: every harness offers every pool model but
-  // WebGPT (an agy with no Google sign-in listed nothing at all and fell back to WebGPT's tiers).
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models,
-    ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
   // Claude Code and opencode offer only CPA models: their own aliases (fable/haiku/opus/sonnet)
-  // are neither CPA nor WebGPT. Codex keeps its ChatGPT-account models next to CPA's.
-  for (const harness of ["ao:claude-code", "ao:opencode"]) {
+  // are neither CPA nor WebGPT. agy too: its own models run on its Google sign-in, which Google
+  // refused ("not currently available in your location"), so it runs every model through CPA's
+  // gateway mode. Codex keeps its ChatGPT-account models next to CPA's.
+  for (const harness of ["ao:claude-code", "ao:opencode", "ao:agy"]) {
     assert.deepEqual((await workflow.call("models", { harness })).models,
       ["cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"], harness);
   }
@@ -1513,6 +1511,8 @@ test("a CPA-only agent reports a CPA failure instead of falling back to its own 
     confirm: async () => true,
   });
   await assert.rejects(workflow.call("models", { harness: "ao:claude-code" }), /CPA model list is unavailable: CPA timed out/);
+  // agy never falls back to its own models, which run on its (refused) Google sign-in.
+  await assert.rejects(workflow.call("models", { harness: "ao:agy" }), /CPA model list is unavailable: CPA timed out/);
   // Codex still has its own ChatGPT-account models when CPA is down.
   assert.deepEqual((await workflow.call("models", { harness: "ao:codex" })).models, ["sonnet"]);
 });
