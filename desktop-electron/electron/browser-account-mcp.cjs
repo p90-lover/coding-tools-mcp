@@ -14,14 +14,29 @@ const GAVE_WAY_RETRY_MS = 2 * 60_000;
 const GAVE_WAY_RETRY_MAX_MS = 30 * 60_000;
 // A setup that failed is tried again later, not never. Until 2026-11-13 one failure stopped automatic
 // setup for that account until its sign-in cookie changed, so a page that loaded slowly on the busy
-// disk, or a check that misread a signed-in account, left it unconnected for good. A failure only the
-// person can clear (signing in, a security check, a workspace owner) waits the longest; any other
-// waits 10 minutes, twice as long after each failure in a row, up to an hour. Success starts over.
+// disk, or a check that misread a signed-in account, left it unconnected for good. A failure waits
+// 10 minutes, twice as long after each failure in a row, up to an hour; one that needs the person or a
+// workspace owner waits the hour. Success starts over.
 const FAILED_RETRY_MS = 10 * 60_000;
 const FAILED_RETRY_MAX_MS = 60 * 60_000;
-const NEEDS_THE_PERSON = new Set(["verification_required", "platform_sign_in_required", "workspace_owner_required",
+// ChatGPT or OpenAI Platform asked the account to sign in (ChatGPT's 401 for a revoked sign-in, its
+// security check, Platform's login): no later try passes until the person signs in. Such a failure
+// waits for that: a new ChatGPT sign-in in the account's partition, a sign-out, or a Connect by hand
+// that connects it. The time it failed, a refreshed cookie, a failure recorded elsewhere or a tunnel
+// restart do not end it. Seen 2026-11-19: signed-out accounts failed again after every tunnel adoption
+// and account switch, each time loading chatgpt.com in hidden windows on a machine that already lagged.
+const WAITS_FOR_SIGN_IN = new Set(["verification_required", "platform_sign_in_required"]);
+const NEEDS_THE_PERSON = new Set(["workspace_owner_required",
   "workspace_admin_required", "workspace_publish_required", "tunnel_owner_mismatch", "platform_account_mismatch",
   "tunnel_permission_required", "configuration_required", "mcp_access_denied", "manual_browser_inspection_disabled"]);
+
+/** A fingerprint of the account's ChatGPT sign-in cookie: the cookie itself never leaves its partition or enters logs. */
+function sessionFingerprint(cookies) {
+  return createHash("sha256").update(JSON.stringify(cookies
+    .filter(cookie => cookie.name === "__Secure-next-auth.session-token"
+      || cookie.name.startsWith("__Secure-next-auth.session-token."))
+    .map(cookie => [cookie.name, cookie.value]).sort((a, b) => a[0].localeCompare(b[0])))).digest("hex");
+}
 
 function createBrowserAccountMcpSync(deps) {
   const attempts = new Map();
@@ -29,7 +44,8 @@ function createBrowserAccountMcpSync(deps) {
   // may start. Not keyed by the session cookie: loading ChatGPT may refresh it, which must not
   // count as a new reason to start over.
   const gaveWays = new Map();
-  // Per account: how many setups in a row failed at this partition and target (see FAILED_RETRY_MS).
+  // Per account: how many setups in a row failed at this partition and target, the last one's code, and
+  // what ends its wait (FAILED_RETRY_MS, WAITS_FOR_SIGN_IN). Kept across a restart of the same tunnel.
   const failures = new Map();
   const now = deps.now ?? Date.now;
   let inFlight = null;
@@ -66,17 +82,28 @@ function createBrowserAccountMcpSync(deps) {
         if (backoff?.place === place && now() < backoff.retryAt) continue;
         const cookies = await deps.readCookies(account.partition);
         if (!current()) continue;
+        const failure = failures.get(account.id);
         if (!signedInFromCookies(cookies)) {
           attempts.delete(account.id);
+          // Signed out: whatever signs it in next is the new sign-in its wait is for.
+          if (WAITS_FOR_SIGN_IN.has(failure?.code)) failures.delete(account.id);
           continue;
         }
         // Only a fingerprint stays in memory; secrets never leave this partition or enter logs.
-        const sessionKey = createHash("sha256").update(JSON.stringify(cookies
-          .filter(cookie => cookie.name === "__Secure-next-auth.session-token"
-            || cookie.name.startsWith("__Secure-next-auth.session-token."))
-          .map(cookie => [cookie.name, cookie.value]).sort((a, b) => a[0].localeCompare(b[0])))).digest("hex");
+        const sessionKey = sessionFingerprint(cookies);
         const key = `${account.partition}\0${target}\0${sessionKey}`;
         const errorAt = account.connector?.errorAt ?? null;
+        if (failure?.place === place) {
+          const okAt = account.connector?.okAt ?? null;
+          if (okAt !== null && okAt !== failure.okAt) {
+            // Connected since it failed (a Connect by hand, or a turn found it bound): nothing to set up.
+            failures.delete(account.id);
+            attempts.set(account.id, { key, errorAt, retryAt: Infinity });
+            continue;
+          }
+          // Checked before anything opens: a waiting account costs one cookie read, no HTTP and no window.
+          if (WAITS_FOR_SIGN_IN.has(failure.code) ? failure.session === sessionKey : now() < failure.retryAt) continue;
+        }
         const previous = attempts.get(account.id);
         if (previous?.key === key && previous.errorAt === errorAt && now() < previous.retryAt) continue;
         const proof = await deps.verifySignIn(account.partition);
@@ -117,15 +144,21 @@ function createBrowserAccountMcpSync(deps) {
         }
         gaveWays.delete(account.id);
         // Our own recorded failure is not a new external failure that warrants another setup at once;
-        // a failure waits its turn (FAILED_RETRY_MS), a connected account waits for new sign-in cookies.
+        // a failure waits its turn (FAILED_RETRY_MS, WAITS_FOR_SIGN_IN), a connected account waits for
+        // new sign-in cookies or a newer failure recorded elsewhere.
         const recorded = deps.accounts().find(entry => entry.id === account.id);
         let retryAt = Infinity;
         if (failed) {
           const before = failures.get(account.id);
           const count = before?.place === place ? before.count + 1 : 1;
-          failures.set(account.id, { place, count });
-          retryAt = now() + (NEEDS_THE_PERSON.has(failed?.code) ? FAILED_RETRY_MAX_MS
+          const code = typeof failed?.code === "string" ? failed.code : null;
+          retryAt = WAITS_FOR_SIGN_IN.has(code) ? Infinity : now() + (NEEDS_THE_PERSON.has(code) ? FAILED_RETRY_MAX_MS
             : Math.min(FAILED_RETRY_MAX_MS, FAILED_RETRY_MS * 2 ** (count - 1)));
+          // The sign-in as the setup left it: its own chatgpt.com pages may have refreshed the cookie,
+          // which is no new sign-in.
+          const after = await deps.readCookies(account.partition).catch(() => null);
+          failures.set(account.id, { place, count, code, retryAt, okAt: recorded?.connector?.okAt ?? null,
+            session: after && signedInFromCookies(after) ? sessionFingerprint(after) : sessionKey });
         } else {
           failures.delete(account.id);
         }
@@ -147,8 +180,35 @@ function createBrowserAccountMcpSync(deps) {
       })).finally(() => { inFlight = null; });
       return inFlight;
     },
-    // An explicit runtime/tunnel restart starts a new round, even with unchanged login cookies.
-    invalidate() { generation++; attempts.clear(); gaveWays.clear(); failures.clear(); },
+    /**
+     * The MCP tunnel is ready again: each connected or untried account checks its connector, even with
+     * unchanged login cookies. An account waiting after a failure or a give-way keeps waiting: this
+     * fires on every runtime restart (an account switch's setup adopts the same tunnel), and a restart
+     * that changed nothing it failed on started every failing account's setup again (2026-11-19). A
+     * started tunnel (`tunnelStarted`) ends the waits of failures it can fix, not those of the person's
+     * own (WAITS_FOR_SIGN_IN, NEEDS_THE_PERSON); a different tunnel is a new target, which starts over.
+     */
+    invalidate({ tunnelStarted = false } = {}) {
+      generation++;
+      attempts.clear();
+      if (!tunnelStarted) return;
+      for (const failure of failures.values()) {
+        if (!WAITS_FOR_SIGN_IN.has(failure.code) && !NEEDS_THE_PERSON.has(failure.code)) failure.retryAt = 0;
+      }
+    },
+    /**
+     * Why the account's automatic setup waits for its sign-in (verification_required,
+     * platform_sign_in_required), or null: it failed there and its ChatGPT sign-in is unchanged since.
+     */
+    async signInWait(accountId) {
+      const failure = failures.get(accountId);
+      if (!WAITS_FOR_SIGN_IN.has(failure?.code)) return null;
+      const account = deps.accounts().find(entry => entry.id === accountId);
+      if (!account) return null;
+      const cookies = await deps.readCookies(account.partition);
+      return signedInFromCookies(cookies) && sessionFingerprint(cookies) === failure.session
+        && failures.get(accountId) === failure ? failure.code : null;
+    },
     /**
      * A Connect the user asked for comes first. Until the returned release runs, no round starts, and
      * one already connecting fails its admission check at its next step, so it gives way (deferred,

@@ -898,7 +898,8 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
  */
 function restartAutomaticMcpVerification({ logger, stateStore, reason }) {
   automaticMcpAttempt = null;
-  automaticAccountMcp?.invalidate();
+  // An adopted tunnel is the one the failing accounts failed with: they keep waiting (invalidate).
+  automaticAccountMcp?.invalidate({ tunnelStarted: reason !== "tunnel-adopted" });
   void automaticAccountMcp?.sync();
   const state = stateStore.read();
   if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
@@ -1566,6 +1567,15 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   if (planKey && planKey === bridgePlanKey) {
     browserAccountService.takeBridgeRefresh(accountId);
     logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "same-plan" });
+    return;
+  }
+  // An account whose ChatGPT sign-in is gone (its MCP setup stopped at ChatGPT's 401 or security check,
+  // and its sign-in has not changed since) gets no core setup: setup would restart the runtime to read
+  // a plan the account cannot serve, and each restart used to start every failing account's MCP setup
+  // again (2026-11-19). The refresh stays pending for the account's next sign-in.
+  const signInWait = automaticAccountMcp ? await automaticAccountMcp.signInWait(accountId).catch(() => null) : null;
+  if (signInWait === "verification_required") {
+    logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "signed-out" });
     return;
   }
   // Setup restarts the bridge, which would end every running turn (a switch no longer waits for
