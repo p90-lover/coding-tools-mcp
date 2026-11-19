@@ -96,7 +96,12 @@ async function captureRegularFile(filePath, { followSymlink = false } = {}) {
   }
   let symlink;
   if (followSymlink && stat.isSymbolicLink()) {
-    symlink = { link: await fs.promises.readlink(filePath), target: await fs.promises.realpath(filePath) };
+    // The callback fs.realpath, not fs.promises.realpath: checkpointWritePath compares this target with
+    // fs.realpathSync, and the promise version resolves like fs.realpath.native. On Windows that expands
+    // 8.3 short names (C:\Users\RUNNER~1\...), so an unchanged link read as "symlink changed" and setup's
+    // rollback refused to restore it (runtime-host test, CI 2026-11-19).
+    const target = await new Promise((resolve, reject) => fs.realpath(filePath, (error, resolved) => (error ? reject(error) : resolve(resolved))));
+    symlink = { link: await fs.promises.readlink(filePath), target };
     stat = await fs.promises.lstat(symlink.target);
   }
   if (!stat.isFile()) {
