@@ -133,9 +133,14 @@ export function ChatTurnStats({ model, models = [], from, rounds, running, onRef
   if (!rounds) return null;
   const has = stats?.available && stats.steps;
   // CPA refusing the model, right where the request numbers are: "6 refused · rate limited (429)".
-  const refused = refusal && refusal.streak >= 2 ? <span key="refusal" className="is-warn"
-    title={`The last ${refusal.streak} requests to this model through CPA failed${refusal.since ? ` since ${new Date(refusal.since).toLocaleTimeString()}` : ""}`}>
-    {refusal.streak} refused · {cpaStatusWord(refusal.status)}</span> : null;
+  // The strip is one row that fades out where a narrow pane cuts it off (codex-chat.css), so the
+  // warning leads it: at the end it was the part cut off.
+  const refusedText = refusal && refusal.streak >= 2 ? `${refusal.streak} refused · ${cpaStatusWord(refusal.status)}` : "";
+  const refused = refusedText ? <span key="refusal" className="is-warn"
+    title={`The last ${refusal!.streak} requests to this model through CPA failed${refusal!.since ? ` since ${new Date(refusal!.since).toLocaleTimeString()}` : ""}`}>
+    {refusedText}</span> : null;
+  /** The whole strip as text, for its tooltip where the row is cut off. */
+  const whole = (texts: string[]) => [refusedText, ...texts].filter(Boolean).join(" | ");
   // A DeepSeek model's chat shows DeepSeek Harness's two pills: "4 turns 17 steps · 38 tok/s" and
   // "123K tok · Cache hit 97%"; the time and per-direction numbers are on hover.
   if (isDeepSeekModel(model)) {
@@ -146,8 +151,8 @@ export function ChatTurnStats({ model, models = [], from, rounds, running, onRef
       pills.push({ key: "tokens", text: `${tokensShort((stats.inputTokens ?? 0) + (stats.outputTokens ?? 0))} tok${stats.cacheHit !== null && stats.cacheHit !== undefined ? ` · Cache hit ${Math.round(stats.cacheHit * 100)}%` : ""}`,
         title: `In ${tokensShort(stats.inputTokens)} · out ${tokensShort(stats.outputTokens)}` });
     }
-    return <p className={`cx-turn-stats is-dsh${running ? " is-running" : ""}`} aria-label="Latest turn">
-      {pills.map((pill) => <span key={pill.key} title={pill.title}>{pill.text}</span>)}{refused}
+    return <p className={`cx-turn-stats is-dsh${running ? " is-running" : ""}`} aria-label="Latest turn" title={whole(pills.map((pill) => pill.text))}>
+      {refused}{pills.map((pill) => <span key={pill.key} title={pill.title}>{pill.text}</span>)}
     </p>;
   }
   const parts: { key: string; text: string; title: string }[] = [
@@ -165,7 +170,7 @@ export function ChatTurnStats({ model, models = [], from, rounds, running, onRef
     }
     parts.push({ key: "tokens", text: `in ${tokensShort(stats.inputTokens)} · out ${tokensShort(stats.outputTokens)}`, title: "Tokens used this turn, retries included" });
   }
-  return <p className={`cx-turn-stats${running ? " is-running" : ""}`} aria-label="Latest turn">
-    {parts.map((part) => <span key={part.key} title={part.title}>{part.text}</span>)}{refused}
+  return <p className={`cx-turn-stats${running ? " is-running" : ""}`} aria-label="Latest turn" title={whole(parts.map((part) => part.text))}>
+    {refused}{parts.map((part) => <span key={part.key} title={part.title}>{part.text}</span>)}
   </p>;
 }
