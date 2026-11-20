@@ -1527,11 +1527,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
   const CPA_STOCK_WINDOW = 272_000;
   /**
-   * Real context ceilings of provider-plugin models that CPA reports only with its stock window,
-   * by the model's own name (after any provider prefix). Without one, the card offers the client's
-   * 2M ceiling as unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M.
+   * Real context ceilings of models that CPA reports only with its stock window, by the model's
+   * own name (after any provider prefix). Without one, the card offers the client's 2M ceiling as
+   * unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI
+   * Studio key is listed at the stock 272K, though CPA's own catalog gives 1,048,576 for every
+   * Gemini 4 model (Antigravity's and OpenCode's report it): until 2026-11-20 a Gemini 4 Carbon
+   * chat was capped at 272K and its window field refused 1m and every 7-digit size.
    */
-  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000]];
+  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000],
+    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/i, 1_048_576]];
   const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
   /**
    * The largest window a card may set for a model whose catalog reports `limit`. CPA's
@@ -1910,9 +1914,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // model goes (Luna: 272K by default, up to 1M).
       // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
       // window, whatever the model really takes: that number is no limit, so it is left unknown
-      // instead of capping the card (and of becoming its default).
+      // instead of capping the card (and of becoming its default). A model of CPA's own providers
+      // reporting the stock window may really have it (Codex's GPT models do), so only a known
+      // ceiling (KNOWN_CONTEXT_LIMITS: Gemini 4 from a Vertex key) replaces it there.
       const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
-      const stock = id.includes("/") && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
+      const stock = (id.includes("/") || knownContextLimit(id) !== undefined)
+        && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
       // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
       const limit = stock ? knownContextLimit(id) : reported;
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
