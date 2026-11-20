@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.9.0",
+  "version": "0.10.1",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "8bceb7208c492a325afdcf24b4d8bc2ccf4f59e3",
+    "commit": "531cc8f4ebe9e1c85650d70742e8d378176df454",
     "license": "MIT"
   },
   "changes": [
-    "A key that answers that it has no credits (OpenAI insufficient_quota / credit_balance_exhausted, Anthropic, DeepSeek, HTTP 402) is left out of routing for 30 min, doubling to 12 h, and CPA's own selector is told to skip it; a request that succeeds on it, or Credits added, puts it back",
-    "For a model sign-in accounts serve, API keys and other providers are fallbacks the user turns on under Accounts > Fallbacks, used only after every sign-in account is spent; the usage log no longer keeps a configured key as a record's source",
-    "Smart routing covers Codex, Claude and Antigravity sign-in accounts and mixed requests (0.8.0): accounts with quota left come first, then unread sign-in accounts; a spent account is never chosen while another can answer",
-    "Accounts gains Claude quota and Antigravity quota views; Auto Review keeps 0.7.1's default route for Codex fallbacks",
+    "Each account goes out through its own proxy_url (the route Coding Tools gives every CPA credential): requests, model syncs, balance reads and Test no longer use CPA's one global proxy, and a marker re-saved after a model-list change keeps its proxy_url (0.10.1)",
+    "Upstream cards keep each account's usage across CPA restarts; In CPA lists every account CPA serves, config API keys included; quota bars show what is left; Moonshot and StepFun balances are read; AI Studio shows no card until an account is signed in (0.10.1)",
+    "CPA's own rotation and its rate-limit cooldowns pick accounts again: CPA Helper's quota polling, smart routing, out-of-credit key blocks, opt-in fallbacks, Codex reset credits and keeper are gone; usage and cost history, the price book and key labels stay (0.10.0)",
+    "CPA's Plugins sidebar shows one entry, Provider Manager; Auto Review, Cline Pass and the usage history are pages in its console (0.10.0)",
     "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
     "Cline Pass, CommandCode Go, CommandCode and Grok accounts are provider-manager auth files with a kind; their models, logins and management routes are unchanged"
   ],
@@ -22,9 +22,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/cpa-provider-manager-v0.9.0.dll",
-      "sha256": "8aedaced6c13cb1dfad6a59d64724fb1d3751c25c780956e8623bd000d7d934c",
-      "size": 27210752
+      "path": "windows/amd64/cpa-provider-manager-v0.10.1.dll",
+      "sha256": "b486aa9d9f98f0f07036ba8f46a6d6fc68a82283137b42b0a654e40788949e2a",
+      "size": 27062272
     }
   }
 }
