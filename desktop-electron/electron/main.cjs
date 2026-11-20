@@ -146,6 +146,7 @@ const {
   validateSidebarState,
   validateUpdateSettingsPatch,
 } = require("./state.cjs");
+const { rememberListener, restoreWorkspaceListeners } = require("./workspace-listeners.cjs");
 const {
   MIN_WINDOW_BOUNDS,
   readWindowState,
@@ -2369,7 +2370,8 @@ function registerIpc({ logger, stateStore }) {
         type: "warning",
         title: "Coding Tools",
         message: `${action} the ${input.service} listener?`,
-        detail: `${name}\n${location}\nOnly the local listener changes. The tunnel settings stay as saved.`,
+        detail: `${name}\n${location}\nOnly the local listener changes. The tunnel settings stay as saved.`
+          + (input.operation === "stop" ? "" : "\nIt starts again whenever Coding Tools restarts, until you stop it."),
         buttons: ["Cancel", "Continue"],
         defaultId: 0,
         cancelId: 0,
@@ -2377,12 +2379,18 @@ function registerIpc({ logger, stateStore }) {
       });
       if (response !== 1) return { ok: false, cancelled: true };
     }
-    return headlessHost.request("/api/v1/workspaces/service", {
+    const result = await headlessHost.request("/api/v1/workspaces/service", {
       workspace_id: input.workspaceId,
       service: input.service,
       operation: input.operation,
       confirm: changing,
     });
+    // A listener the person just confirmed starts again after a restart; one they stopped does not.
+    if (changing && result?.ok === true) {
+      stateStore.update({ workspaceListeners: rememberListener(stateStore.read().workspaceListeners,
+        input.workspaceId, input.service, input.operation) });
+    }
+    return result;
   });
   handle("coding-tools:workspaces:copy-secret", async (event, input) => {
     await assertFocusedMainWindowSettled(event, true);
@@ -5610,6 +5618,20 @@ async function start() {
     missionWorkflowRuntime = agentOrchestratorWorkflow;
     void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
       .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
+    // The workspace listeners the person had started come back after a restart or an update, so
+    // ChatGPT's native Codex keeps working (workspace-listeners.cjs).
+    if (!LAUNCHER_SMOKE_TEST && stateStore.read().workspaceListeners?.length) {
+      void listHeadlessWorkspaces().then(async (items) => {
+        const entries = stateStore.read().workspaceListeners;
+        const { kept } = await restoreWorkspaceListeners({ entries, workspaceIds: items.map(item => item.id),
+          request: (pathname, body) => headlessHost.request(pathname, body), logger });
+        // Forget only the removed workspaces' entries: a listener started meanwhile stays.
+        const forgotten = entries.filter(entry => !kept.includes(entry));
+        if (forgotten.length) {
+          stateStore.update({ workspaceListeners: (stateStore.read().workspaceListeners || []).filter(entry => !forgotten.includes(entry)) });
+        }
+      }).catch(error => logger.warn("workspace.listener_restore_failed", { message: String(error?.message || error).slice(0, 300) }));
+    }
     // Goals carry on with the window minimized (its reads, which sweep them, stop then).
     if (!LAUNCHER_SMOKE_TEST) agentOrchestratorWorkflow.startGoalWatch();
     // A turn a chat's agent starts by itself gets a card, so its requests are seen and screened.
