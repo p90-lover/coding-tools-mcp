@@ -206,6 +206,40 @@ test("a custom context window is set without a nested form, so it never submits 
   assert.deepEqual([clicked, stopped, prevented], [1, 1, 1], "Enter applies the size and goes no further");
 });
 
+test("the custom context window takes 100k, 1m and 7-digit sizes, and says why a size is refused", () => {
+  // 2026-11-20: on Gemini 4 Carbon (capped at a wrong 272K) the field turned red for "1m" and every
+  // 7-digit size and never said why; it read as "abbreviations and 7 digits are not supported".
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-4-carbon", permission_profile: ":ao-default" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [{ id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true }], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const menu = (limit, draft) => {
+    const caps = { "cpa/gemini-4-carbon": { efforts: ["high"], contextLimit: limit, contextWindow: { min: 4096, max: limit, kind: "context" } } };
+    // State order: search, models, caps, gaps, held, error, contextDraft.
+    view.render("AgentOrchestratorComposerControls", props, ["", ["cpa/gemini-4-carbon"], caps, {}, {}, "", draft]);
+    const tree = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Context window").props.children(() => {});
+    return {
+      input: elements(tree, item => item.type === "input")[0],
+      set: elements(elements(tree, item => item.props?.className === "ao-context-custom")[0], item => item.type === "button")[0],
+      problem: elements(tree, item => item.props?.id === "ao-context-draft-problem")[0]?.props.children ?? null,
+    };
+  };
+  const capped = menu(272_000, "1m");
+  assert.equal(capped.problem, "Up to 272k for this model", "a size past the model's limit says the limit");
+  assert.equal(capped.set.props.disabled, true);
+  assert.equal(capped.input.props["aria-invalid"], true);
+  assert.equal(capped.input.props.inputMode, "text", "k and m can be typed on any keyboard");
+  assert.match(capped.input.props.placeholder, /100k.*1m/, "the field shows that abbreviations work");
+  assert.equal(menu(272_000, "abc").problem, "Type a size such as 100k, 1m or 250000");
+  for (const [draft, tokens] of [["1m", 1_000_000], ["1,000,000", 1_000_000], ["1048576", 1_048_576], ["100k", 100_000]]) {
+    const ok = menu(1_048_576, draft);
+    assert.equal(ok.problem, null, `${draft} is a size this model takes`);
+    assert.equal(ok.set.props.disabled, false);
+    ok.set.props.onClick();
+    assert.equal(routes.at(-1).context_window, tokens, `${draft} sets ${tokens}`);
+  }
+});
+
 test("the harness menu is a strip of logos: no names or state words on rows, every harness in one scrolling column, the pick up top", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const route = { harness_id: "ao:aider", model: "", permission_profile: ":ao-default" };

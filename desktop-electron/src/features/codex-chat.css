@@ -601,9 +601,13 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
   color: var(--color-text-primary); font: inherit; font-size: 12px; line-height: 18px; cursor: pointer; vertical-align: baseline; }
 .cx-turn-restart:hover:not(:disabled) { background: var(--cx-hover); }
 .cx-turn-restart:disabled { opacity: .5; cursor: default; }
-/* Answer / Continue beside "waiting for you" (WaitingAnswer). In a narrow split pane the line is cut
-   short with an ellipsis, so the button stays in view next to the time. */
-.cx-turn-running .cx-turn-answer { margin-left: 6px; }
+/* A running turn's line (TurnRunning) is one row in any pane: in a narrow split pane it wrapped onto
+   four lines. Its text fades out where it is cut off (cx-fade-cut) and shows whole on hover; its
+   button (Recover, or Answer / Continue beside "waiting for you") stays in view next to it. */
+.cx-turn-running { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cx-turn-running-text { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap;
+  animation: cx-fade-cut linear both; animation-timeline: scroll(self inline); }
+.cx-turn-running .cx-turn-restart { flex: none; }
 .dsh-running-content { max-width: 100%; }
 .dsh-running-content .dsh-shimmer { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dsh-running-content .cx-turn-restart { flex: none; }
@@ -1343,19 +1347,33 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 /* It grows with its text up to the cap (field-sizing), with no script measuring it on each key. */
 .cx-composer textarea { display: block; width: 100%; min-height: 24px; max-height: 240px; padding: 4px 4px 4px; border: 0; outline: none; resize: none; field-sizing: content; overflow-y: auto;
   background: transparent; color: var(--color-text-primary); font: inherit; font-size: 14px; line-height: 1.5; }
-/* The line under the chat box: rounds, then the latest turn's model requests (ChatTurnStats). */
-.cx-turn-stats { display: flex; flex-wrap: wrap; justify-content: center; width: calc(100% - 48px); max-width: 780px; margin: -8px auto 10px; padding: 0;
-  color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums; animation: cx-turn-stats-in .3s ease-out; }
+/* The line under the chat box: rounds, then the latest turn's model requests (ChatTurnStats). One
+   row in any pane: a narrow split pane wrapped it onto four lines. Centered while it fits; cut off, it
+   starts at the left and its end fades out (cx-fade-cut), the whole strip in its tooltip. */
+.cx-turn-stats { display: flex; flex-wrap: nowrap; justify-content: safe center; overflow: hidden; width: calc(100% - 48px); max-width: 780px; margin: -8px auto 10px; padding: 0;
+  color: var(--ao-muted); font-size: 12px; font-variant-numeric: tabular-nums;
+  animation: cx-turn-stats-in .3s ease-out, cx-fade-cut linear both; animation-timeline: auto, scroll(self inline); }
 .cx-turn-stats span { padding: 0 10px; white-space: nowrap; transition: color .15s ease; }
 .cx-turn-stats span + span { border-left: 1px solid color-mix(in srgb, var(--ao-muted) 35%, transparent); }
 .cx-turn-stats span:hover { color: var(--color-text-primary); }
 /* CPA refusing the turn's model (ChatTurnStats): amber, so a rate limit reads apart from slow work. */
 .cx-turn-stats span.is-warn, .cx-turn-stats span.is-warn:hover { color: var(--ao-amber, #c98a12); }
 .cx-turn-stats.is-dsh span.is-warn { border-color: color-mix(in srgb, var(--ao-amber, #c98a12) 45%, transparent); }
-.cx-turn-stats.is-running span:first-child::before { display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%;
+/* The running dot marks the rounds, which follow the refusal warning when there is one. */
+.cx-turn-stats.is-running span:is(:first-child:not(.is-warn), .is-warn + span)::before { display: inline-block; width: 6px; height: 6px; margin: 0 6px 1px 0; border-radius: 50%;
   background: var(--ao-green, #2e9d5b); content: ""; animation: cx-pulse 1.4s ease-in-out infinite; }
 @keyframes cx-turn-stats-in { from { opacity: 0; transform: translateY(-3px); } }
-@media (prefers-reduced-motion: reduce) { .cx-turn-stats, .cx-turn-stats.is-running span:first-child::before { animation: none; } }
+/* A one-row line's end fades out only where it is cut off: a scroll timeline exists only while its
+   box has more than it shows, so text that fits keeps its last letters. Nothing scrolls it; the mask
+   holds at its start. */
+@keyframes cx-fade-cut {
+  from, to { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cx-turn-stats.is-running span:is(:first-child:not(.is-warn), .is-warn + span)::before { animation: none; }
+  /* The fade is not motion: only the strip's slide-in goes. */
+  .cx-turn-stats { animation: cx-fade-cut linear both; animation-timeline: scroll(self inline); }
+}
 /* The chat box's row on one 28 px grid: every control 28 px tall with 7 px corners, icons in 28 px
    squares, Send a 28 px circle. No carets and no boxes: a control is its icon or its word, and the
    hover tint says it opens. In reading order: attach, permissions, Single/Team, then the harness's
