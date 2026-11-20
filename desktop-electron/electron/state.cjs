@@ -1,4 +1,5 @@
 const { createStateFileWriter, readStateFile } = require("./durable-state.cjs");
+const { normalizeListeners } = require("./workspace-listeners.cjs");
 const SIDEBAR_MIN_WIDTH = 240;
 const SIDEBAR_MAX_WIDTH = 420;
 const SESSION_REFRESH_REMINDER_INTERVAL_MS = 48 * 60 * 60 * 1000;
@@ -147,6 +148,13 @@ function normalizeState(parsed) {
     // The sidebar's "More tools" section stays open only when this is true; absent means it opens
     // while one of its pages is showing.
     if (Object.hasOwn(state, "sidebarMoreToolsPinned") && state.sidebarMoreToolsPinned !== true) delete state.sidebarMoreToolsPinned;
+    // Workspace listeners the person started, started again at launch (workspace-listeners.cjs);
+    // absent means none.
+    if (Object.hasOwn(state, "workspaceListeners")) {
+      const listeners = normalizeListeners(state.workspaceListeners);
+      if (listeners.length) state.workspaceListeners = listeners;
+      else delete state.workspaceListeners;
+    }
     // Renderer accessibility (renderer-accessibility.cjs): absent means "auto".
     if (Object.hasOwn(state, "rendererAccessibility") && !["auto", "on", "off"].includes(state.rendererAccessibility)) delete state.rendererAccessibility;
     for (const key of Object.keys(UPDATE_SETTINGS)) {

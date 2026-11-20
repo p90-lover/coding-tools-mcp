@@ -131,6 +131,17 @@ function result(value: Record<string, unknown>, isError = false) {
   };
 }
 
+/** The desktop control server's own reason for refusing a request (`{ error }`), or null. */
+async function refusalReason(response: Response): Promise<string | null> {
+  try {
+    const body = await response.json() as { error?: unknown };
+    const text = typeof body?.error === "string" ? body.error.replace(/\s+/g, " ").trim() : "";
+    return text ? text.slice(0, 300) : null;
+  } catch {
+    return null;
+  }
+}
+
 function afterSafeStart(contract: ChatGptMcpContract, description: string): string {
   return contract === "safe"
     ? `For a Zero Risk request connected by codex_turn_start. ${description}`
@@ -692,7 +703,18 @@ export async function runChatGptMcpServer(options: {
           body: JSON.stringify({ workspace_id, request_id, tool, arguments: tool === "codex_agent_control" || tool === "codex_command_exec" ? { ...toolArguments, request_id } : toolArguments }),
           signal: extra.signal,
         });
-        if (!response.ok) throw new Error(`Native Codex control returned HTTP ${response.status}`);
+        if (!response.ok) {
+          // The desktop app refuses with its reason, such as "Start this workspace's authenticated MCP
+          // listener first". Seen 2026-11-20: replacing it with the generic answer below left ChatGPT
+          // telling the person to "check the listener and native Codex connection" while every
+          // workspace's listener was simply stopped. The refused request_id keeps its failed receipt,
+          // so a retry after the fix needs a new one.
+          const reason = response.status >= 400 && response.status < 500 ? await refusalReason(response) : null;
+          if (reason) {
+            return result({ code: "native_codex_refused", message: `Coding Tools refused the native Codex request: ${reason}. Ask the person to fix that in the Coding Tools desktop app, then retry with a new request_id.` }, true);
+          }
+          throw new Error(`Native Codex control returned HTTP ${response.status}`);
+        }
         const payload = await response.json() as Record<string, unknown>;
         const operation = payload?.operation as Record<string, unknown> | undefined;
         if (payload?.ok !== true || !operation || typeof operation !== "object") {
