@@ -84,18 +84,25 @@ function usableExecutable(candidate, platform = process.platform) {
   }
 }
 
-function captureRegularFile(filePath, { followSymlink = false } = {}) {
+// Asynchronous: setup runs on Electron main, and on the busy hard disk this readFileSync of config.json
+// alone held every window for 255 ms (launcher.main_blocked, 2026-11-19).
+async function captureRegularFile(filePath, { followSymlink = false } = {}) {
   let stat;
   try {
-    stat = fs.lstatSync(filePath);
+    stat = await fs.promises.lstat(filePath);
   } catch (error) {
     if (error?.code === "ENOENT") return { path: filePath, exists: false };
     throw error;
   }
   let symlink;
   if (followSymlink && stat.isSymbolicLink()) {
-    symlink = { link: fs.readlinkSync(filePath), target: fs.realpathSync(filePath) };
-    stat = fs.lstatSync(symlink.target);
+    // The callback fs.realpath, not fs.promises.realpath: checkpointWritePath compares this target with
+    // fs.realpathSync, and the promise version resolves like fs.realpath.native. On Windows that expands
+    // 8.3 short names (C:\Users\RUNNER~1\...), so an unchanged link read as "symlink changed" and setup's
+    // rollback refused to restore it (runtime-host test, CI 2026-11-19).
+    const target = await new Promise((resolve, reject) => fs.realpath(filePath, (error, resolved) => (error ? reject(error) : resolve(resolved))));
+    symlink = { link: await fs.promises.readlink(filePath), target };
+    stat = await fs.promises.lstat(symlink.target);
   }
   if (!stat.isFile()) {
     throw new Error(`Setup checkpoint path is not a regular file: ${filePath}`);
@@ -106,7 +113,7 @@ function captureRegularFile(filePath, { followSymlink = false } = {}) {
   return {
     path: filePath,
     exists: true,
-    data: fs.readFileSync(symlink?.target ?? filePath),
+    data: await fs.promises.readFile(symlink?.target ?? filePath),
     mode: stat.mode & 0o777,
     ...(symlink ? { symlink } : {}),
   };
@@ -668,7 +675,8 @@ class RuntimeHost {
       ? tunnel : null;
   }
 
-  captureSetupCheckpoint(snapshot) {
+  /** The files setup may change, read without blocking the main process (captureRegularFile). */
+  async captureSetupCheckpoint(snapshot) {
     if (typeof this.supervisor.configPath !== "string" || !path.isAbsolute(this.supervisor.configPath)) {
       throw new Error("Launcher runtime supervisor has no absolute configuration path for setup rollback");
     }
@@ -709,9 +717,14 @@ class RuntimeHost {
         paths.add(path.join(tunnel.profileDir, `${tunnel.profileName}.yaml`));
       }
     }
-    return [...paths].map(filePath => captureRegularFile(filePath, {
-      followSymlink: filePath === path.join(this.codexHome, "config.toml"),
-    }));
+    // One file at a time: parallel reads only make the hard disk seek between them.
+    const checkpoint = [];
+    for (const filePath of paths) {
+      checkpoint.push(await captureRegularFile(filePath, {
+        followSymlink: filePath === path.join(this.codexHome, "config.toml"),
+      }));
+    }
+    return checkpoint;
   }
 
   setupCheckpointChanged(checkpoint) {
@@ -1628,10 +1641,17 @@ class RuntimeHost {
   async runSetup(name, args, options) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const previousRuntime = this.runtimeConfigSnapshot();
-    const checkpoint = this.captureSetupCheckpoint(previousRuntime);
+    // Held before the checkpoint's reads: nothing else starts while they wait on the disk.
     this.lifecycleOperation = name;
+    let checkpoint;
     let setupCommandStarted = false;
     let runtimeTransitionStarted = false;
+    try {
+      checkpoint = await this.captureSetupCheckpoint(previousRuntime);
+    } catch (error) {
+      this.lifecycleOperation = null;
+      throw error;
+    }
     try {
       if (this.launcherProfile === "production") {
         await this.run(name, [...args, "--preflight-only"], {

@@ -12,11 +12,17 @@
 // way, 10 times a second, on the same clock, so every mark on screen stays in phase and they cost at most
 // one frame per step together.
 //
+// The pet's napping z's and chimney smoke loop the same way, for as long as it sleeps at home, which is its
+// usual idle state. Left free they held a 63k-element window at the screen's refresh (93 frames a second)
+// and every frame repainted the page: 2026-11-19, the renderer sent the GPU process 1,345 MB a minute at 95%
+// of a core with the z's running, 438 MB at 80% with them paused, the GPU process 46% against 30%.
+//
 // Animations are collected from the element that fires animationstart. Asking the document for its
 // animations on every step forced a style recalculation of the whole page each time: 13% of a core in a
 // 24k-element chat, even with the window covered and painting about once a second (2026-11-01).
 const SHIMMERS = new Set(["cx-shimmer", "dsh-shimmer"]);
-const LOOPS = new Set(["cx-pulse", "cx-spin", "cdx-spin", "cx-rplan-spin", "cx-scroll-dot-wave", "cx-receipt-sending", "ao-spin"]);
+const LOOPS = new Set(["cx-pulse", "cx-spin", "cdx-spin", "cx-rplan-spin", "cx-scroll-dot-wave", "cx-receipt-sending", "ao-spin",
+  "cx-pet-z", "cx-pet-smoke"]);
 const SHIMMER_STEP_MS = 1000 / 30;
 const LOOP_STEP_MS = 100;
 

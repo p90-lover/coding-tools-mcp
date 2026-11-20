@@ -35,7 +35,10 @@ function fixture() {
     ...options, IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false,
     automaticMcpAttempt: null, mcpVerificationInFlight: null, catalogVerificationTimer: null,
     // The signed-in accounts' MCP sync (#1089): a new round makes it look again.
-    accountSyncs: [], automaticAccountMcp: { invalidate() { context.accountSyncs.push("invalidate"); }, async sync() { context.accountSyncs.push("sync"); } },
+    accountSyncs: [], automaticAccountMcp: {
+      invalidate(options) { context.accountSyncs.push(options?.tunnelStarted ? "invalidate started" : "invalidate adopted"); },
+      async sync() { context.accountSyncs.push("sync"); },
+    },
     send() {}, publishOperation: op => calls.push(op.status), mainWindow: null,
     runtimeSupervisor: { readConfig: () => ({ mode: "full", releaseVersion: "5.0.6" }), readState: () => ({ daemonPid: 123 }) },
     runtimeHost: { currentOperation: () => null, mcpCredentialsConfigured: () => true,
@@ -155,7 +158,7 @@ test("a tunnel restart or sign-in starts a new round that checks the connector a
   assert.equal(f.calls.filter(x => x === "connector").length, 1);
   f.restart("tunnel-started");
   assert.deepEqual(f.monitors, ["monitor"], "the stopped monitor starts again");
-  assert.deepEqual(f.context.accountSyncs, ["invalidate", "sync"], "and the signed-in accounts' MCP is checked again");
+  assert.deepEqual(f.context.accountSyncs, ["invalidate started", "sync"], "and the signed-in accounts' MCP is checked again");
   assert.equal(await f.run(), false);
   assert.equal(f.calls.filter(x => x === "connector").length, 2, "checked again, which reloads ChatGPT's connector list");
   f.context.catalogVerificationTimer = {};
@@ -165,6 +168,14 @@ test("a tunnel restart or sign-in starts a new round that checks the connector a
   f.context.catalogVerificationTimer = null;
   f.restart("tunnel-started");
   assert.deepEqual(f.monitors, ["monitor"], "nothing starts with the setting off");
+});
+
+test("a runtime restart that adopts the running tunnel tells the accounts' sync so", () => {
+  // Every runtime restart (an account switch's setup) adopts the tunnel; the accounts' failures keep
+  // their waits (browser-account-mcp.test.cjs, "a runtime restart that adopts the same tunnel…").
+  const f = fixture();
+  f.restart("tunnel-adopted");
+  assert.deepEqual(f.context.accountSyncs, ["invalidate adopted", "sync"]);
 });
 
 test("a new round that begins during a check runs a fresh check next", async () => {
