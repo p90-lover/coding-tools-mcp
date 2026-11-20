@@ -3744,6 +3744,10 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
     { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
     { id: "cline-pass/deepseek-v4.1-flash", context_window: 272000, max_context_window: 272000 },
     { id: "cline-pass/brand-new-model", context_window: 272000, max_context_window: 272000 },
+    // A Vertex AI key's Gemini 4 rows carry CPA's stock window; Codex's GPT model really has 272K.
+    { id: "gemini-4-carbon", owned_by: "google", context_window: 272000, max_context_window: 272000 },
+    { id: "gemini-4-hydrogen", owned_by: "google", context_window: 272000, max_context_window: 272000 },
+    { id: "gpt-6.1-sol", owned_by: "openai", context_window: 272000, max_context_window: 272000 },
   ] };
   async function launch(model, contextWindow) {
     let launched;
@@ -3777,6 +3781,15 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   assert.equal(known.contextWindow.max, 1000000, "the card can't be set past it");
   assert.equal(deepseek.launched.contextWindow, 1000000, "a blank card starts at its full known window");
   assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
+  // 2026-11-20: a Gemini 4 Carbon chat (Vertex key) was capped at CPA's stock 272K, and its window
+  // field refused 1m. CPA's own catalog gives every Gemini 4 model 1,048,576.
+  const carbon = await launch("gemini-4-carbon");
+  const gemini = carbon.models.capabilities["cpa/gemini-4-carbon"];
+  assert.equal(gemini.contextLimit, 1048576, "the known Gemini 4 window replaces the stock one, with no provider prefix");
+  assert.equal(gemini.contextWindow.max, 1048576, "so 1m can be set");
+  assert.equal(carbon.launched.contextWindow, 1048576, "and a blank card starts at it");
+  assert.equal(carbon.models.capabilities["cpa/gemini-4-hydrogen"].contextLimit, 1048576);
+  assert.equal(carbon.models.capabilities["cpa/gpt-6.1-sol"].contextLimit, 272000, "a 272K a model of CPA's own providers reports is kept");
 });
 
 // The user (2026-11-11), looking at a window menu that topped out at 872k: "it should up 1m context
