@@ -53,6 +53,7 @@ const PLUGIN_SOURCES = Object.freeze({
 const TOOL_SOURCES = Object.freeze({
   "antigravity-cli": { name: "Antigravity CLI", repository: "google-antigravity/antigravity-cli", latest: true },
   rtk: { name: "RTK", repository: "rtk-ai/rtk", latest: true },
+  "codex-cli": { name: "Codex CLI", repository: "openai/codex" },
 });
 
 /** Agent Orchestrator's fork: the branch the app's pinned AO commit is built from. */
@@ -133,6 +134,7 @@ function createAppPlugins({
   // The Antigravity CLI service, made with the backend (null until it starts), and RTK's.
   antigravityCli = () => null,
   rtk = null,
+  codexCli = null,
   // The folder holding AO's daemon and its build manifest.json (null before the backend starts).
   agentOrchestratorRoot = () => null,
   // The browser engine is built into the app: its row reads the app's updater ({ getState }) and
@@ -173,6 +175,7 @@ function createAppPlugins({
 
   /** An item the app can install updates for, so auto-update means something: not one that ships in an app update. */
   const autoUpdatable = (item) => item.id === "cpa" || item.id === "antigravity-cli" || item.id === "rtk"
+    || (item.id === "codex-cli" && item.supported === true)
     || (item.kind === "cpa-plugin" && Boolean(PLUGIN_SOURCES[item.id.slice("cpa-plugin:".length)]) && !PLUGIN_SOURCES[item.id.slice("cpa-plugin:".length)].rebuilt);
 
   // One lookup however many checks ask at once: the list checks every item together.
@@ -508,11 +511,37 @@ function createAppPlugins({
       note: newer && !winget ? "Installed without winget: update it the way you installed it." : null };
   }
 
+  async function codexRelease(force) {
+    const key = "npm:@openai/codex";
+    const cached = releases.get(key);
+    if (!force && cached && now() - cached.at < CHECK_TTL_MS) return cached;
+    let entry;
+    try { entry = { ...(await codexCli.latest()), at: now() }; } catch (error) {
+      entry = { at: now(), error: error instanceof Error ? error.message : String(error) };
+    }
+    releases.set(key, entry);
+    return entry;
+  }
+
+  async function codexItem(force) {
+    const current = await codexCli.status();
+    const base = { ...toolBase("codex-cli"), installed: current.version, supported: current.supported,
+      updating: updating.has("codex-cli") || current.installing };
+    if (!current.supported) return { ...base, note: "Managed updates are available on Windows x64 and arm64." };
+    const release = await codexRelease(force);
+    if (release.error) return { ...base, error: release.error };
+    const newer = !current.version || compare(release.version, current.version) > 0;
+    return { ...base, latest: release.version, releaseUrl: release.url, updateAvailable: newer, canUpdate: newer && release.supported,
+      note: newer && !release.supported ? "The stable release has no package for this Windows build."
+        : current.managed ? "New native sessions use this copy. Agent Orchestrator picks it up when its daemon next starts."
+          : "Updates install a separate copy for Coding Tools and leave the existing Codex install alone." };
+  }
+
   // Every item is checked at once: one after another, a cold check waited on each GitHub call in turn.
   async function list({ refresh = false } = {}) {
     const plugins = await installedPlugins();
     const [items, { autoUpdate }] = await Promise.all([Promise.all([cpaItem(refresh), agentOrchestratorItem(refresh), browserEngineItem(refresh), antigravityItem(refresh), rtkItem(refresh),
-      ...plugins.map((plugin) => pluginItem(plugin, refresh))]), readSettings()]);
+      ...(codexCli ? [codexItem(refresh)] : []), ...plugins.map((plugin) => pluginItem(plugin, refresh))]), readSettings()]);
     for (const item of items) {
       item.autoUpdatable = autoUpdatable(item);
       item.autoUpdate = item.autoUpdatable && autoUpdate[item.id] === true;
@@ -544,6 +573,17 @@ function createAppPlugins({
       throw new Error(`winget didn't update rtk ${before.version} (exit ${code})${output ? `: ${output.split(/\r?\n/u).filter(Boolean).pop()}` : ""}`);
     }
     logger.info?.("app-plugins.updated", { plugin: "rtk", from: before.version, to: after });
+  }
+
+  async function updateCodex() {
+    if (!codexCli) throw new Error("Codex CLI updates are unavailable here");
+    const release = await codexRelease(true);
+    if (release.error) throw new Error(release.error);
+    if (!release.supported) throw new Error("The stable Codex CLI release has no package for this build");
+    const before = await codexCli.status();
+    const after = await codexCli.install(release);
+    if (!after.version || compare(after.version, release.version) < 0) throw new Error("The Codex CLI did not update");
+    if (before.version !== after.version) logger.info?.("app-plugins.updated", { plugin: "codex-cli", from: before.version, to: after.version });
   }
 
   /** Streams one release asset to `target`, following GitHub's redirect without the token. */
@@ -626,6 +666,8 @@ function createAppPlugins({
         await updateAntigravity();
       } else if (key === "rtk") {
         await updateRtk();
+      } else if (key === "codex-cli") {
+        await updateCodex();
       } else if (key.startsWith("cpa-plugin:")) {
         await updatePlugin(key.slice("cpa-plugin:".length), restart);
       } else {

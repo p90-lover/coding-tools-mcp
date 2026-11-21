@@ -86,6 +86,7 @@ const { consumeRelaunchNote, spawnRelaunchGuard } = require("./relaunch-guard.cj
 const { createUpdateHealthGate, waitForIdleChats } = require("./update-health-gate.cjs");
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { createAppPlugins } = require("./app-plugins.cjs");
+const { createCodexCli } = require("./codex-cli.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
@@ -4924,7 +4925,10 @@ async function start() {
     },
     logger,
   });
+  const codexCli = createCodexCli({ toolsRoot: path.join(app.getPath("userData"), "tools"), fetchImpl: fetchRemoteOffMain });
+  await codexCli.load();
   appPluginsService = createAppPlugins({
+    codexCli,
     cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
     services: () => externalServicesController,
     fetchImpl: fetchRemoteOffMain,
@@ -5088,7 +5092,7 @@ async function start() {
     const { createAntigravityAuthBrowser } = backendBundles.requireModule(backend, "antigravity-auth-browser.cjs");
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
     const { createChangePulse, createRunChangeFilter } = backendBundles.requireModule(backend, "ao-session-events.cjs");
-    const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
+    const { createAgentOrchestratorWorkflow, resolveAoNativeConnection, aoWebCatalogForModel, findInstalledCodexExecutable } = backendBundles.requireModule(backend, "agent-orchestrator-workflow.cjs");
     const { HeadlessHost } = backendBundles.requireModule(backend, "headless-host.cjs");
     const aoDataRoot = process.env.CODING_TOOLS_AO_DATA_DIR
       ? path.resolve(process.env.CODING_TOOLS_AO_DATA_DIR)
@@ -5427,7 +5431,8 @@ async function start() {
         try { env = shimProxyEnvironment(await antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
         // Isolated empty/default auth home for managed agy only (the shim applies it to
         // USERPROFILE/HOME). Never set USERPROFILE or HOME on the daemon itself.
-        env = { ...env, CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli.authHome() };
+        env = { ...env, CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli.authHome(),
+          CODING_TOOLS_MANAGED_CODEX_EXE: codexCli.executable() || "" };
         // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
         // session's own settings, on each Codex app-server's command line and in each OpenCode
         // chat's inline config (empty: off). ready() above wrote the plugin's file.
@@ -5484,6 +5489,7 @@ async function start() {
     }).catch((error) => logger.warn("ao.surviving_chats_failed", { detail: String(error?.message ?? error).slice(0, 300) }));
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => codexCli.executable() || findInstalledCodexExecutable?.() || null,
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
       // Files the person attached (saved by launcher:save-attachment): reading one needs no review.
