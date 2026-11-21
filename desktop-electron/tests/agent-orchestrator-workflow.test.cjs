@@ -14629,6 +14629,55 @@ test("a rewind in a busy project reads the chat's own runs, not only the project
 });
 
 
+test("a resend of the latest unsent message preserves all older replies and does not duplicate the saved message", async () => {
+  const description = "first ask\n\nFollow-up (2026-11-21 05:06 UTC):\nsecond ask"
+    + "\n\nFollow-up (2026-11-21 06:20 UTC):\nthird ask\n\nFollow-up (2026-11-21 06:31 UTC):\ngo and test in live";
+  const done = (id, stamp) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { started_at_ms: Date.parse(stamp), answer: id } }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Search", description }], runs: [
+    done("r1", "2026-11-21T04:33:45Z"), done("r2", "2026-11-21T05:06:23Z"), done("r3", "2026-11-21T06:20:48Z"),
+  ] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    findCodexExecutable: () => process.execPath, resolveHarness: async () => { throw new Error("offline fixture"); } });
+  try {
+    const sent = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go and test in live",
+      rewind: { index: 3, description }, deferStart: true });
+    assert.ok(sent.runId);
+    assert.equal(world.tasks[0].description, description, "the saved user message is reused, not appended again");
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3"],
+      "every earlier reply stays visible");
+    assert.equal(world.updates.filter(change => change.operation === "create_from_team").length, 1);
+  } finally { workflow.dispose(); }
+});
+
+test("a resend still rejects ambiguous history gaps without hiding replies or editing messages", async (t) => {
+  const description = "first ask\n\nFollow-up (2026-11-21 06:20 UTC):\nsecond ask\n\nFollow-up (2026-11-21 06:31 UTC):\nthird ask";
+  for (const scenario of ["same-minute", "missing-start", "older-message", "multiple-gaps", "task-read-failure"]) {
+    await t.test(scenario, async () => {
+      const done = (id, started) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false,
+        nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { started_at_ms: started } }] });
+      const runs = [done("r1", Date.parse("2026-11-21T06:00:00Z")),
+        done("r2", scenario === "missing-start" ? undefined : Date.parse(scenario === "same-minute" ? "2026-11-21T06:31:10Z" : "2026-11-21T06:20:10Z"))];
+      if (scenario === "multiple-gaps") runs.pop();
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "Search", description }], runs });
+      const requestHeadless = async (endpoint, body) => {
+        if (scenario === "task-read-failure" && endpoint === "/api/v1/ao/read" && body.task_id) throw new Error("chat read unavailable");
+        return world.requestHeadless(endpoint, body);
+      };
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => process.execPath });
+      const older = scenario === "older-message";
+      try {
+        await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: older ? "second ask" : "third ask",
+          rewind: { index: older ? 1 : 2, description }, deferStart: true }), /still synchronizing/);
+        assert.equal(world.tasks[0].description, description);
+        assert.equal(world.edits.length, 0);
+        assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), runs.map(run => run.id));
+        assert.equal(world.updates.filter(change => change.operation === "create_from_team").length, 0);
+      } finally { workflow.dispose(); }
+    });
+  }
+});
+
 // 2026-11-06 to 11-11: one project past 100 tasks refused every new chat, "Couldn't find the new
 // chat's task. Refresh the board.", and each try left an empty task behind: the send looked for its
 // task in board reads that held the project's oldest 100.

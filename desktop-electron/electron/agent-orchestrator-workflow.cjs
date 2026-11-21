@@ -2556,6 +2556,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return {
       ...project,
       runs: [...project.runs.filter(run => run.project_id !== task), ...own.runs.filter(run => run.project_id === task)],
+      sendTaskRuns: task,
       ...(lifecycle.length ? { task_lifecycle: [...(project.task_lifecycle ?? []).filter(item => item?.task_id !== task), ...lifecycle] } : {}),
     };
   }
@@ -7338,11 +7339,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           // reply goes. A compacted chat keeps every run but one summary in place of its earlier
           // messages: its oldest runs answer messages it no longer has, and they stay. Counted equal,
           // every compacted chat (22 of 160 on 2026-11-11, goal chats above all) refused each rewind,
-          // "still synchronizing", however often it was reloaded. Fewer runs than messages stays
-          // refused: the chat shows that by the minute, and a rewind must not guess.
+          // "still synchronizing", however often it was reloaded. Missing runs remain ambiguous
+          // unless only the last message lacks a run and every existing run predates its minute.
           const summarized = roots.length - bodies.length;
-          if (summarized < 0) throw new Error("This chat's messages are still synchronizing; reload before rewind");
-          const hidden = new Set(roots.slice(summarized + rewind.index).map(run => run.id));
+          const selectedAt = rewind.index > 0 ? Date.parse(`${marks[rewind.index - 1][1].replace(" ", "T")}:00Z`) : NaN;
+          const unsentLast = saved.sendTaskRuns === task && summarized === -1 && rewind.index === bodies.length - 1
+            && roots.every(run => {
+              const starts = (run.nodes ?? []).map(node => node.receipt?.started_at_ms).filter(value => Number.isFinite(value) && value > 0);
+              return starts.length > 0 && Number.isFinite(selectedAt) && Math.min(...starts) < selectedAt;
+            });
+          if (summarized < 0 && !unsentLast) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+          const hidden = new Set((unsentLast ? [] : roots.slice(summarized + rewind.index)).map(run => run.id));
           for (let size = -1; size !== hidden.size;) {
             size = hidden.size;
             for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
