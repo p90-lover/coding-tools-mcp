@@ -178,7 +178,7 @@ const EMPTY_AUTH_ACCOUNT = "empty";
 
 function isolatedAuthAccountId(accountId) {
   const id = String(accountId || "").trim();
-  return AUTH_ACCOUNT_ID.test(id) ? id : EMPTY_AUTH_ACCOUNT;
+  return AUTH_ACCOUNT_ID.test(id) && !id.endsWith(".") ? id : EMPTY_AUTH_ACCOUNT;
 }
 
 /** Per-account auth home under the managed tools root. "empty" is a fresh profile. */
@@ -499,7 +499,43 @@ function createAntigravityCli({
     return ensureIsolatedAuthHome(isolatedAuthHome(toolsRoot, accountId));
   }
 
-  return Object.freeze({ status, statusAsync, install, update, executable, binDir: binDirAsync, authHome, manifest });
+  async function terminalLaunch(proxyEnvironment, accountId) {
+    if (!proxyEnvironment.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
+    const home = await authHome(accountId);
+    if (platform !== "win32") {
+      return { executable: executable(), env: manualAuthEnvironment(proxyEnvironment, process.env, { home, platform }) };
+    }
+    const current = await installedAsync(await versionDirsAsync());
+    if (!current) throw new Error("Install the Antigravity CLI first");
+    const launcher = path.join(binDir, `agy-terminal-${crypto.createHash("sha256").update(home).digest("hex").slice(0, 24)}.cmd`);
+    const batchValue = (value) => {
+      if (/["\r\n\x00]/.test(value)) throw new Error("The Antigravity CLI path cannot be used in a Windows terminal");
+      return value.replace(/%/g, "%%");
+    };
+    // The AO terminal endpoint only admits proxy and SSH overrides. The profile is local to agy.
+    const script = [
+      "@echo off",
+      "setlocal DisableDelayedExpansion",
+      'if not defined HTTPS_PROXY (echo Antigravity CLI requires the Coding Tools proxy. 1>&2 & exit /b 1)',
+      ...Object.entries(windowsHomeVars(home)).map(([key, value]) => `set "${key}=${batchValue(value)}"`),
+      'set "AGY_ACP_FORCE_FILE_STORAGE=1"',
+      `"${batchValue(current.executable)}"`,
+      "",
+    ].join("\r\n");
+    if (await fs.promises.readFile(launcher, "utf8").catch(() => null) !== script) {
+      await fs.promises.mkdir(binDir, { recursive: true, mode: 0o700 });
+      const temp = `${launcher}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.promises.writeFile(temp, script, { mode: 0o700, flag: "wx" });
+        await fs.promises.rename(temp, launcher);
+      } finally {
+        await fs.promises.rm(temp, { force: true }).catch(() => {});
+      }
+    }
+    return { executable: launcher, env: manualAuthEnvironment(proxyEnvironment) };
+  }
+
+  return Object.freeze({ status, statusAsync, install, update, executable, binDir: binDirAsync, authHome, terminalLaunch, manifest });
 }
 
 module.exports = { createAntigravityCli, loadManifest, releaseManifest, compareVersion, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment, isolatedAuthAccountId, isolatedAuthHome, ensureIsolatedAuthHome, isolatedAuthEnvironment, windowsHomeVars, EMPTY_AUTH_ACCOUNT };
