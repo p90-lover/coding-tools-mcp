@@ -75,13 +75,13 @@ test("Settings › Chat holds Claude Code's auto-compact and the chat's own swit
   assert.match(read("electron/main.cjs"), /\["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"\]\.includes\(input\.operation\) && input\.arguments\?\.enabled === undefined && input\.arguments\?\.percent === undefined && input\.arguments\?\.seconds === undefined/);
 });
 
-test("Settings › Chat: quota-based reviews need consent, and Approve for me or Let the model judge is consent", () => {
+test("Settings › Chat: CPA approval reviews require explicit consent separate from the chat mode", () => {
   const page = read("src/features/ChatSettingsPage.tsx");
   assert.match(page, /<Toggle label="Allow quota-based reviews" checked=\{chat\?\.meteredReviews === true\}/);
   assert.match(page, /setChatPreference\("chat_model_judges", \{ meteredReviews: next \}\)/);
-  assert.match(page, /Reviews through CPA use account quota/);
-  assert.match(page, /Approve for me and Let the model judge are your choice of a review, so they run either way/);
-  assert.doesNotMatch(page, /also require Allow quota-based reviews/, "the judge no longer waits on the quota switch");
+  assert.match(page, /Off by default\. Turn on to let CPA review approvals using account quota/);
+  assert.match(page, /Approve for me and Let the model judge do not turn CPA reviews on/);
+  assert.match(page, /eligible shell requests can use native Codex Guardian; anything it cannot review waits for you/);
   assert.match(read("electron/main.cjs"), /input\.arguments\?\.meteredReviews === undefined/);
 });
 
