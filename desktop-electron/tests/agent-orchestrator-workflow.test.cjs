@@ -11752,6 +11752,8 @@ for (const [label, refusal, reason] of [
   // Sent inside the reply stream, with no status (2026-11-11: attempts 1-8 failed the same way).
   ["no status", "API Error: Complexity 'xhigh' is not supported for this image model.",
     /^The provider refused this request \(Complexity 'xhigh' is not supported for this image model\.\)\. Change that, or choose another model, since retrying won't fix it\.$/],
+  ["ACP authentication required", 'chat driver requires authentication: ACP session/prompt: {"code":-32000,"message":"Authentication required"}',
+    /^This failure needs you\. Check the account pool or provider sign-in, then retry manually\.$/],
 ])
 test(`"Retry automatically" leaves a request the provider refused (${label}) for the person, with the provider's reason`, async () => {
   // OpenCode Go's region refusal was retried eight times a round (2026-10-29); each try got the same 400.
@@ -11782,7 +11784,7 @@ test(`"Retry automatically" leaves a request the provider refused (${label}) for
     await new Promise(resolve => setTimeout(resolve, 100));
     mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: refusal } };
     let detail = "";
-    for (let tries = 0; tries < 100 && !/provider refused/.test(detail); tries++) {
+    for (let tries = 0; tries < 100 && !reason.test(detail) && !/Retrying automatically in/.test(detail); tries++) {
       await new Promise(resolve => setTimeout(resolve, 20));
       detail = String((await status()).detail ?? "");
     }

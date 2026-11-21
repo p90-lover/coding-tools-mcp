@@ -5568,7 +5568,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // A failure a retry cannot fix: a sign-in, the account pool, or the model's quota used up.
-  const POOL_EXHAUSTED = new RegExp(`auth_unavailable|invalid[_ -]?auth|account[^\\n]*(?:exhaust|unavail)|pool[^\\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|${QUOTA_EXHAUSTED.source}`, "i");
+  const POOL_EXHAUSTED = new RegExp(`auth_unavailable|invalid[_ -]?auth|\\b(?:chat driver requires authentication|authentication required)\\b|account[^\\n]*(?:exhaust|unavail)|pool[^\\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|${QUOTA_EXHAUSTED.source}`, "i");
   // CPA answers "unknown provider for model X" when nothing serves X at all: a model it retired
   // (gpt-5.5, 2026-10-22), not one cooling down (that one is still routed, and gets a 429). Kept from
   // memory for 30 days, it stayed in the menu and each try spent a full launch (65 s) to fail again;
@@ -5642,7 +5642,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (retryCancelled(mission.workspace_id, mission.id)) return { detail: AUTO_RETRY_CANCELLED };
     const error = String(node.receipt?.error || "");
     if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
-    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or sign in again, since retrying won't fix it." };
+    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or provider sign-in, then retry manually." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
     if (REQUEST_REFUSED.test(error)) return { detail: `The provider refused this request (${refusedReason(error)}). Change that, or choose another model, since retrying won't fix it.` };
     if (ROUTE_REFUSED.test(error)) return { detail: "This chat can't start on its agent as it is set up. Change the model or permissions and send a follow-up, since retrying won't fix it." };
