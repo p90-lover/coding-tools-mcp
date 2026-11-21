@@ -5167,11 +5167,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * Whether a request is screened (again): one never screened, or one the reviewer left to the
    * person before "Let the model judge" was on. Turning the judge on from that request's own card
    * did nothing: its "ask" was kept, so no pass looked at it again and the turn waited for an hour
-   * (seen live 2026-11-04, a `git -C … push`). A request already judged, or whose answer could
-   * not be sent, is not judged again; that answer is sent again instead when it is due (resendDue).
+   * (seen live 2026-11-04, a `git -C … push`). A quota-blocked ask can arrive after consent was
+   * granted if Guardian was already in flight. Such an ask is not a verdict. A decided answer
+   * is never replaced; if delivery failed, it is sent again only when due (resendDue).
    */
   const rescreen = (advice) => !advice || resendDue(advice)
-    || (advice.action === "ask" && !advice.judged && !advice.resolved && !advice.unsent && chatPreferences.get().modelJudges);
+    || (advice.action === "ask" && !advice.resolved && !advice.unsent
+      && (advice.quotaBlocked ? chatPreferences.get().meteredReviews : !advice.judged && chatPreferences.get().modelJudges));
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
     const jobs = [];
