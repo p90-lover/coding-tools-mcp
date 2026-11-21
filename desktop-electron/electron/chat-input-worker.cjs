@@ -57,17 +57,21 @@ function runInputWorker() {
       if (used + delta > maxStoredBytes) throw fail("INPUT_STORAGE_FULL", "Saved input storage is full; pending input was not removed");
       run("UPDATE usage SET bytes=bytes+? WHERE id=1", delta);
     };
+    function ownedAttachment(item, force) {
+      const known = one("SELECT bytes FROM blobs WHERE hash=?", item.blobId);
+      if (!known) throw fail("ATTACHMENT_MISSING", "Saved attachment reference is unavailable");
+      try { return blobs.verify(item.blobId, known.bytes, { force, name: item.name }); }
+      catch (error) {
+        if (error.code === "ENOENT") throw fail("ATTACHMENT_MISSING", "The saved attachment is missing; this input was not sent");
+        throw error;
+      }
+    }
     function preserve(value, verifyContent = false) {
       const draft = draftPayload(value);
       if (!draft) return null;
       draft.attachments = draft.attachments.map(item => {
         if (!item.path) return item;
-        let saved;
-        if (item.blobId) {
-          const known = one("SELECT bytes FROM blobs WHERE hash=?", item.blobId);
-          if (!known) throw fail("ATTACHMENT_MISSING", "Saved attachment reference is unavailable");
-          saved = blobs.verify(item.blobId, known.bytes, { force: verifyContent, name: item.name });
-        } else saved = blobs.put({ sourcePath: item.path, name: item.name });
+        const saved = item.blobId ? ownedAttachment(item, verifyContent) : blobs.put({ sourcePath: item.path, name: item.name });
         run("INSERT OR IGNORE INTO blobs(hash,bytes,type) VALUES(?,?,?)", saved.blobId, saved.size, saved.type ?? "application/octet-stream");
         return { ...item, path: saved.path, blobId: saved.blobId };
       });
@@ -197,6 +201,13 @@ function runInputWorker() {
         return transaction(() => {
           const current = input(args.workspaceId, args.inputId);
           if (current.state !== "queued") return { ...viewInput(current), claimed: false };
+          const checked = new Set();
+          for (const file of JSON.parse(current.payload).attachments) {
+            if (!file.path) continue;
+            const snapshot = ownedAttachment(file, !checked.has(file.blobId));
+            if (snapshot.path !== file.path) throw fail("ATTACHMENT_CORRUPT", "The saved attachment path changed; this input was not sent");
+            checked.add(file.blobId);
+          }
           run("UPDATE inputs SET state='dispatching',updated_at=? WHERE id=?", Date.now(), current.id);
           return { ...viewInput(input(args.workspaceId, args.inputId)), claimed: true };
         });

@@ -83,7 +83,10 @@ function createChatInputService({ file, attachmentsRoot, legacyDraftsFile = null
       }
     } else if (!steer && reconcile) {
       const found = await reconcile({ workspaceId, inputId });
-      if (found?.input_id === inputId && found.run?.workspace_id === workspaceId && found.run_id === found.run.id && found.task_id === found.run.project_id) {
+      if (found?.ok === true && found.found === true && found.input_id === inputId && found.run?.workspace_id === workspaceId
+        && typeof found.run_id === "string" && found.run_id && found.run_id === found.run.id
+        && typeof found.task_id === "string" && found.task_id && found.task_id === found.run.project_id
+        && (!saved.destination.taskId || found.task_id === saved.destination.taskId)) {
         receipt = { inputId, stage: "host-run", result: { ok: true, taskId: found.task_id, runId: found.run_id, run: found.run, status: "recovered" } };
       }
     }

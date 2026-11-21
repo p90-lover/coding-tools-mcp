@@ -2075,7 +2075,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
-        // A session that is gone, or refuses the message, falls back to a fresh start.
+        const nativeContinuation = continued?.session.startsWith("native:");
+        // Only legacy AO may hand off a refusal to a fresh session.
         let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
         // An agent AO could not confirm was back within its wait failed the message ("Couldn't confirm
@@ -2092,6 +2093,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (outcome.error) unconfirmed = outcome.error;
         const usable = Boolean(continued) && !outcome.error && Boolean(outcome.usable);
         if (continued) checkMs = now() - checkStarted;
+        if (nativeContinuation && !usable) throw new Error("The original native session could not be continued. The message was not sent to a replacement agent.");
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
           // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
@@ -2122,6 +2124,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               return null;
             });
           sendMs = now() - sendStarted;
+          if (nativeContinuation && !(typeof sent?.turnId === "string" && sent.turnId)) {
+            const readback = await Promise.resolve().then(() => harnessService().recover?.(continued.session, null,
+              { workspaceId, requestId: reserved.request_key })).catch(() => null);
+            const receipt = readback?.sendReceipt;
+            if (receipt?.sessionId !== continued.session || receipt.workspaceId !== workspaceId || receipt.requestId !== reserved.request_key
+              || typeof receipt.turnId !== "string" || !receipt.turnId) {
+              throw Object.assign(new Error("Native delivery is unknown. The reserved turn was kept and was not sent again."), { code: "NATIVE_DELIVERY_UNKNOWN" });
+            }
+            sent = { turnId: receipt.turnId };
+          }
           if (sent?.turnId) givenInstructions(continued.session, standing.hash);
           // A send that ran out of time may still reach the agent: it is stopped (its session,
           // worktree and conversation stay) before the fresh agent starts, so the two never work on
@@ -2212,6 +2224,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const left = (launching.get(workspaceId) ?? 1) - 1;
         if (left > 0) launching.set(workspaceId, left); else launching.delete(workspaceId);
       }
+      if (failure?.code === "NATIVE_DELIVERY_UNKNOWN") throw failure;
       if (session) {
         sessionOwners.set(session, runKey(workspaceId, runId));
         if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
@@ -2463,6 +2476,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
+      if (externalAgent(node)?.startsWith("orchestrator-")) {
+        return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+      }
       // The launch was lost before AO returned a session; hold it rather than replay.
       const held = await requestHeadless("/api/v1/ao/external/submitted", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: node.receipt?.request_key || node.request_key,
@@ -7344,8 +7360,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             : { team_id: team.id, team_revision: team.revision, worker_limit: team.worker_limit || 3,
               ...(executionMode === "team" ? { execution_mode: "team" } : {}) }) },
       } }, { localConfirmation: true });
-      if (response?.ok !== true || response.input_id !== inputId || !response.task_id || response.run?.workspace_id !== id
-        || response.run_id !== response.run.id || response.task_id !== response.run.project_id) throw new Error("Chat input acceptance returned an invalid receipt; do not resend");
+      if (response?.ok !== true || response.input_id !== inputId || typeof response.task_id !== "string" || !response.task_id
+        || response.run?.workspace_id !== id || typeof response.run_id !== "string" || !response.run_id || response.run_id !== response.run.id
+        || response.task_id !== response.run.project_id || existingTask && response.task_id !== existingTask) {
+        throw new Error("Chat input acceptance returned an invalid receipt; do not resend");
+      }
       return response;
     };
     if (taskId) {
@@ -7493,6 +7512,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!task) throw new Error("Couldn't find the new chat's task. Refresh the board.");
     }
 
+    if (acceptedInput?.duplicate === true) return { ok: true, taskId: task, runId: acceptedInput.run_id, run: acceptedInput.run, status: "recovered" };
     let runId, createdRun;
     try {
       if (acceptedInput) { runId = acceptedInput.run_id; createdRun = acceptedInput.run; }

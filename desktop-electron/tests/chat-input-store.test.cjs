@@ -23,8 +23,9 @@ const payload = text => ({ text, attachments: [], annotations: [] });
 const save = (store, expectedRevision, text, mutationId = `save-${expectedRevision}`) => store.call("draftSave", { ...scope, expectedRevision, mutationId, draft: payload(text) });
 const accept = (store, inputId, text, extra = {}) => store.call("accept", { ...scope, inputId, mode: "send", payload: payload(text), destination: { engine: "native", taskId: "chat" }, ...extra });
 
-test("a committed revision and owned attachment survive reopen and deletion of the original", async t => {
-  const f = fixture(t), store = f.open();
+test("a committed revision and owned attachment survive abrupt worker exit and deletion of the original", async t => {
+  let worker;
+  const f = fixture(t), store = f.open({ createWorker(file, options) { worker = new Worker(file, options); return worker; } });
   const original = path.join(f.root, "original.txt");
   fs.writeFileSync(original, "preserve these exact bytes");
   const draft = { text: "inspect this", attachments: [{ name: "original.txt", path: original, markup: "important" }], annotations: [{ id: 99, quote: "exact", note: "keep", anchor: { answer: 1, start: 0, end: 5 } }] };
@@ -35,7 +36,7 @@ test("a committed revision and owned attachment survive reopen and deletion of t
   assert.match(saved.draft.attachments[0].blobId, /^[a-f0-9]{64}$/);
   assert.equal((await store.call("draftSave", { ...scope, expectedRevision: 0, mutationId: "first", draft })).duplicate, true);
   await assert.rejects(store.call("draftSave", { ...scope, expectedRevision: 0, mutationId: "first", draft: payload("different") }), { code: "INPUT_ID_CONFLICT" });
-  await store.close();
+  await worker.terminate();
   fs.unlinkSync(original);
   const restored = await f.open().call("draftGet", scope);
   assert.equal(restored.revision, 1);

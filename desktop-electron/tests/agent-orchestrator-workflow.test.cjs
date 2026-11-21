@@ -12388,6 +12388,54 @@ function workflowInternals(options) {
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
 
+test("native follow-up uses only its exact read-only reservation receipt after a lost reply", async () => {
+  const route = { harness_id: "ao:orchestrator-fixture", model: "fixture" };
+  const scope = { sessionId: "native:existing", workspaceId: "ws", requestId: "follow-up-reservation", turnId: "exact-turn" };
+  for (const found of [scope, null, { ...scope, requestId: "earlier-reservation" }, { ...scope, sessionId: "native:other" },
+    { ...scope, workspaceId: "another-workspace" }]) {
+    const submitted = [];
+    let reads = 0, sends = 0, starts = 0;
+    const workflow = workflowInternals({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/reserve")) return { ok: true, request_key: scope.requestId, prompt: "follow-up" };
+        if (endpoint.endsWith("/submitted")) submitted.push(body);
+        return { ok: true, run: {} };
+      },
+      aoHarness: { continuable: async () => true, async send(id, text, key) {
+        sends += 1;
+        assert.deepEqual([id, text, key], [scope.sessionId, "follow-up", scope.requestId]);
+        throw new Error("Lost reply after dispatch");
+      }, async recover(id, turn, keys) {
+        reads += 1;
+        assert.equal(id, scope.sessionId);
+        assert.equal(turn, null);
+        assert.deepEqual(keys, { workspaceId: scope.workspaceId, requestId: scope.requestId });
+        return { sendReceipt: found };
+      }, async spawn() { starts += 1; return "replacement"; } },
+    });
+    try {
+      workflow.continuations.set("new", { session: scope.sessionId, text: "follow-up" });
+      const pending = workflow.dispatchExternal(scope.workspaceId, "new", { id: "next", role: "planner", route }, 1, true, true);
+      if (found === scope) {
+        assert.equal((await pending).session_id, scope.sessionId);
+        assert.equal(workflow.expectedTurns.get(scope.sessionId), scope.turnId);
+        assert.deepEqual(submitted.map(body => [body.session_id, body.request_key]), [[scope.sessionId, scope.requestId]]);
+      } else {
+        await assert.rejects(pending, { code: "NATIVE_DELIVERY_UNKNOWN" });
+        const node = { id: "next", state: "reserved", route, request_key: scope.requestId };
+        const mission = { id: "new", nodes: [node] };
+        const observed = await workflow.observeExternal(scope.workspaceId, mission.id, node, mission);
+        assert.equal(observed.recovery_required, true);
+        assert.equal(observed.run.nodes[0].state, "reserved");
+        assert.deepEqual(submitted, [], "Neither dispatch nor observation relabels uncertainty as a failed launch");
+      }
+      assert.equal(sends, 1);
+      assert.equal(reads, 1);
+      assert.equal(starts, 0, "Ambiguous native delivery never starts a replacement session");
+    } finally { workflow.dispose(); }
+  }
+});
+
 test("restoration uncertainty: a sent message stops the old agent and starts a new one; warm starts never replace it", async () => {
   // The user: "if cant reconnect to chat agent can it just create a new agent chat with current context window".
   const route = { harness_id: "ao:claude-code", model: "fixture" };

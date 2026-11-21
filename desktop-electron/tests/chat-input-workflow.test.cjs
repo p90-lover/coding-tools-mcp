@@ -93,6 +93,7 @@ test("input workflow restores a missing queue projection from durable inputs wit
 
 test("input workflow commits a new task and run through one atomic host operation", async t => {
   const updates = [], boardWrites = [];
+  let accepted;
   const route = { harness_id: "ao:codex", provider_id: "agent-orchestrator", account_id: "ao-local", model: "fixture", permission_profile: ":ao-default" };
   const workflow = createAgentOrchestratorWorkflow({
     inputJournal: journalStub({ dispatch: async (args, execute) => execute(args) }),
@@ -109,20 +110,26 @@ test("input workflow commits a new task and run through one atomic host operatio
         assert.equal(body.confirm, true);
         assert.equal(body.change.operation, "accept_chat_input");
         const input = body.change.input;
-        return { ok: true, input_id: input.input_id, task_id: "accepted-task", run_id: input.run_id,
+        if (accepted) return { ...accepted, duplicate: true };
+        accepted = { ok: true, input_id: input.input_id, task_id: "accepted-task", run_id: input.run_id,
           run: { id: input.run_id, workspace_id: "project", project_id: "accepted-task", revision: 1,
             execution_mode: "single", nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] } };
+        return accepted;
       }
       throw new Error("fixture stops before external dispatch");
     },
   });
   t.after(() => workflow.dispose());
-  const result = await workflow.call("chat_send", { workspaceId: "project", inputId: "saved-input", message: "hello", executionMode: "single", singleRoute: route });
+  const args = { workspaceId: "project", inputId: "saved-input", message: "hello", executionMode: "single", singleRoute: route };
+  const result = await workflow.call("chat_send", args);
   assert.equal(result.taskId, "accepted-task");
   assert.equal(updates.length, 1);
   assert.equal(updates[0].input.input_id, "saved-input");
   assert.equal(updates[0].input.expected_board_revision, 4);
   assert.equal(updates[0].input.description, "hello");
+  const duplicate = await workflow.call("chat_send", args);
+  assert.equal(duplicate.runId, result.runId);
+  assert.equal(duplicate.status, "recovered", "An existing atomic receipt must not start a run again");
   assert.deepEqual(boardWrites, []);
 });
 

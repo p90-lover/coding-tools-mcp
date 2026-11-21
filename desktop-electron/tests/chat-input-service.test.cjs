@@ -49,6 +49,30 @@ test("journal bridge dispatches the accepted route once and returns its durable 
   assert.equal(saved.receipt.stage, "host-run"); assert.equal(saved.state, "accepted");
 });
 
+test("queued delivery verifies its owned attachment again before allowing execution", async t => {
+  const { service, root } = fixture(t);
+  const original = path.join(root, "original.txt"), bytes = "original bytes";
+  fs.writeFileSync(original, bytes);
+  const inputId = "with-attachment", args = { workspaceId: "project", inputId };
+  const { payload } = await service.call({ ...request(inputId), payload: { text: "hello", annotations: [],
+    attachments: [{ name: "original.txt", path: original }] }, destination: { taskId: "task", message: `hello\nAttached file: ${original}` } });
+  const owned = payload.attachments[0].path;
+  assert.notEqual(owned, original);
+  fs.unlinkSync(original);
+  fs.writeFileSync(owned, "modified bytes");
+  await assert.rejects(service.dispatch(args, () => assert.fail("modified files may not reach execution")), { code: "ATTACHMENT_CORRUPT" });
+  assert.equal((await service.get("project", inputId)).state, "queued");
+  fs.writeFileSync(owned, bytes);
+  const sent = await service.dispatch(args, async input => {
+    assert.equal(input.inputId, inputId);
+    assert.equal(input.message, `hello\nAttached file: ${owned}`);
+    assert.equal(fs.readFileSync(owned, "utf8"), bytes);
+    return { ok: true, taskId: "task", runId: "run" };
+  });
+  assert.equal(sent.runId, "run");
+  assert.equal((await service.get("project", inputId)).state, "accepted");
+});
+
 test("journal bridge never retries an uncertain send and only defers a confirmed undelivered steer", async t => {
   const { service } = fixture(t);
   await service.call(request("uncertain"));
@@ -71,9 +95,19 @@ test("journal bridge reconciles a lost host receipt without another dispatch", a
   let executions = 0;
   const execute = async () => { executions += 1; throw new Error("response lost after host commit"); };
   await assert.rejects(service.dispatch({ workspaceId: "project", inputId: "lost-host-reply" }, execute), /response lost/);
-  const result = await service.dispatch({ workspaceId: "project", inputId: "lost-host-reply" }, execute, { reconcile: async () => ({
-    ok: true, input_id: "lost-host-reply", task_id: "task", run_id: "existing-run", run: { id: "existing-run", workspace_id: "project", project_id: "task" },
-  }) });
+  const args = { workspaceId: "project", inputId: "lost-host-reply" };
+  const receipt = { ok: true, found: true, input_id: args.inputId, task_id: "task", run_id: "existing-run",
+    run: { id: "existing-run", workspace_id: "project", project_id: "task" } };
+  for (const other of [null, { ...receipt, found: false }, { ...receipt, input_id: "different-input" }, { ...receipt, run_id: "different-run" },
+    { ...receipt, run: { ...receipt.run, workspace_id: "another-project" } },
+    { ...receipt, task_id: "different-task", run: { ...receipt.run, project_id: "different-task" } }]) {
+    await assert.rejects(service.dispatch(args, execute, { reconcile: async () => other }), { code: "INPUT_DELIVERY_UNKNOWN" });
+    assert.equal((await service.get(args.workspaceId, args.inputId)).state, "unknown");
+  }
+  const result = await service.dispatch(args, execute, { reconcile: async identity => {
+    assert.deepEqual(identity, args);
+    return receipt;
+  } });
   assert.equal(result.runId, "existing-run");
   assert.equal(result.status, "recovered");
   assert.equal(executions, 1);
