@@ -6,7 +6,7 @@ The independent project is [p90-lover/Orchestrator](https://github.com/p90-lover
 
 ## What changes here
 
-`createAgentOrchestratorUpstream` constructs the same legacy runtime, then returns the version-1 handler. All 9 runtime methods and all 27 harness methods are exposed. The handler validates the complete interface before invoking anything and binds to that one runtime. It preserves receivers, arguments, result/promise/error identities and synchronous `watch` cancellation. It does not retry a request or select another engine.
+`createAgentOrchestratorUpstream` constructs the same legacy runtime, then returns the version-1 handler. All 9 runtime methods and all 27 required harness methods are exposed. Handler 0.1.1 also forwards `busyChatSessions` when the runtime supplies it, so the current host can discover autonomous turns without making older version-1 engines implement that capability. The handler validates the complete interface before invoking anything and binds to that one runtime. It preserves receivers, arguments, result/promise/error identities and synchronous `watch` cancellation. It does not retry a request or select another engine.
 
 `desktop-electron/electron/orchestrator-handler.cjs` is vendored from the separate repository so the installed app has no new runtime network/package dependency. `desktop-electron/vendor/orchestrator-handler.json` pins the source commit and hash. Updating it requires verifying the source, updating both bytes and provenance, and rerunning the handler/adapter contract tests. `BACKEND_MODULES` includes the handler so backend updates carry it.
 

@@ -1,6 +1,6 @@
 "use strict";
 
-const HANDLER_VERSION = "0.1.0";
+const HANDLER_VERSION = "0.1.1";
 const CONTRACT_VERSION = 1;
 const RUNTIME_METHODS = Object.freeze([
   "call", "start", "stop", "show", "hide", "snapshot",
@@ -14,6 +14,8 @@ const HARNESS_METHODS = Object.freeze([
   "resolveApproval", "timeline", "compact", "compactionStatus", "interrupt",
   "openTerminal", "closeTerminal",
 ]);
+
+const OPTIONAL_HARNESS_METHODS = Object.freeze(["busyChatSessions"]);
 
 // Shape compatibility is not proof of an engine's behavioral compatibility.
 function inspectRuntime(runtime) {
@@ -48,8 +50,10 @@ function createOrchestratorHandler({ runtime, contractVersion = CONTRACT_VERSION
   // could duplicate work or apply an approval to a different session.
   return Object.freeze({
     ...bindMethods(runtime, RUNTIME_METHODS),
-    harness: Object.freeze(bindMethods(runtime.harness, HARNESS_METHODS)),
+    harness: Object.freeze(bindMethods(runtime.harness, [
+      ...HARNESS_METHODS, ...OPTIONAL_HARNESS_METHODS.filter(name => typeof runtime.harness[name] === "function"),
+    ])),
   });
 }
 
-module.exports = { HANDLER_VERSION, CONTRACT_VERSION, RUNTIME_METHODS, HARNESS_METHODS, inspectRuntime, createOrchestratorHandler };
+module.exports = { HANDLER_VERSION, CONTRACT_VERSION, RUNTIME_METHODS, HARNESS_METHODS, OPTIONAL_HARNESS_METHODS, inspectRuntime, createOrchestratorHandler };

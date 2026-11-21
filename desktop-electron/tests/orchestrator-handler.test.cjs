@@ -26,7 +26,7 @@ test("the actual AO adapter uses the complete handler contract without starting 
   });
   assert.equal(inspectRuntime(runtime).shapeCompatible, true);
   assert.deepEqual(Object.keys(runtime).sort(), [...RUNTIME_METHODS, "harness"].sort());
-  assert.deepEqual(Object.keys(runtime.harness).sort(), [...HARNESS_METHODS].sort());
+  assert.deepEqual(Object.keys(runtime.harness).sort(), [...HARNESS_METHODS, "busyChatSessions"].sort());
   assert.ok(Object.isFrozen(runtime), "the production factory returns the immutable handler boundary");
   assert.ok(Object.isFrozen(runtime.harness));
   assert.equal(runtime.snapshot().state, "stopped");
