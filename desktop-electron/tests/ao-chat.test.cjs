@@ -3120,6 +3120,7 @@ test("a quiet turn whose model CPA keeps refusing says so, with what the refusal
   assert.equal(chat.cpaRefusalNote({ streak: 2, status: 503, since: now - 20_000, lastAt: now - 5_000 }, now),
     " · CPA refused the last 2 requests: model service error (503), just now");
   assert.equal(chat.cpaRefusalNote({ streak: 3, status: 401, since: null, lastAt: null }, now), " · CPA refused the last 3 requests: sign-in refused (401)");
+  assert.equal(chat.cpaRefusalNote({ streak: 8, status: 403, since: null, lastAt: null }, now), " · CPA refused the last 8 requests: access denied (403)");
   assert.equal(chat.cpaRefusalNote({ streak: 1, status: 429, since: now, lastAt: now }, now), "", "one failure is usually retried at once");
   assert.equal(chat.cpaRefusalNote(null, now), "");
 });
