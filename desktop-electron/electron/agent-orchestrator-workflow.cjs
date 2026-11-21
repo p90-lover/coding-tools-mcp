@@ -641,7 +641,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
   const continuations = new Map();
-  // What a retried chat's own session is told: its last turn ended early, and it should go on.
+  // Only automatic recovery should continue a turn with its unfinished answer in context.
   const RETRY_CONTINUE_TEXT = "Your previous turn was interrupted before it finished (the app restarted or the step failed). "
     + "Continue the same task from where you left off; do not start over or repeat work that is already done.";
   // runId -> { workspaceId, taskId }: a follow-up whose agent may start fresh; a fresh start gets
@@ -2150,7 +2150,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt) - utf8Bytes(standing.text);
         if (!sent?.turnId && handoff) stage("summarising the chat for a new agent");
         const prompt = standing.text + (!sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt);
+          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom, handoff.retryOf).catch(() => "")) + reserved.prompt : reserved.prompt);
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
@@ -3724,10 +3724,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     clock.mark("control");
     if (action === "stop") releaseNativePreviews(id, run);
-    // A retried single-model chat continues its agent's own session, which already holds the
-    // conversation and what it read and ran: launching a fresh one began the task again from
-    // nothing. The retry moved the card's receipt into its history; a session that is gone or
-    // refuses the message still falls back to a fresh start (dispatchExternal).
     // The run is running again: a round its goal judged before is judged again when it settles.
     if (["retry", "retry_auto", "resume"].includes(action) && result.run) reopenGoalRound(id, result.run);
     // A person's retry is a fresh attempt: "Retry automatically" covers its failures again. The app's
@@ -3736,15 +3732,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if ((action === "retry" || action === "retry_auto") && !automatic) autoRetryCancelled.delete(runKey(id, run));
     if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
       const card = result.run.nodes?.[0];
-      const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
-      if (typeof session === "string" && session && !continuations.has(run)) {
-        continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
-        if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
-        // A session that cannot be continued starts a fresh agent: it begins with the chat so far, as
-        // a follow-up's does, not with the step's first prompt alone.
-        if (result.run.project_id && !handoffs.has(run)) {
-          handoffs.set(run, { workspaceId: id, taskId: result.run.project_id });
-          if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+      const taskId = result.run.project_id;
+      if (card?.state === "pending" && externalAgent(card)) {
+        const session = card.history?.at(-1)?.thread_id;
+        if (action === "retry" && !automatic && taskId) {
+          queueRetryHandoff(id, taskId, run);
+        } else if (typeof session === "string" && session && !continuations.has(run) && !handoffs.get(run)?.retryOf) {
+          continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
+          if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+          if (taskId && !handoffs.has(run)) {
+            handoffs.set(run, { workspaceId: id, taskId });
+            if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+          }
         }
       }
     }
@@ -6775,6 +6774,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const missingModel = missingModelNotice(team);
       if (missingModel) return { ok: false, reason: missingModel };
     }
+    const retryLastReply = single && externalAgent({ route: singleRoute })
+      && saved.runs.findLast(run => run.project_id === mission.project_id)?.id === previous;
     // Asked for by the person (Retry, or Restart, on what the composer has now): it takes over a
     // pending automatic retry rather than wait for it to run the old setup.
     await retireOpenRuns(id, mission.project_id, saved.runs, { supersedeRetry: true });
@@ -6783,6 +6784,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         : mission.team?.id ? { executionMode: "team" } : {});
     // The new run answers the same message: the chat shows it there, not under the next message.
     chatEdits.restarted(id, mission.project_id, previous, next);
+    if (retryLastReply) queueRetryHandoff(id, mission.project_id, next, previous);
     try {
       const started = await startRun({ workspaceId: id, runId: next, executable: selectedExecutable });
       return { ok: true, runId: next, status: started.status };
@@ -9278,9 +9280,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const handoffSummaries = new Map(); // JSON [workspace, task] -> { covered, count, summary }
   const HANDOFF_INPUT_BYTES = 200 * 1024;
   const repliesHash = (items) => createHash("sha256").update(items.join("\n\n")).digest("hex");
-  async function chatHandoff(workspaceId, taskId, runId, maxBytes) {
-    const saved = await runs({ workspaceId });
-    const earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && run.id !== runId));
+  function queueRetryHandoff(workspaceId, taskId, runId, retryOf = runId) {
+    continuations.delete(runId);
+    handoffs.set(runId, { workspaceId, taskId, retryOf });
+    if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+  }
+  async function chatHandoff(workspaceId, taskId, runId, maxBytes, retryOf) {
+    const saved = await runs({ workspaceId, ...(retryOf ? { taskId } : {}) });
+    let earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && (retryOf || run.id !== runId)));
+    if (retryOf) {
+      // All replacement attempts belong to the same user turn; none is earlier context for Retry.
+      let cutoff = earlier.findIndex(run => run.id === retryOf);
+      while (cutoff >= 0) {
+        const attempt = earlier[cutoff];
+        const parent = attempt.restarts_run_id || attempt.replaces_run_id;
+        if (!parent) break;
+        cutoff = earlier.findIndex((run, index) => index < cutoff && run.id === parent);
+      }
+      earlier = earlier.slice(0, Math.max(cutoff, 0));
+    }
     const replies = [];
     for (const run of earlier) {
       for (const node of run.nodes || []) {
