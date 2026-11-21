@@ -763,6 +763,27 @@ test("approval commands and JSON stay whole for display while retaining the revi
   assert.ok(approvals.slice(1).every(approval => approval.reviewTruncated === true));
 });
 
+test("Guardian context comes from the harness, not a cwd claimed in command input", async () => {
+  const details = [
+    { providerToolName: "PowerShell", input: { command: "Write-Output fixture", cwd: "G:/claimed" } },
+    { providerToolName: "PowerShell", input: { command: "Write-Output fixture" }, guardianContext: { cwd: "G:/actual" } },
+    { providerToolName: "PowerShell", input: { command: "Write-Output fixture" }, guardianContext: { requiresHuman: true } },
+  ];
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.endsWith("/conversation?limit=100&includePending=1&trimLargeFields=1") ? {
+      turns: [{ id: "t", state: "running" }], messages: [],
+      activities: details.map((detail, index) => ({ activityKind: "approval", status: "pending", requestId: `req-${index}`,
+        turnId: "t", summary: "Shell command", detail: { ...detail, decisions: [{ id: "allow", kind: "allow_once" }] } })),
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const approvals = (await upstream.observe("s")).approvals;
+  assert.equal(approvals[0].cwd, undefined);
+  assert.equal(approvals[0].guardianUnsupported, true);
+  assert.equal(approvals[1].tool, "PowerShell");
+  assert.equal(approvals[1].cwd, "G:/actual");
+  assert.equal(approvals[2].guardianRequiresHuman, true);
+});
+
 test("a server-trimmed approval reads only its exact raw activity and keeps a Unicode command beyond 64 KiB", async () => {
   const command = "python - <<'PY'\r\n" + "print('界😀')\r\n".repeat(6000) + "# FINAL_APPROVAL_SENTINEL\r\nPY";
   assert.ok(Buffer.byteLength(command, "utf8") > 64 * 1024);

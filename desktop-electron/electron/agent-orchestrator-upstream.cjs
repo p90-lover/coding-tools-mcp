@@ -1033,8 +1033,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           .filter(decision => typeof decision?.id === "string" && typeof decision?.kind === "string")
           .map(decision => ({ id: decision.id.slice(0, 200), kind: decision.kind.slice(0, 40), label: String(decision.label || decision.kind).slice(0, 120) }));
         const command = typeof input.command === "string" && input.command.trim() ? input.command : "";
-        const cwd = typeof detail.guardianContext?.cwd === "string" ? detail.guardianContext.cwd
-          : typeof input.cwd === "string" ? input.cwd : typeof input.workdir === "string" ? input.workdir : "";
+        const cwd = typeof detail.guardianContext?.cwd === "string" ? detail.guardianContext.cwd : "";
         const mismatchedDirs = [input.cwd, input.workdir].some(value => typeof value === "string" && value !== cwd);
         const shellOptions = command && (mismatchedDirs || input.dangerouslyDisableSandbox === true || input.run_in_background === true
           || Object.keys(input).some(key => !["command", "cwd", "workdir", "description", "timeout", "dangerouslyDisableSandbox", "run_in_background"].includes(key)));
