@@ -466,6 +466,33 @@ test("observe returns the current turn's reasoning, tool calls and messages in o
   ], "the prompt and earlier turns are left out");
 });
 
+test("observe keeps a structured turn plan live when its original row leaves the tail", async () => {
+  let plan = [{ text: "Inspect the renderer", status: "pending" }];
+  let includeRow = true;
+  let includeTurnPlan = false;
+  const upstream = observeHarness({
+    internalApi: async (_method, endpoint) => endpoint.includes("/conversation?") ? {
+      turns: [{ id: "t", state: "running", ...(includeTurnPlan ? { plan: { steps: plan } } : {}) }],
+      messages: [],
+      activities: includeRow ? [{ id: "provider-plan", turnId: "t", sequence: 1, activityKind: "plan",
+        status: "completed", detail: { steps: plan } }] : [],
+    } : { session: { id: "s", mode: "chat", status: "working" } },
+  });
+  const read = async () => JSON.parse(JSON.stringify((await upstream.observe("s")).timeline));
+  const initial = await read();
+  assert.equal(initial.length, 1);
+  assert.deepEqual(initial[0].plan, plan);
+  includeTurnPlan = true;
+  includeRow = false;
+  plan = [{ text: "Inspect the renderer", status: "completed" }, { text: "Run tests", status: "in_progress" }];
+  const updated = await read();
+  assert.equal(updated.length, 1);
+  assert.equal(updated[0].id, initial[0].id);
+  assert.deepEqual(updated[0].plan, plan);
+  plan = [];
+  assert.deepEqual((await read())[0].plan, [], "an explicit empty plan replaces previous steps");
+});
+
 test("a running turn whose chat host is gone is interrupted, even when its PID was reused", async () => {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ct-ao-host-"));
   const closed = await new Promise(resolve => { const probe = require("node:net").createServer().listen(0, "127.0.0.1", () => {

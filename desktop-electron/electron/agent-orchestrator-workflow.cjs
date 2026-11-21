@@ -2932,6 +2932,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         : publicText(item.text, item.kind === "message" || item.kind === "reasoning" || item.kind === "steer" ? 64 * 1024 : 400),
       ...(item.label ? { label: publicText(item.label, 40) } : {}),
       ...(item.description ? { description: publicText(item.description, 200) } : {}),
+      ...(item.kind === "plan" && Array.isArray(item.plan) ? { plan: item.plan.slice(0, 50).flatMap(step =>
+        typeof step?.text === "string" ? [{ text: publicText(step.text, 400),
+          status: ["completed", "in_progress"].includes(step.status) ? step.status : "pending" }] : []) } : {}),
       // How long a finished call or thought took (the upstream adapter's durationMs).
       ...(Number.isFinite(item.durationMs) && item.durationMs > 0 ? { durationMs: Math.round(item.durationMs) } : {}),
       ...(item.input ? { input: publicText(item.input, toolBytes.input) } : {}),
