@@ -2938,6 +2938,13 @@ function registerIpc({ logger, stateStore }) {
     return appsHost.catalog();
   });
   handle("coding-tools:apps:call", async (event, input = {}) => {
+    if (input.moduleId === "agent-orchestrator" && input.operation === "chat_autobot_permission") {
+      await assertFocusedMainWindowSettled(event, true);
+      const workflow = activeAoWorkflow;
+      if (!workflow?.configureChatAutobot) throw new Error("Autobot Roll Out is unavailable in this desktop runtime.");
+      const result = await workflow.configureChatAutobot(input.arguments, () => activeAoWorkflow === workflow);
+      return { ok: true, result };
+    }
     if (!appsHost) throw new Error("Apps host is unavailable");
     // The chat surface's own background calls run on load, on a timer or when a chat opens, often
     // while focus sits in an embedded view or another app; refused there, they only filled the

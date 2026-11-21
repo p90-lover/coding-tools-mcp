@@ -91,7 +91,9 @@ test("no valid approval when the identity or Guardian verdict is missing or the 
   for (const options of [{ badCall: true }, { asksForTool: true }, { authKind: "apiKey" }, { assessment: null },
     { assessment: { outcome: "allow", riskLevel: "medium", userAuthorization: "high" } }]) {
     const { review, request, requests } = await fixture(t, options);
-    assert.equal((await review(request)).action, "ask");
+    const verdict = await review(request);
+    assert.equal(verdict.action, "ask");
+    assert.notEqual(verdict.guardianUnavailable, true, "an invalid review is not permission to use the fallback");
     assert.equal(requests.some(entry => !entry.method || entry.method === "turn/start" || entry.method === "command/exec"), false);
   }
 });
@@ -103,5 +105,7 @@ test("uncertain cwd, non-shell and unavailable auth do not start a reviewer", as
   assert.deepEqual(requests, []);
   const noAuth = createGuardianReview({ platform: "win32", stateDir: request.folder, authFile: path.join(request.folder, "missing.json"),
     executable: () => path.join(request.folder, "codex.exe"), spawnProcess: () => assert.fail("no native sign-in") });
-  assert.match((await noAuth(request)).reason, /ChatGPT sign-in/);
+  const outcome = await noAuth(request);
+  assert.match(outcome.reason, /ChatGPT sign-in/);
+  assert.equal(outcome.guardianUnavailable, true);
 });

@@ -119,6 +119,7 @@ async function exactShellAction(approval, folder) {
 }
 
 const pending = (reason) => ({ action: "ask", reason });
+const unavailable = (reason) => ({ ...pending(reason), guardianUnavailable: true });
 
 function usage(result) {
   const limits = result?.rateLimits;
@@ -142,20 +143,21 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
   if (!path.isAbsolute(stateDir || "")) throw new Error("Native Guardian needs an absolute app data path");
   let reviewing = false;
   return async function reviewGuardian({ approval, folder, task, signal, probeUsage = false }) {
-    if (platform !== "win32" || !task || signal?.aborted) return pending("Native Guardian cannot review this request.");
+    if (!task || signal?.aborted) return pending("Native Guardian cannot review this request.");
+    if (platform !== "win32") return unavailable("Native Guardian is not available on this platform.");
     const action = await exactShellAction(approval, folder);
     if (!action) return pending("Native Guardian needs a complete shell command and working directory from this harness.");
     const binary = executable();
-    if (!path.isAbsolute(binary || "")) return pending("Install the stable Codex CLI in App Plugins to use native Guardian.");
+    if (!path.isAbsolute(binary || "")) return unavailable("Install the stable Codex CLI in App Plugins to use native Guardian.");
     if (reviewing) return pending("Native Guardian is reviewing another request. Check this one yourself.");
     reviewing = true;
-    let root, server;
+    let root, server, timeout;
     try {
       const account = await prepareAccount();
-      if (!account) return pending("Native Guardian needs a current ChatGPT sign-in in the Codex CLI.");
+      if (!account) return unavailable("Native Guardian needs a current ChatGPT sign-in in the Codex CLI.");
       await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
       root = await fs.mkdtemp(path.join(stateDir, "review-"));
-      const timeout = AbortSignal.timeout(WORK_LIMIT_MS);
+      timeout = AbortSignal.timeout(WORK_LIMIT_MS);
       server = openReviewServer(binary, root, env, signal ? AbortSignal.any([signal, timeout]) : timeout, spawnProcess);
       await server.request("initialize", { clientInfo: { name: "coding_tools_guardian", version: "1.0.0" }, capabilities: { experimentalApi: true } });
       server.notify("initialized");
@@ -181,8 +183,10 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
       const { outcome, riskLevel, userAuthorization } = result?.assessment || {};
       return { ...assessment, probeAssessment: { outcome, riskLevel, userAuthorization }, usage: { before, after: usage(await server.request("account/rateLimits/read")) } };
     } catch (error) {
-      const unavailable = pending("Native Codex Guardian did not answer. Check this request yourself; it was not sent to CPA.");
-      return probeUsage ? { ...unavailable, diagnostics: { method: error?.rpcMethod ?? null, code: error?.rpcCode ?? null } } : unavailable;
+      const outcome = !signal?.aborted && (timeout?.aborted || error?.rpcCode === -32601 || error?.code === "ENOENT")
+        ? unavailable("Native Codex Guardian is unavailable.")
+        : pending("Native Guardian did not return a valid decision. Check this request yourself.");
+      return probeUsage ? { ...outcome, diagnostics: { method: error?.rpcMethod ?? null, code: error?.rpcCode ?? null } } : outcome;
     } finally {
       await server?.close();
       if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 2 }).catch(() => {});
