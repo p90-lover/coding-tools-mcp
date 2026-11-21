@@ -3631,7 +3631,7 @@ function registerIpc({ logger, stateStore }) {
       creating = true;
       try {
         result = await createWorkspaceConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
-        preserveSurface: typeof assertAutomaticCurrent === "function",
+        preserveSurface: true,
         onContext: recordBrowserWorkspaceContext,
         accountCandidates: async () => {
           const candidates = [];
