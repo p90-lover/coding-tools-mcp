@@ -1206,9 +1206,8 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-rplan-step.is-failed { --tone: var(--ao-red); }
 .cx-rplan-mark { flex: none; display: inline-grid; place-items: center; width: 16px; height: 16px; margin-top: 1px; border: 1.5px solid var(--tone);
   border-radius: 50%; color: var(--tone); box-sizing: border-box; }
-.cx-rplan-step.is-done .cx-rplan-mark { border-color: transparent; background: color-mix(in srgb, var(--tone) 16%, transparent); }
+.cx-rplan-mark.is-done { --tone: var(--ao-green); background: color-mix(in srgb, var(--tone) 12%, transparent); }
 .cx-rplan-step.is-running .cx-rplan-mark { border-top-color: transparent; animation: cx-rplan-spin 0.9s linear infinite; }
-.cx-rplan-step.is-pending .cx-rplan-mark { border-style: dashed; }
 @keyframes cx-rplan-spin { to { transform: rotate(360deg); } }
 .cx-rplan-body { display: flex; flex-direction: column; min-width: 0; }
 .cx-rplan-step-title { min-width: 0; overflow: hidden; color: var(--color-text-primary); text-overflow: ellipsis; white-space: nowrap; }

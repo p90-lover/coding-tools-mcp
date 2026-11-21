@@ -227,6 +227,21 @@ test("the default transcript shows real task progress for both ordinary and Deep
   }
 });
 
+test("a structured plan updates the same visual task from pending to a checked circle", () => {
+  const plans = load("chat-reply-plan.ts", { "./ao-chat": chat });
+  const view = load("ChatReplyPlan.tsx");
+  const render = (entries, live = true) => {
+    const plan = plans.replyPlan([{ id: "ao:plan:t", kind: "plan", status: "completed", text: "", plan: entries }], live);
+    return renderToStaticMarkup(React.createElement(view.ReplyPlanView, { plan, style: "focus", live }));
+  };
+  const pending = [{ text: "Read requirements", status: "pending" }, { text: "Implement", status: "pending" }];
+  assert.match(render(pending), /0 of 2 done.*cx-rplan-mark is-pending.*aria-label="To do".*Read requirements/);
+  const active = [{ ...pending[0], status: "completed" }, { ...pending[1], status: "in_progress" }];
+  assert.match(render(active), /1 of 2 done.*cx-rplan-mark is-done.*aria-label="Done".*<svg.*Read requirements.*is-running.*Implement/);
+  assert.doesNotMatch(render(active, false), /2 of 2 done/, "ending a turn doesn't check off unfinished work");
+  assert.equal(render([]), "");
+});
+
 test("transcript tasks fold when finished and never invent a checklist from ordinary tool calls", () => {
   const plans = load("chat-reply-plan.ts", { "./ao-chat": chat });
   const view = load("ChatReplyPlan.tsx");

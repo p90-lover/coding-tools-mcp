@@ -2947,6 +2947,13 @@ function registerIpc({ logger, stateStore }) {
     return appsHost.catalog();
   });
   handle("coding-tools:apps:call", async (event, input = {}) => {
+    if (input.moduleId === "agent-orchestrator" && input.operation === "chat_autobot_permission") {
+      await assertFocusedMainWindowSettled(event, true);
+      const workflow = activeAoWorkflow;
+      if (!workflow?.configureChatAutobot) throw new Error("Autobot Roll Out is unavailable in this desktop runtime.");
+      const result = await workflow.configureChatAutobot(input.arguments, () => activeAoWorkflow === workflow);
+      return { ok: true, result };
+    }
     if (!appsHost) throw new Error("Apps host is unavailable");
     // The chat surface's own background calls run on load, on a timer or when a chat opens, often
     // while focus sits in an embedded view or another app; refused there, they only filled the
@@ -3641,7 +3648,7 @@ function registerIpc({ logger, stateStore }) {
       creating = true;
       try {
         result = await createWorkspaceConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
-        preserveSurface: typeof assertAutomaticCurrent === "function",
+        preserveSurface: true,
         onContext: recordBrowserWorkspaceContext,
         accountCandidates: async () => {
           const candidates = [];
@@ -5380,6 +5387,10 @@ async function start() {
     antigravityAuthBrowser = createAntigravityAuthBrowser({
       BrowserWindow, sessionFor: partition => session.fromPartition(partition),
       proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,
+      onRateLimited: ({ message, retryAt }) => {
+        logger.warn?.("antigravity.sign_in_rate_limited", { retryAt });
+        if (Notification.isSupported()) new Notification({ title: "Antigravity sign-in rate limited", body: message, silent: true }).show();
+      },
     });
     setProviderAuthBrowser(() => antigravityAuthBrowser);
     antigravityReauth = createAntigravityReauth({

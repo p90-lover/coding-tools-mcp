@@ -131,6 +131,7 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  plan?: { text: string; status: "pending" | "in_progress" | "completed" }[];
   /** How long a finished tool call or thought took, from AO's first and last update of it. */
   durationMs?: number;
   /** Images a tool call returned (a screenshot, a picture it read), as the files Claude Code saved them to. */
@@ -239,6 +240,7 @@ export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
     return -1;
   };
   for (const raw of items) {
+    if (raw.kind === "plan" && raw.plan) continue;
     // The agent's messages without notices the harness wrote into them; one that was only a notice goes.
     const said = raw.kind === "message" && raw.text ? withoutHarnessNotices(raw.text) : raw.text;
     if (raw.kind === "message" && raw.text && !said) continue;
@@ -1141,7 +1143,7 @@ export const RESTART_RESUME_WINDOW_MS = 24 * 60 * 60_000;
 // (POOL_EXHAUSTED, QUOTA_EXHAUSTED).
 const RESTART_ATTEMPT_LIMIT = 8;
 const AUTO_RETRY_ATTEMPT_LIMIT = 8;
-const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|insufficient_quota|usage_limit_reached|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)|API Error: (?:400|404|422)\b|chat driver incompatible:\s*read [^:\n]{1,40} version/i;
+const NEEDS_PERSON = /auth_unavailable|invalid[_ -]?auth|\b(?:chat driver requires authentication|authentication required)\b|account[^\n]*(?:exhaust|unavail)|pool[^\n]*exhaust|sign[- ]?in|reauth|HTTP (?:401|403)|insufficient_quota|usage_limit_reached|quota[^\n]{0,40}(?:exceed|exhaust|reached|used up)|(?:exceed|reach|hit)(?:ed)? your[^\n]{0,40}(?:quota|limit)|API Error: (?:400|404|422)\b|chat driver incompatible:\s*read [^:\n]{1,40} version/i;
 
 /** The newest time any card of the run started, current receipts and earlier attempts alike (0: none). */
 function newestStart(mission: ResumeCandidate): number {
@@ -1557,7 +1559,8 @@ export type CpaRefusal = { streak: number; status: number | null; statuses?: Rec
 /** What an HTTP status from CPA means to the person waiting on the turn. */
 export function cpaStatusWord(status: number | null): string {
   if (status === 429) return "rate limited (429)";
-  if (status === 401 || status === 403) return `sign-in refused (${status})`;
+  if (status === 401) return "sign-in refused (401)";
+  if (status === 403) return "access denied (403)";
   if (status === 402) return "out of credit (402)";
   if (status !== null && status >= 500) return `model service error (${status})`;
   return status ? `HTTP ${status}` : "failed";

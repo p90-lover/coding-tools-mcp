@@ -74,6 +74,7 @@ const BACKEND_MODULES = Object.freeze([
   "process-tree.cjs",
   // Codex's Auto-review policy, which agent-orchestrator-workflow.cjs reviews requests by.
   "codex-guardian-policy.cjs",
+  "chat-autobot-permission.cjs",
   "ao-context-breakdown.cjs",
   "cpa-antigravity-reauth.cjs",
   // Relabels Provider Manager account kinds in CPA's auth-file listing (cpa-oauth-adapter, cpa-usage, the workflow).

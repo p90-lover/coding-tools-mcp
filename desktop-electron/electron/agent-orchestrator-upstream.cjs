@@ -692,6 +692,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         ...(typeof activity.streamedText === "string" ? { streamedText: cut(activity.streamedText) } : {}) }
       : activity)) };
   }
+  function planEntries(value) {
+    if (!Array.isArray(value)) return undefined;
+    const entries = value.slice(0, 50).flatMap(step => typeof step?.text === "string" && step.text.trim()
+      ? [{ text: step.text.trim(), status: ["completed", "in_progress"].includes(step.status) ? step.status : "pending" }] : []);
+    return entries.length || !value.length ? entries : undefined;
+  }
   /**
    * The current turn as a Codex-style transcript: assistant messages, reasoning and tool calls
    * in AO sequence order. A live poll reads only the session's newest items (conversationTail) and
@@ -702,6 +708,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (typeof turnId !== "string") return [];
     const starts = new Map(); // item -> when AO created it (ms), to time recovered thoughts below
     const started = (item, source) => { starts.set(item, Date.parse(source.createdAt ?? "")); return item; };
+    const activities = (Array.isArray(conversation?.activities) ? conversation.activities : [])
+      .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string");
+    const isPlanSnapshot = activity => activity.activityKind === "plan" && Array.isArray(activity.detail?.steps);
+    const planRow = activities.findLast(isPlanSnapshot);
+    const turn = Array.isArray(conversation?.turns) ? conversation.turns.find(candidate => candidate.id === turnId) : undefined;
+    const plan = planEntries(turn?.plan?.steps) ?? planEntries(planRow?.detail.steps);
     const items = [
       ...(Array.isArray(conversation?.messages) ? conversation.messages : [])
         .filter(message => message.turnId === turnId && message.role === "assistant" && typeof message.text === "string" && message.text.trim())
@@ -709,8 +721,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           // Streaming or finished, a message keeps up to TIMELINE_TEXT_BYTES: a 4 KB cut froze the
           // live answer until the turn ended, and cut a finished one mid-word.
           status: message.streaming && !turnOver ? "running" : "completed", text: utf8Prefix(message.text.trim(), TIMELINE_TEXT_BYTES) }, message)),
-      ...(Array.isArray(conversation?.activities) ? conversation.activities : [])
-        .filter(activity => activity.turnId === turnId && typeof activity.activityKind === "string")
+      ...activities.filter(activity => !plan || !isPlanSnapshot(activity))
         .map(activity => started(activity.activityKind === "system" && activity.detail?.event === "steer" && typeof activity.detail.text === "string"
           // AO records a steer as a system row tagged event "steer"; it is the user's own words.
           ? { id: String(activity.id), sequence: Number(activity.sequence) || 0, kind: "steer", status: "completed",
@@ -727,7 +738,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const next = items.slice(at + 1).map(later => starts.get(later)).find(Number.isFinite);
       if (Number.isFinite(begun) && next > begun) item.durationMs = Math.min(next - begun, 24 * 3600_000);
     });
-    return items.slice(-TIMELINE_ITEMS);
+    if (!plan) return items.slice(-TIMELINE_ITEMS);
+    // The activity window can drop the original plan row; keep the turn snapshot inside the tail budget.
+    return [...items.slice(-(TIMELINE_ITEMS - 1)), { id: `ao:plan:${turnId}`, kind: "plan", status: "completed", text: "", plan }];
   }
   // Callers of a working chat's observe() (the run loop, the chat's activity poll and its follow-ups,
   // the approval screen, the panel's status poll) share one tail read, but each built its timeline
@@ -768,9 +781,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
    */
   async function pastTurnTimeline(id, turnId, pages = 80) {
     let conversation = await conversationTail(id, [60, 20]);
-    const merged = { messages: [], activities: [] };
+    const merged = { messages: [], activities: [], turns: [] };
     let mine = 0;
     for (let page = 0; conversation && page < pages; page += 1) {
+      if (!merged.turns.length && Array.isArray(conversation.turns)) {
+        const turn = conversation.turns.find(item => item.id === turnId && Array.isArray(item.plan?.steps));
+        if (turn) merged.turns.push(turn);
+      }
       const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
       const activities = Array.isArray(conversation.activities) ? conversation.activities : [];
       merged.messages.push(...messages);

@@ -3279,13 +3279,18 @@ test("a chat's timeline reads CPA's key once, not once per field, and still reda
       throw new Error(`unexpected ${endpoint}`);
     },
     cpaConnection: () => { reads += 1; return { baseUrl: "http://127.0.0.1:8317", proxyApiKey: key }; },
-    aoHarness: { timeline: async () => Array.from({ length: 300 }, (_, index) => ({ id: `c${index}`, kind: "command", status: "completed",
-      text: `curl -H x-key:${key} url`, description: `step ${index}`, input: `{"k":"${key}"}`, output: `echo ${key}` })) },
+    aoHarness: { timeline: async () => [
+      ...Array.from({ length: 300 }, (_, index) => ({ id: `c${index}`, kind: "command", status: "completed",
+        text: `curl -H x-key:${key} url`, description: `step ${index}`, input: `{"k":"${key}"}`, output: `echo ${key}` })),
+      { id: "ao:plan:turn-1", kind: "plan", text: "", status: "completed", plan: [{ text: `Read setup for ${key}`, status: "completed" }] },
+    ] },
     confirm: async () => true,
   });
   const { timeline } = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
-  assert.equal(timeline.length, 300);
-  assert.doesNotMatch(JSON.stringify(timeline), new RegExp(key), "the key is redacted from every field");
+  assert.equal(timeline.length, 301);
+  assert.equal(timeline.at(-1).plan[0].status, "completed");
+  assert.match(timeline.at(-1).plan[0].text, /^Read setup for /);
+  assert.doesNotMatch(JSON.stringify(timeline), new RegExp(key), "the key is redacted from every field, including plan steps");
   assert.ok(reads <= 2, `CPA's connection was read ${reads} times for one timeline`);
 });
 
@@ -3744,6 +3749,8 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   const catalog = { data: [
     { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
     { id: "cline-pass/deepseek-v4.1-flash", context_window: 272000, max_context_window: 272000 },
+    { id: "deepseek-v4-1-flash-1017", context_window: 272000, max_context_window: 272000 },
+    { id: "deepseek-v4-1-flash-1020", context_window: 200000, max_context_window: 200000 },
     { id: "cline-pass/brand-new-model", context_window: 272000, max_context_window: 272000 },
     // A Vertex AI key's Gemini 4 rows carry CPA's stock window; Codex's GPT model really has 272K.
     { id: "gemini-4-carbon", owned_by: "google", context_window: 272000, max_context_window: 272000 },
@@ -3781,6 +3788,10 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   assert.equal(known.contextLimit, 1000000);
   assert.equal(known.contextWindow.max, 1000000, "the card can't be set past it");
   assert.equal(deepseek.launched.contextWindow, 1000000, "a blank card starts at its full known window");
+  const dated = await launch("deepseek-v4-1-flash-1017", 1000000);
+  assert.equal(dated.models.capabilities["cpa/deepseek-v4-1-flash-1017"].contextWindow.max, 1000000);
+  assert.equal(dated.launched.contextWindow, 1000000, "the hyphenated CPA alias can set the known limit");
+  assert.equal(dated.models.capabilities["cpa/deepseek-v4-1-flash-1020"].contextLimit, 200000, "an explicit non-stock cap wins");
   assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
   // 2026-11-20: a Gemini 4 Carbon chat (Vertex key) was capped at CPA's stock 272K, and its window
   // field refused 1m. CPA's own catalog gives every Gemini 4 model 1,048,576.
@@ -7001,6 +7012,57 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.ok(advised.length >= 1 && advised.every(model => model === "codex-auto-review"), "Codex's review model reviews, never the chat's own model");
   // Its "ask" gets one more review that must choose allow or deny; still undecided, the write waits.
   assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
+});
+
+test("Autobot config needs consent and answers an attested single-chat request only while enabled", async () => {
+  const root = process.cwd();
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model", permission_profile: ":ao-default",
+    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  let approved = false;
+  let request = { approval_id: "step", source: "ao", kind: "command", command: "pwd", cwd: root,
+    tool: "Bash", turn_id: "t", decisions: [{ id: "yes", kind: "allow_once" }, { id: "always", kind: "allow_always" }, { id: "no", kind: "reject_once" }] };
+  const mission = { id: "run", workspace_id: "ws", project_id: "chat", execution_mode: "single", nodes: [
+    { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    confirm: async () => approved,
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission] }
+      : { operation: { state: "completed", result: { ok: true, task: { id: "chat", description: "Check the project" } } } },
+    nativeGuardianReview: () => assert.fail("local scope never needs Guardian"),
+    fetchImpl: () => assert.fail("no model/network request for local scope"),
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: request ? [request] : [] }),
+      sessionWorkspace: async () => ({ root }),
+      resolveApproval: async (session, id, decision) => { resolved.push([session, id, decision]); request = null; return { ok: true }; },
+    },
+  });
+  const scope = { workspaceId: "ws", taskId: "chat" };
+  const turn = { workspaceId: "ws", runId: "run", nodeId: "one" };
+  try {
+    await assert.rejects(workflow.call("chat_autobot_permission", { ...scope, selected: ["location"] }), /unknown|unsupported/i);
+    assert.equal((await workflow.configureChatAutobot({ ...scope, selected: ["location"] })).enabled, false);
+    approved = true;
+    assert.equal((await workflow.configureChatAutobot({ ...scope, selected: ["location"] }, () => false)).enabled, false);
+    assert.equal((await workflow.configureChatAutobot({ ...scope, selected: ["location"] })).enabled, true);
+    await workflow.call("observe", turn);
+    for (let tries = 0; !resolved.length && tries < 50; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved, [["session-1", "step", "yes"]]);
+    await new Promise(resolve => setImmediate(resolve));
+    mission.nodes[0].receipt.thread_id = "native:session-1";
+    request = { approval_id: "native-step", source: "ao", kind: "command", command: "pwd", cwd: root,
+      tool: "Bash", turn_id: "t", decisions: [{ id: "yes", kind: "allow_once" }] };
+    const native = await workflow.call("observe", turn);
+    assert.equal(native.pending_approvals[0]?.approval_id, "native-step");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(resolved, [["session-1", "step", "yes"]], "A native request still needs a manual decision");
+    mission.nodes[0].receipt.thread_id = "session-1";
+    await workflow.configureChatAutobot({ ...scope, disable: true });
+    assert.equal((await workflow.configureChatAutobot(scope)).enabled, false);
+    request = { approval_id: "later", source: "ao", kind: "command", command: "pwd", cwd: root,
+      tool: "Bash", turn_id: "t", decisions: [{ id: "yes", kind: "allow_once" }] };
+    await workflow.call("observe", turn);
+    assert.deepEqual(resolved, [["session-1", "step", "yes"]]);
+  } finally { workflow.dispose(); }
 });
 
 test("Approve for me picked while a turn runs reviews that turn's requests at once, not from its next turn", async () => {
@@ -11826,6 +11888,10 @@ for (const [label, refusal, reason] of [
   // Sent inside the reply stream, with no status (2026-11-11: attempts 1-8 failed the same way).
   ["no status", "API Error: Complexity 'xhigh' is not supported for this image model.",
     /^The provider refused this request \(Complexity 'xhigh' is not supported for this image model\.\)\. Change that, or choose another model, since retrying won't fix it\.$/],
+  ["ACP authentication required", 'chat driver requires authentication: ACP session/prompt: {"code":-32000,"message":"Authentication required"}',
+    /^This failure needs you\. Check the provider sign-in and whether the configured account can access this model, then retry manually\. You can also choose another model\.$/],
+  ["HTTP 403", "The provider denied access (HTTP 403).",
+    /^Access was denied \(HTTP 403\)\. Check that the configured provider account can use this model, or choose another model\.$/],
 ])
 test(`"Retry automatically" leaves a request the provider refused (${label}) for the person, with the provider's reason`, async () => {
   // OpenCode Go's region refusal was retried eight times a round (2026-10-29); each try got the same 400.
@@ -11856,7 +11922,7 @@ test(`"Retry automatically" leaves a request the provider refused (${label}) for
     await new Promise(resolve => setTimeout(resolve, 100));
     mission.nodes[0] = { ...mission.nodes[0], state: "held", receipt: { ...mission.nodes[0].receipt, error: refusal } };
     let detail = "";
-    for (let tries = 0; tries < 100 && !/provider refused/.test(detail); tries++) {
+    for (let tries = 0; tries < 100 && !reason.test(detail) && !/Retrying automatically in/.test(detail); tries++) {
       await new Promise(resolve => setTimeout(resolve, 20));
       detail = String((await status()).detail ?? "");
     }
@@ -12382,8 +12448,11 @@ function workflowInternals(options) {
   const fixture = new Module(filename, module);
   fixture.filename = filename;
   fixture.paths = module.paths;
-  const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
-    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, observeExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+  const original = fs.readFileSync(filename, "utf8");
+  const exportStart = "return Object.freeze({ call,";
+  assert.equal(original.split(exportStart).length, 2, "the fixture must find exactly one workflow return");
+  const source = original.replace(exportStart,
+    `${exportStart} takeWarm, chatPrewarm, dispatchExternal, observeExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun,`);
   fixture._compile(source, filename);
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
@@ -12630,6 +12699,54 @@ test("a cold start that fails gives its slot to the next launch at once", async 
     assert.deepEqual(started, [3]);
     assert.deepEqual(results.map(result => result.status), ["rejected", "rejected", "fulfilled"], "each failed start still reports its own error");
   } finally { workflow.dispose(); }
+});
+
+test("native Stop requires and verifies the exact turn receipt without escalating uncertainty", async () => {
+  const session = "native:session", owner = "run", turnId = "current-turn";
+  const calls = [];
+  let receipt = { turnId, state: "cancelled" };
+  const workflow = workflowInternals({ aoHarness: {
+    observe: async () => ({ turnId, status: "working", turnState: "running" }),
+    interrupt: async (...args) => { calls.push(args); assert.deepEqual(args, [session, { turnId }]); return receipt; },
+    exitAgent: async () => assert.fail("An unconfirmed native stop must not shut down the session"),
+  } });
+  try {
+    await assert.rejects(workflow.stopExternalTurn(session), /exact native turn/);
+    assert.equal(await workflow.stopExternalTurn(session, { owner, turnId: "stale-turn" }), false);
+    assert.deepEqual(calls, []);
+    await workflow.stopExternalTurn(session, { owner, turnId });
+    assert.deepEqual(calls, [[session, { turnId }]]);
+    for (const ambiguous of [{ turnId: "other-turn", state: "cancelled" }, { turnId, state: "unknown" }]) {
+      receipt = ambiguous;
+      await assert.rejects(workflow.stopExternalTurn(session, { owner, turnId, releaseAgent: true }), /could not be confirmed/);
+    }
+  } finally { workflow.dispose(); }
+});
+
+test("concurrent native Stops do not share a receipt for a different turn", async () => {
+  const session = "native:session", owner = "run", turns = [];
+  let active = "first", announce, finish;
+  const entered = new Promise(resolve => { announce = resolve; });
+  const gate = new Promise(resolve => { finish = resolve; });
+  const workflow = workflowInternals({ aoHarness: {
+    observe: async () => ({ turnId: active, status: "working", turnState: "running" }),
+    async interrupt(id, { turnId }) {
+      assert.equal(id, session);
+      turns.push(turnId);
+      if (turnId === "first") { announce(); await gate; }
+      return { turnId, state: "cancelled" };
+    },
+  } });
+  try {
+    const first = workflow.stopExternalTurn(session, { owner, turnId: "first" });
+    await entered;
+    const same = workflow.stopExternalTurn(session, { owner, turnId: "first" });
+    active = "second";
+    const second = workflow.stopExternalTurn(session, { owner, turnId: "second" });
+    finish();
+    await Promise.all([first, same, second]);
+    assert.deepEqual(turns, ["first", "second"]);
+  } finally { finish(); workflow.dispose(); }
 });
 
 test("concurrent host-release upgrades recheck the in-flight stop after its first settlement", async () => {

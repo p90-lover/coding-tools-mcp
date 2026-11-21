@@ -60,7 +60,7 @@ export function reviewPrompt(focus = ""): string {
 }
 
 /** Plan mode (Codex's collaboration mode): explore and plan, never change anything. */
-export const PLAN_PREFIX = `[Plan mode] Do not change anything: no file edits, formatters that rewrite files, patches, migrations or other mutating commands. You may read, search and run non-mutating checks to ground the plan. Ask only what you can't discover. Reply with a decision-complete plan another engineer could implement without making decisions — goal, approach, the exact files and changes, tests, risks and open questions — and wait for approval before implementing.
+export const PLAN_PREFIX = `[Plan mode] Do not change anything: no file edits, formatters that rewrite files, patches, migrations or other mutating commands. You may read, search and run non-mutating checks to ground the plan. Ask only what you can't discover. Reply with a decision-complete plan another engineer could implement without making decisions — goal, approach, the exact files and changes, tests, risks and open questions — and wait for approval before implementing. If your harness has a plan or task tool, use it to publish the checklist in chat. Mark only steps already completed as done; leave proposed implementation steps pending.
 
 Request:
 `;

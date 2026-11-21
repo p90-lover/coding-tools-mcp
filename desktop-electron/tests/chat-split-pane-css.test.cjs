@@ -106,7 +106,7 @@ test("the chat box's row is one 28 px grid of plain controls, with no carets, bo
   assert.doesNotMatch(rule(".ao-workflow .cx-composer .ao-mode-toggle"), /border: 1px/);
   assert.doesNotMatch(controls, /<Caret/, "no carets on the chat box's chips");
   assert.doesNotMatch(permissions, /<Caret|<span>\{active\?\.label/, "the permission chip is its level's icon");
-  assert.match(permissions, /aria-label=\{`Permissions: \$\{active\?\.label \|\| "Custom"\}`\}/, "its name stays its label");
+  assert.match(permissions, /aria-label=\{`Permissions: \$\{permissionLabel\}`\}/, "its name stays its label");
   assert.match(css, /\.ao-permissions > \.ao-composer-chip\[data-danger\] \{ color: var\(--ao-red/, "Full access stays tinted");
   assert.doesNotMatch(chat, /cx-mic|Voice input/, "no placeholder mic");
   assert.doesNotMatch(css, /\.ao-composer-picker:last-child \{ margin-left: auto; \}/, "the window chip stays beside its effort");

@@ -733,7 +733,10 @@ export function AgentConversation({ runId, nodeId, live, loadWork }: { runId: st
   return <div className="cx-agent-conversation">
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
     {items === null ? <p className="cx-workbench-empty">Reading its conversation…</p>
-      : items.length ? <LiveTimeline items={items} live={live} finished={!live} expanded />
+      : items.length ? <>
+        <ReplyPlanView plan={replyPlan(items, live)} style="transcript" live={live} />
+        <LiveTimeline items={items} live={live} finished={!live} expanded />
+      </>
         : <p className="cx-workbench-empty">{live ? "It hasn't done anything yet." : "Its conversation could not be read back."}</p>}
   </div>;
 }

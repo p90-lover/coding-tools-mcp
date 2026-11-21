@@ -362,6 +362,21 @@ test("with Retry automatically on, a single chat's failed step that nothing retr
     { execution_mode: "team" }), Date.now(), on), null);
 });
 
+test("restart pickup leaves ACP authentication refusals for the person but still retries transient errors", () => {
+  const { restartResume } = require("../electron/chat-resume.cjs");
+  const now = Date.now();
+  for (const [error, expected] of [
+    ['chat driver requires authentication: ACP session/prompt: {"code":-32000,"message":"Authentication required"}', null],
+    ['ACP session/prompt: {"code":-32000,"message":"Authentication required"}', null],
+    ['ACP session/prompt: {"code":-32603,"message":"Internal error"}', "retry"],
+    ["API Error: 503 upstream unavailable", "retry"],
+  ]) {
+    const mission = run("r", "t", [node("p", "planner", "held", { receipt: { error, started_at_ms: now } })], { execution_mode: "single" });
+    assert.equal(chat.restartResume(mission, now, { autoRetry: true }), expected, error);
+    assert.equal(restartResume(mission, now, { autoRetry: true }), expected, error);
+  }
+});
+
 test("archived and deleted task metadata hides chats without losing explicit history or scheduled status", () => {
   const runs=[run("r1","a",[node("p","planner","pending")]),run("r2","b",[]),run("r3","c",[])];
   const tasks=[{id:"a",title:"A"},{id:"b",title:"B",state:"archived"},{id:"c",title:"C"}];
@@ -3108,6 +3123,7 @@ test("a quiet turn whose model CPA keeps refusing says so, with what the refusal
   assert.equal(chat.cpaRefusalNote({ streak: 2, status: 503, since: now - 20_000, lastAt: now - 5_000 }, now),
     " · CPA refused the last 2 requests: model service error (503), just now");
   assert.equal(chat.cpaRefusalNote({ streak: 3, status: 401, since: null, lastAt: null }, now), " · CPA refused the last 3 requests: sign-in refused (401)");
+  assert.equal(chat.cpaRefusalNote({ streak: 8, status: 403, since: null, lastAt: null }, now), " · CPA refused the last 8 requests: access denied (403)");
   assert.equal(chat.cpaRefusalNote({ streak: 1, status: 429, since: now, lastAt: now }, now), "", "one failure is usually retried at once");
   assert.equal(chat.cpaRefusalNote(null, now), "");
 });

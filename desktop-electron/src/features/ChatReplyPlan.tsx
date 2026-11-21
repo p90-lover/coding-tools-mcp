@@ -23,8 +23,9 @@ function planCount(plan: ReplyPlan): string {
   return plan.source === "agent" ? `${plan.done} of ${total} done` : `${total} ${total === 1 ? "step" : "steps"}`;
 }
 
-export function ReplyPlanView({ plan, style, live }: { plan: ReplyPlan; style: ChatStyle; live: boolean }) {
+export function ReplyPlanView({ plan, style: preference, live }: { plan: ReplyPlan; style: ChatStyle; live: boolean }) {
   const [chosen, setChosen] = useState<boolean | null>(null);
+  const style = preference === "focus" && plan.source === "agent" ? "transcript" : preference;
   const transcript = style === "transcript";
   if (!plan.steps.length || (transcript && plan.source !== "agent")) return null;
   const current = plan.steps.find((step) => step.state === "running") ?? plan.steps.find((step) => step.state === "pending");
@@ -43,7 +44,8 @@ export function ReplyPlanView({ plan, style, live }: { plan: ReplyPlan; style: C
   return <section className={`cx-rplan is-${style}`} aria-label={transcript ? "Tasks" : "Plan"}>
     {transcript ? <button type="button" className="cx-rplan-head cx-rplan-toggle" aria-expanded={open} onClick={() => setChosen(!open)}>
       <svg className="cx-rplan-chevron" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 3 5 5-5 5" /></svg>
-      {heading}{!open && current ? <span className="cx-rplan-current" title={current.title}>{current.title}</span> : null}
+      {heading}{!open && plan.done === plan.steps.length ? <StepMark state="done" /> : null}
+      {!open && current ? <span className="cx-rplan-current" title={current.title}>{current.title}</span> : null}
     </button> : <header className="cx-rplan-head">{heading}</header>}
     {open ? <ol className="cx-rplan-steps">
       {plan.steps.map((step, index) => <li key={step.key} className={`cx-rplan-step is-${step.state}`} aria-current={step === current ? "step" : undefined}>
