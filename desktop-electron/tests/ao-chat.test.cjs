@@ -362,6 +362,21 @@ test("with Retry automatically on, a single chat's failed step that nothing retr
     { execution_mode: "team" }), Date.now(), on), null);
 });
 
+test("restart pickup leaves ACP authentication refusals for the person but still retries transient errors", () => {
+  const { restartResume } = require("../electron/chat-resume.cjs");
+  const now = Date.now();
+  for (const [error, expected] of [
+    ['chat driver requires authentication: ACP session/prompt: {"code":-32000,"message":"Authentication required"}', null],
+    ['ACP session/prompt: {"code":-32000,"message":"Authentication required"}', null],
+    ['ACP session/prompt: {"code":-32603,"message":"Internal error"}', "retry"],
+    ["API Error: 503 upstream unavailable", "retry"],
+  ]) {
+    const mission = run("r", "t", [node("p", "planner", "held", { receipt: { error, started_at_ms: now } })], { execution_mode: "single" });
+    assert.equal(chat.restartResume(mission, now, { autoRetry: true }), expected, error);
+    assert.equal(restartResume(mission, now, { autoRetry: true }), expected, error);
+  }
+});
+
 test("archived and deleted task metadata hides chats without losing explicit history or scheduled status", () => {
   const runs=[run("r1","a",[node("p","planner","pending")]),run("r2","b",[]),run("r3","c",[])];
   const tasks=[{id:"a",title:"A"},{id:"b",title:"B",state:"archived"},{id:"c",title:"C"}];
