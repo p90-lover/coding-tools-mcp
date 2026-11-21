@@ -87,6 +87,7 @@ const { createUpdateHealthGate, waitForIdleChats } = require("./update-health-ga
 const { createComponentUpdater } = require("./component-updates.cjs");
 const { createAppPlugins } = require("./app-plugins.cjs");
 const { createCodexCli } = require("./codex-cli.cjs");
+const { createGuardianReview } = require("./guardian-review.cjs");
 const { readImagePreview, saveChatAttachment } = require("./chat-attachments.cjs");
 const { useNativeUpdateTransport } = require("./update.cjs");
 const {
@@ -4927,6 +4928,11 @@ async function start() {
   });
   const codexCli = createCodexCli({ toolsRoot: path.join(app.getPath("userData"), "tools"), fetchImpl: fetchRemoteOffMain });
   await codexCli.load();
+  const nativeGuardianReview = createGuardianReview({
+    stateDir: path.join(app.getPath("userData"), "tools", "guardian-review"),
+    authFile: path.join(app.getPath("home"), ".codex", "auth.json"),
+    executable: codexCli.executable,
+  });
   appPluginsService = createAppPlugins({
     codexCli,
     cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
@@ -5490,6 +5496,7 @@ async function start() {
     missionWorkflowRuntime?.dispose();
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       findCodexExecutable: () => codexCli.executable() || findInstalledCodexExecutable?.() || null,
+      nativeGuardianReview,
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
       // Files the person attached (saved by launcher:save-attachment): reading one needs no review.

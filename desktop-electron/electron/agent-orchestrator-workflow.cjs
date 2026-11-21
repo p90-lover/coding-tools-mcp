@@ -498,7 +498,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -4801,20 +4801,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
     }
   }
-  // "Allow quota-based reviews" covers the reviews nobody chose: a screen action's review in a chat
-  // not on Approve for me (reviewToolCall's stand-in reviewer). Approve for me, a Team's approver
-  // and "Let the model judge" are the person's own choice of a model review, so they run with it
-  // off too. Until 2026-11-17 off stopped every review, and the judge with them (the user's call).
-  const quotaReviewBlocked = (approver) => {
-    const preferences = chatPreferences.get();
-    return preferences.meteredReviews || preferences.modelJudges || !approver?.standIn ? null : {
-      action: "ask", unresolved: true, quotaBlocked: true,
-      reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Turn on Allow quota-based reviews or Let the model judge in Settings > Chat, choose Approve for me for this chat, or answer this request yourself. Native Codex Auto-review is separate.",
-    };
-  };
+  function quotaReviewBlocked(reason = "Quota-based reviews are off. CPA reviews use account quota. This request needs your approval.") {
+    return chatPreferences.get().meteredReviews ? null : { action: "ask", unresolved: true, quotaBlocked: true, reason };
+  }
+
+  async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, blocked) {
+    const manual = reason => ({ ...blocked, reason });
+    if (!nativeGuardianReview || partial || approver.settings?.instructions?.trim() || approval.source !== "ao"
+      || approval.kind !== "command" || !["Bash", "PowerShell"].includes(approval.tool) || !approval.turn_id
+      || !approval.cwd || approval.guardianUnsupported || gitPushRequest(approval.command)) return blocked;
+    const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
+    await verifyCurrent();
+    if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
+    const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
+    if (!outcome || !["allow", "deny"].includes(outcome.action)) return manual(outcome?.reason || blocked.reason);
+    const observed = await harnessService().observe(approval.thread_id, approval.turn_id).catch(() => null);
+    await verifyCurrent();
+    const current = observed?.turnId === approval.turn_id && observed.approvals?.find(value => value.approval_id === approval.approval_id);
+    const fields = ["turn_id", "kind", "source", "tool", "command", "cwd", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions", "decisions"];
+    if (!current || fields.some(field => JSON.stringify(current[field]) !== JSON.stringify(approval[field]))) {
+      return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
+    }
+    return { ...outcome, reason: publicText(outcome.reason, 300) };
+  }
+
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
-    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+    const quotaBlocked = quotaReviewBlocked();
+    if (quotaBlocked) return reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, quotaBlocked);
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -4940,7 +4954,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let failure = null;
     for (const model of candidates) {
-      if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+      if (quotaReviewBlocked()) return quotaReviewBlocked();
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
@@ -4957,7 +4971,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
         check();
-        if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+        if (quotaReviewBlocked()) return quotaReviewBlocked();
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -4984,7 +4998,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reviewerFailed(model, error);
       }
     }
-    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+    if (quotaReviewBlocked()) return quotaReviewBlocked();
     throw failure;
   }
 
@@ -5040,7 +5054,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }, () => owned && !sessionStops.has(thread) && !backgroundRuns.get(sessionOwners.get(thread))?.stopped);
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: toolName, message: publicText(error?.message || error, 200) });
-      return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
+      return quotaReviewBlocked() || (judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" });
     }
   }
   /**
@@ -5247,6 +5261,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // summary the reviewer reads.
     const denial = requestDenial(approval);
     const blocked = Boolean(denial);
+    if (!blocked && approval.guardianRequiresHuman === true) {
+      approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, judged: true, reason: "The harness requires your decision for this request." });
+      if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
+      return null;
+    }
     // The command advisor must not decide from a truncated command or permission scope.
     const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
       || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
