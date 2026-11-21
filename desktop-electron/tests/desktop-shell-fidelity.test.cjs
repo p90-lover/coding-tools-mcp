@@ -43,7 +43,7 @@ test("the main shell keeps the original Coding Tools navigation order", () => {
   assert.match(i18n, /product: "Coding Tools"/);
 });
 
-test("the Browser sidebar still is never covered by a loading panel", () => {
+test("the Browser toolbar reveals a signed-out page and preserves the sidebar still", () => {
   const ts = require("typescript"), vm = require("node:vm");
   const file = ts.createSourceFile("App.tsx", read("src/App.tsx"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const surface = file.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "BrowserSurface");
@@ -52,18 +52,26 @@ test("the Browser sidebar still is never covered by a loading panel", () => {
   const components = ["BrowserAccountSwitcher", "BrowserAddressBar", "StateDot", "BrandMark", "PrimaryButton", "SecondaryButton", "ManualTurnGuide", "ChromeLoginNotice"];
   // ChromeLoginNotice.tsx's helpers (#1095): no Chrome sign-in is under way here.
   const chromeLogin = { chromeLoginPending: () => false, chromeLoginContinuationPending: () => false, chromeLoginWaitingForClose: () => false };
+  const actions = [];
+  let visible = false;
+  const api = {
+    async showBrowser() { actions.push("show"); visible = true; },
+    async hideBrowser() { actions.push("hide"); visible = false; },
+    async openPasskeyLogin() { actions.push("sign in"); },
+  };
   vm.runInNewContext(ts.transpileModule(surface.getText(file) + "\nexports.BrowserSurface = BrowserSurface;", {
     compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, {
-    exports, api: {}, ...Object.fromEntries(components.map(name => [name, name])), ...chromeLogin, formatBrowserAddress: (url) => url ?? "",
+    exports, api, ...Object.fromEntries(components.map(name => [name, name])), ...chromeLogin, formatBrowserAddress: (url) => url ?? "",
     useState: value => [value, () => {}], useEffect() {},
     require: name => name === "react/jsx-runtime" ? { jsx, jsxs: jsx } : {},
   });
   const walk = item => !item || typeof item !== "object" ? [] : Array.isArray(item) ? item.flatMap(walk) : [item, ...walk(item.props?.children)];
   const still = "data:image/jpeg;base64,AAAA";
   const render = browser => walk(exports.BrowserSurface({
-    browser: { tabs: [], status: "ready", ...browser }, still, browserSlotRef() {},
-    copy: { loading: "Loading..." }, interactionMode: "automatic", operation: null, platform: "win32", setError() {},
+    browser: { tabs: [], status: "signed-out", authenticated: false, visible, ...browser }, still, browserSlotRef() {},
+    copy: { loading: "Loading...", showBrowser: "Show browser", hideBrowser: "Hide browser" },
+    interactionMode: "automatic", operation: null, platform: "win32", setError: assert.fail,
   }));
   for (const loading of [false, true]) {
     const shown = render({ visible: true, loading });
@@ -71,9 +79,22 @@ test("the Browser sidebar still is never covered by a loading panel", () => {
     assert.ok(!shown.some(item => item.props.className === "browser-underlay"), "an opaque later sibling painted over the still during hover");
     assert.equal(shown.filter(item => item.type === "span" && item.props.className === "gpb-muted" && item.props.children === "Loading...").length, loading ? 1 : 0, "real navigation keeps its toolbar loading indicator");
   }
-  const hidden = render({ visible: false });
+  const toolbarButton = (nodes, label) => {
+    const toolbar = nodes.find(item => item.props.className === "gpb-bar");
+    const button = walk(toolbar).find(item => item.type === "button" && item.props.children === label);
+    assert.ok(button, `${label} is in the toolbar`);
+    assert.equal(button.props.disabled, false);
+    return button;
+  };
+  const hidden = render();
   assert.ok(hidden.some(item => item.props.className === "browser-empty"));
   assert.ok(!hidden.some(item => item.props.className === "browser-still"), "a closed browser never shows an old captured page");
+  toolbarButton(hidden, "Show browser").props.onClick();
+  const shown = render();
+  assert.ok(!shown.some(item => item.props.className === "browser-empty"));
+  toolbarButton(shown, "Hide browser").props.onClick();
+  assert.ok(render().some(item => item.props.className === "browser-empty"));
+  assert.deepEqual(actions, ["show", "hide"], "showing the browser doesn't start Chrome sign-in");
 });
 
 test("the error toast says a runtime timeout in words and seconds", () => {
