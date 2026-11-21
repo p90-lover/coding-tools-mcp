@@ -3278,13 +3278,18 @@ test("a chat's timeline reads CPA's key once, not once per field, and still reda
       throw new Error(`unexpected ${endpoint}`);
     },
     cpaConnection: () => { reads += 1; return { baseUrl: "http://127.0.0.1:8317", proxyApiKey: key }; },
-    aoHarness: { timeline: async () => Array.from({ length: 300 }, (_, index) => ({ id: `c${index}`, kind: "command", status: "completed",
-      text: `curl -H x-key:${key} url`, description: `step ${index}`, input: `{"k":"${key}"}`, output: `echo ${key}` })) },
+    aoHarness: { timeline: async () => [
+      ...Array.from({ length: 300 }, (_, index) => ({ id: `c${index}`, kind: "command", status: "completed",
+        text: `curl -H x-key:${key} url`, description: `step ${index}`, input: `{"k":"${key}"}`, output: `echo ${key}` })),
+      { id: "ao:plan:turn-1", kind: "plan", text: "", status: "completed", plan: [{ text: `Read setup for ${key}`, status: "completed" }] },
+    ] },
     confirm: async () => true,
   });
   const { timeline } = await workflow.call("turn_timeline", { workspaceId: "ws-1", runId: "run-1", nodeId: "p" });
-  assert.equal(timeline.length, 300);
-  assert.doesNotMatch(JSON.stringify(timeline), new RegExp(key), "the key is redacted from every field");
+  assert.equal(timeline.length, 301);
+  assert.equal(timeline.at(-1).plan[0].status, "completed");
+  assert.match(timeline.at(-1).plan[0].text, /^Read setup for /);
+  assert.doesNotMatch(JSON.stringify(timeline), new RegExp(key), "the key is redacted from every field, including plan steps");
   assert.ok(reads <= 2, `CPA's connection was read ${reads} times for one timeline`);
 });
 
