@@ -1,0 +1,12 @@
+diff --git a/backend/internal/adapters/chatdriver/acp/client.go b/backend/internal/adapters/chatdriver/acp/client.go
+--- a/backend/internal/adapters/chatdriver/acp/client.go
++++ b/backend/internal/adapters/chatdriver/acp/client.go
+@@ -202,7 +202,8 @@ func approvalToolDetail(tool acpsdk.ToolCallUpdate, activityKind domain.ActivityK
+ 		detail["input"] = tool.RawInput
+ 	}
+ 	if claude := nestedMap(tool.Meta, "claudeCode"); claude != nil {
+ 		copyDetail(detail, claude, "toolName", "providerToolName")
++		copyDetail(detail, claude, "guardianContext", "guardianContext")
+ 	}
+ 	encoded, err := json.Marshal(detail)
+ 	if err != nil {

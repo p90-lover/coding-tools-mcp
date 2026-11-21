@@ -1035,6 +1035,10 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           .filter(decision => typeof decision?.id === "string" && typeof decision?.kind === "string")
           .map(decision => ({ id: decision.id.slice(0, 200), kind: decision.kind.slice(0, 40), label: String(decision.label || decision.kind).slice(0, 120) }));
         const command = typeof input.command === "string" && input.command.trim() ? input.command : "";
+        const cwd = typeof detail.guardianContext?.cwd === "string" ? detail.guardianContext.cwd : "";
+        const mismatchedDirs = [input.cwd, input.workdir].some(value => typeof value === "string" && value !== cwd);
+        const shellOptions = command && (mismatchedDirs || input.dangerouslyDisableSandbox === true || input.run_in_background === true
+          || Object.keys(input).some(key => !["command", "cwd", "workdir", "description", "timeout", "dangerouslyDisableSandbox", "run_in_background"].includes(key)));
         const path = typeof input.file_path === "string" ? input.file_path : typeof input.path === "string" ? input.path : "";
         // Claude Code's ExitPlanMode asks to leave plan mode with the plan it wrote; each offered
         // decision is a different way to go on (auto, accept edits, ask for edits, keep planning).
@@ -1044,7 +1048,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // AO's ACP approvals for an MCP tool carry no toolName, only the name as the activity's
         // summary (seen live: subjectKind "mcp_tool", toolKind "other"). Without it the input was
         // dropped, so the reviewer saw an exec_command with no command and answered "ask".
-        const toolName = String(detail.toolName || activity.summary || "");
+        const toolName = String(detail.toolName || detail.providerToolName || activity.summary || "");
         // Its card and the reviewer get the label and a count, never the secrets it hides.
         if (REDACT_TOOL.test(toolName)) input = hiddenSecretsInput(input);
         const arguments_ = Object.keys(input).length ? JSON.stringify(input) : "";
@@ -1066,9 +1070,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
           ...(reviewTruncated ? { reviewTruncated: true } : {}),
           ...(typeof activity.createdAt === "string" ? { since: activity.createdAt } : {}),
           ...(command ? { command } : {}), ...(path ? { path: utf8Prefix(path, 1000) } : {}),
+          ...(cwd && Buffer.byteLength(cwd, "utf8") <= 2048 ? { cwd } : {}),
+          ...(shellOptions ? { guardianUnsupported: true } : {}),
+          ...(detail.guardianContext?.requiresHuman === true ? { guardianRequiresHuman: true } : {}),
           ...(typeof input.description === "string" ? { reason: utf8Prefix(input.description, 500) } : {}),
           // The tool's own name when AO has it; otherwise its summary ("PowerShell") rather than ACP's "other".
-          tool: String(detail.toolName || (detail.toolKind && detail.toolKind !== "other" ? detail.toolKind : activity.summary) || "tool").slice(0, 80),
+          tool: String(detail.toolName || detail.providerToolName || (detail.toolKind && detail.toolKind !== "other" ? detail.toolKind : activity.summary) || "tool").slice(0, 80),
           // An approval AO holds outside a turn has no turnId: the key is left out, since the IPC
           // response schema refuses an undefined value ("pending_approvals[0].turn_id must be a JSON
           // value") and the whole status read failed with it.

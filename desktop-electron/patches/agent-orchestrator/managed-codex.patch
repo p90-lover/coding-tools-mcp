@@ -1,0 +1,13 @@
+diff --git a/backend/internal/adapters/agent/codex/codex.go b/backend/internal/adapters/agent/codex/codex.go
+--- a/backend/internal/adapters/agent/codex/codex.go
++++ b/backend/internal/adapters/agent/codex/codex.go
+@@ -358,6 +358,9 @@ func ResolveCodexBinary(ctx context.Context) (string, error) {
+ 	}
+
+ 	if runtime.GOOS == "windows" {
++		if managed := os.Getenv("CODING_TOOLS_MANAGED_CODEX_EXE"); filepath.IsAbs(managed) && strings.EqualFold(filepath.Base(managed), "codex.exe") && fileExists(managed) {
++			return managed, nil
++		}
+ 		candidates := []string{}
+ 		if appData := os.Getenv("APPDATA"); appData != "" {
+ 			shim := filepath.Join(appData, "npm", "codex.cmd")

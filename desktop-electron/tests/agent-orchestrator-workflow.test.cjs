@@ -8036,6 +8036,79 @@ test("retrying a chat whose grant is spent gets a fresh grant and continues the 
   assert.match(sent[0]?.[1] ?? "", /interrupted before it finished.*Continue the same task/s);
 });
 
+test("manual Retry starts the last answer again with earlier replies but none of its old attempts", async (t) => {
+  for (const status of ["failed", "finished"]) await t.test(status, async (child) => {
+    const route = { harness_id: "ao:claude-code", model: "cpa/test-model", permission_profile: ":ao-default" };
+    const description = "Give me a color\n\nFollow-up (2026-10-10 10:00 UTC):\nUse that color in a haiku";
+    const makeRun = (id, state, answer) => ({
+      id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+      nodes: [{ id: "one", role: "planner", parents: [], route, state, history: [],
+        ...(answer ? { receipt: { thread_id: id + "-session", answer } } : {}) }],
+    });
+    const first = makeRun("first", "finished", "The color is cobalt.");
+    const previous = makeRun("previous-try", "finished", "An older attempt at the haiku.");
+    const latest = { ...makeRun("last-try", status, "Leave this take on the haiku out."), restarts_run_id: previous.id };
+    const world = chatWorld({ runs: [first, previous, latest], tasks: [{ id: "task-1", title: "Poem", description }] });
+    const digest = "a".repeat(64), spawned = [], sent = [];
+    let selected = latest;
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: digest }),
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true,
+          runs: body.run_id ? world.runs.filter(run => run.id === body.run_id) : world.runs,
+          worker_capacity: { [selected.id]: 1 } };
+        if (endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team") {
+          selected = makeRun(body.change.run_id, "pending");
+          world.runs.push(selected);
+          return { ok: true, run: selected };
+        }
+        const card = selected.nodes[0];
+        if (endpoint === "/api/v1/ao/control") {
+          assert.equal(body.action, "retry");
+          card.history.push(card.receipt);
+          card.receipt = null;
+          card.state = "pending";
+          return { ok: true, run: selected };
+        }
+        if (endpoint === "/api/v1/ao/grant") return { ok: true, run: selected, grant: { executable_sha256: digest } };
+        if (endpoint === "/api/v1/ao/external/reserve") {
+          card.state = "reserved";
+          return { ok: true, request_key: "retry-key", prompt: description };
+        }
+        if (endpoint === "/api/v1/ao/external/submitted") {
+          card.state = "running";
+          card.receipt = { thread_id: body.session_id };
+          return { ok: true, run: selected };
+        }
+        if (endpoint === "/api/v1/ao/external/terminal") {
+          card.state = "finished";
+          return { ok: true, run: selected };
+        }
+        return world.requestHeadless(endpoint, body);
+      },
+      aoHarness: {
+        spawn: async input => { spawned.push(input); return "fresh-session"; },
+        continuable: async () => true,
+        send: async (id, text) => { sent.push([id, text]); return { turnId: "continued" }; },
+        observe: async (_id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "New haiku" }),
+      },
+    });
+    child.after(() => workflow.dispose());
+    const args = { workspaceId: "ws-1", runId: latest.id };
+    if (status === "failed") await workflow.call("control_run", { ...args, action: "retry" });
+    const result = await workflow.call(status === "failed" ? "start_run" : "restart_run", args);
+    assert.equal(result.status, "running");
+    for (let tries = 0; tries < 200 && !spawned.length && !sent.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(sent, [], "the existing session must not continue its last attempt");
+    assert.equal(spawned.length, 1);
+    assert.match(spawned[0].prompt, /The color is cobalt\./, "the earlier answer remains in context");
+    assert.match(spawned[0].prompt, /Use that color in a haiku$/);
+    assert.doesNotMatch(spawned[0].prompt, /older attempt|Leave this take|do not start over/i);
+    assert.deepEqual(world.edits, [], "Retry does not add or change a user message");
+  });
+});
+
 test("a turn that ends on the provider error the agent printed is saved with that error, so a refusal is not retried", async () => {
   // Seen 2026-11-16: Claude Code said "API Error: 400 Function tools with reasoning_effort are not
   // supported for gpt-6-astra in /v1/chat/completions" and exited. AO saved the turn as failed with
@@ -14556,6 +14629,55 @@ test("a rewind in a busy project reads the chat's own runs, not only the project
     ["first ask", "second ask"]);
 });
 
+
+test("a resend of the latest unsent message preserves all older replies and does not duplicate the saved message", async () => {
+  const description = "first ask\n\nFollow-up (2026-11-21 05:06 UTC):\nsecond ask"
+    + "\n\nFollow-up (2026-11-21 06:20 UTC):\nthird ask\n\nFollow-up (2026-11-21 06:31 UTC):\ngo and test in live";
+  const done = (id, stamp) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { started_at_ms: Date.parse(stamp), answer: id } }] });
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Search", description }], runs: [
+    done("r1", "2026-11-21T04:33:45Z"), done("r2", "2026-11-21T05:06:23Z"), done("r3", "2026-11-21T06:20:48Z"),
+  ] });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    findCodexExecutable: () => process.execPath, resolveHarness: async () => { throw new Error("offline fixture"); } });
+  try {
+    const sent = await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go and test in live",
+      rewind: { index: 3, description }, deferStart: true });
+    assert.ok(sent.runId);
+    assert.equal(world.tasks[0].description, description, "the saved user message is reused, not appended again");
+    assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["r1", "r2", "r3"],
+      "every earlier reply stays visible");
+    assert.equal(world.updates.filter(change => change.operation === "create_from_team").length, 1);
+  } finally { workflow.dispose(); }
+});
+
+test("a resend still rejects ambiguous history gaps without hiding replies or editing messages", async (t) => {
+  const description = "first ask\n\nFollow-up (2026-11-21 06:20 UTC):\nsecond ask\n\nFollow-up (2026-11-21 06:31 UTC):\nthird ask";
+  for (const scenario of ["same-minute", "missing-start", "older-message", "multiple-gaps", "task-read-failure"]) {
+    await t.test(scenario, async () => {
+      const done = (id, started) => ({ id, workspace_id: "ws-1", project_id: "task-1", cancelled: false,
+        nodes: [{ id: "lead", role: "planner", state: "finished", receipt: { started_at_ms: started } }] });
+      const runs = [done("r1", Date.parse("2026-11-21T06:00:00Z")),
+        done("r2", scenario === "missing-start" ? undefined : Date.parse(scenario === "same-minute" ? "2026-11-21T06:31:10Z" : "2026-11-21T06:20:10Z"))];
+      if (scenario === "multiple-gaps") runs.pop();
+      const world = chatWorld({ tasks: [{ id: "task-1", title: "Search", description }], runs });
+      const requestHeadless = async (endpoint, body) => {
+        if (scenario === "task-read-failure" && endpoint === "/api/v1/ao/read" && body.task_id) throw new Error("chat read unavailable");
+        return world.requestHeadless(endpoint, body);
+      };
+      const workflow = createAgentOrchestratorWorkflow({ requestHeadless, findCodexExecutable: () => process.execPath });
+      const older = scenario === "older-message";
+      try {
+        await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: older ? "second ask" : "third ask",
+          rewind: { index: older ? 1 : 2, description }, deferStart: true }), /still synchronizing/);
+        assert.equal(world.tasks[0].description, description);
+        assert.equal(world.edits.length, 0);
+        assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), runs.map(run => run.id));
+        assert.equal(world.updates.filter(change => change.operation === "create_from_team").length, 0);
+      } finally { workflow.dispose(); }
+    });
+  }
+});
 
 // 2026-11-06 to 11-11: one project past 100 tasks refused every new chat, "Couldn't find the new
 // chat's task. Refresh the board.", and each try left an empty task behind: the send looked for its

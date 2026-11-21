@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { assertSafeGo } = require("./go-toolchain.cjs");
+const { patchClaudeGuardianContext } = require("./claude-guardian-context.cjs");
 
 const projectRoot = path.resolve(__dirname, "../..");
 const sourceRoot = path.resolve(process.env.CODING_TOOLS_AO_SOURCE_DIR || path.join(projectRoot, "module", "agent-orchestrator"));
@@ -34,7 +35,12 @@ function buildAcpRuntime() {
   };
   const current = marker(built);
   if (!current) throw new Error("AO ACP runtime build produced no marker");
-  if (marker(acpOutputRoot) === current) return JSON.parse(current);
+  const patchedMarker = { ...JSON.parse(current), signature: crypto.createHash("sha256").update(current)
+    .update(fs.readFileSync(require.resolve("./claude-guardian-context.cjs"))).digest("hex") };
+  const patchedMarkerText = JSON.stringify(patchedMarker);
+  const adapterSubpath = path.join("node_modules", "@agentclientprotocol", "claude-agent-acp", "dist", "acp-agent.js");
+  if (marker(acpOutputRoot) === patchedMarkerText && fs.existsSync(path.join(acpOutputRoot, adapterSubpath))) return patchedMarker;
+  const patchedAdapter = patchClaudeGuardianContext(fs.readFileSync(path.join(built, adapterSubpath), "utf8"));
   // Retain the previous runtime in aiTemp/Trash (this repository never deletes build output).
   if (fs.existsSync(acpOutputRoot)) {
     const trash = path.join(projectRoot, "aiTemp", "Trash", "acp-runtime");
@@ -42,7 +48,9 @@ function buildAcpRuntime() {
     fs.renameSync(acpOutputRoot, path.join(trash, new Date().toISOString().replace(/[:.]/g, "-")));
   }
   fs.cpSync(built, acpOutputRoot, { recursive: true });
-  return JSON.parse(current);
+  fs.writeFileSync(path.join(acpOutputRoot, adapterSubpath), patchedAdapter);
+  fs.writeFileSync(path.join(acpOutputRoot, ".ao-acp-runtime.json"), patchedMarkerText);
+  return patchedMarker;
 }
 
 function run(command, arguments_, cwd, env = {}) {
@@ -125,7 +133,23 @@ async function main() {
   const goOutput = (arguments_) => spawnSync(goExecutable, arguments_, { encoding: "utf8", windowsHide: true, env: { ...process.env, GOTOOLCHAIN: "local" } }).stdout;
   assertSafeGo(goOutput(["env", "GOVERSION"]), `The Go toolchain (${goExecutable})`);
   const daemonPath = path.join(outputRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
-  run(goExecutable, ["build", "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "./cmd/ao"], path.join(sourceRoot, "backend"), {
+  const replace = {};
+  for (const [source, patchName] of [
+    ["backend/internal/adapters/agent/codex/codex.go", "managed-codex.patch"],
+    ["backend/internal/adapters/chatdriver/acp/client.go", "guardian-acp-context.patch"],
+  ]) {
+    const original = path.join(sourceRoot, source);
+    const overlay = path.join(stageRoot, source);
+    const patch = path.join(projectRoot, "desktop-electron", "patches", "agent-orchestrator", patchName);
+    fs.mkdirSync(path.dirname(overlay), { recursive: true });
+    fs.writeFileSync(overlay, fs.readFileSync(original, "utf8").replace(/\r\n/g, "\n"));
+    run("git", ["apply", "--check", "--directory=" + stageRelative, patch], projectRoot);
+    run("git", ["apply", "--directory=" + stageRelative, patch], projectRoot);
+    replace[original] = overlay;
+  }
+  const overlayFile = path.join(stageRoot, "daemon-overlay.json");
+  fs.writeFileSync(overlayFile, JSON.stringify({ Replace: replace }));
+  run(goExecutable, ["build", `-overlay=${overlayFile}`, "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "./cmd/ao"], path.join(sourceRoot, "backend"), {
     GOWORK: "off", GOTOOLCHAIN: "local",
   });
   assertSafeGo(goOutput(["version", daemonPath]), "The built AO daemon");

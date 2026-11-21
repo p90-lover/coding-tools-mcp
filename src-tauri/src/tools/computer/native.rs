@@ -928,7 +928,8 @@ mod fixture_test {
             .expect("idempotent receipt");
         assert_eq!(duplicate["already_executed"], true);
         assert_eq!(duplicate["replayed"], false);
-        let frame = super::super::record_frame(&lease).expect("real in-memory window capture");
+        let frame =
+            super::super::record_frame(&lease, false).expect("real in-memory window capture");
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(frame["base64"].as_str().unwrap())
             .unwrap();

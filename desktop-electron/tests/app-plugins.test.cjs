@@ -8,7 +8,11 @@ const { createAppPlugins, parsePluginFile, baseVersion } = require("../electron/
 const { installBundledCommandCodePlugin } = require("../electron/cpa-managed.cjs");
 
 const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
-const tempRoot = (name) => fs.mkdtempSync(path.join(__dirname, `../../aiTemp/${name}-`));
+const tempRoot = (name) => {
+  const dir = path.resolve(__dirname, "../../aiTemp");
+  fs.mkdirSync(dir, { recursive: true });
+  return fs.mkdtempSync(path.join(dir, `${name}-`));
+};
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 /** A fake GitHub: the release lists per repository, branch heads, and asset bytes behind a redirect. */
@@ -61,7 +65,7 @@ function fakeGitHub({ releases, assets = {}, branches = {}, compares = {}, defau
   return { fetchImpl, calls };
 }
 
-function setup({ releases, assets, branches, compares, defaultBranches, bundle = null, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null, aoManifest = null }) {
+function setup({ releases, assets, branches, compares, defaultBranches, bundle = null, files = {}, cpa = { version: "8.0.46", latest: "8.0.51", available: true }, antigravityCli = () => null, rtk = null, aoManifest = null, codexCli = null }) {
   const root = tempRoot("app-plugins");
   const stateDir = path.join(root, "cpa");
   const pluginDir = path.join(stateDir, "plugins", "windows", "amd64");
@@ -84,7 +88,8 @@ function setup({ releases, assets, branches, compares, defaultBranches, bundle =
     updateManagedComponent: async (id, options) => { updates.push([id, options]); return { swapped: true, from: cpa.version, to: cpa.latest }; },
   };
   const plugins = createAppPlugins({
-    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk, agentOrchestratorRoot: () => aoRoot,
+    cpaStateDir: stateDir, services: () => services, restartCpa: async () => { restarts += 1; }, antigravityCli, rtk, codexCli,
+    agentOrchestratorRoot: () => aoRoot,
     fetchImpl: github.fetchImpl, env: { GH_TOKEN: "ghp_testtoken0123456789abcdef" }, spawnImpl: () => { throw new Error("no gh"); },
     platform: "win32", arch: "x64", logger: { info() {} }, pluginBundleFile,
   });
@@ -92,6 +97,34 @@ function setup({ releases, assets, branches, compares, defaultBranches, bundle =
 }
 
 const release = (tag, assets = [], extra = {}) => ({ tag_name: tag, draft: false, prerelease: false, html_url: `https://github.com/x/releases/tag/${tag}`, assets, ...extra });
+
+test("App plugins offers Codex's stable version and installs manually or only when opted in", async (t) => {
+  let version = "0.164.0", latest = "0.171.0";
+  const installs = [];
+  const codexCli = {
+    status: async () => ({ version, supported: true, managed: installs.length > 0, installing: false }),
+    latest: async () => ({ version: latest, supported: true, url: `https://github.com/openai/codex/releases/tag/rust-v${latest}` }),
+    install: async (release) => { installs.push(release.version); version = release.version; return { version }; },
+  };
+  const { plugins, root, restarts } = setup({ codexCli, releases: {} });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const codex = (result) => result.items.find((item) => item.id === "codex-cli");
+  const available = codex(await plugins.list());
+  assert.deepEqual([available.installed, available.latest, available.canUpdate, available.autoUpdatable, available.autoUpdate],
+    ["0.164.0", "0.171.0", true, true, false]);
+  assert.deepEqual((await plugins.autoUpdateNow()).results, []);
+  await plugins.setAutoUpdate("codex-cli", true);
+  const result = await plugins.autoUpdateNow();
+  assert.deepEqual(result.results.map(({ id, from, to, ok }) => ({ id, from, to, ok })),
+    [{ id: "codex-cli", from: "0.164.0", to: "0.171.0", ok: true }]);
+  assert.equal(codex(result).updateAvailable, false);
+  assert.match(codex(result).note, /daemon next starts/);
+  await plugins.setAutoUpdate("codex-cli", false);
+  latest = "0.172.0";
+  assert.equal(codex(await plugins.update("codex-cli")).installed, "0.172.0");
+  assert.deepEqual(installs, ["0.171.0", "0.172.0"]);
+  assert.equal(restarts(), 0);
+});
 
 test("a plugin's id and version come from its DLL's name", () => {
   assert.deepEqual(parsePluginFile("cpa-provider-manager-v0.2.1.dll"), { id: "cpa-provider-manager", version: "0.2.1" });

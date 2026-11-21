@@ -499,7 +499,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, inputJournal = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, inputJournal = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -646,7 +646,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const dispatching = new Set();
   // runId -> { session, text }: a single-model follow-up that continues its chat's live AO session.
   const continuations = new Map();
-  // What a retried chat's own session is told: its last turn ended early, and it should go on.
+  // Only automatic recovery should continue a turn with its unfinished answer in context.
   const RETRY_CONTINUE_TEXT = "Your previous turn was interrupted before it finished (the app restarted or the step failed). "
     + "Continue the same task from where you left off; do not start over or repeat work that is already done.";
   // runId -> { workspaceId, taskId }: a follow-up whose agent may start fresh; a fresh start gets
@@ -2156,7 +2156,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt) - utf8Bytes(standing.text);
         if (!sent?.turnId && handoff) stage("summarising the chat for a new agent");
         const prompt = standing.text + (!sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom).catch(() => "")) + reserved.prompt : reserved.prompt);
+          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom, handoff.retryOf).catch(() => "")) + reserved.prompt : reserved.prompt);
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
@@ -2562,6 +2562,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return {
       ...project,
       runs: [...project.runs.filter(run => run.project_id !== task), ...own.runs.filter(run => run.project_id === task)],
+      sendTaskRuns: task,
       ...(lifecycle.length ? { task_lifecycle: [...(project.task_lifecycle ?? []).filter(item => item?.task_id !== task), ...lifecycle] } : {}),
     };
   }
@@ -3735,10 +3736,6 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     clock.mark("control");
     if (action === "stop") releaseNativePreviews(id, run);
-    // A retried single-model chat continues its agent's own session, which already holds the
-    // conversation and what it read and ran: launching a fresh one began the task again from
-    // nothing. The retry moved the card's receipt into its history; a session that is gone or
-    // refuses the message still falls back to a fresh start (dispatchExternal).
     // The run is running again: a round its goal judged before is judged again when it settles.
     if (["retry", "retry_auto", "resume"].includes(action) && result.run) reopenGoalRound(id, result.run);
     // A person's retry is a fresh attempt: "Retry automatically" covers its failures again. The app's
@@ -3747,15 +3744,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if ((action === "retry" || action === "retry_auto") && !automatic) autoRetryCancelled.delete(runKey(id, run));
     if ((action === "retry" || action === "retry_auto") && result.run?.execution_mode === "single") {
       const card = result.run.nodes?.[0];
-      const session = card?.state === "pending" && externalAgent(card) ? card.history?.at(-1)?.thread_id : null;
-      if (typeof session === "string" && session && !continuations.has(run)) {
-        continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
-        if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
-        // A session that cannot be continued starts a fresh agent: it begins with the chat so far, as
-        // a follow-up's does, not with the step's first prompt alone.
-        if (result.run.project_id && !handoffs.has(run)) {
-          handoffs.set(run, { workspaceId: id, taskId: result.run.project_id });
-          if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+      const taskId = result.run.project_id;
+      if (card?.state === "pending" && externalAgent(card)) {
+        const session = card.history?.at(-1)?.thread_id;
+        if (action === "retry" && !automatic && taskId) {
+          queueRetryHandoff(id, taskId, run);
+        } else if (typeof session === "string" && session && !continuations.has(run) && !handoffs.get(run)?.retryOf) {
+          continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
+          if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+          if (taskId && !handoffs.has(run)) {
+            handoffs.set(run, { workspaceId: id, taskId });
+            if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+          }
         }
       }
     }
@@ -4814,20 +4814,34 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
     }
   }
-  // "Allow quota-based reviews" covers the reviews nobody chose: a screen action's review in a chat
-  // not on Approve for me (reviewToolCall's stand-in reviewer). Approve for me, a Team's approver
-  // and "Let the model judge" are the person's own choice of a model review, so they run with it
-  // off too. Until 2026-11-17 off stopped every review, and the judge with them (the user's call).
-  const quotaReviewBlocked = (approver) => {
-    const preferences = chatPreferences.get();
-    return preferences.meteredReviews || preferences.modelJudges || !approver?.standIn ? null : {
-      action: "ask", unresolved: true, quotaBlocked: true,
-      reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Turn on Allow quota-based reviews or Let the model judge in Settings > Chat, choose Approve for me for this chat, or answer this request yourself. Native Codex Auto-review is separate.",
-    };
-  };
+  function quotaReviewBlocked(reason = "Quota-based reviews are off. CPA reviews use account quota. This request needs your approval.") {
+    return chatPreferences.get().meteredReviews ? null : { action: "ask", unresolved: true, quotaBlocked: true, reason };
+  }
+
+  async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, blocked) {
+    const manual = reason => ({ ...blocked, reason });
+    if (!nativeGuardianReview || partial || approver.settings?.instructions?.trim() || approval.source !== "ao"
+      || approval.kind !== "command" || !["Bash", "PowerShell"].includes(approval.tool) || !approval.turn_id
+      || !approval.cwd || approval.guardianUnsupported || gitPushRequest(approval.command)) return blocked;
+    const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
+    await verifyCurrent();
+    if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
+    const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
+    if (!outcome || !["allow", "deny"].includes(outcome.action)) return manual(outcome?.reason || blocked.reason);
+    const observed = await harnessService().observe(approval.thread_id, approval.turn_id).catch(() => null);
+    await verifyCurrent();
+    const current = observed?.turnId === approval.turn_id && observed.approvals?.find(value => value.approval_id === approval.approval_id);
+    const fields = ["turn_id", "kind", "source", "tool", "command", "cwd", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions", "decisions"];
+    if (!current || fields.some(field => JSON.stringify(current[field]) !== JSON.stringify(approval[field]))) {
+      return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
+    }
+    return { ...outcome, reason: publicText(outcome.reason, 300) };
+  }
+
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
-    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+    const quotaBlocked = quotaReviewBlocked();
+    if (quotaBlocked) return reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, quotaBlocked);
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -4953,7 +4967,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let failure = null;
     for (const model of candidates) {
-      if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+      if (quotaReviewBlocked()) return quotaReviewBlocked();
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
@@ -4970,7 +4984,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
         check();
-        if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+        if (quotaReviewBlocked()) return quotaReviewBlocked();
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -4997,7 +5011,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reviewerFailed(model, error);
       }
     }
-    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
+    if (quotaReviewBlocked()) return quotaReviewBlocked();
     throw failure;
   }
 
@@ -5053,7 +5067,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }, () => owned && !sessionStops.has(thread) && !backgroundRuns.get(sessionOwners.get(thread))?.stopped);
     } catch (error) {
       logger?.warn?.("ao.tool_review_failed", { tool: toolName, message: publicText(error?.message || error, 200) });
-      return judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" };
+      return quotaReviewBlocked() || (judges ? { action: "deny", reason: "The reviewer could not answer, and Let the model judge is on" } : { action: "ask", reason: "The reviewer could not answer" });
     }
   }
   /**
@@ -5261,6 +5275,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // summary the reviewer reads.
     const denial = requestDenial(approval);
     const blocked = Boolean(denial);
+    if (!blocked && approval.guardianRequiresHuman === true) {
+      approverAdvice.set(approval.approval_id, { action: "ask", unresolved: true, judged: true, reason: "The harness requires your decision for this request." });
+      if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
+      return null;
+    }
     // The command advisor must not decide from a truncated command or permission scope.
     const incomplete = approval.reviewTruncated === true || request.length > REVIEW_REQUEST_LIMIT
       || publicText(request, REVIEW_REQUEST_LIMIT + 1) !== request
@@ -6788,6 +6807,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const missingModel = missingModelNotice(team);
       if (missingModel) return { ok: false, reason: missingModel };
     }
+    const retryLastReply = single && externalAgent({ route: singleRoute })
+      && saved.runs.findLast(run => run.project_id === mission.project_id)?.id === previous;
     // Asked for by the person (Retry, or Restart, on what the composer has now): it takes over a
     // pending automatic retry rather than wait for it to run the old setup.
     await retireOpenRuns(id, mission.project_id, saved.runs, { supersedeRetry: true });
@@ -6796,6 +6817,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         : mission.team?.id ? { executionMode: "team" } : {});
     // The new run answers the same message: the chat shows it there, not under the next message.
     chatEdits.restarted(id, mission.project_id, previous, next);
+    if (retryLastReply) queueRetryHandoff(id, mission.project_id, next, previous);
     try {
       const started = await startRun({ workspaceId: id, runId: next, executable: selectedExecutable });
       return { ok: true, runId: next, status: started.status };
@@ -7376,11 +7398,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           // reply goes. A compacted chat keeps every run but one summary in place of its earlier
           // messages: its oldest runs answer messages it no longer has, and they stay. Counted equal,
           // every compacted chat (22 of 160 on 2026-11-11, goal chats above all) refused each rewind,
-          // "still synchronizing", however often it was reloaded. Fewer runs than messages stays
-          // refused: the chat shows that by the minute, and a rewind must not guess.
+          // "still synchronizing", however often it was reloaded. Missing runs remain ambiguous
+          // unless only the last message lacks a run and every existing run predates its minute.
           const summarized = roots.length - bodies.length;
-          if (summarized < 0) throw new Error("This chat's messages are still synchronizing; reload before rewind");
-          const hidden = new Set(roots.slice(summarized + rewind.index).map(run => run.id));
+          const selectedAt = rewind.index > 0 ? Date.parse(`${marks[rewind.index - 1][1].replace(" ", "T")}:00Z`) : NaN;
+          const unsentLast = saved.sendTaskRuns === task && summarized === -1 && rewind.index === bodies.length - 1
+            && roots.every(run => {
+              const starts = (run.nodes ?? []).map(node => node.receipt?.started_at_ms).filter(value => Number.isFinite(value) && value > 0);
+              return starts.length > 0 && Number.isFinite(selectedAt) && Math.min(...starts) < selectedAt;
+            });
+          if (summarized < 0 && !unsentLast) throw new Error("This chat's messages are still synchronizing; reload before rewind");
+          const hidden = new Set((unsentLast ? [] : roots.slice(summarized + rewind.index)).map(run => run.id));
           for (let size = -1; size !== hidden.size;) {
             size = hidden.size;
             for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
@@ -9393,9 +9421,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const handoffSummaries = new Map(); // JSON [workspace, task] -> { covered, count, summary }
   const HANDOFF_INPUT_BYTES = 200 * 1024;
   const repliesHash = (items) => createHash("sha256").update(items.join("\n\n")).digest("hex");
-  async function chatHandoff(workspaceId, taskId, runId, maxBytes) {
-    const saved = await runs({ workspaceId });
-    const earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && run.id !== runId));
+  function queueRetryHandoff(workspaceId, taskId, runId, retryOf = runId) {
+    continuations.delete(runId);
+    handoffs.set(runId, { workspaceId, taskId, retryOf });
+    if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+  }
+  async function chatHandoff(workspaceId, taskId, runId, maxBytes, retryOf) {
+    const saved = await runs({ workspaceId, ...(retryOf ? { taskId } : {}) });
+    let earlier = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId && (retryOf || run.id !== runId)));
+    if (retryOf) {
+      // All replacement attempts belong to the same user turn; none is earlier context for Retry.
+      let cutoff = earlier.findIndex(run => run.id === retryOf);
+      while (cutoff >= 0) {
+        const attempt = earlier[cutoff];
+        const parent = attempt.restarts_run_id || attempt.replaces_run_id;
+        if (!parent) break;
+        cutoff = earlier.findIndex((run, index) => index < cutoff && run.id === parent);
+      }
+      earlier = earlier.slice(0, Math.max(cutoff, 0));
+    }
     const replies = [];
     for (const run of earlier) {
       for (const node of run.nodes || []) {
