@@ -1316,6 +1316,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // nodeKey -> { at, pending }: the run loop's latest view of an AO card's parked tool requests.
   const pendingFrames = new Map();
   const aoPending = (node, session, observed) => (observed?.approvals || []).map(approval => ({ ...approval, nodeId: node.id, thread_id: session }));
+  const nativeApproval = approval => typeof approval?.thread_id === "string" && approval.thread_id.startsWith("native:");
   // Any card (orchestrator, worker or reviewer) on an AO harness runs as an AO session.
   const externalAgent = (node) => typeof node?.route?.harness_id === "string"
     && node.route.harness_id.startsWith("ao:") ? node.route.harness_id.slice(3) : null;
@@ -2756,14 +2757,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const frame = pendingFrames.get(key);
       // A quiet frame is the loop's latest word until its next observation is due (QUIET_OBSERVE_MS
       // and one pass): asking AO again in between would bring back the reads it spared.
-      if (frame && Date.now() - frame.at < (frame.quiet ? QUIET_OBSERVE_MS + 500 : 1500)) {
+      if (frame && !nativeApproval({ thread_id: frame.node?.receipt?.thread_id }) && !frame.pending.some(nativeApproval)
+        && Date.now() - frame.at < (frame.quiet ? QUIET_OBSERVE_MS + 500 : 1500)) {
         return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending, frame.mission ? frame : null) } };
       }
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
       if (found && externalAgent(found.node)) {
         const session = found.node.receipt?.thread_id;
+        const turn = nativeApproval({ thread_id: session }) ? found.node.receipt?.turn_id || expectedTurns.get(session) : expectedTurns.get(session);
         const observed = found.node.state === "running" && session
-          ? await harnessService().observe(session, expectedTurns.get(session)).catch(() => ({})) : {};
+          ? await harnessService().observe(session, turn).catch(() => ({})) : {};
         return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed), found) } };
       }
     }
@@ -3549,14 +3552,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const approving = chosen ? !offered.kind.startsWith("reject") : allow;
       // The person answered on the request's card; the app may confirm it once more (a dialog the
       // person can turn off with "Don't ask again"), still only from the focused window.
-      if (!await (confirmToolRequest ?? confirm)({
+      const native = nativeApproval(pending);
+      if (native && !pending.turn_id) throw new Error("Native approval is missing its original turn identity");
+      if (!await (native ? confirm : (confirmToolRequest ?? confirm))({
         message: chosen ? `${offered.label}?` : approving ? "Allow this tool request once?" : "Deny this tool request?",
         detail: `Run: ${run}
 Node: ${node}
 Tool: ${pending.tool}
 ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pending.path}` : `Request: ${pending.summary}`}`,
       })) return { ok: false, cancelled: true };
-      await harnessService().resolveApproval(pending.thread_id, approval, decision);
+      if (native) await harnessService().resolveApproval(pending.thread_id, approval, decision, "", { workspaceId: id, turnId: pending.turn_id });
+      else await harnessService().resolveApproval(pending.thread_id, approval, decision);
       // The person has looked at this chat's requests: the next one is the reviewer's again.
       reviewDenials.delete(pending.thread_id);
       rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
@@ -4428,7 +4434,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const withAdvice = (approvals, card = null) => Array.isArray(approvals)
     // A status read already in flight can return the request after its answer was sent. Do not
     // offer that answered request again; advice alone (including a failed send) never removes it.
-    ? approvals.filter((item) => !approverAdvice.get(item?.approval_id)?.resolved).map((item) => {
+    ? approvals.filter((item) => nativeApproval(item) || !approverAdvice.get(item?.approval_id)?.resolved).map((item) => {
+      if (nativeApproval(item)) return item;
       // Modern native commands carry escalation scope separately from item/permissions requests.
       const request = item?.request;
       const scoped = item?.kind === "command" && request
@@ -5081,7 +5088,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Whether a pending request waits on the person, not on a reviewer that answers it for them. */
   function approvalNeedsPerson(mission, node, approval) {
-    if (["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
+    if (nativeApproval(approval) || ["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
     const approver = cardApprover(mission, node);
     if (!approver || approver.settings?.auto_decide !== true) return true;
     // "Approve for me" answers what its reviewer allows or denies. What the reviewer cannot decide
@@ -5176,7 +5183,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // A question the agent asked is the person's to answer: never screened or answered for them.
         // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
-        const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
+        const screened = !nativeApproval(approval) && !["question", "plan"].includes(approval?.kind)
+          && (approval?.kind === "command" || approval?.source === "ao");
         if (!screened || !approval.approval_id || !rescreen(approverAdvice.get(approval.approval_id)) || screening.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
@@ -5482,7 +5490,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const { node, pending } of waiting) {
       for (const approval of pending) {
         const id = approval?.approval_id;
-        if (!id) continue;
+        if (!id || nativeApproval(approval)) continue;
         live.add(id);
         if (!pendingSeen.has(id)) pendingSeen.set(id, at);
         if (!answersForPerson(node, mission) || autoAnswered.has(id)) continue;
