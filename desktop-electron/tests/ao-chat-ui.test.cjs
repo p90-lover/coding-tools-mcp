@@ -1444,7 +1444,9 @@ test("an unsent draft is saved by the app: read back first, saved after each cha
   assert.ok(deliver.indexOf("await acceptMessage(") < deliver.indexOf('setDraft("")'), "acceptance precedes clearing the composer");
   assert.match(deliver, /sameAttachmentSnapshot\(composing\.current\.attachments, owner\.attachments, acceptedAttachments\)/, "new attachments are not cleared");
   assert.match(deliver, /if \(fromComposer\) settleSavedDraft\(owner, handedOff\);/);
-  assert.match(source, /const accepted = await acceptMessage\(text, "queue", owner, true\);\s*await enqueue/, "queued input is durably accepted before enqueue");
+  const submit = source.slice(source.indexOf("const submit = async"), source.indexOf("const queueOf ="));
+  assert.match(submit, /const accepted = await acceptMessage\(text, "queue", owner, true\);[\s\S]*?await enqueue\(selectedTaskId, \{[^\n]+inputId: accepted\.inputId/,
+    "queued input is durably accepted before enqueue, which receives its exact ID");
   const surface = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
   assert.match(surface, /draftGet: key => chatInputDraftGet\(inputCall, workspaceId!, key\)/);
   assert.match(surface, /queue=\{chatQueue\} drafts=\{chatDrafts\}/);
