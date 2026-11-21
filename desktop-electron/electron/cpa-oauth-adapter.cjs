@@ -243,7 +243,9 @@ async function startCpaAccountLogin({
     signal?.throwIfAborted();
     const deadline = now() + Math.max(1, timeoutMs);
     while (now() <= deadline) {
+      browser?.throwIfFailed?.();
       const status = await request(`/v0/management/get-auth-status?state=${encodeURIComponent(state)}`);
+      browser?.throwIfFailed?.();
       if (status?.status === "ok") {
         const resolved = await resolveAuthFile({
           adapter, requestJson: request, baselineIds, reservedAuthFileIds: reserved,

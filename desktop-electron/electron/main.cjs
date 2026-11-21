@@ -5370,6 +5370,10 @@ async function start() {
     antigravityAuthBrowser = createAntigravityAuthBrowser({
       BrowserWindow, sessionFor: partition => session.fromPartition(partition),
       proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,
+      onRateLimited: ({ message, retryAt }) => {
+        logger.warn?.("antigravity.sign_in_rate_limited", { retryAt });
+        if (Notification.isSupported()) new Notification({ title: "Antigravity sign-in rate limited", body: message, silent: true }).show();
+      },
     });
     setProviderAuthBrowser(() => antigravityAuthBrowser);
     antigravityReauth = createAntigravityReauth({

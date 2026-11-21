@@ -282,6 +282,7 @@ test("Google sign-in applies its selected proxy before navigation and owns brows
     async setProxy(options) { events.push(["proxy", options]); },
     getUserAgent: () => "Chrome/130 Electron/33 coding-tools/1", setUserAgent() {},
     setPermissionRequestHandler() {}, setPermissionCheckHandler() {},
+    webRequest: { onHeadersReceived() {} },
   };
   const open = createAntigravityAuthBrowser({
     BrowserWindow: FakeWindow, sessionFor: () => browserSession, cleanUserAgent: require("../electron/browser-url.cjs").cleanUserAgent,
@@ -316,6 +317,104 @@ test("Google sign-in applies its selected proxy before navigation and owns brows
   finishProxy();
   await rejected;
   assert.equal(events.length, before, "disposed setup must not create a late browser");
+});
+
+function fakeGoogleSignIn({ now, onLoad } = {}) {
+  const { EventEmitter } = require("node:events");
+  const { createAntigravityAuthBrowser } = require("../electron/antigravity-auth-browser.cjs");
+  const windows = [];
+  const notices = [];
+  let proxyReads = 0;
+  class FakeWindow extends EventEmitter {
+    constructor({ webPreferences }) {
+      super();
+      this.session = webPreferences.session;
+      this.webContents = new EventEmitter();
+      this.webContents.setWindowOpenHandler = () => {};
+      windows.push(this);
+    }
+    isDestroyed() { return this.destroyed === true; }
+    close() { this.destroyed = true; this.emit("closed"); }
+    show() {}
+    async loadURL() { onLoad?.(this); }
+    rateLimit(responseHeaders = {}, resourceType = "mainFrame") {
+      let cancel = false;
+      this.session.headers?.({ url: "https://accounts.google.com/o/oauth2/v2/auth", statusCode: 429,
+        responseHeaders, resourceType }, result => { cancel = result.cancel === true; });
+      return cancel;
+    }
+  }
+  const open = createAntigravityAuthBrowser({
+    BrowserWindow: FakeWindow, cleanUserAgent: value => value, now,
+    onRateLimited: limit => notices.push(limit),
+    sessionFor: () => {
+      const session = { async setProxy() {}, getUserAgent: () => "Chrome/130", setUserAgent() {},
+        setPermissionRequestHandler() {}, setPermissionCheckHandler() {},
+        webRequest: { onHeadersReceived(filter, listener) { session.headers = filter && listener; } } };
+      return session;
+    },
+    proxyEnvironment: () => { proxyReads += 1; return { HTTPS_PROXY: "http://127.0.0.1:7890" }; },
+  });
+  return { open, windows, notices, proxyReads: () => proxyReads };
+}
+
+const GOOGLE_SIGN_IN_URL = "https://accounts.google.com/o/oauth2/v2/auth?state=opaque-state";
+
+test("Google sign-in 429 honors Retry-After before opening a fresh browser", async () => {
+  let clock = 10_000;
+  let firstLoad = true;
+  const { open, windows, notices, proxyReads } = fakeGoogleSignIn({ now: () => clock, onLoad: window => {
+    if (!firstLoad) return;
+    firstLoad = false;
+    window.rateLimit({ "ReTrY-AfTeR": ["120"] });
+  } });
+  await assert.rejects(open(GOOGLE_SIGN_IN_URL), { status: 429, retryAt: 130_000 });
+  assert.equal(windows[0].isDestroyed(), true);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0].message, /120 seconds/);
+  assert.doesNotMatch(notices[0].message, /opaque-state/);
+  clock = 129_000;
+  await assert.rejects(open(GOOGLE_SIGN_IN_URL), { status: 429, retryAt: 130_000 });
+  assert.equal(windows.length, 1);
+  assert.equal(proxyReads(), 1);
+  clock = 130_000;
+  (await open(GOOGLE_SIGN_IN_URL)).close();
+  assert.equal(windows.length, 2);
+});
+
+test("Google sign-in 429 without a usable Retry-After waits one minute", async () => {
+  for (const headers of [{}, { "retry-after": ["not a date"] }]) {
+    const { open } = fakeGoogleSignIn({ now: () => 10_000, onLoad: window => window.rateLimit(headers) });
+    await assert.rejects(open(GOOGLE_SIGN_IN_URL), { status: 429, retryAt: 70_000 });
+  }
+});
+
+test("Google sign-in 429 after the page opens stops OAuth polling and cleans up the attempt", async () => {
+  const { startCpaAccountLogin } = require("../electron/cpa-oauth-adapter.cjs");
+  const clock = Date.UTC(2026, 10, 21, 14, 0, 0);
+  const retryAt = clock + 90_000;
+  const { open, windows } = fakeGoogleSignIn({ now: () => clock });
+  let polls = 0;
+  let cleanups = 0;
+  const pending = startCpaAccountLogin({
+    adapterId: "cpa-antigravity", openExternal: open, now: () => clock,
+    requestJson: async (route, options = {}) => {
+      const pathname = new URL(route, "http://127.0.0.1").pathname;
+      if (pathname.endsWith("/antigravity-auth-url")) return { status: "ok", state: "opaque-state", url: GOOGLE_SIGN_IN_URL };
+      if (pathname.endsWith("/get-auth-status")) { polls += 1; return { status: "pending" }; }
+      if (pathname.endsWith("/oauth-session")) { assert.equal(options.method, "DELETE"); cleanups += 1; }
+      return { files: [] };
+    },
+    sleep: async () => {
+      assert.equal(polls, 1);
+      assert.equal(windows[0].rateLimit({}, "image"), false);
+      assert.equal(windows[0].rateLimit({ "Retry-After": [new Date(retryAt).toUTCString()] }), true);
+    },
+  });
+  await assert.rejects(pending, { status: 429, retryAt });
+  assert.equal(polls, 1);
+  assert.equal(cleanups, 1);
+  assert.equal(windows[0].isDestroyed(), true);
 });
 
 test("the apps host routes Antigravity CLI operations to the main-process service", async () => {
