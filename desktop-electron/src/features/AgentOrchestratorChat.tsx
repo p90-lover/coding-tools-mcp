@@ -1715,7 +1715,8 @@ export function AgentOrchestratorChat({
     snapshot: CHAT_DRAFTS.get(draftKey)?.snapshot ?? { text: draft }, queuedRecovery: [] as DraftRecovery[] });
   const queueRecoveries = composing.current.queuedRecovery ?? [];
   composing.current = { taskId: selectedTaskId, cacheKey: draftOwner.current, draft, attachments, annotations,
-    snapshot: composing.current.snapshot.text === draft ? composing.current.snapshot : { text: draft },
+    snapshot: composing.current.snapshot.text === draft && composing.current.attachments === attachments
+      && composing.current.annotations === annotations ? composing.current.snapshot : { text: draft },
     queuedRecovery: queueRecoveries.filter((entry) => !entry.applied) };
   const draftRegistration = useRef<{ key: string; entry: DraftEntry; owner: NonNullable<DraftEntry["owner"]> } | null>(null);
   // Leaving the chat view (the Mission Board, the structure view) unmounts this chat without
@@ -1809,7 +1810,7 @@ export function AgentOrchestratorChat({
   type DraftBinding = { key: string; project: string; writer: DraftCoalescer; store: ChatDraftActions; loaded: boolean; ready: Promise<void>; pendingUnloaded?: SavedChatDraft };
   const draftBinding = useRef<DraftBinding | null>(null);
   const acceptingInput = useRef(false);
-  const pendingAccepts = useRef(new Map<string, AcceptInputArgs>());
+  const pendingAccepts = useRef(new Map<string, { owner: typeof composing.current; fromComposer: boolean; request: AcceptInputArgs }>());
   const [pendingInputs, setPendingInputs] = useState<PendingChatInput[]>([]);
   const [pendingInputsError, setPendingInputsError] = useState("");
   const [pendingRefresh, setPendingRefresh] = useState(0);
@@ -2027,48 +2028,55 @@ export function AgentOrchestratorChat({
     if (acceptingInput.current) throw new Error("This input is still being saved");
     acceptingInput.current = true;
     try {
-      const existing = [...pendingAccepts.current.values()].find(request => request.key === owner.cacheKey
-        && request.destination.message === message && request.destination.taskId === (selectedTaskId || undefined)
-        && request.destination.goal === goal);
-      if (existing) return store.accept(existing);
-      const selection = store.getExecutionSelection();
-      let payload = fromComposer ? savedDraftOf(owner.draft, owner.attachments, owner.annotations) : null;
-      payload ??= { text: message, attachments: [], annotations: [] };
-      if (binding?.key === owner.cacheKey) {
-        await binding.ready;
-        const latest = composing.current;
-        if (binding.loaded && fromComposer && latest.cacheKey === owner.cacheKey && latest.draft === owner.draft
-          && latest.attachments === owner.attachments && latest.annotations === owner.annotations) binding.writer.queueChange(payload);
-        await binding.writer.flush();
-        payload = binding.writer.preservedDraft(payload);
-      }
-      const persistedMessage = rebuildAttachmentMessage(message, fromComposer ? owner.attachments : [], payload.attachments);
-      const destination = buildAcceptDestination({ message: persistedMessage, ...selection.execution, ...selection.executable,
-        ...(selectedTaskId ? { taskId: selectedTaskId } : {}), ...(!selectedTaskId && title.trim() ? { title: title.trim() } : {}),
-        ...(goal ? { goal } : {}), ...(restart ? { restart: true } : {}) });
-      const signature = JSON.stringify([projectId, owner.cacheKey, mode, payload, destination]);
-      let request = pendingAccepts.current.get(signature);
-      if (!request) {
+      const existing = [...pendingAccepts.current.values()].find(item => item.owner.cacheKey === owner.cacheKey
+        && item.owner.snapshot === owner.snapshot && item.fromComposer === fromComposer);
+      let request = existing?.request;
+      if (request) {
+        if (!fromComposer || request.mode !== mode || request.destination.taskId !== (selectedTaskId || undefined)
+          || request.destination.goal !== goal || Boolean(request.destination.restart) !== restart) {
+          throw new Error("An earlier save is unresolved. Check saved inputs before submitting this draft another way");
+        }
+      } else {
         if (pendingAccepts.current.size >= 20) throw new Error("Resolve the earlier pending inputs before submitting more messages");
+        const selection = store.getExecutionSelection();
+        let payload = (fromComposer ? savedDraftOf(owner.draft, owner.attachments, owner.annotations) : null)
+          ?? { text: message, attachments: [], annotations: [] };
+        if (binding?.key === owner.cacheKey) {
+          await binding.ready;
+          const latest = composing.current;
+          if (binding.loaded && fromComposer && latest.cacheKey === owner.cacheKey && latest.snapshot === owner.snapshot) binding.writer.queueChange(payload);
+          await binding.writer.flush();
+          payload = binding.writer.preservedDraft(payload);
+        }
+        const persistedMessage = rebuildAttachmentMessage(message, fromComposer ? owner.attachments : [], payload.attachments);
+        const destination = buildAcceptDestination({ message: persistedMessage, ...selection.execution, ...selection.executable,
+          ...(selectedTaskId ? { taskId: selectedTaskId } : {}), ...(!selectedTaskId && title.trim() ? { title: title.trim() } : {}),
+          ...(goal ? { goal } : {}), ...(restart ? { restart: true } : {}) });
         request = { key: owner.cacheKey, inputId: createUuid(), mode, payload, destination,
           ...(fromComposer && binding?.key === owner.cacheKey && binding.writer.matchesSaved(payload) ? { draftRevision: binding.writer.getKnownRevision() } : {}) };
-        pendingAccepts.current.set(signature, request);
+        pendingAccepts.current.set(request.inputId, { owner, fromComposer, request });
       }
       const resumeDraft = binding?.key === owner.cacheKey ? binding.writer.pauseForAcceptance() : null;
       let accepted: AcceptReceipt;
       try {
         accepted = await store.accept(request);
+        pendingAccepts.current.delete(request.inputId);
         resumeDraft?.(accepted.draft, request.payload);
       } finally { resumeDraft?.(); }
       if (alive.current && composing.current.cacheKey === owner.cacheKey) {
         setAttachments(current => mergePersistedAttachments(current, owner.attachments, accepted.payload.attachments));
+      }
+      if (fromComposer && store.pending) {
+        owner.snapshot.sent = true;
+        const entry = CHAT_DRAFTS.get(owner.cacheKey);
+        if (entry?.snapshot === owner.snapshot) trimDraftEntry(owner.cacheKey, entry);
       }
       return accepted;
     } finally { acceptingInput.current = false; if (alive.current) setPendingRefresh(value => value + 1); }
   };
   const forgetAcceptedInput = (inputId?: string) => {
     if (!inputId) return;
-    for (const [signature, request] of pendingAccepts.current) if (request.inputId === inputId) pendingAccepts.current.delete(signature);
+    pendingAccepts.current.delete(inputId);
   };
   /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
   const deliver = async (message: string, goal?: string, fromComposer = true, restart = false, inputId?: string, capturedOwner?: typeof composing.current) => {
@@ -2345,12 +2353,16 @@ export function AgentOrchestratorChat({
       let handedOff = false;
       try {
         const accepted = await acceptMessage(text, "queue", owner, true);
+        const clearSubmittedDraft = () => {
+          if (alive.current && composing.current.cacheKey === owner.cacheKey && composing.current.draft === owner.draft
+            && composing.current.annotations === owner.annotations && sameAttachmentSnapshot(composing.current.attachments, owner.attachments, accepted.payload.attachments)) {
+            setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
+          }
+        };
+        const recoverable = Boolean(draftsNow.current?.pending);
+        if (recoverable) clearSubmittedDraft();
         await enqueue(selectedTaskId, { what: "Message", message: accepted.destination.message, inputId: accepted.inputId });
-        if (alive.current && composing.current.cacheKey === owner.cacheKey && composing.current.draft === owner.draft
-          && composing.current.annotations === owner.annotations && sameAttachmentSnapshot(composing.current.attachments, owner.attachments, accepted.payload.attachments)) {
-          setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
-        }
-        forgetAcceptedInput(accepted.inputId);
+        if (!recoverable) clearSubmittedDraft();
         handedOff = true;
       } catch (error) {
         if (alive.current && composing.current.cacheKey === owner.cacheKey) say("Not queued", refusalText(error));

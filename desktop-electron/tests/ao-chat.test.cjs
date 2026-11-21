@@ -1377,7 +1377,11 @@ function rendererCallback(file, name, globals) {
   };
   visit(tree); assert.ok(body, name);
   const exports = {};
-  const context = { exports, pane: undefined, paneWanted: { current: null }, pageRegistry: null, pageNumber: 1, initialPageSelection: null, ...globals };
+  const context = { exports, pane: undefined, paneWanted: { current: null }, pageRegistry: null, pageNumber: 1, initialPageSelection: null,
+    acceptingInput: { current: false }, draftsNow: { current: {} }, setPendingRefresh() {}, forgetAcceptedInput() {}, setCard() {},
+    sameAttachmentSnapshot: (current, original, accepted) => current === original || current === accepted,
+    acceptMessage: async (message, _mode, owner) => ({ inputId: "fixture-input", destination: { message }, payload: { attachments: owner?.attachments ?? [] } }),
+    ...globals };
   if (file === "AgentOrchestratorSurface.tsx" && name !== "takeChatHere" && !("takeChatHere" in globals)) {
     context.takeChatHere = rendererCallback(file, "takeChatHere", globals);
   }
@@ -1856,6 +1860,7 @@ function outgoingSend() {
 
 test("the real project picker cannot carry a pending message into another blank project's scoped composer", async () => {
   const ui = outgoingSend(), sending = ui.start("project-a", "A's pending message");
+  await new Promise(setImmediate);
   assert.equal(ui.shown("project-a"), "A's pending message");
   const callback = (file, property, contains, globals) => {
     const source = fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
@@ -1887,7 +1892,11 @@ test("the real project picker cannot carry a pending message into another blank 
 test("overlapping deliver callbacks change only their own optimistic message", async t => {
   // A lower-level ownership invariant: ordinary submit/queue/busy gates still prevent a second send.
   for (const outcome of ["resolve", "reject"]) await t.test(outcome, async () => {
-    const ui = outgoingSend(), first = ui.start("project-a", "A"), second = ui.start("project-b", "B"), ownB = ui.state.outgoing;
+    const ui = outgoingSend(), first = ui.start("project-a", "A");
+    await new Promise(setImmediate);
+    const second = ui.start("project-b", "B");
+    await new Promise(setImmediate);
+    const ownB = ui.state.outgoing;
     first[outcome](outcome === "reject" ? new Error("A failed") : undefined); const completed = await first.done;
     if (outcome === "resolve") assert.equal(completed, true);
     // A's failed send, made while B's composer was open, goes back to A's own draft with why (it was lost).
@@ -1955,7 +1964,8 @@ test("send completion preserves the next chat's draft and edits typed during the
       setOutgoing() {}, setAnnotations() {},
     });
     const sending = deliver("sent text");
-    assert.equal(state.draft, "", "the sent text leaves the composer at once, not when the send returns");
+    await new Promise(setImmediate);
+    assert.equal(state.draft, "", "the accepted text leaves the composer before delivery returns");
     state.draft = "new unsent text"; composing.current = { taskId, draft: state.draft, attachments };
     reply.resolve(); assert.equal(await sending, true);
     assert.equal(state.draft, "new unsent text", taskId);
@@ -1984,6 +1994,7 @@ test("a pending new-chat send keeps its real API identity and leaves the next pr
 
 function queuedComposer(attachments = [], sharedMaps, options = {}) {
   const maps = sharedMaps ?? { CHAT_DRAFTS: new Map([["task-b", { snapshot: { text: "B private draft" }, pending: [] }]]), CHAT_ATTACHMENTS: new Map([["task-b", [{ path: "G:/b.txt" }]]]), CHAT_ANNOTATIONS: new Map([["task-b", [{ text: "B annotation" }]]]) };
+  maps.inputs ??= new Map();
   let blankKey = options.blankKey, taskId = options.taskId ?? "task-a";
   const key = () => state.taskId || blankKey;
   const initial = name => rendererCallback("AgentOrchestratorChat.tsx", name, { ...maps, draftKey: taskId || blankKey, useState: value => [typeof value === "function" ? value() : value, () => {}] })[0];
@@ -2039,112 +2050,115 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
       const submit = rendererCallback("AgentOrchestratorChat.tsx", "submit", { ...globals(), commands: undefined, chatSlashParse: chat.chatSlashParse, chatMessageWithAttachments: chat.chatMessageWithAttachments,
         chatMessageWithAnnotations: chat.chatMessageWithAnnotations, canSend: true, queueing: true, queueWhileSending: false, CHAT_MESSAGE_LIMIT: 8192, enqueue,
         CHAT_MESSAGE_BYTES: chat.CHAT_MESSAGE_BYTES, chatMessageBytes: chat.chatMessageBytes, chatMessageFits: chat.chatMessageFits,
+        refusalText: error => error.message, draftsNow: { current: { pending: true } },
+        acceptMessage: async (message, mode, owner) => {
+          const inputId = `accepted-${maps.inputs.size + 1}`;
+          const accepted = { inputId, destination: { message }, payload: { text: owner.draft, attachments: owner.attachments, annotations: owner.annotations } };
+          maps.inputs.set(inputId, { ...accepted, mode, key: owner.cacheKey, state: "queued" });
+          owner.snapshot.sent = true;
+          if (maps.CHAT_DRAFTS.get(owner.cacheKey)?.snapshot === owner.snapshot) helpers.trimDraftEntry(owner.cacheKey, maps.CHAT_DRAFTS.get(owner.cacheKey));
+          return accepted;
+        },
         say: rendererCallback("AgentOrchestratorChat.tsx", "say", { setCard: set("card") }) });
-      await submit(); renderSnapshot();
-      return { text, queuedTask, fail: async () => { reply.reject(new Error("queue unavailable")); await new Promise(setImmediate); } };
+      const inputId = `accepted-${maps.inputs.size + 1}`;
+      const submitting = submit();
+      await new Promise(setImmediate);
+      renderSnapshot();
+      return { text, inputId, queuedTask, fail: async () => { reply.reject(new Error("queue unavailable")); await submitting; await new Promise(setImmediate); } };
     },
   };
   if (!sharedMaps) ui.mount();
   return ui;
 }
 
-test("a queue rejection after real sidebar navigation preserves B and restores the serialized draft to A", async () => {
-  const ui = queuedComposer([{ name: "note.txt", path: "G:/note.txt", image: false }]), sent = await ui.submit(); ui.moveTo("task-b");
+test("a lost queue acknowledgement after sidebar navigation keeps A's input and leaves B alone", async () => {
+  const attachment = { name: "note.txt", path: "G:/note.txt", image: false };
+  const ui = queuedComposer([attachment]), sent = await ui.submit();
+  assert.equal(ui.state.draft, "", "clear after durable acceptance, not after dispatch returns");
+  ui.moveTo("task-b");
   const files = ui.state.attachments, annotations = ui.state.annotations; await sent.fail();
-  assert.equal(ui.calls[0].operation, "chat_queue"); assert.equal(ui.calls[0].args.taskId, "task-a"); assert.equal(ui.calls[0].args.workspaceId, "project");
+  const { operation, args } = ui.calls[0];
+  assert.equal(operation, "chat_queue"); assert.equal(args.taskId, "task-a"); assert.equal(args.workspaceId, "project");
   assert.equal(ui.state.draft, "B private draft"); assert.equal(ui.state.card, null); assert.equal(ui.state.attachments, files); assert.equal(ui.state.annotations, annotations);
-  ui.moveTo("task-a"); assert.equal(ui.state.draft, sent.text);
+  ui.moveTo("task-a"); assert.equal(ui.state.draft, "");
+  const saved = ui.maps.inputs.get(sent.inputId);
+  assert.equal(saved.key, "task-a"); assert.equal(saved.destination.message, sent.text);
+  assert.equal(saved.payload.attachments[0], attachment);
+  assert.match(JSON.stringify(args), new RegExp(sent.inputId));
 });
 
-test("queue recovery prepends to the same chat's newer text and respects an explicit later clear", async () => {
-  const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft"); await sent.fail();
-  assert.equal(ui.state.draft, sent.text + "\n\nnewer A draft"); assert.match(ui.state.card.text, /queue unavailable/);
-  ui.renderSnapshot(); ui.type(""); ui.unmount(); assert.equal(ui.maps.CHAT_DRAFTS.has("task-a"), false);
-});
-
-test("a same-batch edit or clear after queue recovery stays authoritative on switch or unmount", async t => {
-  for (const value of ["", "latest A edit"]) for (const leave of ["switch", "unmount"]) await t.test(`${value ? "edit" : "clear"}: ${leave}`, async () => {
-    const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail();
-    ui.input(value); ui.flush(); ui.renderSnapshot(); ui.defer(false);
-    if (leave === "switch") ui.moveTo("task-b"); else ui.unmount();
-    assert.equal(ui.maps.CHAT_DRAFTS.get("task-a")?.snapshot.text ?? "", value);
-    if (leave === "switch") { ui.moveTo("task-a"); assert.equal(ui.state.draft, value); }
+test("queue acknowledgement failure preserves a newer draft or explicit clear across navigation", async t => {
+  for (const value of ["", "latest A edit", "A queued message"]) await t.test(value || "clear", async () => {
+    const ui = queuedComposer(), sent = await ui.submit(); ui.type(value);
+    ui.defer(true); await sent.fail(); ui.defer(false);
+    ui.moveTo("task-b"); ui.flush(); ui.moveTo("task-a");
+    assert.equal(ui.state.draft, value);
+    assert.equal(ui.maps.inputs.get(sent.inputId).destination.message, sent.text);
+    assert.equal(ui.calls.length, 1);
   });
 });
 
-test("deferred queue recovery cannot overwrite the next chat and remains recoverable on switch-back", async () => {
-  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.defer(false);
-  ui.moveTo("task-b"); ui.flush(); assert.equal(ui.state.draft, "B private draft"); assert.equal(ui.state.card, null);
-  ui.moveTo("task-a"); assert.equal(ui.state.draft, sent.text);
-});
-
-test("a switch-back before the deferred queue recovery applies does not restore it twice", async () => {
-  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.defer(false);
-  ui.moveTo("task-b"); ui.moveTo("task-a"); ui.flush(); ui.renderSnapshot();
-  assert.equal(ui.state.draft, sent.text);
-});
-
-test("an applied recovery survives unmount before the next state render", async () => {
-  const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft"); ui.defer(true); await sent.fail();
-  ui.flush(1); ui.unmount();
-  assert.equal(ui.maps.CHAT_DRAFTS.get("task-a").snapshot.text, sent.text + "\n\nnewer A draft");
-});
-
-test("typing the same text before deferred recovery still preserves both messages", async () => {
-  const ui = queuedComposer(), sent = await ui.submit(); ui.defer(true); await sent.fail();
-  ui.type(sent.text); ui.defer(false); ui.moveTo("task-b"); ui.flush(); ui.moveTo("task-a");
-  assert.equal(ui.state.draft, sent.text + "\n\n" + sent.text);
-});
-
-test("partly applied queue recoveries preserve every failed payload once across navigation", async () => {
-  const ui = queuedComposer(), first = await ui.submit(); ui.type("A second message"); const second = await ui.submit(); ui.type("newer A draft");
-  ui.defer(true); await first.fail(); await second.fail(); ui.defer(false); ui.flush(2); ui.renderSnapshot();
-  ui.moveTo("task-b"); ui.flush(); ui.moveTo("task-a");
-  assert.equal(ui.state.draft, second.text + "\n\n" + first.text + "\n\nnewer A draft");
-});
-
-test("queue recovery survives unmount before a deferred state commit or before rejection", async t => {
-  for (const timing of ["before commit", "before failure"]) await t.test(timing, async () => {
-    const ui = queuedComposer(), sent = await ui.submit(); ui.type("newer A draft");
-    if (timing === "before commit") { ui.defer(true); await sent.fail(); }
-    ui.unmount(); if (timing === "before failure") await sent.fail(); ui.flush();
-    const fresh = queuedComposer([], ui.maps); fresh.mount();
-    assert.equal(fresh.state.draft, sent.text + "\n\nnewer A draft"); assert.equal(ui.lateSetters(), 0); fresh.unmount();
+test("input acceptance retries the same draft revision but not a later identical draft", async () => {
+  const snapshot = { text: "same text" };
+  const owner = { cacheKey: "task-a", draft: snapshot.text, snapshot, attachments: [], annotations: [] };
+  const composing = { current: owner }, pendingAccepts = { current: new Map() }, attempts = [];
+  let nextId = 0;
+  const acceptMessage = rendererCallback("AgentOrchestratorChat.tsx", "acceptMessage", {
+    composing, pendingAccepts, selectedTaskId: "task-a", acceptingInput: { current: false }, draftBinding: { current: null },
+    draftsNow: { current: { pending: async () => [], getExecutionSelection: () => ({}), accept: async request => {
+      attempts.push(request);
+      if (attempts.length === 1) throw new Error("accept acknowledgement lost");
+      return request;
+    } } },
+    savedDraftOf: (text, attachments, annotations) => ({ text, attachments, annotations }),
+    rebuildAttachmentMessage: message => message, buildAcceptDestination: destination => destination,
+    createUuid: () => "revision-" + ++nextId, alive: { current: true }, setAttachments() {}, CHAT_DRAFTS: new Map(),
   });
+  await assert.rejects(acceptMessage(owner.draft, "queue", owner, true), /acknowledgement lost/);
+  assert.equal(snapshot.sent, undefined);
+  await assert.rejects(acceptMessage(owner.draft, "send", owner, true), /earlier save is unresolved/);
+  const retried = await acceptMessage(owner.draft, "queue", owner, true);
+  assert.equal(attempts[0], retried);
+  assert.equal(attempts[1], retried);
+  assert.equal(snapshot.sent, true);
+  assert.equal(pendingAccepts.current.size, 0);
+  const newer = { ...owner, snapshot: { text: snapshot.text } };
+  composing.current = newer;
+  const accepted = await acceptMessage(newer.draft, "queue", newer, true);
+  assert.notEqual(accepted.inputId, retried.inputId);
+  assert.equal(accepted.destination.message, retried.destination.message);
 });
 
-test("a late queue failure reaches a new same-chat instance before or after its draft adoption", async t => {
-  for (const timing of ["before adoption", "after adoption"]) for (const typed of ["", "new instance draft", "A queued message"]) await t.test(`${timing}: ${typed || "blank"}`, async () => {
-    const old = queuedComposer(), sent = await old.submit(); old.unmount();
-    const fresh = queuedComposer([], old.maps); if (timing === "after adoption") fresh.mount(); fresh.type(typed);
-    await sent.fail(); if (timing === "before adoption") fresh.mount();
-    assert.equal(fresh.state.draft, sent.text + (typed ? "\n\n" + typed : ""));
-    fresh.unmount(); const again = queuedComposer([], old.maps); again.mount();
-    assert.equal(again.state.draft, sent.text + (typed ? "\n\n" + typed : "")); assert.equal(old.lateSetters(), 0); again.unmount();
+test("identical queued submissions have distinct saved input IDs", async () => {
+  const ui = queuedComposer(), first = await ui.submit(); ui.type("A queued message");
+  const second = await ui.submit(); ui.type("newer A draft");
+  await first.fail(); await second.fail();
+  assert.notEqual(first.inputId, second.inputId);
+  assert.deepEqual([...ui.maps.inputs.keys()], [first.inputId, second.inputId]);
+  assert.equal(ui.state.draft, "newer A draft");
+  assert.match(ui.state.card.text, /queue unavailable/);
+});
+
+test("a late queue failure keeps the saved input across unmount and draft adoption", async t => {
+  for (const timing of ["before adoption", "after adoption"]) await t.test(timing, async () => {
+    const old = queuedComposer(), sent = await old.submit(); old.type("newer A draft"); old.unmount();
+    const fresh = queuedComposer([], old.maps);
+    if (timing === "after adoption") fresh.mount();
+    await sent.fail();
+    if (timing === "before adoption") fresh.mount();
+    assert.equal(fresh.state.draft, "newer A draft");
+    assert.equal(fresh.maps.inputs.get(sent.inputId).destination.message, sent.text);
+    assert.equal(old.lateSetters(), 0); fresh.unmount();
   });
-});
-
-test("multiple late recoveries survive a new owner's deferred updater and later cleanup", async () => {
-  const old = queuedComposer(), first = await old.submit(); old.type("second payload"); const second = await old.submit(); old.unmount();
-  const fresh = queuedComposer([], old.maps); fresh.mount(); fresh.type(first.text); fresh.defer(true);
-  await first.fail(); await second.fail(); fresh.unmount(); fresh.flush();
-  const again = queuedComposer([], old.maps); again.mount();
-  assert.equal(again.state.draft, second.text + "\n\n" + first.text + "\n\n" + first.text); again.unmount();
-});
-
-test("a deferred new-owner recovery cannot change B or be detached by stale cleanup", async () => {
-  const old = queuedComposer(), sent = await old.submit(); old.unmount();
-  const fresh = queuedComposer([], old.maps); fresh.mount(); fresh.type("new A text");
-  const entry = fresh.maps.CHAT_DRAFTS.get("task-a"); old.unmount(); assert.equal(fresh.maps.CHAT_DRAFTS.get("task-a"), entry);
-  fresh.defer(true); await sent.fail(); fresh.defer(false); fresh.moveTo("task-b"); fresh.flush();
-  assert.equal(fresh.state.draft, "B private draft"); assert.equal(fresh.state.card, null); fresh.moveTo("task-a");
-  assert.equal(fresh.state.draft, sent.text + "\n\nnew A text"); fresh.type(""); fresh.unmount(); assert.equal(fresh.maps.CHAT_DRAFTS.has("task-a"), false);
 });
 
 test("successful sends retire only their exact cached snapshot, including identical later text", async t => {
   for (const edit of ["unchanged", "edited", "identical"]) await t.test(edit, async () => {
     const ui = queuedComposer(); ui.type("sent text"); const sending = ui.send();
-    if (edit !== "unchanged") { ui.renderSnapshot(); ui.type(edit === "edited" ? "new text" : "sent text"); }
+    if (edit !== "unchanged") {
+      await new Promise(setImmediate);
+      ui.renderSnapshot(); ui.type(edit === "edited" ? "new text" : "sent text");
+    }
     ui.unmount(); assert.equal(await sending.finish(), true);
     if (edit === "unchanged") assert.equal(ui.maps.CHAT_DRAFTS.has("task-a"), false);
     else { const fresh = queuedComposer([], ui.maps); fresh.mount(); assert.equal(fresh.state.draft, edit === "edited" ? "new text" : "sent text"); fresh.unmount(); }
@@ -2154,21 +2168,10 @@ test("successful sends retire only their exact cached snapshot, including identi
 test("successful-send cache cleanup retains a separate failed queue receipt", async () => {
   const ui = queuedComposer(), queued = await ui.submit(); ui.type("later sent text"); const sending = ui.send(); ui.unmount();
   await queued.fail(); assert.equal(await sending.finish(), true);
-  const fresh = queuedComposer([], ui.maps); fresh.mount(); assert.equal(fresh.state.draft, queued.text); fresh.unmount();
-});
-
-test("a recovery updater tolerates React's ignored first invocation", async () => {
-  const ui = queuedComposer(), sent = await ui.submit(); ui.replayUpdaters(true); await sent.fail();
-  assert.equal(ui.state.draft, sent.text); ui.unmount();
-});
-
-test("adopted queue receipts retire even when a same-batch clear leaves the draft unchanged", async () => {
-  const ui = queuedComposer();
-  for (let i = 0; i < 3; i++) {
-    ui.type("payload " + i); const sent = await ui.submit(); ui.defer(true); await sent.fail(); ui.input(""); ui.flush(); ui.defer(false); ui.renderSnapshot();
-    assert.equal(ui.state.draft, ""); assert.equal(ui.maps.CHAT_DRAFTS.get("task-a").pending.length, 0);
-  }
-  ui.unmount(); assert.equal(ui.maps.CHAT_DRAFTS.has("task-a"), false);
+  const fresh = queuedComposer([], ui.maps); fresh.mount();
+  assert.equal(fresh.state.draft, "");
+  assert.equal(fresh.maps.inputs.get(queued.inputId).destination.message, queued.text);
+  fresh.unmount();
 });
 
 test("approval callbacks refuse a request displayed by a previous run and still send the current request", async () => {
