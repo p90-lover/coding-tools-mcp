@@ -30,6 +30,8 @@ const ALLOWED = {
   // The prior port record is captured before the first await; ready apps are rejected before IO.
   "browser-debugging.cjs": 1,
   "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 4, "chat-archive.cjs": 1, "chat-edits.cjs": 1,
+  // The input worker owns attachment snapshots and SQLite transactions; main only sends worker RPCs.
+  "chat-attachment-store.cjs": 29, "chat-input-worker.cjs": 4,
   "chat-goals.cjs": 2, "chat-loops.cjs": 1, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 1,
   // /schedule reads its saved schedules once, when the workflow is created at startup; it saves off the main thread.
   "chat-schedules.cjs": 1,

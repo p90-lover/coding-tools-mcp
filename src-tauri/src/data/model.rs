@@ -19,6 +19,8 @@ pub struct OAuthRefreshTokenRecord {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppData {
     #[serde(default)]
+    pub chat_input_receipts: Vec<crate::integrations::chat_input::Receipt>,
+    #[serde(default)]
     pub ao_runs: Vec<crate::integrations::ao::Run>,
     #[serde(default)]
     pub ao_task_lifecycle: Vec<crate::integrations::ao_lifecycle::TaskLifecycle>,

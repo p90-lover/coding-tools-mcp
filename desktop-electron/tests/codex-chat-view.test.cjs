@@ -16,6 +16,14 @@ const transpile = (file, require, globals = {}) => {
 };
 const chat = transpile("ao-chat.ts", () => ({}));
 const prompts = transpile("codex-prompts.ts", () => ({}));
+const afterAction = () => new Promise(setImmediate);
+function inputContent({ inputId, ...content }) {
+  assert.match(inputId, /^[0-9a-f-]{36}$/i, "the send carries an accepted input ID");
+  return JSON.parse(JSON.stringify(content));
+}
+const chatInput = transpile("chat-input-client.ts", name => name === "./ao-chat" ? chat : {}, {
+  crypto: require("node:crypto"), setTimeout: () => 0, clearTimeout() {},
+});
 
 test("the context command keeps native thread IDs out of the AO session lookup", async () => {
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8").replace(/\r\n/g, "\n");
@@ -130,6 +138,7 @@ function mount(props, { effects = false, objectUrls, responseEvents } = {}) {
     { localStorage: timers.localStorage, window: timers, structuredClone, Event });
   const responseMenu = transpile("response-style-menu.ts", name => name === "./chat-response-style" ? responseStyles : {});
   const module = transpile("AgentOrchestratorChat.tsx", (name) => name === "react" ? react : name === "react/jsx-runtime" ? { jsx, jsxs: jsx }
+    : name === "./chat-input-client" ? chatInput
     : name === "./chat-response-style" ? responseStyles : name === "./response-style-menu" ? responseMenu
     : name === "./ResponseStyleSettings" ? { ResponseStyleSettings: () => null }
     : name === "./chat-transcript" ? transpile("chat-transcript.ts", name => name === "./ao-chat" ? chat : {})
@@ -204,10 +213,22 @@ function appQueue() {
 }
 
 function base(extra = {}) {
-  const calls = [];
+  const calls = [], drafts = new Map();
+  const get = key => drafts.get(key) ?? { revision: 0, draft: null, updatedAt: null };
+  const save = (key, draft) => {
+    const receipt = { revision: get(key).revision + 1, draft, updatedAt: null };
+    drafts.set(key, receipt);
+    return receipt;
+  };
   return {
     calls,
     props: {
+      drafts: {
+        draftGet: async key => get(key), draftSave: async (key, _revision, _mutation, draft) => save(key, draft),
+        getExecutionSelection: () => ({}), restore: async (key, _input, _revision, _mutation, draft) => save(key, draft),
+        accept: async ({ key, inputId, payload, destination, draftRevision }) => ({ ok: true, inputId, state: "queued", payload, destination,
+          draft: draftRevision === get(key).revision ? save(key, null) : get(key) }),
+      },
       runs: [], tasks: [], selectedTaskId: "", busy: false, loadDescription: async () => "", openStructure() {}, approvals: [], approve() {},
       describeRoute: () => "", retryStart() {}, projectName: "Alpha", queue: appQueue(),
       send: async (input) => { calls.push(["send", input]); }, stop: (id) => calls.push(["stop", id]), restart: (id) => calls.push(["restart", id]),
@@ -369,8 +390,8 @@ test("slash commands open a menu and run on Enter; attachments are sent with the
   view = sending.render();
   walk(view).find((element) => element.type === "textarea").props.onChange({ target: { value: "look at this" } });
   view = sending.render();
-  await walk(view).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), ["send", { taskId: "t", message: "look at this\n\nAttached image: C:\\shots\\shot.png" }]);
+  walk(view).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
+  assert.deepEqual([calls.at(-1)[0], inputContent(calls.at(-1)[1])], ["send", { taskId: "t", message: "look at this\n\nAttached image: C:\\shots\\shot.png" }]);
 });
 
 const delayedReply = () => {
@@ -476,8 +497,8 @@ test("a pasted image finishing after a draft switch attaches only to its origina
   assert.equal(field("original").props.value, "Original draft");
   assert.deepEqual(walk(original).filter(element => element.props?.className === "cx-attachment-name").map(text), ["original.png"]);
   assert.deepEqual(walk(original).filter(element => element.type === "img").map(element => element.props.alt), ["original.png"]);
-  await walk(render("original")).find(element => element.type === "form").props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["send", { taskId: "original", message: "Original draft\n\nAttached image: G:/fixtures/original.png" }]]);
+  walk(render("original")).find(element => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
+  assert.deepEqual(calls.map(([kind, input]) => [kind, inputContent(input)]), [["send", { taskId: "original", message: "Original draft\n\nAttached image: G:/fixtures/original.png" }]]);
 });
 
 test("a pasted image finishing between draft render and passive effects survives the switch", async t => {
@@ -521,8 +542,8 @@ test("a failed pasted image save releases Send and preserves the typed draft", a
   assert.doesNotMatch(text(ready), /Attaching files…/);
   assert.equal(walk(ready).filter(element => element.props?.className === "cx-attachment-name").length, 0);
   assert.equal(walk(ready).find(element => element.props?.["aria-label"] === "Send message").props.disabled, false);
-  await walk(ready).find(element => element.type === "form").props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["send", { message: "Keep these details" }]]);
+  walk(ready).find(element => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
+  assert.deepEqual(calls.map(([kind, input]) => [kind, inputContent(input)]), [["send", { message: "Keep these details" }]]);
 });
 
 test("IME confirmation leaves the message unsent until an ordinary Enter", async t => {
@@ -538,7 +559,7 @@ test("IME confirmation leaves the message unsent until an ordinary Enter", async
     assert.deepEqual(calls, []); assert.equal(prevented, 0);
     walk(page.render()).find(element => element.props?.["aria-label"] === "Message").props.onKeyDown({ key: "Enter", shiftKey: false, nativeEvent: { isComposing: false, keyCode: 13 }, preventDefault() { prevented++; } });
     await new Promise(setImmediate);
-    assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["send", { message: "你好" }]]); assert.equal(prevented, 1);
+    assert.deepEqual(calls.map(([kind, input]) => [kind, inputContent(input)]), [["send", { message: "你好" }]]); assert.equal(prevented, 1);
   });
 });
 
@@ -609,7 +630,7 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   const fresh = base({});
   const newChat = mount(fresh.props);
   type(newChat, "/goal make every test pass"); await enter(newChat);
-  assert.deepEqual(JSON.parse(JSON.stringify(fresh.calls.at(-1))), ["send", { message: "make every test pass", goal: "make every test pass" }]);
+  assert.deepEqual([fresh.calls.at(-1)[0], inputContent(fresh.calls.at(-1)[1])], ["send", { message: "make every test pass", goal: "make every test pass" }]);
   type(newChat, "/review the auth changes"); await enter(newChat);
   assert.match(fresh.calls.at(-1)[1].message, /^Review the current code changes \(staged, unstaged, and untracked files\)\. Do not change any files\.\nFocus: the auth changes/);
   assert.match(fresh.calls.at(-1)[1].message, /\[P0\][\s\S]*patch is correct/);
@@ -718,7 +739,7 @@ test("Codex slash commands run from the composer in a Single chat or a team, wit
   walk(cardOf(idle)).find((element) => element.type === "button" && text(element).startsWith("Older chat")).props.onClick();
   assert.deepEqual(actions.at(-1), ["open", "older"]);
   type(idle, "/goal replace it with this"); await enter(idle);
-  assert.deepEqual(JSON.parse(JSON.stringify(done.calls.at(-1))), ["send", { taskId: "t", message: "replace it with this", goal: "replace it with this" }],
+  assert.deepEqual([done.calls.at(-1)[0], inputContent(done.calls.at(-1)[1])], ["send", { taskId: "t", message: "replace it with this", goal: "replace it with this" }],
     "a new objective replaces the chat's goal after confirmation");
 });
 
@@ -733,8 +754,8 @@ test("while the agent works, a typed message steers it at once; Esc on an empty 
   textarea().props.onChange({ target: { value: "use pnpm" } });
   const button = walk(view.render()).find((element) => element.props?.["aria-label"] === "Steer the agent");
   assert.ok(button && !button.props.disabled, "with a message typed, Send steers instead of showing Stop");
-  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "use pnpm" }]);
+  walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
+  assert.deepEqual(steered.map(inputContent), [{ taskId: "t", message: "use pnpm" }]);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "a delivered steer is not also sent as a follow-up");
 });
 
@@ -892,7 +913,7 @@ test("a working WebGPT (Native Codex) chat steers its turn, as the Codex bridge 
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
   assert.notEqual(textarea().props.placeholder, "Running. New messages send when it finishes");
   textarea().props.onChange({ target: { value: "also check the logs" } });
-  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(steered, ["also check the logs"], "the message joins the running turn");
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0);
@@ -908,7 +929,7 @@ test("a working chat on a model that can't be steered queues a message typed mea
   textarea().props.onChange({ target: { value: "also check the logs" } });
   const button = walk(view.render()).find((element) => element.props?.["aria-label"] === "Queue message");
   assert.ok(button && !button.props.disabled, "Send queues instead of being replaced by Stop");
-  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "nothing is sent while the turn runs");
   assert.equal(textarea().props.value, "", "the composer is free for the next message");
   // As Claude Code shows it: in the queued-message bar above the composer, not in a notice card.
@@ -928,7 +949,7 @@ test("Enter is never refused while another action holds the surface: the message
   textarea().props.onChange({ target: { value: "keep going" } });
   const button = walk(view.render()).find((element) => element.type === "button" && element.props?.type === "submit");
   assert.ok(button && !button.props.disabled, "Send stays live while the surface is busy");
-  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "it waits for the lock instead of being refused");
   assert.equal(textarea().props.value, "", "the composer is free at once");
   assert.match(text(walk(view.render()).find((element) => element.props?.["aria-label"] === "Queued messages")), /keep going/);
@@ -944,8 +965,10 @@ test("an idle chat sends immediately during an unrelated surface action and keep
     const textarea = () => walk(view.render()).find(element => element.type === "textarea");
     textarea().props.onChange({ target: { value: "send without waiting for refresh" } });
     walk(view.render()).find(element => element.type === "form").props.onSubmit({ preventDefault() {} });
-    assert.equal(sends.length, 1, "Send reaches the backend before the unrelated action or its acceptance promise settles");
-    assert.equal(textarea().props.value, "", "the draft clears immediately");
+    assert.equal(sends.length, 0, "dispatch waits for durable acceptance");
+    await afterAction();
+    assert.equal(sends.length, 1, "Send does not wait for the unrelated surface action");
+    assert.equal(textarea().props.value, "", "the draft clears after durable acceptance");
     const pending = view.render();
     assert.match(text(pending), /send without waiting for refresh/, "the pending message is visible before backend acknowledgement");
     assert.equal(walk(pending).some(element => element.props?.["aria-label"] === "Queued messages"), false, "an idle chat does not enter the background queue");
@@ -959,12 +982,12 @@ test("a queued message waits in Claude Code's queued bar: 1 message queued, its 
   const { props, calls } = base({ selectedTaskId: "t-bar", working: true,
     runs: [run("r1", "t-bar", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
     steer: async () => { throw new Error("not steerable"); } });
-  const view = mount(props);
+  const view = mount(props, { effects: true });
   const all = () => walk(view.render());
   const textarea = () => all().find((element) => element.type === "textarea");
   const queue = async (message) => {
     textarea().props.onChange({ target: { value: message } });
-    await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+    all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   };
   await queue("first   note\nsecond line");
   const band = () => all().find((element) => String(element.props?.className).startsWith("cx-queued-band"));
@@ -980,6 +1003,7 @@ test("a queued message waits in Claude Code's queued bar: 1 message queued, its 
   // Edit in composer takes it out of the queue and back into the box, ahead of anything typed.
   textarea().props.onChange({ target: { value: "typed meanwhile" } });
   action("Edit in composer").props.onClick();
+  await afterAction();
   assert.equal(band(), undefined, "it leaves the queue");
   assert.equal(textarea().props.value, "first   note\nsecond line\n\ntyped meanwhile");
   // Remove from queue drops it; nothing is sent.
@@ -1002,6 +1026,7 @@ test("a steer on its way stays in the chat while a message waiting for the next 
     return all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
   };
   type("use the other API");
+  await afterAction();
   type("then rerun the tests");
   await new Promise((resolve) => setImmediate(resolve));
   // The steer is in the chat, in its turn: it sat under the goal in the queued bar, then jumped up.
@@ -1030,7 +1055,7 @@ test("a turn waiting for you: Answer when a request is shown, else Continue, whi
   assert.equal(lost.onAnswer, undefined, "with none shown there is nothing to bring up");
   lost.onContinue();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "Continue.", restart: true }], "Continue restarts the stuck turn with one message");
+  assert.deepEqual(steered.map(inputContent), [{ taskId: "t", message: "Continue.", restart: true }], "Continue restarts the stuck turn with one message");
   assert.equal(provided({ steer: undefined }).onContinue, undefined, "a chat that cannot steer offers no Continue");
 });
 
@@ -1092,7 +1117,7 @@ test("a message neither sent nor queued comes back to its composer with why, nev
   t.after(() => view.unmount());
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
   textarea().props.onChange({ target: { value: "rerun the tests" } });
-  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   await new Promise(setImmediate);
   assert.equal(textarea().props.value, "rerun the tests", "back where it was typed");
   assert.match(text(view.render()), /Couldn't send (or queue )?the message: This chat is still running/);
@@ -1111,7 +1136,7 @@ test("the composer sends annotations and typed text once, together, for both sen
     const id = annotator().props.onAdd("the OCR worker count is fixed");
     annotator().props.onComment(id, "one worker per account");
     all().find((element) => element.type === "textarea").props.onChange({ target: { value: "Can OCR handle multiple accounts?" } });
-    await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+    all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
     assert.equal(delivered.length, 1, "one request, not an annotation-only send followed by the typed text");
     const parts = chat.chatMessageParts(delivered[0].message);
     assert.equal(parts.text, "Can OCR handle multiple accounts?");
@@ -1125,19 +1150,20 @@ test("Edit in composer gives a queued message's annotations back as the composer
   const { props } = base({ selectedTaskId: "t-notes", working: true,
     runs: [run("r1", "t-notes", [node("w", "planner", "running", { route: { harness_id: "codex", model: "gpt-5" } })], { execution_mode: "single" })],
     steer: async () => { throw new Error("not steerable"); } });
-  const view = mount(props);
+  const view = mount(props, { effects: true });
   const all = () => walk(view.render());
   const annotator = () => all().find((element) => typeof element.props?.onAdd === "function");
   const tray = () => all().find((element) => Array.isArray(element.props?.annotations) && typeof element.props?.onRemove === "function");
   const id = annotator().props.onAdd("the parser drops tabs");
   annotator().props.onComment(id, "fix this too");
   all().find((element) => element.type === "textarea").props.onChange({ target: { value: "first note" } });
-  await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   assert.equal(tray().props.annotations.length, 0, "the annotation went with the queued message");
   // A new selection made meanwhile stays, after the queued message's own.
   annotator().props.onAdd("another line");
   const band = all().find((element) => element.props?.className === "cx-queued-band");
   walk(band).find((element) => element.props?.["aria-label"] === "Edit in composer").props.onClick();
+  await afterAction();
   assert.equal(all().find((element) => element.type === "textarea").props.value, "first note", "only the text goes in the box");
   assert.deepEqual(JSON.parse(JSON.stringify(tray().props.annotations.map((item) => [item.text, item.comment]))),
     [["the parser drops tabs", "fix this too"], ["another line", ""]], "its annotations come back as chips, ahead of the new one");
@@ -1152,6 +1178,7 @@ test("a steer is in the chat from the moment it is sent: Sending…, then Unread
   const all = () => walk(view.render());
   all().find((element) => element.type === "textarea").props.onChange({ target: { value: "use the other API" } });
   const sending = all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  await afterAction();
   const bubble = () => all().find((element) => element.props?.className === "cx-user cx-steer");
   const receipt = () => walk(bubble()).find((element) => element.type === "SteerReceiptMark").props.receipt;
   assert.match(text(bubble()), /use the other API/, "in the chat at once");
@@ -1182,7 +1209,7 @@ test("a steer the agent has not read stays in the turn it was sent in when the n
   const view = mount(props);
   const all = (next) => walk(view.render(next));
   all().find((element) => element.type === "textarea").props.onChange({ target: { value: "use the other API" } });
-  await all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  all().find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   const next = { runs: [run("r1", "t-steer", [node("w", "planner", "finished", { route, output: { text: "done" } })], { execution_mode: "single" }),
     run("r2", "t-steer", [node("w2", "planner", "running", { route })], { execution_mode: "single" })] };
   const articles = all(next).filter((element) => element.type === "article");
@@ -1206,8 +1233,8 @@ test("after an app restart a running AO card is still steered, though the page i
   const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
   assert.equal(textarea().props.placeholder, "", "steering shows no hint");
   textarea().props.onChange({ target: { value: "have you done it?" } });
-  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-  assert.deepEqual(JSON.parse(JSON.stringify(steered)), [{ taskId: "t", message: "have you done it?" }]);
+  walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
+  assert.deepEqual(steered.map(inputContent), [{ taskId: "t", message: "have you done it?" }]);
 });
 
 test("a failed step's card names the step and its error, and its turn leaves the error to the card", () => {
@@ -1256,7 +1283,7 @@ test("each chat has its own queue, kept by the app: it is sent with the chat clo
   const view = mount(props);
   const queueIn = async (task, message) => {
     walk(view.render({ selectedTaskId: task })).find((element) => element.type === "textarea").props.onChange({ target: { value: message } });
-    await walk(view.render({ selectedTaskId: task })).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+    walk(view.render({ selectedTaskId: task })).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   };
   await queueIn("t-a", "check the logs");
   await queueIn("t-b", "run the tests");
@@ -1509,7 +1536,7 @@ test("while the agent waits on a request, a typed message is still steered: the 
   // whole turn. The steer now waits on the backend until the request is answered (chat_steer).
   assert.equal(textarea().props.placeholder, "", "steering shows no hint");
   textarea().props.onChange({ target: { value: "yes, go ahead" } });
-  await walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
+  walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} }); await afterAction();
   assert.deepEqual(steered.map((input) => input.message), ["yes, go ahead"]);
   assert.equal(calls.filter(([kind]) => kind === "send").length, 0, "never a send into the busy turn");
 });
@@ -2131,7 +2158,8 @@ test("a follow-up refused for focus whose queueing is refused too comes back to 
     const textarea = () => walk(view.render()).find((element) => element.type === "textarea");
     textarea().props.onChange({ target: { value: "check the logs again" } });
     const submitted = walk(view.render()).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} });
-    assert.equal(textarea().props.value, "", "the composer cleared as the message went");
+    await afterAction();
+    assert.equal(textarea().props.value, "", "the composer cleared after the acceptance receipt");
     if (typedSince) { textarea().props.onChange({ target: { value: "and the build" } }); view.render(); }
     reply.reject(unfocused);
     await submitted;
@@ -2143,19 +2171,20 @@ test("a follow-up refused for focus whose queueing is refused too comes back to 
   }
 });
 
-test("Send now on a queued message whose send and re-queue are both refused gives the message back", async () => {
+test("Send now keeps its original queued input when send and re-queue are refused", async () => {
   const unfocused = new Error("Click into the Coding Tools window and try again: this action runs only from the focused app window");
   const queue = appQueue();
   const { props } = base({ selectedTaskId: "t", projectId: "ws", queue, send: async () => { throw unfocused; },
     runs: [run("r1", "t", [node("p", "planner", "finished", { receipt: { answer: "done" } })], { execution_mode: "single" })] });
   const view = mount(props, { effects: true });
-  await queue.add("t", { what: "Message", message: "run the tests" });
+  await queue.add("t", { what: "Message", message: "run the tests", inputId: "original-input" });
   queue.add = async () => { throw unfocused; };
   for (let i = 0; i < 2; i += 1) await new Promise(setImmediate);
   const sendNow = walk(view.render()).find((element) => element.props?.["aria-label"] === "Send now");
   assert.ok(sendNow, "the queued bar offers Send now");
   sendNow.props.onClick();
   for (let i = 0; i < 6; i += 1) await new Promise(setImmediate);
-  assert.equal(walk(view.render()).find((element) => element.type === "textarea").props.value, "run the tests");
-  assert.match(text(view.render()), /Couldn't queue the message: Click into the Coding Tools window/);
+  assert.equal(walk(view.render()).find((element) => element.type === "textarea").props.value, "");
+  assert.equal(queue.chats.get("t")[0].inputId, "original-input");
+  assert.match(text(view.render()), /Input kept.*Click into the Coding Tools window/);
 });

@@ -1365,6 +1365,7 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.equal(spawned.length, 1);
   assert.equal(spawned[0].agent, "claude-code");
   assert.equal(spawned[0].prompt, "Do the task");
+  assert.equal(spawned[0].requestId, "ao-key");
   assert.equal((await workflow.call("observe", { workspaceId: "ws-1", runId: "run-1", nodeId: "worker" })).pending_approvals.length, 0);
   assert.equal(calls.filter((item) => item.endpoint === "/api/v1/ao/external/terminal").length, 0);
   turn = { turnId: "turn-1", turnState: "completed", answer: "Done with evidence" };

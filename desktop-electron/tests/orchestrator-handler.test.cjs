@@ -26,11 +26,30 @@ test("the actual AO adapter uses the complete handler contract without starting 
   });
   assert.equal(inspectRuntime(runtime).shapeCompatible, true);
   assert.deepEqual(Object.keys(runtime).sort(), [...RUNTIME_METHODS, "harness"].sort());
-  assert.deepEqual(Object.keys(runtime.harness).sort(), [...HARNESS_METHODS].sort());
+  assert.deepEqual(Object.keys(runtime.harness).sort(), [...HARNESS_METHODS, "busyChatSessions"].sort());
   assert.ok(Object.isFrozen(runtime), "the production factory returns the immutable handler boundary");
   assert.ok(Object.isFrozen(runtime.harness));
   assert.equal(runtime.snapshot().state, "stopped");
   assert.ok(BACKEND_MODULES.includes("orchestrator-handler.cjs"));
+});
+
+test("the actual factory composes a trusted runtime once and still validates the handler contract", () => {
+  const roots = {
+    resourceRoot: path.resolve(__dirname, "../../aiTemp/orchestrator-contract/resources"),
+    dataRoot: path.resolve(__dirname, "../../aiTemp/orchestrator-contract/data"),
+  };
+  let composed = 0;
+  const result = Promise.resolve("native:fixture");
+  const runtime = createAgentOrchestratorUpstream({ ...roots, composeRuntime(legacy) {
+    composed += 1;
+    assert.equal(legacy.snapshot().state, "stopped");
+    return { ...legacy, harness: { ...legacy.harness, spawn: () => result } };
+  } });
+  assert.equal(composed, 1);
+  assert.strictEqual(runtime.harness.spawn(), result);
+  assert.equal(runtime.snapshot().state, "stopped");
+  assert.throws(() => createAgentOrchestratorUpstream({ ...roots, composeRuntime: () => ({}) }), /Incompatible Orchestrator runtime/);
+  assert.throws(() => createAgentOrchestratorUpstream({ ...roots, composeRuntime: "untrusted-runtime" }), /must be a function/);
 });
 
 test("all handler operations preserve exact values and invoke the same engine once", async () => {

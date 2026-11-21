@@ -80,8 +80,12 @@ test("a narrow chat box keeps one row in every pane: the model's name gives up i
   assert.match(narrow, /\[aria-label="Choose model"\]\) \{ flex: 1 1 0; \}/, "the model takes what the first row leaves");
   assert.match(css, /\n\.cx-composer-send \{ display: flex; flex: none; align-items: center; gap: 4px; margin-left: auto; \}/,
     "Send and the context ring move as one, at the right end of the row they end on");
-  assert.match(chat, /<div className="cx-composer-send">\s*\{selectedTaskId \? <ChatContextMeter/, "the chat box groups them");
-  const bar = chat.slice(chat.indexOf('<div className="cx-composer-bar">'), chat.indexOf('<div className="cx-composer-send">'));
+  const sendStart = chat.indexOf('<div className="cx-composer-send">');
+  assert.ok(sendStart >= 0);
+  const sendGroup = chat.slice(sendStart, chat.indexOf("</div>", sendStart));
+  assert.match(sendGroup, /\{selectedTaskId \? <ChatContextMeter/);
+  assert.match(sendGroup, /className="cx-send/);
+  const bar = chat.slice(chat.indexOf('<div className="cx-composer-bar">'), sendStart);
   assert.ok(bar.includes("AgentOrchestratorComposerControls") && !bar.includes("cx-head-spacer"), "no spacer splits the row");
 });
 
