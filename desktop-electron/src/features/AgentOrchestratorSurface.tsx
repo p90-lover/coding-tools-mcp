@@ -14,6 +14,7 @@ import {
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
 import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, permissionChangeNotice, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import type { AutobotControl, AutobotState } from "./AgentOrchestratorAutobot";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
 import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, createActivityPoller, keepUnanswered, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
@@ -1598,6 +1599,11 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
       ...(node && permissionMission ? { runId: permissionMission.id, nodeId: node.id } : {}) });
     return result.capability as PermissionCapability ?? { supported: false, profiles: [], reason: "This agent didn't report its permissions" };
   }, [workspaceId, permissionMission?.id, JSON.stringify(permissionTeam?.nodes.map(node => [node.id, node.route]))]);
+  const configureAutobot = useCallback<AutobotControl>(async change => {
+    const result = await moduleCall("chat_autobot_permission", { workspaceId, taskId: chatTaskId, ...change });
+    return result as unknown as AutobotState;
+  }, [workspaceId, chatTaskId]);
+  const showAutobot = Boolean(chatTaskId) && composerMode === "single" && ["ao:claude-code", "ao:codex"].includes(singleRoute.harness_id);
   const savePermissions = async (snapshot: AoTeam, revision: number | undefined, selectedRoleIds: string[], permission: PermissionSelection) => {
     // The backend keeps its original chat; only that owner's unchanged composer may show its result.
     const owner = selection.current, intent = composerIntent.current;
@@ -3264,7 +3270,8 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                 onOpenTeam={openTeam}
                 onOpenMissionBoard={() => { setSheet(""); setView("board"); }}
                 permissions={<AgentOrchestratorPermissions key={JSON.stringify([workspaceId, chatTaskId, permissionMission?.id, composerMode, permissionTeam?.id, composerIntent.current])} team={permissionTeam} mission={permissionMission} busy={Boolean(busy)}
-                  loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies} />}
+                  loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies}
+                  configureAutobot={showAutobot ? configureAutobot : undefined} />}
                 approve={approve}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
                 warning={chatTaskId && selectedRun?.project_id === chatTaskId ? runWarning || undefined : undefined}

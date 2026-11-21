@@ -63,10 +63,11 @@ export function stepActions(items: ChatLiveItem[]): PlanAction[] {
 const failedItem = (item: ChatLiveItem) => /^(failed|error|errored)$/i.test(item.status);
 const runningItem = (item: ChatLiveItem) => /^(running|pending|in_progress)$/i.test(item.status);
 
-/** The agent's newest todo list, from a TodoWrite (`todos`) or update_plan (`plan`) call's input. */
+/** The latest structured snapshot, with tool inputs for older harnesses that don't send one. */
 export function agentPlan(items: ChatLiveItem[]): { title: string; status: string }[] | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
+    if (item.kind === "plan" && item.plan) return item.plan.map(step => ({ title: stepTitle(step.text), status: step.status }));
     if (!WORK_KINDS.has(item.kind) || failedItem(item) || !["todo_write", "todowrite", "update_plan"].includes(dshToolName(item)) || !item.input) continue;
     let input: unknown;
     try { input = JSON.parse(item.input); } catch { continue; }
