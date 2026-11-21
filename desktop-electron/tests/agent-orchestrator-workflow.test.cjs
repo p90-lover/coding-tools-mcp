@@ -6,7 +6,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createAgentOrchestratorWorkflow: createWorkflow, resolveAoNativeConnection, reviewScriptExcerpts } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow: createWorkflow, resolveAoNativeConnection, reviewScriptExcerpts, ROUTE_REFUSED } = require("../electron/agent-orchestrator-workflow.cjs");
 // A fixture never looks for the machine's own Codex CLI: without this, tests passed only where
 // `codex` was installed (a developer's PC) and failed on a clean CI runner. A test that is about
 // finding Codex passes its own findCodexExecutable.
@@ -1360,11 +1360,12 @@ test("AO harness workers run as AO sessions and return their answer as the card 
   assert.deepEqual(catalog.harnesses.map((item) => [item.id, item.runnable, item.chat]),
     [["codex-native", true, undefined], ["ao:claude-code", true, true], ["ao:aider", true, false]]);
   // An agent outside the CPA gateway lists its own models; "default" is never offered.
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
+  assert.deepEqual((await workflow.call("models", { harness: "ao:aider", workspaceId: "ws-1" })).models, ["sonnet"], "\"default\" is never offered");
   await workflow.call("advance", { workspaceId: "ws-1", runId: "run-1", executable: "C:\codex.exe" });
   assert.equal(spawned.length, 1);
   assert.equal(spawned[0].agent, "claude-code");
   assert.equal(spawned[0].prompt, "Do the task");
+  assert.equal(spawned[0].requestId, "ao-key");
   assert.equal((await workflow.call("observe", { workspaceId: "ws-1", runId: "run-1", nodeId: "worker" })).pending_approvals.length, 0);
   assert.equal(calls.filter((item) => item.endpoint === "/api/v1/ao/external/terminal").length, 0);
   turn = { turnId: "turn-1", turnState: "completed", answer: "Done with evidence" };
@@ -1490,13 +1491,11 @@ test("CPA models go only to agents that can use them through the gateway", async
   });
   // Aider has no gateway launch support: its own models only.
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
-  // agy runs CPA models through its gateway mode too: every harness offers every pool model but
-  // WebGPT (an agy with no Google sign-in listed nothing at all and fell back to WebGPT's tiers).
-  assert.deepEqual((await workflow.call("models", { harness: "ao:agy" })).models,
-    ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
   // Claude Code and opencode offer only CPA models: their own aliases (fable/haiku/opus/sonnet)
-  // are neither CPA nor WebGPT. Codex keeps its ChatGPT-account models next to CPA's.
-  for (const harness of ["ao:claude-code", "ao:opencode"]) {
+  // are neither CPA nor WebGPT. agy too: its own models run on its Google sign-in, which Google
+  // refused ("not currently available in your location"), so it runs every model through CPA's
+  // gateway mode. Codex keeps its ChatGPT-account models next to CPA's.
+  for (const harness of ["ao:claude-code", "ao:opencode", "ao:agy"]) {
     assert.deepEqual((await workflow.call("models", { harness })).models,
       ["cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"], harness);
   }
@@ -1513,6 +1512,8 @@ test("a CPA-only agent reports a CPA failure instead of falling back to its own 
     confirm: async () => true,
   });
   await assert.rejects(workflow.call("models", { harness: "ao:claude-code" }), /CPA model list is unavailable: CPA timed out/);
+  // agy never falls back to its own models, which run on its (refused) Google sign-in.
+  await assert.rejects(workflow.call("models", { harness: "ao:agy" }), /CPA model list is unavailable: CPA timed out/);
   // Codex still has its own ChatGPT-account models when CPA is down.
   assert.deepEqual((await workflow.call("models", { harness: "ao:codex" })).models, ["sonnet"]);
 });
@@ -3719,8 +3720,11 @@ test("team chat binds selected identity and rejects stale config before writing"
 
 test("external Codex-style permission tuples map to the real AO approval mode at spawn", async () => {
   // Claude Code's own "auto" mode exists only for Claude models, so its "Approve for me" accepts edits
-  // and leaves tool requests to our reviewer; Codex keeps its native auto-review.
-  for (const agent of ["codex", "claude-code"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review",agent === "codex" ? "auto" : "accept-edits"],["never","user","bypass-permissions"]]) {
+  // and leaves tool requests to our reviewer; Codex keeps its native auto-review. Full access is
+  // every agent's bypass.
+  for (const agent of ["codex", "claude-code", "opencode", "agy", "pi", "unreal-agent", "cline"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review",agent === "codex" ? "auto" : "accept-edits"],["never","user","bypass-permissions"]]) {
+    // An agent that can't ask the chat runs in Full access only (the next test refuses the rest).
+    if (policy === "on-request" && !["codex", "claude-code"].includes(agent)) continue;
     let launched;
     const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-6-luna",
       permission_profile: ":ao-default", native_permission_profile: policy === "never" ? ":danger-full-access" : ":workspace", approval_policy: policy, approvals_reviewer: reviewer };
@@ -3741,6 +3745,10 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
     { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
     { id: "cline-pass/deepseek-v4.1-flash", context_window: 272000, max_context_window: 272000 },
     { id: "cline-pass/brand-new-model", context_window: 272000, max_context_window: 272000 },
+    // A Vertex AI key's Gemini 4 rows carry CPA's stock window; Codex's GPT model really has 272K.
+    { id: "gemini-4-carbon", owned_by: "google", context_window: 272000, max_context_window: 272000 },
+    { id: "gemini-4-hydrogen", owned_by: "google", context_window: 272000, max_context_window: 272000 },
+    { id: "gpt-6.1-sol", owned_by: "openai", context_window: 272000, max_context_window: 272000 },
   ] };
   async function launch(model, contextWindow) {
     let launched;
@@ -3774,6 +3782,15 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   assert.equal(known.contextWindow.max, 1000000, "the card can't be set past it");
   assert.equal(deepseek.launched.contextWindow, 1000000, "a blank card starts at its full known window");
   assert.equal((await launch("gpt-6-luna", 300000)).launched.contextWindow, 300000, "a window the card sets wins");
+  // 2026-11-20: a Gemini 4 Carbon chat (Vertex key) was capped at CPA's stock 272K, and its window
+  // field refused 1m. CPA's own catalog gives every Gemini 4 model 1,048,576.
+  const carbon = await launch("gemini-4-carbon");
+  const gemini = carbon.models.capabilities["cpa/gemini-4-carbon"];
+  assert.equal(gemini.contextLimit, 1048576, "the known Gemini 4 window replaces the stock one, with no provider prefix");
+  assert.equal(gemini.contextWindow.max, 1048576, "so 1m can be set");
+  assert.equal(carbon.launched.contextWindow, 1048576, "and a blank card starts at it");
+  assert.equal(carbon.models.capabilities["cpa/gemini-4-hydrogen"].contextLimit, 1048576);
+  assert.equal(carbon.models.capabilities["cpa/gpt-6.1-sol"].contextLimit, 272000, "a 272K a model of CPA's own providers reports is kept");
 });
 
 // The user (2026-11-11), looking at a window menu that topped out at 872k: "it should up 1m context
@@ -3919,6 +3936,49 @@ test("each model is filed under the provider CPA says serves it, though CPA's fu
   }
 });
 
+test("API provider models missing from the enhanced catalog are discovered from the standard list", async () => {
+  for (const enhanced of [[], [{ slug: "gpt-fixture", context_window: 1000000, supported_reasoning_levels: ["high"] }]]) {
+    const workflow = createAgentOrchestratorWorkflow({
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+      fetchImpl: async (url) => ({ ok: true, json: async () => String(url).includes("/auth-files") ? { files: [] }
+        : String(url).includes("client_version") ? { models: enhanced } : { data: [
+          { id: "gpt-fixture", owned_by: "codex" }, { id: "custom/vendor-model", owned_by: "custom-api", context_length: 64000 },
+        ] } }),
+    });
+    const listed = await workflow.call("models", { harness: "ao:claude-code" });
+    assert.ok(listed.models.includes("cpa/custom/vendor-model"));
+    assert.equal(listed.capabilities["cpa/custom/vendor-model"].provider, "custom-api");
+    assert.equal(listed.capabilities["cpa/custom/vendor-model"].contextLimit, 64000);
+    assert.equal(listed.models.filter((id) => id === "cpa/gpt-fixture").length, 1);
+    if (enhanced.length) assert.equal(listed.capabilities["cpa/gpt-fixture"].contextLimit, 1000000);
+  }
+});
+
+test("enabled CPA accounts automatically reload standard-list models after a catalog refresh", async () => {
+  let clock = 1_000_000;
+  let enabled = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async (url) => ({ ok: true, json: async () => String(url).includes("/auth-files")
+      ? { files: [{ name: "cline-account.json", provider: "cline", disabled: !enabled }] }
+      : String(url).includes("client_version") ? { models: [{ slug: "gpt-fixture" }] }
+        : { data: [{ id: "gpt-fixture", owned_by: "codex" }, { id: "cline-pass/custom-model", owned_by: "cline" }] } }),
+  });
+  const before = await workflow.call("models", {});
+  assert.ok(!before.models.includes("cline-pass/custom-model"));
+  enabled = true;
+  clock += 60_001;
+  const after = await workflow.call("models", {});
+  assert.ok(after.models.includes("cline-pass/custom-model"));
+  assert.equal(after.capabilities["cline-pass/custom-model"].provider, "cline");
+  enabled = false;
+  clock += 60_001;
+  const disabled = await workflow.call("models", {});
+  assert.ok(!disabled.models.includes("cline-pass/custom-model"));
+  assert.match(disabled.unavailable["cline-pass/custom-model"], /disabled in CPA/);
+});
+
 test("a model CPA stops listing stays in the picker with its effort and window, and a send on it goes to CPA", async () => {
   let catalog = { data: [{ id: "gemini-3.8-flash-high", context_window: 1000000 }, { id: "cline-pass/deepseek-v4-flash", context_window: 1000000 }] };
   let clock = 1_000_000;
@@ -4002,6 +4062,80 @@ test("a chat on a model CPA no longer offers is refused before a task or run is 
   await workflow.call("chat_send", { workspaceId: "ws", message: "hi", executionMode: "single",
     singleRoute: { ...route, model: "cpa/gemini-3.8-flash-high" } }).catch(() => undefined);
   assert.ok(writes.length > 0, "a listed model is not refused");
+});
+
+test("a remembered model leaves the menu once only a disabled account served it, and stays through a cooldown", async () => {
+  // 2026-11-18: Gemini 4 Argon High came from one of ten Antigravity accounts. That account was
+  // disabled in CPA, CPA stopped listing the model, and the menu kept it from memory (30 days):
+  // each send failed "unknown provider for model gemini-4-argon-high".
+  let clock = 5_000_000;
+  let plain;
+  let accounts;
+  let registered; // account file -> the models CPA has registered to it, or null when unreadable
+  const asked = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => clock,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture", managementKey: "manage" }),
+    fetchImpl: async (url, init) => {
+      const target = new URL(String(url));
+      if (target.pathname === "/v0/management/auth-files/models") {
+        assert.equal(init.headers.Authorization, "Bearer manage");
+        const name = target.searchParams.get("name");
+        asked.push(name);
+        const models = registered[name];
+        return models ? { ok: true, json: async () => ({ models: models.map(id => ({ id, owned_by: "antigravity" })) }) }
+          : { ok: false, status: 500, json: async () => ({}) };
+      }
+      if (target.pathname === "/v0/management/auth-files") return { ok: true, json: async () => ({ files: accounts }) };
+      if (target.pathname.startsWith("/v0/management/")) return { ok: false, status: 404, json: async () => ({}) };
+      if (target.search) return { ok: true, json: async () => ({ models: plain.data.map(row => ({ slug: row.id, context_window: 200000 })) }) };
+      return { ok: true, json: async () => plain };
+    },
+  });
+  const read = async () => { clock += 2 * 60_000; return workflow.call("models", {}); };
+  const both = [{ name: "ag-1.json", provider: "antigravity" }, { name: "ag-6.json", provider: "antigravity" }];
+
+  plain = { data: [{ id: "gpt-5.5", owned_by: "openai" }, { id: "gemini-3-flash", owned_by: "antigravity" }, { id: "gemini-4-argon-high", owned_by: "antigravity" }] };
+  accounts = both;
+  registered = { "ag-1.json": ["gemini-3-flash"], "ag-6.json": ["gemini-3-flash", "gemini-4-argon-high"] };
+  assert.deepEqual((await read()).models, ["gpt-5.5", "gemini-3-flash", "gemini-4-argon-high"]);
+  assert.deepEqual(asked, [], "nothing missing: no account is asked");
+
+  // A cooldown: CPA hides the model, but the enabled account still has it. It stays, held.
+  plain = { data: [{ id: "gpt-5.5", owned_by: "openai" }, { id: "gemini-3-flash", owned_by: "antigravity" }] };
+  let listed = await read();
+  assert.ok(listed.models.includes("gemini-4-argon-high"));
+  assert.match(listed.held["gemini-4-argon-high"], /not listing it right now/);
+  assert.deepEqual(asked.sort(), ["ag-1.json", "ag-6.json"], "only the provider's enabled accounts are asked");
+
+  // An account whose models cannot be read: nothing is judged.
+  registered = { "ag-1.json": ["gemini-3-flash"], "ag-6.json": null };
+  accounts = [...both];
+  listed = await read();
+  assert.match(listed.held["gemini-4-argon-high"], /not listing it right now/, "unreadable: kept, as before");
+
+  // The account that served it is disabled: CPA unregisters its models, and the menu drops it.
+  accounts = [both[0], { ...both[1], disabled: true }];
+  registered = { "ag-1.json": ["gemini-3-flash"] };
+  asked.length = 0;
+  listed = await read();
+  assert.ok(!listed.models.includes("gemini-4-argon-high"), "gone from the menu");
+  assert.equal(listed.held?.["gemini-4-argon-high"], undefined);
+  assert.match(listed.unavailable["gemini-4-argon-high"], /No enabled Antigravity account in CPA serves it now: the account that did is disabled/);
+  assert.deepEqual(asked, ["ag-1.json"], "a disabled account is not asked");
+  assert.ok(listed.models.includes("gemini-3-flash"));
+
+  // A Codex model CPA stopped listing is still remembered: an API key in CPA's config may serve it.
+  plain = { data: [{ id: "gemini-3-flash", owned_by: "antigravity" }] };
+  listed = await read();
+  assert.match(listed.held["gpt-5.5"], /not listing it right now/);
+
+  // Turned back on: CPA lists it again, and so does the menu.
+  accounts = both;
+  plain = { data: [{ id: "gemini-3-flash", owned_by: "antigravity" }, { id: "gemini-4-argon-high", owned_by: "antigravity" }] };
+  listed = await read();
+  assert.ok(listed.models.includes("gemini-4-argon-high"));
+  assert.equal(listed.unavailable?.["gemini-4-argon-high"], undefined);
 });
 
 test("CPA's model list leaves out a provider plugin's models when nobody is signed in to that provider", async () => {
@@ -4158,12 +4292,12 @@ test("permission capabilities use installed AO adapter modes without fabricating
     requestHeadless: async (endpoint) => { reads.push(endpoint); throw new Error("No native connection"); },
     aoHarness: { catalog: async () => [
       { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
-      { id: "agy", installed: true },
+      { id: "agy", installed: true }, { id: "pi", installed: true, chat: true },
     ], spawn: async (...args) => { launches.push(args); } },
   });
-  // agy takes the three modes too (AO maps them onto its --mode and --dangerously-skip-permissions):
-  // without one it waited at approvals in a terminal nobody saw and its card never finished.
-  for (const harness_id of ["ao:claude-code", "ao:agy"]) {
+  // Every installed AO harness offers the menu, Full access at least: a chat moved onto Pi or
+  // Antigravity had nothing it could pick before (2026-11-17), Full access included.
+  for (const harness_id of ["ao:claude-code", "ao:opencode", "ao:agy", "ao:pi"]) {
     const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } })).capability;
     assert.equal(capability.supported, true, harness_id);
     assert.equal(capability.source, "ao-adapter");
@@ -4171,12 +4305,17 @@ test("permission capabilities use installed AO adapter modes without fabricating
     assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
     assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
     assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
-    // agy in its terminal cannot bring an approval to the chat, and its auto mode is unavailable
-    // through the gateway, so Ask and Approve for me are excluded there; Full access remains.
+    // agy in its terminal cannot bring an approval to the chat, and Pi and opencode (on its own
+    // allow-all default) never ask, so Ask and Approve for me are excluded there with that reason;
+    // Full access remains.
+    const fullAccessOnly = harness_id !== "ao:claude-code";
     assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
-      harness_id === "ao:agy" ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
+      fullAccessOnly ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
+    if (fullAccessOnly) for (const mode of capability.excluded_modes) assert.match(mode.reason, /Choose Full access, the only mode it runs in\.$/);
   }
-  for (const harness_id of ["ao:opencode", "codex-native"]) {
+  assert.match((await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id: "ao:agy" } })).capability.excluded_modes[0].reason,
+    /^Antigravity asks for approval in its own terminal/);
+  for (const harness_id of ["ao:pi-not-installed", "codex-native"]) {
     const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
     assert.equal(unsupported.capability.supported, false);
   }
@@ -4239,6 +4378,26 @@ test("external dispatch refuses permission tuples the adapter cannot honor", asy
     });
     await assert.rejects(workflow.call("advance", {workspaceId:"ws",runId:"run"}), /cannot honor|permission tuple|unsupported.*permission/i);
     assert.equal(launched, false);
+  }
+  // Ask or Approve for me on an agent that can't ask the chat is refused with its reason, never
+  // launched to wait at an approval nobody sees (agy, Cline) or to run unchecked (Pi, Unreal Agent).
+  for (const [agent, why] of [["agy", /^Antigravity asks for approval in its own terminal/], ["pi", /^Pi runs its tools without asking/],
+    ["unreal-agent", /^Unreal Agent has no approval channel/], ["cline", /^Cline asks for approval in its own terminal/],
+    ["opencode", /^opencode allows every tool by its own default/], ["kimi", /^kimi has no way to ask the chat/]]) {
+    for (const reviewer of ["user", "auto_review"]) {
+      let launched = false;
+      const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "default", permission_profile: ":ao-default",
+        native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer };
+      const mission = { id:"run",workspace_id:"ws",revision:1,nodes:[{id:"one",role:"planner",state:"pending",parents:[],route}] };
+      const workflow = createAgentOrchestratorWorkflow({
+        requestHeadless: async endpoint => endpoint.endsWith("/read") ? {ok:true,runs:[mission],worker_capacity:{run:1}}
+          : endpoint.endsWith("/reserve") ? {ok:true,request_key:"key",prompt:"direct"} : {ok:true,run:mission},
+        aoHarness: { spawn: async () => { launched=true;return "session"; } }, confirm: async()=>true,
+      });
+      await assert.rejects(workflow.call("advance", {workspaceId:"ws",runId:"run"}), (error) => why.test(error.message)
+        && /Choose Full access, the only mode it runs in\.$/.test(error.message) && ROUTE_REFUSED.test(error.message));
+      assert.equal(launched, false, `${agent} ${reviewer}`);
+    }
   }
 });
 
@@ -8095,6 +8254,129 @@ test("Settings › Instructions start a new agent's first message, within AO's 1
 
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
 test("a follow-up after a held turn (a hung turn the user's message stopped) continues its session too", () => followUpContinues("held"));
+
+// ---- turns a chat's agent starts by itself (adoptAutonomousTurns) ----
+
+/**
+ * A Claude chat whose card r1 finished turn "turn-1" in AO session "sess-1". `newest` is what AO's
+ * conversation shows as the session's newest turn; `busy` is the sessions AO calls working or
+ * waiting for input; `agentUp` is whether the chat's agent can be continued.
+ */
+function autonomousChat({ newest, busy = ["sess-1"], agentUp = true, cardState = "finished" } = {}) {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const task = { id: "task-1", title: "Ship", description: "first ask", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: cardState, parents: [], route, receipt: { thread_id: "sess-1", turn_id: "turn-1", answer: "done" } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map();
+  const spawned = [], sent = [], observedWith = [], submitted = [];
+  // A card the chat makes is in the project's runs from then on, as the service keeps it.
+  const card = (id) => {
+    if (!created.has(id)) {
+      const run = { id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false, revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(id, run);
+      world.runs.push(run);
+    }
+    return created.get(id);
+  };
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) return { ok: true, runs: [card(body.run_id)], worker_capacity: { [body.run_id]: 1 } };
+    if (endpoint === "/api/v1/ao/update" && body.change?.operation === "create_from_team") {
+      const result = await world.requestHeadless(endpoint, body, options);
+      card(body.change.run_id);
+      return result;
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") {
+      submitted.push(body);
+      latest.nodes[0].state = body.session_id ? "running" : "held";
+      latest.nodes[0].receipt = { thread_id: body.session_id, ...(body.error ? { error: body.error } : {}) };
+      return { ok: true, run: latest };
+    }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    aoHarness: {
+      busyChatSessions: async () => busy,
+      spawn: async input => { spawned.push(input); return "new-session"; },
+      continuable: async id => agentUp && id === "sess-1",
+      send: async (...args) => { sent.push(args); return { turnId: "sent-turn", state: "running" }; },
+      observe: async (id, expected) => {
+        observedWith.push([id, expected ?? null]);
+        if (expected === "turn-1") return { status: "idle", turnId: "turn-1", turnState: "completed", answer: "done", approvals: [] };
+        return newest;
+      },
+    },
+  });
+  return { world, workflow, route, spawned, sent, observedWith, submitted };
+}
+const waitFor = async (ok) => { for (let tries = 0; tries < 300 && !ok(); tries++) await new Promise(resolve => setTimeout(resolve, 10)); };
+
+test("a turn a chat's agent starts by itself gets a card of its own, and nothing is sent to the agent", async (t) => {
+  // Another local Claude session messaged the agent: AO shows a newer turn that waits on a permission request.
+  const newest = { status: "needs_input", turnId: "autonomous-turn-9", turnState: "running", needsInput: true,
+    answer: "", liveOutput: "", timeline: [], approvals: [{ requestId: "req-1", kind: "approval", tool: "Bash", command: "git push" }] };
+  const { world, workflow, spawned, sent, observedWith, submitted } = autonomousChat({ newest });
+  t.after(() => workflow.dispose());
+  await workflow.call("runs", { workspaceId: "ws-1" }); // the window reads the project
+
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), ["sess-1"]);
+  await waitFor(() => observedWith.some(([, expected]) => expected === "autonomous-turn-9"));
+  assert.match(world.edits.at(-1).description, /Follow-up \([^)]+ UTC\):\nClaude continued on its own\.$/, "the chat shows where the turn came from");
+  assert.equal(world.updates.at(-1).operation, "create_from_team");
+  assert.equal(submitted.at(-1)?.session_id, "sess-1", "the card holds the chat's own agent");
+  assert.deepEqual(sent, [], "the agent is already working on the turn: nothing is sent");
+  assert.deepEqual(spawned, [], "and no new agent is started");
+  assert.ok(observedWith.some(([id, expected]) => id === "sess-1" && expected === "autonomous-turn-9"),
+    "the card watches that turn, so its requests are shown and screened and its answer is the card's");
+});
+
+test("a turn the agent started by itself is not adopted twice, nor one the chat already has or that ended", async (t) => {
+  const running = { status: "working", turnId: "autonomous-turn-9", turnState: "running", answer: "", liveOutput: "", timeline: [], approvals: [] };
+  const cases = [
+    ["AO calls no chat agent busy", { newest: running, busy: [] }],
+    ["the newest turn is the card's own", { newest: { ...running, turnId: "turn-1" } }],
+    ["the newest turn already ended", { newest: { ...running, turnState: "completed" } }],
+    ["the newest turn has not started", { newest: { ...running, turnState: "queued" } }],
+    ["the chat's card is still working", { newest: running, cardState: "running" }],
+  ];
+  for (const [why, setup] of cases) {
+    const { workflow, world, sent } = autonomousChat(setup);
+    t.after(() => workflow.dispose());
+    await workflow.call("runs", { workspaceId: "ws-1" });
+    assert.deepEqual(await workflow.adoptAutonomousTurns(), [], why);
+    assert.equal(world.updates.length, 0, `${why}: no card`);
+    assert.deepEqual(sent, [], why);
+  }
+
+  const { workflow, world } = autonomousChat({ newest: running });
+  t.after(() => workflow.dispose());
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), ["sess-1"]);
+  const cards = world.updates.length;
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), [], "its card now drives the session");
+  assert.equal(world.updates.length, cards);
+});
+
+test("an adopted turn whose agent is gone fails its card instead of starting a new agent on the placeholder", async (t) => {
+  const newest = { status: "working", turnId: "autonomous-turn-9", turnState: "running", answer: "", liveOutput: "", timeline: [], approvals: [] };
+  const { workflow, spawned, sent, submitted } = autonomousChat({ newest, agentUp: false });
+  t.after(() => workflow.dispose());
+  await workflow.call("runs", { workspaceId: "ws-1" });
+  assert.deepEqual(await workflow.adoptAutonomousTurns(), ["sess-1"]);
+  await waitFor(() => submitted.length > 0);
+  assert.match(String(submitted.at(-1)?.error), /stopped before the turn it started on its own could be shown/);
+  assert.equal(submitted.at(-1)?.session_id, undefined);
+  assert.deepEqual(spawned, [], "no fresh agent gets \"Claude continued on its own.\" as its task");
+  assert.deepEqual(sent, []);
+});
 
 test("a follow-up brings its chat's agent back while the card is reserved, not after", async () => {
   // Seen live 2026-11-09: the reservation and the launch settings took 1-18 s, and only then did a
@@ -12963,6 +13245,73 @@ test("a hung turn the stall stop cannot interrupt has its agent shut down, so th
   await listed.look();
   assert.deepEqual(listed.calls, [], "a shown request is left for the person");
   listed.workflow.dispose();
+});
+
+// Seen 2026-11-16 (the user's screenshot): a chat's step failed with
+// `ACP session/prompt: {"code":-32800,"message":"Request cancelled","data":{"error":"context canceled"}}`.
+// The stall stop had shut a hung turn's agent down, and AO recorded the turn it had cancelled itself
+// as failed with the protocol's cancel error. An AO with the fix calls the turn interrupted, and
+// observe() then says "the app restarted" of it, which is not what happened either.
+test("a turn the stall stop ended says the agent stopped responding, not AO's cancel error", async () => {
+  const CANCELLED = 'ACP session/prompt: {"code":-32800,"message":"Request cancelled","data":{"error":"context canceled"}}';
+  const RESTARTED = "The agent's process ended before it finished (the app restarted); retry this card.";
+  const STALLED = "The agent stopped responding, so its turn was stopped.";
+  /** The card's failure once AO shows `ended`, after a look at the turn while it was quiet for `quietMinutes`. */
+  async function failureFor(ended, { quietMinutes = 15 } = {}) {
+    const clock = 2_000_000_000_000;
+    const calls = [], terminal = [];
+    let shown = null;
+    const node = { id: "w", role: "worker", task_id: "t", parents: [], state: "running",
+      route: { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/m", permission_profile: ":ao-default" },
+      receipt: { request_key: "k", status: "submitted", thread_id: "sess-1", turn_id: "turn-1" } };
+    const workflow = createAgentOrchestratorWorkflow({
+      now: () => clock,
+      // The 15 s settle window's 250 ms polls run at once; other timers keep their length.
+      setTimer: (resolve, ms) => setTimeout(resolve, ms === 250 ? 0 : ms),
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [{ id: "run", workspace_id: "ws", revision: 1, cancelled: false, execution_mode: "single", nodes: [node] }] };
+        if (endpoint === "/api/v1/ao/external/terminal") { terminal.push(body); return { ok: true }; }
+        throw new Error(`Unexpected AO endpoint ${endpoint}`);
+      },
+      aoHarness: {
+        observe: async () => shown ?? { turnId: "turn-1", turnState: "running", status: "working",
+          lastActivityAt: clock - quietMinutes * 60_000, timeline: [], approvals: [] },
+        interrupt: async (session) => { calls.push(["interrupt", session]); },
+        exitAgent: async (session) => { calls.push(["exit", session]); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    const look = () => workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "w" });
+    try {
+      await workflow.call("chat_auto_retry", { enabled: true });
+      await look();
+      shown = { turnId: "turn-1", approvals: [], timeline: [], ...ended };
+      await look();
+    } finally { workflow.dispose(); }
+    assert.equal(terminal.length, 1, "the turn's end was saved");
+    return { failure: terminal[0].failure, calls };
+  }
+
+  // The AO in 0.8.129 and before: the turn it cancelled itself is "failed" with the cancel error.
+  const old = await failureFor({ turnState: "failed", status: "exited", exited: true, error: CANCELLED });
+  assert.deepEqual(old.calls, [["interrupt", "sess-1"], ["exit", "sess-1"]], "the hung turn's agent was shut down");
+  assert.equal(old.failure, STALLED);
+  // An AO with the fix: interrupted, no error of its own, and observe() reads its agent as gone.
+  assert.equal((await failureFor({ turnState: "interrupted", status: "exited", exited: true, error: RESTARTED })).failure, STALLED);
+  // The interrupt landed and the agent stayed up: "AO turn interrupted" said nothing either.
+  assert.equal((await failureFor({ turnState: "interrupted", status: "idle" })).failure, STALLED);
+  // A real error that reached the turn is still what the card says, and what its retry rules read.
+  assert.equal((await failureFor({ turnState: "failed", status: "idle", error: "API Error: 503 upstream unavailable" })).failure,
+    "API Error: 503 upstream unavailable");
+  // Another turn of the session, ended later, is not the one the stop went for.
+  assert.equal((await failureFor({ turnId: "turn-2", turnState: "interrupted", status: "idle" })).failure, "AO turn interrupted");
+
+  // No stall stop (the turn showed life a minute ago): something else shut the agent down.
+  const busy = await failureFor({ turnState: "failed", status: "exited", exited: true, error: CANCELLED }, { quietMinutes: 1 });
+  assert.deepEqual(busy.calls, [], "the stall stop left a working turn alone");
+  assert.equal(busy.failure, "The agent was stopped while it worked on this step.", "AO's cancel record is never shown as the step's error");
+  // A turn an app restart interrupted keeps its own text: the step's direct retry reads it.
+  assert.equal((await failureFor({ turnState: "interrupted", status: "exited", exited: true, error: RESTARTED }, { quietMinutes: 1 })).failure, RESTARTED);
 });
 
 // Seen live 2026-11-10: AO lost five chats' agents while their hosts lived on, and the turns read

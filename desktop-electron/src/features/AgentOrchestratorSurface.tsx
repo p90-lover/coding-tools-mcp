@@ -24,7 +24,7 @@ import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, typ
 import { createLatestConfigQueue } from "./ao-config";
 import {
   AGENT_DEFAULT_MODEL, AgentOrchestratorRoleEditor, DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL, HarnessPicker, NATIVE_HARNESS, SPECIALTIES, defaultTeam, emptyRoleSettings, starterSettings,
-  cardMeta, harnessLabel, modelLabel, modelShortLabel, permissionsFitted, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
+  cardMeta, harnessLabel, modelLabel, modelShortLabel, teamForMission, workerRoute, type AoHarness, type AoModelCatalog, type AoModelLoader, type AoRoute, type AoTeam, type RoleSettings,
 } from "./AgentOrchestratorRoleEditor";
 import "./agent-orchestrator.css";
 import "./codex-chat.css";
@@ -265,7 +265,7 @@ function startNotice(result: Record<string, unknown>): string {
 const routeIdentity = (route: AoRoute) => CHAT_ROUTE_FIELDS.map(name => (route as unknown as Record<string, unknown>)[name] ?? null);
 /**
  * Whether `route` is the setup a single chat's step ran on: its saved route, or that route as the
- * composer shows it when the chat opens (its permission choices applied, then fitted).
+ * composer shows it when the chat opens (its permission choices applied).
  */
 function singleRouteMatches(route: AoRoute, mission: AoMission, card: AoMission["nodes"][number]): boolean {
   const same = (other: AoRoute) => JSON.stringify(routeIdentity(other)) === JSON.stringify(routeIdentity(route));
@@ -278,7 +278,7 @@ function singleRouteMatches(route: AoRoute, mission: AoMission, card: AoMission[
   }
   if (intent?.approval_policy !== undefined) shown.approval_policy = intent.approval_policy;
   if (intent?.approvals_reviewer !== undefined) shown.approvals_reviewer = intent.approvals_reviewer;
-  return same(shown) || same(permissionsFitted(shown));
+  return same(shown);
 }
 function lastChatRoute(): AoRoute | null {
   try {
@@ -287,9 +287,8 @@ function lastChatRoute(): AoRoute | null {
     const route = Object.fromEntries(Object.entries(saved).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name)
       && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)))));
     const required = ["harness_id", "provider_id", "account_id", "model", "permission_profile"];
-    // A route remembered before Pi/opencode dropped a carried-over mode still holds one.
     return required.every(name => typeof route[name] === "string") && route.model && route.model !== AGENT_DEFAULT_MODEL
-      ? permissionsFitted(route as unknown as AoRoute) : null;
+      ? route as unknown as AoRoute : null;
   } catch { return null; }
 }
 function rememberChatRoute(route: AoRoute) {
@@ -577,8 +576,9 @@ export const CHAT_CONTEXT_LIMIT = 8192;
 export function aoChatExecution(mode: "single" | "team", route: AoRoute, teams: AoTeam[], teamId: string): JsonObject {
   if (mode === "single") {
     if (!route.model || route.model === "default") throw new Error("Choose a model first.");
-    // Every send and pre-warm comes through here: a mode Pi or opencode can't honor never leaves.
-    return { executionMode: "single", singleRoute: { ...permissionsFitted(route) } };
+    // Every send and pre-warm comes through here. The chat's permission mode goes as picked: a mode
+    // its agent can't run in is refused at launch with the reason, never dropped or swapped.
+    return { executionMode: "single", singleRoute: { ...route } };
   }
   const selected = teams.find(team => team.id === teamId);
   if (!selected || !Number.isSafeInteger(selected.revision)) throw new Error("This saved team changed. Refresh and choose it again.");
@@ -610,16 +610,22 @@ export type SplitPaneLink = {
   onClose: () => void;
 };
 
-export function AgentOrchestratorSurface({ language, setError, pane, pageNumber = 1 }: {
+/**
+ * `pageNumber`: the chat page this surface is on now (the registry and the page tabs go by it).
+ * `pageId`: what the page's own state is stored under (chatPageKey, its new-chat draft); it stays
+ * the same when a page before it closes and this one moves up a place.
+ */
+export function AgentOrchestratorSurface({ language, setError, pane, pageNumber = 1, pageId = pageNumber }: {
   language: Language;
   setError: (error: string | null) => void;
   pane?: SplitPaneLink;
   pageNumber?: number;
+  pageId?: number;
 }) {
   const copy = words[language];
   const surfaceHidden = useSurfaceHidden();
   const pageRegistry = useContext(ChatPagesContext);
-  const [initialPageSelection] = useState(() => !pane && pageRegistry ? readPageSelection(pageNumber) : null);
+  const [initialPageSelection] = useState(() => !pane && pageRegistry ? readPageSelection(pageId) : null);
   const attachmentPreview = useCallback((file: string) => window.codexWebLauncher?.attachmentPreview?.(file)
     ?? Promise.reject(new Error("Previews show in the desktop app")), []);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
@@ -634,12 +640,12 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [workspaceId, setWorkspaceId] = useState(() => {
     if (pane) return pane.workspaceId;
     if (initialPageSelection) return initialPageSelection.workspaceId;
-    try { return localStorage.getItem(chatPageKey("coding-tools:ao:workspace", pageNumber)) || localStorage.getItem("coding-tools:ao:workspace") || ""; }
+    try { return localStorage.getItem(chatPageKey("coding-tools:ao:workspace", pageId)) || localStorage.getItem("coding-tools:ao:workspace") || ""; }
     catch { return ""; }
   });
   // The chat a split pane is to show once its project has loaded (null: not a pane).
   const paneWanted = useRef(pane ? { workspaceId: pane.workspaceId, taskId: pane.taskId }
-    : initialPageSelection ?? (pageRegistry && pageNumber > 1 ? { workspaceId, taskId: "" } : null));
+    : initialPageSelection ?? (pageRegistry && pageId > 1 ? { workspaceId, taskId: "" } : null));
   const paneSelectionPending = useRef(false);
   // One project tree switches between the conversation and the selected graph above its workspace board.
   const [view, setView] = useState<"chat" | "overview" | "board">("chat");
@@ -1552,8 +1558,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         }
         if (intent?.approval_policy !== undefined) route.approval_policy = intent.approval_policy;
         if (intent?.approvals_reviewer !== undefined) route.approvals_reviewer = intent.approvals_reviewer;
-        // A saved Pi/opencode chat whose launch was refused for a carried-over mode can go on.
-        setSingleRoute(permissionsFitted(route));
+        setSingleRoute(route);
       }
     } else {
       setComposerMode("team");
@@ -2163,7 +2168,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   const [splitMaxCols, setSplitMaxCols] = useState(2);
   const [splitWeightsSaved, setSplitWeightsSaved] = useState<number[] | undefined>(undefined);
   const [splitRow, setSplitRow] = useState(SPLIT_ROW.DEFAULT);
-  const splitStore = chatPageKey(SPLIT_STORE, pageNumber);
+  const splitStore = chatPageKey(SPLIT_STORE, pageId);
   // A chat another page had no screen for: taken once this page's saved split has loaded (splitReady).
   const [splitReady, setSplitReady] = useState(false);
   const [pageOpenAsked, setPageOpenAsked] = useState(0);
@@ -2182,9 +2187,9 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, splitPanes]);
   useEffect(() => {
     if (pane || !pageRegistry || chatTaskId === null || loadedWorkspace !== workspaceId) return;
-    try { localStorage.setItem(chatPageKey(`${CHAT_PAGES_STORE}:selection`, pageNumber), JSON.stringify({ workspaceId, taskId: chatTaskId })); }
+    try { localStorage.setItem(chatPageKey(`${CHAT_PAGES_STORE}:selection`, pageId), JSON.stringify({ workspaceId, taskId: chatTaskId })); }
     catch { /* Keep the selected chat for this session. */ }
-  }, [pane, pageRegistry, pageNumber, workspaceId, chatTaskId, loadedWorkspace]);
+  }, [pane, pageRegistry, pageId, workspaceId, chatTaskId, loadedWorkspace]);
   /** The pane already showing a chat, so a chat is never open twice (both would send its queue). */
   const paneShowing = (id: string, taskId: string) => !taskId ? undefined : workspaceId === id && chatTaskId === taskId ? "main"
     : splitPanes.find((item) => item.workspaceId === id && item.taskId === taskId)?.id;
@@ -2658,7 +2663,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     setWorkspaceId(id);
     setChatTaskId(null);
     if (pane) return;
-    try { localStorage.setItem(chatPageKey("coding-tools:ao:workspace", pageNumber), id); } catch { /* Selection still works for this session. */ }
+    try { localStorage.setItem(chatPageKey("coding-tools:ao:workspace", pageId), id); } catch { /* Selection still works for this session. */ }
   };
   const chooseWorkspace = (id: string) => {
     // A chat clicked in a project still loading gives way to whatever is chosen now: a project, a
@@ -3215,7 +3220,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           maxColumns={splitMaxCols} onMaxColumns={setSplitMaxCols}
           onDropChat={pane ? undefined : (chat, target) => openInSplit(chat.workspaceId || workspaceId, chat.taskId, target)}
           onMovePane={pane ? undefined : moveSplitPane}
-          panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError} pageNumber={pageNumber}
+          panes={pane ? [] : splitPanes.map((item) => ({ ...item, content: <AgentOrchestratorSurface language={language} setError={setError} pageNumber={pageNumber} pageId={pageId}
             pane={{ id: item.id, workspaceId: item.workspaceId, taskId: item.taskId, onNewChat: (id, newScreen) => newScreen ? openNewChat(id, true) : newChatInPane(item.id, id), onClose: () => closeSplitPane(item.id),
               onChat: (id, taskId) => setSplitPanes((current) => current.map((entry) => entry.id === item.id ? { ...entry, workspaceId: id, taskId } : entry)) }} /> }))}>
         {view === "chat" ? (
@@ -3225,7 +3230,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                 onClosePane={pane ? pane.onClose : splitPanes.length ? () => closeSplitPane("main") : undefined}
                 runs={chatRuns}
                 tasks={allTasks} selectedTaskId={chatTaskId ?? ""} deciding={chatTaskId === null}
-                draftScope={pane?.id ?? (pageNumber === 1 ? "main" : `page-${pageNumber}`)}
+                draftScope={pane?.id ?? (pageId === 1 ? "main" : `page-${pageId}`)}
                 projectLoadError={projectLoadError} onRetryProject={() => setProjectLoadRevision((value) => value + 1)} onComposing={prewarmOnTyping}
                 projectName={workspaces.find((item) => item.id === workspaceId)?.name} projectBranch={projectBranch}
                 stop={stopChat} restart={restartChat} loadWork={loadChatWork}

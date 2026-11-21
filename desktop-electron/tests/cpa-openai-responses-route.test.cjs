@@ -141,6 +141,58 @@ test("keys with their own outbound route get a twin each; providers with nothing
   assert.deepEqual(again(state)["api-keys"], groups);
 });
 
+// Seen 2026-11-17 in the owner's own settings: two enabled providers of one name at
+// api.openai.com, each with its own key and the same 96 models. A twin was matched to its
+// provider by name alone, so the second write folded both twins into the first provider and
+// the second key no longer served its reasoning models.
+test("two providers of one name, each with its own key, keep a twin each however often the config is written", (t) => {
+  const first = openai({ keys: [{ "api-key": "sk-one", weight: 3 }] });
+  const second = openai({ keys: [{ "api-key": "sk-two" }] });
+  const state = stateWith(t, { "config-version": 8, "api-keys": { "openai-compatibility": [first, second] } });
+  const shape = (groups) => ({
+    twins: groups.codex.map((entry) => [entry.name, entry.keys.map((key) => key["api-key"]), names(entry.models)]),
+    providers: groups["openai-compatibility"].map((provider) => names(provider.models)),
+  });
+  const groups = configure(state)["api-keys"];
+  assert.deepEqual(shape(groups), {
+    twins: [["Chatgpt-api-key (Responses)", ["sk-one"], REASONING], ["Chatgpt-api-key (Responses) 2", ["sk-two"], REASONING]],
+    providers: [OTHER, OTHER],
+  });
+  assert.deepEqual(again(state)["api-keys"], groups, "the same after CPA's next start");
+  assert.deepEqual(again(state)["api-keys"], groups, "and the one after");
+  // The second is disabled: its own models go back to it, and the first keeps its twin.
+  const disabled = again(state, (config) => { config["api-keys"]["openai-compatibility"][1].disabled = true; return config; })["api-keys"];
+  assert.deepEqual(names(disabled["openai-compatibility"][1].models).sort(), [...REASONING, ...OTHER].sort());
+  assert.deepEqual(shape(disabled).twins, [["Chatgpt-api-key (Responses)", ["sk-one"], REASONING]]);
+  assert.deepEqual(names(disabled["openai-compatibility"][0].models), OTHER);
+  // Enabled again, it gets its twin back.
+  const enabled = again(state, (config) => { delete config["api-keys"]["openai-compatibility"][1].disabled; return config; })["api-keys"];
+  assert.deepEqual(shape(enabled), shape(groups));
+});
+
+test("a renamed provider keeps its reasoning models, and the same key held twice gets one twin", (t) => {
+  // Renamed in CPA's panel after the split: the twin still carries the old name.
+  const renamed = stateWith(t, { "config-version": 8, "api-keys": { "openai-compatibility": [openai()] } });
+  configure(renamed);
+  const after = again(renamed, (config) => { config["api-keys"]["openai-compatibility"][0].name = "OpenAI"; return config; })["api-keys"];
+  assert.deepEqual(after.codex.map((entry) => [entry.name, names(entry.models)]), [["OpenAI (Responses)", REASONING]], "found by its key, not by the old name");
+  assert.deepEqual(names(after["openai-compatibility"][0].models), OTHER);
+  assert.deepEqual(again(renamed)["api-keys"], after);
+
+  // The same provider entered twice (one name, one key): one twin serves the models, not two.
+  const twice = stateWith(t, { "config-version": 8, "api-keys": { "openai-compatibility": [openai(), openai()] } });
+  const groups = configure(twice)["api-keys"];
+  assert.deepEqual(groups.codex.map((entry) => [entry.name, entry.keys.map((key) => key["api-key"]), names(entry.models)]),
+    [["Chatgpt-api-key (Responses)", ["sk-fixture-one"], REASONING]]);
+  assert.deepEqual(groups["openai-compatibility"].map((provider) => names(provider.models)), [OTHER, OTHER], "neither keeps a model that /chat/completions refuses");
+  assert.deepEqual(again(twice)["api-keys"], groups, "the same on every later write");
+  // Held twice under different prefixes, the key serves two sets of model names: a twin each.
+  const prefixed = stateWith(t, { "config-version": 8, "api-keys": { "openai-compatibility": [openai({ prefix: "a" }), openai({ prefix: "b" })] } });
+  const both = configure(prefixed)["api-keys"];
+  assert.deepEqual(both.codex.map((entry) => [entry.name, entry.prefix]), [["Chatgpt-api-key (Responses)", "a"], ["Chatgpt-api-key (Responses) 2", "b"]]);
+  assert.deepEqual(again(prefixed)["api-keys"], both);
+});
+
 test("the person's own rules on the provider are kept beside the new one", (t) => {
   const own = { status: 400, match: ["context_length_exceeded"], action: "stop" };
   const state = stateWith(t, { "config-version": 8, "api-keys": { "openai-compatibility": [openai({ "request-scoped-errors": [own] })] } });

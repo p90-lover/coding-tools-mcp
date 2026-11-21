@@ -489,6 +489,31 @@ test("an operation's program is started off the main thread, with its output rea
   assert.deepEqual(started, [[process.execPath, ["ignore", "pipe", "pipe"]]], "started once, the operation's own program");
 });
 
+// Live 2026-11-17: a chat's WebGPT model lookup (about 2 s) failed Connect MCP as "runtime setup".
+test("a read-only operation holds the runtime's slot but is no setup to wait for", async () => {
+  const { spawnOffThread } = require("../electron/off-thread-run.cjs");
+  const host = new RuntimeHost({
+    app: { getPath: () => os.tmpdir(), getVersion: () => "1.1.3" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source",
+    browserDescriptorPath: "/runtime/launcher-browser.json",
+    supervisor: {},
+    startProgram: (file, args, options) => spawnOffThread(file, args, options),
+  });
+  host.command = () => ({ executable: process.execPath, args: ["-e", "setTimeout(() => process.stdout.write('ok'), 150)"], cwd: os.tmpdir() });
+  const lookup = host.run("ao-web-model-catalog", [], { readOnly: true });
+  assert.equal(host.currentOperation(), "ao-web-model-catalog");
+  assert.equal(host.setupOperation(), null);
+  await assert.rejects(host.run("setup", []), /Another launcher operation is active/, "it still runs one at a time");
+  await lookup;
+  const setup = host.run("setup", []);
+  assert.equal(host.setupOperation(), "setup");
+  await setup;
+  assert.equal(host.setupOperation(), null);
+  host.lifecycleOperation = "update";
+  assert.equal(host.setupOperation(), "update");
+});
+
 test("production and DEV setup entrypoints reject the opposite launcher profile", async () => {
   await assert.rejects(hostFor(null).host.setupDevCore(), /isolated DEV launcher/);
   await assert.rejects(devHostFor(null).host.setupCore(), /unavailable in the isolated DEV launcher profile/);
@@ -1565,4 +1590,60 @@ test("Chrome login accepts a configured Windows executable and refuses unsupport
     fixture.platform = "unsupported";
     assert.throws(() => fixture.passkeyChromeExecutable(), /Windows and macOS/);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+
+test("setup reads its checkpoint without a synchronous disk call, and holds its operation while it reads", async (t) => {
+  // Live 2026-11-19: captureSetupCheckpoint's readFileSync of config.json held Electron main 255 ms
+  // (launcher.main_blocked) during an account switch's core setup.
+  // In the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
+  const root = path.join(__dirname, "..", "..", "aiTemp", `runtime-checkpoint-${process.pid}`);
+  fs.mkdirSync(path.join(root, "codex"), { recursive: true });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configPath = path.join(root, "config.json");
+  fs.writeFileSync(configPath, '{"mode":"full"}\n');
+  fs.writeFileSync(path.join(root, "codex", "config.toml"), "model = \"gpt\"\n");
+  const supervisor = {
+    configPath, coreHome: root,
+    readSetupConfig: () => ({ mode: "full", browserHost: "launcher" }),
+    readConfig: () => ({ mode: "full", browserHost: "launcher" }),
+    stopForSetup: async () => {}, startIfConfigured: async () => ({ status: "ready" }),
+  };
+  const host = new RuntimeHost({
+    app: { getPath: () => root, getVersion: () => "1.1.3" },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: "/source", browserDescriptorPath: "/runtime/launcher-browser.json",
+    codexHome: path.join(root, "codex"), launcherProfile: "development", coreHome: root, supervisor,
+  });
+
+  const names = ["lstatSync", "readFileSync", "readlinkSync", "realpathSync", "statSync"];
+  const originals = Object.fromEntries(names.map((name) => [name, fs[name]]));
+  const syncCalls = [];
+  for (const name of names) fs[name] = function (...args) { syncCalls.push(name); return originals[name].apply(fs, args); };
+  let checkpoint;
+  try {
+    checkpoint = await host.captureSetupCheckpoint({ owner: "launcher", config: {} });
+  } finally {
+    Object.assign(fs, originals);
+  }
+  assert.deepEqual(syncCalls, [], "no synchronous call on the main process");
+  const byPath = new Map(checkpoint.map((entry) => [entry.path, entry]));
+  assert.equal(byPath.get(configPath).exists, true);
+  assert.equal(byPath.get(configPath).data.toString(), '{"mode":"full"}\n');
+  assert.equal(byPath.get(path.join(root, "codex", "config.toml")).exists, true);
+  assert.equal(byPath.get(path.join(root, "codex", "models_cache.json")).exists, false, "a missing file is recorded as missing");
+  assert.equal(host.setupCheckpointChanged(checkpoint), false, "the same files the rollback compares");
+
+  // While the reads wait on the disk, no other operation can start between the check and the setup.
+  let release;
+  host.captureSetupCheckpoint = () => new Promise((resolve) => { release = resolve; });
+  host.run = async () => ({ code: 0, stdout: "", stderr: "" });
+  const setup = host.runSetup("first", ["setup", "--full"], {});
+  assert.equal(host.currentOperation(), "first");
+  await assert.rejects(host.runSetup("second", ["setup", "--full"], {}), /Another launcher operation is active: first/);
+  release([]);
+  await setup;
+  assert.equal(host.currentOperation(), null);
+  host.captureSetupCheckpoint = async () => { throw new Error("checkpoint unreadable"); };
+  await assert.rejects(host.runSetup("third", ["setup", "--full"], {}), /checkpoint unreadable/);
+  assert.equal(host.currentOperation(), null, "a checkpoint that cannot be read leaves no operation behind");
 });

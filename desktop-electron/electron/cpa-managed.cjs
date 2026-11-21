@@ -215,7 +215,7 @@ function yamlString(value) {
 // account kinds. CPA gives a plugin one auth identifier, so those accounts are provider-manager auth
 // files with a "kind" (migrateAuthFiles).
 const COMMANDCODE_PLUGINS = [
-  { id: "cpa-provider-manager", file: "cpa-provider-manager-v0.7.1.dll", sha256: "b0fdcf134eb39e5d72bea2e0dfbb7a7b3f2cde3974f8e78ea97a00d3829b49b3" },
+  { id: "cpa-provider-manager", file: "cpa-provider-manager-v0.10.1.dll", sha256: "b486aa9d9f98f0f07036ba8f46a6d6fc68a82283137b42b0a654e40788949e2a" },
 ];
 
 // The plugins Provider Manager replaced. Their DLLs and config blocks are removed: a stale plugin
@@ -451,19 +451,42 @@ function withOpenAIResponsesRoute(apiKeys) {
   const codex = Array.isArray(apiKeys.codex) ? apiKeys.codex : [];
   const isTwin = (entry) => isPlainObject(entry) && typeof entry.name === "string" && entry.name.includes(RESPONSES_TWIN) && openAIHost(entry);
   const twinOf = (entry) => entry.name.slice(0, entry.name.indexOf(RESPONSES_TWIN));
-  // Fold each twin's models back into the provider it was split from (the first of that name,
-  // wherever it points now).
+  const keysOf = (entry) => new Set(providerKeys(entry).map((key) => key["api-key"]));
+  // The provider a twin was split from, wherever it points now: the one holding the twin's keys.
+  // A name alone does not say which. Seen 2026-11-17 in the owner's settings: two providers of
+  // one name, each with its own key; both twins folded into the first, and the second key no
+  // longer served its reasoning models. A provider renamed in CPA's panel lost them altogether.
+  // The name and the prefix decide between providers holding the same key (one key may serve two
+  // sets of model names), and the name finds a provider whose keys changed.
+  const named = providers.filter((provider) => isPlainObject(provider) && typeof provider.name === "string");
+  const prefixOf = (entry) => (typeof entry.prefix === "string" ? entry.prefix : "");
+  const homeOf = (twin) => {
+    const keys = [...keysOf(twin)];
+    const sameName = (provider) => provider.name === twinOf(twin);
+    const samePrefix = (provider) => prefixOf(provider) === prefixOf(twin);
+    const holdsAll = (provider) => { const own = keysOf(provider); return keys.length > 0 && keys.every((key) => own.has(key)); };
+    const holdsAny = (provider) => { const own = keysOf(provider); return keys.some((key) => own.has(key)); };
+    return named.find((provider) => sameName(provider) && samePrefix(provider) && holdsAll(provider))
+      ?? named.find((provider) => sameName(provider) && holdsAll(provider)) ?? named.find((provider) => sameName(provider) && holdsAny(provider))
+      ?? named.find(holdsAll) ?? named.find(holdsAny) ?? named.find(sameName);
+  };
+  const back = new Map(); // provider -> the models its twins hold
+  for (const twin of codex.filter(isTwin)) {
+    const home = homeOf(twin);
+    if (home) back.set(home, [...(back.get(home) ?? []), ...(Array.isArray(twin.models) ? twin.models : [])]);
+  }
+  // Fold each twin's models back into its provider.
   const restored = providers.map((provider) => {
-    if (!isPlainObject(provider) || typeof provider.name !== "string") return provider;
-    const first = providers.find((other) => isPlainObject(other) && other.name === provider.name) === provider;
-    const back = first ? codex.filter((entry) => isTwin(entry) && twinOf(entry) === provider.name).flatMap((entry) => (Array.isArray(entry.models) ? entry.models : [])) : [];
+    if (!back.has(provider)) return provider;
     const models = Array.isArray(provider.models) ? provider.models : [];
     const known = new Set(models.map((model) => model?.name));
-    const missing = back.filter((model) => isPlainObject(model) && typeof model.name === "string" && !known.has(model.name) && known.add(model.name));
+    const missing = back.get(provider).filter((model) => isPlainObject(model) && typeof model.name === "string" && !known.has(model.name) && known.add(model.name));
     return missing.length ? { ...provider, models: [...models, ...missing] } : provider;
   });
   const twins = [];
   const names = new Set();
+  // The same keys entered twice with the same place, prefix and headers are one route: one twin.
+  const sameRoute = new Map();
   const compat = restored.map((provider) => {
     if (!isPlainObject(provider) || !openAIHost(provider) || provider.disabled === true) return provider;
     const keys = providerKeys(provider);
@@ -477,23 +500,35 @@ function withOpenAIResponsesRoute(apiKeys) {
       const route = typeof entry["proxy-url"] === "string" ? entry["proxy-url"] : "";
       routes.set(route, [...(routes.get(route) ?? []), entry]);
     }
+    // Only what a codex model entry may carry: CPA refuses a config with any other field.
+    const twinModels = moving.map((model) => ({ name: model.name, alias: model.alias || model.name,
+      ...Object.fromEntries(RESPONSES_MODEL_FIELDS.filter((field) => field in model).map((field) => [field, model[field]])) }));
     for (const [route, entries] of routes) {
-      let name = `${provider.name ?? "openai"}${RESPONSES_TWIN}`;
-      for (let copy = 2; names.has(name); copy++) name = `${provider.name ?? "openai"}${RESPONSES_TWIN} ${copy}`;
-      names.add(name);
-      twins.push({
-        name, "base-url": OPENAI_API,
+      const settings = {
         ...(Number.isInteger(provider.priority) ? { priority: provider.priority } : {}),
         ...(typeof provider.prefix === "string" && provider.prefix ? { prefix: provider.prefix } : {}),
         ...(isPlainObject(provider.headers) ? { headers: provider.headers } : {}),
         ...(route ? { "proxy-url": route } : {}),
-        // Only what a codex model entry may carry: CPA refuses a config with any other field.
-        models: moving.map((model) => ({ name: model.name, alias: model.alias || model.name,
-          ...Object.fromEntries(RESPONSES_MODEL_FIELDS.filter((field) => field in model).map((field) => [field, model[field]])) })),
+      };
+      const same = JSON.stringify([settings, entries.map((entry) => entry["api-key"]).sort()]);
+      const existing = sameRoute.get(same);
+      if (existing) {
+        const held = new Set(existing.models.map((model) => model.name));
+        existing.models.push(...twinModels.filter((model) => !held.has(model.name)));
+        continue;
+      }
+      let name = `${provider.name ?? "openai"}${RESPONSES_TWIN}`;
+      for (let copy = 2; names.has(name); copy++) name = `${provider.name ?? "openai"}${RESPONSES_TWIN} ${copy}`;
+      names.add(name);
+      const twin = {
+        name, "base-url": OPENAI_API, ...settings,
+        models: [...twinModels],
         // Not dressed up as the Codex client: OpenAI refuses "Codex usage" from an API key whose
         // organization has the ChatGPT API-credits benefit, and this is plain API traffic.
         keys: entries.map((entry) => ({ "api-key": entry["api-key"], ...("weight" in entry ? { weight: entry.weight } : {}), "disable-codex-cloaking": true })),
-      });
+      };
+      sameRoute.set(same, twin);
+      twins.push(twin);
     }
     const moved = new Set(moving);
     const rules = Array.isArray(provider["request-scoped-errors"]) ? provider["request-scoped-errors"] : [];

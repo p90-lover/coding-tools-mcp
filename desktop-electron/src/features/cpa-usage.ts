@@ -30,7 +30,12 @@ export type CpaUsageAccount = CpaUsageCounts & {
   models: CpaUsageModel[]; quota: CpaCodexQuota | CpaClineQuota | null;
   window?: { from: number; to: number } | null; usageAvailable?: boolean;
 };
+export type CpaApiCredits = {
+  id: string; provider: string; service: string; label: string; kind: "credits" | "key-budget";
+  balances: { currency: string; amount: string }[]; reason?: string;
+};
 export type CpaUsage = {
+  apiCredits?: CpaApiCredits[];
   available: boolean; reason?: string; range?: CpaUsageRange; from?: number | null; refreshedAt?: number;
   accounts?: CpaUsageAccount[]; totals?: CpaUsageCounts & { cost: number | null; costSource: CpaCostSource; costPartial: boolean };
   models?: CpaUsageModel[];
@@ -51,9 +56,10 @@ export function costLabel(cost: number | null | undefined, partial = false): str
 
 /** Says where a cost came from, for its tooltip. */
 export function costSourceLabel(source: CpaCostSource, partial: boolean, zh: boolean): string {
-  const from = source === "cpa-helper" ? (zh ? "CPA Helper 價目表" : "CPA Helper's price book")
+  // "cpa-helper" is the price book's id; it is Provider Manager's now (CPA Helper is no longer a part, 0.10.0).
+  const from = source === "cpa-helper" ? (zh ? "Provider Manager 價目表" : "Provider Manager's price book")
     : source === "estimate" ? (zh ? "內建公開價目表估算" : "the built-in list-price table")
-      : source === "mixed" ? (zh ? "CPA Helper 價目表與內建價目表" : "CPA Helper's price book and the built-in list-price table")
+      : source === "mixed" ? (zh ? "Provider Manager 價目表與內建價目表" : "Provider Manager's price book and the built-in list-price table")
         : (zh ? "無價格" : "no price");
   const rest = partial ? (zh ? "；部分模型沒有價格，未計入。" : " Models with no price aren't counted.") : "";
   return zh ? `估算成本（API 牌價，訂閱帳戶不按 token 計費），來源：${from}${rest}` : `Estimated at API prices, from ${from}. Subscriptions aren't billed per token.${rest}`;

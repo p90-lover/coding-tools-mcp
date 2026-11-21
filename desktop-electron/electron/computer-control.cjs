@@ -298,8 +298,17 @@ window.showHistory = (entries, icons = {}) => {
 };</script></body></html>`;
 }
 
+/**
+ * Whether process `pid` still runs. Signal 0 only checks; EPERM means it runs under another
+ * account or elevated. An unknown pid counts as running, so control never ends on a guess.
+ */
+function processRuns(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try { process.kill(pid, 0); return true; } catch (error) { return error?.code === "EPERM"; }
+}
+
 function createComputerControl({ request, BrowserWindow, screen, logger = null, ownPids = () => [process.pid], onRequests = () => undefined,
-  approvalsFile = null, now = Date.now, fileIcon = null }) {
+  approvalsFile = null, now = Date.now, fileIcon = null, processAlive = processRuns }) {
   const approvals = createAppApprovals({ file: approvalsFile, now });
   let bar = null;
   let heartbeat = null;
@@ -487,6 +496,11 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
         const current = (await request("/api/v1/computer/status?heartbeat=true", null, { method: "GET", localConfirmation: true }))?.status;
         if (bar !== own || own.isDestroyed()) return;
         if (!current || current.state === "stopped") { closeBar(); controlled = null; return; }
+        // The app under control quit (the agent closed it, or it crashed), so there is nothing left
+        // to control: control ends and the pill closes. Until 2026-11-17 headless kept control on
+        // and the pill stayed, "waiting for its next step", until the person found Stop: once for
+        // two hours after an agent closed the test app it had been driving.
+        if (controlled && !processAlive(controlled.pid)) { void stop("the controlled app closed"); return; }
         // A new frame the agent was given (a snapshot, or the one after each action) goes on the preview.
         const snapshot = typeof current.last_snapshot_id === "string" ? current.last_snapshot_id : null;
         if (snapshot && snapshot !== frameShown && snapshot !== frameTried) void loadFrame(own, snapshot);
@@ -769,4 +783,4 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   });
 }
 
-module.exports = { createComputerControl, createAppApprovals, barPage, describeAction, modelLabel, appName, appKey };
+module.exports = { createComputerControl, createAppApprovals, barPage, describeAction, modelLabel, appName, appKey, processRuns };

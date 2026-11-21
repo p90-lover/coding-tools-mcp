@@ -331,6 +331,54 @@ function quotaUsageWindow(account, range, at) {
   return { from: start, to: end };
 }
 
+/** Only official balance endpoints receive upstream credentials; redirects must not forward them. */
+function apiCreditTargets(config) {
+  const groups = config?.["api-keys"];
+  const entries = groups && typeof groups === "object" && !Array.isArray(groups)
+    ? Object.entries(groups).flatMap(([kind, rows]) => Array.isArray(rows) ? rows.map((row) => ({ kind, row })) : []) : [];
+  for (const row of Array.isArray(config?.["openai-compatibility"]) ? config["openai-compatibility"] : []) entries.push({ kind: "openai-compatibility", row });
+  const targets = [], seen = new Set();
+  for (const { kind, row } of entries) {
+    if (!row || row.disabled === true || row.enabled === false) continue;
+    let url;
+    try { url = new URL(row["base-url"] || (kind === "deepseek" ? "https://api.deepseek.com" : kind === "openrouter" ? "https://openrouter.ai/api/v1" : "")); } catch { continue; }
+    if (url.protocol !== "https:" || url.username || url.password || url.port) continue;
+    const service = url.hostname === "api.deepseek.com" ? "deepseek" : url.hostname === "openrouter.ai" ? "openrouter" : null;
+    if (!service) continue;
+    const keys = Array.isArray(row.keys) ? row.keys : Array.isArray(row["api-key-entries"]) ? row["api-key-entries"] : [row];
+    for (const entry of keys) {
+      const key = text(entry?.["api-key"], 4096);
+      if (!key || /[\s*]/.test(key) || entry.disabled === true || entry.enabled === false || seen.has(key)) continue;
+      seen.add(key);
+      targets.push({ key, service, provider: text(row.name, 64) || kind, label: text(row.name, 80) || (service === "deepseek" ? "DeepSeek" : "OpenRouter"),
+        id: `api-${targets.length}`, url: service === "deepseek" ? "https://api.deepseek.com/user/balance" : "https://openrouter.ai/api/v1/key" });
+      if (targets.length === 4) return targets;
+    }
+  }
+  return targets;
+}
+
+async function readApiCredits(config, fetchImpl = fetchOffThread) {
+  return mapLimited(apiCreditTargets(config), 2, async (target) => {
+    const row = { id: target.id, provider: target.provider, service: target.service, label: target.label,
+      kind: target.service === "openrouter" ? "key-budget" : "credits", balances: [] };
+    try {
+      const response = await fetchImpl(target.url, { method: "GET", headers: { Authorization: `Bearer ${target.key}` },
+        redirect: "error", signal: AbortSignal.timeout(5_000) });
+      if (!response.ok) return { ...row, reason: `Balance unavailable (HTTP ${response.status})` };
+      const body = await response.json();
+      if (target.service === "deepseek") {
+        row.balances = (Array.isArray(body?.balance_infos) ? body.balance_infos : []).slice(0, 2)
+          .filter((balance) => ["USD", "CNY"].includes(balance?.currency) && /^-?\d+(\.\d+)?$/.test(String(balance.total_balance)) && Number.isFinite(Number(balance.total_balance)))
+          .map((balance) => ({ currency: balance.currency, amount: String(balance.total_balance) }));
+      } else if (typeof body?.data?.limit_remaining === "number" && Number.isFinite(body.data.limit_remaining)) {
+        row.balances = [{ currency: "USD", amount: String(body.data.limit_remaining) }];
+      }
+      return row.balances.length ? row : { ...row, reason: target.service === "openrouter" ? "No key budget reported; account credits require a management key" : "Balance not reported" };
+    } catch { return { ...row, reason: "Balance could not be read" }; }
+  });
+}
+
 function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThread, now = Date.now, logger = console } = {}) {
   const cache = new Map(); // range -> { at, value }
   const pending = new Map(); // range or turn key -> Promise
@@ -407,15 +455,17 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
       if (from) params.set("from", String(from));
       return params.toString();
     };
+    const credits = range === "7d" ? optional(target, "/config").then((config) => readApiCredits(config, fetchImpl)) : Promise.resolve([]);
+    const withoutUsage = async (reason) => ({ ok: true, available: false, reason, ...(range === "7d" ? { apiCredits: await credits } : {}) });
     let byAuth;
     try { byAuth = await get(target, `/cpa-helper/rankings?${query({ group: "auth" })}`); }
-    catch { return { ok: true, available: false, reason: "CPA did not answer" }; }
-    if (byAuth.status === 404) return { ok: true, available: false, reason: "CPA Helper is not installed in CPA, and CPA keeps no usage history of its own" };
-    if (byAuth.status === 401 || byAuth.status === 403) return { ok: true, available: false, reason: "CPA refused the management key" };
-    if (!byAuth.ok) return { ok: true, available: false, reason: `CPA answered HTTP ${byAuth.status}` };
+    catch { return withoutUsage("CPA did not answer"); }
+    if (byAuth.status === 404) return withoutUsage("Provider Manager's usage history is not in CPA, and CPA keeps no usage history of its own");
+    if (byAuth.status === 401 || byAuth.status === 403) return withoutUsage("CPA refused the management key");
+    if (!byAuth.ok) return withoutUsage(`CPA answered HTTP ${byAuth.status}`);
     const authRows = Array.isArray(byAuth.body?.items) ? byAuth.body.items.slice(0, MAX_ACCOUNTS) : [];
 
-    const [modelListing, fileListing, codex, splits] = await Promise.all([
+    const [modelListing, fileListing, codex, splits, apiCredits] = await Promise.all([
       optional(target, `/cpa-helper/rankings?${query({ group: "model" })}`),
       optional(target, "/auth-files").then((listing) => withAccountKinds(listing, () => optional(target, "/cpa-provider-manager/api/kinds"))),
       quota?.read ? quota.read().catch(() => null) : null,
@@ -423,6 +473,7 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
         const listing = await optional(target, `/cpa-helper/rankings?${query({ group: "model", auth: String(row.key) })}`);
         return [String(row.key), Array.isArray(listing?.items) ? listing.items : null];
       }),
+      credits,
     ]);
     const authFiles = Array.isArray(fileListing?.files) ? fileListing.files : null;
     // The switcher's pool only matters when CPA has its bridge account (or the list is unreadable).
@@ -435,7 +486,7 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
       codexAccounts: codex?.available && Array.isArray(codex.accounts) ? codex.accounts : [],
       cline: cline && Array.isArray(cline.accounts) ? cline : null,
     });
-    return { ok: true, available: true, range, from, refreshedAt: now(), source: "CPA Helper", ...result };
+    return { ok: true, available: true, range, from, refreshedAt: now(), source: "CPA Helper", ...result, ...(range === "7d" ? { apiCredits } : {}) };
   }
 
   async function loadWindow(range) {
@@ -636,5 +687,5 @@ function summarizeRecords(items) {
 }
 
 module.exports = Object.freeze({
-  createCpaUsage, aggregateUsage, summarizeRecords, refusalOf, recordTime, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES,
+  createCpaUsage, aggregateUsage, summarizeRecords, refusalOf, recordTime, clineQuotaOf, priceFor, estimateCost, cellCost, modelKey, RANGES, apiCreditTargets, readApiCredits,
 });

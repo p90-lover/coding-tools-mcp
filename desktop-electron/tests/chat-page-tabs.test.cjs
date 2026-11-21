@@ -21,7 +21,8 @@ function loadPages(options = {}) {
   const react = {
     createContext: (value) => { const context = { value }; context.Provider = { context }; return context; },
     useContext: (context) => contexts.has(context) ? contexts.get(context) : context.value,
-    useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    // `sets` collects what each state setter is called with (the tabs' menu, the host's pages).
+    useState: (initial) => [typeof initial === "function" ? initial() : initial, (next) => { options.sets?.push(next); }],
     useRef: (current) => ({ current }), useMemo: (build) => build(), useCallback: (callback) => callback,
     useEffect: (effect) => { options.effects?.push(effect); }, useLayoutEffect: (effect) => { options.layout?.push(effect); },
     useSyncExternalStore: (_subscribe, snapshot) => snapshot(),
@@ -29,7 +30,7 @@ function loadPages(options = {}) {
   const jsx = (type, props, key) => ({ type, props, key });
   const values = new Map(options.store ?? []);
   const globals = {
-    localStorage: { getItem: (name) => values.get(name) ?? null, setItem: (name, value) => values.set(name, value) },
+    localStorage: { getItem: (name) => values.get(name) ?? null, setItem: (name, value) => values.set(name, value), removeItem: (name) => values.delete(name) },
     window: options.window ?? { addEventListener() {}, removeEventListener() {} },
     ...(options.Element ? { Element: options.Element } : {}),
   };
@@ -41,7 +42,8 @@ function loadPages(options = {}) {
     : name === "react/jsx-runtime" ? { jsx, jsxs: jsx, Fragment: "Fragment" }
     : name === "./chat-pages" ? pages
     : name === "./AgentOrchestratorSurface" ? { AgentOrchestratorSurface: Surface }
-    : name === "./ChatMenu" ? { ChatGlyph: function ChatGlyph() { return null; } }
+    : name === "./ChatMenu" ? { ChatGlyph: function ChatGlyph() { return null; }, ChatMenu: function ChatMenu() { return null; } }
+    : name === "./chat-split" ? { SPLIT_STORE: "coding-tools:ao:split-view" }
     : name === "./page-visibility" ? { SurfaceHiddenContext: react.createContext(false), NativeViewsCoveredContext: react.createContext(false), useSurfaceHidden: () => () => false }
     : {} });
   // The registry ChatPages provides carries the tabs each page draws.
@@ -54,20 +56,20 @@ function loadPages(options = {}) {
   return { pages, host, tree, render, Surface, values };
 }
 const children = (element) => [element.props.children].flat(Infinity).filter(Boolean);
-// The dock's parts: the sheen, the tablist (the blob first, then the tabs) and + when it is shown.
+// The dock's parts: the sheen, the tablist (the blob first, then the tabs), + when it is shown, and the tabs' menu.
 const dock = (nav) => {
-  const [sheen, list, add] = children(nav);
+  const [sheen, list, ...rest] = children(nav);
   assert.equal(sheen.props.className, "cx-page-sheen");
   assert.equal(sheen.props["aria-hidden"], "true");
   const [blob, ...tabs] = children(list);
   assert.equal(blob.props.className, "cx-page-blob");
   assert.equal(blob.props["aria-hidden"], "true");
-  return { list, blob, tabs, add };
+  return { list, blob, tabs, add: rest.find((part) => part.props?.className === "cx-page-add"), menu: rest.find((part) => part.type?.name === "ChatMenu") };
 };
 const pagerOf = (extra = {}) => {
   const calls = [];
-  return { calls, pager: { active: 1, count: 3, canAdd: true, keys: true,
-    select: (page) => calls.push(["select", page]), add: () => calls.push(["add"]), ...extra } };
+  return { calls, pager: { active: 1, count: 3, canAdd: true, canClose: true, keys: true,
+    select: (page) => calls.push(["select", page]), add: () => calls.push(["add"]), close: (page) => calls.push(["close", page]), ...extra } };
 };
 
 test("the open page's tabs are its number among the others and +, with the keys in their tooltips", () => {
@@ -83,7 +85,7 @@ test("the open page's tabs are its number among the others and +, with the keys 
   assert.deepEqual(tabs.map((tab) => tab.props.tabIndex), [0, -1, -1]);
   assert.deepEqual(tabs.map((tab) => tab.props["aria-controls"]), ["chat-page-1", "chat-page-2", "chat-page-3"]);
   assert.deepEqual(tabs.map((tab) => tab.props.title), ["Page 1 (Ctrl+1)", "Page 2 (Ctrl+2)", "Page 3 (Ctrl+3)"]);
-  assert.deepEqual(tabs.map((tab) => tab.props["aria-keyshortcuts"]), ["Control+1", "Control+2", "Control+3"]);
+  assert.deepEqual(tabs.map((tab) => tab.props["aria-keyshortcuts"]), ["Control+1 Delete", "Control+2", "Control+3"], "Delete closes the open page's tab");
   assert.equal(list.props["aria-keyshortcuts"], undefined, "no Shift+Q / Shift+R any more");
   assert.equal(add.props["aria-label"], "New page");
   tabs[2].props.onClick();
@@ -101,6 +103,86 @@ test("arrow keys, Home and End move along the tabs, wrapping round", () => {
   assert.equal(prevented, 4, "other keys are left alone");
 });
 
+test("a tab closes its page from its menu, with a middle click or with Delete, as a browser tab does", () => {
+  const sets = [];
+  const { render } = loadPages({ sets });
+  const { pager, calls } = pagerOf({ active: 2 });
+  const { list, tabs, menu } = dock(render(pager, 2));
+  assert.ok(menu, "the dock carries the tabs' menu");
+  assert.deepEqual(tabs.map((tab) => tab.props.children), [1, 2, 3], "no close button or text on the tabs");
+  let prevented = 0;
+  const preventDefault = () => prevented++;
+
+  // Right-click on page 3's tab: one item, Close page.
+  tabs[2].props.onContextMenu({ preventDefault, clientX: 120, clientY: 640, currentTarget: { getBoundingClientRect: () => ({ left: 90, top: 630 }) } });
+  const opened = sets.at(-1);
+  assert.deepEqual({ x: opened.x, y: opened.y, label: opened.label }, { x: 120, y: 640, label: "Page 3" });
+  assert.deepEqual(JSON.parse(JSON.stringify(opened.items.map((item) => [item.label, item.shortcut]))), [["Close page", "Del"]]);
+  opened.items[0].run();
+  // The menu key reports no pointer: the menu opens on the tab.
+  tabs[0].props.onContextMenu({ preventDefault, clientX: 0, clientY: 0, currentTarget: { getBoundingClientRect: () => ({ left: 30, top: 630 }) } });
+  assert.deepEqual([sets.at(-1).x, sets.at(-1).y], [30, 630]);
+
+  // A middle click closes the tab's page; its press starts no autoscroll; other buttons do nothing.
+  tabs[0].props.onMouseDown({ button: 1, preventDefault });
+  tabs[0].props.onAuxClick({ button: 1, preventDefault });
+  tabs[0].props.onAuxClick({ button: 2, preventDefault });
+  tabs[1].props.onMouseDown({ button: 0, preventDefault });
+
+  // Delete on the focused tab.
+  list.props.onKeyDown({ key: "Delete", target: { closest: () => ({ getAttribute: () => "2" }) }, preventDefault });
+  assert.deepEqual(calls, [["close", 3], ["close", 1], ["close", 2]]);
+  assert.equal(prevented, 2 + 1 + 1 + 1, "the two menus, the middle press, the middle click and Delete");
+});
+
+test("the last page's tab cannot close it: its menu says why, and a middle click or Delete does nothing", () => {
+  const sets = [];
+  const { render } = loadPages({ sets });
+  const { pager, calls } = pagerOf({ count: 1, canClose: false });
+  const { list, tabs } = dock(render(pager, 1));
+  assert.equal(tabs[0].props["aria-keyshortcuts"], "Control+1", "no Delete for the last page");
+  tabs[0].props.onContextMenu({ preventDefault() {}, clientX: 10, clientY: 10, currentTarget: { getBoundingClientRect: () => ({ left: 0, top: 0 }) } });
+  const [item] = sets.at(-1).items;
+  assert.equal(item.label, "Close page");
+  assert.equal(item.run, undefined, "shown disabled");
+  assert.equal(item.reason, "The last page stays open");
+  let prevented = 0;
+  tabs[0].props.onAuxClick({ button: 1, preventDefault: () => prevented++ });
+  list.props.onKeyDown({ key: "Delete", target: null, preventDefault: () => prevented++ });
+  assert.deepEqual(calls, []);
+  assert.equal(prevented, 0, "the keys and clicks stay the browser's");
+});
+
+test("closing a page from the host saves the pages left, drops the closed page's saved state and opens the page before it", () => {
+  const split = "coding-tools:ao:split-view";
+  const selection = "coding-tools:ao:chat-pages:selection";
+  const store = [
+    ["coding-tools:ao:chat-pages", JSON.stringify({ enabled: true, pageCount: 3, keyboard: true, wheel: true })],
+    ["coding-tools:ao:chat-pages:active", "2"],
+    [`${selection}:page-2`, '{"workspaceId":"ws","taskId":"chat-b"}'], [`${split}:page-2`, '{"panes":[]}'], ["coding-tools:ao:workspace:page-2", "ws"],
+    [`${selection}:page-3`, '{"workspaceId":"ws","taskId":"chat-c"}'], [`${split}:page-3`, '{"panes":[{"taskId":"chat-d"}]}'], ["coding-tools:ao:workspace:page-3", "ws"],
+    ["coding-tools:ao:workspace", "ws"],
+  ];
+  const sets = [];
+  const { tree, values } = loadPages({ store, sets });
+  const pager = tree.props.children.props.children.props.value;
+  assert.equal(pager.canClose, true);
+  pager.close(2);
+  assert.deepEqual(JSON.parse(values.get("coding-tools:ao:chat-pages")),
+    { enabled: true, pageCount: 2, keyboard: true, wheel: true, pageIds: [1, 3], lastPageId: 3 });
+  for (const key of [`${selection}:page-2`, `${split}:page-2`, "coding-tools:ao:workspace:page-2"]) assert.equal(values.has(key), false, `${key} removed`);
+  assert.equal(values.get(`${selection}:page-3`), '{"workspaceId":"ws","taskId":"chat-c"}', "the old page 3 keeps its own state, not moved");
+  assert.equal(values.get(`${split}:page-3`), '{"panes":[{"taskId":"chat-d"}]}');
+  assert.equal(values.get("coding-tools:ao:workspace"), "ws", "the shared project key stays");
+  assert.equal(values.get("coding-tools:ao:chat-pages:active"), "1", "the closed page was open: the page before it opens");
+
+  // After a restart: two pages, the second on id 3's saved state, each section keyed by its id.
+  const again = loadPages({ store: [...values] });
+  const sections = children(again.tree.props.children.props.children);
+  assert.deepEqual(sections.map((section) => [section.key, section.props.id, section.props["aria-label"]]),
+    [[1, "chat-page-1", "Chat page 1"], [3, "chat-page-2", "Chat page 2"]]);
+});
+
 test("only the open page draws tabs; none with pages off; no + once twelve pages are open; keys off leave plain tooltips", () => {
   const { render } = loadPages();
   assert.equal(render(pagerOf({ active: 2 }).pager, 1), null, "a page out of view draws no tabs (and no duplicate ids)");
@@ -113,7 +195,8 @@ test("only the open page draws tabs; none with pages off; no + once twelve pages
   assert.equal(twelve[10].props["aria-keyshortcuts"], undefined);
   const quiet = dock(render(pagerOf({ keys: false }).pager, 1)).tabs;
   assert.equal(quiet[0].props.title, "Page 1");
-  assert.equal(quiet[0].props["aria-keyshortcuts"], undefined);
+  assert.equal(quiet[0].props["aria-keyshortcuts"], "Delete", "the page keys off: Delete still closes the open page");
+  assert.equal(quiet[1].props["aria-keyshortcuts"], undefined);
 });
 
 test("each visited page draws its own surface, and only visited pages mount", () => {
@@ -251,5 +334,7 @@ test("scrolling never waits for the page listener, and page keys check typing be
   const key = /const key = \(event: KeyboardEvent\) => \{([\s\S]*?)\n {4}\};/.exec(host)[1];
   assert.ok(key.indexOf("pageNumberKey") < key.indexOf("dialogOpen()"), "the DOM query runs only for a page key");
   // A page's chats are one element while their inputs are: turning a page redraws two pages, not all.
-  assert.match(host, /function PageSurface[\s\S]*?return useMemo\(\(\) => <AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} \/>, \[page, language, setError\]\);/);
+  assert.match(host, /function PageSurface[\s\S]*?return useMemo\(\(\) => <AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} pageId=\{id\} \/>, \[page, id, language, setError\]\);/);
+  // Keyed by id: a page keeps its surface (and the chats on it) when a page before it closes.
+  assert.match(host, /<section key=\{id\} id=\{`chat-page-\$\{page\}`\}/);
 });

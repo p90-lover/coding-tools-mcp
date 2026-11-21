@@ -286,6 +286,12 @@ export function AgentOrchestratorComposerControls({
   const setEffort = (effort: string | null) => { const next = { ...route }; if (effort) next.effort = effort; else delete next.effort; rememberTuning(next, "effort"); onRouteChange(next); };
   const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; rememberTuning(next, "context_window"); onRouteChange(next); };
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
+  /** Why the typed size can't be set, in the field's own terms, or null (empty or fine). */
+  const draftTokens = parseTokens(contextDraft);
+  const draftProblem = !contextDraft.trim() || !context ? null
+    : draftTokens === null ? "Type a size such as 100k, 1m or 250000"
+      : context.max !== undefined && draftTokens > context.max ? `Up to ${contextText(context.max)} for this model`
+        : draftTokens < context.min ? `At least ${contextText(context.min)}` : null;
   // No "Default" window: a chat starts at 400K (or the model's limit, if lower). The model list sets
   // it once it knows the model's range, and so does picking a model. A model whose limit is not
   // known runs at the agent's own window, which the chip calls "Auto" like an unpicked effort.
@@ -456,15 +462,20 @@ export function AgentOrchestratorComposerControls({
             event.preventDefault(); event.stopPropagation();
             event.currentTarget.querySelector<HTMLButtonElement>("button")?.click();
           }}>
-            <input type="text" inputMode="numeric" aria-label="Custom context window" placeholder="Custom" value={contextDraft}
+            {/* Text, not numeric: "100k" and "1m" are sizes too (parseTokens), and a numeric
+                keyboard has no k or m. */}
+            <input type="text" inputMode="text" aria-label="Custom context window" placeholder="Custom: 100k, 1m…" value={contextDraft}
               title={context ? `${contextText(context.min)}–${context.max ? contextText(context.max) : "no limit"}` : undefined}
-              aria-invalid={Boolean(contextDraft.trim()) && !inRange(parseTokens(contextDraft) ?? Number.NaN)} onChange={event => setContextDraft(event.target.value)} />
+              aria-invalid={Boolean(draftProblem)} aria-describedby={draftProblem ? "ao-context-draft-problem" : undefined}
+              onChange={event => setContextDraft(event.target.value)} />
             <button type="button" className="ao-popover-apply" aria-label="Set" title="Set" disabled={busy || !inRange(parseTokens(contextDraft) ?? Number.NaN)} onClick={() => {
               const tokens = parseTokens(contextDraft);
               if (tokens === null || !inRange(tokens)) return;
               setWindow(tokens); setContextDraft(""); close();
             }}><Icon name="check" width="14" height="14" /></button>
           </div>
+          {/* A refused size says why, instead of only turning the field red. */}
+          {draftProblem ? <p id="ao-context-draft-problem" className="ao-popup-muted" role="status">{draftProblem}</p> : null}
         </div>}
       </ChipMenu>
     </> : <ChipMenu heading="Orchestrator / Team" popupClass="ao-team-popup" ariaLabel="Choose saved team" disabled={busy}

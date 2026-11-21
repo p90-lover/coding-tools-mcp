@@ -58,7 +58,7 @@ test("each isolated account connects once; historical okAt cannot skip this run'
   assert.deepEqual(f.connected, ["one", "two"]);
 });
 
-test("one failure continues to other accounts and does not retry its own recorded failure", async () => {
+test("one failure continues to other accounts; neither its own recorded failure nor a later one cuts its wait short", async () => {
   const f = fixture();
   f.deps.connect = async id => {
     f.connected.push(id);
@@ -72,9 +72,14 @@ test("one failure continues to other accounts and does not retry its own recorde
   await f.sync.sync();
   assert.deepEqual(f.connected, ["one", "two"]);
   assert.equal(f.warnings.length, 1);
-  f.accounts[0].connector.errorAt = ++f.state.time; // a later tool/explicit check reported a new failure
+  // A Connect by hand that failed again, or a turn, recorded a newer failure: the account was failing
+  // anyway, so that alone starts no setup (before 2026-11-19 it started one at once).
+  f.accounts[0].connector.errorAt = ++f.state.time;
   await f.sync.sync();
-  assert.deepEqual(f.connected, ["one", "two", "one"]);
+  assert.deepEqual(f.connected, ["one", "two"]);
+  f.state.time += 10 * 60_000;
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two", "one"], "it waits its 10 minutes");
 });
 
 test("a failed setup's log record names the page state it stopped on, beside the fixed message", async () => {
@@ -93,7 +98,7 @@ test("a failed setup's log record names the page state it stopped on, beside the
   ]);
 });
 
-test("a failed setup is tried again later, longer after each failure; one only the person can clear waits an hour", async () => {
+test("a failed setup is tried again later, longer after each failure; one a workspace owner must clear waits an hour", async () => {
   // Live 2026-11-13: one failure ("ChatGPT verification is required…", on a signed-in account) left
   // that account's automatic setup stopped until its sign-in cookie changed, so it never connected.
   const f = fixture();
@@ -131,13 +136,140 @@ test("a failed setup is tried again later, longer after each failure; one only t
   person.deps.connect = async id => {
     person.connected.push(id);
     person.accounts[0].connector = { errorAt: person.state.time };
-    throw Object.assign(new Error("Sign in to this account in the Browser tab before connecting MCP."), { code: "verification_required" });
+    throw Object.assign(new Error("Only a verified owner of this ChatGPT workspace can create its MCP connector."), { code: "workspace_owner_required" });
   };
   await person.sync.sync();
   person.state.time += 59 * 60_000; await person.sync.sync();
-  assert.equal(person.connected.length, 1, "a sign-in the person must do is not retried every 10 minutes");
+  assert.equal(person.connected.length, 1, "what a workspace owner must do is not retried every 10 minutes");
   person.state.time += 60_000; await person.sync.sync();
   assert.equal(person.connected.length, 2, "but an hour later it looks again");
+});
+
+test("an account ChatGPT or Platform asked to sign in waits for that sign-in, not for the clock", async t => {
+  // Live 2026-11-19: "verification_required" (setupCause "ownership check chatgpt:signed_out", ChatGPT's
+  // 401) and Cloudflare's check failed again on every pass that let them, each time in hidden windows.
+  for (const code of ["verification_required", "platform_sign_in_required"]) await t.test(code, async () => {
+    const f = fixture();
+    f.accounts.splice(1);
+    let failing = true;
+    f.deps.connect = async id => {
+      f.connected.push(id);
+      if (!failing) return { connected: true };
+      f.accounts[0].connector = { errorAt: f.state.time };
+      throw Object.assign(new Error("ChatGPT signed this account out. Sign in again in the Browser tab."), { code });
+    };
+    await f.sync.sync();
+    for (const hours of [1, 6, 48]) {
+      f.state.time += hours * 60 * 60_000;
+      await f.sync.sync();
+    }
+    assert.equal(f.connected.length, 1, "no time ends the wait");
+    assert.deepEqual(f.verified, ["persist:one"], "a waiting account is not even checked over HTTP");
+    f.cookies.set("persist:one", cookie("signed-in-again"));
+    failing = false;
+    await f.sync.sync();
+    assert.equal(f.connected.length, 2, "a new sign-in in its partition starts it at once");
+    await f.sync.sync();
+    assert.equal(f.connected.length, 2, "and once connected it is left alone");
+  });
+
+  await t.test("a sign-out ends the wait: the next sign-in is a new one", async () => {
+    const f = fixture();
+    f.accounts.splice(1);
+    f.deps.connect = async id => {
+      f.connected.push(id);
+      throw Object.assign(new Error("signed out"), { code: "verification_required" });
+    };
+    await f.sync.sync();
+    f.cookies.set("persist:one", []);
+    await f.sync.sync();
+    f.cookies.set("persist:one", cookie("one")); // signed in again; this test's cookie happens to match
+    await f.sync.sync();
+    assert.equal(f.connected.length, 2);
+  });
+
+  await t.test("the setup's own refresh of the sign-in cookie is no new sign-in", async () => {
+    const f = fixture();
+    f.accounts.splice(1);
+    let refreshes = 0;
+    f.deps.connect = async id => {
+      f.connected.push(id);
+      // Loading chatgpt.com in the setup's hidden window may hand the partition a new session cookie.
+      f.cookies.set("persist:one", cookie(`refreshed-${++refreshes}`));
+      throw Object.assign(new Error("signed out"), { code: "verification_required" });
+    };
+    await f.sync.sync();
+    await f.sync.sync();
+    assert.equal(f.connected.length, 1);
+  });
+
+  await t.test("a Connect by hand that connects it ends the wait without another setup", async () => {
+    const f = fixture();
+    f.accounts.splice(1);
+    f.accounts[0].connector = { okAt: 5 }; // connected in an earlier run
+    f.deps.connect = async id => {
+      f.connected.push(id);
+      f.accounts[0].connector = { ...f.accounts[0].connector, errorAt: f.state.time };
+      throw Object.assign(new Error("signed out"), { code: "verification_required" });
+    };
+    await f.sync.sync();
+    f.accounts[0].connector = { okAt: ++f.state.time, errorAt: null }; // the person's Connect (or a turn) bound it
+    await f.sync.sync();
+    await f.sync.sync();
+    assert.equal(f.connected.length, 1, "a connected account needs no setup");
+    f.accounts[0].connector = { okAt: f.state.time, errorAt: ++f.state.time }; // a turn later found it broken
+    f.deps.connect = async id => { f.connected.push(id); return { connected: true }; };
+    await f.sync.sync();
+    assert.equal(f.connected.length, 2, "and it is set up again like any connected account");
+  });
+});
+
+test("a runtime restart that adopts the same tunnel starts no setup for a failing account", async () => {
+  // Live 2026-11-19: each account switch ran core setup, which restarted the runtime; each restart adopted
+  // the running tunnel (runtime.tunnel_adopted) and invalidate() cleared every wait, so every failing
+  // account loaded chatgpt.com again in hidden windows, one after another.
+  const f = fixture();
+  const codes = { one: "verification_required", two: "creation_failed" };
+  f.accounts.push({ id: "three", partition: "persist:three" });
+  f.cookies.set("persist:three", cookie("three"));
+  f.deps.connect = async id => {
+    f.connected.push(id);
+    if (!codes[id]) return { connected: true };
+    throw Object.assign(new Error(`failed ${id}`), { code: codes[id] });
+  };
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two", "three"]);
+  for (let restart = 0; restart < 3; restart++) {
+    f.sync.invalidate({ tunnelStarted: false });
+    await f.sync.sync();
+  }
+  assert.deepEqual(f.connected, ["one", "two", "three", "three", "three", "three"],
+    "only the connected account checks its connector again; the failing ones keep waiting");
+  assert.deepEqual(f.verified.filter(partition => partition !== "persist:three"), ["persist:one", "persist:two"],
+    "the failing ones are not even checked over HTTP");
+
+  f.sync.invalidate({ tunnelStarted: true });
+  await f.sync.sync();
+  assert.deepEqual(f.connected.slice(6), ["two", "three"],
+    "a started tunnel retries a failure it can fix, never one waiting for the person's sign-in");
+  f.sync.invalidate();
+  await f.sync.sync();
+  assert.deepEqual(f.connected.slice(8), ["three"], "invalidate() alone is an adoption: the retried failure waits again");
+});
+
+test("signInWait names a sign-in wait while the account's sign-in is unchanged, and nothing else", async () => {
+  const f = fixture();
+  const codes = { one: "verification_required", two: "creation_failed" };
+  f.deps.connect = async id => { f.connected.push(id); throw Object.assign(new Error("failed"), { code: codes[id] }); };
+  assert.equal(await f.sync.signInWait("one"), null, "nothing known yet");
+  await f.sync.sync();
+  assert.equal(await f.sync.signInWait("one"), "verification_required");
+  assert.equal(await f.sync.signInWait("two"), null, "a failure the clock or a tunnel can end is no sign-in wait");
+  assert.equal(await f.sync.signInWait("missing"), null);
+  f.cookies.set("persist:one", cookie("signed-in-again"));
+  assert.equal(await f.sync.signInWait("one"), null, "a new sign-in ends it");
+  f.cookies.set("persist:one", []);
+  assert.equal(await f.sync.signInWait("one"), null, "so does a sign-out");
 });
 
 test("a setup that gave way to an account switch runs again, though the switch is already over", async () => {
@@ -414,7 +546,7 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
     mainWindow: { isDestroyed: () => false, isVisible: () => true, isMinimized: () => false,
       isFocused: () => focused, webContents: { isFocused: () => nativeFocus },
       on: (event, fn) => { callbacks[event] = fn; }, once: (event, fn) => { callbacks[event] = fn; } },
-    runtimeHost: { currentOperation: () => null, mcpCredentialsConfiguredAsync: async () => true },
+    runtimeHost: { currentOperation: () => null, setupOperation: () => null, mcpCredentialsConfiguredAsync: async () => true },
     runtimeSupervisor: { readConfigAsync: async () => { coreReads++; return config; }, extraTunnels: { status: () => [] } },
     routeIdleAccountPartition: async partition => routes.push(partition),
     session: { fromPartition: partition => ({ cookies: { get: async () => cookie(partition) } }) },

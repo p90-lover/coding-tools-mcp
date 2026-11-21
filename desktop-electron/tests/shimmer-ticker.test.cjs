@@ -96,6 +96,25 @@ test("pulsing dots and spinners are stepped 10 times a second on the same clock;
   assert.equal(pulse.currentTime, 1033, "a hidden window does not step its marks");
 });
 
+test("the napping pet's z's and chimney smoke are stepped like the status marks, not left at the screen's refresh", () => {
+  // Live 2026-11-19 on 0.8.138: the pet asleep in its cottage ran three cx-pet-z loops, which held the window
+  // at 93 frames a second; the renderer sent the GPU process 1,345 MB a minute, 438 MB with them paused.
+  const { install, doc, timers, element, animation, start } = setup();
+  install(doc);
+  const cottage = element();
+  const zs = [animation("cx-pet-z", cottage), animation("cx-pet-z", cottage), animation("cx-pet-z", cottage)];
+  start("cx-pet-z", cottage);
+  assert.equal(timers.size, 1);
+  assert.ok(Math.abs([...timers.values()][0].ms - 100) < 0.01, "10 steps a second, like the other marks");
+  assert.deepEqual(zs.map((z) => z.playState), ["paused", "paused", "paused"]);
+  const chimney = element(), smoke = animation("cx-pet-smoke", chimney);
+  start("cx-pet-smoke", chimney);
+  assert.equal(smoke.playState, "paused", "the smoke is stepped too");
+  doc.timeline.currentTime = 1100;
+  [...timers.values()][0].fn();
+  assert.deepEqual([...zs, smoke].map((looping) => looping.currentTime), [1100, 1100, 1100, 1100], "one clock");
+});
+
 test("pulsing dots drawn by ::before/::after are stepped too; their element's getAnimations() leaves them out", () => {
   // Live 2026-11-16 on 0.8.121: 6 of 24 status marks still ran freely, every one a span::before
   // (.cx-turn-stats, .cx-reply-status, .cx-ctx-state), so the compositor still drew every refresh.

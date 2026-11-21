@@ -93,6 +93,7 @@ const {
   setProviderBrowserHost,
   setProviderBrowserProxyBinding,
   setProviderCpaConnection,
+  setProviderAuthBrowser,
   setProviderLogger,
   stopProxyBridgeNova,
 } = require("./provider-bootstrap.cjs");
@@ -116,6 +117,7 @@ function loadCreateCodingToolsAppsHost(appHandlerRoot) {
   }
 }
 const { createAppsProviderServices } = require("./apps-provider-services.cjs");
+const { listCpaAuthAccounts } = require("./cpa-auth-inventory.cjs");
 const { createCodingToolsAppsMcp, mergeAppsCatalog } = require("./coding-tools-apps-mcp.cjs");
 const {
   KEEP_UI_RESPONSIVE_SKIP_REASON,
@@ -144,6 +146,7 @@ const {
   validateSidebarState,
   validateUpdateSettingsPatch,
 } = require("./state.cjs");
+const { rememberListener, restoreWorkspaceListeners } = require("./workspace-listeners.cjs");
 const {
   MIN_WINDOW_BOUNDS,
   readWindowState,
@@ -905,7 +908,8 @@ async function autoConnectExistingMcpIfReady({ logger, stateStore, health, confi
  */
 function restartAutomaticMcpVerification({ logger, stateStore, reason }) {
   automaticMcpAttempt = null;
-  automaticAccountMcp?.invalidate();
+  // An adopted tunnel is the one the failing accounts failed with: they keep waiting (invalidate).
+  automaticAccountMcp?.invalidate({ tunnelStarted: reason !== "tunnel-adopted" });
   void automaticAccountMcp?.sync();
   const state = stateStore.read();
   if (IS_DEV_PROFILE || quitting || shutdownInProgress || !state.autoConnectExistingMcp
@@ -1573,6 +1577,15 @@ async function onBrowserAccountSignedIn(accountId, host, { logger, stateStore })
   if (planKey && planKey === bridgePlanKey) {
     browserAccountService.takeBridgeRefresh(accountId);
     logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "same-plan" });
+    return;
+  }
+  // An account whose ChatGPT sign-in is gone (its MCP setup stopped at ChatGPT's 401 or security check,
+  // and its sign-in has not changed since) gets no core setup: setup would restart the runtime to read
+  // a plan the account cannot serve, and each restart used to start every failing account's MCP setup
+  // again (2026-11-19). The refresh stays pending for the account's next sign-in.
+  const signInWait = automaticAccountMcp ? await automaticAccountMcp.signInWait(accountId).catch(() => null) : null;
+  if (signInWait === "verification_required") {
+    logger.info("browser_accounts.bridge_refresh_skipped", { accountId, reason: "signed-out" });
     return;
   }
   // Setup restarts the bridge, which would end every running turn (a switch no longer waits for
@@ -2366,7 +2379,8 @@ function registerIpc({ logger, stateStore }) {
         type: "warning",
         title: "Coding Tools",
         message: `${action} the ${input.service} listener?`,
-        detail: `${name}\n${location}\nOnly the local listener changes. The tunnel settings stay as saved.`,
+        detail: `${name}\n${location}\nOnly the local listener changes. The tunnel settings stay as saved.`
+          + (input.operation === "stop" ? "" : "\nIt starts again whenever Coding Tools restarts, until you stop it."),
         buttons: ["Cancel", "Continue"],
         defaultId: 0,
         cancelId: 0,
@@ -2374,12 +2388,18 @@ function registerIpc({ logger, stateStore }) {
       });
       if (response !== 1) return { ok: false, cancelled: true };
     }
-    return headlessHost.request("/api/v1/workspaces/service", {
+    const result = await headlessHost.request("/api/v1/workspaces/service", {
       workspace_id: input.workspaceId,
       service: input.service,
       operation: input.operation,
       confirm: changing,
     });
+    // A listener the person just confirmed starts again after a restart; one they stopped does not.
+    if (changing && result?.ok === true) {
+      stateStore.update({ workspaceListeners: rememberListener(stateStore.read().workspaceListeners,
+        input.workspaceId, input.service, input.operation) });
+    }
+    return result;
   });
   handle("coding-tools:workspaces:copy-secret", async (event, input) => {
     await assertFocusedMainWindowSettled(event, true);
@@ -2994,6 +3014,17 @@ function registerIpc({ logger, stateStore }) {
     await assertFocusedMainWindowSettled(event, true);
     return switchBrowserAccount(id, { logger, stateStore });
   });
+  // OpenAI Platform's sign-in for one account, in the person's Chrome (BrowserHost.openPlatformChromeLogin),
+  // where Windows signs in. The account is shown first: the sign-in joins that account's own saved session.
+  // Elsewhere `inChrome: false`, and the card opens Platform in the Browser tab.
+  handle("launcher:browser-account-platform-login", async (event, id) => {
+    await assertFocusedMainWindowSettled(event, true);
+    if (typeof id !== "string" || !id) throw new Error("Unknown ChatGPT account");
+    await switchBrowserAccount(id, { logger, stateStore });
+    if (browserAccounts.activeId() !== id || !browserHost) throw new Error("The browser account changed before the OpenAI Platform sign-in");
+    if (!browserHost.externalLogin) return { inChrome: false };
+    return { inChrome: true, ...(await browserHost.openPlatformChromeLogin()) };
+  });
   handle("launcher:browser-account-rename", async (event, input) => {
     await assertFocusedMainWindowSettled(event, true);
     browserAccounts.rename(input?.id, input?.label);
@@ -3555,7 +3586,8 @@ function registerIpc({ logger, stateStore }) {
     let requireReady = false, creating = false, connectorConfirmed = false;
     const assertCurrent = () => {
       assertAutomaticCurrent?.();
-      if (runtimeHost.currentOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
+      // A chat's WebGPT model lookup (read-only, about 2 s) is not a setup: it failed this check mid-Connect.
+      if (runtimeHost.setupOperation()) throw new Error("Wait for the current runtime setup to finish before connecting MCP.");
       if (!operationBrowser || operationBrowser !== browserHost || operationBrowser.partition !== operationPartition
         || browserAccounts.partitionOf(accountId) !== partition || extraTunnels !== runtimeSupervisor?.extraTunnels
         || browserAccountsStatus().switching || quitting || shutdownInProgress) {
@@ -3696,7 +3728,7 @@ function registerIpc({ logger, stateStore }) {
         && mainWindow.isFocused() && mainWindow.webContents.isFocused()
         && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
         && (!operation || (connecting && operation === "MCP connector creation"))
-        && runtimeHost && !runtimeHost.currentOperation();
+        && runtimeHost && !runtimeHost.setupOperation();
     },
     prepare: async () => {
       // Timers must not synchronously read configuration/credential files on the main thread.
@@ -4945,7 +4977,10 @@ async function start() {
       powerSaveBlocker,
     },
   });
-  const providerServices = createAppsProviderServices({ providerNetworkReady });
+  const providerServices = createAppsProviderServices({
+    providerNetworkReady,
+    listCpaAuthAccounts: async () => listCpaAuthAccounts({ directory: cpaAuthDirectory() }),
+  });
   // MCP Events: incidents detected here are delivered by the headless service's event hub
   // to the webhook subscriptions ChatGPT created on the workspace MCP listeners. Reports
   // wait for an already-running headless service; they never start one.
@@ -5085,7 +5120,8 @@ async function start() {
         executable,
         at: Date.now(),
         stdout: runtimeHost.run("ao-web-model-catalog", ["catalog", "ao-web", "--codex", executable], {
-          embedded: true, timeoutMs: 45_000, message: "Checking the WebGPT model…",
+          // It only prints the catalog, so MCP setup does not wait for it (RuntimeHost.setupOperation).
+          embedded: true, readOnly: true, timeoutMs: 45_000, message: "Checking the WebGPT model…",
           successMessage: "WebGPT model checked",
         }).then((result) => result.stdout),
       };
@@ -5335,6 +5371,7 @@ async function start() {
       BrowserWindow, sessionFor: partition => session.fromPartition(partition),
       proxyEnvironment: antigravityProxyEnvironment, cleanUserAgent,
     });
+    setProviderAuthBrowser(() => antigravityAuthBrowser);
     antigravityReauth = createAntigravityReauth({
       cpaConnection: () => externalServicesController?.cpaConnection(),
       openExternal: (url, options) => antigravityAuthBrowser(url, options),
@@ -5357,7 +5394,9 @@ async function start() {
           const env = await antigravityProxyEnvironment();
           if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
-            executable: antigravityCli.executable(), env: manualAuthEnvironment(env), workspaceId: args.workspaceId || undefined,
+            executable: antigravityCli.executable(),
+            env: manualAuthEnvironment(env, process.env, { home: await antigravityCli.authHome(args.accountId) }),
+            workspaceId: args.workspaceId || undefined,
           });
           return { ok: true, ...terminal, title: "agy" };
         }
@@ -5396,6 +5435,9 @@ async function start() {
         try { await rtk.ready(15_000); } catch { /* starts without waiting */ }
         let env = {};
         try { env = shimProxyEnvironment(await antigravityProxyEnvironment()); } catch { /* no proxy for agy */ }
+        // Isolated empty/default auth home for managed agy only (the shim applies it to
+        // USERPROFILE/HOME). Never set USERPROFILE or HOME on the daemon itself.
+        env = { ...env, CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli.authHome() };
         // RTK's Claude Code and Codex hooks and its OpenCode plugin, which AO puts in each Claude
         // session's own settings, on each Codex app-server's command line and in each OpenCode
         // chat's inline config (empty: off). ready() above wrote the plugin's file.
@@ -5587,8 +5629,24 @@ async function start() {
     missionWorkflowRuntime = agentOrchestratorWorkflow;
     void listHeadlessWorkspaces().then(items => agentOrchestratorWorkflow.restoreSchedules(items))
       .catch(() => logger.warn("ao.schedule_restore_failed", { detail: "Saved delayed starts need inspection; none were replayed." }));
+    // The workspace listeners the person had started come back after a restart or an update, so
+    // ChatGPT's native Codex keeps working (workspace-listeners.cjs).
+    if (!LAUNCHER_SMOKE_TEST && stateStore.read().workspaceListeners?.length) {
+      void listHeadlessWorkspaces().then(async (items) => {
+        const entries = stateStore.read().workspaceListeners;
+        const { kept } = await restoreWorkspaceListeners({ entries, workspaceIds: items.map(item => item.id),
+          request: (pathname, body) => headlessHost.request(pathname, body), logger });
+        // Forget only the removed workspaces' entries: a listener started meanwhile stays.
+        const forgotten = entries.filter(entry => !kept.includes(entry));
+        if (forgotten.length) {
+          stateStore.update({ workspaceListeners: (stateStore.read().workspaceListeners || []).filter(entry => !forgotten.includes(entry)) });
+        }
+      }).catch(error => logger.warn("workspace.listener_restore_failed", { message: String(error?.message || error).slice(0, 300) }));
+    }
     // Goals carry on with the window minimized (its reads, which sweep them, stop then).
     if (!LAUNCHER_SMOKE_TEST) agentOrchestratorWorkflow.startGoalWatch();
+    // A turn a chat's agent starts by itself gets a card, so its requests are seen and screened.
+    if (!LAUNCHER_SMOKE_TEST) agentOrchestratorWorkflow.startAutonomousTurnWatch(listHeadlessWorkspaces);
     // Chats a restart interrupted resume now, in every project, without waiting for the window or
     // the ChatGPT bridge (whose connect observes their cards again): resumeInterrupted says which.
     if (!LAUNCHER_SMOKE_TEST) {
@@ -5819,7 +5877,8 @@ async function start() {
       logger,
       // The approved extension connects the current Chrome profile. App-side fresh verification
       // still uses this account's routed partition; ordinary Chrome's routing is never changed.
-      loginWithPasskey: () => runtimeHost.captureCurrentChromeLogin({ safeStorage }),
+      // `target: "platform"`: OpenAI Platform's sign-in (BrowserHost.openPlatformChromeLogin).
+      loginWithPasskey: (_partition, options) => runtimeHost.captureCurrentChromeLogin({ safeStorage, target: options?.target === "platform" ? "platform" : "chatgpt" }),
       signInConflict: (partition, user) => browserAccounts.otherAccountWithLogin(partition, user)?.label ?? null,
       partition: browserAccounts.partitionOf(accountId),
       profile: LAUNCHER_PROFILE.kind,

@@ -114,6 +114,12 @@ export interface ProviderAccountRecord {
   lastUsedAt?: string;
   archivedAt?: string;
   error?: string;
+  remainingBalance?: {
+    remaining: number | null;
+    currency?: string | null;
+    kind?: string | null;
+  } | null;
+  displayOnly?: boolean;
 }
 
 export interface ProviderAccountInput {
@@ -1174,6 +1180,11 @@ export interface LauncherApi {
   browserAccounts(): Promise<BrowserAccountsStatus>;
   addBrowserAccount(): Promise<BrowserAccountsStatus>;
   switchBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
+  /**
+   * Shows the account, then asks Chrome for its OpenAI Platform sign-in and keeps it in the account's own
+   * saved session. `inChrome: false` where sign-in does not go through Chrome: open Platform in the Browser tab.
+   */
+  openPlatformSignIn(id: string): Promise<{ inChrome: boolean; imported?: number }>;
   renameBrowserAccount(id: string, label: string): Promise<BrowserAccountsStatus>;
   removeBrowserAccount(id: string): Promise<BrowserAccountsStatus>;
   /** Bulk delete: removes each listed account; one that could not go is in `failed` with its reason. */

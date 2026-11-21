@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createBridge, loadEngine, validateCall, sameExecutable, failureReply, METHODS } from '../src-tauri/src/tools/computer/codex-bridge.mjs';
+import { createBridge, loadEngine, validateCall, sameExecutable, failureReply, METHODS, TEXT_SKIP_MS, TEXT_UNAVAILABLE } from '../src-tauri/src/tools/computer/codex-bridge.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -140,6 +140,77 @@ test('only bounded in-memory native screenshot responses are forwarded', async (
   }
   const f = fixture({ get_window_state: async () => ({ window, screenshots: [], accessibility: { tree: 'x'.repeat(16 * 1024 * 1024) } }) });
   await assert.rejects(f.bridge.call('get_window_state', {}), /CODEX_RESPONSE_TOO_LARGE/);
+});
+
+// The installed engine's words when a window's text takes too long (measured 2026-11-17 on a
+// window of 1500 controls): the whole read fails, screenshot included.
+const textTimeout = () => new Error('UI Automation operation exceeded 8000 ms. Accessibility text is unavailable for this read. '
+  + 'Reread the same window using get_window_state with include_text: false, include_screenshot: true. '
+  + 'This read timeout does not mean preceding input failed; inspect the app before repeating input.');
+function slowTextFixture() {
+  const calls = [];
+  const clock = { at: 1_000 };
+  const client = {
+    async get_window(params) { calls.push(['get_window', params]); return window; },
+    async get_window_state(params) {
+      calls.push(['get_window_state', params]);
+      if (params.include_text) throw textTimeout();
+      return { window, screenshots: [{ id: 'native-2', url: png, width: 640, height: 480, zIndex: 0 }] };
+    },
+    async close() {},
+  };
+  return { calls, clock, bridge: createBridge({ client, windowId: window.id, executable, now: () => clock.at }) };
+}
+
+test('a window whose text takes too long is still seen: the snapshot has its screenshot and says the text is unavailable', async () => {
+  // Before, the snapshot failed whole (CODEX_CAPTURE_FAILED), so such a window could never be seen.
+  assert.equal(failureReply(textTimeout()).code, 'CODEX_CAPTURE_FAILED');
+  const f = slowTextFixture();
+  const state = await f.bridge.call('get_window_state', { include_screenshot: true, include_text: true });
+  assert.equal(state.screenshots[0].url, png);
+  assert.equal(state.accessibility.unavailable, TEXT_UNAVAILABLE);
+  assert.match(state.accessibility.unavailable, /screenshot only/);
+  assert.deepEqual(f.calls.slice(1), [
+    ['get_window_state', { include_screenshot: true, include_text: true, window }],
+    ['get_window_state', { include_screenshot: true, include_text: false, window }],
+  ], 'read again as the engine says: the same window, screenshot without text');
+
+  // For a minute the text is not tried: it would run out again, and the wait came close to the app's 12 s per call.
+  f.calls.length = 0;
+  f.clock.at += TEXT_SKIP_MS - 1;
+  assert.equal((await f.bridge.call('get_window_state', { include_screenshot: true, include_text: true })).accessibility.unavailable, TEXT_UNAVAILABLE);
+  assert.deepEqual(f.calls, [['get_window_state', { include_screenshot: true, include_text: false, window }]]);
+  // Then it is tried again.
+  f.calls.length = 0;
+  f.clock.at += 1;
+  await f.bridge.call('get_window_state', { include_screenshot: true, include_text: true });
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[0][1].include_text, true);
+});
+
+test('only a read that wants a screenshot does without text; other failures are not reread', async () => {
+  // Text alone was asked for: without it there is nothing to return.
+  const f = slowTextFixture();
+  await assert.rejects(f.bridge.call('get_window_state', { include_screenshot: false, include_text: true }), /UI Automation operation exceeded/);
+  assert.equal(f.calls.filter(([method]) => method === 'get_window_state').length, 1);
+  // Any other failure of the read stays that read's failure.
+  for (const failure of [new Error('Failed to capture screenshot'), new Error('element index 3 is stale')]) {
+    const calls = [];
+    const bridge = createBridge({ executable, windowId: window.id, client: {
+      async get_window() { return window; }, async close() {},
+      async get_window_state(params) { calls.push(params); throw failure; },
+    } });
+    await assert.rejects(bridge.call('get_window_state', { include_screenshot: true, include_text: true }), (error) => error === failure);
+    assert.equal(calls.length, 1, `${failure.message}: no second read`);
+  }
+  // A closed engine is not read again.
+  let close;
+  const closing = createBridge({ executable, windowId: window.id, client: {
+    async get_window() { return window; }, async close() {},
+    async get_window_state(params) { if (params.include_text) { await close(); throw textTimeout(); } return { window, screenshots: [] }; },
+  } });
+  close = () => closing.close();
+  await assert.rejects(closing.call('get_window_state', { include_screenshot: true, include_text: true }), /UI Automation/);
 });
 
 test('closing during an operation fences late results and every subsequent action', async () => {

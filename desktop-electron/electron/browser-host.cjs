@@ -364,6 +364,22 @@ function signOutUrl(value) {
   return /(^|\/)(log-?out|sign-?out)(\/|$)/i.test(new URL(value).pathname);
 }
 
+/**
+ * Whether a sign-in a tab of the person's own goes to is ChatGPT's, which Windows hands to Chrome
+ * (requestChromeLogin). OpenAI Platform signs in through auth.openai.com too: handed to Chrome, its
+ * Log in only showed ChatGPT again, so no account could sign in to Platform (2026-11-17). A sign-in
+ * that another page started (Platform, or the sign-in pages it leads to) stays in the tab.
+ */
+function chatGptSignInNavigation(fromUrl, toUrl) {
+  if (!allowedAuthUrl(toUrl) || signOutUrl(toUrl)) return false;
+  if (new URL(toUrl).hostname === "chatgpt.com") return true;
+  try {
+    return new URL(fromUrl).hostname === "chatgpt.com";
+  } catch {
+    return true;
+  }
+}
+
 function navigationOriginForLog(value) {
   try {
     const parsed = new URL(value);
@@ -1729,7 +1745,7 @@ class BrowserHost {
       return { action: "deny" };
     });
     contents.on("will-navigate", (event, url) => {
-      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && allowedAuthUrl(url) && !signOutUrl(url)) {
+      if (this.externalLogin && browserInteractionModeFor(this) === "automatic" && chatGptSignInNavigation(contents.getURL(), url)) {
         event.preventDefault();
         this.requestChromeLogin(contents);
       }
@@ -3948,6 +3964,55 @@ class BrowserHost {
           message: error instanceof Error ? error.message : String(error) });
       }
     });
+  }
+
+  /**
+   * OpenAI Platform's sign-in, in the person's Chrome (2026-11-18). An account's MCP setup stops at
+   * Platform's login when the account's saved OpenAI sign-in (auth.openai.com) is missing or ran out,
+   * and only the person can sign in. Chrome sends its OpenAI cookies; they join the shown account's
+   * own saved session, where Platform finds them on every later setup. Its ChatGPT session stays.
+   */
+  openPlatformChromeLogin() {
+    requireAutomaticBrowserInspection(this, "OpenAI Platform sign-in through Chrome");
+    return this.withManualOperation("OpenAI Platform sign-in", () => this.runPlatformChromeLogin());
+  }
+
+  async runPlatformChromeLogin() {
+    const contents = this.view?.webContents, partition = this.partition;
+    if (!contents || contents.isDestroyed()) throw new Error("The selected account's browser is unavailable");
+    const account = await this.readSessionUser();
+    if (!account) throw new Error("Sign in to this account's ChatGPT first: its OpenAI Platform sign-in belongs to that login.");
+    const transfer = await this.loginWithPasskey(partition, { proxyRules: await contents.session.resolveProxy("https://auth.openai.com/"), target: "platform" });
+    let error = null, imported = 0;
+    try {
+      if (this.destroyed || this.partition !== partition || this.view?.webContents !== contents || contents.isDestroyed()) {
+        throw new Error("The browser account changed during the OpenAI Platform sign-in. Sign in again on the selected account.");
+      }
+      transfer.assertCurrent?.();
+      // Chrome's ChatGPT login says whose OpenAI sign-in this is: another account's is refused untouched.
+      const chrome = normalizeSessionUser(transfer.expectedUser);
+      if (!chrome) throw signInIdentityError("Chrome did not say which ChatGPT account it is signed in to, so nothing was added. Open ChatGPT in that Chrome profile, then try again.");
+      if (!sameSessionUser(chrome, account)) {
+        throw signInIdentityError(`Chrome is signed in to ${loginName(chrome)}, not ${loginName(account)}, so nothing was added. Sign in to ${loginName(account)} in Chrome, then try again.`);
+      }
+      // Only OpenAI's own cookies: a ChatGPT capture (connector 1.1) carries ChatGPT's too, which stay as they are.
+      const cookies = validatePasskeyLoginState(transfer.storageState).cookies
+        .filter(cookie => { const host = new URL(cookie.url).hostname; return host === "openai.com" || host.endsWith(".openai.com"); });
+      if (!cookies.length) throw new Error("Chrome sent no OpenAI sign-in, so nothing was added. Sign in to OpenAI Platform in Chrome, then try again.");
+      for (const cookie of cookies) {
+        transfer.assertCurrent?.();
+        await contents.session.cookies.set(cookie);
+        imported++;
+      }
+      await contents.session.cookies.flushStore();
+      this.logger.info("browser.platform_signin_imported", { cookies: imported, from: transfer.origin === "https://platform.openai.com" ? "platform" : "chatgpt" });
+    } catch (caught) {
+      error = caught;
+    }
+    transfer.complete?.(!error);
+    try { await transfer.cleanup(); } catch { /* the capture ends by itself */ }
+    if (error) throw error;
+    return { imported };
   }
 
   async runPasskeyLogin() {

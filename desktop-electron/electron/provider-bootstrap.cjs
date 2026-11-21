@@ -5,6 +5,7 @@ const {
 const { createProviderExecutionPlan } = require("./provider-execution-router.cjs");
 const { resolveLauncherProfile } = require("./profile.cjs");
 const { retireProxyGateway } = require("./proxy-gateway-retire.cjs");
+const { listCpaAuthAccounts, overlayCpaAccounts } = require("./cpa-auth-inventory.cjs");
 const { createNovaManager } = require("./proxybridge-nova.cjs");
 
 // Nova's profile carries proxy passwords; the page gets whether one is saved, never the value.
@@ -22,6 +23,7 @@ let providerBrowserHostGetter = () => null;
 // Which proxy profile a Browser-tab account's partition is bound to (main's browser-accounts.cjs).
 let providerBrowserProxyBinding = () => null;
 let providerCpaConnectionGetter = () => null;
+let providerAuthBrowserGetter = () => null;
 // The launcher's own log (launcher.jsonl, which redacts proxy credentials and bearer tokens) once
 // main has created it. Provider Network starts first: its events until then are kept and written
 // when the log arrives.
@@ -67,6 +69,13 @@ function setProviderCpaConnection(getter) {
   providerCpaConnectionGetter = getter;
 }
 
+function setProviderAuthBrowser(getter) {
+  if (typeof getter !== "function") {
+    throw new Error("Provider auth browser getter must be a function");
+  }
+  providerAuthBrowserGetter = getter;
+}
+
 function providerNetworkReady() {
   if (!providerNetworkControllerPromise) {
     throw new Error("Provider Network has not been installed");
@@ -104,14 +113,35 @@ function installProviderNetwork({
 
   // The window's copy names each proxy's sign-in username, so the Proxy page can tell proxies on one
   // address apart. Only this copy: saves and routing never decrypt a sign-in.
+  // CPA auth-dir accounts are overlaid from this cache so shown()/publish() stay
+  // synchronous (onChanged can run on the UI path). The cache is filled with
+  // fs.promises, never *Sync.
+  let cpaAccounts = [];
+
+  async function loadCpaAccounts() {
+    try {
+      const directory = require("path").join(app.getPath("userData"), "integrations", "state", "cpa", "auth");
+      cpaAccounts = await listCpaAuthAccounts({ directory });
+    } catch {
+      cpaAccounts = [];
+    }
+    return cpaAccounts;
+  }
+
   function shown(snapshot) {
-    return controller?.store?.withProxyUsernames?.(snapshot) ?? snapshot;
+    const withNames = controller?.store?.withProxyUsernames?.(snapshot) ?? snapshot;
+    return overlayCpaAccounts(withNames, cpaAccounts);
   }
 
   function publish(snapshot) {
     const visible = shown(snapshot);
     sendAll("launcher:provider-network-changed", visible);
     return visible;
+  }
+
+  async function publishFresh(snapshot) {
+    await loadCpaAccounts();
+    return publish(snapshot);
   }
 
   providerNetworkControllerPromise = app.whenReady().then(async () => {
@@ -134,6 +164,11 @@ function installProviderNetwork({
       session,
       shell,
       userData: app.getPath("userData"),
+      openProviderLoginUrl: (url, options) => {
+        const opener = providerAuthBrowserGetter();
+        if (typeof opener === "function") return opener(url, options);
+        return shell.openExternal(url);
+      },
     });
     // Before anything awaits: this runs ahead of main's own whenReady code, so every program main
     // starts (AO, the Codex bridge, the MCP tunnel, chat agents) inherits the saved route.
@@ -181,6 +216,8 @@ function installProviderNetwork({
     });
     novaManager = nova;
     app.once("will-quit", () => nova?.stopPolling());
+    await loadCpaAccounts();
+    try { publish(controller.store.snapshot()); } catch {}
     return controller;
   });
   const controllerPromise = providerNetworkControllerPromise;
@@ -218,10 +255,10 @@ function installProviderNetwork({
     // reported to the page.
     await active.store.saved?.();
     if (refreshGlobal) snapshot = await active.applyGlobalRouting();
-    return publish(snapshot);
+    return publishFresh(snapshot);
   }
 
-  handle("launcher:provider-snapshot", (active) => shown(active.store.snapshot()));
+  handle("launcher:provider-snapshot", (active) => loadCpaAccounts().then(() => shown(active.store.snapshot())));
   handle("launcher:provider-execution-plan", (active, _event, input) => (
     createProviderExecutionPlan(active.store.snapshot(), input)
   ));
@@ -361,4 +398,5 @@ module.exports = {
   setProviderBrowserHost,
   setProviderBrowserProxyBinding,
   setProviderCpaConnection,
+  setProviderAuthBrowser,
 };

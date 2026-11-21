@@ -11,6 +11,9 @@ const {
 
 const ORIGIN = "http://127.0.0.1:8317";
 const SECRET = "real-management-secret";
+// A management request that could only fail is cancelled, never sent: CPA counts each as a failed
+// login and bans 127.0.0.1, the whole machine, after five (seen 2026-11-18).
+const BLOCKED = { cancel: true };
 
 function storage() {
   const values = new Map();
@@ -147,7 +150,7 @@ test("CPA Helper iframe under the managed panel gets the key only on its own API
     `${ORIGIN}/v0/management/cpa-helper-evil/x`,
     `http://localhost:8317/v0/management/cpa-helper/usage`,
   ]) {
-    assert.deepEqual(await f.request({ frame: helper, url, requestHeaders }), { requestHeaders });
+    assert.deepEqual(await f.request({ frame: helper, url, requestHeaders }), BLOCKED);
   }
   for (const frame of [
     { ...helper, url: `${ORIGIN}/v0/resource/plugins/other/index.html` },
@@ -160,11 +163,9 @@ test("CPA Helper iframe under the managed panel gets the key only on its own API
     { ...helper, parent: { ...f.frame, url: `${ORIGIN}/other.html` } },
     { ...helper, parent: null },
   ]) {
-    assert.deepEqual(await f.request({ frame, url: helperApi, requestHeaders }), { requestHeaders });
+    assert.deepEqual(await f.request({ frame, url: helperApi, requestHeaders }), BLOCKED);
   }
-  assert.deepEqual(await f.request({ frame: helper, url: helperApi, webContentsId: 72, requestHeaders }), {
-    requestHeaders,
-  });
+  assert.deepEqual(await f.request({ frame: helper, url: helperApi, webContentsId: 72, requestHeaders }), BLOCKED);
   f.setConnection(null);
   assert.deepEqual(await f.request({ frame: helper, url: helperApi, requestHeaders }), { cancel: true });
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
@@ -185,9 +186,8 @@ test("only the exact direct managed iframe and webContents can seed or exchange 
     f.frame.url = url;
     await handler({}, false, 5, 9);
     assert.equal(f.frame.reloads, 0);
-    assert.deepEqual(await f.request({ requestHeaders: { Authorization: "Bearer coding-tools-fake" } }), {
-      requestHeaders: { Authorization: "Bearer coding-tools-fake" },
-    });
+    // No exchange, and this window never holds a real key: cancelled, not sent to fail.
+    assert.deepEqual(await f.request({ requestHeaders: { Authorization: "Bearer coding-tools-fake" } }), BLOCKED);
   }
   f.frame.url = `${ORIGIN}/management.html`;
   f.frame.top = {};
@@ -196,8 +196,11 @@ test("only the exact direct managed iframe and webContents can seed or exchange 
   f.frame.top = f.mainFrame;
   await handler({}, false, 5, 9);
   assert.equal(f.frame.reloads, 1);
-  assert.deepEqual(await f.request({ webContentsId: 72 }), {
-    requestHeaders: { authorization: `Bearer ${f.sessionStorage.getItem("coding-tools-cpa-session")}` },
+  // Another window gets no exchange, and a marker it sends can only fail.
+  assert.deepEqual(await f.request({ webContentsId: 72 }), BLOCKED);
+  // Its own typed key still goes through untouched.
+  assert.deepEqual(await f.request({ webContentsId: 72, requestHeaders: { Authorization: "Bearer typed-by-a-person" } }), {
+    requestHeaders: { Authorization: "Bearer typed-by-a-person" },
   });
 });
 
@@ -212,9 +215,7 @@ test("missing or mismatched main-process connection cancels marker requests with
   assert.deepEqual(await f.request(), { cancel: true });
   f.setConnection(null);
   assert.deepEqual(await f.request(), { cancel: true });
-  assert.deepEqual(await f.request({ requestHeaders: { Authorization: "Bearer some-other-token" } }), {
-    requestHeaders: { Authorization: "Bearer some-other-token" },
-  });
+  assert.deepEqual(await f.request({ requestHeaders: { Authorization: "Bearer some-other-token" } }), BLOCKED);
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
@@ -227,8 +228,8 @@ test("Accounts and CPA can reuse a cached launcher marker without accepting it o
   assert.deepEqual(await f.request({ requestHeaders }), {
     requestHeaders: { authorization: `Bearer ${SECRET}` },
   });
-  assert.deepEqual(await f.request({ webContentsId: 72, requestHeaders }), { requestHeaders });
-  assert.deepEqual(await f.request({ frame: null, requestHeaders }), { requestHeaders });
+  assert.deepEqual(await f.request({ webContentsId: 72, requestHeaders }), BLOCKED);
+  assert.deepEqual(await f.request({ frame: null, requestHeaders }), BLOCKED);
   f.setConnection(null);
   assert.deepEqual(await f.request({ requestHeaders }), { cancel: true });
 });
@@ -276,11 +277,11 @@ test("Cline switcher frame gets the opaque marker exchange only for its own mana
   });
   for (const url of [`${ORIGIN}/v0/management/config`, `${ORIGIN}/v0/management/cpa-helper/usage`,
     `${ORIGIN}/v0/management/cline-pass-switcher-evil/api/accounts`]) {
-    assert.deepEqual(await f.request({ frame, url, requestHeaders }), { requestHeaders });
+    assert.deepEqual(await f.request({ frame, url, requestHeaders }), BLOCKED);
   }
   // The retired plugin's own page is no longer served, so it gets nothing.
   const retired = { ...frame, url: `${ORIGIN}/v0/resource/plugins/cline-pass-switcher/index.html` };
-  assert.deepEqual(await f.request({ frame: retired, url: clineApi, requestHeaders }), { requestHeaders });
+  assert.deepEqual(await f.request({ frame: retired, url: clineApi, requestHeaders }), BLOCKED);
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
@@ -298,6 +299,49 @@ test("non-loopback origins are rejected and destroying the host removes the requ
   f.destroy();
   assert.equal(f.calls.at(-1).listener, null);
   assert.deepEqual(f.calls.at(-1).filter, { urls: [`${ORIGIN}/v0/management/*`] });
+});
+
+test("a management request that could only fail is cancelled, so CPA never bans 127.0.0.1 for it", async () => {
+  // 2026-11-18: CPA answered every management call "IP banned due to too many failed attempts" for
+  // 30 minutes, the app's own included: five failed logins from 127.0.0.1 ban the whole machine.
+  const f = fixture();
+  f.install();
+  await f.webContents.listeners("did-frame-finish-load")[0]({}, false, 5, 9);
+  const marker = f.sessionStorage.getItem("coding-tools-cpa-session");
+  const url = `${ORIGIN}/v0/management/api-call`;
+  // The panel's own request is exchanged, through either header CPA reads.
+  assert.deepEqual(await f.request({ url }), { requestHeaders: { authorization: `Bearer ${SECRET}` } });
+  assert.deepEqual(await f.request({ url, requestHeaders: { "X-Management-Key": marker } }), {
+    requestHeaders: { "X-Management-Key": SECRET },
+  });
+  // A frame torn down mid-request (the panel reloads after seeding; a page switch), a request with no
+  // key, or one carrying something this window cannot exchange: each would be a failed login.
+  const gone = { ...f.frame, isDestroyed: () => true };
+  for (const request of [{ frame: gone }, { frame: null }, { requestHeaders: {} }, { requestHeaders: { Authorization: "Bearer " } },
+    { requestHeaders: { Authorization: "Bearer enc::v1::QQQdWQBIQFdIH1ZeWQ" } }]) {
+    assert.deepEqual(await f.request({ url, ...request }), BLOCKED, JSON.stringify(Object.keys(request)));
+  }
+  // Each blocked request is named once a minute per reason and path, without any key.
+  const blocked = f.logs.filter(([event]) => event === "cpa.management_request_blocked");
+  assert.ok(blocked.length >= 2 && blocked.length <= 3, `${blocked.length} lines`);
+  for (const [, detail] of blocked) assert.equal(detail.path, "/v0/management/api-call");
+  for (let i = 0; i < 20; i += 1) await f.request({ url, frame: null });
+  assert.equal(f.logs.filter(([event]) => event === "cpa.management_request_blocked").length, blocked.length, "repeats are not logged again");
+  assert.doesNotMatch(JSON.stringify(f.logs), new RegExp(`${SECRET}|${marker}|enc::v1`));
+});
+
+test("a window that closes after another installed the hook leaves that hook in place", async () => {
+  const f = fixture();
+  f.install();
+  const first = f.calls.at(-1).listener;
+  f.install(); // a second window on the same session replaces the one listener Electron keeps
+  assert.notEqual(f.calls.at(-1).listener, first);
+  const before = f.calls.length;
+  const [firstTeardown, secondTeardown] = f.webContents.listeners("destroyed");
+  firstTeardown();
+  assert.equal(f.calls.length, before, "the newer hook is not removed");
+  secondTeardown();
+  assert.equal(f.calls.at(-1).listener, null, "the current owner's teardown removes it");
 });
 
 // CPA Auto Review is Provider Manager's "autoreview" part: its page is in Provider Manager's "review"
@@ -323,15 +367,15 @@ test("Codex Auto Review's page gets the key on its own routes and a read-only ac
     [`${ORIGIN}/v0/management/codex-review-account-selector-evil/x`, "GET"],
     // The plugin's earlier name had routes of its own; Provider Manager serves none under it.
     [`${ORIGIN}/v0/management/codex-auto-review/settings`, "GET"]]) {
-    assert.deepEqual(await f.request({ frame, url, method, requestHeaders }), { requestHeaders }, `${method} ${url}`);
+    assert.deepEqual(await f.request({ frame, url, method, requestHeaders }), BLOCKED, `${method} ${url}`);
   }
   // Another plugin's page gets none of it.
   const other = { ...frame, url: `${ORIGIN}/v0/resource/plugins/other/index.html` };
-  assert.deepEqual(await f.request({ frame: other, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }), { requestHeaders });
+  assert.deepEqual(await f.request({ frame: other, url: `${ORIGIN}/v0/management/auth-files`, method: "GET", requestHeaders }), BLOCKED);
   // Nor does a review page outside the managed panel.
   const loose = { ...frame, parent: f.mainFrame };
   assert.deepEqual(await f.request({ frame: loose, url: `${ORIGIN}/v0/management/codex-review-account-selector/settings`, method: "GET", requestHeaders }),
-    { requestHeaders });
+    BLOCKED);
   assert.equal(JSON.stringify(f.logs).includes(SECRET), false);
 });
 
@@ -352,7 +396,7 @@ test("the retired reviewer pages and look-alikes of the review page get no sign-
   ]) {
     const frame = { url: page, top: f.mainFrame, parent: f.frame, isDestroyed: () => false };
     for (const url of [`${ORIGIN}/v0/management/codex-review-account-selector/settings`, `${ORIGIN}/v0/management/auth-files`]) {
-      assert.deepEqual(await f.request({ frame, url, method: "GET", requestHeaders }), { requestHeaders }, `${page} -> ${url}`);
+      assert.deepEqual(await f.request({ frame, url, method: "GET", requestHeaders }), BLOCKED, `${page} -> ${url}`);
     }
   }
 });
@@ -547,6 +591,47 @@ test("a Provider Manager card names OpenCode and shows its windows; idle cards l
   q.tick();
   assert.match(go.card.children.at(-2).textContent, /70% left/);
   assert.deepEqual([first.button.clicks, second.button.clicks], [2, 2], "pressed again after the refresh period, one per tick");
+});
+
+test("a Provider Manager API-key card shows the remaining balance from quota.balances", async () => {
+  const state = { providers: [
+    { id: "openai-api", kind: "openai", enabled: true, quota: { balances: [
+      { kind: "credit", currency: "USD", remaining: 12.5 },
+    ] } },
+    { id: "opencode-go", kind: "opencode-go", enabled: true, quota: { windows: {
+      rolling: { percent: 30, resetsAt: "2026-10-24T09:00:00Z", status: "ok" },
+    }, balances: [ { kind: "key-budget", currency: "USD", remaining: 3.25 } ] } },
+  ] };
+  const routes = {
+    "/v0/management/cpa-provider-manager/api/state": () => state,
+    "/v0/management/auth-files": () => ({ files: [] }),
+  };
+  const q = quotaPage({ hash: "#/auth-files", usage: { accounts: [] }, routes });
+  const api = authCard("cpa-provider-manager-openai-api", { badge: "Provider-manager", runtime: true });
+  const go = authCard("cpa-provider-manager-opencode-go", { badge: "Provider-manager", runtime: true });
+  q.page.append(api.card, go.card);
+  q.run();
+  for (let i = 0; i < 6; i++) await q.settle();
+  q.tick();
+
+  const apiBlock = api.card.children.at(-2);
+  assert.equal(apiBlock.dataset.codingTools, "provider-quota-openai-api");
+  assert.match(apiBlock.textContent, /Remaining balance/);
+  assert.match(apiBlock.textContent, /USD/);
+  assert.match(apiBlock.textContent, /12[.,]50/);
+
+  const goBlock = go.card.children.at(-2);
+  assert.equal(goBlock.dataset.codingTools, "provider-quota-opencode-go");
+  assert.match(goBlock.textContent, /Key budget/);
+  assert.match(goBlock.textContent, /3[.,]25/);
+  assert.match(goBlock.textContent, /70% left/);
+
+  // A failed quota read keeps the last remaining balance on screen.
+  state.providers[0].quota = { error: "usage answered HTTP 500" };
+  q.clock.now += 2 * 60e3 + 1;
+  q.tick();
+  for (let i = 0; i < 6; i++) await q.settle();
+  assert.match(api.card.children.at(-2).textContent, /12[.,]50/);
 });
 
 test("Auth Files cards get the Cline Pass windows and each Codex account's credit balance", async () => {

@@ -5,14 +5,13 @@ import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 import { CheckGlyph, FolderGlyph, GlobeGlyph, HandGlyph, ShieldAlertGlyph, ShieldCodeGlyph, TerminalGlyph, WarningGlyph } from "./AgentOrchestratorPermissionGlyphs";
 import type { KeyboardEvent, ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
-import { NATIVE_HARNESS, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
-import { knownQuotaReviews, onQuotaReviews, refreshQuotaReviews } from "./quota-reviews";
+import { NATIVE_HARNESS, PERMISSION_HARNESSES, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
 
 export type PermissionCapability = {
   supported: boolean; reason?: string;
   profiles: { id: string; allowed: boolean; description?: string }[];
   approval_policies?: string[]; approvals_reviewers?: string[];
-  /** Whole modes the adapter cannot honour although each part is listed (agy's Ask: its approvals stay in its terminal). */
+  /** Whole modes the adapter cannot honour although each part is listed (Ask and Approve for me on an agent that can't ask the chat). */
   excluded_modes?: { profile: string; policy: string; reviewer: string; reason?: string }[];
   requirements?: Record<string, unknown>;
 };
@@ -31,14 +30,15 @@ export function missionPermissionNodes(mission: AoMission): AoNode[] {
 }
 /**
  * Whether a running card's agent asks this app about each request, so the chat answers them by its
- * newest permission pick at once (liveRoute in agent-orchestrator-workflow). One launched to ask
- * does, and so does Claude Code under "Approve for me" (this app reviews its requests); an agent
- * launched with its own auto-review or with no approvals answers for itself until its next turn,
- * and the native Codex bridge reports its own policy (RuntimePermissionPolicy).
+ * newest permission pick at once (liveRoute in agent-orchestrator-workflow). An agent that asks the
+ * chat (PERMISSION_HARNESSES) does, launched to ask or under "Approve for me" (this app reviews its
+ * requests), except Codex there, which runs its own auto-review. One in Full access, or one that
+ * can't ask the chat, answers for itself until its next turn, and the native Codex bridge reports
+ * its own policy (RuntimePermissionPolicy).
  */
 export function appAnswersRequests(route: AoNode["route"] | undefined): boolean {
-  if (!route || route.harness_id === NATIVE_HARNESS || route.approval_policy === "never") return false;
-  return route.approvals_reviewer !== "auto_review" || /claude-code/.test(route.harness_id ?? "");
+  if (!route || !PERMISSION_HARNESSES.has(route.harness_id) || route.approval_policy === "never") return false;
+  return route.approvals_reviewer !== "auto_review" || route.harness_id !== "ao:codex";
 }
 /** A running card's approvals as they are answered now: the route it launched on, with the chat's newer pick laid over it. */
 export function livePermissionRoute(mission: AoMission, node: AoNode): AoNode["route"] {
@@ -47,15 +47,6 @@ export function livePermissionRoute(mission: AoMission, node: AoNode): AoNode["r
     ...(intent?.approval_policy !== undefined ? { approval_policy: intent.approval_policy } : {}),
     ...(intent?.approvals_reviewer !== undefined ? { approvals_reviewer: intent.approvals_reviewer } : {}) };
 }
-/**
- * Whether this app itself reviews a card's requests under "Approve for me": the agent asks the app
- * (`launched`) and the pick it follows (`live`) is Approve for me. These are the reviews "Allow
- * quota-based reviews" gates (quotaReviewBlocked); Codex's own auto-review is separate.
- */
-export function appReviewsRequests(launched: AoNode["route"] | undefined, live = launched): boolean {
-  return appAnswersRequests(launched) && live?.approvals_reviewer === "auto_review";
-}
-export const QUOTA_REVIEWS_PAUSED = "Approve for me is paused: quota-based reviews are off, so requests wait for you. Turn on Allow quota-based reviews in Settings > Chat to resume it.";
 /** What a saved permission change does to the chat's running turn. */
 export function permissionChangeNotice(mission: AoMission | undefined, selection: PermissionSelection): string {
   const running = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)) ?? [];
@@ -176,13 +167,6 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const [failed, setFailed] = useState(false);
   /** Full access waiting on the dialog, and whether the chat it opened from is dark. */
   const [confirming, setConfirming] = useState<{ selection: PermissionSelection; dark: boolean } | null>(null);
-  /** "Allow quota-based reviews" in Settings > Chat: while it is off, the requests this app reviews wait for you. */
-  const [quotaReviews, setQuotaReviews] = useState<boolean | null>(knownQuotaReviews);
-  useEffect(() => onQuotaReviews(setQuotaReviews), []);
-  // Read once per window, and again whenever the menu opens, since it is switched on another page.
-  useEffect(() => {
-    if (popup.open || knownQuotaReviews() === null) void refreshQuotaReviews().then(setQuotaReviews, () => undefined);
-  }, [popup.open]);
   const nodes = team?.nodes ?? [];
   const supported = nodes.filter(node => metadata[node.id]?.supported);
   const key = nodes.map(node => node.id).join("|");
@@ -208,20 +192,15 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const active = PERMISSION_MODES.find(mode => nodes.length > 0 && nodes.every(node =>
     nativePermission(node.route) === mode.profile && node.route.approval_policy === mode.policy && node.route.approvals_reviewer === mode.reviewer));
   const running = mission?.nodes.filter(node => ["running", "reserved"].includes(node.state)) ?? [];
-  // Approve for me answered by this app, in the running turn or from the next one, stops while
-  // quota-based reviews are off: the chip says so instead of "Active now".
-  const pausedHere = (launched: AoNode["route"], live = launched) => quotaReviews === false && appReviewsRequests(launched, live);
-  const paused = nodes.some(node => pausedHere(node.route)) || running.some(node => pausedHere(node.route, livePermissionRoute(mission!, node)));
   const effective = running.map(node => {
     const status = runtimePolicies?.[mission!.id + ":" + node.id];
     if (status?.policy_acknowledged && status.effective_policy) return "Active: " + Object.values(status.effective_policy).join(" · ");
     if (node.route.harness_id === NATIVE_HARNESS) return "Active permissions not confirmed yet";
     // An agent that asks this app about each request runs by the chat's newest pick at once; one
     // that answers for itself keeps what it launched with until its next turn.
-    const route = livePermissionRoute(mission!, node);
-    const live = permissionSummary([{ ...node, route }]);
+    const live = permissionSummary([{ ...node, route: livePermissionRoute(mission!, node) }]);
     const launched = permissionSummary([node]);
-    return appAnswersRequests(node.route) ? (pausedHere(node.route, route) ? "Paused now: " : "Active now: ") + live
+    return appAnswersRequests(node.route) ? "Active now: " + live
       : live === launched ? "Active: " + launched : `This turn: ${launched} · your change applies from the next turn`;
   }).join("; ");
   // A pick reaches the running turn at once when every running agent asks this app about its requests.
@@ -255,11 +234,8 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   // access is tinted, so the risky level still stands out without its words.
   return <div className="ao-permissions ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
     <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
-      aria-controls="ao-permissions-panel" aria-label={`Permissions: ${active?.label || "Custom"}${paused ? " (paused)" : ""}`}
-      data-danger={active?.danger ? "" : undefined} data-paused={paused ? "" : undefined}
-      // While paused, the save notice ("Active now: …") would contradict the line that explains it.
-      disabled={busy || saving} title={(active?.label || "Custom") + (paused ? " · paused\n" + QUOTA_REVIEWS_PAUSED : "") + "\n" + permissionSummary(nodes)
-        + (effective ? " · " + effective : "") + (notice && !failed && !paused ? " · " + notice : "")}
+      aria-controls="ao-permissions-panel" aria-label={`Permissions: ${active?.label || "Custom"}`} data-danger={active?.danger ? "" : undefined}
+      disabled={busy || saving} title={(active?.label || "Custom") + "\n" + permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
       {ChipGlyph ? <ChipGlyph width="16" height="16" /> : <Icon name="shield" width="16" height="16" />}
     </button>

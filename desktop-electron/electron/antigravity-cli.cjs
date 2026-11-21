@@ -145,7 +145,13 @@ function shimBody(executable, platform = process.platform) {
         `if defined CODING_TOOLS_AGY_${key} set "${key}=%CODING_TOOLS_AGY_${key}%"`,
         `if defined CODING_TOOLS_AGY_${key} set "${key.toLowerCase()}=%CODING_TOOLS_AGY_${key}%"`,
       ]),
+      'if defined CODING_TOOLS_AGY_AUTH_HOME (',
+      '  set "USERPROFILE=%CODING_TOOLS_AGY_AUTH_HOME%"',
+      '  for %%I in ("%CODING_TOOLS_AGY_AUTH_HOME%") do set "HOMEDRIVE=%%~dI"',
+      '  for %%I in ("%CODING_TOOLS_AGY_AUTH_HOME%") do set "HOMEPATH=%%~pI%%~nI%%~xI"',
+      ')',
       'if not defined SSH_CLIENT set "SSH_CLIENT=coding-tools"',
+      'if not defined AGY_ACP_FORCE_FILE_STORAGE set "AGY_ACP_FORCE_FILE_STORAGE=1"',
       `"${executable}" %*`,
       "",
     ].join("\r\n");
@@ -157,7 +163,9 @@ function shimBody(executable, platform = process.platform) {
     "  exit 1",
     "fi",
     ...SHIM_PROXY_KEYS.map(key => `[ -n "$CODING_TOOLS_AGY_${key}" ] && export ${key}="$CODING_TOOLS_AGY_${key}" ${key.toLowerCase()}="$CODING_TOOLS_AGY_${key}"`),
+    'if [ -n "$CODING_TOOLS_AGY_AUTH_HOME" ]; then export HOME="$CODING_TOOLS_AGY_AUTH_HOME"; fi',
     'export SSH_CLIENT="${SSH_CLIENT:-coding-tools}"',
+    'export AGY_ACP_FORCE_FILE_STORAGE="${AGY_ACP_FORCE_FILE_STORAGE:-1}"',
     `exec "${executable}" "$@"`,
     "",
   ].join("\n");
@@ -165,7 +173,61 @@ function shimBody(executable, platform = process.platform) {
 
 // The CLI's documented SSH auth mode prints a sign-in link/code instead of opening the
 // system browser. Keep this local to managed agy; a real SSH session keeps its own value.
-function manualAuthEnvironment(environment, inherited = process.env) {
+const AUTH_ACCOUNT_ID = /^[A-Za-z0-9._@-]{1,128}$/;
+const EMPTY_AUTH_ACCOUNT = "empty";
+
+function isolatedAuthAccountId(accountId) {
+  const id = String(accountId || "").trim();
+  return AUTH_ACCOUNT_ID.test(id) ? id : EMPTY_AUTH_ACCOUNT;
+}
+
+/** Per-account auth home under the managed tools root. "empty" is a fresh profile. */
+function isolatedAuthHome(toolsRoot, accountId) {
+  if (!toolsRoot || !path.isAbsolute(toolsRoot)) throw new Error("Antigravity auth home root must be absolute");
+  return path.join(toolsRoot, "antigravity-cli", "homes", isolatedAuthAccountId(accountId));
+}
+
+async function ensureIsolatedAuthHome(home) {
+  if (!home || !path.isAbsolute(home)) throw new Error("Antigravity isolated auth home must be absolute");
+  await fs.promises.mkdir(home, { recursive: true, mode: 0o700 });
+  try { await fs.promises.chmod(home, 0o700); } catch { /* Windows may ignore mode */ }
+  return home;
+}
+
+function windowsHomeVars(home) {
+  const resolved = path.win32.resolve(home);
+  const root = path.win32.parse(resolved).root;
+  const drive = root.replace(/[\\/]+$/u, "");
+  let homepath = resolved.slice(root.length).replace(/\//gu, "\\");
+  if (!homepath.startsWith("\\")) homepath = `\\${homepath}`;
+  return { USERPROFILE: resolved, HOMEDRIVE: drive, HOMEPATH: homepath };
+}
+
+/**
+ * Bind a launch to an empty or account-specific auth home so it does not inherit the
+ * machine's default CLI profile (`%USERPROFILE%\\.gemini` / `$HOME/.gemini`) or its cookies.
+ * On Windows the CLI reads USERPROFILE only; on macOS/Linux it reads HOME. Never set these
+ * on the AO daemon itself — only on an agy process (or via the shim from AUTH_HOME).
+ */
+function isolatedAuthEnvironment({ home, environment = {}, inherited = process.env, platform = process.platform } = {}) {
+  if (!home || !path.isAbsolute(home)) throw new Error("Antigravity isolated auth home must be absolute");
+  const env = {
+    ...environment,
+    SSH_CLIENT: environment.SSH_CLIENT || inherited.SSH_CLIENT || "coding-tools",
+    CODING_TOOLS_AGY_AUTH_HOME: home,
+    AGY_ACP_FORCE_FILE_STORAGE: environment.AGY_ACP_FORCE_FILE_STORAGE || "1",
+  };
+  if (platform === "win32") Object.assign(env, windowsHomeVars(home));
+  else env.HOME = home;
+  return env;
+}
+
+function manualAuthEnvironment(environment, inherited = process.env, options = {}) {
+  if (options.home) {
+    return isolatedAuthEnvironment({
+      home: options.home, environment, inherited, platform: options.platform,
+    });
+  }
   return { ...environment, SSH_CLIENT: environment.SSH_CLIENT || inherited.SSH_CLIENT || "coding-tools" };
 }
 
@@ -432,7 +494,12 @@ function createAntigravityCli({
     return binDir;
   }
 
-  return Object.freeze({ status, statusAsync, install, update, executable, binDir: binDirAsync, manifest });
+  /** Empty or per-account auth home for a launched CLI session. Never the user's default profile. */
+  async function authHome(accountId) {
+    return ensureIsolatedAuthHome(isolatedAuthHome(toolsRoot, accountId));
+  }
+
+  return Object.freeze({ status, statusAsync, install, update, executable, binDir: binDirAsync, authHome, manifest });
 }
 
-module.exports = { createAntigravityCli, loadManifest, releaseManifest, compareVersion, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment };
+module.exports = { createAntigravityCli, loadManifest, releaseManifest, compareVersion, platformAsset, validateArchive, findExecutable, tarBinary, shimBody, shimProxyEnvironment, manualAuthEnvironment, isolatedAuthAccountId, isolatedAuthHome, ensureIsolatedAuthHome, isolatedAuthEnvironment, windowsHomeVars, EMPTY_AUTH_ACCOUNT };

@@ -12,16 +12,21 @@ const EXTENSION_ORIGIN = `chrome-extension://${EXTENSION_ID}`;
 const CONNECTOR_FILES = ["manifest.json", "background.js", "confirm.html", "confirm.js", "README.md"];
 const MAX_BODY_BYTES = 1024 * 1024;
 const CONNECT_PAGE = '<!doctype html><html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Coding Tools Chrome sign-in</title></head><body><h1>Connect this Chrome profile</h1><p id="status">Connecting to the Coding Tools Chrome connector…</p><p>If the connector is not installed, return to Coding Tools, choose Install connector, then load that folder from chrome://extensions using Load unpacked. Open this connection again afterwards.</p><script src="/connect.js"></script></body></html>';
-const CONNECT_SCRIPT = `(() => {
+// The sign-ins a connection can ask Chrome for. "platform" (connector 1.2.0): OpenAI Platform's, which
+// an account's MCP setup needs and only the person can give (2026-11-18). An older connector ignores the
+// target and sends a ChatGPT capture, which carries this profile's OpenAI sign-in too.
+const CAPTURE_TARGETS = new Set(["chatgpt", "platform"]);
+const connectScript = target => `(() => {
  const status = document.getElementById('status');
  const token = location.hash.slice(1);
  if (!/^[a-f0-9]{64}$/.test(token)) { status.textContent = 'This connection link expired. Open Chrome again from Coding Tools.'; return; }
  if (!globalThis.chrome?.runtime?.sendMessage) { status.textContent = 'Open this link in the Chrome profile where you installed the Coding Tools connector.'; return; }
- chrome.runtime.sendMessage('${EXTENSION_ID}', {type:'connect', port:Number(location.port), token}, reply => {
+ chrome.runtime.sendMessage('${EXTENSION_ID}', {type:'connect', port:Number(location.port), token, target:'${target}'}, reply => {
   const error = chrome.runtime.lastError;
   if (error || !reply?.ok) { status.textContent = reply?.error || 'Install the Coding Tools connector in this Chrome profile, then open the connection again.'; return; }
   history.replaceState(null, '', '/connect');
-  status.textContent = 'If asked, approve the matching connection code in the connector tab. Sign in to ChatGPT in this profile; verification is automatic. Keep Chrome open.';
+  status.textContent = 'If asked, approve the matching connection code in the connector tab. ${target === "platform"
+    ? "Sign in to OpenAI Platform in the tab it opens, with the same account" : "Sign in to ChatGPT in this profile"}; verification is automatic. Keep Chrome open.';
   fetch('/result', {headers:{Authorization:'Bearer '+token},cache:'no-store'}).then(r=>r.json()).then(result => {
    status.textContent = result.verified ? 'Verified in Coding Tools. You can keep using Chrome normally.' : 'The app did not verify this sign-in. Return to Coding Tools to retry.';
   },()=>{status.textContent='The app connection ended. Return to Coding Tools to check its result.';});
@@ -60,8 +65,10 @@ async function chromeConnectorIdentity(userData, safeStorage) {
   return identity;
 }
 
-function validCapture(body) {
-  if (!body || body.version !== 1 || body.origin !== "https://chatgpt.com" || body.sessionAuthenticated !== true
+/** A Platform capture only answers a Platform connection; a ChatGPT one answers either (connector 1.1). */
+function validCapture(body, target = "chatgpt") {
+  const origins = target === "platform" ? ["https://platform.openai.com", "https://chatgpt.com"] : ["https://chatgpt.com"];
+  if (!body || body.version !== 1 || !origins.includes(body.origin) || body.sessionAuthenticated !== true
     || !Array.isArray(body.cookies) || body.cookies.length > 256 || body.cookies.length === 0) throw new Error("Invalid Chrome sign-in capture");
   for (const cookie of body.cookies) {
     const domain = cookie?.domain?.replace(/^\./, "").toLowerCase();
@@ -110,8 +117,9 @@ function decryptCapture(envelope, identity, challenge) {
 }
 
 /** Only the approved extension may submit a one-use capture. Browser appearance is never proof of app authentication. */
-async function createChromeProfileCapture({ identity, onPhase = () => {}, timeoutMs = 10 * 60_000 }) {
-  if (!identity?.privateKey || !identity.publicKey || !Number.isFinite(timeoutMs) || timeoutMs < 1) throw new Error("Invalid Chrome connector options");
+async function createChromeProfileCapture({ identity, onPhase = () => {}, timeoutMs = 10 * 60_000, target = "chatgpt" }) {
+  if (!identity?.privateKey || !identity.publicKey || !Number.isFinite(timeoutMs) || timeoutMs < 1 || !CAPTURE_TARGETS.has(target)) throw new Error("Invalid Chrome connector options");
+  const script = connectScript(target);
   const token = randomBytes(32).toString("hex"), expiresAt = Date.now() + timeoutMs;
   let captureResolve, captureReject, verificationResolve;
   const result = new Promise((resolve, reject) => { captureResolve = resolve; captureReject = reject; });
@@ -149,7 +157,7 @@ async function createChromeProfileCapture({ identity, onPhase = () => {}, timeou
       response.setHeader("Cache-Control", "no-store"); response.setHeader("Referrer-Policy", "no-referrer");
       response.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'");
       response.setHeader("Content-Type", request.url === "/connect" ? "text/html; charset=utf-8" : "text/javascript; charset=utf-8");
-      response.end(request.url === "/connect" ? CONNECT_PAGE : CONNECT_SCRIPT); return;
+      response.end(request.url === "/connect" ? CONNECT_PAGE : script); return;
     }
     if (!authorized(request) || finished || Date.now() >= expiresAt) return send(response, 403, { error: "Connection expired or not authorized" });
     if (request.method === "GET" && request.url === "/hello" && origin === EXTENSION_ORIGIN) {
@@ -167,10 +175,11 @@ async function createChromeProfileCapture({ identity, onPhase = () => {}, timeou
     for await (const chunk of request) { bytes += chunk.length; if (bytes > MAX_BODY_BYTES) { send(response, 413, { error: "Capture is too large" }); request.resume(); return; } chunks.push(chunk); }
     const challenge = `1\n${token}\n${server.address().port}\n${expiresAt}\n`;
     const body = decryptCapture(JSON.parse(Buffer.concat(chunks).toString("utf8")), identity, challenge);
-    const storageState = validCapture(body), expectedUser = captureUser(body);
+    const storageState = validCapture(body, target), expectedUser = captureUser(body);
     if (finished || consumed || Date.now() >= expiresAt) return send(response, 409, { error: "Capture no longer current" });
     consumed = true; onPhase("verifying");
-    captureResolve({ storageState, expectedUser, source: "approved-chrome-profile-connector",
+    // `origin` says what Chrome sent: Platform's sign-in, or (connector 1.1) a ChatGPT capture.
+    captureResolve({ storageState, expectedUser, source: "approved-chrome-profile-connector", target, origin: body.origin,
       assertCurrent: () => { if (finished || Date.now() >= expiresAt) throw new Error("The Chrome profile connection is no longer current"); },
       // BrowserHost completes this only after its existing fresh authentication and inspection.
       complete: verified => finish(verified),

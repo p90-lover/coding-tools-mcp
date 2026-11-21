@@ -185,13 +185,35 @@ const CPA_MODEL_PREFIX = "cpa/";
 const GATEWAY_AGENTS = new Set(["claude-code", "codex", "opencode", "agy", "pi", "unreal-agent"]);
 // The Pi provider AO's managed Pi extension registers for a CPA session (AO ports.PiGatewayProvider).
 const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
-// Agents whose AO adapter honours the three permission modes. agy maps them onto its --mode
-// (accept-edits, auto) and --dangerously-skip-permissions; without one it ran in request-review
-// and stopped at approvals in a terminal nobody saw, so its card never finished.
-const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
-const AGY_ASK_REASON = "Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.";
+// Agents whose AO driver hands each tool request it wants approved to the chat (an ACP
+// session/request_permission, or Codex's app-server approval), so all three permission modes run
+// there: Ask is the agent's accept-edits mode with the rest asked in the chat, Approve for me sends
+// those requests to this app's reviewer (Codex: its own auto-review), Full access is bypass.
+// Every other agent runs in Full access only, which each AO adapter maps onto its bypass flag:
+// in Ask or Approve for me it would never ask (Pi, Unreal Agent, opencode on its own default) or
+// ask in a terminal nobody sees (agy, Cline), and its card would run unchecked or wait for good.
+// Those two modes are refused at launch with the agent's reason (fullAccessOnly) and shown so in
+// its permission menu.
+const PERMISSION_AGENTS = new Set(["claude-code", "codex"]);
+// Why an agent outside PERMISSION_AGENTS can't run in Ask or Approve for me, by agent.
+const FULL_ACCESS_REASONS = {
+  agy: "Antigravity asks for approval in its own terminal, which the chat does not show, so it would wait for good",
+  cline: "Cline asks for approval in its own terminal, which the chat does not show, so it would wait for good",
+  // AO leaves opencode on its own rules in every mode but bypass, and those allow every tool.
+  opencode: "opencode allows every tool by its own default, so it would never ask the chat, and nothing would be reviewed",
+  pi: "Pi runs its tools without asking first (pi-acp sends no approval requests), so the chat can neither ask you nor review them for you",
+  "unreal-agent": "Unreal Agent has no approval channel, so the chat can neither ask you nor review its tools for you",
+};
+// The end of every such reason, which ROUTE_REFUSED matches: retrying never gets past it.
+const FULL_ACCESS_ONLY = "Choose Full access, the only mode it runs in.";
+/** Why `agent` takes only Full access, for its permission menu and a refused launch. */
+const fullAccessOnly = (agent) => `${FULL_ACCESS_REASONS[agent]
+  ?? `${agent} has no way to ask the chat before it runs a tool, so the chat can neither ask you nor review its tools for you`}. ${FULL_ACCESS_ONLY}`;
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
-const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
+// agy too, by the user's choice (2026-11-18): its own models run on its Google sign-in, which Google
+// refused here ("not currently available in your location", "Verify your account to continue"), so
+// a chat on one never sent its first message, while the same Gemini models answered through CPA.
+const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode", "agy"]);
 // Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
 // by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
 // requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
@@ -345,7 +367,8 @@ function refusedReason(error) {
  */
 // One distinctive phrase of each refusal aoLaunchArgs throws, not "Launch failed:" as a whole: a
 // launch that timed out is what "Retry automatically" is for.
-const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
+// "Antigravity asks for approval in its own terminal" is how a card saved before 0.8.137 says it.
+const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA model|Choose Full access, the only mode it runs in|Antigravity asks for approval in its own terminal|Choose a supported CPA reasoning level/i;
 /**
  * AO could not run the agent's program at all: its version probe failed ("chat driver incompatible:
  * read Codex version: exit status 1", CHAT_DRIVER_INCOMPATIBLE). The program is missing, broken or
@@ -691,14 +714,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     let effort = node.route.effort === "auto" ? null : node.route.effort ?? effortDefault;
     const agent = externalAgent(node);
     const profile = node.route.native_permission_profile ?? node.route.permission_profile;
-    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && (!PERMISSION_AGENTS.has(agent)
-      || !(profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user")
-        || profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user"))) {
+    const asking = profile === ":workspace" && node.route.approval_policy === "on-request" && ["user", "auto_review"].includes(node.route.approvals_reviewer ?? "user");
+    const fullAccess = profile === ":danger-full-access" && node.route.approval_policy === "never" && (node.route.approvals_reviewer ?? "user") === "user";
+    if ((node.route.approval_policy !== undefined || node.route.native_permission_profile !== undefined) && !asking && !fullAccess) {
       throw new Error("This adapter cannot honor the saved permission tuple; choose a supported mode explicitly.");
     }
-    // A saved Ask or Approve-for-me route (a team template, an older chat) is refused rather than
-    // left waiting at an approval in agy's terminal that nobody sees.
-    if (agent === "agy" && node.route.approval_policy === "on-request") throw new Error(AGY_ASK_REASON);
+    // Ask or Approve for me on an agent that can't ask the chat (a moved chat, a team template) is
+    // refused with its reason, rather than left waiting at an approval nobody sees, or run unchecked.
+    if (asking && !PERMISSION_AGENTS.has(agent)) throw new Error(fullAccessOnly(agent));
     const viaCpa = node.route.model.startsWith(CPA_MODEL_PREFIX) ? node.route.model.slice(CPA_MODEL_PREFIX.length) : null;
     if (viaCpa && !GATEWAY_AGENTS.has(agent)) {
       throw new Error(`${node.settings?.name || "This card"}: ${agent} can't use the CPA model ${node.route.model}. Choose one of its own models.`);
@@ -747,7 +770,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // "auto" mode exists only for Claude models and otherwise falls back to asking for every
       // edit. Claude Code therefore accepts edits and its tool requests go to our reviewer.
       ...(node.route.approval_policy ? { approvalMode: node.route.approval_policy === "never" ? "bypass-permissions"
-        : node.route.approvals_reviewer === "auto_review" && agent !== "claude-code" ? "auto" : "accept-edits" } : {}),
+        : node.route.approvals_reviewer === "auto_review" && agent === "codex" ? "auto" : "accept-edits" } : {}),
       // The app's own terminal follows "Approve for me" too: routine project commands run unasked.
       ...(node.route.approvals_reviewer === "auto_review" ? { autoReview: true } : {}),
       ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
@@ -1038,6 +1061,102 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     idleTimer?.unref?.();
   }
   if (releaseIdleAgents) scheduleIdleRelease(IDLE_FIRST_SWEEP_MS);
+
+  // Claude Code can start a turn with no message from the chat: another local Claude session sent it
+  // a message, or something it started finished. AO now takes such a turn as one the agent started
+  // (agent-orchestrator#54), but the chat showed nothing of it: its last card had finished, so nothing
+  // observed the session. The turn's first permission request waited unseen for hours while the chat
+  // read Done (2026-11-09, coding-tools-mcp-278). The sweep finds a chat agent AO calls working or
+  // waiting for input that no run of this app drives, and gives its newer turn a card of its own, as
+  // a wake-up's turn has: the chat shows it working, "Approve for me" screens its requests, and its
+  // answer is the card's result.
+  const AUTONOMOUS_FIRST_SWEEP_MS = 45_000;
+  const AUTONOMOUS_SWEEP_MS = 2 * 60_000;
+  const ADOPTED_TURN_LOST = "The chat's agent stopped before the turn it started on its own could be shown.";
+  const ADOPT_TRIES = 3;
+  const adoptTries = new Map(); // `${session}\n${turnId}` -> failed attempts
+  let autonomousTimer = null;
+  let autonomousStopped = false;
+  let listedWorkspaces = null; // the app's projects (startAutonomousTurnWatch), besides those the window read
+  /** Sessions whose newer turn got a card; tests call it directly, the app on a timer. */
+  async function adoptAutonomousTurns() {
+    const busy = await harnessService().busyChatSessions?.().catch(() => []) ?? [];
+    if (!busy.length) return [];
+    // Only when every driven run could be read: a session one of them uses is never taken from it.
+    const driven = await drivenSessions();
+    if (!driven) return [];
+    const ours = new Set([...warm.values()].map(entry => entry.session).filter(Boolean));
+    const left = new Set(busy.map(String).filter(id => !driven.has(id) && !ours.has(id) && !sessionStops.has(id)));
+    if (!left.size) return [];
+    // A minimized window reads no project, so the app's own list is asked too.
+    const listed = listedWorkspaces ? await Promise.resolve().then(listedWorkspaces).catch(() => []) : [];
+    const workspaceIds = new Set([...lastSwept.keys(), ...(Array.isArray(listed) ? listed : [])
+      .map(item => typeof item === "string" ? item : item?.id).filter(id => typeof id === "string" && id).map(id => clean(id, 128))]);
+    const adopted = [];
+    for (const workspaceId of workspaceIds) {
+      if (!left.size || autonomousStopped) break;
+      const saved = await runs({ workspaceId }).catch(() => null);
+      if (!saved) continue;
+      for (const session of [...left]) {
+        const holds = node => node.receipt?.thread_id === session || (node.history || []).some(entry => entry?.thread_id === session);
+        const owner = saved.runs.filter(run => run.workspace_id === workspaceId && run.project_id && (run.nodes || []).some(holds)).at(-1);
+        if (!owner) continue;
+        left.delete(session);
+        if (await adoptTurnOf(workspaceId, saved, owner.project_id, session)) adopted.push(session);
+      }
+    }
+    return adopted;
+  }
+  async function adoptTurnOf(workspaceId, saved, taskId, session) {
+    const chatRuns = saved.runs.filter(run => run.project_id === taskId);
+    const latest = chatRuns.at(-1);
+    // The chat's newest card must be the settled card of this very agent: a newer card, or one still
+    // working, owns what the agent does, and a stopped or hidden chat is left alone.
+    const card = resumableChatCard(latest);
+    if (card?.receipt?.thread_id !== session || latest.cancelled || latest.paused
+      || backgroundRuns.get(runKey(workspaceId, latest.id))?.stopped || chatWorking(workspaceId, taskId, saved.runs)
+      || taskLifecycle(saved, taskId).visibility !== "active") return false;
+    const observed = await harnessService().observe(session).catch(() => null);
+    const turnId = observed?.turnId;
+    if (typeof turnId !== "string" || !turnId || observed.turnState === "queued" || TERMINAL_TURNS.has(observed.turnState)
+      || observed.agentGone || observed.exited) return false;
+    // A turn a card of this chat already had (its own, one it was retried from, one being sent) is no new turn.
+    const known = chatRuns.flatMap(run => run.nodes ?? []).some(node => [node.receipt, ...(node.history ?? [])].some(entry => entry?.turn_id === turnId))
+      || [...expectedTurns.values()].includes(turnId);
+    const key = `${session}\n${turnId}`;
+    if (known || (adoptTries.get(key) ?? 0) >= ADOPT_TRIES) return false;
+    const agent = externalAgent(card) === "claude-code" ? "Claude" : "The agent";
+    try {
+      const result = await chatSend({ workspaceId, taskId, message: `${agent} continued on its own.`, ...followUpSelection(latest),
+        deferStart: true, afterRunId: latest.id }, undefined, { adoptTurn: { session, turnId } });
+      if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The card was not created");
+      adoptTries.delete(key);
+      logger?.info?.("ao.autonomous_turn_adopted", { session, needsInput: observed.needsInput === true, approvals: observed.approvals?.length ?? 0 });
+      return true;
+    } catch (error) {
+      adoptTries.set(key, (adoptTries.get(key) ?? 0) + 1);
+      if (adoptTries.size > 200) adoptTries.delete(adoptTries.keys().next().value);
+      logger?.warn?.("ao.autonomous_turn_adopt_failed", { session, message: publicText(error?.message || error, 200) });
+      return false;
+    }
+  }
+  /**
+   * Starts the sweep (the app does, once its backend runs; tests call adoptAutonomousTurns by hand).
+   * `listWorkspaces` lists the app's projects, as restoreSchedules takes them.
+   */
+  function startAutonomousTurnWatch(listWorkspaces = null) {
+    if (typeof listWorkspaces === "function") listedWorkspaces = listWorkspaces;
+    if (autonomousTimer || autonomousStopped) return;
+    const next = (delay) => {
+      autonomousTimer = setTimer(() => {
+        void adoptAutonomousTurns()
+          .catch(error => logger?.warn?.("ao.autonomous_turn_sweep_failed", { message: publicText(error?.message || error, 200) }))
+          .finally(() => { if (!autonomousStopped) next(AUTONOMOUS_SWEEP_MS); });
+      }, delay);
+      autonomousTimer?.unref?.();
+    };
+    next(AUTONOMOUS_FIRST_SWEEP_MS);
+  }
 
   /** chat_prewarm: keep an agent ready for the new chat's selected model, or its team's orchestrator. */
   async function chatPrewarm({ workspaceId, executionMode, singleRoute, teamId, taskId } = {}) {
@@ -1333,7 +1452,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // Why a provider has none: its accounts are all disabled in CPA, or none was added. The model
       // menu and a refused send say so, instead of only "not offered right now".
       const disabled = new Set(files.filter(entry => entry.status === "disabled" && !enabled.has(entry.provider)).map(entry => entry.provider));
-      return Object.assign(enabled, { disabled, upstreams });
+      return Object.assign(enabled, { disabled, upstreams, files });
     } catch { return null; }
   }
   const PLUGIN_NAMES = { cline: "Cline Pass", "commandcode-go": "CommandCode Go", commandcode: "CommandCode", grok: "Grok", kimi: "Kimi" };
@@ -1351,8 +1470,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const response = await fetchImpl(`${baseUrl}/v1/models`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(5_000) });
       if (!response.ok) return null;
       const rows = (await response.json())?.data;
-      return Array.isArray(rows) ? new Map(rows.filter(row => typeof row?.id === "string" && typeof row.owned_by === "string")
-        .map(row => [row.id, row.owned_by.trim().toLowerCase()])) : null;
+      return Array.isArray(rows) ? { rows, owners: new Map(rows.filter(row => typeof row?.id === "string" && typeof row.owned_by === "string")
+        .map(row => [row.id, row.owned_by.trim().toLowerCase()])) } : null;
     } catch { return null; }
   }
 
@@ -1413,11 +1532,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
   const CPA_STOCK_WINDOW = 272_000;
   /**
-   * Real context ceilings of provider-plugin models that CPA reports only with its stock window,
-   * by the model's own name (after any provider prefix). Without one, the card offers the client's
-   * 2M ceiling as unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M.
+   * Real context ceilings of models that CPA reports only with its stock window, by the model's
+   * own name (after any provider prefix). Without one, the card offers the client's 2M ceiling as
+   * unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI
+   * Studio key is listed at the stock 272K, though CPA's own catalog gives 1,048,576 for every
+   * Gemini 4 model (Antigravity's and OpenCode's report it): until 2026-11-20 a Gemini 4 Carbon
+   * chat was capped at 272K and its window field refused 1m and every 7-digit size.
    */
-  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000]];
+  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000],
+    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/i, 1_048_576]];
   const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
   /**
    * The largest window a card may set for a model whose catalog reports `limit`. CPA's
@@ -1464,8 +1587,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         ? "Client context declaration, not a larger provider limit. Client version/model applicability is checked again at launch."
         : "The provider did not report this model's limit, so 2M (the client's ceiling) is unverified.";
     } else capabilities.contextReason = unqualifiedOpenCode ? "OpenCode context requires an explicit provider/model."
-      : "This harness/model has no verified context-window setter.";
+      : windowlessReason(agent);
     return capabilities;
+  }
+  /**
+   * Why the window chip is off for an agent: the agent itself has no setting for it that AO can
+   * pass, so the chip names that instead of a generic "no verified setter" (the user, 2026-11-17:
+   * "fix why i cant set the context window"). Checked 2026-11-17: agy 1.5.10 has no flag, setting
+   * or gateway variable for it; Unreal Agent's UNREAL_HARNESS_LLM_* carry none.
+   */
+  function windowlessReason(agent) {
+    if (agent === "agy") return "Antigravity sizes its own context window and has no setting for it, so it can't be set here.";
+    if (agent === "unreal-agent") return "Unreal Agent sizes its own context window and has no setting for it, so it can't be set here.";
+    if (agent === "pi") return "Pi takes a window only on a CPA model, which AO declares to it; Pi's own models keep the window Pi gives them.";
+    return `${HARNESS_NAMES[agent] ?? agent} has no context-window setting AO can pass, so it can't be set here.`;
   }
 
   /**
@@ -1505,7 +1640,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
       // Claude Code's and opencode's own catalogs (fable/haiku/opus/opus[1m]/sonnet, provider
-      // aliases) are neither CPA nor WebGPT models, so those agents offer only the CPA pool. Codex
+      // aliases) are neither CPA nor WebGPT models, and agy's run on a Google sign-in that may be
+      // refused (CPA_ONLY_AGENTS), so those agents offer only the CPA pool. Codex
       // keeps its own ChatGPT-account models. For a CPA-only agent a CPA failure is reported,
       // never silently replaced by its aliases; the renderer drops a rejected catalog and retries.
       const cpaOnly = CPA_ONLY_AGENTS.has(agent);
@@ -1631,6 +1767,54 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** Resolves once the remembered models are on disk. */
   async function knownModelsSaved() { while (knownModelsSaving) await knownModelsSaving; }
   const HELD_NOTE = "CPA is not listing it right now (cooling down after upstream errors, or CPA is restarting); a message still goes to CPA, which answers for itself";
+
+  // A remembered model stays only while an enabled account still has it. CPA keeps a model
+  // registered to its account through quota cooldowns and errors, and unregisters every model of a
+  // disabled account. Until 2026-11-18 the models only a disabled account served (Gemini 4 Argon,
+  // Carbon and Hydrogen on one of ten Antigravity accounts) stayed in the menu for 30 days, and each
+  // send failed "unknown provider". Judged only for providers CPA serves through sign-in accounts
+  // alone: a Codex, Claude or Gemini model can also come from an API key in CPA's config, which no
+  // account in this list stands for.
+  const SIGN_IN_ONLY_PROVIDERS = new Map([["antigravity", "Antigravity"]]);
+  const ACCOUNT_MODELS_TTL_MS = 60_000;
+  const MAX_CHECKED_ACCOUNTS = 64;
+  let accountModelsCache = { key: "", at: 0, served: null };
+  /** The models CPA has registered to `provider`'s enabled accounts, or null when one could not be read. */
+  async function enabledAccountModels({ baseUrl, managementKey }, files, provider, at) {
+    const names = files.filter(entry => entry.provider === provider && entry.status !== "disabled").map(entry => entry.name).slice(0, MAX_CHECKED_ACCOUNTS);
+    const key = `${provider}\n${names.join("\n")}`;
+    if (accountModelsCache.key === key && at - accountModelsCache.at < ACCOUNT_MODELS_TTL_MS) return accountModelsCache.served;
+    const served = new Set();
+    for (let start = 0; start < names.length; start += 4) {
+      const lists = await Promise.all(names.slice(start, start + 4).map(async name => {
+        try {
+          const response = await fetchImpl(`${baseUrl}/v0/management/auth-files/models?name=${encodeURIComponent(name)}`, {
+            headers: { Authorization: `Bearer ${managementKey}` }, signal: AbortSignal.timeout(5_000),
+          });
+          const models = response.ok ? (await response.json())?.models : null;
+          return Array.isArray(models) ? models : null;
+        } catch { return null; }
+      }));
+      if (lists.some(list => !list)) return null;
+      for (const list of lists) for (const model of list) if (typeof model?.id === "string") served.add(model.id);
+    }
+    accountModelsCache = { key, at, served };
+    return served;
+  }
+  /** Remembered models CPA no longer lists that no enabled account has: id -> provider. */
+  async function modelsNoEnabledAccountServes(cpa, accountProviders, liveIds, at) {
+    const gone = new Map();
+    if (!cpa.managementKey || !Array.isArray(accountProviders?.files)) return gone;
+    const candidates = Object.entries(knownModels)
+      .map(([id, entry]) => [id, String(entry.capability?.provider ?? "").trim().toLowerCase()])
+      .filter(([id, provider]) => SIGN_IN_ONLY_PROVIDERS.has(provider) && !liveIds.includes(id));
+    for (const provider of new Set(candidates.map(([, owner]) => owner))) {
+      const served = await enabledAccountModels(cpa, accountProviders.files, provider, at);
+      if (!served) continue; // an account could not be read: nothing of this provider is judged
+      for (const [id, owner] of candidates) if (owner === provider && !served.has(id)) gone.set(id, provider);
+    }
+    return gone;
+  }
   /** The remembered models CPA did not list (ids already listed stay as CPA gave them). */
   function rememberedModels(ids, capabilities, plugins, held, note, at = now()) {
     for (const [id, entry] of Object.entries(knownModels)) {
@@ -1661,6 +1845,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const cpa = connection();
     const { baseUrl, key } = cpa;
     let rows;
+    let enhanced = false;
     // The classic OpenAI list contains only IDs; the enhanced catalog carries capabilities.
     for (const suffix of ["?client_version=pi", ""]) {
       try {
@@ -1670,7 +1855,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (!response.ok) throw new Error(`CPA model catalog returned HTTP ${response.status}`);
         const payload = await response.json();
         rows = Array.isArray(payload?.models) ? payload.models : Array.isArray(payload?.data) ? payload.data : null;
-        if (rows) break;
+        if (rows) { enhanced = Boolean(suffix); break; }
         throw new Error("CPA model catalog has an unsupported shape");
       } catch (error) { if (!suffix) throw error; }
     }
@@ -1682,9 +1867,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // Who serves each model, from the plain list's owned_by. The enhanced catalog names no provider,
     // so every model was filed by its name: Antigravity's claude-sonnet-4-6 under Claude and its
     // gemini-… under Gemini, as if Antigravity and a Claude sign-in or API key were one provider.
+    const plain = enhanced ? await modelOwners(cpa) : null;
+    if (plain) {
+      // Custom API providers can list IDs without enhanced capability metadata.
+      const listedIds = new Set(rows.map(entry => entry?.slug ?? entry?.id));
+      rows = [...rows, ...plain.rows.filter(entry => typeof entry?.id === "string" && !listedIds.has(entry.id))];
+    }
     const listed = rows?.some(entry => typeof entry?.owned_by === "string");
-    const owners = listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
-      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : await modelOwners(cpa);
+    const owners = plain?.owners ?? (listed ? new Map(rows.filter(entry => typeof entry?.id === "string" && typeof entry.owned_by === "string")
+      .map(entry => [entry.id, entry.owned_by.trim().toLowerCase()])) : null);
     const unserved = id => Boolean(accountProviders && owners && id.includes("/") && PLUGIN_PROVIDERS.has(owners.get(id))
       && !accountProviders.has(owners.get(id)));
     const disabled = (id, provider, live = false) => {
@@ -1728,9 +1919,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // model goes (Luna: 272K by default, up to 1M).
       // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
       // window, whatever the model really takes: that number is no limit, so it is left unknown
-      // instead of capping the card (and of becoming its default).
+      // instead of capping the card (and of becoming its default). A model of CPA's own providers
+      // reporting the stock window may really have it (Codex's GPT models do), so only a known
+      // ceiling (KNOWN_CONTEXT_LIMITS: Gemini 4 from a Vertex key) replaces it there.
       const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
-      const stock = id.includes("/") && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
+      const stock = (id.includes("/") || knownContextLimit(id) !== undefined)
+        && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
       // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
       const limit = stock ? knownContextLimit(id) : reported;
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
@@ -1760,6 +1954,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const switchedOff = !ids.includes(id) && disabled(id);
       if (switchedOff) unavailable[id] = pluginUnavailable(owners?.get(id) || entry.capability.provider || id.split("/")[0], accountProviders);
       if (switchedOff || at - entry.seen > KNOWN_MODEL_MS) { delete knownModels[id]; changed = true; }
+    }
+    for (const [id, provider] of await modelsNoEnabledAccountServes(cpa, accountProviders, ids, at)) {
+      unavailable[id] = `No enabled ${SIGN_IN_ONLY_PROVIDERS.get(provider)} account in CPA serves it now: the account that did is disabled. `
+        + "Turn it back on in CPA > Accounts, or choose another model";
+      delete knownModels[id];
+      changed = true;
     }
     rememberedModels(ids, capabilities, plugins, held, id => unavailable[id] || HELD_NOTE, at);
     for (const id of Object.keys(held)) delete unavailable[id];
@@ -1897,7 +2097,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId));
           if (stopped?.ok !== true) throw unconfirmed;
         }
-        if (usable) {
+        if (usable && continued.adoptTurn) {
+          // A turn the agent started by itself (adoptAutonomousTurns): the card takes that turn as
+          // its own. Nothing is sent; the agent is already working on it.
+          sessionOwners.set(continued.session, runKey(workspaceId, runId));
+          if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
+          sent = { turnId: continued.adoptTurn };
+        } else if (usable) {
           sessionOwners.set(continued.session, runKey(workspaceId, runId));
           if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
           stage("sending your message to the agent");
@@ -1936,6 +2142,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
             reason: unconfirmed ? "restore_unconfirmed" : !usable ? "not_continuable" : sendError ? "send_failed" : "send_refused",
             ...(sendError ? { message: sendError } : {}) });
         }
+        // The turn is the agent's own: with that agent gone there is nothing to show, and a fresh agent
+        // must not be started on the card's placeholder message.
+        if (continued?.adoptTurn && !sent?.turnId) throw new Error(ADOPTED_TURN_LOST);
         // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
         // with what the earlier agents replied; the first card to start takes it.
         const handoff = handoffs.get(runId);
@@ -1979,7 +2188,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage(starting);
           const holder = await takeColdStart(count => stage(`waiting for ${count} other agent${count === 1 ? "" : "s"} to finish starting`));
           stage(starting);
-          try { session = await harnessService().spawn({ ...launch, prompt }); }
+          try { session = await harnessService().spawn({ ...launch, prompt, requestId: reserved.request_key }); }
           catch (error) { releaseColdStart(holder); throw error; }
           // A brand-new agent holding nothing but this message: the one kind of start the launch
           // watchdog may end (stopStalledLaunch). Its clock starts with the spawn, not the wait above.
@@ -2057,6 +2266,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const TOOL_STALL_MS = 30 * 60_000;
   const TOOL_STALL_MARGIN_MS = 5 * 60_000;
   const stalledStops = new Map(); // session -> when its stalled turn was stopped
+  // The turn each stall stop went for, so its card says why it ended (TURN_STALL_FAILURE).
+  const stalledTurns = new Map(); // session -> turn id
+  // What the card of a turn the stall stop ended says. When the interrupt does not land the stop
+  // shuts the agent down, and AO recorded that turn as failed with the protocol's own cancel error.
+  // The chat showed it as the step's failure (the user's screenshot, 2026-11-16):
+  // `ACP session/prompt: {"code":-32800,"message":"Request cancelled","data":{"error":"context canceled"}}`.
+  const TURN_STALL_FAILURE = "The agent stopped responding, so its turn was stopped.";
+  // AO's record of a turn whose agent was shut down under it (AO cancelling its own request): never
+  // an error of the step. An AO with the fix calls such a turn interrupted and records no error.
+  const AGENT_STOPPED_ERROR = /^ACP session\/prompt: \{"code":-32800\b/;
+  const AGENT_STOPPED_FAILURE = "The agent was stopped while it worked on this step.";
   function stalledTurnInfo(observed) {
     if (!Number.isFinite(observed?.lastActivityAt)) return null;
     // The stop interrupts the whole session, so the whole session is judged: a turn queued behind a
@@ -2139,10 +2359,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     // A stop that fails is tried again after TURN_STALL_MS; it never fails the observation.
     const release = observed.agentGone === true || previous !== undefined;
     const isStalled = current => nothingToAnswer(current) && Boolean(stalledTurnInfo(current));
+    // A stop that failed may still have sent its interrupt, so the turn counts as one it went for.
+    const wentFor = () => {
+      stalledTurns.set(session, turnId);
+      if (stalledTurns.size > 200) stalledTurns.delete(stalledTurns.keys().next().value);
+    };
     try {
       if (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId, isStalled, escalate: true, ...(release ? { releaseAgent: true } : {}) }) === false) return false;
     }
-    catch (error) { logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
+    catch (error) { wentFor(); logger?.warn?.("ao.stalled_turn_stop_failed", { message: publicText(error?.message || error, 200), released: release }); return false; }
+    wentFor();
     logger?.info?.("ao.stalled_turn_stopped", { idleSeconds: Math.round(stalled.idle / 1000), toolRunning: stalled.toolRunning, released: release, orphaned });
     return true;
   }
@@ -2270,9 +2496,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       return { ok: true, pending_approvals: withAdvice(pending, { mission, node }), needs_input: waitsForInput(session, observed, pending), session_id: session, ...(quiet ? { quiet: true } : {}) };
     }
     const completed = observed.turnState === "completed";
+    // A turn that ended because its agent was stopped under it has no error of its own. What AO or
+    // observe() wrote about the stop is not shown as the step's failure: AO's cancel record
+    // (AGENT_STOPPED_ERROR), or, for a turn the stall stop went for, "the app restarted" (observe()
+    // says that of any interrupted turn whose agent is gone). The card says what happened instead.
+    const stalledTurn = Boolean(observed.turnId) && stalledTurns.get(session) === observed.turnId;
+    const recorded = String(observed.error || "");
+    const stopRecord = AGENT_STOPPED_ERROR.test(recorded);
+    const error = stopRecord || (stalledTurn && RESTART_INTERRUPTED.test(recorded)) ? "" : observed.error;
     // What the provider told the agent, when AO itself recorded no error for the turn (agentApiError):
     // the card's retry and goal checks read the failure text, and without it they retried a refusal.
-    const said = !completed && !observed.error ? agentApiError(observed.answer) : "";
+    const said = !completed && !error ? agentApiError(observed.answer) : "";
     const result = await requestHeadless("/api/v1/ao/external/terminal", {
       workspace_id: workspaceId, run_id: runId, node_id: node.id, session_id: session,
       ...(observed.turnId ? { turn_id: observed.turnId } : {}),
@@ -2280,7 +2514,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       completed,
       // A start the launch watchdog ended says so, not AO's "Session start was cancelled".
       ...(!completed ? { failure: (stalledLaunches.has(session) ? LAUNCH_STALL_FAILURE : "")
-        || observed.error || said || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
+        || error || said || (stalledTurn ? TURN_STALL_FAILURE : stopRecord ? AGENT_STOPPED_FAILURE : "")
+        || (observed.exited ? "The agent exited before it gave a final answer" : `AO turn ${observed.turnState}`) } : {}),
     });
     if (result?.ok !== true) throw new Error("Couldn't save the agent's result. Check the card.");
     return { ...result, pending_approvals: [] };
@@ -2568,23 +2803,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       if (route.harness_id !== "codex-native") {
         const agent = externalAgent({ route });
-        if (!PERMISSION_AGENTS.has(agent)) return unavailable("This adapter does not support the three permission modes.");
+        if (!agent) return unavailable("Choose a valid model route");
         const catalog = await recentHarnessCatalog();
         const adapter = catalog.find(item => item.id === agent && item.installed);
         if (!adapter) return unavailable("This harness is not installed.");
-        // The bundled AO adapters accept approvalMode per session. This is not Native Codex
-        // metadata or an effective-policy acknowledgement, and grants no shared MCP/app rights.
+        // Every AO adapter takes approvalMode per session, Full access as its bypass flag. This is
+        // not Native Codex metadata or an effective-policy acknowledgement, and grants no shared
+        // MCP/app rights. An agent that can't ask the chat lists Ask and Approve for me as excluded,
+        // with its reason, rather than offering no mode at all: a chat moved onto Pi or Antigravity
+        // then had nothing it could pick, Full access included.
+        const asks = PERMISSION_AGENTS.has(agent);
         return { ok: true, capability: {
           supported: true, source: "ao-adapter", requested_only: true,
           profiles: [{ id: ":workspace", allowed: agent !== "codex" || adapter.chat === true }, { id: ":danger-full-access", allowed: true }],
           ...(agent === "codex" && !adapter.chat ? { reason: "Workspace presets require the Codex chat driver; TUI inherits unverified sandbox settings." } : {}),
           approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"],
-          // agy in its terminal asks there, which no chat or card shows: Ask (accept-edits still asks
-          // before shell commands) would wait for good, and Approve for me (--mode auto) is "not
-          // available for this account" through the CPA gateway, so it falls back to asking too.
-          // Only Full access runs unattended.
-          ...(agent === "agy" && !adapter.chat ? { excluded_modes: ["user", "auto_review"].map(reviewer =>
-            ({ profile: ":workspace", policy: "on-request", reviewer, reason: AGY_ASK_REASON })) } : {}),
+          ...(!asks ? { excluded_modes: ["user", "auto_review"].map(reviewer =>
+            ({ profile: ":workspace", policy: "on-request", reviewer, reason: fullAccessOnly(agent) })) } : {}),
         } };
       }
     }
@@ -4572,13 +4807,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       logger?.info?.("ao.review_timing", clock.fields({ outcome, tool: String(input?.approval?.tool ?? input?.approval?.kind ?? "").slice(0, 80) }));
     }
   }
-  const quotaReviewBlocked = () => chatPreferences.get().meteredReviews ? null : {
-    action: "ask", unresolved: true, quotaBlocked: true,
-    reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Enable Allow quota-based reviews in Settings > Chat, or answer this request yourself. Native Codex Auto-review is separate.",
+  // "Allow quota-based reviews" covers the reviews nobody chose: a screen action's review in a chat
+  // not on Approve for me (reviewToolCall's stand-in reviewer). Approve for me, a Team's approver
+  // and "Let the model judge" are the person's own choice of a model review, so they run with it
+  // off too. Until 2026-11-17 off stopped every review, and the judge with them (the user's call).
+  const quotaReviewBlocked = (approver) => {
+    const preferences = chatPreferences.get();
+    return preferences.meteredReviews || preferences.modelJudges || !approver?.standIn ? null : {
+      action: "ask", unresolved: true, quotaBlocked: true,
+      reason: "Quota-based reviews are off. CPA reviews use account quota, even with Codex CLI login. Turn on Allow quota-based reviews or Let the model judge in Settings > Chat, choose Approve for me for this chat, or answer this request yourself. Native Codex Auto-review is separate.",
+    };
   };
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
-    if (quotaReviewBlocked()) return quotaReviewBlocked();
+    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -4588,7 +4830,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // One that failed lately is tried last, not skipped: Codex's auto-review benched by a single
     // timeout left only the card's own model for ten minutes.
     const candidates = [...all.filter(model => !(reviewerDown.get(model) > now())), ...all.filter(model => reviewerDown.get(model) > now())];
-    if (!candidates.length) throw new Error(`CPA does not serve ${AUTO_REVIEW_MODEL}: sign in to a Codex account in CPA and choose it in Plugins > Codex Auto Review`);
+    if (!candidates.length) throw new Error(`CPA does not serve ${AUTO_REVIEW_MODEL}: sign in to a Codex account in CPA and choose it in Provider Manager > Auto Review`);
     // This call bypasses the agent gateway: a same-model fallback still needs the card's effort.
     // A different reviewer (notably codex-auto-review) keeps its own default, not the worker's max.
     const route = approver.route ?? {};
@@ -4704,7 +4946,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let failure = null;
     for (const model of candidates) {
-      if (quotaReviewBlocked()) return quotaReviewBlocked();
+      if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
@@ -4721,7 +4963,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
         check();
-        if (quotaReviewBlocked()) return quotaReviewBlocked();
+        if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
@@ -4748,7 +4990,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reviewerFailed(model, error);
       }
     }
-    if (quotaReviewBlocked()) return quotaReviewBlocked();
+    if (quotaReviewBlocked(approver)) return quotaReviewBlocked(approver);
     throw failure;
   }
 
@@ -4793,7 +5035,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const current = (latest.nodes || []).find(holds);
           if (!current || reviewAttempt(latest, current) !== owner) { owned = false; check(); }
         };
-        const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true } };
+        const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true }, standIn: true };
         const approval = { kind: "tool", tool: toolName, thread_id: thread,
           toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
         const verdict = await askApprover({ approver, mission: run, approval, decide: judges, judge: judges,
@@ -6969,7 +7211,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         deferred: input?.deferStart === true }));
     }
   }
-  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId, inputId } = {}, checkCurrent = () => {}, { supersedeRetry = false } = {}, clock = stepClock(now)) {
+  /** `adoptTurn` ({ session, turnId }, internal callers only): the run takes that turn of the chat's
+   *  live agent instead of sending the message (adoptAutonomousTurns). */
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId, inputId } = {}, checkCurrent = () => {}, { supersedeRetry = false, adoptTurn = null } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -7071,6 +7315,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await chatResizes.get(resizeKey(id, task))?.catch(() => undefined);
       const live = rewind || freshSessionRequired(id, task) ? null : continuationCard(previous, executionMode, singleRoute, { workspaceId: id, taskId: task });
       if (live) continuation = { session: live.receipt.thread_id, text };
+      if (adoptTurn) {
+        if (continuation?.session !== adoptTurn.session) throw new Error(ADOPTED_TURN_LOST);
+        continuation.adoptTurn = adoptTurn.turnId;
+      }
       if (rewind && (chatWorking(id, task, saved.runs)
         || chatEdits.visible(id, saved.runs.filter(run => run.project_id === task)).some(run => !runSettled(run)))) {
         throw new Error("Stop the chat before rewinding a message");
@@ -9996,6 +10244,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goalTimers.clear();
     if (goalWatchTimer) clearTimer(goalWatchTimer);
     goalWatchTimer = null;
+    autonomousStopped = true;
+    if (autonomousTimer) clearTimer(autonomousTimer);
+    autonomousTimer = null;
     autoRetryDisposed = true;
     for (const timer of autoRetryTimers) clearTimer(timer);
     autoRetryTimers.clear();
@@ -10195,7 +10446,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved(), chatInputs?.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
+    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
 module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

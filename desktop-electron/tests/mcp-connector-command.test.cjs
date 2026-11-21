@@ -417,6 +417,8 @@ test("account setup keeps its captured account and tunnel across awaited workspa
     { name: "a runtime operation during binding persistence cannot mark success", saveRuntime: true },
     { name: "a tunnel replacement during binding persistence cannot mark success", saveRetarget: true },
     { name: "an account remap during binding persistence cannot mark success", saveRemap: true },
+    // Live 2026-11-17: a chat's WebGPT model lookup (read-only, ~2 s) failed Connect MCP as "runtime setup".
+    { name: "a chat's read-only model lookup from setup through binding does not stop it", lookup: true, completes: true },
   ]) await t.test(scenario.name, async () => {
     let handler, partition = "persist:account-2", browserOperation = scenario.busy ? "MCP tunnel settings" : null, runtimeOperation = null;
     const calls = { create: 0, save: 0, bound: 0 };
@@ -431,7 +433,9 @@ test("account setup keeps its captured account and tunnel across awaited workspa
       quitting: false, shutdownInProgress: false, runtimeStartupInFlight: Promise.resolve(), browserAccountsStatus: () => ({ switching: false }),
       browserAccounts: { has: id => id === "account-2", partitionOf: () => partition,
         recordConnector: (_id, value) => { if (value.bound) calls.bound++; return true; } },
-      browserHost: host, runtimeHost: { currentOperation: () => runtimeOperation, runtimeConfigSnapshot: () => ({ configured: false }) },
+      browserHost: host, runtimeHost: { currentOperation: () => runtimeOperation, runtimeConfigSnapshot: () => ({ configured: false }),
+        // As RuntimeHost.setupOperation: a read-only operation is not one setup waits for.
+        setupOperation: () => runtimeOperation === "ao-web-model-catalog" ? null : runtimeOperation },
       currentConnectorSettings: require("../electron/mcp-connector-setup.cjs").currentConnectorSettings,
       connectorCredentials: require("../electron/mcp-connector-setup.cjs").connectorCredentials,
       session: { fromPartition: () => ({ cookies: { get: async () => { if (scenario.cookieSwitch) host.partition = "persist:other"; return []; } } }) },
@@ -453,6 +457,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
       createWorkspaceConnector: async options => {
         calls.create++; browserOperation = "MCP connector creation";
         try {
+          if (scenario.lookup) runtimeOperation = "ao-web-model-catalog"; // still running at every later check
           options.assertCurrent();
           if (scenario.setupSwitch) host.partition = "persist:other";
           return { created: false, connected: !scenario.unconfirmed, href: "/plugins/exact", binding: { tunnelId: "tunnel_original" } };
@@ -464,7 +469,7 @@ test("account setup keeps its captured account and tunnel across awaited workspa
     vm.runInNewContext(source.slice(start, end), settledFocus(context));
     if (scenario.completes) assert.equal((await handler({}, "account-2")).connected, true);
     else await assert.rejects(handler({}, "account-2"));
-    const saving = scenario.saveSwitch || scenario.saveActive || scenario.saveBusy || scenario.saveRuntime || scenario.saveRetarget || scenario.saveRemap;
+    const saving = scenario.lookup || scenario.saveSwitch || scenario.saveActive || scenario.saveBusy || scenario.saveRuntime || scenario.saveRetarget || scenario.saveRemap;
     assert.equal(calls.create, scenario.setupSwitch || scenario.unconfirmed || saving ? 1 : 0);
     assert.equal(calls.save, saving ? 1 : 0);
     assert.equal(calls.bound, scenario.completes ? 1 : 0);
@@ -509,7 +514,7 @@ test("account setup verifies the configured main tunnel without an extra assignm
           if (scenario.saveRetarget && value.bound) config.automaticTunnel = { tunnelId: otherId };
           return true;
         } },
-      browserHost: host, runtimeHost: { currentOperation: () => null,
+      browserHost: host, runtimeHost: { currentOperation: () => null, setupOperation: () => null,
         runtimeConfigSnapshot: () => ({ configured: !scenario.unconfigured, owner: "launcher", config }),
         mcpCredentialsConfigured: () => !scenario.noCredentials, mcpConnectorName: () => name },
       currentConnectorSettings, connectorCredentials,
@@ -1079,4 +1084,12 @@ test("a signed-out session and a security check read as what they are, and the l
   assert.equal(owned("tunnels:load_failed:neterr_failed"), "ownership check tunnels:load_failed:neterr_failed");
   assert.equal(owned("chatgpt:Private Text"), null, "anything but the observer's own words stays out");
   assert.equal(owned(null), null, "an older error without a check says nothing more than before");
+
+  // ChatGPT refused the account's sign-in (401): the person signs in again, so automatic setup waits
+  // for them (verification_required) instead of failing again every few minutes.
+  const { CHATGPT_SIGNED_OUT } = require("../electron/mcp-connector-setup.cjs");
+  assert.deepEqual(mcpConnectorCommandFailure(Object.assign(new Error(CHATGPT_SIGNED_OUT), { ownershipCause: "chatgpt:signed_out" })),
+    { code: "verification_required", message: CHATGPT_SIGNED_OUT });
+  assert.equal(mcpConnectorFailureCause(Object.assign(new Error(CHATGPT_SIGNED_OUT), { ownershipCause: "chatgpt:signed_out" }),
+    mcpConnectorCommandFailure(new Error(CHATGPT_SIGNED_OUT))), "ownership check chatgpt:signed_out");
 });

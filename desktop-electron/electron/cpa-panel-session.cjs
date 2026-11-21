@@ -26,6 +26,29 @@ function autoReviewPluginOf(pathname) {
   return AUTO_REVIEW_PAGES.find(([prefix]) => pathname.startsWith(prefix))?.[1] ?? null;
 }
 
+const MARKER = /^coding-tools-[a-f0-9]{48}$/;
+/**
+ * The management credential a request carries, as CPA reads it: `Authorization: Bearer <key>` (or
+ * the bare key), else `X-Management-Key`. `marker` when it is one of this app's opaque placeholders.
+ * Null when it carries none.
+ */
+function managementCredential(headers) {
+  const authorization = Object.keys(headers).find((name) => name.toLowerCase() === "authorization");
+  if (authorization && String(headers[authorization]).trim()) {
+    const value = String(headers[authorization]).trim();
+    const bearer = /^bearer\s+/i.test(value);
+    const key = bearer ? value.replace(/^bearer\s+/i, "") : value;
+    return { name: authorization, bearer, marker: MARKER.test(key) };
+  }
+  const named = Object.keys(headers).find((name) => name.toLowerCase() === "x-management-key");
+  if (named && String(headers[named]).trim()) return { name: named, bearer: false, marker: MARKER.test(String(headers[named]).trim()) };
+  return null;
+}
+// session -> the install whose header hook is the session's current one. Electron keeps one
+// onBeforeSendHeaders listener per session, so a window that closes after another installed its
+// hook must not remove that one.
+const hookOwners = new WeakMap();
+
 // localStorage entries seeded into the managed CPA origin. Values carry only the
 // opaque session marker; the real key is swapped in by the main-process header hook.
 function panelStorageEntries(origin, marker) {
@@ -105,6 +128,32 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
     }
   }
 
+  /**
+   * CPA counts every management request with a missing or wrong key as a failed login, and five in a
+   * row ban the address for 30 minutes. The address is 127.0.0.1: the whole machine, this app's own
+   * CPA calls included ("IP banned due to too many failed attempts", 2026-11-18). So a request that
+   * can only fail is cancelled here instead, and said once a minute per path, without any key.
+   */
+  const blockedAt = new Map(); // "<reason> <path>" -> when it was last logged
+  function blockDoomedRequest(callback, reason, details) {
+    let path = "";
+    try { path = new URL(details.url).pathname.slice(0, 80); } catch {}
+    const key = `${reason} ${path}`;
+    const at = Date.now();
+    if (!(at - (blockedAt.get(key) ?? -Infinity) < 60_000)) {
+      blockedAt.delete(key);
+      blockedAt.set(key, at);
+      if (blockedAt.size > 100) blockedAt.delete(blockedAt.keys().next().value);
+      logger?.warn?.("cpa.management_request_blocked", {
+        reason, path, ownWindow: details.webContentsId === webContents.id,
+        frame: !details.frame ? "none" : isManagedPanel(details.frame) ? "panel" : "other",
+      });
+    }
+    callback({ cancel: true });
+  }
+
+  const hookOwner = {};
+  hookOwners.set(browserSession, hookOwner);
   browserSession.webRequest.onBeforeSendHeaders({
     urls: [`${origin}/v0/management/*`],
   }, (details, callback) => {
@@ -123,27 +172,33 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
         markerMatches: Boolean(header) && headers[header] === `Bearer ${sessionMarker}`,
       });
     }
-    if (details.webContentsId !== webContents.id
-      || !(isManagedPanel(details.frame) || isCpaHelperRequest(details.frame, details.url, details.method))) {
-      callback({ requestHeaders: headers });
-      return;
-    }
-    const authorizationHeader = Object.keys(headers).find((name) => name.toLowerCase() === "authorization");
+    const ownWindow = details.webContentsId === webContents.id;
+    const credential = managementCredential(headers);
+    const exchangeable = ownWindow
+      && (isManagedPanel(details.frame) || isCpaHelperRequest(details.frame, details.url, details.method));
     // Accounts and CPA share persisted UI storage, including markers from earlier
     // launcher instances. The owned frame/origin above is the authorization boundary;
     // these opaque placeholders never authenticate directly with CPA.
-    if (authorizationHeader && /^Bearer coding-tools-[a-f0-9]{48}$/.test(headers[authorizationHeader])) {
-      try {
-        const connection = getConnection();
-        if (connection?.baseUrl !== origin || !connection.managementKey) {
-          callback({ cancel: true });
-          return;
-        }
-        headers[authorizationHeader] = `Bearer ${connection.managementKey}`;
-      } catch {
+    if (!exchangeable || !credential?.marker) {
+      // A request that can only fail never goes out: CPA counts it as a failed login (see
+      // blockDoomedRequest). A marker outside the exchange above, and anything this window sends
+      // that it cannot exchange, since this window never holds the real key. Another window's own
+      // key (a person who typed one) still goes through.
+      if (credential?.marker) blockDoomedRequest(callback, "marker-not-exchanged", details);
+      else if (ownWindow) blockDoomedRequest(callback, credential ? "key-not-exchangeable" : "no-key", details);
+      else callback({ requestHeaders: headers });
+      return;
+    }
+    try {
+      const connection = getConnection();
+      if (connection?.baseUrl !== origin || !connection.managementKey) {
         callback({ cancel: true });
         return;
       }
+      headers[credential.name] = credential.bearer ? `Bearer ${connection.managementKey}` : connection.managementKey;
+    } catch {
+      callback({ cancel: true });
+      return;
     }
     callback({ requestHeaders: headers });
   });
@@ -215,6 +270,8 @@ function installCpaPanelSession({ webContents, webFrameMain, getConnection, logg
   webContents.on("did-frame-finish-load", signInAutoReview);
   webContents.on("did-frame-finish-load", watchQuotaPage);
   webContents.once("destroyed", () => {
+    if (hookOwners.get(browserSession) !== hookOwner) return;
+    hookOwners.delete(browserSession);
     browserSession.webRequest.onBeforeSendHeaders({ urls: [`${origin}/v0/management/*`] }, null);
   });
 }
@@ -500,13 +557,14 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
         for (const upstream of (await response.json())?.providers || []) {
           if (!upstream?.id || !upstream.enabled) continue;
           const windows = upstream.quota?.windows && Object.keys(upstream.quota.windows).length ? upstream.quota.windows : null;
+          const balances = Array.isArray(upstream.quota?.balances) && upstream.quota.balances.length ? upstream.quota.balances : null;
           const error = upstream.quota?.error || '';
           if (/\\b429\\b/.test(error)) noteLimited();
           const kept = providers[upstream.id];
-          // A failed quota read keeps the last good windows on screen.
-          next[upstream.id] = windows ? { at: Date.now(), kind: upstream.kind, windows }
-            : kept?.windows ? { ...kept, kind: upstream.kind }
-            : { at: Date.now(), kind: upstream.kind, error };
+          // A failed quota read keeps the last good windows and remaining balance on screen.
+          if (windows || balances) next[upstream.id] = { at: Date.now(), kind: upstream.kind, windows, balances };
+          else if (kept?.windows || kept?.balances) next[upstream.id] = { ...kept, kind: upstream.kind };
+          else if (error || upstream.quota) next[upstream.id] = { at: Date.now(), kind: upstream.kind, error: error || 'Balance not reported' };
         }
         providers = next;
         write(PROVIDERS_SAVED, providers);
@@ -531,6 +589,15 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
       const prefix = 'AuthFileQuota-module__' + name + '___';
       const node = document.querySelector('[class*="' + prefix + '"]');
       return node ? String(node.className).split(' ').find((value) => value.startsWith(prefix)) || '' : '';
+    }
+    function balanceRow(balance) {
+      const amount = balance.remaining == null ? 'No key limit'
+        : [balance.currency, Number(balance.remaining).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })].filter(Boolean).join(' ');
+      const label = balance.kind === 'key-budget' ? 'Key budget' : 'Remaining balance';
+      const row = el('div', 'display:flex;justify-content:space-between;gap:8px;margin:0');
+      row.append(el('span', 'color:var(--text-primary);font-size:12px;font-weight:600', label),
+        el('span', 'color:var(--text-primary);font-size:12px', amount));
+      return row;
     }
     function quotaRow(limit) {
       if (!quotaClass('quotaRow')) return windowRow(limit);
@@ -565,9 +632,10 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
       section.dataset.codingTools = key;
       for (const entry of entries) {
         if (entries.length > 1) section.append(el('div', 'color:var(--text-primary);font-size:12px;font-weight:600', entry.name));
-        if (entry.error) section.append(el('div', 'color:var(--viz-failure);font-size:11.5px', entry.error));
-        else if (!entry.limits.length) section.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
-        else section.append(...entry.limits.map(quotaRow));
+        if (entry.error && !entry.limits.length && !(entry.balances || []).length) section.append(el('div', 'color:var(--viz-failure);font-size:11.5px', entry.error));
+        if (entry.balances && entry.balances.length) section.append(...entry.balances.map(balanceRow));
+        else if (!entry.error && !entry.limits.length) section.append(el('div', 'color:var(--text-tertiary);font-size:11.5px', 'No usage windows on this key'));
+        if (entry.limits.length) section.append(...entry.limits.map(quotaRow));
       }
       section.append(el('div', 'color:var(--text-tertiary);font-size:11px', ago(at)));
       held?.node.remove();
@@ -623,8 +691,8 @@ function quotaPageScript(marker, { refreshDelayMs = process.env.CODING_TOOLS_CPA
         const badge = card.querySelector('[class*="AuthFileCard-module__providerBadge"]');
         const label = PROVIDER_BADGES[entry.kind];
         if (badge && label && badge.textContent !== label) badge.textContent = label;
-        if (!entry.windows && !entry.error) continue;
-        placeBlock(card, windowsBlock('provider-quota-' + id, [{ error: entry.windows ? '' : entry.error, limits: entry.windows ? providerLimits(entry.windows) : [] }], entry.at));
+        if (!entry.windows && !(entry.balances || []).length && !entry.error) continue;
+        placeBlock(card, windowsBlock('provider-quota-' + id, [{ error: (entry.windows || (entry.balances || []).length) ? '' : entry.error, limits: entry.windows ? providerLimits(entry.windows) : [], balances: entry.balances || [] }], entry.at));
       }
       pressIdleQuota(cards);
       for (const entry of Object.values(credits)) {

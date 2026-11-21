@@ -1,9 +1,11 @@
 "use strict";
 
-// A permission mode (Ask / Approve for me / Full access) goes only to a harness that can honor it.
-// 2026-11-10: a chat moved from Claude Code to Pi kept "Approve for me", the engine refused every
-// launch ("This adapter cannot honor the saved permission tuple"), and Pi's permission menu offered
-// no mode to pick instead, so the chat could never start.
+// Every harness takes the chat's permission picker. 2026-11-10: a chat moved from Claude Code to Pi
+// kept "Approve for me", the engine refused every launch ("This adapter cannot honor the saved
+// permission tuple"), and Pi's permission menu offered no mode to pick instead. The mode was then
+// dropped on such a move, which left the agent on AO's own "auto" (opencode allowed every tool
+// unasked). 2026-11-17: Full access on an Antigravity chat was refused outright. Now every harness
+// keeps the mode, offers Full access, and runs Ask and Approve for me where it can ask the chat.
 
 require("./support/temp-dirs.cjs"); // removes the temp folders this file makes when it ends
 const test = require("node:test");
@@ -30,30 +32,19 @@ test("the renderer's permission harnesses are the engine's PERMISSION_AGENTS", (
   assert.deepEqual([...editor.PERMISSION_HARNESSES].sort(), names, "a new agent that takes the modes is added to both lists");
 });
 
-test("a mode carried to Pi, opencode or Unreal is dropped; Claude Code, Codex, agy and Native Codex keep it", () => {
-  for (const harness of ["ao:pi", "ao:opencode", "ao:unreal-agent"]) {
-    const next = editor.withTuning(editor.workerRoute(harness, "cpa/gpt-6.1-sol"), claude);
-    for (const field of MODE_FIELDS) assert.equal(Object.hasOwn(next, field), false, `${harness} gets no ${field}`);
-    assert.equal(next.permission_profile, ":ao-default");
-  }
-  for (const harness of ["ao:codex", "ao:agy"]) {
+test("a mode carried to any harness stays: never dropped to the agent's own permissions", () => {
+  for (const harness of ["ao:pi", "ao:opencode", "ao:unreal-agent", "ao:codex", "ao:agy", "ao:cline"]) {
     const next = editor.withTuning(editor.workerRoute(harness, "cpa/gpt-6.1-sol"), claude);
     for (const field of MODE_FIELDS) assert.equal(next[field], approveForMe[field], `${harness} keeps ${field}`);
+    assert.equal(next.permission_profile, ":ao-default");
   }
   const native = editor.withTuning(editor.workerRoute("codex-native", "gpt-6.1-sol"), claude);
   assert.equal(native.permission_profile, ":workspace");
   assert.equal(native.approval_policy, "on-request");
   assert.equal(native.approvals_reviewer, "auto_review");
-});
-
-test("permissionsFitted leaves a route alone unless it must drop a mode", () => {
-  assert.equal(editor.permissionsFitted(claude), claude, "a harness that takes the modes keeps the same route");
-  const bare = editor.workerRoute("ao:pi", "cpa/gpt-6.1-sol");
-  assert.equal(editor.permissionsFitted(bare), bare, "a Pi route without a mode is already fitted");
-  const stale = { ...bare, ...approveForMe, effort: "xhigh", context_window: 872000 };
-  assert.deepEqual(plain(editor.permissionsFitted(stale)), { ...bare, effort: "xhigh", context_window: 872000 },
-    "the remembered Pi route keeps its model and tuning, only the mode goes");
-  assert.equal(stale.approval_policy, "on-request", "the caller's route is not changed");
+  assert.equal(editor.permissionsFitted, undefined, "no route has its mode dropped any more");
+  assert.equal(plain(editor.withTuning(editor.workerRoute("ao:pi", "cpa/gpt-6.1-sol"), editor.workerRoute("ao:claude-code", "cpa/gpt-6.1-sol"))).approval_policy,
+    undefined, "a route without a mode gets none");
 });
 
 const { createAgentOrchestratorWorkflow, ROUTE_REFUSED } = require("../electron/agent-orchestrator-workflow.cjs");
@@ -62,9 +53,11 @@ const TUPLE_REFUSAL = "Launch failed: This adapter cannot honor the saved permis
 test("a launch the app refused is a route refusal; a failure a later try can get past is not", () => {
   // Each refusal aoLaunchArgs throws, as the card's error shows it.
   const engine = fs.readFileSync(path.resolve(__dirname, "../electron/agent-orchestrator-workflow.cjs"), "utf8");
-  const agyAsk = engine.match(/const AGY_ASK_REASON = "([^"]+)"/)?.[1];
-  assert.ok(agyAsk, "AGY_ASK_REASON is still a literal");
-  for (const refusal of [TUPLE_REFUSAL, `Launch failed: ${agyAsk}`,
+  const fullAccessOnly = engine.match(/const FULL_ACCESS_ONLY = "([^"]+)"/)?.[1];
+  assert.ok(fullAccessOnly, "FULL_ACCESS_ONLY is still a literal");
+  for (const refusal of [TUPLE_REFUSAL, `Launch failed: Pi runs its tools without asking first. ${fullAccessOnly}`,
+    // A card saved before 0.8.137 says it in agy's old words.
+    "Launch failed: Antigravity asks for approval in its own terminal, which the chat does not show, and its auto mode is not available through the CPA gateway, so it would wait for good. Choose Full access.",
     "Launch failed: Single assistant: pi can't use the CPA model cpa/opencode-go/glm-5.3-flash. Choose one of its own models.",
     "Launch failed: Choose a supported CPA reasoning level"]) assert.match(refusal, ROUTE_REFUSED, refusal);
   // A refusal reworded in aoLaunchArgs must be reworded here too: each throw there is one of these.

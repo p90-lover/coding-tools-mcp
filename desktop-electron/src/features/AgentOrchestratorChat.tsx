@@ -323,14 +323,18 @@ function TurnRunning({ turn, refusal }: { turn: ChatTurn; refusal?: CpaRefusal |
   // A restart does not lift a rate limit or a refused sign-in: it says what does instead.
   const hint = refused && (refusal?.status === 429 || refusal?.status === 402) ? " · switch the model or wait"
     : refused && (refusal?.status === 401 || refusal?.status === 403) ? " · sign in again in CPA" : "";
+  const stuck = !hint && note.includes("may be stuck");
+  const detail = `${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}${stuck && !onRestart ? " · recovery is unavailable for this turn" : ""}`;
+  // One row in any pane: the text fades out where it is cut off (codex-chat.css) and shows whole on
+  // hover; its button stays in view beside it. In a narrow split pane it wrapped onto four lines.
   return <p className={`cx-note cx-turn-running${(step.working.stalled && !asking) || refused ? " is-stalled" : ""}`} role="status" aria-live="polite">
-    <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
-    {` · ${step.name}${step.working.activity ? ` — ${step.working.activity}` : ""}${note}${hint}`}
+    <span className="cx-turn-running-text" title={detail}>
+      <span className="cx-shimmer">Working</span>{turn.startedAtMs ? <> for <Elapsed since={turn.startedAtMs} /></> : null}
+      {` · ${detail}`}
+    </span>
     {/* Inspect the accepted turn without adding another prompt or interrupting its work. */}
-    {!hint && note.includes("may be stuck") ? onRestart
-      ? <> · <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
-        title="Check the same agent and accepted turn without sending another message">{restarting ? "Checking…" : "Recover"}</button></>
-      : " · recovery is unavailable for this turn" : ""}
+    {stuck && onRestart ? <button type="button" className="cx-turn-restart" onClick={onRestart} disabled={restarting}
+      title="Check the same agent and accepted turn without sending another message">{restarting ? "Checking…" : "Recover"}</button> : null}
     {asking && !retry ? <WaitingAnswer quietMs={heardAt ? now - heardAt : 0} /> : null}
   </p>;
 }

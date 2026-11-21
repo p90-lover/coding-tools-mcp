@@ -84,18 +84,25 @@ function usableExecutable(candidate, platform = process.platform) {
   }
 }
 
-function captureRegularFile(filePath, { followSymlink = false } = {}) {
+// Asynchronous: setup runs on Electron main, and on the busy hard disk this readFileSync of config.json
+// alone held every window for 255 ms (launcher.main_blocked, 2026-11-19).
+async function captureRegularFile(filePath, { followSymlink = false } = {}) {
   let stat;
   try {
-    stat = fs.lstatSync(filePath);
+    stat = await fs.promises.lstat(filePath);
   } catch (error) {
     if (error?.code === "ENOENT") return { path: filePath, exists: false };
     throw error;
   }
   let symlink;
   if (followSymlink && stat.isSymbolicLink()) {
-    symlink = { link: fs.readlinkSync(filePath), target: fs.realpathSync(filePath) };
-    stat = fs.lstatSync(symlink.target);
+    // The callback fs.realpath, not fs.promises.realpath: checkpointWritePath compares this target with
+    // fs.realpathSync, and the promise version resolves like fs.realpath.native. On Windows that expands
+    // 8.3 short names (C:\Users\RUNNER~1\...), so an unchanged link read as "symlink changed" and setup's
+    // rollback refused to restore it (runtime-host test, CI 2026-11-19).
+    const target = await new Promise((resolve, reject) => fs.realpath(filePath, (error, resolved) => (error ? reject(error) : resolve(resolved))));
+    symlink = { link: await fs.promises.readlink(filePath), target };
+    stat = await fs.promises.lstat(symlink.target);
   }
   if (!stat.isFile()) {
     throw new Error(`Setup checkpoint path is not a regular file: ${filePath}`);
@@ -106,7 +113,7 @@ function captureRegularFile(filePath, { followSymlink = false } = {}) {
   return {
     path: filePath,
     exists: true,
-    data: fs.readFileSync(symlink?.target ?? filePath),
+    data: await fs.promises.readFile(symlink?.target ?? filePath),
     mode: stat.mode & 0o777,
     ...(symlink ? { symlink } : {}),
   };
@@ -227,6 +234,7 @@ class RuntimeHost {
     this.supervisor = supervisor;
     this.getBrowserInteractionMode = getBrowserInteractionMode;
     this.active = null;
+    this.activeReadOnly = false;
     this.activeChild = null;
     this.lifecycleOperation = null;
     this.cleanupEphemeralSecrets();
@@ -241,6 +249,17 @@ class RuntimeHost {
       && this.activeChild.exitCode === null
       && this.activeChild.signalCode === null;
     return this.lifecycleOperation || this.active || (stuckChild ? "previous runtime process shutdown" : null);
+  }
+
+  /**
+   * The runtime operation another setup must wait for, or null. A read-only one (the WebGPT model
+   * lookup chats repeat every 2 minutes, run with `readOnly`) holds the one-at-a-time slot for about
+   * 2 s but changes nothing. Counted as a setup, it failed Connect MCP whenever it overlapped one of
+   * the setup's checks, and made the automatic setup give way (2026-11-17).
+   */
+  setupOperation() {
+    const operation = this.currentOperation();
+    return operation !== null && operation === this.active && this.activeReadOnly ? null : operation;
   }
 
   browserInteractionMode() {
@@ -402,25 +421,29 @@ class RuntimeHost {
     return this.chromeProfileCapture?.cancel() ?? false;
   }
 
-  async captureCurrentChromeLogin({ safeStorage } = {}) {
+  /** `target: "platform"` asks Chrome for OpenAI Platform's sign-in instead of ChatGPT's (connector 1.2.0). */
+  async captureCurrentChromeLogin({ safeStorage, target = "chatgpt" } = {}) {
     if (this.browserInteractionMode() !== "automatic") throw new Error("Chrome session verification requires Automatic mode");
     if (this.currentOperation()) throw new Error("Another runtime operation is already in progress");
     const owner = Symbol("chrome-profile-login");
     this.chromeProfileOwner = owner; this.active = "chrome-profile-login";
     let capture;
     const publish = (status, message) => { if (this.chromeProfileOwner === owner) this.publishOperation?.({ name: "chrome-profile-login", status, message }); };
+    const platform = target === "platform";
     try {
       await this.prepareChromeProfileConnector();
       const identity = await chromeConnectorIdentity(this.app.getPath("userData"), safeStorage);
-      capture = await createChromeProfileCapture({ identity, onPhase: phase => {
+      capture = await createChromeProfileCapture({ identity, target, onPhase: phase => {
         if (this.chromeProfileOwner !== owner) return;
-        if (phase === "verifying") { publish("running", "Verifying the ChatGPT session from your Chrome profile"); return; }
+        if (phase === "verifying") { publish("running", platform ? "Copying the OpenAI Platform sign-in from your Chrome profile" : "Verifying the ChatGPT session from your Chrome profile"); return; }
         publish(phase === "verified" || phase === "cancelled" ? "completed" : "failed", phase === "verified"
           ? "Chrome profile sign-in verified" : phase === "cancelled" ? "Chrome profile sign-in cancelled" : "Chrome profile sign-in was not verified. Open a new connection to retry.");
         this.active = null; this.chromeProfileCapture = null; this.chromeProfileOwner = null;
       } });
       this.chromeProfileCapture = capture;
-      publish("running", `Approve pairing code ${capture.code} once in the Chrome connector, then sign in. Verification is automatic; keep Chrome open.`);
+      publish("running", platform
+        ? `Approve pairing code ${capture.code} once in the Chrome connector, then sign in to OpenAI Platform in the tab Chrome opens, with this account. Verification is automatic; keep Chrome open.`
+        : `Approve pairing code ${capture.code} once in the Chrome connector, then sign in. Verification is automatic; keep Chrome open.`);
       await this.openChromeProfileConnector();
       const transfer = await capture.result;
       if (this.chromeProfileOwner !== owner || this.browserInteractionMode() !== "automatic") {
@@ -652,7 +675,8 @@ class RuntimeHost {
       ? tunnel : null;
   }
 
-  captureSetupCheckpoint(snapshot) {
+  /** The files setup may change, read without blocking the main process (captureRegularFile). */
+  async captureSetupCheckpoint(snapshot) {
     if (typeof this.supervisor.configPath !== "string" || !path.isAbsolute(this.supervisor.configPath)) {
       throw new Error("Launcher runtime supervisor has no absolute configuration path for setup rollback");
     }
@@ -693,9 +717,14 @@ class RuntimeHost {
         paths.add(path.join(tunnel.profileDir, `${tunnel.profileName}.yaml`));
       }
     }
-    return [...paths].map(filePath => captureRegularFile(filePath, {
-      followSymlink: filePath === path.join(this.codexHome, "config.toml"),
-    }));
+    // One file at a time: parallel reads only make the hard disk seek between them.
+    const checkpoint = [];
+    for (const filePath of paths) {
+      checkpoint.push(await captureRegularFile(filePath, {
+        followSymlink: filePath === path.join(this.codexHome, "config.toml"),
+      }));
+    }
+    return checkpoint;
   }
 
   setupCheckpointChanged(checkpoint) {
@@ -799,6 +828,7 @@ class RuntimeHost {
       throw new Error(`Another launcher operation is active: ${this.lifecycleOperation}`);
     }
     this.active = name;
+    this.activeReadOnly = options.readOnly === true;
     this.publishOperation?.({ name, status: "running", message: options.message || name });
     this.logger.info("runtime.operation_started", { name, args: args.map((arg) => /key|token/i.test(arg) ? "[redacted]" : arg) });
     try {
@@ -939,6 +969,7 @@ class RuntimeHost {
       // can report that after the caller already reads it back, so the next read checks the file.
       this.supervisor?.forgetConfig?.();
       this.active = null;
+      this.activeReadOnly = false;
     }
   }
 
@@ -1610,10 +1641,17 @@ class RuntimeHost {
   async runSetup(name, args, options) {
     if (this.currentOperation()) throw new Error(`Another launcher operation is active: ${this.currentOperation()}`);
     const previousRuntime = this.runtimeConfigSnapshot();
-    const checkpoint = this.captureSetupCheckpoint(previousRuntime);
+    // Held before the checkpoint's reads: nothing else starts while they wait on the disk.
     this.lifecycleOperation = name;
+    let checkpoint;
     let setupCommandStarted = false;
     let runtimeTransitionStarted = false;
+    try {
+      checkpoint = await this.captureSetupCheckpoint(previousRuntime);
+    } catch (error) {
+      this.lifecycleOperation = null;
+      throw error;
+    }
     try {
       if (this.launcherProfile === "production") {
         await this.run(name, [...args, "--preflight-only"], {

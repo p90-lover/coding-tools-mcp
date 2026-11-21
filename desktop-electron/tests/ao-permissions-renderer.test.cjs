@@ -206,6 +206,40 @@ test("a custom context window is set without a nested form, so it never submits 
   assert.deepEqual([clicked, stopped, prevented], [1, 1, 1], "Enter applies the size and goes no further");
 });
 
+test("the custom context window takes 100k, 1m and 7-digit sizes, and says why a size is refused", () => {
+  // 2026-11-20: on Gemini 4 Carbon (capped at a wrong 272K) the field turned red for "1m" and every
+  // 7-digit size and never said why; it read as "abbreviations and 7 digits are not supported".
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const routes = [];
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-4-carbon", permission_profile: ":ao-default" };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange: next => routes.push(plain(next)), harnesses: [{ id: "ao:claude-code", label: "Claude Code", runnable: true, installed: true }], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const menu = (limit, draft) => {
+    const caps = { "cpa/gemini-4-carbon": { efforts: ["high"], contextLimit: limit, contextWindow: { min: 4096, max: limit, kind: "context" } } };
+    // State order: search, models, caps, gaps, held, error, contextDraft.
+    view.render("AgentOrchestratorComposerControls", props, ["", ["cpa/gemini-4-carbon"], caps, {}, {}, "", draft]);
+    const tree = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Context window").props.children(() => {});
+    return {
+      input: elements(tree, item => item.type === "input")[0],
+      set: elements(elements(tree, item => item.props?.className === "ao-context-custom")[0], item => item.type === "button")[0],
+      problem: elements(tree, item => item.props?.id === "ao-context-draft-problem")[0]?.props.children ?? null,
+    };
+  };
+  const capped = menu(272_000, "1m");
+  assert.equal(capped.problem, "Up to 272k for this model", "a size past the model's limit says the limit");
+  assert.equal(capped.set.props.disabled, true);
+  assert.equal(capped.input.props["aria-invalid"], true);
+  assert.equal(capped.input.props.inputMode, "text", "k and m can be typed on any keyboard");
+  assert.match(capped.input.props.placeholder, /100k.*1m/, "the field shows that abbreviations work");
+  assert.equal(menu(272_000, "abc").problem, "Type a size such as 100k, 1m or 250000");
+  for (const [draft, tokens] of [["1m", 1_000_000], ["1,000,000", 1_000_000], ["1048576", 1_048_576], ["100k", 100_000]]) {
+    const ok = menu(1_048_576, draft);
+    assert.equal(ok.problem, null, `${draft} is a size this model takes`);
+    assert.equal(ok.set.props.disabled, false);
+    ok.set.props.onClick();
+    assert.equal(routes.at(-1).context_window, tokens, `${draft} sets ${tokens}`);
+  }
+});
+
 test("the harness menu is a strip of logos: no names or state words on rows, every harness in one scrolling column, the pick up top", () => {
   const view = renderer("AgentOrchestratorComposerControls.tsx");
   const route = { harness_id: "ao:aider", model: "", permission_profile: ":ao-default" };
@@ -497,45 +531,27 @@ test("a permission picked while an AO agent works is active now when the agent a
   assert.equal(view.exports.permissionChangeNotice({ id: "chat", nodes: [] }, { reviewer: "auto_review" }), "Applies from the next turn. A running turn keeps its permissions.");
 });
 
-test("Approve for me that this app reviews says paused while quota-based reviews are off, not Active now", () => {
+// The user's call, 2026-11-17: Approve for me is the person's choice of a model review, so it runs
+// with Allow quota-based reviews off, and the chip has no paused state (0.8.125 showed one).
+test("Approve for me reads Active now, whatever the quota-based reviews switch says", () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   const approveForMe = { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
-  const chip = ({ quota, harness = "ao:claude-code", launched = { approvals_reviewer: "user" }, running = true, notice = "" }) => {
+  for (const harness of ["ao:claude-code", "ao:codex"]) {
+    const launched = { approvals_reviewer: "user" }, running = true;
     const lead = { ...node("lead", harness, ":ao-default"), route: { harness_id: harness, permission_profile: ":ao-default", ...approveForMe } };
     // Approve for me was picked mid-turn: the running card keeps its launch route, AO records the pick.
     const mission = { id: "chat", team: { permission_selections: { lead: { permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" } } },
       nodes: running ? [{ ...lead, route: { ...lead.route, ...launched }, id: "attempt", template_role_id: "lead", state: "running" }] : [] };
     const props = { team: { id: "team", nodes: [lead] }, mission, busy: false, loadProfiles: async () => ({}), save: async () => "", shared: null };
-    // State order: menu open, capabilities, notice, saving, failed, Full access dialog, quota-based reviews.
-    const tree = view.render("AgentOrchestratorPermissions", props, [false, { lead: { supported: true, profiles: [] } }, notice, false, false, null, quota]);
-    return elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props;
-  };
-  const { QUOTA_REVIEWS_PAUSED } = view.exports;
-  // Claude Code asks the app, which reviews nothing while the switch is off: every request waits for the person.
-  const off = chip({ quota: false, notice: "Active now: the running turn's requests follow it." });
-  assert.equal(off["aria-label"], "Permissions: Approve for me (paused)");
-  assert.equal(off["data-paused"], "");
-  assert.ok(off.title.startsWith("Approve for me · paused\n" + QUOTA_REVIEWS_PAUSED + "\n"), off.title);
-  assert.match(off.title, /Paused now: :workspace · on-request · auto_review/);
-  assert.doesNotMatch(off.title, /Active now/, "neither the running card nor the save notice claims it is active");
-  assert.match(QUOTA_REVIEWS_PAUSED, /Allow quota-based reviews in Settings > Chat/, "it names the switch that resumes it");
-  // On, it is active now; not read yet, the chip claims nothing about it.
-  for (const quota of [true, undefined, null]) {
-    const shown = chip({ quota });
-    assert.equal(shown["aria-label"], "Permissions: Approve for me"); assert.equal(shown["data-paused"], undefined);
-    assert.match(shown.title, /Active now: :workspace · on-request · auto_review/); assert.doesNotMatch(shown.title, /paused/i);
+    // State order: menu open, capabilities, notice, saving, failed, Full access dialog.
+    const tree = view.render("AgentOrchestratorPermissions", props, [false, { lead: { supported: true, profiles: [] } }, "", false, false, null]);
+    const chip = elements(tree, item => item.type === "button" && item.props["aria-haspopup"] === "menu")[0].props;
+    assert.equal(chip["aria-label"], "Permissions: Approve for me", harness);
+    assert.equal(chip["data-paused"], undefined);
+    assert.match(chip.title, /Active now: :workspace · on-request · auto_review/);
+    assert.doesNotMatch(chip.title, /paused/i);
   }
-  // Between turns, Claude Code's next turn is reviewed here too; Codex runs its own auto-review, which the switch doesn't gate.
-  assert.equal(chip({ quota: false, running: false })["aria-label"], "Permissions: Approve for me (paused)");
-  assert.equal(chip({ quota: false, running: false, harness: "ao:codex" })["data-paused"], undefined);
-  // A Codex card launched to ask is reviewed here once Approve for me is picked mid-turn.
-  assert.equal(chip({ quota: false, harness: "ao:codex" })["data-paused"], "");
-  const route = (harness_id, approvals_reviewer, approval_policy = "on-request") => ({ harness_id, approval_policy, approvals_reviewer });
-  assert.equal(view.exports.appReviewsRequests(route("ao:claude-code", "auto_review")), true);
-  assert.equal(view.exports.appReviewsRequests(route("ao:codex", "auto_review")), false);
-  assert.equal(view.exports.appReviewsRequests(route("ao:codex", "user"), route("ao:codex", "auto_review")), true);
-  assert.equal(view.exports.appReviewsRequests(route("ao:claude-code", "user")), false, "Ask for approval: the person answers, nothing is paused");
-  assert.equal(view.exports.appReviewsRequests(route("codex-native", "auto_review")), false);
+  assert.equal(view.exports.QUOTA_REVIEWS_PAUSED, undefined, "no paused text is left to show");
 });
 
 test("quota-based reviews are read from main without changing them and published to open chats once per change", async () => {

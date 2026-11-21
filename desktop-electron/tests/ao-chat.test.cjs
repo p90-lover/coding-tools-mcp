@@ -1047,7 +1047,7 @@ test("Team and Mission Board header callbacks open the existing graph/board sepa
 });
 
 test("composer execution binds only the explicit single route or a real saved-team revision", () => {
-  // The real route helpers: a single route is fitted to its harness on the way out (permissionsFitted).
+  // The real route helpers, which the surface takes its route types and builders from.
   const editor = {};
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorRoleEditor.tsx"), "utf8"),
     { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText, { exports: editor, require: () => ({}), structuredClone });
@@ -1059,15 +1059,14 @@ test("composer execution binds only the explicit single route or a real saved-te
   assert.deepEqual(plain(surface.aoChatExecution("team", route, teams, "elsewhere")), { executionMode: "team", teamId: "elsewhere", teamRevision: 2 },
     "a team saved from another project runs here too");
   assert.throws(() => surface.aoChatExecution("team", route, teams, "deleted"), /saved team/i);
-  // 2026-11-10: a Pi chat carried Claude Code's "Approve for me" and every launch and pre-warm was
-  // refused ("cannot honor the saved permission tuple"). Pi and opencode take no mode, so none is sent.
+  // The chat's permission mode goes as picked on every harness. Dropping it on Pi and opencode
+  // (until 0.8.137) left them on AO's own "auto": opencode then allowed every tool unasked. A mode an
+  // agent can't run in is refused at launch with the reason (aoLaunchArgs), never swapped here.
   const carried = { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
-  for (const harness of ["ao:pi", "ao:opencode"]) {
+  for (const harness of ["ao:pi", "ao:opencode", "ao:claude-code"]) {
     assert.deepEqual(plain(surface.aoChatExecution("single", { ...route, harness_id: harness, ...carried }, teams, "")).singleRoute,
-      { ...route, harness_id: harness }, `${harness} is sent without a mode it can't honor`);
+      { ...route, harness_id: harness, ...carried }, `${harness} keeps its mode`);
   }
-  assert.deepEqual(plain(surface.aoChatExecution("single", { ...route, ...carried }, teams, "")).singleRoute, { ...route, ...carried },
-    "Claude Code keeps its mode");
 });
 
 test("saved team list accepts authoritative teams and legacy team without manufactured presets", () => {

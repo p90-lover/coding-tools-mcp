@@ -500,6 +500,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     if (!input || typeof input !== "object") throw new Error("Provider account is required");
     const now = new Date().toISOString();
     const id = optionalText(input.id, 160) || crypto.randomUUID();
+    if (String(id).startsWith("cpa-auth:")) throw new Error("This account is listed from CPA and cannot be changed in Provider Center");
     const providerId = requiredText(input.providerId, "Provider ID", 160);
     const auth = requiredText(input.auth, "Authentication type", 32);
     if (!ACCOUNT_AUTH.has(auth)) throw new Error("Unsupported provider authentication type");
@@ -576,6 +577,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
   }
 
   function setAccountEnabled(accountId, enabled) {
+    if (String(accountId || "").startsWith("cpa-auth:")) throw new Error("This account is listed from CPA and cannot be changed in Provider Center");
     const account = findAccount(accountId);
     if (!account) throw new Error("Provider account was not found");
     if (account.archivedAt && enabled) throw new Error("Archived accounts cannot be enabled");
@@ -595,6 +597,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
   }
 
   function archiveAccount(accountId) {
+    if (String(accountId || "").startsWith("cpa-auth:")) throw new Error("This account is listed from CPA and cannot be changed in Provider Center");
     const account = findAccount(accountId);
     if (!account) throw new Error("Provider account was not found");
     const now = new Date().toISOString();
@@ -1241,6 +1244,7 @@ function createProviderNetworkController({
   oauthTimeoutMs = DEFAULT_OAUTH_TIMEOUT_MS,
   requestTimeoutMs = DEFAULT_PROVIDER_REQUEST_TIMEOUT_MS,
   startRouter = startEgressRouter,
+  openProviderLoginUrl = null,
 }) {
   const directory = path.join(userData, "providers");
   const store = createProviderNetworkStore({
@@ -1823,7 +1827,15 @@ function createProviderNetworkController({
       const result = await startCpaAccountLogin({
         adapterId,
         requestJson: (pathname, options) => managementJson(account, pathname, options),
-        openExternal: (url) => shell.openExternal(safeProviderLoginUrl(url)),
+        openExternal: (url, options) => {
+          const target = safeProviderLoginUrl(url);
+          // Antigravity Google sign-in must not reuse the system browser's cookies
+          // (the ineligible default Google session). Other adapters keep openExternal.
+          if (adapterId === "cpa-antigravity" && typeof openProviderLoginUrl === "function") {
+            return openProviderLoginUrl(target, options);
+          }
+          return shell.openExternal(target);
+        },
         sleep: sleepImpl,
         timeoutMs: oauthTimeoutMs,
         pollIntervalMs: oauthPollIntervalMs,

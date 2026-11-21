@@ -1,15 +1,17 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.7.1",
+  "version": "0.10.1",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "c7cab2088b9c491a8d04536c72b625cbe81116ab",
+    "commit": "531cc8f4ebe9e1c85650d70742e8d378176df454",
     "license": "MIT"
   },
   "changes": [
-    "Auto Review: a Codex fallback account can take the default route (codex-auto-review, as the first account does) with no model to pick; other providers still name a model, and no fallback repeats an earlier route",
-    "Smart routing (0.7.0): within a Codex priority tier and across a managed account pool, the account with the most quota at risk per hour before its soonest reset is used first",
+    "Each account goes out through its own proxy_url (the route Coding Tools gives every CPA credential): requests, model syncs, balance reads and Test no longer use CPA's one global proxy, and a marker re-saved after a model-list change keeps its proxy_url (0.10.1)",
+    "Upstream cards keep each account's usage across CPA restarts; In CPA lists every account CPA serves, config API keys included; quota bars show what is left; Moonshot and StepFun balances are read; AI Studio shows no card until an account is signed in (0.10.1)",
+    "CPA's own rotation and its rate-limit cooldowns pick accounts again: CPA Helper's quota polling, smart routing, out-of-credit key blocks, opt-in fallbacks, Codex reset credits and keeper are gone; usage and cost history, the price book and key labels stay (0.10.0)",
+    "CPA's Plugins sidebar shows one entry, Provider Manager; Auto Review, Cline Pass and the usage history are pages in its console (0.10.0)",
     "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
     "Cline Pass, CommandCode Go, CommandCode and Grok accounts are provider-manager auth files with a kind; their models, logins and management routes are unchanged"
   ],
@@ -20,9 +22,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/cpa-provider-manager-v0.7.1.dll",
-      "sha256": "b0fdcf134eb39e5d72bea2e0dfbb7a7b3f2cde3974f8e78ea97a00d3829b49b3",
-      "size": 27136000
+      "path": "windows/amd64/cpa-provider-manager-v0.10.1.dll",
+      "sha256": "b486aa9d9f98f0f07036ba8f46a6d6fc68a82283137b42b0a654e40788949e2a",
+      "size": 27062272
     }
   }
 }

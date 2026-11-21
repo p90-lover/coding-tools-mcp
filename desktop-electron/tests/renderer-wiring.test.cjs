@@ -144,7 +144,7 @@ test("a new chat's Team picker sits in the chat header, with no setting bar abov
 test("Chat mounts the AO chat surface and the original AO UI links back to it", () => {
   assert.match(appSource, /keepAlive\("agent-orchestrator", \(\) => \(\s*<section className="gpb-chat"[\s\S]*?<ChatPages language=\{language\} setError=\{setError\} \/>/);
   const pages = fs.readFileSync(path.join(launcherRoot, "src/features/ChatPages.tsx"), "utf8");
-  assert.match(pages, /<AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} \/>/);
+  assert.match(pages, /<AgentOrchestratorSurface language=\{language\} setError=\{setError\} pageNumber=\{page\} pageId=\{id\} \/>/);
   assert.match(appSource, /keepAlive\("agent-orchestrator-original", \(\) => \(\s*<AgentOrchestratorOriginalSurface openMissions=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
   assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\}/);
 });
@@ -675,7 +675,8 @@ test("Windows and macOS Chrome sign-in uses the owned account route and existing
   assert.match(preloadSource, /openPasskeyLogin:[\s\S]*?launcher:browser-passkey-login/);
   assert.match(preloadSource, /continuePasskeyLogin:[\s\S]*?launcher:browser-passkey-login-continue/);
   assert.match(electronMain, /launcher:browser-passkey-login[\s\S]*?browserHost\.openPasskeyLogin\(\)/);
-  assert.match(electronMain, /loginWithPasskey: \(\) => runtimeHost\.captureCurrentChromeLogin\(\{ safeStorage \}\)/);
+  // The same approved current-profile capture; Platform's sign-in (2026-11-18) only names its target.
+  assert.match(electronMain, /loginWithPasskey: \(_partition, options\) => runtimeHost\.captureCurrentChromeLogin\(\{ safeStorage, target: options\?\.target === "platform" \? "platform" : "chatgpt" \}\)/);
   assert.match(browserHostSource, /\["chatgpt\.com", \.\.\.AUTH_PROVIDER_HOSTS\][\s\S]*?contents\.session\.resolveProxy/);
   assert.match(browserHostSource, /await this\.waitForAuthenticated\(60_000, \(\) => \{ transfer\.assertCurrent\?\.\(\); return false; \}\)[\s\S]*?runSessionInspection\(false\)/);
 });

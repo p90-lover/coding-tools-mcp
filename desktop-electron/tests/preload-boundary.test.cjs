@@ -79,8 +79,11 @@ test("extra tunnel Platform settings send only the existing tunnel id through it
   const { launcher, invocations } = loadPreload();
   await launcher.openMcpTunnelSettings("b41a6986");
   assert.deepEqual(invocations, [{ channel: "launcher:mcp-tunnel-settings", payload: "b41a6986" }]);
+  // The panel's own button opens Platform in the Browser tab, where the person sees it (2026-11-17); the
+  // hidden window stays the background command's (docs/mcp-background-command.md).
   const panel = fs.readFileSync(path.resolve(__dirname, "../src/features/McpTunnelsPanel.tsx"), "utf8");
-  assert.match(panel, /api\.openMcpTunnelSettings\(tunnel\.id\)/);
+  assert.match(panel, /openPlatformInBrowser\(\{\s*api, accountId: tunnel\.accountId \?\? "", url: PLATFORM_TUNNELS_URL, showBrowser: onOpenBrowser,/);
+  assert.doesNotMatch(panel, /api\.openMcpTunnelSettings\(/);
   assert.match(panel, /Platform settings/);
 });
 

@@ -375,3 +375,46 @@ test("a bridge refresh steps aside once another account is shown, and never repo
   assert.ok(failure.indexOf("if (shownElsewhere())") < failure.indexOf("publishOperation("), "a switch during setup is no failure");
   assert.match(body, /browserAccounts\.activeId\(\) !== accountId/);
 });
+
+test("a switch to an account whose ChatGPT sign-in is gone runs no core setup and no runtime restart", async () => {
+  // Live 2026-11-19: account switches ran `core-setup setup --full` and restarted the daemon; each restart
+  // adopted the tunnel and started every failing account's MCP setup again.
+  const vm = require("node:vm");
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const source = main.slice(main.indexOf("async function onBrowserAccountSignedIn"), main.indexOf("function switchBrowserAccount"));
+  const run = async (signInWait) => {
+    const calls = [];
+    const host = { activeTraceId: null, signInVerificationFor: () => null };
+    let pending = true;
+    const context = vm.createContext({
+      setTimeout, IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false, bridgePlanKey: "plus",
+      browserHost: host,
+      browserAccounts: { has: () => true, partitionOf: id => `persist:${id}`, setEmail: () => false, activeId: () => "one" },
+      automaticAccountMcp: { sync: async () => {}, signInWait: async id => { calls.push(`wait ${id}`); return signInWait; } },
+      readChatGptAccountEmail: async () => null, publishBrowserAccounts() {},
+      browserAccountService: {
+        bridgeRefreshPending: () => pending,
+        takeBridgeRefresh: () => { const was = pending; pending = false; return was; },
+      },
+      browserAccountPlanKey: () => "pro",
+      waitForRuntimeHostIdle: async () => {},
+      runtimeHost: { setupCore: async () => { calls.push("core-setup --full"); } },
+      scheduleCodexBridgeAutoConnect: () => calls.push("bridge connect"),
+      publishOperation: () => calls.push("failed"),
+    });
+    const onSignedIn = vm.runInContext(`(${source})`, context);
+    const logged = [];
+    const logger = { info: (event, fields) => logged.push({ event, ...fields }), warn: (event) => logged.push({ event }) };
+    await onSignedIn("one", host, { logger, stateStore: { read: () => ({ coreSetupComplete: true, browserInteractionMode: "automatic" }), update() {} } });
+    return { calls, logged, pending };
+  };
+  const signedOut = await run("verification_required");
+  assert.deepEqual(signedOut.calls, ["wait one"], "no setup, so no daemon restart and no tunnel adoption");
+  assert.deepEqual(signedOut.logged, [{ event: "browser_accounts.bridge_refresh_skipped", accountId: "one", reason: "signed-out" }]);
+  assert.equal(signedOut.pending, true, "the refresh waits for the account's next sign-in");
+  for (const wait of [null, "platform_sign_in_required"]) {
+    const signedIn = await run(wait);
+    assert.deepEqual(signedIn.calls, ["wait one", "core-setup --full", "bridge connect"],
+      `${wait ?? "no failure"}: ChatGPT works, so the bridge takes the account's plan`);
+  }
+});
