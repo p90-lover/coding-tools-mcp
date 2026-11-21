@@ -8035,6 +8035,79 @@ test("retrying a chat whose grant is spent gets a fresh grant and continues the 
   assert.match(sent[0]?.[1] ?? "", /interrupted before it finished.*Continue the same task/s);
 });
 
+test("manual Retry starts the last answer again with earlier replies but none of its old attempts", async (t) => {
+  for (const status of ["failed", "finished"]) await t.test(status, async (child) => {
+    const route = { harness_id: "ao:claude-code", model: "cpa/test-model", permission_profile: ":ao-default" };
+    const description = "Give me a color\n\nFollow-up (2026-10-10 10:00 UTC):\nUse that color in a haiku";
+    const makeRun = (id, state, answer) => ({
+      id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+      nodes: [{ id: "one", role: "planner", parents: [], route, state, history: [],
+        ...(answer ? { receipt: { thread_id: id + "-session", answer } } : {}) }],
+    });
+    const first = makeRun("first", "finished", "The color is cobalt.");
+    const previous = makeRun("previous-try", "finished", "An older attempt at the haiku.");
+    const latest = { ...makeRun("last-try", status, "Leave this take on the haiku out."), restarts_run_id: previous.id };
+    const world = chatWorld({ runs: [first, previous, latest], tasks: [{ id: "task-1", title: "Poem", description }] });
+    const digest = "a".repeat(64), spawned = [], sent = [];
+    let selected = latest;
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: digest }),
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint === "/api/v1/ao/read") return { ok: true,
+          runs: body.run_id ? world.runs.filter(run => run.id === body.run_id) : world.runs,
+          worker_capacity: { [selected.id]: 1 } };
+        if (endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team") {
+          selected = makeRun(body.change.run_id, "pending");
+          world.runs.push(selected);
+          return { ok: true, run: selected };
+        }
+        const card = selected.nodes[0];
+        if (endpoint === "/api/v1/ao/control") {
+          assert.equal(body.action, "retry");
+          card.history.push(card.receipt);
+          card.receipt = null;
+          card.state = "pending";
+          return { ok: true, run: selected };
+        }
+        if (endpoint === "/api/v1/ao/grant") return { ok: true, run: selected, grant: { executable_sha256: digest } };
+        if (endpoint === "/api/v1/ao/external/reserve") {
+          card.state = "reserved";
+          return { ok: true, request_key: "retry-key", prompt: description };
+        }
+        if (endpoint === "/api/v1/ao/external/submitted") {
+          card.state = "running";
+          card.receipt = { thread_id: body.session_id };
+          return { ok: true, run: selected };
+        }
+        if (endpoint === "/api/v1/ao/external/terminal") {
+          card.state = "finished";
+          return { ok: true, run: selected };
+        }
+        return world.requestHeadless(endpoint, body);
+      },
+      aoHarness: {
+        spawn: async input => { spawned.push(input); return "fresh-session"; },
+        continuable: async () => true,
+        send: async (id, text) => { sent.push([id, text]); return { turnId: "continued" }; },
+        observe: async (_id, expected) => ({ status: "idle", turnId: expected, turnState: "completed", answer: "New haiku" }),
+      },
+    });
+    child.after(() => workflow.dispose());
+    const args = { workspaceId: "ws-1", runId: latest.id };
+    if (status === "failed") await workflow.call("control_run", { ...args, action: "retry" });
+    const result = await workflow.call(status === "failed" ? "start_run" : "restart_run", args);
+    assert.equal(result.status, "running");
+    for (let tries = 0; tries < 200 && !spawned.length && !sent.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(sent, [], "the existing session must not continue its last attempt");
+    assert.equal(spawned.length, 1);
+    assert.match(spawned[0].prompt, /The color is cobalt\./, "the earlier answer remains in context");
+    assert.match(spawned[0].prompt, /Use that color in a haiku$/);
+    assert.doesNotMatch(spawned[0].prompt, /older attempt|Leave this take|do not start over/i);
+    assert.deepEqual(world.edits, [], "Retry does not add or change a user message");
+  });
+});
+
 test("a turn that ends on the provider error the agent printed is saved with that error, so a refusal is not retried", async () => {
   // Seen 2026-11-16: Claude Code said "API Error: 400 Function tools with reasoning_effort are not
   // supported for gpt-6-astra in /v1/chat/completions" and exited. AO saved the turn as failed with
