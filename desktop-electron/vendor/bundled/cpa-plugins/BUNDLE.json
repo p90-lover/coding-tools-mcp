@@ -1,15 +1,16 @@
 {
   "schemaVersion": 1,
   "id": "cpa-provider-manager",
-  "version": "0.10.1",
+  "version": "0.10.3",
   "source": {
     "repository": "https://github.com/p90-lover/cpa_provider_manager",
-    "commit": "531cc8f4ebe9e1c85650d70742e8d378176df454",
+    "commit": "41e9f81cf342660c822c5f91e0283f0b04af0381",
     "license": "MIT"
   },
   "changes": [
+    "CPA v8 grouped API keys appear in the inventory; supported keys can check balance on demand using their configured proxy. The console does not expose credentials or change routing (0.10.2–0.10.3)",
     "Each account goes out through its own proxy_url (the route Coding Tools gives every CPA credential): requests, model syncs, balance reads and Test no longer use CPA's one global proxy, and a marker re-saved after a model-list change keeps its proxy_url (0.10.1)",
-    "Upstream cards keep each account's usage across CPA restarts; In CPA lists every account CPA serves, config API keys included; quota bars show what is left; Moonshot and StepFun balances are read; AI Studio shows no card until an account is signed in (0.10.1)",
+    "Upstream cards keep each account's usage across CPA restarts; quota bars show what is left; Moonshot and StepFun balance formats are supported; AI Studio shows no card until an account is signed in (0.10.1)",
     "CPA's own rotation and its rate-limit cooldowns pick accounts again: CPA Helper's quota polling, smart routing, out-of-credit key blocks, opt-in fallbacks, Codex reset credits and keeper are gone; usage and cost history, the price book and key labels stay (0.10.0)",
     "CPA's Plugins sidebar shows one entry, Provider Manager; Auto Review, Cline Pass and the usage history are pages in its console (0.10.0)",
     "CPA loads only Provider Manager: CPA Helper, CPA Auto Review, Cline Pass, CommandCode Go, CommandCode and Grok are its parts",
@@ -22,9 +23,9 @@
   },
   "platforms": {
     "win32/x64": {
-      "path": "windows/amd64/cpa-provider-manager-v0.10.1.dll",
-      "sha256": "b486aa9d9f98f0f07036ba8f46a6d6fc68a82283137b42b0a654e40788949e2a",
-      "size": 27062272
+      "path": "windows/amd64/cpa-provider-manager-v0.10.3.dll",
+      "sha256": "3e06d9948e82bda4c00e5ee30f69dd0f949a798a371ffd0d2563f9a31c655b20",
+      "size": 27088896
     }
   }
 }
