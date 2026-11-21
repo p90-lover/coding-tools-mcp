@@ -8,6 +8,8 @@ The independent project is [p90-lover/Orchestrator](https://github.com/p90-lover
 
 `createAgentOrchestratorUpstream` constructs the same legacy runtime, then returns the version-1 handler. All 9 runtime methods and all 27 required harness methods are exposed. Handler 0.1.1 also forwards `busyChatSessions` when the runtime supplies it, so the current host can discover autonomous turns without making older version-1 engines implement that capability. The handler validates the complete interface before invoking anything and binds to that one runtime. It preserves receivers, arguments, result/promise/error identities and synchronous `watch` cancellation. It does not retry a request or select another engine.
 
+The factory's optional `composeRuntime` callback is a trusted host-code dependency. Source canaries can compose a versioned native router at the same boundary the host uses; normal startup omits the callback and remains on AO. Renderer input, settings and MCP plugins cannot choose the composer.
+
 `desktop-electron/electron/orchestrator-handler.cjs` is vendored from the separate repository so the installed app has no new runtime network/package dependency. `desktop-electron/vendor/orchestrator-handler.json` pins the source commit and hash. Updating it requires verifying the source, updating both bytes and provenance, and rerunning the handler/adapter contract tests. `BACKEND_MODULES` includes the handler so backend updates carry it.
 
 No AO gitlink, database schema, existing session ID, model route, permission policy, UI or installed runtime is changed by this migration stage. The legacy adapter remains large; this boundary does not itself resolve AO writer stalls or remove fork maintenance.

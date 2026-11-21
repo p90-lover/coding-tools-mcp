@@ -33,6 +33,25 @@ test("the actual AO adapter uses the complete handler contract without starting 
   assert.ok(BACKEND_MODULES.includes("orchestrator-handler.cjs"));
 });
 
+test("the actual factory composes a trusted runtime once and still validates the handler contract", () => {
+  const roots = {
+    resourceRoot: path.resolve(__dirname, "../../aiTemp/orchestrator-contract/resources"),
+    dataRoot: path.resolve(__dirname, "../../aiTemp/orchestrator-contract/data"),
+  };
+  let composed = 0;
+  const result = Promise.resolve("native:fixture");
+  const runtime = createAgentOrchestratorUpstream({ ...roots, composeRuntime(legacy) {
+    composed += 1;
+    assert.equal(legacy.snapshot().state, "stopped");
+    return { ...legacy, harness: { ...legacy.harness, spawn: () => result } };
+  } });
+  assert.equal(composed, 1);
+  assert.strictEqual(runtime.harness.spawn(), result);
+  assert.equal(runtime.snapshot().state, "stopped");
+  assert.throws(() => createAgentOrchestratorUpstream({ ...roots, composeRuntime: () => ({}) }), /Incompatible Orchestrator runtime/);
+  assert.throws(() => createAgentOrchestratorUpstream({ ...roots, composeRuntime: "untrusted-runtime" }), /must be a function/);
+});
+
 test("all handler operations preserve exact values and invoke the same engine once", async () => {
   const runtime = { harness: {} };
   const result = {};
