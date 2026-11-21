@@ -6918,8 +6918,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // and takes its answer, and one that turn already took within STEER_REPEAT_MS is not sent again.
   const STEER_REPEAT_MS = 30_000;
   const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
-  function chatSteer(input = {}) {
-    if (input?.inputId || input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input);
+  function chatSteer(input = {}, bindNativeSteer) {
+    if (input?.inputId || input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input, bindNativeSteer);
     const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
     const earlier = steersInFlight.get(key);
     if (earlier) {
@@ -6965,7 +6965,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal, inputId } = {}) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal, inputId } = {}, bindNativeSteer) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -6982,10 +6982,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (restart || objective) throw new Error("This native route does not support restart or goal steering");
       const turnId = card.receipt.turn_id || expectedTurns.get(session);
       if (!turnId) return { ok: true, steered: false, waiting: true, starting: true, reason: "The native turn has no confirmed identity yet." };
+      const target = { taskId: task, runId: run.id, nodeId: card.id, sessionId: session, turnId };
+      if ((await bindNativeSteer?.(target))?.bound !== true) throw new Error("The native steer receiver was not saved");
       const result = await harnessService().steer(session, text, inputId, { workspaceId: id, turnId });
       if (result?.steered === false) return { ok: true, steered: false, reason: "The native agent is not taking steering for that turn" };
       if (result?.steered !== true || result.turnId !== turnId || result.inputId !== inputId) throw new Error("Native steer acknowledgement is unconfirmed");
-      const receipt = { sessionId: session, turnId, inputId };
+      const receipt = { taskId: task, sessionId: session, turnId, inputId };
       if (result.duplicate) return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id, ...receipt };
       return { ...steered(id, task, run, card, text, objective, inputId), ...receipt };
     }
@@ -8986,12 +8988,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     throw new Error("Unknown draft action");
   }
   function dispatchChatInput(args, steer = false, options = {}) {
-    const execute = input => steer ? asPerson(() => chatSteer(input)) : personChatSend(input, options);
+    const execute = (input, bindNativeSteer) => steer ? asPerson(() => chatSteer(input, bindNativeSteer)) : personChatSend(input, options);
     if (!args.inputId) return execute(args);
     if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
     return chatInputs.dispatch(args, execute, { steer, reconcile: ({ workspaceId, inputId }) => asPerson(() =>
       requestHeadless("/api/v1/ao/update", { workspace_id: workspaceId, confirm: true,
-        change: { operation: "read_chat_input_receipt", input_id: inputId } }, { localConfirmation: true })) });
+        change: { operation: "read_chat_input_receipt", input_id: inputId } }, { localConfirmation: true })),
+      reconcileSteer: async ({ workspaceId, inputId, sessionId, turnId }) => {
+        const observed = await harnessService().recover?.(sessionId, turnId, { workspaceId, inputId });
+        return observed?.steerReceipt;
+      },
+    });
   }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
   async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {

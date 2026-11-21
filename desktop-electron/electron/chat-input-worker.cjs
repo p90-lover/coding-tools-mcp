@@ -201,11 +201,31 @@ function runInputWorker() {
           return { ...viewInput(input(args.workspaceId, args.inputId)), claimed: true };
         });
       },
+      bindNativeSteer(args) {
+        return transaction(() => {
+          const current = input(args.workspaceId, args.inputId);
+          const { taskId, runId, nodeId, sessionId, turnId } = args.target ?? {};
+          if (current.state !== "dispatching" || taskId !== JSON.parse(current.destination).taskId) {
+            throw fail("INPUT_SCOPE", "The native steer must bind to this dispatch and chat");
+          }
+          if (typeof sessionId !== "string" || !/^native:[a-zA-Z0-9_-]{1,128}$/.test(sessionId)) throw fail("INPUT_SCOPE", "Choose a native session identity");
+          const receipt = encode({ stage: "native-steer-target", workspaceId: current.workspace, inputId: current.id, sessionId,
+            taskId: identity(taskId, "Task"), runId: identity(runId, "Run"), nodeId: identity(nodeId, "Node"), turnId: identity(turnId, "Turn") });
+          if (current.receipt === receipt) return { bound: true };
+          if (current.receipt !== null) throw fail("INPUT_STATE_CONFLICT", "This steer is already bound to another receiver");
+          charge(Buffer.byteLength(receipt));
+          run("UPDATE inputs SET receipt=?,updated_at=? WHERE id=?", receipt, Date.now(), current.id);
+          return { bound: true };
+        });
+      },
       defer(args) {
         return transaction(() => {
           const current = input(args.workspaceId, args.inputId);
           if (current.state !== "dispatching") throw fail("INPUT_STATE_CONFLICT", "Only a confirmed undelivered request can be deferred");
-          run("UPDATE inputs SET state='queued',updated_at=? WHERE id=?", Date.now(), current.id);
+          const binding = current.receipt && JSON.parse(current.receipt);
+          const receipt = binding?.stage === "native-steer-target" ? null : current.receipt;
+          charge(Buffer.byteLength(receipt ?? "") - Buffer.byteLength(current.receipt ?? ""));
+          run("UPDATE inputs SET state='queued',receipt=?,updated_at=? WHERE id=?", receipt, Date.now(), current.id);
           return viewInput(input(args.workspaceId, args.inputId));
         });
       },
@@ -219,6 +239,11 @@ function runInputWorker() {
           if (args.state === "accepted") {
             const proof = receipt && JSON.parse(receipt);
             if (!proof || proof.inputId !== current.id) throw fail("INPUT_INVALID", "Delivery acceptance needs this input's exact receipt");
+            const target = current.receipt && JSON.parse(current.receipt);
+            if (target?.stage === "native-steer-target" && (proof.stage !== "steer"
+              || ["taskId", "runId", "nodeId", "sessionId", "turnId", "inputId"].some(field => proof.result?.[field] !== target[field]))) {
+              throw fail("INPUT_SCOPE", "The exact native steer receiver did not acknowledge this input");
+            }
             if (proof.stage === "host-run" || proof.stage === "steer") {
               if (proof.result?.ok !== true || typeof proof.result.runId !== "string" || !proof.result.runId
                 || proof.stage === "host-run" && (typeof proof.result.taskId !== "string" || !proof.result.taskId)
@@ -277,7 +302,7 @@ function runInputWorker() {
         }
         if (!Object.hasOwn(operations, operation)) throw fail("INPUT_INVALID", "Unsupported input-store operation");
         const result = operations[operation](args ?? {});
-        if (["draftSave", "restoreDraft", "accept", "dispatch", "defer", "settle", "importDrafts"].includes(operation)) changed = true;
+        if (["draftSave", "restoreDraft", "accept", "dispatch", "bindNativeSteer", "defer", "settle", "importDrafts"].includes(operation)) changed = true;
         parentPort.postMessage({ requestId, result });
       } catch (error) {
         parentPort.postMessage({ requestId, error: { code: error.code ?? "INPUT_STORE_FAILED",

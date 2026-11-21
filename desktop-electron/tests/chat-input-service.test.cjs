@@ -80,6 +80,45 @@ test("journal bridge reconciles a lost host receipt without another dispatch", a
   assert.equal((await service.get("project", "lost-host-reply")).state, "accepted");
 });
 
+test("native steer reconciliation requires the saved receiver and an accepted read-only receipt", async t => {
+  const { service } = fixture(t);
+  const args = { workspaceId: "project", inputId: "lost-native-reply" };
+  const target = { taskId: "task", runId: "run", nodeId: "card", sessionId: "native:session", turnId: "turn" };
+  await service.call(request(args.inputId, "steer"));
+  await assert.rejects(service.dispatch(args, async (_input, bind) => {
+    assert.deepEqual(await bind(target), { bound: true });
+    await assert.rejects(bind({ ...target, turnId: "new-turn" }), { code: "INPUT_STATE_CONFLICT" });
+    await assert.rejects(bind({ ...target, taskId: "other" }), { code: "INPUT_SCOPE" });
+    throw new Error("native reply lost");
+  }, { steer: true }), /native reply lost/);
+  const bound = (await service.get(args.workspaceId, args.inputId)).receipt;
+  assert.deepEqual(bound, { ...args, ...target, stage: "native-steer-target" });
+  const never = () => assert.fail("receipt reconciliation must not dispatch or fall back");
+  const proof = { ...args, sessionId: target.sessionId, turnId: target.turnId, state: "accepted" };
+  for (const bad of [null, { ...proof, turnId: "new-turn" }, { ...proof, state: "unknown" }]) {
+    await assert.rejects(service.dispatch(args, never, { reconcile: never, reconcileSteer: async () => bad }), { code: "INPUT_DELIVERY_UNKNOWN" });
+  }
+  assert.equal((await service.get(args.workspaceId, args.inputId)).state, "unknown");
+  const recovered = await service.dispatch(args, never, { reconcile: never, reconcileSteer: async binding => {
+    assert.deepEqual(binding, bound);
+    return proof;
+  } });
+  assert.deepEqual(recovered, { ...target, inputId: args.inputId, ok: true, steered: true, status: "recovered" });
+});
+
+test("native steer deferral clears its binding only after confirmed non-delivery", async t => {
+  const { service } = fixture(t);
+  const args = { workspaceId: "project", inputId: "deferred-native" };
+  await service.call(request(args.inputId, "steer"));
+  await service.dispatch(args, async (_input, bind) => {
+    await bind({ taskId: "task", runId: "run", nodeId: "card", sessionId: "native:session", turnId: "turn" });
+    return { ok: true, steered: false };
+  }, { steer: true });
+  const saved = await service.get(args.workspaceId, args.inputId);
+  assert.equal(saved.state, "queued");
+  assert.equal(saved.receipt, null);
+});
+
 test("journal bridge concurrent identical sends share one in-flight dispatch", async t => {
   const { service } = fixture(t);
   await service.call(request("concurrent"));

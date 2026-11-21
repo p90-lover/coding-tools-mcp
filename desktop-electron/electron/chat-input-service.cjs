@@ -72,7 +72,26 @@ function createChatInputService({ file, attachmentsRoot, legacyDraftsFile = null
       default: throw fail("INPUT_INVALID", "Choose a supported chat input action");
     }
   }
-  async function dispatch(args, execute, { steer = false, reconcile = null } = {}) {
+  async function reconcileSaved(saved, { steer, reconcile, reconcileSteer }) {
+    const { workspaceId, inputId, receipt: binding } = saved;
+    let receipt;
+    if (binding?.stage === "native-steer-target") {
+      const found = await reconcileSteer?.(binding);
+      if (found?.state === "accepted" && ["workspaceId", "sessionId", "turnId", "inputId"].every(field => found[field] === binding[field])) {
+        const { taskId, runId, nodeId, sessionId, turnId } = binding;
+        receipt = { inputId, stage: "steer", result: { ok: true, steered: true, taskId, runId, nodeId, sessionId, turnId, inputId, status: "recovered" } };
+      }
+    } else if (!steer && reconcile) {
+      const found = await reconcile({ workspaceId, inputId });
+      if (found?.input_id === inputId && found.run?.workspace_id === workspaceId && found.run_id === found.run.id && found.task_id === found.run.project_id) {
+        receipt = { inputId, stage: "host-run", result: { ok: true, taskId: found.task_id, runId: found.run_id, run: found.run, status: "recovered" } };
+      }
+    }
+    if (!receipt) throw fail("INPUT_DELIVERY_UNKNOWN", "Delivery is unknown. Your input is saved; reconcile its receipt before sending it again");
+    await journal.call("settle", { workspaceId, inputId, expectedState: saved.state, state: "accepted", receipt });
+    return receipt.result;
+  }
+  async function dispatch(args, execute, { steer = false, reconcile = null, reconcileSteer = null } = {}) {
     const workspaceId = identity(args.workspaceId, "Project", 200), inputId = identity(args.inputId, "Input ID");
     const saved = await journal.call("get", { workspaceId, inputId });
     if (saved.destination.taskId && args.taskId && saved.destination.taskId !== args.taskId) throw fail("INPUT_SCOPE", "The saved input belongs to a different chat");
@@ -80,34 +99,25 @@ function createChatInputService({ file, attachmentsRoot, legacyDraftsFile = null
     if (saved.state === "accepted" || saved.state === "completed") return saved.receipt?.result;
     const key = encode([workspaceId, inputId]);
     if (dispatching.has(key)) return dispatching.get(key);
-    if (saved.state === "unknown" || saved.state === "dispatching") {
-      if (!steer && reconcile) {
-        const found = await reconcile({ workspaceId, inputId });
-        if (found?.input_id === inputId && found.run?.workspace_id === workspaceId && found.run_id === found.run.id && found.task_id === found.run.project_id) {
-          const result = { ok: true, taskId: found.task_id, runId: found.run_id, run: found.run, status: "recovered" };
-          await journal.call("settle", { workspaceId, inputId, expectedState: saved.state, state: "accepted", receipt: { inputId, stage: "host-run", result } });
+    const work = (async () => {
+      if (saved.state === "unknown" || saved.state === "dispatching") return reconcileSaved(saved, { steer, reconcile, reconcileSteer });
+      const claimed = await journal.call("dispatch", { workspaceId, inputId });
+      if (!claimed.claimed) throw fail("INPUT_STATE_CONFLICT", "This saved input can no longer be dispatched");
+      try {
+        const bindNativeSteer = steer ? target => journal.call("bindNativeSteer", { workspaceId, inputId, target }) : undefined;
+        const result = await execute({ ...saved.destination, workspaceId, inputId, ...(args.deferStart === true ? { deferStart: true } : {}) }, bindNativeSteer);
+        if (steer && result?.ok === true && result.steered === false) {
+          await journal.call("defer", { workspaceId, inputId });
           return result;
         }
-      }
-      throw fail("INPUT_DELIVERY_UNKNOWN", "Delivery is unknown. Your input is saved; reconcile its receipt before sending it again");
-    }
-    const work = (async () => {
-    const claimed = await journal.call("dispatch", { workspaceId, inputId });
-    if (!claimed.claimed) throw fail("INPUT_STATE_CONFLICT", "This saved input can no longer be dispatched");
-    try {
-      const result = await execute({ ...saved.destination, workspaceId, inputId, ...(args.deferStart === true ? { deferStart: true } : {}) });
-      if (steer && result?.ok === true && result.steered === false) {
-        await journal.call("defer", { workspaceId, inputId });
+        if (!result || result.ok === false || steer && result.steered !== true) throw fail("INPUT_DELIVERY_UNKNOWN", "Delivery did not return a confirmed receipt; your input remains saved");
+        const receipt = { inputId, stage: steer ? "steer" : "host-run", result };
+        await journal.call("settle", { workspaceId, inputId, expectedState: "dispatching", state: "accepted", receipt });
         return result;
+      } catch (error) {
+        await journal.call("settle", { workspaceId, inputId, expectedState: "dispatching", state: "unknown" }).catch(() => {});
+        throw error;
       }
-      if (!result || result.ok === false || steer && result.steered !== true) throw fail("INPUT_DELIVERY_UNKNOWN", "Delivery did not return a confirmed receipt; your input remains saved");
-      const receipt = { inputId, stage: steer ? "steer" : "host-run", result };
-      await journal.call("settle", { workspaceId, inputId, expectedState: "dispatching", state: "accepted", receipt });
-      return result;
-    } catch (error) {
-      await journal.call("settle", { workspaceId, inputId, expectedState: "dispatching", state: "unknown" }).catch(() => {});
-      throw error;
-    }
     })();
     dispatching.set(key, work);
     try { return await work; } finally { if (dispatching.get(key) === work) dispatching.delete(key); }
