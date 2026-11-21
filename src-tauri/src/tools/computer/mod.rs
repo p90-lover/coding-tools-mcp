@@ -24,6 +24,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use types::{selector_from, Step};
 pub use types::{Bounds, Control, Selector, Target};
 
+pub(super) fn fit_capture_result(result: Value, limit: usize) -> Value {
+    capture::fit_result(result, limit)
+}
+
 type Result<T> = std::result::Result<T, WorkspaceError>;
 const OVERLAY_LEASE: Duration = Duration::from_secs(3);
 const FRAME_AGE: Duration = Duration::from_secs(15);
@@ -152,6 +156,33 @@ struct Sequence {
     steps: Vec<Value>,
     next: usize,
     uncertain: bool,
+    blocked: bool,
+}
+impl Sequence {
+    fn resume_allowed(&self) -> bool {
+        self.next < self.steps.len() && !self.uncertain && !self.blocked
+    }
+
+    fn require_resumable(&self) -> Result<()> {
+        if self.uncertain {
+            return Err(error(
+                "SEQUENCE_OUTCOME_UNKNOWN",
+                "A step may have applied. Reobserve; automatic replay/resume is prohibited.",
+            ));
+        }
+        if self.blocked {
+            return Err(error(
+                "SEQUENCE_NOT_RESUMABLE",
+                "The step was not sent and its receipt cannot be replayed. Reobserve before choosing a different action.",
+            ));
+        }
+        Ok(())
+    }
+
+    fn record_failed_step(&mut self, receipt: &Value) {
+        self.uncertain = !settled(receipt);
+        self.blocked = !self.uncertain;
+    }
 }
 #[derive(Default)]
 struct State {
@@ -215,7 +246,7 @@ impl State {
                 "request_window_refresh_needed":self.receipts.len()>=MAX_RECEIPTS-8,
                 "overlay_ready":l.heartbeat.is_some_and(|t|t.elapsed()<=OVERLAY_LEASE),
                 "action":self.action,"screenshot_storage":"memory_only","engine":"codex_sky","codex_agent_invoked":false,
-                "sequence":self.sequence.as_ref().map(|s|json!({"sequence_id":s.id,"next_step":s.next,"total_steps":s.steps.len(),"outcome_unknown":s.uncertain})),
+                "sequence":self.sequence.as_ref().map(|s|json!({"sequence_id":s.id,"next_step":s.next,"total_steps":s.steps.len(),"outcome_unknown":s.uncertain,"resume_allowed":s.resume_allowed()})),
                 "last_snapshot_id":self.frame.as_ref().and_then(|f|f.value.get("snapshot_id"))})
         } else {
             json!({"state":"stopped","reason":self.last_reason,"supported":cfg!(target_os="windows"),"screenshot_storage":"memory_only","codex_invoked":false})
@@ -501,10 +532,10 @@ fn checked_lease(ctx: &ToolContext, args: &Value, input: bool) -> Result<Lease> 
     l.validate(ctx.workspace.root(), id, Instant::now(), true)?;
     Ok(l.clone())
 }
-fn record_frame(l: &Lease) -> Result<Value> {
+fn record_frame(l: &Lease, include_text: bool) -> Result<Value> {
     check_same_lease(l, false)?;
     let bounds = native::validate_target(&l.target, false)?;
-    let mut frame = match capture::codex_frame(l, bounds, 2000) {
+    let mut frame = match capture::codex_frame(l, bounds, 2000, include_text) {
         // Codex's engine leaves its own windows (ChatGPT and Codex) out of what it controls. They
         // can still be seen: the window's own pixels from the in-memory GDI capture the local
         // preview uses. Input to them stays refused (CODEX_WINDOW_UNAVAILABLE), so this shows,
@@ -838,7 +869,7 @@ fn execute_codex_method(l: &Lease, args: &Value, method: &str) -> Result<Value> 
 }
 
 fn snapshot_result(l: &Lease, include_ui: bool) -> Result<Value> {
-    let mut result = record_frame(l)?;
+    let mut result = record_frame(l, include_ui)?;
     if include_ui {
         let (controls, truncated) = native::inspect(&l.target)?;
         check_same_lease(l, false)?;
@@ -849,7 +880,7 @@ fn snapshot_result(l: &Lease, include_ui: bool) -> Result<Value> {
     Ok(result)
 }
 fn with_post_frame(l: &Lease, summary: Value) -> Value {
-    match record_frame(l) {
+    match record_frame(l, false) {
         Ok(mut frame) => {
             frame["ok"] = json!(summary.get("ok").and_then(Value::as_bool).unwrap_or(true));
             frame["operation"] = summary;
@@ -873,12 +904,7 @@ fn sequence(l: &Lease, args: &Value) -> Result<Value> {
                 "Sequence id already has different steps",
             ));
         }
-        if old.uncertain {
-            return Err(error(
-                "SEQUENCE_OUTCOME_UNKNOWN",
-                "A step may have applied. Reobserve; automatic replay/resume is prohibited.",
-            ));
-        }
+        old.require_resumable()?;
         let from=args.get("resume_from_step").and_then(Value::as_u64).ok_or_else(||error("EXPLICIT_RESUME_REQUIRED","Supply resume_from_step equal to the reported next_step; completed steps will not replay"))?;
         if from as usize != old.next {
             return Err(error(
@@ -918,6 +944,7 @@ fn sequence(l: &Lease, args: &Value) -> Result<Value> {
             steps: steps.clone(),
             next: 0,
             uncertain: false,
+            blocked: false,
         }
     };
     {
@@ -950,12 +977,13 @@ fn sequence(l: &Lease, args: &Value) -> Result<Value> {
         match result {
             Ok(value) => {
                 let failed = value.get("ok").and_then(Value::as_bool) == Some(false);
-                summaries.push(json!({"step":plan.next,"action":step.name(),"ok":!failed}));
                 if failed {
-                    // A step whose input never left stops the sequence without making it uncertain.
-                    plan.uncertain = !settled(&value);
+                    plan.record_failed_step(&value);
+                    summaries.push(json!({"step":plan.next,"action":step.name(),"ok":false,
+                        "outcome":value["outcome"],"code":value["code"],"retry_allowed":false}));
                     break;
                 }
+                summaries.push(json!({"step":plan.next,"action":step.name(),"ok":true}));
                 plan.next += 1;
             }
             Err(e) => {
@@ -979,7 +1007,7 @@ fn sequence(l: &Lease, args: &Value) -> Result<Value> {
             s.sequence = Some(plan.clone());
         }
     }
-    let summary = json!({"ok":done,"sequence_id":id,"completed":done,"next_step":plan.next,"total_steps":plan.steps.len(),"outcome_unknown":plan.uncertain,"resume_allowed":!done&&!plan.uncertain,"fallbackRecommended":!done,"steps":summaries,"replayed":false});
+    let summary = json!({"ok":done,"sequence_id":id,"completed":done,"next_step":plan.next,"total_steps":plan.steps.len(),"outcome_unknown":plan.uncertain,"resume_allowed":plan.resume_allowed(),"fallbackRecommended":!done,"steps":summaries,"replayed":false});
     Ok(with_post_frame(l, summary))
 }
 pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
@@ -1129,6 +1157,29 @@ pub fn call(ctx: &ToolContext, name: &str, args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computer_sequence_does_not_offer_resume_for_a_terminal_receipt() {
+        let mut plan = Sequence {
+            id: "sequence".into(),
+            steps: vec![json!({"action":"type","text":"fixture"})],
+            next: 0,
+            uncertain: false,
+            blocked: false,
+        };
+        assert!(plan.resume_allowed());
+        for (outcome, code) in [
+            (NOT_SENT, "SEQUENCE_NOT_RESUMABLE"),
+            ("unknown", "SEQUENCE_OUTCOME_UNKNOWN"),
+        ] {
+            plan.record_failed_step(&json!({"ok":false,"outcome":outcome}));
+            assert!(!plan.resume_allowed());
+            assert_eq!(plan.uncertain, outcome != NOT_SENT);
+            assert_eq!(plan.require_resumable().unwrap_err().code(), code);
+            assert_eq!(plan.next, 0);
+        }
+    }
+
     #[test]
     fn computer_scope_heartbeat_pause_expiry_and_stop() {
         let root = PathBuf::from("workspace");
