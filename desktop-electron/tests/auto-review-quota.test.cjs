@@ -83,6 +83,28 @@ test("a changed pending command with the same ID does not receive the old Guardi
   } finally { state.workflow.dispose(); }
 });
 
+test("enabling quota reviews while Guardian is undecided rechecks the pending request", { timeout: 5_000 }, async (t) => {
+  for (const action of ["ask", "deny"]) await t.test(action, async () => {
+    const started = Promise.withResolvers(), guardian = Promise.withResolvers();
+    const state = fixture(undefined, { nativeGuardianReview: async () => {
+      started.resolve();
+      return guardian.promise;
+    } });
+    try {
+      await state.workflow.call("chat_model_judges", { enabled: true });
+      await state.observe();
+      await started.promise;
+      assert.deepEqual(state.calls, [], "turning the judge on does not enable paid reviews");
+      await state.workflow.call("chat_model_judges", { meteredReviews: true });
+      guardian.resolve({ action, reason: "fixture Guardian answer", actor: "guardian" });
+      for (let tick = 0; tick < 3 && !state.resolved.length; tick++) await state.observe();
+      assert.deepEqual(state.resolved, [["permission-1", action === "deny" ? "no" : "yes"]]);
+      assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, action === "deny" ? 0 : 1,
+        "review the undecided request after consent, but never replace a Guardian denial");
+    } finally { guardian.resolve(null); state.workflow.dispose(); }
+  });
+});
+
 test("unsupported shell context stays manual and local routine commands require no model", async () => {
   let reviews = 0;
   const state = fixture(undefined, { approvalDetails: { cwd: undefined }, nativeGuardianReview: async () => { reviews++; } });
