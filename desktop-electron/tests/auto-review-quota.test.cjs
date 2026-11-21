@@ -8,15 +8,17 @@ const path = require("node:path");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
 /** A Claude Code chat; `reviewer` "auto_review" is Approve for me, "user" is Ask for approval. */
-function fixture(preferences, { reviewer = "auto_review" } = {}) {
+function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, approvalDetails = {} } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer };
   const node = { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session", request_key: "key" } };
   const run = { id: "run", workspace_id: "ws", project_id: "task", revision: 1, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [node] };
   const calls = [], resolved = [];
   let command = "python tools/migrate.py --apply";
+  const cwd = path.resolve(__dirname, "..");
   const workflow = createAgentOrchestratorWorkflow({
     chatPreferencesFile: preferences,
+    nativeGuardianReview,
     findCodexExecutable: () => process.execPath,
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
@@ -25,12 +27,14 @@ function fixture(preferences, { reviewer = "auto_review" } = {}) {
         ? { data: [{ id: "codex-auto-review" }, { id: "test-model" }] }
         : { choices: [{ message: { content: JSON.stringify({ outcome: "allow", rationale: "fixture verdict" }) } }] } };
     },
-    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [run] } : { ok: true },
+    requestHeadless: async (endpoint, body) => endpoint.endsWith("/read") ? { ok: true, runs: [run] }
+      : body?.tool === "workflow_list" ? { ok: true, operation: { state: "completed", result: { ok: true, task: { description: "I authorize the migration in this test workspace" } } } }
+        : { ok: true },
     aoHarness: {
-      sessionWorkspace: async () => ({ projectFolder: path.resolve(__dirname, "..") }),
+      sessionWorkspace: async () => ({ projectFolder: cwd }),
       observe: async () => ({ turnId: "turn", turnState: "running", timeline: [], approvals: [{
-        approval_id: command, source: "ao", kind: "command", tool: "Bash", command,
-        decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }],
+        approval_id: "permission-1", source: "ao", kind: "command", tool: "Bash", turn_id: "turn", command, cwd,
+        decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }], ...approvalDetails,
       }] }),
       resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
     },
@@ -46,43 +50,77 @@ function fixture(preferences, { reviewer = "auto_review" } = {}) {
   };
 }
 
-// The user's call, 2026-11-17: with Allow quota-based reviews off, Approve for me and Let the model
-// judge did nothing ("auto review isn't working ... and let model judge not working too"). Choosing
-// either is choosing a model review, so it runs; the switch covers only reviews nobody chose.
-test("Approve for me reviews run with quota-based reviews off; routine rules still need no model", async () => {
-  const state = fixture();
+test("Approve for me routes the exact pending shell action to Guardian, without a CPA call", async () => {
+  const seen = [];
+  const state = fixture(undefined, { nativeGuardianReview: async (input) => {
+    seen.push(input);
+    return { action: "allow", reason: "fixture native verdict", actor: "guardian" };
+  } });
   try {
     assert.equal((await state.workflow.call("chat_model_judges")).meteredReviews, false);
-    const verdict = await state.screen();
-    assert.equal(verdict.action, "allow", "the chat's own Approve for me reviews its screen actions");
-    assert.ok(state.calls.some(url => url.endsWith("/chat/completions")));
+    assert.equal((await state.screen()).action, "ask", "the app's screen actions are not native shell approvals");
     await state.observe();
-    assert.deepEqual(state.resolved, [["python tools/migrate.py --apply", "yes"]], "a command the reviewer allowed is answered for the person");
-    assert.equal(state.route.approvals_reviewer, "auto_review", "the saved native reviewer selection is not rewritten");
+    assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].approval.command, "python tools/migrate.py --apply");
+    assert.equal(seen[0].approval.cwd, seen[0].folder);
+    assert.match(seen[0].task, /I authorize/);
+    assert.deepEqual(state.calls, [], "neither catalog nor CPA reviews are sent");
+    assert.equal(state.route.approvals_reviewer, "auto_review");
+  } finally { state.workflow.dispose(); }
+});
+
+test("a changed pending command with the same ID does not receive the old Guardian decision", async () => {
+  const state = fixture(undefined, { nativeGuardianReview: async () => {
+    state.command("python tools/migrate.py --different");
+    return { action: "allow", reason: "fixture old verdict", actor: "guardian" };
+  } });
+  try {
+    const pending = await state.observe();
+    assert.equal(pending.length, 1);
+    assert.deepEqual(state.resolved, []);
+    assert.deepEqual(state.calls, []);
+  } finally { state.workflow.dispose(); }
+});
+
+test("unsupported shell context stays manual and local routine commands require no model", async () => {
+  let reviews = 0;
+  const state = fixture(undefined, { approvalDetails: { cwd: undefined }, nativeGuardianReview: async () => { reviews++; } });
+  try {
+    assert.equal((await state.observe()).length, 1);
+    assert.deepEqual(state.resolved, []);
+    assert.equal(reviews, 0);
+    assert.deepEqual(state.calls, []);
   } finally { state.workflow.dispose(); }
   const routine = fixture();
   try {
     routine.command("npm test");
     await routine.observe();
-    assert.deepEqual(routine.resolved, [["npm test", "yes"]]);
-    assert.deepEqual(routine.calls, [], "local rules need no model");
+    assert.deepEqual(routine.resolved, [["permission-1", "yes"]]);
+    assert.deepEqual(routine.calls, []);
   } finally { routine.workflow.dispose(); }
 });
 
-for (const judge of [false, true]) test(`a chat not on Approve for me: its screen reviews ${judge ? "run with Let the model judge on" : "spend no quota while both switches are off"}`, async () => {
+for (const judge of [false, true]) test(`screen reviews cannot spend CPA quota with consent off and model judge ${judge ? "on" : "off"}`, async () => {
   const state = fixture(undefined, { reviewer: "user" });
   try {
     await state.workflow.call("chat_model_judges", { enabled: judge });
     const verdict = await state.screen();
-    if (judge) {
-      assert.equal(verdict.action, "allow", "Let the model judge is the person's choice of a model review");
-      assert.ok(state.calls.some(url => url.endsWith("/chat/completions")));
-      return;
-    }
     assert.equal(verdict.action, "ask");
     assert.equal(verdict.quotaBlocked, true);
     assert.match(verdict.reason, /CPA reviews use account quota/);
-    assert.deepEqual(state.calls, [], "neither catalog nor review requests are sent");
+    assert.deepEqual(state.calls, []);
+  } finally { state.workflow.dispose(); }
+});
+
+test("a harness-required human decision is not automated even with the paid reviewer enabled", async () => {
+  const state = fixture(undefined, { approvalDetails: { guardianRequiresHuman: true }, nativeGuardianReview: async () => assert.fail("human-only") });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    const pending = await state.observe();
+    assert.equal(pending.length, 1);
+    assert.deepEqual(state.resolved, []);
+    assert.deepEqual(state.calls, []);
   } finally { state.workflow.dispose(); }
 });
 

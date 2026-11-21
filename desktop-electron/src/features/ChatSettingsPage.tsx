@@ -432,11 +432,11 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
               </Row>
-              <Row label="Allow quota-based reviews" description="Off by default. Reviews through CPA use account quota, even with Codex CLI login. Approve for me and Let the model judge are your choice of a review, so they run either way. This switch covers the rest: screen actions in chats on another permission mode, which wait for you while it is off. Native Codex Auto-review is separate.">
+              <Row label="Allow quota-based reviews" description="Off by default. Turn on to let CPA review approvals using account quota. While off, eligible shell requests can use native Codex Guardian; anything it cannot review waits for you. Approve for me and Let the model judge do not turn CPA reviews on.">
                 <Toggle label="Allow quota-based reviews" checked={chat?.meteredReviews === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { meteredReviews: next })} />
               </Row>
-              <Row label="Let the model judge" description="Requests and goal rounds that would wait for you are judged by the model instead. Its reviews go through CPA and use account quota.">
+              <Row label="Let the model judge" description="Let a reviewer decide eligible requests and goal rounds. This does not enable paid approval reviews or override requests that need you.">
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
               </Row>

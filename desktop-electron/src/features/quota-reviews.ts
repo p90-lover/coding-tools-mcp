@@ -1,12 +1,6 @@
 import { getCodingToolsClient } from "../api/client";
 
-/**
- * "Allow quota-based reviews" (chat_model_judges' meteredReviews), kept by the app in main. While it
- * is off, this app's reviews stop before any model call (quotaReviewBlocked in
- * agent-orchestrator-workflow): "Approve for me" can't answer for you and every request waits. The
- * user saw that as Auto Review turning itself off, with the permission chip still saying "Active
- * now". Settings > Chat publishes the switch here, so an open chat's chip follows it at once.
- */
+// The app stores CPA review consent separately from the chat's chosen permission mode.
 const CHANGED = "coding-tools:quota-reviews-changed";
 let known: boolean | null = null;
 
