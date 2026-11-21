@@ -397,6 +397,10 @@ test("Autobot is a chat-only permission row with a transforming mark and exact s
   assert.match(text(rows.at(-1)), /Autobot Roll Out/);
   assert.equal(rows.at(-1).props["aria-checked"], true);
   assert.equal(rows[0].props["aria-checked"], false);
+  const chipLabel = rendered => elements(rendered, item => item.type === "button" && item.props["aria-controls"] === "ao-permissions-panel")[0].props["aria-label"];
+  assert.equal(chipLabel(tree), "Permissions: Autobot Roll Out");
+  const disabledTree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false, false, null, { ...state, enabled: false }, null]);
+  assert.equal(chipLabel(disabledTree), "Permissions: Ask for approval");
   const svg = plugin.render("AutobotMark", { animate: true });
   assert.match(svg.props.className, /is-transforming/);
   assert.deepEqual(elements(svg, item => item.type === "g").map(item => item.props.className), ["cx-autobot-car", "cx-autobot-robot"]);

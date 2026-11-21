@@ -12439,8 +12439,11 @@ function workflowInternals(options) {
   const fixture = new Module(filename, module);
   fixture.filename = filename;
   fixture.paths = module.paths;
-  const source = fs.readFileSync(filename, "utf8").replace("return Object.freeze({ call, restoreSchedules,",
-    "return Object.freeze({ takeWarm, chatPrewarm, dispatchExternal, observeExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, call, restoreSchedules,");
+  const original = fs.readFileSync(filename, "utf8");
+  const exportStart = "return Object.freeze({ call,";
+  assert.equal(original.split(exportStart).length, 2, "the fixture must find exactly one workflow return");
+  const source = original.replace(exportStart,
+    `${exportStart} takeWarm, chatPrewarm, dispatchExternal, observeExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun,`);
   fixture._compile(source, filename);
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }

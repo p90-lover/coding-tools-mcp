@@ -568,7 +568,7 @@ test("reads of a running card reuse a recent live answer from its chat host inst
   }
 });
 
-test("every operation the renderer calls is one the AO module accepts (the chat's commands included)", () => {
+test("every operation the renderer calls is accepted by the AO module or the desktop gate", async () => {
   // Every way the renderer reaches the module counts: literal calls, and each helper that takes the
   // operation first and passes it on, in its own file or a file that imports it. Only moduleCall was
   // read before, so the subagent panel's own helper (paneCall "subagent_transcript") was never
@@ -604,8 +604,44 @@ test("every operation the renderer calls is one the AO module accepts (the chat'
   for (const operation of ["subagent_transcript", "chat_context", "cpa_usage", "chat_auto_retry"]) assert.ok(called.has(operation), `${operation} is called`);
   assert.equal(handler.isReadOnly("subagent_transcript"), true, "a read: it needs no focused window");
   for (const operation of ["chat_send", "chat_goal", "chat_loop", "chat_queue", "compact_chat", "chat_diff", "chat_delete_message", "runs"]) assert.ok(called.has(operation), `${operation} is called`);
-  const unknown = [...called].filter(operation => !handler.operations.includes(operation));
+  const autobot = "chat_autobot_permission";
+  assert.ok(called.has(autobot), "the renderer's native permission operation is checked");
+  assert.ok(!handler.operations.includes(autobot), "Autobot configuration is not exposed through the shared host");
+  const unknown = [...called].filter(operation => operation !== autobot && !handler.operations.includes(operation));
   assert.deepEqual(unknown, [], "an operation missing here fails in the app as \"Unknown Agent Orchestrator operation\"");
+
+  const main = fs.readFileSync(path.resolve(__dirname, "../electron/main.cjs"), "utf8");
+  const start = main.indexOf('  handle("coding-tools:apps:call",');
+  const end = main.indexOf("\n  handle(", start + 1);
+  assert.ok(start >= 0 && end > start, "the desktop apps IPC handler is registered");
+  const focused = {};
+  const args = { workspaceId: "workspace", taskId: "chat", selected: ["location"] };
+  const nativeResult = { enabled: true };
+  const steps = [];
+  let appCall;
+  require("node:vm").runInNewContext(main.slice(start, end), {
+    handle(channel, invoke) { assert.equal(channel, "coding-tools:apps:call"); appCall = invoke; },
+    async assertFocusedMainWindowSettled(event, needsFocus) {
+      assert.equal(needsFocus, true);
+      if (event !== focused) throw new Error("Desktop focus required");
+      steps.push("focus");
+    },
+    activeAoWorkflow: {
+      async configureChatAutobot(received, isCurrent) {
+        assert.equal(received, args);
+        assert.equal(isCurrent(), true);
+        steps.push("configure");
+        return nativeResult;
+      },
+    },
+  });
+  const input = { moduleId: "agent-orchestrator", operation: autobot, arguments: args };
+  await assert.rejects(appCall({}, input), /Desktop focus required/);
+  assert.deepEqual(steps, []);
+  const reply = await appCall(focused, input);
+  assert.equal(reply.ok, true);
+  assert.equal(reply.result, nativeResult);
+  assert.deepEqual(steps, ["focus", "configure"]);
   assert.equal(handler.isReadOnly("chat_diff"), true);
   assert.equal(handler.isReadOnly("chat_goal"), false);
   assert.equal(handler.isReadOnly("chat_loop"), false);
