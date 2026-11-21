@@ -1557,7 +1557,8 @@ export type CpaRefusal = { streak: number; status: number | null; statuses?: Rec
 /** What an HTTP status from CPA means to the person waiting on the turn. */
 export function cpaStatusWord(status: number | null): string {
   if (status === 429) return "rate limited (429)";
-  if (status === 401 || status === 403) return `sign-in refused (${status})`;
+  if (status === 401) return "sign-in refused (401)";
+  if (status === 403) return "access denied (403)";
   if (status === 402) return "out of credit (402)";
   if (status !== null && status >= 500) return `model service error (${status})`;
   return status ? `HTTP ${status}` : "failed";

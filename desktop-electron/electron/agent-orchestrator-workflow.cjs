@@ -5661,7 +5661,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (retryCancelled(mission.workspace_id, mission.id)) return { detail: AUTO_RETRY_CANCELLED };
     const error = String(node.receipt?.error || "");
     if (QUOTA_EXHAUSTED.test(error)) return { detail: `The model's quota is used up${quotaResets(error)}. Choose another model, or retry once it resets.` };
-    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the account pool or provider sign-in, then retry manually." };
+    if (/\bHTTP 403\b/i.test(error)) return { detail: "Access was denied (HTTP 403). Check that the configured provider account can use this model, or choose another model." };
+    if (POOL_EXHAUSTED.test(error)) return { detail: "This failure needs you. Check the provider sign-in and whether the configured account can access this model, then retry manually. You can also choose another model." };
     if (MODEL_RETIRED.test(error)) return { detail: "CPA no longer serves this model. Choose another model and send again." };
     if (REQUEST_REFUSED.test(error)) return { detail: `The provider refused this request (${refusedReason(error)}). Change that, or choose another model, since retrying won't fix it.` };
     if (ROUTE_REFUSED.test(error)) return { detail: "This chat can't start on its agent as it is set up. Change the model or permissions and send a follow-up, since retrying won't fix it." };
