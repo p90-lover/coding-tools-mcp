@@ -125,7 +125,16 @@ async function main() {
   const goOutput = (arguments_) => spawnSync(goExecutable, arguments_, { encoding: "utf8", windowsHide: true, env: { ...process.env, GOTOOLCHAIN: "local" } }).stdout;
   assertSafeGo(goOutput(["env", "GOVERSION"]), `The Go toolchain (${goExecutable})`);
   const daemonPath = path.join(outputRoot, process.platform === "win32" ? "ao-daemon.exe" : "ao-daemon");
-  run(goExecutable, ["build", "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "./cmd/ao"], path.join(sourceRoot, "backend"), {
+  const codexSource = path.join("backend", "internal", "adapters", "agent", "codex", "codex.go");
+  const codexPatch = path.join(projectRoot, "desktop-electron", "patches", "agent-orchestrator", "managed-codex.patch");
+  const codexOverlay = path.join(stageRoot, codexSource);
+  fs.mkdirSync(path.dirname(codexOverlay), { recursive: true });
+  fs.writeFileSync(codexOverlay, fs.readFileSync(path.join(sourceRoot, codexSource), "utf8").replace(/\r\n/g, "\n"));
+  run("git", ["apply", "--check", "--directory=" + stageRelative, codexPatch], projectRoot);
+  run("git", ["apply", "--directory=" + stageRelative, codexPatch], projectRoot);
+  const overlayFile = path.join(stageRoot, "daemon-overlay.json");
+  fs.writeFileSync(overlayFile, JSON.stringify({ Replace: { [path.join(sourceRoot, codexSource)]: codexOverlay } }));
+  run(goExecutable, ["build", `-overlay=${overlayFile}`, "-trimpath", "-ldflags", "-X=github.com/aoagents/agent-orchestrator/backend/internal/config.CodingToolsLocalOnly=1", "-o", daemonPath, "./cmd/ao"], path.join(sourceRoot, "backend"), {
     GOWORK: "off", GOTOOLCHAIN: "local",
   });
   assertSafeGo(goOutput(["version", daemonPath]), "The built AO daemon");

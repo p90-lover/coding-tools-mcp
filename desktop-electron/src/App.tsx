@@ -1560,7 +1560,9 @@ function BrowserSurface({
               : copy.passkeySignIn}
           </button>
         ) : null}
-        {visible ? <button className="button-secondary" onClick={() => void toggle()} type="button">{copy.hideBrowser}</button> : null}
+        <button className="button-secondary" disabled={!browser} onClick={() => void toggle()} type="button">
+          {visible ? copy.hideBrowser : copy.showBrowser}
+        </button>
       </header>
       {/* Tabs as in any browser: each of the person's own closes, and + opens another on this account.
           Codex tasks' tabs sit beside them. */}

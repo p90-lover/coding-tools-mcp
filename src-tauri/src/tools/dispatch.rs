@@ -181,6 +181,13 @@ fn call_current(ctx: &ToolContext, name: &str, args: &Value, enforce_profile: bo
     }
     match pending_read {
         Some(page) => page.fit_result(result, MAX_SERIALIZED_TOOL_RESULT_BYTES),
+        None if matches!(
+            name,
+            "computer_snapshot" | "computer_action" | "computer_sequence"
+        ) =>
+        {
+            crate::tools::computer::fit_capture_result(result, MAX_SERIALIZED_TOOL_RESULT_BYTES)
+        }
         None => result,
     }
 }

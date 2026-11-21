@@ -336,9 +336,37 @@ test("managed CLI auth suppresses the external browser without changing other ha
   assert.deepEqual(inherited, { PATH: "untouched" });
   assert.equal(shimProxyEnvironment(proxy).SSH_CLIENT, undefined, "the AO daemon and other harnesses must not inherit fake SSH");
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
-  assert.match(main, /env: manualAuthEnvironment\(env, process\.env, \{ home: await antigravityCli\.authHome\(args\.accountId\) \}\)/);
+  assert.match(main, /antigravityCli\.terminalLaunch\(await antigravityProxyEnvironment\(\), args\.accountId\)/);
+  assert.match(main, /openTerminal\(\{\s*\.\.\.launch,\s*workspaceId: args\.workspaceId \|\| undefined,/);
   assert.match(main, /CODING_TOOLS_AGY_AUTH_HOME: await antigravityCli\.authHome\(\)/);
   assert.doesNotMatch(main, /USERPROFILE: antigravityCli/, "the AO daemon must not inherit a rewritten USERPROFILE");
+});
+
+test("Windows Open agy keeps the isolated profile out of AO's proxy-only terminal request", async () => {
+  const toolsRoot = path.join(temp(), "tools with spaces");
+  const install = path.join(toolsRoot, "antigravity-cli", "1.0.0");
+  fs.mkdirSync(install, { recursive: true });
+  fs.writeFileSync(path.join(install, "CODING_TOOLS_TOOL.json"), JSON.stringify({ version: "1.0.0", executable: "agy.exe" }));
+  fs.writeFileSync(path.join(install, "agy.exe"), "fixture");
+  const cli = createAntigravityCli({ toolsRoot, platform: "win32", arch: "x64" });
+  const proxy = Object.fromEntries(["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+    .map(key => [key, "http://127.0.0.1:7890"]));
+  Object.assign(proxy, { NO_PROXY: "localhost", no_proxy: "localhost", NODE_USE_ENV_PROXY: "1" });
+  await assert.rejects(() => cli.terminalLaunch({}), /global proxy/i);
+  const first = await cli.terminalLaunch(proxy);
+  const other = await cli.terminalLaunch(proxy, "second@example.test");
+  assert.deepEqual(first.env, { ...proxy, SSH_CLIENT: process.env.SSH_CLIENT || "coding-tools" });
+  assert.deepEqual(other.env, first.env);
+  assert.match(first.executable, /\.cmd$/i);
+  assert.notEqual(first.executable, other.executable);
+  const launcher = fs.readFileSync(first.executable, "utf8");
+  assert.match(launcher, /if not defined HTTPS_PROXY[\s\S]*exit \/b 1/);
+  assert.ok(launcher.includes(`set "USERPROFILE=${path.win32.resolve(isolatedAuthHome(toolsRoot))}"`));
+  assert.ok(launcher.includes('set "AGY_ACP_FORCE_FILE_STORAGE=1"'));
+  assert.ok(launcher.includes(`"${path.join(install, "agy.exe")}"`));
+  assert.ok(!launcher.includes(proxy.HTTPS_PROXY), "proxy credentials never land in the launcher file");
+  assert.ok(fs.readFileSync(other.executable, "utf8").includes(`set "USERPROFILE=${path.win32.resolve(isolatedAuthHome(toolsRoot, "second@example.test"))}"`));
+  assert.equal((await cli.terminalLaunch(proxy, "..")).executable, first.executable, "a dot segment cannot select the parent profile");
 });
 
 test("the agy shim applies only the Coding Tools proxy and refuses to run without it", () => {
