@@ -623,11 +623,11 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     pageFailureState = state;
     return new Error(message);
   }
-  function findManagedAppCard(name) {
-    if (!personalPluginsLoaded()) return null;
+  function findExactPluginCard(name, scope) {
     const wanted = canonicalAppIdentity(name);
     const openLabel = canonicalAppIdentity('open ' + name);
     const matches = pluginCardLinks().filter(link => {
+      if (scope && !scope.contains(link)) return false;
       if (canonicalAppIdentity(link.getAttribute('aria-label')) === openLabel) return true;
       // Current cards use an empty overlay link labelled by a sibling title.
       const labelledTitle = (link.getAttribute('aria-labelledby') || '').trim().split(/\\s+/)
@@ -637,9 +637,32 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       const heading = card.querySelector('h1,h2,h3,h4');
       return heading && canonicalAppIdentity(heading.innerText || heading.textContent) === wanted;
     });
-    const identities = new Map(matches.map(link => [new URL(link.href, location.href).pathname, link]));
+    const identities = new Map(matches.map(link => {
+      const url = new URL(link.href, location.href);
+      return [url.origin + url.pathname, link];
+    }));
     if (identities.size > 1) throw new Error('More than one connector has the configured name.');
     return identities.values().next().value || null;
+  }
+  function findManagedAppCard(name) {
+    return personalPluginsLoaded() ? findExactPluginCard(name) : null;
+  }
+  function workspacePluginsTab(workspaceName) {
+    if (!workspaceName || !['/plugins', '/plugins/'].includes(location.pathname)) return null;
+    const tabs = [...document.querySelectorAll('main [role="tab"]')].filter(tab => visible(tab)
+      && textMatches(tab, [workspaceName], true)
+      && !textMatches(tab, [...PERSONAL_VIEW_LABELS, 'Public', '公開', '公开'], true));
+    return tabs.length === 1 ? tabs[0] : null;
+  }
+  function findWorkspaceAppCard(name, workspaceName) {
+    const tab = workspacePluginsTab(workspaceName);
+    if (tab?.getAttribute('aria-selected') !== 'true' || directoryLoading()) return null;
+    const selected = [...document.querySelectorAll('main [role="tab"][aria-selected="true"]')].filter(visible);
+    if (selected.length !== 1 || selected[0] !== tab) return null;
+    const main = document.querySelector('main');
+    const panelId = tab.getAttribute('aria-controls');
+    const panel = panelId ? document.getElementById(panelId) : main;
+    return panel && main?.contains(panel) && visible(panel) ? findExactPluginCard(name, panel) : null;
   }
   async function selectWorkspace(name) {
     if (typeof name !== 'string' || !name.trim() || name.length > 200) throw new Error('ChatGPT did not expose the target workspace name.');
@@ -691,32 +714,74 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     if (visibleDialogs().length && !await closeOpenDialog()) throw unverified();
     return identity;
   }
-  async function createTunnelConnector(settings, phase = 'legacy') {
+  async function createTunnelConnector(settings, phase = 'legacy', workspaceName = null) {
     if (/just a moment|verify you are human|checking your browser/i.test(document.title + ' ' + (document.body?.innerText || '').slice(0, 300))) {
       throw new Error('Complete Cloudflare verification in Coding Tools Browser, then try again.');
     }
-    if (location.origin !== 'https://chatgpt.com' || !isPersonalPluginsPage()
+    if (location.origin !== 'https://chatgpt.com'
+      || (!isPersonalPluginsPage() && !(workspaceName && workspacePluginsTab(workspaceName)))
       || !settings || typeof settings.name !== 'string' || !settings.name.trim()
       || !/^tunnel_[a-f0-9]{32}$/.test(settings.tunnelId)
       || settings.authentication !== 'none') {
       throw new Error('The current ChatGPT connector settings are invalid.');
     }
+    const prepareCard = card => {
+      if (phase === 'legacy') return { created: false, href: card.getAttribute('href') };
+      const href = new URL(card.getAttribute('href'), location.origin);
+      if (href.origin !== location.origin || href.username || href.password || !isPluginDetailUrl(href.href)) {
+        throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
+      }
+      // A card is only a navigation candidate. The host still verifies fresh saved tunnel fields.
+      return { prepared: true, existing: true, href: href.pathname + href.search };
+    };
+    const findWorkspace = () => workspaceName && findWorkspaceAppCard(settings.name, workspaceName);
+    const lookupWorkspace = async () => {
+      const tab = workspaceName && workspacePluginsTab(workspaceName);
+      if (!tab) return null;
+      let previous;
+      if (tab.getAttribute('aria-selected') !== 'true') {
+        if (phase !== 'existing') {
+          const selected = [...document.querySelectorAll('main [role="tab"][aria-selected="true"]')].filter(visible);
+          if (selected.length !== 1) return null;
+          previous = selected[0];
+        }
+        tab.click();
+      }
+      await clearPluginSearch();
+      const card = await waitFor(findWorkspace, 5000);
+      if (!card && previous) {
+        // A failed read of the workspace list must never leave Create in that list.
+        previous.click();
+        if (!await waitFor(() => previous.isConnected && previous.getAttribute('aria-selected') === 'true'
+          && !directoryLoading(), 5000)) {
+          throw new Error('The Personal plugins tab did not finish loading.');
+        }
+      }
+      return card;
+    };
     const started = Date.now();
     pageFailureState = null;
     let personal = null, sawEmpty = false;
     for (let tries = 0; tries < 2 && !personal; tries++) {
       const found = await waitFor(() => {
+        const card = findWorkspace();
+        if (card) return { card };
         const tabs = [...document.querySelectorAll('main [role="tab"]')]
           .filter(tab => visible(tab) && textMatches(tab, PERSONAL_VIEW_LABELS, true));
         if (tabs.length === 1) return tabs[0];
         return tabs.length === 0 && personalListEmpty() ? 'empty' : null;
       }, 10_000);
       if (!found) break;
+      if (found.card) return prepareCard(found.card);
       // An empty list must still read empty a moment later; a Personal tab that was only late wins.
       personal = found !== 'empty' || await personalListSettledEmpty() ? found : null;
       if (!personal) sawEmpty = true;
     }
-    if (!personal) throw await personalPageFailure('ChatGPT did not expose one Personal plugins tab.', started, sawEmpty);
+    if (!personal) {
+      const card = await lookupWorkspace();
+      if (card) return prepareCard(card);
+      throw await personalPageFailure('ChatGPT did not expose one Personal plugins tab.', started, sawEmpty);
+    }
     const empty = personal === 'empty';
     if (!empty) {
       // The URL can say view=personal while the rendered directory still selects Public.
@@ -726,9 +791,8 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       }
     }
     await clearPluginSearch();
-    const listed = await waitFor(() => {
-      // Nothing personal to find: the connector is absent, and Create starts from the Add action.
-      if (empty) return personalListEmpty() ? { absent: true } : null;
+    const readPersonalDirectory = () => {
+      if (empty && personalListEmpty()) return { absent: true };
       if (!personalPluginsLoaded()) return null;
       const card = findManagedAppCard(settings.name);
       if (card) return { card };
@@ -740,20 +804,19 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       if (/no plugins found/i.test(main?.innerText || '')
         && allClickable(main).some(el => textMatches(el, ['Add'], true))) return { absent: true };
       return null;
-    }, 40_000);
+    };
+    const listed = await waitFor(readPersonalDirectory, 40_000);
     if (!listed) throw await personalPageFailure('The Personal plugins list did not finish loading, so the connector was not created.', started);
-    if (listed.card) {
-      if (phase === 'prepare' || phase === 'existing') {
-        const href = new URL(listed.card.getAttribute('href'), location.origin);
-        if (href.origin !== location.origin || href.username || href.password || !isPluginDetailUrl(href.href)) {
-          throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
-        }
-        // This is a navigation candidate only; the host verifies fresh saved tunnel fields before Connect.
-        return { prepared: true, existing: true, href: href.pathname + href.search };
-      }
-      return { created: false, href: listed.card.getAttribute('href') };
-    }
+    if (listed.card) return prepareCard(listed.card);
+    const workspaceCard = await lookupWorkspace();
+    if (workspaceCard) return prepareCard(workspaceCard);
     if (phase === 'existing') throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
+    if (!isPersonalPluginsPage()) throw new Error('The current ChatGPT connector settings are invalid.');
+    if (workspaceName) {
+      const currentList = readPersonalDirectory();
+      if (!currentList) throw await personalPageFailure('The Personal plugins list did not finish loading, so the connector was not created.', started);
+      if (currentList.card) return prepareCard(currentList.card);
+    }
     const add = allClickable(document.querySelector('main')).filter(el =>
       !el.closest('[role="dialog"],form') && textMatches(el, ['Add'], true)
       && !el.disabled && el.getAttribute('aria-disabled') !== 'true');
@@ -927,7 +990,9 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
   globalThis.__codingToolsConnectorHelpers = Object.freeze({
     activeSurface, acknowledgeCustomServerTrust, allClickable, canonicalAppIdentity,
     cardDetailUrl, clearPluginSearch, connectControlIn, elementLabels, ensurePersonalView, findClickable, findExactAppNode,
-    prepareTunnelConnector: (settings, existingOnly = false) => createTunnelConnector(settings, existingOnly ? 'existing' : 'prepare'), submitPreparedTunnelConnector, inspectTunnelConnectorIdentity,
+    prepareTunnelConnector: (settings, existingOnly = false, workspaceName = null) =>
+      createTunnelConnector(settings, existingOnly ? 'existing' : 'prepare', workspaceName),
+    submitPreparedTunnelConnector, inspectTunnelConnectorIdentity,
     prepareTunnelConnectorConnection, openTunnelConnectorConsent, confirmTunnelConnectorConsent,
     ${testLegacy ? "createTunnelConnector, ensureTunnelConnectorConnected," : ""}
     pageFailureState: () => pageFailureState,
@@ -1148,10 +1213,11 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       await onContext?.(partition, await freshContext());
       const bindingPath = path.join(app.getPath("userData"), "mcp-account-connector-bindings.json");
       const saved = await readAccountConnectorBindings(app);
-      await freshContext();
+      const current = await freshContext();
+      const workspaceName = current.workspaceStructure === "workspace" ? current.workspaceName ?? null : null;
       await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
       const prepared = shared ? { prepared: true, existing: true, href: sharedProof.href }
-        : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)}, ${existingOnly})`, true)
+        : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)}, ${existingOnly}, ${JSON.stringify(workspaceName)})`, true)
           .catch(error => withPageState(popup, error));
       if (prepared?.prepared !== true) throw new Error("ChatGPT did not prepare the exact tunnel connector.");
       if (existingOnly && prepared.existing !== true) throw new Error(UNVERIFIED_CONNECTOR);

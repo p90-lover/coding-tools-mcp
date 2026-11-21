@@ -837,6 +837,65 @@ test("managed connector matching ignores an unrelated plugin card mentioning its
   }
 });
 
+test("Connect finds a workspace plugin without a Personal tab", async () => {
+  const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
+  const browser = await chromium.launch({
+    executablePath: process.env.CHROME_PATH || "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    headless: true,
+    args: ["--no-proxy-server"],
+  });
+  const url = "https://chatgpt.com/plugins";
+  try {
+    const page = await browser.newPage({ serviceWorkers: "block" });
+    await page.route("**/*", route => route.request().url() === url ? route.fulfill({ contentType: "text/html", body: `<!doctype html><main>
+      <div role="tablist"><button id="public" role="tab" aria-selected="true" aria-controls="public-plugins">Public</button>
+      <button id="workspace" role="tab" aria-selected="false" aria-controls="workspace-plugins">Fixture workspace</button></div>
+      <section id="public-plugins"><a aria-label="Open Fixture MCP" href="/plugins/public">Fixture MCP</a></section>
+      <section id="workspace-plugins" hidden><article><a aria-label="Open Fixture MCP" href="/plugins/exact">Fixture MCP</a></article></section>
+      <button id="add">Add</button></main>
+      <script>
+        globalThis.addTabs = [];
+        document.getElementById('add').onclick = () => {
+          addTabs.push(document.querySelector('[role=tab][aria-selected=true]').id);
+        };
+        const selectWorkspaceTab = selected => {
+          document.getElementById('public').setAttribute('aria-selected', String(!selected));
+          document.getElementById('workspace').setAttribute('aria-selected', String(selected));
+          document.getElementById('workspace-plugins').hidden = !selected;
+        };
+        document.getElementById('workspace').onclick = () => selectWorkspaceTab(true);
+        document.getElementById('public').onclick = () => selectWorkspaceTab(false);
+      </script>` }) : route.abort());
+    await page.goto(url);
+    await page.evaluate(extensionHelpersSource());
+    const result = await page.evaluate(async () => {
+      const h = globalThis.__codingToolsConnectorHelpers;
+      const settings = { name: "Fixture MCP", tunnelId: `tunnel_${"a".repeat(32)}`, authentication: "none" };
+      const existing = await h.prepareTunnelConnector(settings, true, "Fixture workspace");
+      document.getElementById("public").click();
+      const owner = await h.prepareTunnelConnector(settings, false, "Fixture workspace");
+      document.getElementById("workspace-plugins").insertAdjacentHTML("beforeend",
+        '<article><a aria-label="Open Fixture MCP" href="/plugins/duplicate">Fixture MCP</a></article>');
+      const ambiguous = await h.prepareTunnelConnector(settings, true, "Fixture workspace")
+        .then(() => null, error => error.message);
+      document.getElementById("workspace-plugins").replaceChildren();
+      document.getElementById("public").click();
+      const missing = await h.prepareTunnelConnector(settings, false, "Fixture workspace")
+        .then(() => null, error => error.message);
+      return { existing, owner, ambiguous, missing, addTabs: globalThis.addTabs };
+    });
+    assert.deepEqual(result, {
+      existing: { prepared: true, existing: true, href: "/plugins/exact" },
+      owner: { prepared: true, existing: true, href: "/plugins/exact" },
+      ambiguous: "More than one connector has the configured name.",
+      missing: "ChatGPT did not open its custom MCP server form.",
+      addTabs: ["public"],
+    });
+  } finally {
+    await browser.close();
+  }
+});
+
 test("a loading Personal directory reuses its existing connector without opening Create", async () => {
   const { chromium } = require(require.resolve("playwright-core", { paths: [path.join(__dirname, "../../runtime-web")] }));
   const browser = await chromium.launch({
@@ -979,6 +1038,7 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   calls.length = 0; records.length = 0;
   await handler({}, "other");
   assert.deepEqual(calls.find(entry => entry?.target)?.target, { partition: "persist:other", requireTunnelMatch: true, tunnelId: tunnels[0].tunnelId });
+  assert.equal(calls.find(entry => entry?.target)?.preserveSurface, true, "manual account setup works in its own hidden windows without taking over the Browser tab");
   assert(calls.includes("route:persist:other") && calls.includes("reconnect:extra"));
   assert.deepEqual(records, [{ id: "other", bound: true }]);
   failure = "ChatGPT refused this connector";
