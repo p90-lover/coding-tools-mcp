@@ -167,6 +167,45 @@ test("a lost acceptance response is recovered by the same input ID without dupli
   assert.equal((await recovered.call("list", scope)).items.length, 1);
 });
 
+test("version 1 draft and outbox survive native target migration and abrupt worker exit", async t => {
+  const f = fixture(t), first = f.open();
+  await save(first, 0, "kept draft");
+  await accept(first, "kept-input", "queued");
+  await first.close();
+  const { DatabaseSync } = require("node:sqlite");
+  const old = new DatabaseSync(f.config.file);
+  old.exec("DROP TABLE native_send_targets; PRAGMA user_version=1");
+  old.close();
+  let worker;
+  const next = f.open({ createWorker(file, options) { worker = new Worker(file, options); return worker; } });
+  const key = { workspaceId: "project", runId: "run", nodeId: "card", requestId: "native-send" };
+  const target = { sessionId: "native:session" };
+  await next.call("bindNativeSendTarget", { ...key, ...target });
+  await worker.terminate();
+  const reopened = f.open();
+  assert.deepEqual({ ...await reopened.call("readNativeSendTarget", key) }, target);
+  assert.equal((await reopened.call("draftGet", scope)).draft.text, "kept draft");
+  assert.equal((await reopened.call("get", { workspaceId: "project", inputId: "kept-input" })).state, "queued");
+});
+
+test("native target bindings are exact, immutable and charged to the journal budget", async t => {
+  const store = fixture(t, { maxStoredBytes: 1024 }).open();
+  await save(store, 0, "kept draft");
+  const key = { workspaceId: "project", runId: "r".repeat(128), nodeId: "n".repeat(128), requestId: "a".repeat(128) };
+  const sessionId = `native:${"s".repeat(120)}`;
+  const bind = args => store.call("bindNativeSendTarget", args);
+  const read = args => store.call("readNativeSendTarget", args);
+  await bind({ ...key, sessionId });
+  await bind({ ...key, sessionId });
+  await assert.rejects(bind({ ...key, sessionId: "native:different" }), { code: "INPUT_STATE_CONFLICT" });
+  await assert.rejects(bind({ ...key, requestId: "b".repeat(128), sessionId }), { code: "INPUT_STORAGE_FULL" });
+  for (const changed of [{ workspaceId: "other" }, { runId: "other" }, { nodeId: "other" }, { requestId: "other" }]) {
+    assert.equal(await read({ ...key, ...changed }), null);
+  }
+  assert.equal((await read(key)).sessionId, sessionId);
+  assert.equal((await store.call("draftGet", scope)).draft.text, "kept draft");
+});
+
 test("unknown schema is refused without changing the input database", async t => {
   const f = fixture(t);
   const { DatabaseSync } = require("node:sqlite");

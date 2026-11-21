@@ -2074,11 +2074,41 @@ pub fn record_submission(
     request_key: &str,
     thread_id: Option<&str>,
 ) -> AppResult<Run> {
+    record_submission_with_turn(
+        data,
+        workspace_id,
+        run_id,
+        node_id,
+        request_key,
+        thread_id,
+        None,
+    )
+}
+
+fn native_identity(value: &str) -> bool {
+    text(value, 128)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+pub fn record_submission_with_turn(
+    data: &mut AppData,
+    workspace_id: &str,
+    run_id: &str,
+    node_id: &str,
+    request_key: &str,
+    thread_id: Option<&str>,
+    turn_id: Option<&str>,
+) -> AppResult<Run> {
     let run = data
         .ao_runs
         .iter_mut()
         .find(|run| run.id == run_id && run.workspace_id == workspace_id)
         .ok_or_else(|| fail("AO run not found"))?;
+    if turn_id.is_some() && (run.cancelled || run.paused) {
+        return Err(fail("Native submission reservation is no longer active"));
+    }
     let node = run
         .nodes
         .iter_mut()
@@ -2089,11 +2119,26 @@ pub fn record_submission(
         .as_mut()
         .filter(|receipt| receipt.request_key == request_key && receipt.status == "reserved")
         .ok_or_else(|| fail("AO reservation changed"))?;
+    if let Some(turn) = turn_id {
+        let is_native_session = thread_id
+            .and_then(|id| id.strip_prefix("native:"))
+            .is_some_and(native_identity);
+        if !is_native_session
+            || !native_identity(turn)
+            || !external_harness(&receipt.route)
+                .is_some_and(|agent| agent.starts_with("orchestrator-"))
+        {
+            return Err(fail(
+                "Native submission needs the exact native session and turn",
+            ));
+        }
+    }
     if let Some(id) = thread_id {
         if !text(id, 128) || id.contains('/') {
             return Err(fail("Invalid native thread ID"));
         }
         receipt.thread_id = Some(id.into());
+        receipt.turn_id = turn_id.map(str::to_owned);
         receipt.status = "submitted".into();
         node.state = State::Running;
     } else {
@@ -2274,6 +2319,16 @@ pub fn record_terminal(
             receipt.status == "submitted" && receipt.thread_id.as_deref() == Some(thread_id)
         })
         .ok_or_else(|| fail("AO native thread identity changed"))?;
+    if thread_id.starts_with("native:")
+        && receipt
+            .turn_id
+            .as_deref()
+            .is_some_and(|expected| Some(expected) != turn_id)
+    {
+        return Err(fail(
+            "Native turn identity changed before terminal observation",
+        ));
+    }
     let first_word = answer.and_then(verdict_word);
     let verdict = match (&node.role, first_word.as_deref()) {
         (Role::Reviewer | Role::Approver, Some("APPROVED")) => Some("APPROVED"),
@@ -4035,6 +4090,71 @@ mod tests {
         .unwrap();
         create(&mut data, 1, run).unwrap();
         data
+    }
+
+    #[test]
+    fn native_submission_persists_the_exact_turn_and_rejects_a_stale_terminal() {
+        let mut data = free_link_fixture(json!([
+            free_link_node("planner", "planner", &[]),
+            free_link_node("worker", "worker", &["planner"]),
+            free_link_node("reviewer", "reviewer", &["worker"]),
+        ]));
+        data.ao_runs[0].execution_mode = ExecutionMode::Single;
+        data.ao_runs[0].nodes[0].route.harness_id = "ao:orchestrator-fixture".into();
+        let revision = data.ao_runs[0].revision;
+        reserve(
+            &mut data,
+            "qa",
+            "run",
+            "planner",
+            revision,
+            "follow-up".into(),
+            None,
+        )
+        .unwrap();
+        let mut submit = |request, session| {
+            record_submission_with_turn(
+                &mut data,
+                "qa",
+                "run",
+                "planner",
+                request,
+                Some(session),
+                Some("new-turn"),
+            )
+        };
+        assert!(submit("old-reservation", "native:session").is_err());
+        assert!(submit("follow-up", "legacy-session").is_err());
+        submit("follow-up", "native:session").unwrap();
+        let mut restored: AppData =
+            serde_json::from_value(serde_json::to_value(data).unwrap()).unwrap();
+        let before = restored.ao_runs.clone();
+        assert!(record_terminal(
+            &mut restored,
+            "qa",
+            "run",
+            "planner",
+            "native:session",
+            Some("old-turn"),
+            Some("stale answer"),
+            true,
+            None,
+        )
+        .is_err());
+        assert_eq!(restored.ao_runs, before);
+        let done = record_terminal(
+            &mut restored,
+            "qa",
+            "run",
+            "planner",
+            "native:session",
+            Some("new-turn"),
+            Some("correct answer"),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(done.nodes[0].state, State::Finished);
     }
 
     fn free_link_node(id: &str, role: &str, parents: &[&str]) -> serde_json::Value {

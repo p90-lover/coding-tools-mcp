@@ -126,6 +126,8 @@ function createChatInputService({ file, attachmentsRoot, legacyDraftsFile = null
     try { return await work; } finally { if (dispatching.get(key) === work) dispatching.delete(key); }
   }
   return Object.freeze({ call, dispatch, get: (workspaceId, inputId) => journal.call("get", { workspaceId, inputId }),
+    bindNativeSendTarget: (scope, sessionId) => journal.call("bindNativeSendTarget", { ...scope, sessionId }),
+    readNativeSendTarget: scope => journal.call("readNativeSendTarget", scope),
     pending: (after = 0) => journal.call("pending", { after }),
     cancel: (workspaceId, inputId) => journal.call("settle", { workspaceId, inputId, expectedState: "queued", state: "cancelled" }),
     saved: () => journal.saved(), close: () => journal.close() });

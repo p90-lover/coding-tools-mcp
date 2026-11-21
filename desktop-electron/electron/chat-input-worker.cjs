@@ -22,7 +22,7 @@ function runInputWorker() {
     const one = (sql, ...args) => db.prepare(sql).get(...args);
     const run = (sql, ...args) => db.prepare(sql).run(...args);
     const version = one("PRAGMA user_version").user_version;
-    if (![0, 1].includes(version)) throw fail("INPUT_SCHEMA_UNSUPPORTED", "Saved input schema is newer than this app; it was not changed");
+    if (![0, 1, 2].includes(version)) throw fail("INPUT_SCHEMA_UNSUPPORTED", "Saved input schema is newer than this app; it was not changed");
     db.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=1000; PRAGMA wal_autocheckpoint=0");
     const transaction = fn => {
       db.exec("BEGIN IMMEDIATE");
@@ -47,6 +47,10 @@ function runInputWorker() {
       CREATE TABLE blobs(hash TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL);
       CREATE TABLE imports(id TEXT PRIMARY KEY, digest TEXT NOT NULL, imported_at INTEGER NOT NULL);
       PRAGMA user_version=1;`));
+    if (version < 2) transaction(() => db.exec(`
+      CREATE TABLE native_send_targets(workspace TEXT NOT NULL, run_id TEXT NOT NULL, node_id TEXT NOT NULL,
+        request_id TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY(workspace,run_id,node_id,request_id)) WITHOUT ROWID;
+      PRAGMA user_version=2;`));
     transaction(() => run("UPDATE inputs SET state='unknown',updated_at=? WHERE state='dispatching'", Date.now()));
     const blobs = createAttachmentStore(attachmentsRoot);
     const scope = args => [identity(args.workspaceId, "Project", 200), identity(args.key, "Composer", 512)];
@@ -145,7 +149,26 @@ function runInputWorker() {
         return { ...viewInput(input(workspace, id)), duplicate: false, draft: viewDraft(loadDraft(workspace, composer)) };
       });
     }
+    const sendScope = args => [identity(args.workspaceId, "Project", 200), identity(args.runId, "Run"),
+      identity(args.nodeId, "Card"), identity(args.requestId, "Reservation")];
+    const sendTarget = scope => one(`SELECT session_id AS sessionId FROM native_send_targets
+      WHERE workspace=? AND run_id=? AND node_id=? AND request_id=?`, ...scope);
     const operations = {
+      bindNativeSendTarget(args) {
+        const scope = sendScope(args), { sessionId } = args;
+        if (typeof sessionId !== "string" || !/^native:[a-zA-Z0-9_-]{1,121}$/.test(sessionId)) throw fail("INPUT_SCOPE", "Choose a native session identity");
+        return transaction(() => {
+          const previous = sendTarget(scope);
+          if (previous) {
+            if (previous.sessionId !== sessionId) throw fail("INPUT_STATE_CONFLICT", "This reservation is already bound to another session");
+          } else {
+            charge(Buffer.byteLength(encode([...scope, sessionId])));
+            run("INSERT INTO native_send_targets VALUES(?,?,?,?,?)", ...scope, sessionId);
+          }
+          return { sessionId };
+        });
+      },
+      readNativeSendTarget(args) { return sendTarget(sendScope(args)) ?? null; },
       draftGet(args) { return viewDraft(loadDraft(...scope(args))); },
       draftSave: saveDraft,
       draftConflicts(args) {
@@ -313,7 +336,7 @@ function runInputWorker() {
         }
         if (!Object.hasOwn(operations, operation)) throw fail("INPUT_INVALID", "Unsupported input-store operation");
         const result = operations[operation](args ?? {});
-        if (["draftSave", "restoreDraft", "accept", "dispatch", "bindNativeSteer", "defer", "settle", "importDrafts"].includes(operation)) changed = true;
+        if (["draftSave", "restoreDraft", "accept", "dispatch", "bindNativeSteer", "bindNativeSendTarget", "defer", "settle", "importDrafts"].includes(operation)) changed = true;
         parentPort.postMessage({ requestId, result });
       } catch (error) {
         parentPort.postMessage({ requestId, error: { code: error.code ?? "INPUT_STORE_FAILED",

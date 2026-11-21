@@ -1990,6 +1990,14 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
   }
 
+  const validNativeTurnId = value => typeof value === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
+  async function nativeSendReceipt(sessionId, { workspaceId, requestId }) {
+    const readback = await Promise.resolve().then(() => harnessService().recover?.(sessionId, null, { workspaceId, requestId })).catch(() => null);
+    const receipt = readback?.sendReceipt;
+    return receipt?.sessionId === sessionId && receipt.workspaceId === workspaceId && receipt.requestId === requestId
+      && validNativeTurnId(receipt.turnId) ? receipt : null;
+  }
+
   // plain: a single-model run, whose one card is a plain assistant rather than an AO worker.
   async function dispatchExternal(workspaceId, runId, node, expectedRevision, background, plain = false) {
     const agent = externalAgent(node);
@@ -2007,7 +2015,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // is already being started, or the reservation fails) leaves a resumed agent the idle sweep
       // releases again, as reopening the chat does.
       const early = continuing ? continuations.get(runId) : null;
-      const earlyCheck = early ? continuableOutcome(early.session) : null;
+      const isNativeAgent = Boolean(agent?.startsWith("orchestrator-"));
+      const matchesEngine = target => target.session.startsWith("native:") === isNativeAgent;
+      const earlyCheck = early && matchesEngine(early) ? continuableOutcome(early.session) : null;
       // Checked after the card is reserved: a refusal found before it left the card pending, so the
       // chat said "Starting" for good and the reason lived only in memory. Now it holds the card
       // with the reason, which the chat shows and Retry clears.
@@ -2047,7 +2057,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }, background ? undefined : { localConfirmation: true });
       if (reserved?.ok === true && reserved.waiting) return reserved;
       if (reserved?.ok !== true || typeof reserved.request_key !== "string") throw new Error("AO harness reservation outcome is unknown");
-      let session = null;
+      let session = null, nativeTurnId = null;
       let failure = null;
       // What the launch is doing right now, for the card ("starting a new agent"): it said only
       // "launching" for as long as a launch took, however it went and wherever it waited.
@@ -2086,6 +2096,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // the new agent, which starts with the chat so far (the handoff below).
         let unconfirmed = null;
         const checkStarted = now();
+        if (continued && !matchesEngine(continued)) throw new Error("The selected engine does not own the original session. The message was not sent.");
         // checkMs is what the launch still waited for here, after the check that began with it.
         const outcome = !continued ? { usable: false }
           : await (continued === early ? earlyCheck : continuableOutcome(continued.session));
@@ -2114,6 +2125,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           // was given them (or since the app started, when that is not known).
           const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
           const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
+          const receiver = { workspaceId, runId, nodeId: node.id, requestId: reserved.request_key };
+          if (nativeContinuation) {
+            if (!chatInputs?.bindNativeSendTarget) throw new Error("Durable native send storage is unavailable; the message was not sent");
+            await chatInputs.bindNativeSendTarget(receiver, continued.session);
+          }
           const sendStarted = now();
           let sendTimedOut = false;
           sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key,
@@ -2124,16 +2140,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               return null;
             });
           sendMs = now() - sendStarted;
-          if (nativeContinuation && !(typeof sent?.turnId === "string" && sent.turnId)) {
-            const readback = await Promise.resolve().then(() => harnessService().recover?.(continued.session, null,
-              { workspaceId, requestId: reserved.request_key })).catch(() => null);
-            const receipt = readback?.sendReceipt;
-            if (receipt?.sessionId !== continued.session || receipt.workspaceId !== workspaceId || receipt.requestId !== reserved.request_key
-              || typeof receipt.turnId !== "string" || !receipt.turnId) {
+          if (nativeContinuation && !validNativeTurnId(sent?.turnId)) {
+            sent = await nativeSendReceipt(continued.session, receiver);
+            if (!sent) {
               throw Object.assign(new Error("Native delivery is unknown. The reserved turn was kept and was not sent again."), { code: "NATIVE_DELIVERY_UNKNOWN" });
             }
-            sent = { turnId: receipt.turnId };
           }
+          if (nativeContinuation) nativeTurnId = sent.turnId;
           if (sent?.turnId) givenInstructions(continued.session, standing.hash);
           // A send that ran out of time may still reach the agent: it is stopped (its session,
           // worktree and conversation stay) before the fresh agent starts, so the two never work on
@@ -2240,7 +2253,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const latest = await runs({ workspaceId, runId }).catch(() => null);
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
-        if (!mission?.cancelled && card && card.state === "reserved" && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped) return false;
+        const stopped = backgroundRuns.get(runKey(workspaceId, runId))?.stopped;
+        const attached = nativeTurnId && card?.state === "running" && card.receipt?.request_key === reserved.request_key
+          && card.receipt.thread_id === session && card.receipt.turn_id === nativeTurnId;
+        if (!stopped && !mission?.cancelled && (card?.state === "reserved" || attached || (nativeTurnId && !mission))) return false;
         await stopExternalTurn(session, mission?.cancelled || backgroundRuns.get(runKey(workspaceId, runId))?.stopped
           ? { owner: runKey(workspaceId, runId), releaseAgent: true } : null);
         return true;
@@ -2250,6 +2266,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         saved = await requestHeadless("/api/v1/ao/external/submitted", {
           workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
           ...(session ? { session_id: session } : {}),
+          ...(nativeTurnId ? { turn_id: nativeTurnId } : {}),
           // The held card says why: a first chat's start runs detached, so this is the only place it shows.
           ...(!session && failure ? { error: String(failure?.message || failure).slice(0, 400) } : {}),
         });
@@ -2477,7 +2494,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
       if (externalAgent(node)?.startsWith("orchestrator-")) {
-        return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+        const requestId = node.receipt?.request_key || node.request_key;
+        const receiver = { workspaceId, runId, nodeId: node.id, requestId };
+        const target = !requestId || mission?.paused || mission?.cancelled ? null
+          : await chatInputs?.readNativeSendTarget?.(receiver).catch(() => null);
+        const receipt = target?.sessionId ? await nativeSendReceipt(target.sessionId, receiver) : null;
+        if (!receipt) return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+        const attached = await requestHeadless("/api/v1/ao/external/submitted", {
+          workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: requestId,
+          session_id: target.sessionId, turn_id: receipt.turnId,
+        });
+        if (attached?.ok !== true) throw new Error("Couldn't attach the exact native receipt. The message was not sent again.");
+        return { ...attached, pending_approvals: [] };
       }
       // The launch was lost before AO returned a session; hold it rather than replay.
       const held = await requestHeadless("/api/v1/ao/external/submitted", {

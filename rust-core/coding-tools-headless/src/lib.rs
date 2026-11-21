@@ -917,6 +917,8 @@ struct AoExternalSubmittedRequest {
     request_key: String,
     #[serde(default)]
     session_id: Option<String>,
+    #[serde(default)]
+    turn_id: Option<String>,
     /// Why the launch failed, when it returned no session; shown on the held card.
     #[serde(default)]
     error: Option<String>,
@@ -6104,8 +6106,12 @@ async fn ao_external_submitted(
     }
     let saved = tokio::task::spawn_blocking(move || {
         coding_tools_core::data::DataStore::update_file(|data| {
-            match (body.session_id.as_deref(), body.error.as_deref()) {
-                (None, Some(reason)) => integrations::ao::record_failed_submission(
+            match (
+                body.session_id.as_deref(),
+                body.error.as_deref(),
+                body.turn_id.as_deref(),
+            ) {
+                (None, Some(reason), None) => integrations::ao::record_failed_submission(
                     data,
                     &body.workspace_id,
                     &body.run_id,
@@ -6113,13 +6119,14 @@ async fn ao_external_submitted(
                     &body.request_key,
                     reason,
                 ),
-                (session, _) => integrations::ao::record_submission(
+                (session, _, turn) => integrations::ao::record_submission_with_turn(
                     data,
                     &body.workspace_id,
                     &body.run_id,
                     &body.node_id,
                     &body.request_key,
                     session,
+                    turn,
                 ),
             }
         })

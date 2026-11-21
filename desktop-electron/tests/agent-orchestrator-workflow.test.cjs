@@ -12394,8 +12394,15 @@ test("native follow-up uses only its exact read-only reservation receipt after a
   for (const found of [scope, null, { ...scope, requestId: "earlier-reservation" }, { ...scope, sessionId: "native:other" },
     { ...scope, workspaceId: "another-workspace" }]) {
     const submitted = [];
-    let reads = 0, sends = 0, starts = 0;
+    let bound, reads = 0, sends = 0, starts = 0;
+    const key = { workspaceId: scope.workspaceId, runId: "new", nodeId: "next", requestId: scope.requestId };
     const workflow = workflowInternals({
+      inputJournal: { pending: async () => ({ items: [] }),
+        async bindNativeSendTarget(receiver, sessionId) {
+          assert.deepEqual(receiver, key); bound = { sessionId };
+        },
+        async readNativeSendTarget(receiver) { assert.deepEqual(receiver, key); return bound; },
+      },
       requestHeadless: async (endpoint, body) => {
         if (endpoint.endsWith("/reserve")) return { ok: true, request_key: scope.requestId, prompt: "follow-up" };
         if (endpoint.endsWith("/submitted")) submitted.push(body);
@@ -12403,6 +12410,7 @@ test("native follow-up uses only its exact read-only reservation receipt after a
       },
       aoHarness: { continuable: async () => true, async send(id, text, key) {
         sends += 1;
+        assert.deepEqual(bound, { sessionId: id }, "Native delivery must start after the binding commits");
         assert.deepEqual([id, text, key], [scope.sessionId, "follow-up", scope.requestId]);
         throw new Error("Lost reply after dispatch");
       }, async recover(id, turn, keys) {
@@ -12419,7 +12427,7 @@ test("native follow-up uses only its exact read-only reservation receipt after a
       if (found === scope) {
         assert.equal((await pending).session_id, scope.sessionId);
         assert.equal(workflow.expectedTurns.get(scope.sessionId), scope.turnId);
-        assert.deepEqual(submitted.map(body => [body.session_id, body.request_key]), [[scope.sessionId, scope.requestId]]);
+        assert.deepEqual(submitted.map(body => [body.session_id, body.request_key, body.turn_id]), [[scope.sessionId, scope.requestId, scope.turnId]]);
       } else {
         await assert.rejects(pending, { code: "NATIVE_DELIVERY_UNKNOWN" });
         const node = { id: "next", state: "reserved", route, request_key: scope.requestId };
@@ -12430,7 +12438,7 @@ test("native follow-up uses only its exact read-only reservation receipt after a
         assert.deepEqual(submitted, [], "Neither dispatch nor observation relabels uncertainty as a failed launch");
       }
       assert.equal(sends, 1);
-      assert.equal(reads, 1);
+      assert.equal(reads, found === scope ? 1 : 2);
       assert.equal(starts, 0, "Ambiguous native delivery never starts a replacement session");
     } finally { workflow.dispose(); }
   }
