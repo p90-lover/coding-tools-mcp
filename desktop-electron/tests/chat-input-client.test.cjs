@@ -23,6 +23,65 @@ test("createUuid produces valid RFC 4122 v4 UUIDs", () => {
   assert.notEqual(id1, id2);
 });
 
+test("pending pages reveal later saved inputs after abrupt journal worker exit", async t => {
+  const { Worker } = require("node:worker_threads");
+  const { createChatInputService } = require("../electron/chat-input-service.cjs");
+  const { createChatInputStore } = require("../electron/chat-input-store.cjs");
+  const parent = path.resolve(__dirname, "../../aiTemp/chat-input-tests");
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, "paging-"));
+  let worker;
+  const open = () => {
+    const store = createChatInputStore({ file: path.join(root, "inputs.sqlite"), attachmentsRoot: path.join(root, "attachments"),
+      createWorker: (entry, options) => (worker = new Worker(entry, options)) });
+    return { service: createChatInputService({ store }), store };
+  };
+  let { service, store } = open();
+  t.after(async () => {
+    await service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const workspaceId = "ws1", key = "composer";
+  const save = (inputId, scope = {}) => service.call({ action: "accept", workspaceId, key, ...scope, inputId, mode: "send",
+    payload: { text: "same input text", attachments: [], annotations: [] }, destination: { taskId: "chat", message: "same input text" } });
+  for (let i = 1; i <= 26; i++) await save(`input-${i}`);
+  await save("other-composer", { key: "other" });
+  await save("other-workspace", { workspaceId: "ws2" });
+  const claimed = await store.call("dispatch", { workspaceId, inputId: "input-26" });
+  assert.equal(claimed.claimed, true);
+  assert.equal(claimed.state, "dispatching");
+  await worker.terminate();
+  await service.close();
+  ({ service } = open());
+
+  const moduleCall = (operation, args) => {
+    assert.equal(operation, "chat_input");
+    assert.equal(args.action, "pending");
+    return service.call(args);
+  };
+  const first = await client.chatInputPending(moduleCall, workspaceId, key);
+  assert.deepEqual(Array.from(first.items, item => item.inputId), Array.from({ length: 25 }, (_, i) => `input-${i + 1}`));
+  assert.equal(first.hasMore, true);
+  const second = await client.chatInputPending(moduleCall, workspaceId, key, first.cursor);
+  assert.deepEqual(Array.from(second.items, item => [item.inputId, item.state]), [["input-26", "unknown"]]);
+  assert.ok(second.cursor > first.cursor);
+  assert.equal(second.hasMore, false);
+  assert.deepEqual(Array.from((await client.chatInputPending(moduleCall, workspaceId, key)).items, item => item.inputId), Array.from(first.items, item => item.inputId));
+  assert.equal((await service.get(workspaceId, "input-26")).state, "unknown");
+});
+
+test("pending pages reject non-advancing cursors, mismatched scope and duplicate input identity", async () => {
+  const record = { inputId: "queued", workspaceId: "ws1", key: "composer", mode: "send", state: "queued", destination: { message: "fixture" } };
+  const page = { ok: true, items: [record], hasMore: true, cursor: 26 };
+  const read = response => client.chatInputPending(async () => response, "ws1", "composer", 25);
+  assert.equal((await read(page)).cursor, 26);
+  for (const malformed of [{ ...page, cursor: 25 }, { ...page, hasMore: undefined }, { ...page, items: [] },
+    { ...page, items: [{ ...record, key: "other" }] }, { ...page, items: [record, record] }]) {
+    await assert.rejects(read(malformed), { code: "INPUT_RECEIPT_INVALID" });
+  }
+  await assert.rejects(client.chatInputPending(() => assert.fail("invalid cursor must not issue an RPC"), "ws1", "composer", -1), { code: "INPUT_RECEIPT_INVALID" });
+});
+
 test("buildAcceptDestination enforces whitelist and validates message", () => {
   const valid = client.buildAcceptDestination({
     message: "hello world",

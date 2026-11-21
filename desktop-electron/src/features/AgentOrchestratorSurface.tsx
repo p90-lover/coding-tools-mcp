@@ -2053,7 +2053,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     draftGet: key => chatInputDraftGet(inputCall, workspaceId!, key),
     draftSave: (key, revision, mutationId, draft) => chatInputDraftSave(inputCall, workspaceId!, key, revision, mutationId, draft),
     accept: args => chatInputAccept(inputCall, workspaceId!, args),
-    pending: key => chatInputPending(inputCall, workspaceId!, key),
+    pending: (key, after) => chatInputPending(inputCall, workspaceId!, key, after),
     cancel: async inputId => { await inputCall("chat_input", { workspaceId, action: "cancel", inputId }); },
     restore: async (key, inputId, expectedRevision, mutationId, draft) => {
       const result = await inputCall("chat_input", { workspaceId, action: "restore_draft", key, inputId, expectedRevision, mutationId, draft });

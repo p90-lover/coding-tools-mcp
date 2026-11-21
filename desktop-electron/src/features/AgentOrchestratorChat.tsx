@@ -135,7 +135,7 @@ export function syncChatQueues(workspaceId: string, queues: Record<string, Queue
   for (const listener of queueListeners) listener();
 }
 /** The app's queue for the chats of the open project (AgentOrchestratorSurface's chat_queue calls). */
-import { createUuid, buildAcceptDestination, rebuildAttachmentMessage, DraftCoalescer, mergePersistedAttachments, sameAttachmentSnapshot, type DurableDraftReceipt, type DraftSaveResult, type AcceptInputArgs, type AcceptReceipt, type AcceptMode, type DraftStatus, type SavedChatDraft, type PendingChatInput } from "./chat-input-client";
+import { createUuid, buildAcceptDestination, rebuildAttachmentMessage, DraftCoalescer, mergePersistedAttachments, sameAttachmentSnapshot, type DurableDraftReceipt, type DraftSaveResult, type AcceptInputArgs, type AcceptReceipt, type AcceptMode, type DraftStatus, type SavedChatDraft, type PendingInputPage } from "./chat-input-client";
 export type { SavedChatDraft } from "./chat-input-client";
 
 export type ChatQueueActions = {
@@ -151,7 +151,7 @@ export type ChatDraftActions = {
   draftGet: (key: string) => Promise<DurableDraftReceipt>;
   draftSave: (key: string, expectedRevision: number, mutationId: string, draft: SavedChatDraft | null) => Promise<DraftSaveResult>;
   accept: (args: AcceptInputArgs) => Promise<AcceptReceipt>;
-  pending?: (key: string) => Promise<PendingChatInput[]>;
+  pending?: (key: string, after: number) => Promise<PendingInputPage>;
   cancel?: (inputId: string) => Promise<void>;
   restore?: (key: string, inputId: string, expectedRevision: number, mutationId: string, draft: SavedChatDraft) => Promise<DurableDraftReceipt>;
   getExecutionSelection: () => { execution: Record<string, unknown>; executable: Record<string, unknown> };
@@ -1815,18 +1815,26 @@ export function AgentOrchestratorChat({
   const draftBinding = useRef<DraftBinding | null>(null);
   const acceptingInput = useRef(false);
   const pendingAccepts = useRef(new Map<string, { owner: typeof composing.current; fromComposer: boolean; request: AcceptInputArgs }>());
-  const [pendingInputs, setPendingInputs] = useState<PendingChatInput[]>([]);
-  const [pendingInputsError, setPendingInputsError] = useState("");
+  const pendingScope = JSON.stringify([projectId, draftKey]);
+  const [pendingLocation, setPendingLocation] = useState<{ scope: string; after: number } | null>(null);
+  const pendingAfter = pendingLocation?.scope === pendingScope ? pendingLocation.after : 0;
+  const [pendingResult, setPendingResult] = useState<{ scope: string; after: number; page?: PendingInputPage; error?: string } | null>(null);
+  const pendingRead = pendingResult?.scope === pendingScope && pendingResult.after === pendingAfter ? pendingResult : null;
+  const pendingPage = pendingRead?.page;
+  const pendingInputs = pendingPage?.items ?? [];
+  const pendingInputsError = pendingRead?.error ?? "";
   const [pendingRefresh, setPendingRefresh] = useState(0);
   const [recoveringInput, setRecoveringInput] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
     const store = draftsNow.current;
-    setPendingInputs([]); setPendingInputsError("");
-    if (store?.pending) void store.pending(draftKey).then(items => { if (live) setPendingInputs(items); },
-      error => { if (live) setPendingInputsError(refusalText(error)); });
+    setPendingResult(null);
+    if (store?.pending) void store.pending(draftKey, pendingAfter).then(
+      page => { if (live) setPendingResult({ scope: pendingScope, after: pendingAfter, page }); },
+      error => { if (live) setPendingResult({ scope: pendingScope, after: pendingAfter, error: refusalText(error) }); },
+    );
     return () => { live = false; };
-  }, [draftKey, projectId, pendingRefresh]);
+  }, [draftKey, pendingScope, pendingAfter, pendingRefresh]);
 
   const writeDraft = async (key: string, value: SavedChatDraft | null) => {
     const binding = draftBinding.current;
@@ -3429,6 +3437,14 @@ export function AgentOrchestratorChat({
             }}>Discard unsent input</button> : null}
           </footer>
         </section>)}
+        {pendingAfter > 0 || pendingPage?.hasMore ? <section className="cx-command-card" aria-label="Saved input pages">
+          {pendingPage && pendingInputs.length === 0 ? <p>No more saved inputs on this page.</p> : null}
+          <footer>
+            {pendingAfter > 0 ? <button type="button" disabled={Boolean(recoveringInput)} onClick={() => setPendingLocation(null)}>First saved inputs</button> : null}
+            {pendingPage?.hasMore ? <button type="button" disabled={Boolean(recoveringInput)}
+              onClick={() => setPendingLocation({ scope: pendingScope, after: pendingPage.cursor })}>Next saved inputs</button> : null}
+          </footer>
+        </section> : null}
         {pendingInputsError ? <section className="cx-command-card" role="status"><strong>Saved input could not be loaded</strong><p>{pendingInputsError}</p>
           <button type="button" onClick={() => setPendingRefresh(value => value + 1)}>Retry recovery</button></section> : null}
         <QueuedMessageBar items={queuedBar}

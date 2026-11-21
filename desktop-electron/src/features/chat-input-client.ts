@@ -23,16 +23,23 @@ export type AcceptReceipt = {
   draft: DurableDraftReceipt; duplicate?: boolean;
 };
 export type PendingChatInput = { inputId: string; mode: AcceptMode; state: "queued" | "dispatching" | "unknown"; destination: AcceptDestination };
+export type PendingInputPage = { items: PendingChatInput[]; cursor: number; hasMore: boolean };
 export type ModuleCallFn = (operation: string, args?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 
-export async function chatInputPending(moduleCall: ModuleCallFn, workspaceId: string, key: string): Promise<PendingChatInput[]> {
-  const result = await moduleCall("chat_input", { workspaceId, action: "pending", key });
-  if (result.ok !== true || !Array.isArray(result.items)) throw invalidReceipt();
-  return result.items.map(item => {
-    if (!item || typeof item.inputId !== "string" || !["send", "queue", "steer"].includes(item.mode)
-      || !["queued", "dispatching", "unknown"].includes(item.state) || typeof item.destination?.message !== "string") throw invalidReceipt();
+export async function chatInputPending(moduleCall: ModuleCallFn, workspaceId: string, key: string, after = 0): Promise<PendingInputPage> {
+  if (!Number.isSafeInteger(after) || after < 0) throw invalidReceipt();
+  const { ok, cursor, hasMore, items } = await moduleCall("chat_input", { workspaceId, action: "pending", key, after });
+  if (ok !== true || typeof cursor !== "number" || !Number.isSafeInteger(cursor) || typeof hasMore !== "boolean"
+    || !Array.isArray(items) || items.length > 25 || (items.length ? cursor <= after : cursor !== after || hasMore)) throw invalidReceipt();
+  const ids = new Set<string>();
+  const pending = items.map(item => {
+    if (!item || item.workspaceId !== workspaceId || item.key !== key || typeof item.inputId !== "string" || !item.inputId || ids.has(item.inputId)
+      || !["send", "queue", "steer"].includes(item.mode) || !["queued", "dispatching", "unknown"].includes(item.state)
+      || typeof item.destination?.message !== "string") throw invalidReceipt();
+    ids.add(item.inputId);
     return item as PendingChatInput;
   });
+  return { items: pending, cursor, hasMore };
 }
 
 export const ACCEPT_DESTINATION_FIELDS = new Set(["message", "taskId", "title", "goal", "executionMode", "singleRoute", "teamId", "teamRevision", "executable", "restart", "rewind"]);
