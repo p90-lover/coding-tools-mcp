@@ -1534,7 +1534,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * Gemini 4 model (Antigravity's and OpenCode's report it): until 2026-11-20 a Gemini 4 Carbon
    * chat was capped at 272K and its window field refused 1m and every 7-digit size.
    */
-  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:\.\d+)?-flash\b/i, 1_000_000],
+  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:[.-]\d+)?-flash\b/i, 1_000_000],
     [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/i, 1_048_576]];
   const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
   /**
