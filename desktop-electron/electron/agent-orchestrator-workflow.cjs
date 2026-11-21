@@ -4806,16 +4806,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return chatPreferences.get().meteredReviews ? null : { action: "ask", unresolved: true, quotaBlocked: true, reason };
   }
 
-  async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, blocked) {
-    const manual = reason => ({ ...blocked, reason });
+  async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }) {
+    const manual = reason => ({ action: "ask", unresolved: true, guardianPending: true, reason });
     if (!nativeGuardianReview || partial || approver.settings?.instructions?.trim() || approval.source !== "ao"
       || approval.kind !== "command" || !["Bash", "PowerShell"].includes(approval.tool) || !approval.turn_id
-      || !approval.cwd || approval.guardianUnsupported || gitPushRequest(approval.command)) return blocked;
+      || !approval.cwd || approval.guardianUnsupported || approval.guardianRequiresHuman || gitPushRequest(approval.command)) return null;
     const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     await verifyCurrent();
-    if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
+    if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return null;
     const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
-    if (!outcome || !["allow", "deny"].includes(outcome.action)) return manual(outcome?.reason || blocked.reason);
+    if (!outcome || !["allow", "deny"].includes(outcome.action)) {
+      return manual(outcome?.reason || "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.");
+    }
     const observed = await harnessService().observe(approval.thread_id, approval.turn_id).catch(() => null);
     await verifyCurrent();
     const current = observed?.turnId === approval.turn_id && observed.approvals?.find(value => value.approval_id === approval.approval_id);
@@ -4828,8 +4830,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
+    const native = await reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent });
+    check();
+    if (native) return native;
     const quotaBlocked = quotaReviewBlocked();
-    if (quotaBlocked) return reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, quotaBlocked);
+    if (quotaBlocked) return quotaBlocked;
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -5167,12 +5172,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * Whether a request is screened (again): one never screened, or one the reviewer left to the
    * person before "Let the model judge" was on. Turning the judge on from that request's own card
    * did nothing: its "ask" was kept, so no pass looked at it again and the turn waited for an hour
-   * (seen live 2026-11-04, a `git -C … push`). A quota-blocked ask can arrive after consent was
-   * granted if Guardian was already in flight. Such an ask is not a verdict. A decided answer
-   * is never replaced; if delivery failed, it is sent again only when due (resendDue).
+   * (seen live 2026-11-04, a `git -C … push`). Quota consent can reopen an unsupported request,
+   * not an undecided Guardian request. A decided answer is never replaced; if delivery failed,
+   * it is sent again only when due (resendDue).
    */
   const rescreen = (advice) => !advice || resendDue(advice)
-    || (advice.action === "ask" && !advice.resolved && !advice.unsent
+    || (advice.action === "ask" && !advice.resolved && !advice.unsent && !advice.guardianPending
       && (advice.quotaBlocked ? chatPreferences.get().meteredReviews : !advice.judged && chatPreferences.get().modelJudges));
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
@@ -5327,7 +5332,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
     // doubt), so a request it could read whole no longer waits for the person for want of a decision.
     check();
-    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked) {
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && !advice.guardianPending) {
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal, verifyCurrent }).catch(() => null);
       check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
@@ -5337,10 +5342,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     check();
     // The preference may change while the model or the owner check is in flight. "Let the model
     // judge": a decide pass that failed or still said "ask" is a deny, never the person's: the
-    // request sat on the card though the switch was on. A review quota-based reviews kept from
-    // running (quotaBlocked) is not an undecided review, and still waits for the person.
+    // request sat on the card though the switch was on. An absent or inconclusive native review
+    // cannot be escalated to a paid review or turned into a denial.
     const judgesNow = chatPreferences.get().modelJudges;
-    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && judgesNow) {
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && !advice.guardianPending && judgesNow) {
       advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
     }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
@@ -5757,7 +5762,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function chatModelJudges({ enabled, meteredReviews } = {}) {
     if (meteredReviews !== undefined) {
       if (typeof meteredReviews !== "boolean") throw new Error("Choose on or off for quota-based reviews");
-      await chatPreferences.set({ meteredReviews });
+      const changed = chatPreferences.get().meteredReviews !== meteredReviews;
+      const saving = chatPreferences.set({ meteredReviews });
+      if (changed) logger?.info?.("ao.quota_review_consent_changed", { enabled: meteredReviews });
+      await saving;
       for (const [id, advice] of approverAdvice) {
         if (advice.quotaBlocked && !advice.unsent) {
           approverAdvice.delete(id);
