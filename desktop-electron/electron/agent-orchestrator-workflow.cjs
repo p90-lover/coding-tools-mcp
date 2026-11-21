@@ -6919,7 +6919,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const STEER_REPEAT_MS = 30_000;
   const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
   function chatSteer(input = {}) {
-    if (input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input);
+    if (input?.inputId || input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input);
     const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
     const earlier = steersInFlight.get(key);
     if (earlier) {
@@ -6976,6 +6976,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
     const { run, card } = chatAgentCard(await runs({ workspaceId: id }), task);
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
+    const session = card.receipt.thread_id;
+    if (typeof session === "string" && session.startsWith("native:")) {
+      if (!inputId) throw new Error("Native steering needs a saved input identity");
+      if (restart || objective) throw new Error("This native route does not support restart or goal steering");
+      const turnId = card.receipt.turn_id || expectedTurns.get(session);
+      if (!turnId) return { ok: true, steered: false, waiting: true, starting: true, reason: "The native turn has no confirmed identity yet." };
+      const result = await harnessService().steer(session, text, inputId, { workspaceId: id, turnId });
+      if (result?.steered === false) return { ok: true, steered: false, reason: "The native agent is not taking steering for that turn" };
+      if (result?.steered !== true || result.turnId !== turnId || result.inputId !== inputId) throw new Error("Native steer acknowledgement is unconfirmed");
+      const receipt = { sessionId: session, turnId, inputId };
+      if (result.duplicate) return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id, ...receipt };
+      return { ...steered(id, task, run, card, text, objective, inputId), ...receipt };
+    }
     // This turn already took the same message moments ago: it is not handed over (or noted) again,
     // unless the agent has asked a question since that what was typed answers (below).
     const repeat = !inputId && !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
