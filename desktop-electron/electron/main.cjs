@@ -5083,7 +5083,7 @@ async function start() {
     logger,
   });
   const startBackendFrom = (backend) => {
-    const { createAntigravityCli, shimProxyEnvironment, manualAuthEnvironment } = backendBundles.requireModule(backend, "antigravity-cli.cjs");
+    const { createAntigravityCli, shimProxyEnvironment } = backendBundles.requireModule(backend, "antigravity-cli.cjs");
     const { createAntigravityReauth } = backendBundles.requireModule(backend, "cpa-antigravity-reauth.cjs");
     const { createAntigravityAuthBrowser } = backendBundles.requireModule(backend, "antigravity-auth-browser.cjs");
     const { createAgentOrchestratorUpstream } = backendBundles.requireModule(backend, "agent-orchestrator-upstream.cjs");
@@ -5381,11 +5381,9 @@ async function start() {
         }
         case "install": return antigravityCli.install();
         case "terminal_open": {
-          const env = await antigravityProxyEnvironment();
-          if (!env.HTTPS_PROXY) throw new Error("Select an HTTP or HTTPS global proxy on the Proxy page first");
+          const launch = await antigravityCli.terminalLaunch(await antigravityProxyEnvironment(), args.accountId);
           const terminal = await agentOrchestratorUpstream.harness.openTerminal({
-            executable: antigravityCli.executable(),
-            env: manualAuthEnvironment(env, process.env, { home: await antigravityCli.authHome(args.accountId) }),
+            ...launch,
             workspaceId: args.workspaceId || undefined,
           });
           return { ok: true, ...terminal, title: "agy" };
