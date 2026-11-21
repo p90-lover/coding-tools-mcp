@@ -220,6 +220,7 @@ test("the custom context window takes 100k, 1m and 7-digit sizes, and says why a
     const tree = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Context window").props.children(() => {});
     return {
       input: elements(tree, item => item.type === "input")[0],
+      options: elements(tree, item => typeof item.type === "function" && item.type.name === "Option"),
       set: elements(elements(tree, item => item.props?.className === "ao-context-custom")[0], item => item.type === "button")[0],
       problem: elements(tree, item => item.props?.id === "ao-context-draft-problem")[0]?.props.children ?? null,
     };
@@ -231,6 +232,12 @@ test("the custom context window takes 100k, 1m and 7-digit sizes, and says why a
   assert.equal(capped.input.props.inputMode, "text", "k and m can be typed on any keyboard");
   assert.match(capped.input.props.placeholder, /100k.*1m/, "the field shows that abbreviations work");
   assert.equal(menu(272_000, "abc").problem, "Type a size such as 100k, 1m or 250000");
+  assert.ok(!capped.options.some(option => text(option.props.children) === "1M"));
+  const presets = menu(1_048_576, "").options;
+  assert.deepEqual(presets.map(option => text(option.props.children)), ["32k", "64k", "128k", "200k", "272k", "400k", "1M"]);
+  assert.equal(presets.at(-1).props.title, "1,048,576 tokens");
+  presets.at(-1).props.onPick();
+  assert.equal(routes.at(-1).context_window, 1_048_576, "the single 1M choice sets the exact ceiling");
   for (const [draft, tokens] of [["1m", 1_000_000], ["1,000,000", 1_000_000], ["1048576", 1_048_576], ["100k", 100_000]]) {
     const ok = menu(1_048_576, draft);
     assert.equal(ok.problem, null, `${draft} is a size this model takes`);
