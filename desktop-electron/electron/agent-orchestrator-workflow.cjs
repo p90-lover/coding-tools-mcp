@@ -23,6 +23,7 @@ const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHint
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { ACCOUNT_KINDS_PATH, withAccountKinds } = require("./cpa-account-kinds.cjs");
 const { guardianInstructions } = require("./codex-guardian-policy.cjs");
+const { acceptsAutobot, createAutobotPermission, reviewAutobot } = require("./chat-autobot-permission.cjs");
 const { gitPushRequest, readReviewRepository } = require("./git-remote.cjs");
 const { nativeChatPreviewSessionId } = require("./chat-agent-tools.cjs");
 
@@ -561,6 +562,23 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
+  const autobot = createAutobotPermission();
+  function autobotMayMeter() {
+    const prefs = chatPreferences.get();
+    return prefs.meteredReviews && prefs.modelJudges;
+  }
+  async function configureChatAutobot({ workspaceId, taskId, selected, disable } = {}, isCurrent = () => true) {
+    const prior = autobot.read(workspaceId, taskId);
+    if (disable === true) return autobot.disable(workspaceId, taskId);
+    if (selected === undefined) return prior;
+    const { selected: ids, summary } = autobot.describe(selected);
+    const found = await board({ workspaceId, taskId });
+    if (found.task?.id !== taskId) throw new Error("This chat no longer exists in the selected project.");
+    const before = autobot.revision();
+    const approved = await confirm({ message: "Enable Autobot Roll Out for this chat?", detail: `${summary}\nOther complete requests go to Guardian first. Model fallback uses quota only when both review settings are on. This permission clears when Coding Tools restarts.` });
+    if (!approved || schedulerDisposed || !isCurrent() || before !== autobot.revision()) return { ...autobot.read(workspaceId, taskId), cancelled: true };
+    return autobot.enable(workspaceId, taskId, ids);
+  }
   // Chats whose agent asked to be woken later (schedule_wakeup, chat-wakeups.cjs).
   const wakeups = createWakeupStore({ file: wakeupsFile, now });
   // Chats running a prompt again and again (/loop, chat-loops.cjs).
@@ -4496,9 +4514,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // enough that reviews fell back to a paid model.
   const REVIEW_BUDGET_MS = 45_000;
   const reviewWindows = new Set();
-  function withinReview(operation, isCurrent = () => true) {
+  function withinReview(operation, isCurrent = () => true, budget = REVIEW_BUDGET_MS) {
     const controller = new AbortController();
-    const deadline = now() + REVIEW_BUDGET_MS;
+    const deadline = now() + budget;
     let live = true, timer, rejectWindow;
     const expired = () => new Error("The review attempt timed out or its owner changed; no new decision may be sent from it");
     const check = () => {
@@ -4513,7 +4531,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     };
     const timeout = new Promise((_resolve, reject) => {
       rejectWindow = reject;
-      timer = setTimer(retire, REVIEW_BUDGET_MS);
+      timer = setTimer(retire, budget);
       timer?.unref?.();
     });
     reviewWindows.add(retire);
@@ -4809,21 +4827,28 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return chatPreferences.get().meteredReviews ? null : { action: "ask", unresolved: true, quotaBlocked: true, reason };
   }
 
+  const guardianApprovalFields = ["turn_id", "kind", "source", "tool", "command", "cwd", "path", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions", "decisions"];
+  async function samePendingApproval(approval, verifyCurrent) {
+    const observed = await harnessService().observe(approval.thread_id, approval.turn_id).catch(() => null);
+    await verifyCurrent();
+    const current = observed?.turnId === approval.turn_id && observed.approvals?.find(value => value.approval_id === approval.approval_id);
+    return Boolean(current) && guardianApprovalFields.every(field => JSON.stringify(current[field]) === JSON.stringify(approval[field]));
+  }
   async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, blocked) {
     const manual = reason => ({ ...blocked, reason });
-    if (!nativeGuardianReview || partial || approver.settings?.instructions?.trim() || approval.source !== "ao"
-      || approval.kind !== "command" || !["Bash", "PowerShell"].includes(approval.tool) || !approval.turn_id
-      || !approval.cwd || approval.guardianUnsupported || gitPushRequest(approval.command)) return blocked;
+    if (partial || approver.settings?.instructions?.trim() || approval.source !== "ao" || !approval.turn_id || approval.guardianUnsupported) return blocked;
+    if (approval.kind === "permission") return { ...blocked, guardianUnavailable: true };
+    if (approval.kind !== "command" || !["Bash", "PowerShell"].includes(approval.tool) || !path.isAbsolute(approval.cwd || "")) return blocked;
+    if (!nativeGuardianReview || gitPushRequest(approval.command)) return { ...blocked, guardianUnavailable: true };
     const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     await verifyCurrent();
     if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
     const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
-    if (!outcome || !["allow", "deny"].includes(outcome.action)) return manual(outcome?.reason || blocked.reason);
-    const observed = await harnessService().observe(approval.thread_id, approval.turn_id).catch(() => null);
-    await verifyCurrent();
-    const current = observed?.turnId === approval.turn_id && observed.approvals?.find(value => value.approval_id === approval.approval_id);
-    const fields = ["turn_id", "kind", "source", "tool", "command", "cwd", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions", "decisions"];
-    if (!current || fields.some(field => JSON.stringify(current[field]) !== JSON.stringify(approval[field]))) {
+    if (!outcome || !["allow", "deny"].includes(outcome.action)) {
+      const result = manual(publicText(outcome?.reason || blocked.reason, 300));
+      return !signal?.aborted && outcome?.guardianUnavailable === true ? { ...result, guardianUnavailable: true } : result;
+    }
+    if (!await samePendingApproval(approval, verifyCurrent)) {
       return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
     }
     return { ...outcome, reason: publicText(outcome.reason, 300) };
@@ -4832,6 +4857,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
     const quotaBlocked = quotaReviewBlocked();
+    if (approver.autobot && !autobotMayMeter()) return { action: "ask", unresolved: true, quotaBlocked: true, reason: "Autobot model fallback is off." };
     if (quotaBlocked) return reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, quotaBlocked);
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
@@ -4958,6 +4984,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     let failure = null;
     for (const model of candidates) {
+      if (approver.autobot && !autobotMayMeter()) return { action: "ask", unresolved: true, quotaBlocked: true, reason: "Autobot model fallback is off." };
       if (quotaReviewBlocked()) return quotaReviewBlocked();
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
@@ -5047,7 +5074,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const current = (latest.nodes || []).find(holds);
           if (!current || reviewAttempt(latest, current) !== owner) { owned = false; check(); }
         };
-        const approver = cardApprover(run, node) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true }, standIn: true };
+        const approver = cardApprover(run, node, { useAutobot: false }) ?? { route: node?.route ?? {}, settings: { instructions: "", auto_decide: true }, standIn: true };
         const approval = { kind: "tool", tool: toolName, thread_id: thread,
           toolInput: JSON.stringify(args ?? {}).slice(0, REVIEW_REQUEST_LIMIT + 1), ...(reason ? { reason: publicText(reason, 300) } : {}) };
         const verdict = await askApprover({ approver, mission: run, approval, decide: judges, judge: judges,
@@ -5079,17 +5106,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ...node.route, ...(policy !== undefined ? { approval_policy: policy } : {}), ...(reviewer !== undefined ? { approvals_reviewer: reviewer } : {}) };
   }
   /** The reviewer that answers a card's requests for the person, or null (see screenApprovals). */
-  function cardApprover(mission, own) {
+  function cardApprover(mission, own, { useAutobot = true } = {}) {
     const teamApprover = mission.nodes.find((node) => node.role === "approver" && node.state === "finished" && node.receipt?.verdict === "APPROVED");
     const teamHasApprover = mission.nodes.some((node) => node.role === "approver");
     const route = liveRoute(mission, own);
+    if (useAutobot && !teamHasApprover && mission.execution_mode === "single" && own?.role === "planner"
+      && acceptsAutobot(own.route) && acceptsAutobot(route)) {
+      const config = autobot.get(mission.workspace_id, mission.project_id);
+      if (config) return { route, autobot: config, settings: { instructions: "", auto_decide: true } };
+    }
     return teamApprover ?? (!teamHasApprover && route?.approvals_reviewer === "auto_review" && externalAgent(own)
       ? { route, settings: { instructions: "", auto_decide: true } } : null);
   }
   function reviewAttempt(mission, node) {
     const approver = cardApprover(mission, node);
     return JSON.stringify([activityAttempt(mission.workspace_id, mission.id, node), node.state, node.route, node.settings,
-      approver?.route, approver?.settings, Boolean(mission.cancelled), Boolean(mission.paused)]);
+      approver?.route, approver?.settings, approver?.autobot?.revision, Boolean(mission.cancelled), Boolean(mission.paused)]);
   }
   /** Whether a pending request waits on the person, not on a reviewer that answers it for them. */
   function approvalNeedsPerson(mission, node, approval) {
@@ -5131,15 +5163,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * is retried after REVIEW_RETRY_MS. After DELIVERY_TRIES sends the request is the person's.
    */
   const DELIVERY_TRIES = 3;
-  const resendPending = (advice) => Boolean(advice?.decided) && !advice.resolved && chatPreferences.get().modelJudges
+  const resendPending = (advice) => Boolean(advice?.decided) && !advice.decided.autobot && !advice.resolved && chatPreferences.get().modelJudges
     && (advice.sends ?? 1) < DELIVERY_TRIES;
   const resendDue = (advice) => resendPending(advice)
     && now() - (advice.unsentAt ?? -Infinity) >= (advice.uncertain ? ANSWER_DELIVERY_MS : REVIEW_RETRY_MS);
   /** The advice kept for an answer that did not (surely) reach AO: the decision itself, for its resend. */
   function unsentAnswer(decided, sends, uncertain, reason) {
-    const again = chatPreferences.get().modelJudges && sends < DELIVERY_TRIES;
+    const again = !decided.autobot && chatPreferences.get().modelJudges && sends < DELIVERY_TRIES;
     return { action: "ask", unresolved: true, unsent: decided.action, sends, uncertain, unsentAt: now(),
-      decided: { action: decided.action, reason: decided.reason, actor: decided.actor, reason_code: decided.reason_code, unavailable: decided.unavailable },
+      decided: { action: decided.action, reason: decided.reason, actor: decided.actor, reason_code: decided.reason_code, unavailable: decided.unavailable,
+        ...(decided.autobot ? { autobot: true } : {}) },
       reason: again ? `${uncertain ? "The reviewer's answer may not have reached the agent" : "The reviewer's answer couldn't be sent"};`
         + ` it is sent again while the request still waits (Let the model judge is on). It said ${decided.action}: ${decided.reason}`
         : sends > 1 ? `Sent ${sends} times without reaching the agent. ${reason}` : reason };
@@ -5176,7 +5209,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    */
   const rescreen = (advice) => !advice || resendDue(advice)
     || (advice.action === "ask" && !advice.resolved && !advice.unsent
-      && (advice.quotaBlocked ? chatPreferences.get().meteredReviews : !advice.judged && chatPreferences.get().modelJudges));
+      && (advice.quotaBlocked ? (advice.autobot ? autobotMayMeter() : chatPreferences.get().meteredReviews)
+        : !advice.judged && chatPreferences.get().modelJudges));
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
     const jobs = [];
@@ -5190,7 +5224,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // A question the agent asked is the person's to answer: never screened or answered for them.
         // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
-        const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao");
+        const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao")
+          && (!approver.autobot || approval.source === "ao");
         if (!screened || !approval.approval_id || !rescreen(approverAdvice.get(approval.approval_id)) || screening.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
@@ -5232,7 +5267,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return screenOne(workspaceId, runId, mission, job, {
             ...review, verifyCurrent, sending: (advice, sends) => { mark.sending = advice; mark.sends = sends; },
           });
-        }, current);
+        }, current, job.approver.autobot ? 2 * REVIEW_BUDGET_MS : REVIEW_BUDGET_MS);
         if (said) note = said;
       } catch (error) {
         if (!current()) return;
@@ -5243,6 +5278,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           approverAdvice.set(id, kept);
           note = resendPending(kept) ? "The reviewer's answer may not have reached the agent; it is sent again if the request still waits"
             : "The reviewer's answer delivery is uncertain; check the pending request";
+        } else if (job.approver.autobot) {
+          approverAdvice.set(id, { action: "ask", unresolved: true, judged: true, reason: "Autobot could not verify this request in time. Check it yourself." });
+          if (approverAdvice.size > 500) approverAdvice.delete(approverAdvice.keys().next().value);
         } else {
           const tries = (reviewFailures.get(id)?.tries ?? 0) + 1;
           reviewFailures.set(id, { tries, at: now() });
@@ -5291,7 +5329,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (prior?.unsent && !resend) return null;
     const sends = resend ? (resend.sends ?? 1) + 1 : 1;
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
-    let advice = resend ? { ...resend.decided }
+    let advice = approver.autobot
+      ? { ...(await reviewAutobot({ config: approver.autobot, approval,
+        hardDenial: blocked ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) } : null,
+        incomplete: incomplete || approval.thread_id !== node.receipt?.thread_id,
+        root: async () => (await sessionFolder(approval.thread_id, mission.workspace_id))?.root,
+        guardian: () => reviewWithNativeGuardian({ approver, mission, approval, partial: incomplete, signal, verifyCurrent },
+          { action: "ask", unresolved: true, reason: "Guardian cannot confirm this request." }),
+        mayMeter: autobotMayMeter,
+        model: async () => {
+          if (!await samePendingApproval(approval, verifyCurrent)) return null;
+          check();
+          return askApprover({ approver, mission, approval, decide: true, judge: true, check, signal, verifyCurrent }).catch(() => null);
+        },
+      })), autobot: true }
+      : resend ? { ...resend.decided }
       : exhausted
       ? judges ? { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
@@ -5336,8 +5388,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
       else advice = { ...advice, unresolved: true };
     }
+    if (approver.autobot && advice.action !== "ask" && !await samePendingApproval(approval, verifyCurrent)) {
+      advice = { action: "ask", unresolved: true, judged: true, autobot: true, reason: "The original request changed or is no longer pending." };
+    }
     await verifyCurrent();
     check();
+    if (advice.autobotMetered && !autobotMayMeter()) {
+      advice = { action: "ask", unresolved: true, judged: true, autobot: true, reason: "Autobot model fallback was turned off." };
+    }
     // The preference may change while the model or the owner check is in flight. "Let the model
     // judge": a decide pass that failed or still said "ask" is a deny, never the person's: the
     // request sat on the card though the switch was on. A review quota-based reviews kept from
@@ -10404,7 +10462,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
-  return Object.freeze({ call, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
+  return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
     startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 

@@ -382,6 +382,28 @@ test("permission popup renders exactly three mode rows with no scope or shared g
   assert.ok(!text(tree).includes("SHARED MUST NOT RENDER"));
 });
 
+test("Autobot is a chat-only permission row with a transforming mark and exact scope editor", () => {
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const plugin = renderer("AgentOrchestratorAutobot.tsx");
+  const worker = node("lead", "ao:claude-code", ":ao-default");
+  Object.assign(worker.route, { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" });
+  const state = { enabled: true, selected: ["location"], summary: "Only pwd.", options: [{ id: "location", title: "Show the current folder", commands: ["pwd"] }] };
+  const props = { team: { id: "single-composer", nodes: [worker] }, busy: false,
+    loadProfiles: async () => ({}), save: async () => "", configureAutobot: async () => state };
+  const cap = { lead: { supported: true, profiles: [{ id: ":workspace", allowed: true }], approval_policies: ["on-request"], approvals_reviewers: ["user"] } };
+  const tree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false, false, null, state, null]);
+  const rows = elements(tree, item => item.type === "button" && item.props.role === "menuitemradio");
+  assert.equal(rows.length, 4);
+  assert.match(text(rows.at(-1)), /Autobot Roll Out/);
+  assert.equal(rows.at(-1).props["aria-checked"], true);
+  assert.equal(rows[0].props["aria-checked"], false);
+  const svg = plugin.render("AutobotMark", { animate: true });
+  assert.match(svg.props.className, /is-transforming/);
+  assert.deepEqual(elements(svg, item => item.type === "g").map(item => item.props.className), ["cx-autobot-car", "cx-autobot-robot"]);
+  const css = fs.readFileSync(path.resolve(__dirname, "../src/features/agent-orchestrator.css"), "utf8");
+  assert.match(css, /prefers-reduced-motion: reduce\) \{\s*\.cx-autobot-mark/is);
+});
+
 test("a role that hasn't connected yet can still choose Ask for approval or Approve for me", async () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   const draft = view.exports.draftPermissionCapability();

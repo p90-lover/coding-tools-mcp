@@ -7013,6 +7013,49 @@ test("a single AO card set to Approve for me has its parked tool requests review
   assert.equal(advised.length, 2, "the reviewer is asked only about the unclear write (twice), never about the agent's question");
 });
 
+test("Autobot config needs consent and answers an attested single-chat request only while enabled", async () => {
+  const root = process.cwd();
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model", permission_profile: ":ao-default",
+    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  let approved = false;
+  let request = { approval_id: "step", source: "ao", kind: "command", command: "pwd", cwd: root,
+    tool: "Bash", turn_id: "t", decisions: [{ id: "yes", kind: "allow_once" }, { id: "always", kind: "allow_always" }, { id: "no", kind: "reject_once" }] };
+  const mission = { id: "run", workspace_id: "ws", project_id: "chat", execution_mode: "single", nodes: [
+    { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    confirm: async () => approved,
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission] }
+      : { operation: { state: "completed", result: { ok: true, task: { id: "chat", description: "Check the project" } } } },
+    nativeGuardianReview: () => assert.fail("local scope never needs Guardian"),
+    fetchImpl: () => assert.fail("no model/network request for local scope"),
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: request ? [request] : [] }),
+      sessionWorkspace: async () => ({ root }),
+      resolveApproval: async (session, id, decision) => { resolved.push([session, id, decision]); request = null; return { ok: true }; },
+    },
+  });
+  const scope = { workspaceId: "ws", taskId: "chat" };
+  const turn = { workspaceId: "ws", runId: "run", nodeId: "one" };
+  try {
+    await assert.rejects(workflow.call("chat_autobot_permission", { ...scope, selected: ["location"] }), /unknown|unsupported/i);
+    assert.equal((await workflow.configureChatAutobot({ ...scope, selected: ["location"] })).enabled, false);
+    approved = true;
+    assert.equal((await workflow.configureChatAutobot({ ...scope, selected: ["location"] }, () => false)).enabled, false);
+    assert.equal((await workflow.configureChatAutobot({ ...scope, selected: ["location"] })).enabled, true);
+    await workflow.call("observe", turn);
+    for (let tries = 0; !resolved.length && tries < 50; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved, [["session-1", "step", "yes"]]);
+    await new Promise(resolve => setImmediate(resolve));
+    await workflow.configureChatAutobot({ ...scope, disable: true });
+    assert.equal((await workflow.configureChatAutobot(scope)).enabled, false);
+    request = { approval_id: "later", source: "ao", kind: "command", command: "pwd", cwd: root,
+      tool: "Bash", turn_id: "t", decisions: [{ id: "yes", kind: "allow_once" }] };
+    await workflow.call("observe", turn);
+    assert.deepEqual(resolved, [["session-1", "step", "yes"]]);
+  } finally { workflow.dispose(); }
+});
+
 test("Approve for me picked while a turn runs reviews that turn's requests at once, not from its next turn", async () => {
   // Seen 2026-11-16: Auto Review answered 500 for a while; picked again once it was back, "Approve
   // for me" was saved for the next turn only, and a turn ten hours in kept waiting on the person.
