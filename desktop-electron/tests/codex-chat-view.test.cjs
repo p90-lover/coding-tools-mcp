@@ -1060,6 +1060,41 @@ test("two queued messages fold into Claude Code's stack: Next: …, then a list 
   assert.equal(cleared, 1);
 });
 
+test("queued images use thumbnails in the single bar, folded stack and expanded rows", () => {
+  const { props } = base();
+  const view = mount(props);
+  const first = { name: "before.png", path: "G:\\fixtures\\before.png", image: true };
+  const second = { name: "after.jpg", path: "/fixtures/after.jpg", image: true };
+  const imageOnly = chat.chatMessageWithAttachments("", [first]);
+  const withCaption = chat.chatMessageWithAnnotations(chat.chatMessageWithAttachments("Compare  results", [first, second,
+    { name: "notes.txt", path: "/fixtures/notes.txt" }]), [{ text: "the output", comment: "from before" }]);
+  const sent = [];
+  const item = (key, message) => ({ key, text: message, state: "queued", onSendNow: () => sent.push(message) });
+  const render = items => view.bar({ items, onMenu() {} });
+  const thumbnails = tree => walk(tree).filter(element => element.type === "SentImage");
+  const paths = tree => thumbnails(tree).map(element => element.props.item.path);
+  const single = render([item("single", imageOnly)]);
+  assert.deepEqual(paths(single), [first.path]);
+  assert.equal(typeof thumbnails(single)[0].props.onOpen, "function");
+  assert.doesNotMatch(text(single), /Attached image|fixtures|…/);
+  walk(single).find(element => element.props?.["aria-label"] === "Send now").props.onClick();
+  assert.deepEqual(sent, [imageOnly], "the queued request retains its original attachment path");
+
+  const items = [item("head", withCaption), item("tail", imageOnly)];
+  const folded = walk(render(items)).find(element => element.props?.["aria-expanded"] === false);
+  assert.deepEqual(paths(folded), [first.path], "only the first image is loaded while folded");
+  assert.equal(thumbnails(folded)[0].props.onOpen, undefined, "the stack's button must not contain another button");
+  assert.match(text(folded), /Compare results notes\.txt/);
+  assert.match(text(folded), /\+1/);
+  assert.doesNotMatch(text(folded), /Attached image|fixtures/);
+  folded.props.onClick();
+  const expanded = render(items);
+  assert.deepEqual(paths(expanded), [first.path, second.path, first.path]);
+  assert.ok(thumbnails(expanded).every(element => typeof element.props.onOpen === "function"));
+  assert.match(text(expanded), /Annotations: 1\. "the output" — from before Compare results/);
+  assert.doesNotMatch(text(expanded), /Attached image|fixtures/);
+});
+
 // The user, 2026-11-12: "the message that are waiting to send etc are gone without any issue".
 test("a queued message the app couldn't send says why under it; one it is sending can't be changed", async () => {
   const { props } = base({ selectedTaskId: "t-q", working: true,

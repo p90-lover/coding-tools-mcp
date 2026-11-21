@@ -626,6 +626,12 @@ button.cx-chip:hover, button.cx-chip[aria-expanded="true"] { background: var(--c
 .cx-sent-image:disabled { cursor: default; }
 .cx-sent-image span { padding: 6px; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }
 .cx-sent-image:hover:not(:disabled) { border-color: color-mix(in srgb, var(--color-text-primary) 25%, transparent); }
+.cx-queued-images { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; color: var(--cq-muted); }
+.cx-queued-images .cx-sent-image { flex: none; width: 56px; height: 42px; border-radius: 6px; font-size: 10px; line-height: 13px; }
+.cx-queued-images > span.cx-sent-image { cursor: inherit; }
+.cx-queued-band:has(> .cx-queued-images) { flex-wrap: wrap; }
+.cx-queued-band:has(> .cx-queued-images) .cx-queued-preview { flex-basis: 0; }
+.cx-queued-band > .cx-queued-images { flex: 1 0 100%; }
 .cx-sent-file { display: inline-flex; align-items: center; gap: 10px; width: 220px; min-height: 52px; padding: 8px 12px; border: 1px solid var(--ao-line);
   border-radius: 12px; background: var(--cx-tray); color: var(--color-text-primary); font: inherit; text-align: left; cursor: pointer; }
 .cx-sent-file:disabled { cursor: default; }

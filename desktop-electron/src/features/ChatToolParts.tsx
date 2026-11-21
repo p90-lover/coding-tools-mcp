@@ -16,7 +16,7 @@ export const Attachments = createContext<AttachmentAccess>({});
 /** Share pending reads within a provider; mounted images own the completed full-size data URLs. */
 const PREVIEWS = new WeakMap<NonNullable<AttachmentAccess["preview"]>, Map<string, Promise<string>>>();
 
-export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: (url: string, name?: string) => void }) {
+export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen?: (url: string, name?: string) => void }) {
   const { preview } = useContext(Attachments);
   const [url, setUrl] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
@@ -37,9 +37,10 @@ export function SentImage({ item, onOpen }: { item: ChatSentAttachment; onOpen: 
     read.then((value) => { if (current) setUrl(value); }, () => { if (current) setMissing(true); });
     return () => { current = false; };
   }, [item.path, preview]);
-  return <button type="button" className={`cx-sent-image${missing ? " is-missing" : ""}`} title={item.path} disabled={!url} onClick={() => url && onOpen(url, item.path ?? item.name)}>
-    {url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>}
-  </button>;
+  const className = `cx-sent-image${missing ? " is-missing" : ""}`;
+  const image = url ? <img src={url} alt={item.name} /> : <span>{missing ? "Image not found" : item.name}</span>;
+  if (!onOpen) return <span className={className} title={item.name}>{image}</span>;
+  return <button type="button" className={className} title={item.path} disabled={!url} onClick={() => url && onOpen(url, item.path ?? item.name)}>{image}</button>;
 }
 
 /**
