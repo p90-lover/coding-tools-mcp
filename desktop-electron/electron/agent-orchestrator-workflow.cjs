@@ -500,7 +500,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, inputJournal = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, readNativeLaunchReceipt = null, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, inputJournal = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -2017,6 +2017,15 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       && validNativeTurnId(receipt.turnId) ? receipt : null;
   }
 
+  async function nativeLaunchReceipt(scope) {
+    const receipt = await Promise.resolve().then(() => readNativeLaunchReceipt?.(scope)).catch(() => null);
+    return receipt?.workspaceId === scope.workspaceId && receipt.agent === scope.agent && receipt.requestId === scope.requestId
+      && isNativeSession(receipt.sessionId) && receipt.sessionId.length <= 128 && validNativeTurnId(receipt.sessionId.slice(7))
+      && validNativeTurnId(receipt.turnId) ? receipt : null;
+  }
+  const unknownNativeDelivery = () => Object.assign(new Error("Native delivery is unknown. The reserved turn was kept and was not sent again."),
+    { code: "NATIVE_DELIVERY_UNKNOWN" });
+
   // plain: a single-model run, whose one card is a plain assistant rather than an AO worker.
   async function dispatchExternal(workspaceId, runId, node, expectedRevision, background, plain = false) {
     const agent = externalAgent(node);
@@ -2161,9 +2170,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           sendMs = now() - sendStarted;
           if (nativeContinuation && !validNativeTurnId(sent?.turnId)) {
             sent = await nativeSendReceipt(continued.session, receiver);
-            if (!sent) {
-              throw Object.assign(new Error("Native delivery is unknown. The reserved turn was kept and was not sent again."), { code: "NATIVE_DELIVERY_UNKNOWN" });
-            }
+            if (!sent) throw unknownNativeDelivery();
           }
           if (nativeContinuation) nativeTurnId = sent.turnId;
           if (sent?.turnId) givenInstructions(continued.session, standing.hash);
@@ -2233,8 +2240,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage(starting);
           const holder = await takeColdStart(count => stage(`waiting for ${count} other agent${count === 1 ? "" : "s"} to finish starting`));
           stage(starting);
-          try { session = await harnessService().spawn({ ...launch, prompt, requestId: reserved.request_key }); }
-          catch (error) { releaseColdStart(holder); throw error; }
+          try {
+            if (!isNativeAgent) session = await harnessService().spawn({ ...launch, prompt, requestId: reserved.request_key });
+            else {
+              const reported = await Promise.resolve().then(() => harnessService().spawn({ ...launch, prompt, requestId: reserved.request_key })).catch(() => null);
+              const receipt = await nativeLaunchReceipt({ workspaceId, agent, requestId: reserved.request_key });
+              if (!receipt || (reported && reported !== receipt.sessionId)) throw unknownNativeDelivery();
+              session = receipt.sessionId;
+              nativeTurnId = receipt.turnId;
+            }
+          } catch (error) { releaseColdStart(holder); throw error; }
           // A brand-new agent holding nothing but this message: the one kind of start the launch
           // watchdog may end (stopStalledLaunch). Its clock starts with the spawn, not the wait above.
           if (session) {
@@ -2516,13 +2531,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (externalAgent(node)?.startsWith("orchestrator-")) {
         const requestId = node.receipt?.request_key || node.request_key;
         const receiver = { workspaceId, runId, nodeId: node.id, requestId };
-        const target = !requestId || mission?.paused || mission?.cancelled ? null
-          : await chatInputs?.readNativeSendTarget?.(receiver).catch(() => null);
-        const receipt = target?.sessionId ? await nativeSendReceipt(target.sessionId, receiver) : null;
+        if (!requestId || mission?.paused || mission?.cancelled) return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+        let receipt;
+        try {
+          const target = await chatInputs?.readNativeSendTarget?.(receiver);
+          receipt = target ? await nativeSendReceipt(target.sessionId, receiver)
+            : await nativeLaunchReceipt({ workspaceId, agent: externalAgent(node), requestId });
+        } catch { /* Without the target read, the original receiver is uncertain. */ }
         if (!receipt) return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
         const attached = await requestHeadless("/api/v1/ao/external/submitted", {
           workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: requestId,
-          session_id: target.sessionId, turn_id: receipt.turnId,
+          session_id: receipt.sessionId, turn_id: receipt.turnId,
         });
         if (attached?.ok !== true) throw new Error("Couldn't attach the exact native receipt. The message was not sent again.");
         return { ...attached, pending_approvals: [] };

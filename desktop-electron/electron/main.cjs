@@ -5596,7 +5596,8 @@ async function start() {
         return aoWebCatalogForModel(JSON.parse(await aoWebCatalogOutput(executable)), model);
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
-      aoHarness: agentOrchestratorUpstream.harness,
+      aoHarness: upstreamAtLaunch.harness,
+      readNativeLaunchReceipt: async scope => (await upstreamAtLaunch.call("native_launch_receipt", scope))?.launchReceipt ?? null,
       confirm: confirmAoAction,
       confirmToolRequest,
       confirmRecoverable,

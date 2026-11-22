@@ -12457,6 +12457,48 @@ function workflowInternals(options) {
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
 
+test("native cold launch stays reserved after a lost reply and attaches only its original first turn", async () => {
+  const route = { harness_id: "ao:orchestrator-fixture", model: "fixture" };
+  const scope = { workspaceId: "ws", agent: "orchestrator-fixture", requestId: "cold-reservation" };
+  const exact = { ...scope, sessionId: "native:cold", turnId: "first-turn" };
+  const node = { id: "card", role: "planner", route, state: "reserved", request_key: scope.requestId };
+  const mission = { id: "run", nodes: [node] };
+  const submitted = [];
+  let launches = 0, found = null, failJournalRead = false;
+  const options = { aoHarness: { async spawn() { launches += 1; throw new Error("Fixture lost launch reply"); } },
+    inputJournal: { pending: async () => ({ items: [] }), async readNativeSendTarget() {
+      if (failJournalRead) throw new Error("Fixture journal unavailable");
+      return null;
+    } },
+    readNativeLaunchReceipt: async keys => { assert.deepEqual(keys, scope); return found; },
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint.endsWith("/reserve")) return { ok: true, request_key: scope.requestId, prompt: "first message" };
+      assert.match(endpoint, /\/external\/submitted$/);
+      submitted.push(body);
+      return { ok: true, run: mission };
+    },
+  };
+  const first = workflowInternals(options);
+  try {
+    await assert.rejects(first.dispatchExternal("ws", "run", node, 1, true, true), { code: "NATIVE_DELIVERY_UNKNOWN" });
+    assert.equal(submitted.length, 0);
+  } finally { first.dispose(); }
+  const reopened = workflowInternals(options);
+  try {
+    found = { ...exact, agent: "orchestrator-other" };
+    assert.equal((await reopened.observeExternal("ws", "run", node, mission)).recovery_required, true);
+    found = exact;
+    failJournalRead = true;
+    assert.equal((await reopened.observeExternal("ws", "run", node, mission)).recovery_required, true);
+    assert.equal(submitted.length, 0);
+    failJournalRead = false;
+    await reopened.observeExternal("ws", "run", node, mission);
+    assert.equal(launches, 1);
+    assert.deepEqual(submitted, [{ workspace_id: "ws", run_id: "run", node_id: "card", request_key: scope.requestId,
+      session_id: exact.sessionId, turn_id: exact.turnId }]);
+  } finally { reopened.dispose(); }
+});
+
 test("native follow-up uses only its exact read-only reservation receipt after a lost reply", async () => {
   const route = { harness_id: "ao:orchestrator-fixture", model: "fixture" };
   const scope = { sessionId: "native:existing", workspaceId: "ws", requestId: "follow-up-reservation", turnId: "exact-turn" };
