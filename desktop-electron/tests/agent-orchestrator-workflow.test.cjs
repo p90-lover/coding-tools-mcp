@@ -13894,6 +13894,30 @@ test("a queued message goes as the chat's next turn once its turn ends, with no 
   workflow.dispose();
 });
 
+test("queue delivery keeps checking after a send even if the next turn's settle event is missed", async (t) => {
+  const { world, workflow, advance, queue } = queueChat({ readActualRuns: true });
+  t.after(() => workflow.dispose());
+  for (const message of ["first follow-up", "second follow-up"]) {
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { message } });
+  }
+  await goalSettle();
+  world.runs[0].nodes[0].state = "finished";
+  await advance(60_000);
+  assert.equal(world.updates.length, 1);
+  assert.deepEqual((await queue()).map(item => item.message), ["second follow-up"]);
+
+  const accepted = structuredClone(world.runs[0]);
+  accepted.id = world.updates[0].run_id;
+  accepted.nodes[0].state = "running";
+  world.runs.push(accepted);
+  await advance(5_000);
+  assert.equal(world.updates.length, 1, "the next ordinary message waits for the accepted turn");
+  accepted.nodes[0].state = "finished";
+  await advance(60_000);
+  assert.equal(world.updates.length, 2, "the next message does not need the chat view or a second settle event");
+  assert.deepEqual(await queue(), []);
+});
+
 test("a queued message refused for now goes back to the front and is tried again; a steer one is steered in", async () => {
   const steered = [];
   let take = false;
@@ -13974,6 +13998,50 @@ test("a follow-up queued during launch is steered as soon as its agent is observ
   assert.deepEqual(await queue(), []);
   await advance(60_000);
   assert.deepEqual(steered, ["patch locally and pr"], "the replaced retry cannot deliver twice");
+});
+
+test("queue delivery remembers readiness reported while a steer retry is in flight", async (t) => {
+  const attempts = [], first = Promise.withResolvers();
+  const { workflow, advance, queue } = queueChat({ readActualRuns: true, aoHarness: {
+    observe: async () => ({ turnId: "turn-1", turnState: "running", approvals: [] }),
+    steer: async (_id, text) => { attempts.push(text); return attempts.length === 1 ? first.promise : { steered: true }; },
+  } });
+  t.after(() => { first.resolve({ steered: false, starting: true }); workflow.dispose(); });
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { message: "queued input", steer: true } });
+  await goalSettle();
+  await advance(15_000);
+  assert.deepEqual(attempts, ["queued input"]);
+  for (let i = 0; i < 2; i++) await workflow.call("observe", { workspaceId: "ws-1", runId: "r1", nodeId: "one" });
+  first.resolve({ steered: false, starting: true });
+  await goalSettle();
+  await advance(1);
+  assert.deepEqual(attempts, ["queued input", "queued input"], "the newer ready signal supersedes the old starting result");
+  assert.deepEqual(await queue(), []);
+  await advance(60_000);
+  assert.equal(attempts.length, 2, "repeated ready signals do not send again");
+});
+
+test("queue delivery does not use an older message to answer a new agent question", async (t) => {
+  let asks = true;
+  const answers = [], steers = [];
+  const { workflow, advance, queue } = queueChat({ readActualRuns: true, aoHarness: {
+    observe: async () => ({ turnId: "turn-1", turnState: "running", needsInput: asks, approvals: asks
+      ? [{ kind: "question", approval_id: "question", fields: [{ key: "answer", type: "text" }] }] : [] }),
+    resolveInput: async (...args) => { answers.push(args); return { ok: true }; },
+    steer: async (_id, text) => { steers.push(text); return { steered: true }; },
+  } });
+  t.after(() => workflow.dispose());
+  await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { message: "queued before the question", steer: true } });
+  await goalSettle();
+  await advance(15_000);
+  assert.deepEqual(answers, [], "stored input is not an answer to a new question");
+  assert.deepEqual(steers, []);
+  assert.equal((await queue()).length, 1);
+  asks = false;
+  await workflow.call("observe", { workspaceId: "ws-1", runId: "r1", nodeId: "one" });
+  await advance(1);
+  assert.deepEqual(steers, ["queued before the question"]);
+  assert.deepEqual(await queue(), []);
 });
 
 for (const blocked of ["queued", "agent-gone", "approval", "question", "plain-queue", "team-worker", "other-chat"]) {

@@ -6999,19 +6999,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // and takes its answer, and one that turn already took within STEER_REPEAT_MS is not sent again.
   const STEER_REPEAT_MS = 30_000;
   const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
-  function chatSteer(input = {}) {
-    if (input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input);
+  function chatSteer(input = {}, { fromQueue = false } = {}) {
+    if (input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input, fromQueue);
     const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
     const earlier = steersInFlight.get(key);
     if (earlier) {
-      return earlier.catch(() => null).then((answer) => answer?.steered === true ? { ...answer, duplicate: true } : steerTracked(key, input));
+      return earlier.catch(() => null).then((answer) => answer?.steered === true && !(fromQueue && answer.answered)
+        ? { ...answer, duplicate: true } : steerTracked(key, input, fromQueue));
     }
-    return steerTracked(key, input);
+    return steerTracked(key, input, fromQueue);
   }
   // The steer itself, as its caller's answer: no wait is added in front of it (the chat's note reads
   // the message count while the caller carries on).
-  function steerTracked(key, input) {
-    const mine = chatSteerOnce(input);
+  function steerTracked(key, input, fromQueue) {
+    const mine = chatSteerOnce(input, fromQueue);
     steersInFlight.set(key, mine);
     const forget = () => { if (steersInFlight.get(key) === mine) steersInFlight.delete(key); };
     mine.then(forget, forget);
@@ -7046,7 +7047,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}, fromQueue = false) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -7091,7 +7092,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
-    const question = !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
+    const question = !fromQueue && !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
     const reply = question ? typedAnswer(question, text) : null;
     if (repeat && !reply) return skipRepeat();
     // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
@@ -7122,7 +7123,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
     // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
-    for (const deadline = now() + STEER_ANSWER_WAIT_MS; asking(waiting) && now() < deadline;) {
+    for (const deadline = now() + STEER_ANSWER_WAIT_MS; !fromQueue && asking(waiting) && now() < deadline;) {
       await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
       waiting = await observeCard();
     }
@@ -8811,7 +8812,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const QUEUE_RETRY_MS = 60_000, QUEUE_RESTORE_MS = 30_000, QUEUE_SEND_TRIES = 5;
   const QUEUE_STEER_WAITS = [15_000, 30_000, 60_000];
   const queueTimers = new Map();
-  const draining = new Set();
+  const draining = new Map();
   const queueFailures = new Map(); // item id -> failed sends
   const steerTries = new Map(); // item id -> steers that found the agent not ready
   function armQueue(workspaceId, taskId, delay, steer = false, ready = false) {
@@ -8821,7 +8822,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (wakeupsDisposed || !chatQueue.list(workspaceId, taskId).length) return;
     const handle = setTimer(() => {
       queueTimers.delete(key);
-      void drainQueue(workspaceId, taskId, { steer }).catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
+      void drainQueue(workspaceId, taskId, { steer, ready }).catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
     }, Math.max(1, delay));
     handle?.unref?.();
     queueTimers.set(key, { handle, ready });
@@ -8830,11 +8831,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function wakeQueueOnAgentReady(workspaceId, mission, node, observed) {
     const taskId = mission?.project_id;
     if (!taskId || mission.cancelled || !(mission.execution_mode === "single" || node.role === "planner")
-      || observed.turnState !== "running" || observed.agentGone || observed.exited || observed.needsInput || observed.approvals?.length) return;
+      || observed.turnState !== "running" || observed.provisioning || observed.agentGone || observed.exited || observed.needsInput || observed.approvals?.length) return;
     const key = wakeKey(workspaceId, taskId);
-    if (!chatQueue.list(workspaceId, taskId)[0]?.steer || draining.has(key) || queueTimers.get(key)?.ready) return;
-    // Keep this observational path nonblocking. drainQueue re-reads the current head and lifecycle,
-    // and chatSteer checks the agent again before sending; the per-chat draining lock prevents duplicates.
+    const [head] = chatQueue.list(workspaceId, taskId);
+    if (!head?.steer || head.sending || queueTimers.get(key)?.ready) return;
+    const pass = draining.get(key);
+    if (pass) {
+      // An older in-flight retry can still report "starting". Carry one newer wake past it, but
+      // not past a check that was itself started by a ready signal.
+      if (!pass.ready) pass.wake = head.id;
+      return;
+    }
     armQueue(workspaceId, taskId, 1, true, true);
   }
   // After its chat's turn was found over (or ended here), the next look comes this soon.
@@ -8883,11 +8890,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * the turn this one starts.
    */
   /** `known`: the project's runs as the caller has just read them (queueAfterRun), so they are not read again. */
-  async function drainQueue(workspaceId, taskId, { steer = false, known = null } = {}) {
+  async function drainQueue(workspaceId, taskId, { steer = false, ready = false, known = null } = {}) {
     const key = wakeKey(workspaceId, taskId);
     if (wakeupsDisposed || draining.has(key)) return;
     if (!chatQueue.list(workspaceId, taskId).length) return;
-    draining.add(key);
+    const pass = { ready, wake: null };
+    draining.set(key, pass);
     try {
       let saved = known ?? await runs({ workspaceId });
       // An archived or deleted chat keeps its queue for when it is back.
@@ -8910,13 +8918,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!next) return;
       const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
-        if (!next.steer) {
+        if (!next.steer || next.sending) {
           const freed = await unblockQueuedChat(workspaceId, taskId, saved).catch(() => false);
           if (!wakeupsDisposed) armQueue(workspaceId, taskId, freed ? QUEUE_FREED_MS : QUEUE_RETRY_MS);
           return;
         }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
-        const result = await chatSteer({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}) })
+        const result = await chatSteer({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}) }, { fromQueue: true })
           .catch(error => ({ steered: false, waiting: true, error }));
         if (result.steered === true) {
           chatQueue.remove(workspaceId, taskId, [next.id]);
@@ -8951,6 +8959,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         chatQueue.remove(workspaceId, taskId, [next.id]);
         queueFailures.delete(next.id);
         logger?.info?.("ao.chat_queue.sent", { workspaceId, taskId, left: chatQueue.list(workspaceId, taskId).length });
+        armQueue(workspaceId, taskId, QUEUE_FREED_MS, true);
       } catch (error) {
         const why = String(error?.message || error);
         // Another turn started first (a goal's round, a wake-up): it waits for that one, uncounted.
@@ -8970,7 +8979,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // look was armed while this one waited.
       logger?.warn?.("ao.chat_queue.check_failed", { workspaceId, taskId, message: publicText(error?.message || error, 200) });
       if (!queueTimers.has(key)) armQueue(workspaceId, taskId, QUEUE_RETRY_MS, steer);
-    } finally { draining.delete(key); }
+    } finally {
+      draining.delete(key);
+      if (pass.wake && chatQueue.list(workspaceId, taskId)[0]?.id === pass.wake) armQueue(workspaceId, taskId, 1, true, true);
+    }
   }
   /** The timelines of a run's agent cards, for whether a steer was read; null when none can be read. */
   async function runTimelines(workspaceId, runId) {
