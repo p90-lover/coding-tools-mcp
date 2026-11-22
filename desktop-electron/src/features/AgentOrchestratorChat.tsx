@@ -729,7 +729,10 @@ export function AgentConversation({ runId, nodeId, live, loadWork }: { runId: st
   return <div className="cx-agent-conversation">
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
     {items === null ? <p className="cx-workbench-empty">Reading its conversation…</p>
-      : items.length ? <LiveTimeline items={items} live={live} finished={!live} expanded />
+      : items.length ? <>
+        <ReplyPlanView plan={replyPlan(items, live)} style="transcript" live={live} />
+        <LiveTimeline items={items} live={live} finished={!live} expanded />
+      </>
         : <p className="cx-workbench-empty">{live ? "It hasn't done anything yet." : "Its conversation could not be read back."}</p>}
   </div>;
 }
@@ -1050,8 +1053,27 @@ function QueuedGlyph({ name, size = 16 }: { name: "send" | "edit" | "remove" | "
   </svg>;
 }
 
-/** A queued message on one line, as Claude Code previews it: its readable text, whitespace collapsed. */
-const queuedPreview = (text: string) => chatMessageReadable(text).replace(/\s+/g, " ").trim() || "…";
+function queuedPreview(message: string) {
+  const { text, attachments, annotations } = chatMessageParts(message);
+  const images = attachments.filter(item => item.image && item.path);
+  const files = attachments.filter(item => !item.image || !item.path).map(item => item.name);
+  const readable = annotations ? chatMessageReadable(chatMessageWithAnnotations(text, annotations)) : text;
+  const caption = [readable, ...files].join(" ").replace(/\s+/g, " ").trim();
+  return { caption: caption || (images.length ? "" : "…"), images };
+}
+
+function QueuedImages({ images, folded = false }: { images: ChatSentAttachment[]; folded?: boolean }) {
+  const [open, setOpen] = useState<{ url: string; name?: string } | null>(null);
+  if (!images.length) return null;
+  const visible = folded ? images.slice(0, 1) : images;
+  const more = images.length - visible.length;
+  return <span className="cx-queued-images">
+    {visible.map((item, index) => <SentImage key={`${item.path}:${index}`} item={item}
+      onOpen={folded ? undefined : (url, name) => setOpen({ url, name })} />)}
+    {more > 0 ? <span aria-label={`${more} more ${more === 1 ? "image" : "images"}`}>+{more}</span> : null}
+    {open ? <ImageLightbox url={open.url} name={open.name} onClose={() => setOpen(null)} /> : null}
+  </span>;
+}
 
 /**
  * Claude Code's queued-message bar (its Code tab's QueuedMessageBar): a band right above the
@@ -1068,27 +1090,31 @@ export function QueuedMessageBar({ items, onMenu, onClearAll }: {
   const sendNow = (item: QueuedBarItem, index: number) => index === 0 ? item.onSendNow : undefined;
   if (items.length === 1) {
     const [item] = items;
+    const { caption, images } = queuedPreview(item.text);
     return <div className="cx-queued">
       <div className="cx-queued-band" role="group" aria-label="Queued messages" data-state={item.state}>
         <span className="cx-queued-count">{item.state === "sending" ? "Sending queued message" : "1 message queued"}</span>
-        <span className="cx-queued-preview">{queuedPreview(item.text)}</span>
+        <span className="cx-queued-preview">{caption}</span>
         {sendNow(item, 0) ? <button type="button" className="cx-queued-icon" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"}
           disabled={Boolean(item.sendNowBlocked)} onMouseDown={(event) => event.preventDefault()} onClick={item.onSendNow}><QueuedGlyph name="send" /></button> : null}
         {item.onEdit ? <button type="button" className="cx-queued-icon" aria-label="Edit in composer" data-tip="Edit in composer"
           onMouseDown={(event) => event.preventDefault()} onClick={item.onEdit}><QueuedGlyph name="edit" /></button> : null}
         {item.onRemove ? <button type="button" className="cx-queued-icon" aria-label="Remove from queue" data-tip="Remove from queue"
           onMouseDown={(event) => event.preventDefault()} onClick={item.onRemove}><QueuedGlyph name="remove" /></button> : null}
+        <QueuedImages images={images} />
       </div>
       <QueuedNote note={item.note} />
     </div>;
   }
   const count = `${items.length} messages queued`;
   if (!open) {
+    const { caption, images } = queuedPreview(items[0].text);
     return <div className="cx-queued">
       <button type="button" className="cx-queued-band cx-queued-stack" aria-expanded={false} onClick={() => setOpen(true)}>
         <span className="cx-queued-count">{count}</span>
-        <span className="cx-queued-preview">{items[0].state === "sending" ? "Sending" : "Next"}: {queuedPreview(items[0].text)}</span>
+        <span className="cx-queued-preview">{items[0].state === "sending" ? "Sending" : "Next"}: {caption}</span>
         <span className="cx-queued-caret" aria-hidden="true"><QueuedGlyph name="caret" /></span>
+        <QueuedImages images={images} folded />
       </button>
       <QueuedNote note={items.find((item) => item.note)?.note} />
     </div>;
@@ -1112,8 +1138,13 @@ export function QueuedMessageBar({ items, onMenu, onClearAll }: {
       <div className="cx-queued-list" role="list" aria-label="Queued messages">
         {items.map((item, index) => {
           const menu = actions(item, index);
+          const { caption, images } = queuedPreview(item.text);
           return <div key={item.key} role="listitem" className="cx-queued-row" data-state={item.state}>
-            <span className="cx-queued-body"><span className="cx-queued-text">{queuedPreview(item.text)}</span><QueuedNote note={item.note} /></span>
+            <span className="cx-queued-body">
+              {caption ? <span className="cx-queued-text">{caption}</span> : null}
+              <QueuedImages images={images} />
+              <QueuedNote note={item.note} />
+            </span>
             {menu.length ? <span className="cx-queued-actions">
                 <button type="button" className="cx-queued-icon is-sm" aria-label="Queued message actions" aria-haspopup="menu"
                   onClick={(event) => onMenu(event.currentTarget, menu)}><QueuedGlyph name="more" size={14} /></button>

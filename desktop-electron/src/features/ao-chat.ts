@@ -131,6 +131,7 @@ export type ChatActivity = {
 export type ChatLiveItem = {
   id: string; kind: string; status: string; text: string; label?: string;
   description?: string; input?: string; output?: string;
+  plan?: { text: string; status: "pending" | "in_progress" | "completed" }[];
   /** How long a finished tool call or thought took, from AO's first and last update of it. */
   durationMs?: number;
   /** Images a tool call returned (a screenshot, a picture it read), as the files Claude Code saved them to. */
@@ -239,6 +240,7 @@ export function tidyTimeline(items: ChatLiveItem[]): ChatLiveItem[] {
     return -1;
   };
   for (const raw of items) {
+    if (raw.kind === "plan" && raw.plan) continue;
     // The agent's messages without notices the harness wrote into them; one that was only a notice goes.
     const said = raw.kind === "message" && raw.text ? withoutHarnessNotices(raw.text) : raw.text;
     if (raw.kind === "message" && raw.text && !said) continue;
@@ -1557,7 +1559,8 @@ export type CpaRefusal = { streak: number; status: number | null; statuses?: Rec
 /** What an HTTP status from CPA means to the person waiting on the turn. */
 export function cpaStatusWord(status: number | null): string {
   if (status === 429) return "rate limited (429)";
-  if (status === 401 || status === 403) return `sign-in refused (${status})`;
+  if (status === 401) return "sign-in refused (401)";
+  if (status === 403) return "access denied (403)";
   if (status === 402) return "out of credit (402)";
   if (status !== null && status >= 500) return `model service error (${status})`;
   return status ? `HTTP ${status}` : "failed";

@@ -220,6 +220,7 @@ test("the custom context window takes 100k, 1m and 7-digit sizes, and says why a
     const tree = menuNamed(view.render("AgentOrchestratorComposerControls", props), "Context window").props.children(() => {});
     return {
       input: elements(tree, item => item.type === "input")[0],
+      options: elements(tree, item => typeof item.type === "function" && item.type.name === "Option"),
       set: elements(elements(tree, item => item.props?.className === "ao-context-custom")[0], item => item.type === "button")[0],
       problem: elements(tree, item => item.props?.id === "ao-context-draft-problem")[0]?.props.children ?? null,
     };
@@ -231,6 +232,12 @@ test("the custom context window takes 100k, 1m and 7-digit sizes, and says why a
   assert.equal(capped.input.props.inputMode, "text", "k and m can be typed on any keyboard");
   assert.match(capped.input.props.placeholder, /100k.*1m/, "the field shows that abbreviations work");
   assert.equal(menu(272_000, "abc").problem, "Type a size such as 100k, 1m or 250000");
+  assert.ok(!capped.options.some(option => text(option.props.children) === "1M"));
+  const presets = menu(1_048_576, "").options;
+  assert.deepEqual(presets.map(option => text(option.props.children)), ["32k", "64k", "128k", "200k", "272k", "400k", "1M"]);
+  assert.equal(presets.at(-1).props.title, "1,048,576 tokens");
+  presets.at(-1).props.onPick();
+  assert.equal(routes.at(-1).context_window, 1_048_576, "the single 1M choice sets the exact ceiling");
   for (const [draft, tokens] of [["1m", 1_000_000], ["1,000,000", 1_000_000], ["1048576", 1_048_576], ["100k", 100_000]]) {
     const ok = menu(1_048_576, draft);
     assert.equal(ok.problem, null, `${draft} is a size this model takes`);
@@ -373,6 +380,32 @@ test("permission popup renders exactly three mode rows with no scope or shared g
   assert.deepEqual(rows.map(row => /is-danger/.test(row.props.className)), [false, false, true], "Full access is drawn as a warning, as in Codex");
   assert.equal(elements(tree, item => item.type === "select").length, 0);
   assert.ok(!text(tree).includes("SHARED MUST NOT RENDER"));
+});
+
+test("Autobot is a chat-only permission row with a transforming mark and exact scope editor", () => {
+  const view = renderer("AgentOrchestratorPermissions.tsx");
+  const plugin = renderer("AgentOrchestratorAutobot.tsx");
+  const worker = node("lead", "ao:claude-code", ":ao-default");
+  Object.assign(worker.route, { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" });
+  const state = { enabled: true, selected: ["location"], summary: "Only pwd.", options: [{ id: "location", title: "Show the current folder", commands: ["pwd"] }] };
+  const props = { team: { id: "single-composer", nodes: [worker] }, busy: false,
+    loadProfiles: async () => ({}), save: async () => "", configureAutobot: async () => state };
+  const cap = { lead: { supported: true, profiles: [{ id: ":workspace", allowed: true }], approval_policies: ["on-request"], approvals_reviewers: ["user"] } };
+  const tree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false, false, null, state, null]);
+  const rows = elements(tree, item => item.type === "button" && item.props.role === "menuitemradio");
+  assert.equal(rows.length, 4);
+  assert.match(text(rows.at(-1)), /Autobot Roll Out/);
+  assert.equal(rows.at(-1).props["aria-checked"], true);
+  assert.equal(rows[0].props["aria-checked"], false);
+  const chipLabel = rendered => elements(rendered, item => item.type === "button" && item.props["aria-controls"] === "ao-permissions-panel")[0].props["aria-label"];
+  assert.equal(chipLabel(tree), "Permissions: Autobot Roll Out");
+  const disabledTree = view.render("AgentOrchestratorPermissions", props, [true, cap, "", false, false, null, { ...state, enabled: false }, null]);
+  assert.equal(chipLabel(disabledTree), "Permissions: Ask for approval");
+  const svg = plugin.render("AutobotMark", { animate: true });
+  assert.match(svg.props.className, /is-transforming/);
+  assert.deepEqual(elements(svg, item => item.type === "g").map(item => item.props.className), ["cx-autobot-car", "cx-autobot-robot"]);
+  const css = fs.readFileSync(path.resolve(__dirname, "../src/features/agent-orchestrator.css"), "utf8");
+  assert.match(css, /prefers-reduced-motion: reduce\) \{\s*\.cx-autobot-mark/is);
 });
 
 test("a role that hasn't connected yet can still choose Ask for approval or Approve for me", async () => {

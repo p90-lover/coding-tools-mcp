@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Icon } from "../icons";
 import { useComposerPopover } from "./AgentOrchestratorComposerControls";
 import { CheckGlyph, FolderGlyph, GlobeGlyph, HandGlyph, ShieldAlertGlyph, ShieldCodeGlyph, TerminalGlyph, WarningGlyph } from "./AgentOrchestratorPermissionGlyphs";
+import { AUTOBOT_NAME, AutobotMark, AutobotScope, type AutobotControl, type AutobotState } from "./AgentOrchestratorAutobot";
 import type { KeyboardEvent, ReactNode } from "react";
 import type { AoMission, AoNode } from "./AgentOrchestratorSurface";
 import { NATIVE_HARNESS, PERMISSION_HARNESSES, nativePermission, type AoTeam } from "./AgentOrchestratorRoleEditor";
@@ -153,12 +154,13 @@ export function draftPermissionCapability(): PermissionCapability {
     approvals_reviewers: unique(PERMISSION_MODES.map(mode => mode.reviewer)) };
 }
 
-export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles, save, runtimePolicies }: {
+export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles, save, runtimePolicies, configureAutobot }: {
   team: AoTeam | null; mission?: AoMission; busy: boolean;
   loadProfiles: (roleId: string) => Promise<PermissionCapability>;
   save: (team: AoTeam, missionRevision: number | undefined, selectedRoleIds: string[], selection: PermissionSelection) => Promise<string>;
   /** Retained for legacy callers; shared grant controls deliberately do not render here. */
   shared?: ReactNode; runtimePolicies?: Record<string, RuntimePermissionPolicy>;
+  configureAutobot?: AutobotControl;
 }) {
   const popup = useComposerPopover();
   const [metadata, setMetadata] = useState<Record<string, PermissionCapability>>({});
@@ -167,10 +169,20 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   const [failed, setFailed] = useState(false);
   /** Full access waiting on the dialog, and whether the chat it opened from is dark. */
   const [confirming, setConfirming] = useState<{ selection: PermissionSelection; dark: boolean } | null>(null);
+  const [autobot, setAutobot] = useState<AutobotState | null>(null);
+  const [editingAutobot, setEditingAutobot] = useState<{ canEnable: boolean; dark: boolean } | null>(null);
   const nodes = team?.nodes ?? [];
   const supported = nodes.filter(node => metadata[node.id]?.supported);
   const key = nodes.map(node => node.id).join("|");
-  useEffect(() => { popup.setOpen(false); setMetadata({}); setNotice(""); setConfirming(null); }, [mission?.id, team?.id]);
+  useEffect(() => { popup.setOpen(false); setMetadata({}); setNotice(""); setConfirming(null); setEditingAutobot(null); }, [mission?.id, team?.id]);
+  useEffect(() => {
+    if (!popup.open || !configureAutobot) return;
+    let current = true;
+    void configureAutobot().then(value => { if (current) setAutobot(value); }, cause => {
+      if (current) { setFailed(true); setNotice(String(cause?.message || cause)); }
+    });
+    return () => { current = false; };
+  }, [popup.open, configureAutobot]);
   useEffect(() => {
     if (!popup.open) return;
     let live = true;
@@ -211,6 +223,7 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     if (!team || !canSelect(selection) || busy || saving) return;
     setSaving(true); setNotice(""); setFailed(false);
     try {
+      if (configureAutobot && autobot?.enabled) setAutobot(await configureAutobot({ disable: true }));
       const ids = supported.map(node => node.id);
       setNotice(await save(selectPermissions(team, ids, selection), mission?.revision, ids, selection));
     } catch (cause) { setFailed(true); setNotice(cause instanceof Error ? cause.message : String(cause)); }
@@ -229,29 +242,46 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
     popup.trigger.current?.focus({ preventScroll: true });
     if (confirmed && selection) void apply(selection);
   };
+  const canEnableAutobot = active?.reviewer === "user" && active.policy === "on-request" && canSelect(PERMISSION_MODES[0]);
+  const autobotActive = autobot?.enabled === true && configureAutobot && active?.label === "Ask for approval";
+  const permissionLabel = autobotActive ? AUTOBOT_NAME : active?.label || "Custom";
   const ChipGlyph = active ? MODE_GLYPHS[active.icon] : null;
   // The chip is its level's icon (each level has its own), its name in the label and tooltip; Full
   // access is tinted, so the risky level still stands out without its words.
   return <div className="ao-permissions ao-composer-picker" ref={popup.root} onKeyDown={popup.onKeyDown}>
     <button type="button" className="ao-composer-chip" ref={popup.trigger} aria-expanded={popup.open} aria-haspopup="menu"
-      aria-controls="ao-permissions-panel" aria-label={`Permissions: ${active?.label || "Custom"}`} data-danger={active?.danger ? "" : undefined}
-      disabled={busy || saving} title={(active?.label || "Custom") + "\n" + permissionSummary(nodes) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
+      aria-controls="ao-permissions-panel" aria-label={`Permissions: ${permissionLabel}`} data-danger={active?.danger ? "" : undefined}
+      disabled={busy || saving} title={permissionLabel + "\n" + (autobotActive ? autobot!.summary : permissionSummary(nodes)) + (effective ? " · " + effective : "") + (notice && !failed ? " · " + notice : "")}
       onClick={() => popup.setOpen(value => !value)}>
-      {ChipGlyph ? <ChipGlyph width="16" height="16" /> : <Icon name="shield" width="16" height="16" />}
+      {autobotActive ? <AutobotMark /> : ChipGlyph ? <ChipGlyph width="16" height="16" /> : <Icon name="shield" width="16" height="16" />}
     </button>
     {popup.open ? <section ref={popup.panel} id="ao-permissions-panel" className="ao-composer-popover ao-permissions-panel" aria-label="Access permissions" role="menu">
       <div className="ao-permissions-title">How should actions be approved?</div>
       {PERMISSION_MODES.map(mode => {
         const Glyph = MODE_GLYPHS[mode.icon];
-        return <button key={mode.label} type="button" role="menuitemradio" aria-checked={active?.label === mode.label}
+        return <button key={mode.label} type="button" role="menuitemradio" aria-checked={!autobotActive && active?.label === mode.label}
           className={"ao-permission-option" + (mode.danger ? " is-danger" : "")} disabled={busy || saving || !canSelect(mode)} title={canSelect(mode) ? liveNow ? "Applies now, to the running turn's requests too" : "Applies from the next turn" : unavailableReason(mode)}
           onClick={() => choose({ profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer })}>
           <span className="ao-permission-symbol"><Glyph /></span>
           <span className="ao-permission-text"><strong>{mode.label}</strong><small>{mode.detail}</small></span>
-          {active?.label === mode.label ? <CheckGlyph className="ao-permission-check" /> : null}
+          {!autobotActive && active?.label === mode.label ? <CheckGlyph className="ao-permission-check" /> : null}
         </button>;
       })}
+      {configureAutobot ? <button type="button" role="menuitemradio" aria-checked={Boolean(autobotActive)} className="ao-permission-option"
+        disabled={!autobot || busy || saving || (!canEnableAutobot && !autobot.enabled)}
+        title={canEnableAutobot ? "Choose exact no-quota commands for this chat" : "Start a supported single-model chat in Ask for approval mode first"}
+        onClick={() => {
+          popup.close();
+          setEditingAutobot({ canEnable: canEnableAutobot, dark: popup.root.current?.closest("[data-theme]")?.getAttribute("data-theme") === "dark" });
+        }}>
+        <span className="ao-permission-symbol"><AutobotMark animate /></span>
+        <span className="ao-permission-text"><strong>{AUTOBOT_NAME}</strong><small>{autobot?.enabled && !autobotActive ? "Inactive with these chat permissions" : "Chat plugin · selected commands need no model review"}</small></span>
+        {autobotActive ? <CheckGlyph className="ao-permission-check" /> : null}
+      </button> : null}
     </section> : null}
+    {editingAutobot && configureAutobot && autobot ? <AutobotScope state={autobot} canEnable={editingAutobot.canEnable} dark={editingAutobot.dark}
+      onClose={() => { setEditingAutobot(null); popup.trigger.current?.focus({ preventScroll: true }); }}
+      configure={async change => { const next = await configureAutobot(change); setAutobot(next); return next; }} /> : null}
     {confirming ? <FullAccessDialog dark={confirming.dark} onCancel={() => settle(false)} onConfirm={() => settle(true)} /> : null}
     {notice ? <span className="ao-permission-notice" role={failed ? "alert" : "status"}
       style={failed ? undefined : { position: "absolute", width: 1, height: 1, minWidth: 0, padding: 0, margin: -1, overflow: "hidden", clipPath: "inset(50%)", whiteSpace: "nowrap", border: 0 }}>{notice}</span> : null}

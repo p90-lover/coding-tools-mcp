@@ -280,6 +280,12 @@ export function AgentOrchestratorComposerControls({
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
   const capability = caps[route.model];
   const { efforts, context, fullLimit, presets, fixed } = routeTuning(route, models === null ? undefined : capability);
+  const millionTokenMax = !fixed && context?.max === 1_048_576 ? context.max : null;
+  const lastChoice = millionTokenMax ?? fullLimit;
+  const windowChoices = [...new Set([
+    ...presets.filter(tokens => !millionTokenMax || tokens !== 1_000_000),
+    ...(lastChoice ? [lastChoice] : []),
+  ])].sort((a, b) => a - b);
   // "auto" is always takeable: the model runs at its own effort and nothing is sent (aoLaunchArgs).
   const effortUnsupported = Boolean(route.effort && route.effort !== "auto" && efforts && !efforts.includes(route.effort));
   const levels = (efforts ?? []).filter(effort => effort !== "auto");
@@ -297,7 +303,7 @@ export function AgentOrchestratorComposerControls({
   // known runs at the agent's own window, which the chip calls "Auto" like an unpicked effort.
   const startWindow = models === null ? null : defaultWindow(route, capability);
   const shownWindow = fixed || route.context_window || startWindow || fullLimit;
-  const windowLabel = shownWindow ? contextText(shownWindow) : "Auto";
+  const windowLabel = shownWindow ? (shownWindow === 1_048_576 ? "1M" : contextText(shownWindow)) : "Auto";
   // No "Default" effort either: unpicked, a model runs at its own effort, which the chip names
   // when the model's id carries it ("Gemini 3.8 Flash High" -> High) and otherwise calls "Auto".
   const modelEffort = ownEffort(route.model);
@@ -452,9 +458,9 @@ export function AgentOrchestratorComposerControls({
         title={fixed ? capability?.contextReason || "WebGPT's window is the Codex bridge's" : !context ? capability?.contextReason || "This agent's window cannot be set" : "How much of the conversation the agent keeps in view"}
         label={<span>{windowLabel}</span>}>
         {(close) => <div role="radiogroup" aria-label="Context windows">
-          {[...new Set([...presets, ...(fullLimit ? [fullLimit] : [])])].sort((a, b) => a - b).map(tokens => <Option key={tokens}
+          {windowChoices.map(tokens => <Option key={tokens} title={tokens === millionTokenMax ? `${tokens.toLocaleString("en-US")} tokens` : undefined}
             picked={(route.context_window || startWindow) === tokens} disabled={busy}
-            onPick={() => { setWindow(tokens); close(); }}>{contextText(tokens)}</Option>)}
+            onPick={() => { setWindow(tokens); close(); }}>{tokens === millionTokenMax ? "1M" : contextText(tokens)}</Option>)}
           {/* Not a <form>: this menu sits inside the chat box's form, and a nested form's submit
               reached the chat box's onSubmit too, so Set could send the typed message. */}
           <div className="ao-context-custom" onKeyDown={event => {
