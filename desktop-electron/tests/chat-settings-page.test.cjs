@@ -79,8 +79,8 @@ test("Settings › Chat: CPA approval reviews require explicit consent separate 
   const page = read("src/features/ChatSettingsPage.tsx");
   assert.match(page, /<Toggle label="Allow quota-based reviews" checked=\{chat\?\.meteredReviews === true\}/);
   assert.match(page, /setChatPreference\("chat_model_judges", \{ meteredReviews: next \}\)/);
-  assert.match(page, /Off by default\. In Approve for me, eligible shell requests use native Codex Guardian and wait for you if it cannot decide/);
-  assert.match(page, /Turn on to let CPA review other requests using account quota/);
+  assert.match(page, /Off by default\. In Approve for me, eligible shell requests try native Codex Guardian first/);
+  assert.match(page, /With this and Let the model judge on, eligible fallback reviews can use account quota/);
   assert.match(page, /Approve for me and Let the model judge do not turn CPA reviews on/);
   assert.match(read("electron/main.cjs"), /input\.arguments\?\.meteredReviews === undefined/);
 });

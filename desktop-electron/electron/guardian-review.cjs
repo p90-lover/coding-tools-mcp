@@ -9,6 +9,7 @@ const { StringDecoder } = require("node:string_decoder");
 const MAX_AUTH_BYTES = 128 * 1024;
 const MAX_RPC_BYTES = 1024 * 1024;
 const WORK_LIMIT_MS = 40_000;
+const MAX_PARALLEL_REVIEWS = 4;
 const SHELLS = new Map([["Bash", "bash"], ["PowerShell", "powershell"]]);
 
 async function readNativeAccount(authFile, now = Date.now()) {
@@ -135,13 +136,35 @@ function verdict(result, callId) {
   if (assessment.outcome === "allow" && assessment.riskLevel === "low" && assessment.userAuthorization === "high") {
     return { action: "allow", reason, actor: "guardian", reason_code: "native_guardian" };
   }
-  return pending("Guardian did not confirm low risk and clear user authorization. Check this request yourself.");
+  const unresolved = pending("Guardian did not confirm low risk and clear user authorization. Check this request yourself.");
+  if (assessment.outcome === "allow" || assessment.outcome === "ask") {
+    const risk = assessment.riskLevel;
+    return { ...unresolved, guardianAssessment: risk === "low" ? "low-risk"
+      : risk === "high" || risk === "critical" ? "high-risk" : "risk-unconfirmed" };
+  }
+  return unresolved;
 }
 
 function createGuardianReview({ stateDir, authFile, executable, env = process.env, spawnProcess = spawn,
   prepareAccount = () => readNativeAccount(authFile), platform = process.platform }) {
   if (!path.isAbsolute(stateDir || "")) throw new Error("Native Guardian needs an absolute app data path");
-  let reviewing = false;
+  let active = 0;
+  const waiting = new Set();
+  function acquireSlot(signal) {
+    if (signal.aborted) return false;
+    if (active < MAX_PARALLEL_REVIEWS) { active++; return true; }
+    return new Promise(resolve => {
+      const enter = () => { signal.removeEventListener("abort", abort); resolve(true); };
+      const abort = () => { waiting.delete(enter); resolve(false); };
+      waiting.add(enter);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
+  function releaseSlot() {
+    const enter = waiting.values().next().value;
+    if (enter) { waiting.delete(enter); enter(); }
+    else active--;
+  }
   return async function reviewGuardian({ approval, folder, task, signal, probeUsage = false }) {
     if (!task || signal?.aborted) return pending("Native Guardian cannot review this request.");
     if (platform !== "win32") return unavailable("Native Guardian is not available on this platform.");
@@ -149,16 +172,18 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
     if (!action) return pending("Native Guardian needs a complete shell command and working directory from this harness.");
     const binary = executable();
     if (!path.isAbsolute(binary || "")) return unavailable("Install the stable Codex CLI in App Plugins to use native Guardian.");
-    if (reviewing) return pending("Native Guardian is reviewing another request. Check this one yourself.");
-    reviewing = true;
-    let root, server, timeout;
+    const timeout = AbortSignal.timeout(WORK_LIMIT_MS);
+    const reviewSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    if (!await acquireSlot(reviewSignal)) return pending("Native Guardian did not start this review in time.");
+    let root, server;
     try {
+      reviewSignal.throwIfAborted();
       const account = await prepareAccount();
+      reviewSignal.throwIfAborted();
       if (!account) return unavailable("Native Guardian needs a current ChatGPT sign-in in the Codex CLI.");
       await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
       root = await fs.mkdtemp(path.join(stateDir, "review-"));
-      timeout = AbortSignal.timeout(WORK_LIMIT_MS);
-      server = openReviewServer(binary, root, env, signal ? AbortSignal.any([signal, timeout]) : timeout, spawnProcess);
+      server = openReviewServer(binary, root, env, reviewSignal, spawnProcess);
       await server.request("initialize", { clientInfo: { name: "coding_tools_guardian", version: "1.0.0" }, capabilities: { experimentalApi: true } });
       server.notify("initialized");
       await server.request("account/login/start", { type: "chatgptAuthTokens", ...account });
@@ -188,9 +213,12 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
         : pending("Native Guardian did not return a valid decision. Check this request yourself.");
       return probeUsage ? { ...outcome, diagnostics: { method: error?.rpcMethod ?? null, code: error?.rpcCode ?? null } } : outcome;
     } finally {
-      await server?.close();
-      if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 2 }).catch(() => {});
-      reviewing = false;
+      try {
+        await server?.close();
+      } finally {
+        if (root) await fs.rm(root, { recursive: true, force: true, maxRetries: 2 }).catch(() => {});
+        releaseSlot();
+      }
     }
   };
 }
