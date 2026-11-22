@@ -17,7 +17,7 @@ import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPerm
 import type { AutobotControl, AutobotState } from "./AgentOrchestratorAutobot";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
-import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, createActivityPoller, keepUnanswered, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
+import { GOAL_SUMMARY, goalRounds, approvalAnsweredForYou, chatArchived, chatList, chatLiveRun, keepRevisions, mergeActivityFrames, createActivityPoller, keepUnanswered, chatMarkdown, chatMessageReadable, chatMessagesFromDescription, visibleChatPrompt, chatRunStopping, chatRunsWithHistory, chatTurns, dependencyInstallNote, goalElapsed, restartResume, sendRefusedForNow, type DependencyLinks, type ChatActivity, type ChatCommands, type ChatLiveItem, type ChatGoal, type ChatLoop, type ChatSchedule, type ChatWakeup, type ChatNode, type ChatRun, type QueuedChatMessage, type TaskLifecycleView } from "./ao-chat";
 import { chatWindowBody, chatWindowPage } from "./chat-window";
 import { ChatSettingsPage } from "./ChatSettingsPage";
 import { CHAT_PAGES_STORE, ChatPagesContext, chatPageKey, readPageSelection, type PageOpen } from "./chat-pages";
@@ -2511,9 +2511,11 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // Fork: a new chat starting from this chat's messages (all, the first, or up to one of them).
   const forkChat = (taskId: string, upTo?: number | "first") => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
-    const kept = upTo === undefined ? messages : messages.slice(0, upTo === "first" ? 1 : upTo + 1);
-    if (!kept.length) return;
-    await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: kept.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192) });
+    const kept = typeof upTo === "number" ? messages.slice(0, upTo + 1) : messages;
+    const visible = kept.map(message => chatMessageReadable(visibleChatPrompt(message))).filter(Boolean);
+    const text = (upTo === "first" ? visible[0] ?? "" : visible.join("\n\n")).slice(0, 8192);
+    if (!text) return;
+    await sendChat({ title: `Fork of ${taskName(taskId)}`.slice(0, 240), message: text });
   })().catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
   // Delete message (confirmed in the chat): the message and its reply leave this chat. The chat
   // names the runs its turn showed (the first is the one the message started); the bridge hides
@@ -2557,7 +2559,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
   // composer holds this chat's messages; you pick that project's team or model and send.
   const continueInProject = (taskId: string, targetWorkspaceId: string) => void (async () => {
     const messages = chatMessagesFromDescription(await loadDescription(taskId));
-    const text = messages.map((message) => chatMessageReadable(message.text)).join("\n\n").slice(0, 8192);
+    const text = messages.map(message => chatMessageReadable(visibleChatPrompt(message))).filter(Boolean).join("\n\n").slice(0, 8192);
     setChatSeed({ key: crypto.randomUUID(), workspaceId: targetWorkspaceId, title: `${taskName(taskId)} (continued)`.slice(0, 240), text });
     setPendingChat(null); setInspectedId(""); setDraftTeam(null); setSheet("");
     if (targetWorkspaceId === workspaceId) { setChatTaskId(""); setView("chat"); } else chooseWorkspace(targetWorkspaceId);

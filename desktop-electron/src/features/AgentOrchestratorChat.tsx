@@ -1560,7 +1560,7 @@ export function AgentOrchestratorChat({
     // One that waited in the queue and went as the next turn's message shows there, as that message.
     const sentAsTurn = (entry: PendingSteer) => {
       const at = steerTurnIndex(turns, entry);
-      return at >= 0 && turns.slice(at + 1).some((turn) => turn.user?.text.trim() === entry.text.trim());
+      return at >= 0 && turns.slice(at + 1).some((turn) => !turn.user?.automatic && turn.user?.text.trim() === entry.text.trim());
     };
     // `turns` are the open chat's: another chat's steer is never matched against them (a "continue"
     // here dropped one still on its way there), only aged out.
@@ -2403,7 +2403,8 @@ export function AgentOrchestratorChat({
     };
   }
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
-  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
+  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user && !turn.user.automatic
+    ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
   // Keep the intent from the rendered transcript, even if it changes before confirmation.
   const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
     && projectId && typeof shownDescription === "string"
@@ -2953,7 +2954,7 @@ export function AgentOrchestratorChat({
     // on its own; constructing it once keeps the attachments and message actions identical.
     // Its read receipt leads the actions, as on a steer: "Sending…" while an agent comes up for it,
     // then one check, then two once the model has read it (turnReceipt).
-    const userMessage = !feedback && turn.user ? <div className="cx-user">
+    const userMessage = !feedback && turn.user && !turn.user.automatic ? <div className="cx-user">
       <SentMessage text={turn.user.text} />
       <div className="cx-msg-foot"><SteerReader.Provider value={steerReader(lead)}><SteerReceiptMark receipt={turnReceipt(turn, items, live)} /></SteerReader.Provider>
       <MessageActions text={chatMessageReadable(turn.user.text)}>
@@ -2978,11 +2979,12 @@ export function AgentOrchestratorChat({
         <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
       </div>)}</SteerReader.Provider> : null;
     // A goal's later round opens on a divider: its number and why the last round fell short.
-    const round = feedback ? goalRound(turns, turnIndex) : null;
+    const round = feedback && !turn.user?.automatic ? goalRound(turns, turnIndex) : null;
+    if (turn.user?.automatic && !hasReply && !savedSteers) return foldToggle;
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     const view = <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
-              {feedback ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
+              {feedback && !turn.user?.automatic ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
                 stamp={turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null} /> : null}
               {!hasReply ? <>{userMessage}{savedSteers}</> : null}
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} data-transcript={!dsh && replyStyle === "transcript" ? "codex" : undefined} aria-label="Reply">
@@ -3021,7 +3023,7 @@ export function AgentOrchestratorChat({
                 verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes} onOpenChanges={openChanges}
                 requestModels={turn.runId && !live ? turn.cpaModels : undefined} actions={quietLine ? answerActions : undefined} />
               </section> : null}
-              {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
+              {turn.unsent && !turn.user?.automatic ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, rewindBlocked, notTaken, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,

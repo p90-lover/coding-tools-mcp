@@ -90,18 +90,18 @@ function textOf(value) {
   try { return typeof value === "object" ? JSON.stringify(value) : String(value); } catch { return String(value); }
 }
 
-// How a chat's task description holds its messages (ao-chat.ts chatMessagesFromDescription).
-const FOLLOW_UP = /\n\nFollow-up \(([^)]+) UTC\):\n/;
-const STEER = /\n\n↳ Steer \(([^)]+) UTC\): /;
+const { FOLLOW_UP, STEER, automaticStamp } = require("./chat-edits.cjs");
 /** The user's messages in a chat, oldest first, each with its steers folded into its text. */
 function userMessages(description) {
   const parts = String(description ?? "").split(FOLLOW_UP);
   const messages = [];
   const withSteers = (raw, stamp) => {
     const pieces = raw.split(STEER);
-    let text = pieces[0].trim();
-    for (let index = 1; index < pieces.length; index += 2) text += `\n\n[steer at ${pieces[index]} UTC] ${(pieces[index + 1] ?? "").trim()}`;
-    return { text, ...(stamp ? { at: `${stamp} UTC` } : {}) };
+    const automatic = automaticStamp(stamp);
+    const visible = automatic ? [] : [pieces[0].trim()];
+    for (let index = 1; index < pieces.length; index += 2) visible.push(`[steer at ${pieces[index]} UTC] ${(pieces[index + 1] ?? "").trim()}`);
+    const at = automatic ? pieces[1] : stamp;
+    return { text: visible.join("\n\n"), ...(at ? { at: `${at} UTC` } : {}) };
   };
   if (parts[0]?.trim()) messages.push(withSteers(parts[0]));
   for (let index = 1; index < parts.length; index += 2) messages.push(withSteers(parts[index + 1] ?? "", parts[index]));
@@ -172,7 +172,7 @@ function turnsOf(chat, description) {
     const messages = [];
     const user = (run.replaces_run_id || run.restarts_run_id) ? undefined : said[messageIndex++];
     if (run.replaces_run_id) messages.push({ role: "status", text: "Configuration changed; the chat continued in a new session." });
-    if (user) messages.push({ role: "user", text: user.text, ...(user.at ? { at: user.at } : {}) });
+    if (user?.text) messages.push({ role: "user", text: user.text, ...(user.at ? { at: user.at } : {}) });
     const nodes = [...(run.nodes || [])].sort((a, b) => (ROLE_ORDER[a.role] ?? 9) - (ROLE_ORDER[b.role] ?? 9) || (a.x ?? 0) - (b.x ?? 0));
     for (const node of nodes) {
       const name = String(node.settings?.name || "").trim() || ROLE_NAME[node.role] || "Agent";
@@ -194,7 +194,7 @@ function turnsOf(chat, description) {
   });
   // A message just sent whose run has not started yet.
   for (let index = messageIndex; index < said.length; index += 1) {
-    turns.push({ status: "queued", messages: [{ role: "user", text: said[index].text, ...(said[index].at ? { at: said[index].at } : {}) }] });
+    if (said[index].text) turns.push({ status: "queued", messages: [{ role: "user", text: said[index].text, ...(said[index].at ? { at: said[index].at } : {}) }] });
   }
   return turns;
 }
