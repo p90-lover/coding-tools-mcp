@@ -12518,11 +12518,19 @@ test("native cold launch stays reserved after a lost reply and attaches only its
   } finally { reopened.dispose(); }
 });
 
-test("native follow-up uses only its exact read-only reservation receipt after a lost reply", async () => {
+test("native follow-up requires the exact read-only reservation receipt for every acknowledgement", async () => {
   const route = { harness_id: "ao:orchestrator-fixture", model: "fixture" };
   const scope = { sessionId: "native:existing", workspaceId: "ws", requestId: "follow-up-reservation", turnId: "exact-turn" };
-  for (const found of [scope, null, { ...scope, requestId: "earlier-reservation" }, { ...scope, sessionId: "native:other" },
-    { ...scope, workspaceId: "another-workspace" }]) {
+  const scenarios = [
+    { found: null, reported: "different-turn" },
+    { found: scope, reported: "different-turn" },
+    { found: scope, reported: scope.turnId },
+    { found: scope }, { found: null }, { found: { ...scope, requestId: "earlier-reservation" } },
+    { found: { ...scope, sessionId: "native:other" } }, { found: { ...scope, workspaceId: "another-workspace" }, reported: scope.turnId },
+  ];
+  for (const { found, reported } of scenarios) {
+    const confirmed = found === scope && (reported === undefined || reported === scope.turnId);
+    const exactSubmission = [[scope.sessionId, scope.requestId, scope.turnId]];
     const submitted = [];
     let bound, reads = 0, sends = 0, starts = 0;
     const key = { workspaceId: scope.workspaceId, runId: "new", nodeId: "next", requestId: scope.requestId };
@@ -12542,6 +12550,7 @@ test("native follow-up uses only its exact read-only reservation receipt after a
         sends += 1;
         assert.deepEqual(bound, { sessionId: id }, "Native delivery must start after the binding commits");
         assert.deepEqual([id, text, key], [scope.sessionId, "follow-up", scope.requestId]);
+        if (reported !== undefined) return { turnId: reported };
         throw new Error("Lost reply after dispatch");
       }, async recover(id, turn, keys) {
         reads += 1;
@@ -12554,21 +12563,27 @@ test("native follow-up uses only its exact read-only reservation receipt after a
     try {
       workflow.continuations.set("new", { session: scope.sessionId, text: "follow-up" });
       const pending = workflow.dispatchExternal(scope.workspaceId, "new", { id: "next", role: "planner", route }, 1, true, true);
-      if (found === scope) {
+      if (confirmed) {
         assert.equal((await pending).session_id, scope.sessionId);
         assert.equal(workflow.expectedTurns.get(scope.sessionId), scope.turnId);
-        assert.deepEqual(submitted.map(body => [body.session_id, body.request_key, body.turn_id]), [[scope.sessionId, scope.requestId, scope.turnId]]);
+        assert.deepEqual(submitted.map(body => [body.session_id, body.request_key, body.turn_id]), exactSubmission);
       } else {
         await assert.rejects(pending, { code: "NATIVE_DELIVERY_UNKNOWN" });
+        assert.equal(workflow.expectedTurns.has(scope.sessionId), false);
+        assert.deepEqual(submitted, [], "An uncorroborated acknowledgement cannot attach or fail the reserved card");
         const node = { id: "next", state: "reserved", route, request_key: scope.requestId };
         const mission = { id: "new", nodes: [node] };
         const observed = await workflow.observeExternal(scope.workspaceId, mission.id, node, mission);
-        assert.equal(observed.recovery_required, true);
-        assert.equal(observed.run.nodes[0].state, "reserved");
-        assert.deepEqual(submitted, [], "Neither dispatch nor observation relabels uncertainty as a failed launch");
+        if (found === scope) {
+          assert.deepEqual(submitted.map(body => [body.session_id, body.request_key, body.turn_id]), exactSubmission);
+        } else {
+          assert.equal(observed.recovery_required, true);
+          assert.equal(observed.run.nodes[0].state, "reserved");
+          assert.deepEqual(submitted, [], "Observation must not relabel uncertainty as a failed launch");
+        }
       }
       assert.equal(sends, 1);
-      assert.equal(reads, found === scope ? 1 : 2);
+      assert.equal(reads, confirmed ? 1 : 2);
       assert.equal(starts, 0, "Ambiguous native delivery never starts a replacement session");
     } finally { workflow.dispose(); }
   }

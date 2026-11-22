@@ -2169,11 +2169,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               return null;
             });
           sendMs = now() - sendStarted;
-          if (nativeContinuation && !validNativeTurnId(sent?.turnId)) {
-            sent = await nativeSendReceipt(continued.session, receiver);
-            if (!sent) throw unknownNativeDelivery();
+          if (nativeContinuation) {
+            const receipt = await nativeSendReceipt(continued.session, receiver);
+            if (!receipt || (validNativeTurnId(sent?.turnId) && sent.turnId !== receipt.turnId)) throw unknownNativeDelivery();
+            nativeTurnId = receipt.turnId;
+            sent = receipt;
           }
-          if (nativeContinuation) nativeTurnId = sent.turnId;
           if (sent?.turnId) givenInstructions(continued.session, standing.hash);
           // A send that ran out of time may still reach the agent: it is stopped (its session,
           // worktree and conversation stay) before the fresh agent starts, so the two never work on
