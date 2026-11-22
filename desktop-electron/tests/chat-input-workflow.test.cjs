@@ -2,7 +2,10 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createChatInputService } = require("../electron/chat-input-service.cjs");
 
 function world(t, journal) {
   const calls = [], timers = [];
@@ -131,6 +134,93 @@ test("input workflow commits a new task and run through one atomic host operatio
   assert.equal(duplicate.runId, result.runId);
   assert.equal(duplicate.status, "recovered", "An existing atomic receipt must not start a run again");
   assert.deepEqual(boardWrites, []);
+});
+
+test("native steer acceptance requires the exact durable receipt for the saved input", async t => {
+  const parent = path.resolve(__dirname, "../../aiTemp/chat-input-tests");
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, "steer-receipt-"));
+  const { workspaceId, taskId } = queueArgs;
+  const sessionId = "native:session", firstTurn = "first-turn";
+  const message = "same guidance", scope = { workspaceId, key: "composer" };
+  const proof = inputId => ({ state: "accepted", workspaceId, sessionId, turnId: firstTurn, inputId });
+  const proofs = new Map([["first", proof("first")], ["second", proof("first")]]);
+  const dispatches = [], lookups = [];
+  let activeTurn = firstTurn, journal, workflow;
+  function open() {
+    journal = createChatInputService({ file: path.join(root, "inputs.sqlite"), attachmentsRoot: path.join(root, "attachments") });
+    workflow = createAgentOrchestratorWorkflow({
+      inputJournal: journal,
+      aoHarness: {
+        async steer(session, text, inputId, target) {
+          assert.equal(text, message);
+          assert.equal(session, sessionId);
+          assert.deepEqual(target, { workspaceId, turnId: activeTurn });
+          assert.equal((await journal.get(workspaceId, inputId)).receipt?.turnId, target.turnId);
+          dispatches.push(inputId);
+          return inputId === "not-sent" ? { steered: false } : { steered: true, turnId: target.turnId, inputId };
+        },
+        async recover(sessionId, turnId, { workspaceId, inputId }) {
+          lookups.push({ workspaceId, sessionId, turnId, inputId });
+          return { steerReceipt: proofs.get(inputId) ?? null, replayed: false };
+        },
+      },
+      async requestHeadless(endpoint) {
+        if (endpoint !== "/api/v1/ao/read") throw new Error(`Unexpected fixture route: ${endpoint}`);
+        return { ok: true, task_lifecycle: [], runs: [{ id: "run", workspace_id: workspaceId, project_id: taskId, execution_mode: "single",
+          nodes: [{ id: "node", role: "planner", state: "running", route: { harness_id: "ao:orchestrator-fixture" },
+            receipt: { thread_id: sessionId, turn_id: activeTurn } }] }] };
+      },
+    });
+  }
+  t.after(async () => {
+    workflow?.dispose();
+    await journal?.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  open();
+  const call = (action, fields = {}) => workflow.call("chat_input", { ...scope, action, ...fields });
+  async function submit(inputId) {
+    const { revision } = await call("draft_get");
+    const draft = { text: message, attachments: [], annotations: [] };
+    const saved = await call("draft_save", { draft, expectedRevision: revision, mutationId: `draft-${inputId}` });
+    assert.equal(saved.revision, revision + 1);
+    const submitted = await call("accept", { inputId, mode: "steer", draftRevision: saved.revision, payload: draft, destination: { taskId, message } });
+    assert.equal(submitted.inputId, inputId);
+    assert.equal(submitted.state, "queued");
+    assert.equal(submitted.draft.draft, null);
+    return { workspaceId, taskId, inputId, message };
+  }
+  const first = await submit("first"), second = await submit("second");
+  assert.equal((await workflow.call("chat_steer", first)).inputId, first.inputId);
+  await assert.rejects(workflow.call("chat_steer", second), { code: "NATIVE_DELIVERY_UNKNOWN" });
+  assert.deepEqual(lookups.map(item => item.inputId), ["first", "second"]);
+  assert.equal((await journal.get(workspaceId, first.inputId)).state, "accepted");
+  assert.equal((await journal.get(workspaceId, second.inputId)).state, "unknown");
+
+  workflow.dispose();
+  await journal.close();
+  activeTurn = "later-turn";
+  open();
+  const exact = proof(second.inputId);
+  for (const invalid of [null, { ...exact, turnId: activeTurn }, { ...exact, workspaceId: "another-project" },
+    { ...exact, sessionId: "native:other" }, { ...exact, state: "unknown" }]) {
+    proofs.set(second.inputId, invalid);
+    await assert.rejects(workflow.call("chat_steer", second), { code: "INPUT_DELIVERY_UNKNOWN" });
+    assert.equal((await journal.get(workspaceId, second.inputId)).state, "unknown");
+  }
+  proofs.set(second.inputId, exact);
+  const recovered = await workflow.call("chat_steer", second);
+  assert.equal(recovered.status, "recovered");
+  assert.equal(recovered.inputId, second.inputId);
+  assert.equal(recovered.turnId, firstTurn);
+  assert.equal((await journal.get(workspaceId, second.inputId)).state, "accepted");
+  assert.ok(lookups.every(item => item.workspaceId === workspaceId && item.sessionId === sessionId && item.turnId === firstTurn));
+  assert.deepEqual(dispatches, ["first", "second"], "Reconciling a receipt must not send either input again");
+
+  const unsent = await submit("not-sent");
+  assert.equal((await workflow.call("chat_steer", unsent)).steered, false);
+  assert.equal((await journal.get(workspaceId, unsent.inputId)).state, "queued");
 });
 
 test("input workflow removes a confirmed sent queue projection without cancelling its input", async t => {

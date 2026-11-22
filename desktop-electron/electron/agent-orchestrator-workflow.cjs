@@ -2028,6 +2028,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       && validNativeTurnId(receipt.turnId) ? receipt : null;
   }
 
+  async function nativeSteerReceipt({ workspaceId, inputId, sessionId, turnId }) {
+    const readback = await Promise.resolve().then(() => harnessService().recover?.(sessionId, turnId, { workspaceId, inputId })).catch(() => null);
+    const receipt = readback?.steerReceipt;
+    return receipt?.state === "accepted" && receipt.workspaceId === workspaceId && receipt.inputId === inputId
+      && receipt.sessionId === sessionId && receipt.turnId === turnId ? receipt : null;
+  }
+
   async function nativeLaunchReceipt(scope) {
     const receipt = await Promise.resolve().then(() => readNativeLaunchReceipt?.(scope)).catch(() => null);
     return receipt?.workspaceId === scope.workspaceId && receipt.agent === scope.agent && receipt.requestId === scope.requestId
@@ -7186,13 +7193,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (typeof session === "string" && session.startsWith("native:")) {
       if (!inputId) throw new Error("Native steering needs a saved input identity");
       if (restart || objective) throw new Error("This native route does not support restart or goal steering");
-      const turnId = card.receipt.turn_id || expectedTurns.get(session);
-      if (!turnId) return { ok: true, steered: false, waiting: true, starting: true, reason: "The native turn has no confirmed identity yet." };
+      const turnId = card.receipt.turn_id;
+      if (!validNativeTurnId(turnId)) return { ok: true, steered: false, waiting: true, starting: true, reason: "The native turn has no confirmed identity yet." };
       const target = { taskId: task, runId: run.id, nodeId: card.id, sessionId: session, turnId };
       if ((await bindNativeSteer?.(target))?.bound !== true) throw new Error("The native steer receiver was not saved");
       const result = await harnessService().steer(session, text, inputId, { workspaceId: id, turnId });
       if (result?.steered === false) return { ok: true, steered: false, reason: "The native agent is not taking steering for that turn" };
       if (result?.steered !== true || result.turnId !== turnId || result.inputId !== inputId) throw new Error("Native steer acknowledgement is unconfirmed");
+      if (!await nativeSteerReceipt({ workspaceId: id, sessionId: session, turnId, inputId })) {
+        throw Object.assign(new Error("The native steer receipt is unconfirmed. Your input remains saved and will not be replayed."), { code: "NATIVE_DELIVERY_UNKNOWN" });
+      }
       const receipt = { taskId: task, sessionId: session, turnId, inputId };
       if (result.duplicate) return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id, ...receipt };
       return { ...steered(id, task, run, card, text, objective, inputId), ...receipt };
@@ -9227,10 +9237,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return chatInputs.dispatch(args, execute, { steer, reconcile: ({ workspaceId, inputId }) => asPerson(() =>
       requestHeadless("/api/v1/ao/update", { workspace_id: workspaceId, confirm: true,
         change: { operation: "read_chat_input_receipt", input_id: inputId } }, { localConfirmation: true })),
-      reconcileSteer: async ({ workspaceId, inputId, sessionId, turnId }) => {
-        const observed = await harnessService().recover?.(sessionId, turnId, { workspaceId, inputId });
-        return observed?.steerReceipt;
-      },
+      reconcileSteer: nativeSteerReceipt,
     });
   }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
