@@ -5972,7 +5972,7 @@ test("a command watch actually starts its next turn after the final answer, on t
   assert.equal(await delivered, "delivered");
   assert.equal(world.updates.length, before + 1, "a real run was created, not just a notification string");
   assert.deepEqual(world.updates.at(-1).single_route, route);
-  assert.match(world.edits.at(-1).description, /registered background command watch ended[\s\S]*verify CI and finish delivery[\s\S]*Continue that pending next step now/);
+  assert.match(world.edits.at(-1).description, /Follow-up \(automatic [^)]+ UTC\):\nA registered background command watch ended[\s\S]*verify CI and finish delivery[\s\S]*Continue that pending next step now/);
   await advance(60_000);
   assert.equal(world.updates.length, before + 1, "completion is delivered only once");
 });
@@ -6026,7 +6026,7 @@ test("a monitor's events reach the chat as one batched follow-up, on the same mo
   await advance(3000);
   assert.equal(world.updates.length, before + 1, "both events go out in one follow-up");
   assert.deepEqual(world.updates.at(-1).single_route, route);
-  assert.match(world.edits.at(-1).description, /Monitor events\. This is a tool notification[\s\S]*Monitor "deploy steps" \(monitor-1\):\n {2}build ok\n {2}publish FAILED: 503/);
+  assert.match(world.edits.at(-1).description, /Follow-up \(automatic [^)]+ UTC\):\nMonitor events\. This is a tool notification[\s\S]*Monitor "deploy steps" \(monitor-1\):\n {2}build ok\n {2}publish FAILED: 503/);
 });
 
 test("a monitor holds its events while the chat works and sends them, with its end, once the turn settles", async (t) => {
@@ -6334,7 +6334,7 @@ test("a wake-up sends the chat the agent's note after its minutes, on the same S
   await advance(60_000);
   assert.equal(world.updates.length, before + 1, "one follow-up turn");
   assert.deepEqual(world.updates.at(-1).single_route, route, "the same Single model, so the agent's session continues");
-  assert.match(world.edits.at(-1).description, /Wake-up: 10 minutes ago you asked to be woken[\s\S]*Your note: see whether CI run 42 passed[\s\S]*schedule_wakeup again/);
+  assert.match(world.edits.at(-1).description, /Follow-up \(automatic [^)]+ UTC\):\nWake-up: 10 minutes ago you asked to be woken[\s\S]*Your note: see whether CI run 42 passed[\s\S]*schedule_wakeup again/);
   assert.equal(await wakeupOf(workflow), undefined, "it is spent");
 });
 
@@ -6761,7 +6761,7 @@ test("/schedule continues the chat at its time, waits out a working turn the per
   await workflow.chatScheduleAfterRun("ws-1");
   assert.equal(world.updates.length, before + 1, "sent once the turn settled");
   assert.deepEqual(world.updates.at(-1).single_route, route, "on the chat's own Single model");
-  assert.match(world.edits.at(-1).description, /\nContinue\. \(Scheduled 5h ago: check what has changed/);
+  assert.match(world.edits.at(-1).description, /Follow-up \(automatic [^)]+ UTC\):\nContinue\. \(Scheduled 5h ago: check what has changed/);
   assert.equal(await scheduleOf(workflow), undefined, "a sent schedule is gone");
   await advance(24 * HOUR);
   assert.equal(world.updates.length, before + 1, "and it sends once");
@@ -8455,7 +8455,7 @@ test("a turn a chat's agent starts by itself gets a card of its own, and nothing
 
   assert.deepEqual(await workflow.adoptAutonomousTurns(), ["sess-1"]);
   await waitFor(() => observedWith.some(([, expected]) => expected === "autonomous-turn-9"));
-  assert.match(world.edits.at(-1).description, /Follow-up \([^)]+ UTC\):\nClaude continued on its own\.$/, "the chat shows where the turn came from");
+  assert.match(world.edits.at(-1).description, /Follow-up \(automatic [^)]+ UTC\):\nClaude continued on its own\.$/, "the turn is recorded without a user bubble");
   assert.equal(world.updates.at(-1).operation, "create_from_team");
   assert.equal(submitted.at(-1)?.session_id, "sess-1", "the card holds the chat's own agent");
   assert.deepEqual(sent, [], "the agent is already working on the turn: nothing is sent");
@@ -10393,6 +10393,25 @@ test("rewind truncates and resends in the same chat, preserves earlier replies, 
     assert.ok(result.runId, "the selected message starts a run without another click");
     if (index < 2) assert.doesNotMatch(world.tasks[0].description, /use pnpm|third ask/);
   }
+});
+
+test("rewind preserves an earlier silent run and only restarts a real message", async (t) => {
+  const description = "Follow-up (automatic 2026-10-10 10:00 UTC):\nAn internal wake"
+    + "\n\nFollow-up (2026-10-10 11:00 UTC):\nA human follow-up";
+  const world = chatWorld({ tasks: [{ id: "task-1", title: "Task", description }], runs: ["silent", "human"].map(id => ({
+    id, workspace_id: "ws-1", project_id: "task-1", nodes: [{ id: "lead", role: "planner", state: "finished" }],
+  })) });
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => { throw new Error("offline test"); } });
+  t.after(() => workflow.dispose());
+  const send = (index, message) => workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message,
+    rewind: { index, description }, deferStart: true });
+  await assert.rejects(send(0, "An internal wake"), /no longer in this chat/);
+  assert.equal(world.edits.length, 0);
+  const result = await send(1, "A human follow-up");
+  assert.ok(result.runId);
+  assert.equal(world.tasks[0].description, description);
+  assert.deepEqual((await workflow.call("runs", { workspaceId: "ws-1" })).runs.map(run => run.id), ["silent"]);
 });
 
 test("rewind refuses stale descriptions, changed messages, invalid indexes and busy chats before writing", async () => {
@@ -13844,7 +13863,8 @@ test("a queued message stays queued, marked as going, until its send answers; no
   assert.match(world.edits.at(-1).description, /run the tests$/);
 });
 
-for (const [label, inChat] of [["already in the chat", true], ["never written", false]]) {
+for (const [label, savedStamp, inChat] of [["already in the chat", "2026-11-12 10:00", true], ["never written", "", false],
+  ["the same text was delivered by automation", "automatic 2026-11-12 10:00", false]]) {
   test(`a message an earlier app session was sending when it quit goes once (${label})`, async (t) => {
     // In the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
     const dir = path.join(__dirname, "..", "..", "aiTemp", "chat-queue-tests", require("node:crypto").randomUUID());
@@ -13861,7 +13881,7 @@ for (const [label, inChat] of [["already in the chat", true], ["never written", 
         fs.rmSync(dir, { recursive: true, force: true });
       }
     });
-    if (inChat) world.tasks[0].description = "fix the build\n\nFollow-up (2026-11-12 10:00 UTC):\ndeploy it";
+    if (savedStamp) world.tasks[0].description = `fix the build\n\nFollow-up (${savedStamp} UTC):\ndeploy it`;
     // The saved queue goes on 30 s after the app is back (restoreQueues).
     await advance(30_000);
     await goalSettle();

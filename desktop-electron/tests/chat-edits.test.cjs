@@ -8,7 +8,8 @@ const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
 const ts = require(require.resolve("typescript", { paths: [path.resolve(__dirname, "..")] }));
-const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("../electron/chat-edits.cjs");
+const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore, withoutAutomaticChatPrompts } = require("../electron/chat-edits.cjs");
+const { userMessages } = require("../electron/chat-history.cjs");
 
 // The renderer's own parser, so the rewritten description is checked the way the chat reads it.
 const chat = (() => {
@@ -33,6 +34,26 @@ test("deleting the first message makes the next one first, with its steers kept"
   const [, second, third] = said(description);
   const { stamp: _stamp, ...first } = second; // a first message has no follow-up stamp
   assert.deepEqual(said(after), [first, third]);
+});
+
+test("an automatic turn stays silent after deleting the opening message and still carries real steers", () => {
+  const raw = "Earlier request\n\nFollow-up (automatic 2026-10-10 10:00 UTC):\nAn automated wake note"
+    + "\n\nFollow-up (2026-10-10 11:00 UTC):\nThe next human request";
+  const promoted = chatDescriptionWithout(raw, 0);
+  assert.equal(chatMessageCount(promoted), 2);
+  assert.equal(said(promoted)[0].automatic, true);
+  assert.equal(said(promoted)[1].text, "The next human request");
+
+  const steered = chatDescriptionWithSteer(promoted, 1, "↳ Steer (2026-10-10 10:05 UTC): A real human steer");
+  const [silent, human] = said(steered);
+  assert.equal(silent.text, "An automated wake note");
+  assert.equal(chat.visibleChatPrompt(silent), "A real human steer");
+  assert.equal(chat.visibleChatPrompt(human), "The next human request");
+  assert.match(userMessages(steered)[0].text, /A real human steer/);
+  assert.doesNotMatch(JSON.stringify(userMessages(steered)), /An automated wake note/);
+  assert.match(withoutAutomaticChatPrompts(steered), /A real human steer/);
+  assert.doesNotMatch(withoutAutomaticChatPrompts(steered), /An automated wake note/);
+  assert.equal(chatDescriptionWithout(steered, 1), steered.split("\n\nFollow-up (2026-10-10 11:00 UTC):")[0]);
 });
 
 test("deleting a follow-up takes its steers along and leaves every other message exactly as it was", () => {
