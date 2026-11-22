@@ -768,7 +768,8 @@ export type ChatMessage =
 
 export const CHAT_DEFAULT_TITLE = "New task";
 
-const FOLLOW_UP = /\n\nFollow-up \(([^)]+) UTC\):\n/;
+const FOLLOW_UP = /(?:\n\n|^(?=Follow-up \(automatic \d{4}-\d\d-\d\d \d\d:\d\d UTC\):\n))Follow-up \(([^)\n]+) UTC\):\n/;
+const AUTOMATIC_STAMP = /^automatic (\d{4}-\d{2}-\d{2} \d{2}:\d{2})$/;
 const SETTLED = ["finished", "cancelled", "archived"];
 
 // A message handed to the working agent mid-turn ("steer"), saved under the turn's message by chat_steer.
@@ -831,15 +832,23 @@ function sentSinceRuns(said: { stamp?: string }[], fresh: ChatRun[]): number {
   return count;
 }
 
-/** The user's messages in a chat, oldest first: the task description plus each follow-up. */
-export function chatMessagesFromDescription(description: string | undefined): { text: string; stamp?: string; steers?: ChatSteer[] }[] {
+type ChatPrompt = { text: string; stamp?: string; steers?: ChatSteer[]; automatic?: true };
+
+/** Stored prompts, oldest first. Silent ones still occupy the position of the run they started. */
+export function chatMessagesFromDescription(description: string | undefined): ChatPrompt[] {
   const parts = (description ?? "").split(FOLLOW_UP);
-  const messages: { text: string; stamp?: string; steers?: ChatSteer[] }[] = [];
+  const messages: ChatPrompt[] = [];
   if (parts[0]?.trim()) messages.push(withSteers(parts[0]));
   for (let index = 1; index < parts.length; index += 2) {
-    messages.push({ stamp: parts[index], ...withSteers(parts[index + 1] ?? "") });
+    const date = AUTOMATIC_STAMP.exec(parts[index])?.[1];
+    messages.push({ stamp: date ?? parts[index], ...(date ? { automatic: true as const } : {}), ...withSteers(parts[index + 1] ?? "") });
   }
   return messages;
+}
+
+export function visibleChatPrompt(prompt: ChatPrompt | undefined): string {
+  if (!prompt?.automatic) return prompt?.text ?? "";
+  return (prompt.steers ?? []).map(steer => steer.text).join("\n\n");
 }
 
 export function chatRunStatus(run: ChatRun): ChatStatus {
@@ -1026,10 +1035,11 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
   const messages: ChatMessage[] = [];
   let messageIndex = 0;
   runs.forEach((run) => {
-    const user = run.replaces_run_id ? undefined : said[messageIndex++];
+    const user = (run.replaces_run_id || run.restarts_run_id) ? undefined : said[messageIndex++];
     if (run.replaces_run_id) messages.push({ kind: "status", key: `${run.id}:reconfigured`,
       text: "Settings changed. Continuing from the work so far.", state: "finished" });
-    if (user) messages.push({ kind: "user", key: `${run.id}:user`, text: user.text, stamp: user.stamp });
+    const visible = visibleChatPrompt(user);
+    if (visible) messages.push({ kind: "user", key: `${run.id}:user`, text: visible, stamp: user?.automatic ? user.steers?.[0]?.stamp : user?.stamp });
     for (const node of chatNodeOrder(run.nodes)) {
       const name = chatNodeName(node);
       const key = `${run.id}:${node.id}`;
@@ -1063,7 +1073,8 @@ export function chatTranscript(runs: ChatRun[], description: string | undefined,
   });
   // A message just sent whose run is not visible yet.
   for (let index = messageIndex; index < said.length; index += 1) {
-    messages.push({ kind: "user", key: `pending:${index}`, text: said[index].text, stamp: said[index].stamp });
+    const visible = visibleChatPrompt(said[index]);
+    if (visible) messages.push({ kind: "user", key: `pending:${index}`, text: visible, stamp: said[index].automatic ? said[index].steers?.[0]?.stamp : said[index].stamp });
   }
   return messages;
 }
@@ -1103,7 +1114,7 @@ export type ChatStepRound = { label: string; text: string; verdict?: string };
 export type ChatTurn = {
   key: string;
   runId: string;
-  user?: { text: string; stamp?: string; steers?: ChatSteer[] };
+  user?: ChatPrompt;
   /** Which of the chat's messages `user` is (its place in the task description). */
   messageIndex?: number;
   /** The cards' work, in pipeline order, without the answer that closes the turn. */
@@ -1745,14 +1756,16 @@ export function chatDescriptionUpTo(description: string | undefined, turnIndex: 
   const said = chatMessagesFromDescription(description).slice(0, turnIndex + 1);
   const full = (message: { text: string; steers?: ChatSteer[] }) =>
     [message.text, ...(message.steers ?? []).map((steer) => `↳ Steer (${steer.stamp} UTC): ${steer.text}`)].join("\n\n");
-  return said.map((message, index) => index === 0 ? full(message) : `Follow-up (${message.stamp ?? "earlier"} UTC):\n${full(message)}`).join("\n\n");
+  return said.map((message, index) => index === 0 && !message.automatic ? full(message)
+    : `Follow-up (${message.automatic ? "automatic " : ""}${message.stamp ?? "earlier"} UTC):\n${full(message)}`).join("\n\n");
 }
 
 /** One chat as Markdown, for "Copy › Conversation". */
 export function chatMarkdown(title: string, turns: ChatTurn[]): string {
   const parts = [`# ${title}`];
   for (const turn of turns) {
-    if (turn.user) parts.push(`**You:**\n\n${chatMessageReadable(turn.user.text)}`);
+    const visible = visibleChatPrompt(turn.user);
+    if (visible) parts.push(`**You:**\n\n${chatMessageReadable(visible)}`);
     for (const step of [...turn.steps, ...(turn.final ? [turn.final] : [])]) {
       const body = [step.error ? `Error: ${step.error}` : "", step.text ?? ""].filter(Boolean).join("\n\n");
       if (body) parts.push(`**${step.name}${step.verdict ? ` · ${step.verdict}` : ""}:**\n\n${body}`);

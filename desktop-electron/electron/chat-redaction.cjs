@@ -10,7 +10,7 @@
 // list is the tool's description, so the agent hides only those kinds of text.
 
 // The same follow-up marker chat-edits.cjs and ao-chat.ts (chatMessagesFromDescription) read.
-const FOLLOW_UP = /(\n\nFollow-up \([^)]+ UTC\):\n)/;
+const FOLLOW_UP = /((?:\n\n|^(?=Follow-up \(automatic \d{4}-\d\d-\d\d \d\d:\d\d UTC\):\n))Follow-up \([^)\n]+ UTC\):\n)/;
 // What a hidden secret becomes; ao-chat.ts (hiddenSecretParts) draws it blurred.
 const HIDDEN = /\[hidden: [^\]\n]{1,40}\]/;
 

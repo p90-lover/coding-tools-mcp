@@ -1057,8 +1057,27 @@ function QueuedGlyph({ name, size = 16 }: { name: "send" | "edit" | "remove" | "
   </svg>;
 }
 
-/** A queued message on one line, as Claude Code previews it: its readable text, whitespace collapsed. */
-const queuedPreview = (text: string) => chatMessageReadable(text).replace(/\s+/g, " ").trim() || "…";
+function queuedPreview(message: string) {
+  const { text, attachments, annotations } = chatMessageParts(message);
+  const images = attachments.filter(item => item.image && item.path);
+  const files = attachments.filter(item => !item.image || !item.path).map(item => item.name);
+  const readable = annotations ? chatMessageReadable(chatMessageWithAnnotations(text, annotations)) : text;
+  const caption = [readable, ...files].join(" ").replace(/\s+/g, " ").trim();
+  return { caption: caption || (images.length ? "" : "…"), images };
+}
+
+function QueuedImages({ images, folded = false }: { images: ChatSentAttachment[]; folded?: boolean }) {
+  const [open, setOpen] = useState<{ url: string; name?: string } | null>(null);
+  if (!images.length) return null;
+  const visible = folded ? images.slice(0, 1) : images;
+  const more = images.length - visible.length;
+  return <span className="cx-queued-images">
+    {visible.map((item, index) => <SentImage key={`${item.path}:${index}`} item={item}
+      onOpen={folded ? undefined : (url, name) => setOpen({ url, name })} />)}
+    {more > 0 ? <span aria-label={`${more} more ${more === 1 ? "image" : "images"}`}>+{more}</span> : null}
+    {open ? <ImageLightbox url={open.url} name={open.name} onClose={() => setOpen(null)} /> : null}
+  </span>;
+}
 
 /**
  * Claude Code's queued-message bar (its Code tab's QueuedMessageBar): a band right above the
@@ -1075,27 +1094,31 @@ export function QueuedMessageBar({ items, onMenu, onClearAll }: {
   const sendNow = (item: QueuedBarItem, index: number) => index === 0 ? item.onSendNow : undefined;
   if (items.length === 1) {
     const [item] = items;
+    const { caption, images } = queuedPreview(item.text);
     return <div className="cx-queued">
       <div className="cx-queued-band" role="group" aria-label="Queued messages" data-state={item.state}>
         <span className="cx-queued-count">{item.state === "sending" ? "Sending queued message" : "1 message queued"}</span>
-        <span className="cx-queued-preview">{queuedPreview(item.text)}</span>
+        <span className="cx-queued-preview">{caption}</span>
         {sendNow(item, 0) ? <button type="button" className="cx-queued-icon" aria-label="Send now" data-tip={item.sendNowBlocked ?? "Send now"}
           disabled={Boolean(item.sendNowBlocked)} onMouseDown={(event) => event.preventDefault()} onClick={item.onSendNow}><QueuedGlyph name="send" /></button> : null}
         {item.onEdit ? <button type="button" className="cx-queued-icon" aria-label="Edit in composer" data-tip="Edit in composer"
           onMouseDown={(event) => event.preventDefault()} onClick={item.onEdit}><QueuedGlyph name="edit" /></button> : null}
         {item.onRemove ? <button type="button" className="cx-queued-icon" aria-label="Remove from queue" data-tip="Remove from queue"
           onMouseDown={(event) => event.preventDefault()} onClick={item.onRemove}><QueuedGlyph name="remove" /></button> : null}
+        <QueuedImages images={images} />
       </div>
       <QueuedNote note={item.note} />
     </div>;
   }
   const count = `${items.length} messages queued`;
   if (!open) {
+    const { caption, images } = queuedPreview(items[0].text);
     return <div className="cx-queued">
       <button type="button" className="cx-queued-band cx-queued-stack" aria-expanded={false} onClick={() => setOpen(true)}>
         <span className="cx-queued-count">{count}</span>
-        <span className="cx-queued-preview">{items[0].state === "sending" ? "Sending" : "Next"}: {queuedPreview(items[0].text)}</span>
+        <span className="cx-queued-preview">{items[0].state === "sending" ? "Sending" : "Next"}: {caption}</span>
         <span className="cx-queued-caret" aria-hidden="true"><QueuedGlyph name="caret" /></span>
+        <QueuedImages images={images} folded />
       </button>
       <QueuedNote note={items.find((item) => item.note)?.note} />
     </div>;
@@ -1119,8 +1142,13 @@ export function QueuedMessageBar({ items, onMenu, onClearAll }: {
       <div className="cx-queued-list" role="list" aria-label="Queued messages">
         {items.map((item, index) => {
           const menu = actions(item, index);
+          const { caption, images } = queuedPreview(item.text);
           return <div key={item.key} role="listitem" className="cx-queued-row" data-state={item.state}>
-            <span className="cx-queued-body"><span className="cx-queued-text">{queuedPreview(item.text)}</span><QueuedNote note={item.note} /></span>
+            <span className="cx-queued-body">
+              {caption ? <span className="cx-queued-text">{caption}</span> : null}
+              <QueuedImages images={images} />
+              <QueuedNote note={item.note} />
+            </span>
             {menu.length ? <span className="cx-queued-actions">
                 <button type="button" className="cx-queued-icon is-sm" aria-label="Queued message actions" aria-haspopup="menu"
                   onClick={(event) => onMenu(event.currentTarget, menu)}><QueuedGlyph name="more" size={14} /></button>
@@ -1553,7 +1581,7 @@ export function AgentOrchestratorChat({
     // One that waited in the queue and went as the next turn's message shows there, as that message.
     const sentAsTurn = (entry: PendingSteer) => {
       const at = steerTurnIndex(turns, entry);
-      return at >= 0 && turns.slice(at + 1).some((turn) => turn.user?.text.trim() === entry.text.trim());
+      return at >= 0 && turns.slice(at + 1).some((turn) => !turn.user?.automatic && turn.user?.text.trim() === entry.text.trim());
     };
     // `turns` are the open chat's: another chat's steer is never matched against them (a "continue"
     // here dropped one still on its way there), only aged out.
@@ -2529,7 +2557,8 @@ export function AgentOrchestratorChat({
     };
   }
   // The messages /rewind can go back to, oldest first, with the turn each one opened.
-  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
+  const rewindPoints = turns.flatMap((turn, turnIndex) => turn.user && !turn.user.automatic
+    ? [{ turnIndex, messageIndex: turn.messageIndex ?? turnIndex, text: chatMessageReadable(turn.user.text) }] : []);
   // Keep the intent from the rendered transcript, even if it changes before confirmation.
   const deletion = (turn: ChatTurn | undefined) => turn?.user && turn.runId && turn.messageIndex !== undefined
     && projectId && typeof shownDescription === "string"
@@ -3079,7 +3108,7 @@ export function AgentOrchestratorChat({
     // on its own; constructing it once keeps the attachments and message actions identical.
     // Its read receipt leads the actions, as on a steer: "Sending…" while an agent comes up for it,
     // then one check, then two once the model has read it (turnReceipt).
-    const userMessage = !feedback && turn.user ? <div className="cx-user">
+    const userMessage = !feedback && turn.user && !turn.user.automatic ? <div className="cx-user">
       <SentMessage text={turn.user.text} />
       <div className="cx-msg-foot"><SteerReader.Provider value={steerReader(lead)}><SteerReceiptMark receipt={turnReceipt(turn, items, live)} /></SteerReader.Provider>
       <MessageActions text={chatMessageReadable(turn.user.text)}>
@@ -3104,11 +3133,12 @@ export function AgentOrchestratorChat({
         <span className="cx-stamp" title={`${steer.stamp} UTC`}>{localChatStamp(steer.stamp)}</span>
       </div>)}</SteerReader.Provider> : null;
     // A goal's later round opens on a divider: its number and why the last round fell short.
-    const round = feedback ? goalRound(turns, turnIndex) : null;
+    const round = feedback && !turn.user?.automatic ? goalRound(turns, turnIndex) : null;
+    if (turn.user?.automatic && !hasReply && !savedSteers) return foldToggle;
     // One message that cannot render (a run's unexpected data) shows a notice in its place; the
     // chat and the rest of the window stay up.
     const view = <PartErrorBoundary key={turn.key} label="This message"><article className={`cx-turn${dsh ? " is-dsh" : ""}`}>
-              {feedback ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
+              {feedback && !turn.user?.automatic ? <RoundDivider round={round?.round ?? 2} reason={feedback.reason}
                 stamp={turn.user?.stamp ? <span className="cx-stamp" title={`${turn.user.stamp} UTC`}>{localChatStamp(turn.user.stamp)}</span> : null} /> : null}
               {!hasReply ? <>{userMessage}{savedSteers}</> : null}
               {hasReply ? <section className={`cx-reply is-${replyTone(turn, live)}${teamAnswer ? " is-team" : ""}`} data-transcript={!dsh && replyStyle === "transcript" ? "codex" : undefined} aria-label="Reply">
@@ -3147,7 +3177,7 @@ export function AgentOrchestratorChat({
                 verdict={turn.final?.verdict} attempt={stepAttempt(lead)} members={members} changes={changes} onOpenChanges={openChanges}
                 requestModels={turn.runId && !live ? turn.cpaModels : undefined} actions={quietLine ? answerActions : undefined} />
               </section> : null}
-              {turn.unsent ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
+              {turn.unsent && !turn.user?.automatic ? <p className="cx-note">This message didn't start a turn. Send it again if it's still needed.</p> : null}
             </article></PartErrorBoundary>;
     return foldToggle ? [foldToggle, view] : view;
   }), [turns, thread, deleteBlocked, rewindBlocked, notTaken, deletingBusy, chatRuns, showWork, notStarted, latest?.id, loadWork, dshReaders, restart, runOpen, busy, failedTurn, steerViews, detailsWorkTick,

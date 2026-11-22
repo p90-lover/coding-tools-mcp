@@ -16,7 +16,8 @@ const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { fetchOffThread } = require("./off-thread-run.cjs");
 const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs");
 const { scheduleMessage, scheduleAction, createScheduleStore } = require("./chat-schedules.cjs");
-const { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore } = require("./chat-edits.cjs");
+const { FOLLOW_UP, STEER, automaticStamp, chatFollowUp, chatDescriptionWithout, chatDescriptionWithSteer,
+  chatMessageCount, createChatEditStore, withoutAutomaticChatPrompts } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { userMessages } = require("./chat-history.cjs");
@@ -1145,7 +1146,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (known || (adoptTries.get(key) ?? 0) >= ADOPT_TRIES) return false;
     const agent = externalAgent(card) === "claude-code" ? "Claude" : "The agent";
     try {
-      const result = await chatSend({ workspaceId, taskId, message: `${agent} continued on its own.`, ...followUpSelection(latest),
+      const result = await automaticChatSend({ workspaceId, taskId, message: `${agent} continued on its own.`, ...followUpSelection(latest),
         deferStart: true, afterRunId: latest.id }, undefined, { adoptTurn: { session, turnId } });
       if (result?.ok === false || !result?.runId) throw new Error(result?.reason || "The card was not created");
       adoptTries.delete(key);
@@ -7309,6 +7310,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     try { return await mine; } finally { if (chatSends.get(key) === settled) chatSends.delete(key); }
   }
 
+  function automaticChatSend(input, checkCurrent, options) {
+    return chatSend(input, checkCurrent, { ...options, automatic: true });
+  }
+
   /**
    * A message the person sent (the chat's composer; a goal's round, a wakeup and a loop call chatSend
    * themselves). Into a chat whose goal stalled it picks the goal up again, as /goal resume does: that
@@ -7389,7 +7394,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** `adoptTurn` ({ session, turnId }, internal callers only): the run takes that turn of the chat's
    *  live agent instead of sending the message (adoptAutonomousTurns). */
-  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId, inputId } = {}, checkCurrent = () => {}, { supersedeRetry = false, adoptTurn = null } = {}, clock = stepClock(now)) {
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId, inputId } = {}, checkCurrent = () => {}, { supersedeRetry = false, adoptTurn = null, automatic = false } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -7520,11 +7525,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (rewind) {
           const before = String(detail.task.description || "");
           if (before !== rewind.description) throw new Error("The chat changed before rewind; reload it and try again");
-          const marker = /\n\nFollow-up \(([^)]+) UTC\):\n/g;
-          const marks = [...before.matchAll(marker)];
-          const bodies = before.split(new RegExp(marker.source)).filter((_, index) => index % 2 === 0);
-          if (!bodies[0].trim() || rewind.index >= bodies.length) throw new Error("That message is no longer in this chat; reload it");
-          const selected = bodies[rewind.index].split(/\n\n↳ Steer \(([^)]+) UTC\): /)[0].trim();
+          const marks = [...before.matchAll(new RegExp(FOLLOW_UP.source, "g"))];
+          const bodies = before.split(FOLLOW_UP).filter((_, index) => index % 2 === 0);
+          const hasHead = Boolean(bodies[0].trim());
+          if (!hasHead) bodies.shift();
+          const mark = marks[rewind.index - (hasHead ? 1 : 0)];
+          if (rewind.index >= bodies.length || automaticStamp(mark?.[1])) throw new Error("That message is no longer in this chat; reload it");
+          const selected = bodies[rewind.index].split(STEER)[0].trim();
           if (text !== boardText(clean(selected, 8192, false))) throw new Error("The selected message changed before rewind; reload it");
           const shown = chatEdits.visible(id, saved.runs.filter(run => run.project_id === task));
           const roots = shown.filter(run => !run.restarts_run_id && !run.replaces_run_id);
@@ -7535,7 +7542,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           // "still synchronizing", however often it was reloaded. Missing runs remain ambiguous
           // unless only the last message lacks a run and every existing run predates its minute.
           const summarized = roots.length - bodies.length;
-          const selectedAt = rewind.index > 0 ? Date.parse(`${marks[rewind.index - 1][1].replace(" ", "T")}:00Z`) : NaN;
+          const selectedAt = mark ? Date.parse(`${mark[1].replace(" ", "T")}:00Z`) : NaN;
           const unsentLast = saved.sendTaskRuns === task && summarized === -1 && rewind.index === bodies.length - 1
             && roots.every(run => {
               const starts = (run.nodes ?? []).map(node => node.receipt?.started_at_ms).filter(value => Number.isFinite(value) && value > 0);
@@ -7548,8 +7555,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             for (const run of shown) if (hidden.has(run.restarts_run_id) || hidden.has(run.replaces_run_id)) hidden.add(run.id);
           }
           discarded = [...hidden];
-          const rewound = rewind.index === 0 ? "" : `\n\nFollow-up (${marks[rewind.index - 1][1]} UTC):\n${text}`;
-          const kept = rewind.index === 0 ? "" : before.slice(0, marks[rewind.index - 1].index);
+          const rewound = mark ? chatFollowUp(mark[1], text) : "";
+          const kept = mark ? before.slice(0, mark.index) : "";
           // The messages kept ahead of the rewound one roll over as a send's would, when they and it
           // no longer fit ("This rewind exceeds the chat size limit" left the message unsendable).
           rewoundDescription = rewind.index === 0 ? text
@@ -7558,14 +7565,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           rewindBefore = chatEdits.get(id, task);
         }
         const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
-        const extended = () => `${detail.task.description || ""}\n\nFollow-up (${stamp} UTC):\n${text}`.trim();
+        const followUpBlock = chatFollowUp(automatic ? `automatic ${stamp}` : stamp, text);
+        const extended = () => `${detail.task.description || ""}${followUpBlock}`.trim();
         let description = rewoundDescription ?? extended();
         if (!rewind && utf8Bytes(description) > BOARD_TEXT_BYTES) {
           // This is bounded task-record storage, not the agent's token context. Only roll it over
           // at the hard byte limit: obsolete /autocompact preferences must neither summarize early
           // nor strand a chat. Native /compact and model-token auto-compaction are independent.
           // The rollover always makes room for a message within CHAT_MESSAGE_BYTES (compactChat).
-          const reserve = utf8Bytes(`\n\nFollow-up (${stamp} UTC):\n${text}`);
+          const reserve = utf8Bytes(followUpBlock);
           try {
             await compactChat({ workspaceId: id, taskId: task, reserve });
           } catch (error) {
@@ -7782,7 +7790,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     goals.update(id, task, { round, note: "", lastMessage: message, roundStartedAt: now() });
     try {
       // Started in the background: a failed start settles the run, which marks the goal stalled.
-      const result = await chatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true }, (accepting = false) => {
+      const result = await automaticChatSend({ workspaceId: id, taskId: task, message, ...selection, deferStart: true }, (accepting = false) => {
         if (!still()) throw new Error("The goal changed before the next round was accepted");
         // Submitting run creation accepts this round; a later Pause leaves it running.
         if (accepting) accepted = true;
@@ -8591,7 +8599,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         "Continue that pending next step now. Read the command's output and verify the actual result before reporting success. "
           + "A watch deadline or observation failure is not command success or proof it stopped. Do not replay the command merely because its outcome is unknown. "
           + "If more waiting is needed, register watch_command or schedule_wakeup and check that registration succeeded; a promise alone schedules nothing."].join("\n\n");
-      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, (accepting = false, writing = false) => {
+      const result = await automaticChatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: ticket.runId }, (accepting = false, writing = false) => {
         if (!current()) throw new Error("This command watch was cancelled");
         if (accepting || writing) attempted = true;
       });
@@ -8694,7 +8702,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const message = ["Monitor events. This is a tool notification, not a new user request or approval.", ...sections,
         "Act on these events only as far as your earlier task needs. A monitor that ended sends nothing more: start a new monitor "
           + "if you still need to watch. Silence from a running monitor is not success; verify results before reporting them."].join("\n\n");
-      const result = await chatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: latest.id }, () => {
+      const result = await automaticChatSend({ workspaceId, taskId, message, ...followUpSelection(latest), deferStart: true, afterRunId: latest.id }, () => {
         if (wakeupsDisposed) throw new Error("Monitors were closed");
       });
       if (result?.ok === false || !result?.runId) throw new Error("The monitor follow-up was not sent");
@@ -8816,7 +8824,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         await runLoop(workspaceId, taskId, loop.id);
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true,
+      const result = await automaticChatSend({ workspaceId, taskId, message: wakePrompt(wakeup, now()), ...followUpSelection(latest), deferStart: true,
         afterRunId: latest.id }, (accepting = false, writing = false) => {
         if (!current() || wakeup.dueAt > now()) throw new Error("This wake-up was cancelled, replaced or postponed");
         if (accepting || writing) attempted = true;
@@ -8988,8 +8996,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const detail = await board({ workspaceId, taskId });
     const said = String(detail.task?.description || "");
     const text = item.goal ? goalMessage(cleanObjective(item.goal), 1) : boardText(String(item.message || ""));
-    // The last message, without the steers noted under it (chatDescriptionWithSteer).
-    const last = (said.split(/\n\nFollow-up \([^)]+ UTC\):\n/).at(-1) ?? "").split(/\n\n↳ Steer \(/)[0];
+    const parts = said.split(FOLLOW_UP);
+    if (automaticStamp(parts.at(-2))) return false;
+    const last = parts.at(-1).split(STEER)[0];
     return Boolean(text.trim()) && last.trim() === text.trim();
   }
   /** How a queued message runs: as picked when it was queued, else as the chat's last turn did. */
@@ -9335,7 +9344,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.info?.("ao.loop.ended", { workspaceId, taskId, rounds: loop.round, why: now() >= loop.expiresAt ? "expired" : "chat closed" });
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: loopMessage(loop, loop.wakeNote || ""), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      const result = await automaticChatSend({ workspaceId, taskId, message: loopMessage(loop, loop.wakeNote || ""), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
       if (result?.ok === false) throw new Error(String(result.reason || "the round could not start"));
       // Stopped while this round was sent: the round stands, but the stopped loop goes no further.
       if (!current()) return;
@@ -9449,7 +9458,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         logger?.info?.("ao.schedule.dropped", { workspaceId, taskId });
         return;
       }
-      const result = await chatSend({ workspaceId, taskId, message: scheduleMessage(schedule, now()), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
+      const result = await automaticChatSend({ workspaceId, taskId, message: scheduleMessage(schedule, now()), ...followUpSelection(chatRuns.at(-1)), deferStart: true });
       if (result?.ok === false) throw new Error(String(result.reason || "the message could not start"));
       sent = true;
       schedules.clear(workspaceId, taskId, id);
@@ -9711,7 +9720,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const rolloverRoom = (head, reserve) => Math.max(0, Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - reserve));
   /** The record kept as it was, its newest part within `room` bytes: no model needed, so it cannot fail. */
   function keptRecord(before, room) {
-    const plain = unmarkedRecord(before).trim();
+    const plain = unmarkedRecord(withoutAutomaticChatPrompts(before)).trim();
     if (utf8Bytes(plain) <= room) return plain;
     return room > utf8Bytes(ROLLED_NOTE) ? `${ROLLED_NOTE}${utf8Tail(plain, room - utf8Bytes(ROLLED_NOTE))}` : utf8Tail(plain, room);
   }
