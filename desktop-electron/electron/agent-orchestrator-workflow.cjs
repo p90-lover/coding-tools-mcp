@@ -20,7 +20,7 @@ const { FOLLOW_UP, STEER, automaticStamp, chatFollowUp, chatDescriptionWithout, 
   chatMessageCount, createChatEditStore, withoutAutomaticChatPrompts } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
-const { userMessages } = require("./chat-history.cjs");
+const { retainedChatRequest, isCompactedRecord } = require("./chat-history.cjs");
 const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { ACCOUNT_KINDS_PATH, withAccountKinds } = require("./cpa-account-kinds.cjs");
@@ -2125,6 +2125,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
         const nativeContinuation = continued?.session.startsWith("native:");
+        const handoff = handoffs.get(runId);
+        const recovered = handoff?.retryOf ? await restoreChatRequest(handoff).catch(() => null) : null;
+        const request = handoff?.request ?? recovered?.request;
         // Only legacy AO may hand off a refusal to a fresh session.
         let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
@@ -2162,7 +2165,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage("sending your message to the agent");
           // The person's AGENTS.md files go in front again only when they changed since this agent
           // was given them (or since the app started, when that is not known).
-          const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
+          const text = continued.retry && request ? `${continued.text}\n\n${currentRequestText(request.text)}` : continued.text;
+          const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(text));
           const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
           const receiver = { workspaceId, runId, nodeId: node.id, requestId: reserved.request_key };
           if (nativeContinuation) {
@@ -2171,7 +2175,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           }
           const sendStarted = now();
           let sendTimedOut = false;
-          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key,
+          sent = await harnessService().send(continued.session, fresh ? standing.text + text : text, reserved.request_key,
             { timeoutMs: CONTINUED_SEND_TIMEOUT_MS })
             .catch((error) => {
               sendError = publicText(error?.message || error, 200);
@@ -2209,17 +2213,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // The turn is the agent's own: with that agent gone there is nothing to show, and a fresh agent
         // must not be started on the card's placeholder message.
         if (continued?.adoptTurn && !sent?.turnId) throw new Error(ADOPTED_TURN_LOST);
-        // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
-        // with what the earlier agents replied; the first card to start takes it.
-        const handoff = handoffs.get(runId);
+        if (!sent?.turnId && recovered?.compacted && !request) {
+          throw new Error("The original request is no longer in the saved chat after compaction. Send it again to start a new agent.");
+        }
         handoffs.delete(runId);
-        // A new agent's first message starts with the person's AGENTS.md files, in the room the
-        // request leaves; the chat's handoff gets what is left after them.
-        const standing = sent?.turnId ? { text: "", hash: "" } : await launchInstructions(workspaceId, PROMPT_BYTES - utf8Bytes(reserved.prompt));
-        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt) - utf8Bytes(standing.text);
-        if (!sent?.turnId && handoff) stage("summarising the chat for a new agent");
-        const prompt = standing.text + (!sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom, handoff.retryOf).catch(() => "")) + reserved.prompt : reserved.prompt);
+        const basePrompt = request ? prioritizedChatPrompt(reserved.prompt, request) : reserved.prompt;
+        const standing = sent?.turnId ? { text: "", hash: "" } : await launchInstructions(workspaceId, PROMPT_BYTES - utf8Bytes(basePrompt));
+        const handoffRoom = PROMPT_BYTES - utf8Bytes(basePrompt) - utf8Bytes(standing.text);
+        if (!sent?.turnId && handoff) stage("gathering earlier context for a new agent");
+        const earlier = !sent?.turnId && handoff
+          ? await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom, handoff.retryOf).catch(() => "") : "";
+        const prompt = standing.text + (request ? basePrompt + earlier : earlier + basePrompt);
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
@@ -3856,11 +3860,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const session = card.history?.at(-1)?.thread_id;
         if (action === "retry" && !automatic && taskId) {
           queueRetryHandoff(id, taskId, run);
-        } else if (typeof session === "string" && session && !continuations.has(run) && !handoffs.get(run)?.retryOf) {
-          continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
-          if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+        } else if (!handoffs.get(run)?.retryOf) {
+          if (typeof session === "string" && session && !continuations.has(run)) {
+            continuations.set(run, { session, text: RETRY_CONTINUE_TEXT, retry: true });
+            if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+          }
           if (taskId && !handoffs.has(run)) {
-            handoffs.set(run, { workspaceId: id, taskId });
+            handoffs.set(run, { workspaceId: id, taskId, retryOf: run });
             if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
           }
         }
@@ -4935,11 +4941,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const current = observed?.turnId === approval.turn_id && observed.approvals?.find(value => value.approval_id === approval.approval_id);
     return Boolean(current) && guardianApprovalFields.every(field => JSON.stringify(current[field]) === JSON.stringify(approval[field]));
   }
+  const guardianScope = (approver, approval, partial) => !partial && !approver.settings?.instructions?.trim() && approval.source === "ao"
+    && approval.turn_id && !approval.guardianUnsupported && !approval.guardianRequiresHuman;
+  const guardianShell = (approval) => approval.kind === "command" && ["Bash", "PowerShell"].includes(approval.tool)
+    && typeof approval.cwd === "string" && path.isAbsolute(approval.cwd);
+
   async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, blocked) {
     const manual = reason => ({ ...blocked, reason });
-    if (partial || approver.settings?.instructions?.trim() || approval.source !== "ao" || !approval.turn_id || approval.guardianUnsupported) return blocked;
+    if (!guardianScope(approver, approval, partial)) return blocked;
     if (approval.kind === "permission") return { ...blocked, guardianUnavailable: true };
-    if (approval.kind !== "command" || !["Bash", "PowerShell"].includes(approval.tool) || !path.isAbsolute(approval.cwd || "")) return blocked;
+    if (!guardianShell(approval)) return blocked;
     if (!nativeGuardianReview || gitPushRequest(approval.command)) return { ...blocked, guardianUnavailable: true };
     const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     await verifyCurrent();
@@ -4957,9 +4968,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
     check();
-    const quotaBlocked = quotaReviewBlocked();
+    if (!approver.autobot && guardianScope(approver, approval, partial) && guardianShell(approval) && !gitPushRequest(approval.command)) {
+      const verdict = await reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, {
+        action: "ask", unresolved: true, guardianPending: true,
+        reason: "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.",
+      });
+      check();
+      logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true });
+      return verdict;
+    }
     if (approver.autobot && !autobotMayMeter()) return { action: "ask", unresolved: true, quotaBlocked: true, reason: "Autobot model fallback is off." };
-    if (quotaBlocked) return reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, quotaBlocked);
+    const quotaBlocked = quotaReviewBlocked();
+    if (quotaBlocked) return quotaBlocked;
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -5304,12 +5324,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * Whether a request is screened (again): one never screened, or one the reviewer left to the
    * person before "Let the model judge" was on. Turning the judge on from that request's own card
    * did nothing: its "ask" was kept, so no pass looked at it again and the turn waited for an hour
-   * (seen live 2026-11-04, a `git -C … push`). A quota-blocked ask can arrive after consent was
-   * granted if Guardian was already in flight. Such an ask is not a verdict. A decided answer
-   * is never replaced; if delivery failed, it is sent again only when due (resendDue).
+   * (seen live 2026-11-04, a `git -C … push`). Quota consent can reopen an unsupported request,
+   * not an undecided Guardian request. A decided answer is never replaced; if delivery failed,
+   * it is sent again only when due (resendDue).
    */
   const rescreen = (advice) => !advice || resendDue(advice)
-    || (advice.action === "ask" && !advice.resolved && !advice.unsent
+    || (advice.action === "ask" && !advice.resolved && !advice.unsent && !advice.guardianPending
       && (advice.quotaBlocked ? (advice.autobot ? autobotMayMeter() : chatPreferences.get().meteredReviews)
         : !advice.judged && chatPreferences.get().modelJudges));
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
@@ -5483,7 +5503,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The reviewer was unsure ("ask"): asked once more, it must choose allow or deny (deny when in
     // doubt), so a request it could read whole no longer waits for the person for want of a decision.
     check();
-    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked) {
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && !advice.guardianPending) {
       const decided = await askApprover({ approver, mission, approval, decide: true, partial: incomplete, judge: judges, check, signal, verifyCurrent }).catch(() => null);
       check();
       if (decided && decided.action !== "ask") advice = { action: decided.action, reason: decided.reason, reviewed: true };
@@ -5499,10 +5519,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     // The preference may change while the model or the owner check is in flight. "Let the model
     // judge": a decide pass that failed or still said "ask" is a deny, never the person's: the
-    // request sat on the card though the switch was on. A review quota-based reviews kept from
-    // running (quotaBlocked) is not an undecided review, and still waits for the person.
+    // request sat on the card though the switch was on. An absent or inconclusive native review
+    // cannot be escalated to a paid review or turned into a denial.
     const judgesNow = chatPreferences.get().modelJudges;
-    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && judgesNow) {
+    if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && !advice.guardianPending && judgesNow) {
       advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };
     }
     if (advice.reviewed && approval.thread_id && advice.action === "deny") {
@@ -5920,7 +5940,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function chatModelJudges({ enabled, meteredReviews } = {}) {
     if (meteredReviews !== undefined) {
       if (typeof meteredReviews !== "boolean") throw new Error("Choose on or off for quota-based reviews");
-      await chatPreferences.set({ meteredReviews });
+      const changed = chatPreferences.get().meteredReviews !== meteredReviews;
+      const saving = chatPreferences.set({ meteredReviews });
+      if (changed) logger?.info?.("ao.quota_review_consent_changed", { enabled: meteredReviews });
+      await saving;
       for (const [id, advice] of approverAdvice) {
         if (advice.quotaBlocked && !advice.unsent) {
           approverAdvice.delete(id);
@@ -7100,19 +7123,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // and takes its answer, and one that turn already took within STEER_REPEAT_MS is not sent again.
   const STEER_REPEAT_MS = 30_000;
   const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
-  function chatSteer(input = {}, bindNativeSteer) {
-    if (input?.inputId || input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input, bindNativeSteer);
+  function chatSteer(input = {}, { fromQueue = false, bindNativeSteer } = {}) {
+    if (input?.inputId || input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input, { fromQueue, bindNativeSteer });
     const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
     const earlier = steersInFlight.get(key);
     if (earlier) {
-      return earlier.catch(() => null).then((answer) => answer?.steered === true ? { ...answer, duplicate: true } : steerTracked(key, input));
+      return earlier.catch(() => null).then((answer) => answer?.steered === true && !(fromQueue && answer.answered)
+        ? { ...answer, duplicate: true } : steerTracked(key, input, fromQueue));
     }
-    return steerTracked(key, input);
+    return steerTracked(key, input, fromQueue);
   }
   // The steer itself, as its caller's answer: no wait is added in front of it (the chat's note reads
   // the message count while the caller carries on).
-  function steerTracked(key, input) {
-    const mine = chatSteerOnce(input);
+  function steerTracked(key, input, fromQueue) {
+    const mine = chatSteerOnce(input, { fromQueue });
     steersInFlight.set(key, mine);
     const forget = () => { if (steersInFlight.get(key) === mine) steersInFlight.delete(key); };
     mine.then(forget, forget);
@@ -7147,7 +7171,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal, inputId } = {}, bindNativeSteer) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal, inputId } = {}, { fromQueue = false, bindNativeSteer } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -7207,7 +7231,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const observeCard = () => Promise.resolve().then(() => harnessService().observe?.(card.receipt.thread_id, expectedTurns.get(card.receipt.thread_id)))
       .catch(() => null);
     let waiting = await observeCard();
-    const question = !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
+    const question = !fromQueue && !objective && waiting?.approvals?.length === 1 && waiting.approvals[0]?.kind === "question" ? waiting.approvals[0] : null;
     const reply = question ? typedAnswer(question, text) : null;
     if (repeat && !reply) return skipRepeat();
     // A card that could not be read may be waiting on a request: steering it then wedged AO's chat
@@ -7238,7 +7262,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A steer never stops what the agent is doing (the user: "it shouldnt stop the model action,
     // wait it done to steer"). Declining the waiting request made the agent's tool call fail with
     // "The user doesn't want to take this action right now. STOP…"; the steer now waits for it.
-    for (const deadline = now() + STEER_ANSWER_WAIT_MS; asking(waiting) && now() < deadline;) {
+    for (const deadline = now() + STEER_ANSWER_WAIT_MS; !fromQueue && asking(waiting) && now() < deadline;) {
       await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
       waiting = await observeCard();
     }
@@ -7676,7 +7700,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
     }
     if (taskId) {
-      handoffs.set(runId, { workspaceId: id, taskId: task });
+      const record = followUp?.description;
+      const previous = record?.endsWith(text) ? record.slice(0, -text.length).replace(/\n\nFollow-up \([^)]+ UTC\):\n$/, "") : "";
+      handoffs.set(runId, { workspaceId: id, taskId: task,
+        ...(executionMode === "single" ? { request: { text, record, previous } } : {}) });
       if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
     }
     if (objective) {
@@ -8000,17 +8027,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     && (outcome !== "finished" || (goal.evaluatedAs ?? (goal.checkedAt ? "checked" : "stalled")) === "checked");
 
   const scoring = new Set();
-  /** The user's message a run answered: runs that answer a new message take the task's messages in order; a restart or replacement answers its original's. */
   function runMessage(description, taskRuns, run) {
-    const said = userMessages(description);
-    const fresh = taskRuns.filter(entry => !entry.replaces_run_id && !entry.restarts_run_id);
-    let origin = run;
-    for (let hops = 0; origin && (origin.replaces_run_id || origin.restarts_run_id) && hops < 20; hops += 1) {
-      const previous = origin.replaces_run_id || origin.restarts_run_id;
-      origin = taskRuns.find(entry => entry.id === previous);
-    }
-    const index = origin ? fresh.findIndex(entry => entry.id === origin.id) : -1;
-    return (index >= 0 ? said[index] : said.at(-1))?.text ?? "";
+    return retainedChatRequest(description, taskRuns, run.id)?.text ?? "";
   }
   /** One grade of a Team round by a free model (as checkGoal picks them); null when none answered. */
   async function gradeRound(message, mission) {
@@ -8960,7 +8978,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const QUEUE_RETRY_MS = 60_000, QUEUE_RESTORE_MS = 30_000, QUEUE_SEND_TRIES = 5;
   const QUEUE_STEER_WAITS = [15_000, 30_000, 60_000];
   const queueTimers = new Map();
-  const draining = new Set();
+  const draining = new Map();
   const queueFailures = new Map(); // item id -> failed sends
   const steerTries = new Map(); // item id -> steers that found the agent not ready
   function armQueue(workspaceId, taskId, delay, steer = false, ready = false) {
@@ -8970,7 +8988,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (wakeupsDisposed || !chatQueue.list(workspaceId, taskId).length) return;
     const handle = setTimer(() => {
       queueTimers.delete(key);
-      void drainQueue(workspaceId, taskId, { steer }).catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
+      void drainQueue(workspaceId, taskId, { steer, ready }).catch(error => logger?.warn?.("ao.chat_queue_failed", { message: publicText(error?.message || error, 200) }));
     }, Math.max(1, delay));
     handle?.unref?.();
     queueTimers.set(key, { handle, ready });
@@ -8979,11 +8997,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function wakeQueueOnAgentReady(workspaceId, mission, node, observed) {
     const taskId = mission?.project_id;
     if (!taskId || mission.cancelled || !(mission.execution_mode === "single" || node.role === "planner")
-      || observed.turnState !== "running" || observed.agentGone || observed.exited || observed.needsInput || observed.approvals?.length) return;
+      || observed.turnState !== "running" || observed.provisioning || observed.agentGone || observed.exited || observed.needsInput || observed.approvals?.length) return;
     const key = wakeKey(workspaceId, taskId);
-    if (!chatQueue.list(workspaceId, taskId)[0]?.steer || draining.has(key) || queueTimers.get(key)?.ready) return;
-    // Keep this observational path nonblocking. drainQueue re-reads the current head and lifecycle,
-    // and chatSteer checks the agent again before sending; the per-chat draining lock prevents duplicates.
+    const [head] = chatQueue.list(workspaceId, taskId);
+    if (!head?.steer || head.sending || queueTimers.get(key)?.ready) return;
+    const pass = draining.get(key);
+    if (pass) {
+      // An older in-flight retry can still report "starting". Carry one newer wake past it, but
+      // not past a check that was itself started by a ready signal.
+      if (!pass.ready) pass.wake = head.id;
+      return;
+    }
     armQueue(workspaceId, taskId, 1, true, true);
   }
   // After its chat's turn was found over (or ended here), the next look comes this soon.
@@ -9037,11 +9061,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * the turn this one starts.
    */
   /** `known`: the project's runs as the caller has just read them (queueAfterRun), so they are not read again. */
-  async function drainQueue(workspaceId, taskId, { steer = false, known = null } = {}) {
+  async function drainQueue(workspaceId, taskId, { steer = false, ready = false, known = null } = {}) {
     const key = wakeKey(workspaceId, taskId);
     if (wakeupsDisposed || draining.has(key)) return;
     if (!chatQueue.list(workspaceId, taskId).length) return;
-    draining.add(key);
+    const pass = { ready, wake: null };
+    draining.set(key, pass);
     try {
       let saved = known ?? await runs({ workspaceId });
       // An archived or deleted chat keeps its queue for when it is back.
@@ -9077,13 +9102,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
-        if (!next.steer) {
+        if (!next.steer || next.sending) {
           const freed = await unblockQueuedChat(workspaceId, taskId, saved).catch(() => false);
           if (!wakeupsDisposed) armQueue(workspaceId, taskId, freed ? QUEUE_FREED_MS : QUEUE_RETRY_MS);
           return;
         }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
-        const result = await dispatchChatInput({ workspaceId, taskId, message: next.message, ...(next.inputId ? { inputId: next.inputId } : {}), ...(next.goal ? { goal: next.goal } : {}) }, true)
+        const result = await dispatchChatInput({ workspaceId, taskId, message: next.message, ...(next.inputId ? { inputId: next.inputId } : {}), ...(next.goal ? { goal: next.goal } : {}) }, true, { fromQueue: true })
           .catch(error => ({ steered: false, waiting: true, error }));
         if (result.steered === true) {
           chatQueue.remove(workspaceId, taskId, [next.id]);
@@ -9118,6 +9143,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         chatQueue.remove(workspaceId, taskId, [next.id]);
         queueFailures.delete(next.id);
         logger?.info?.("ao.chat_queue.sent", { workspaceId, taskId, left: chatQueue.list(workspaceId, taskId).length });
+        armQueue(workspaceId, taskId, QUEUE_FREED_MS, true);
       } catch (error) {
         const why = String(error?.message || error);
         // Another turn started first (a goal's round, a wake-up): it waits for that one, uncounted.
@@ -9137,7 +9163,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // look was armed while this one waited.
       logger?.warn?.("ao.chat_queue.check_failed", { workspaceId, taskId, message: publicText(error?.message || error, 200) });
       if (!queueTimers.has(key)) armQueue(workspaceId, taskId, QUEUE_RETRY_MS, steer);
-    } finally { draining.delete(key); }
+    } finally {
+      draining.delete(key);
+      if (pass.wake && chatQueue.list(workspaceId, taskId)[0]?.id === pass.wake) armQueue(workspaceId, taskId, 1, true, true);
+    }
   }
   /** The timelines of a run's agent cards, for whether a steer was read; null when none can be read. */
   async function runTimelines(workspaceId, runId) {
@@ -9191,8 +9220,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action === "set") return { ok: true, kept: chatDrafts.set(id, name, draft) };
     throw new Error("Unknown draft action");
   }
-  function dispatchChatInput(args, steer = false, options = {}) {
-    const execute = (input, bindNativeSteer) => steer ? asPerson(() => chatSteer(input, bindNativeSteer)) : personChatSend(input, options);
+  function dispatchChatInput(args, steer = false, { fromQueue = false, ...options } = {}) {
+    const execute = (input, bindNativeSteer) => steer ? asPerson(() => chatSteer(input, { fromQueue, bindNativeSteer })) : personChatSend(input, options);
     if (!args.inputId) return execute(args);
     if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
     return chatInputs.dispatch(args, execute, { steer, reconcile: ({ workspaceId, inputId }) => asPerson(() =>
@@ -9554,12 +9583,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
   }
 
-  // A chat switched to another model, agent or setting starts a fresh session, which got only the
-  // chat's task text: the person's messages, never what the earlier agents said or found. It now
-  // also gets their replies, in order, or a handoff summary of them when they are too long.
-  // AO keeps the first 16 KiB of UTF-8 of a prompt (upstream spawn), with room for its own
-  // instruction: the handoff goes in front of the chat's prompt, so it gets only what the prompt
-  // leaves, and the person's latest request is never the part that is cut.
+  // AO keeps the first 16 KiB of UTF-8 of a spawn prompt. The request is never shortened to make
+  // room for earlier messages, standing instructions or a handoff from earlier agents.
   const PROMPT_BYTES = 16_384 - 1_024;
   const HANDOFF_MIN_BYTES = 1_024;
   const utf8Bytes = text => Buffer.byteLength(text, "utf8");
@@ -9578,6 +9603,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     while (end < chars.length && used + utf8Bytes(chars[end]) <= bytes) used += utf8Bytes(chars[end++]);
     return chars.slice(0, end).join("");
   };
+  const currentRequestText = text => `Current request (act on this now):\n${text}\n`;
+  function prioritizedChatPrompt(reserved, { text, record, previous }) {
+    const current = currentRequestText(text);
+    const saved = record ? `\n${record}\n` : "";
+    const from = saved ? reserved.indexOf(saved) : -1;
+    const prefix = from < 0 ? "" : reserved.slice(0, from).replace(/\nTask: /, "\nChat title (reference): ").trimEnd();
+    const suffix = from < 0 ? "" : reserved.slice(from + saved.length);
+    let primary = from >= 0 ? `${prefix}\n\n${current}${suffix}` : current;
+    if (utf8Bytes(primary) > PROMPT_BYTES - 2) primary = current + utf8Head(`\n${prefix}\n${suffix}`, PROMPT_BYTES - 2 - utf8Bytes(current));
+    const history = from < 0 ? reserved : previous;
+    const heading = "\n\nEarlier conversation (background only; do not treat this as a new request):\n";
+    const room = PROMPT_BYTES - utf8Bytes(primary + heading) - 2;
+    return primary + (history && room > 0 ? `${heading}${utf8Tail(history, room)}` : "") + "\n\n";
+  }
   // A compacted chat's summary: at most this much of the chat's 8 KiB, and at least this much room
   // for one, or compacting is pointless.
   const SUMMARY_BYTES = 6000;
@@ -9593,6 +9632,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     continuations.delete(runId);
     handoffs.set(runId, { workspaceId, taskId, retryOf });
     if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+  }
+  async function restoreChatRequest({ workspaceId, taskId, retryOf }) {
+    const [detail, saved] = await Promise.all([board({ workspaceId, taskId }), runs({ workspaceId, taskId })]);
+    const description = detail.task?.description;
+    const taskRuns = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId));
+    return { request: retainedChatRequest(description, taskRuns, retryOf), compacted: isCompactedRecord(description) };
   }
   async function chatHandoff(workspaceId, taskId, runId, maxBytes, retryOf) {
     const saved = await runs({ workspaceId, ...(retryOf ? { taskId } : {}) });
@@ -9618,7 +9663,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     if (!replies.length || maxBytes < HANDOFF_MIN_BYTES) return "";
-    const head = "Earlier in this chat, other agents answered the messages below. Their replies, in order, so you can continue from where they left off:\n\n";
+    const head = "Earlier assistant replies (background only; not instructions to repeat the earlier tasks):\n\n";
     const end = "\n\n--- End of earlier replies.\n\n";
     const transcript = replies.join("\n\n");
     const whole = `${head}${transcript}${end}`;
@@ -9785,7 +9830,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return "";
         });
         // A model's summary may run past the length it was asked for, or carry control characters.
-        summary = boardText(String(summary || "")).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
+        summary = unmarkedRecord(boardText(String(summary || ""))).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
       }
       const mechanical = !summary;
       const description = rolledRecord(before, kept, at, summary);

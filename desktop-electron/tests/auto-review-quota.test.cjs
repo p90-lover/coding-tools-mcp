@@ -14,6 +14,7 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
   const node = { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session", request_key: "key" } };
   const run = { id: "run", workspace_id: "ws", project_id: "task", revision: 1, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [node] };
   const calls = [], resolved = [];
+  const firstAnswer = Promise.withResolvers();
   let command = "python tools/migrate.py --apply";
   const cwd = path.resolve(__dirname, "..");
   const workflow = createAgentOrchestratorWorkflow({
@@ -36,10 +37,14 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
         approval_id: "permission-1", source: "ao", kind: "command", tool: "Bash", turn_id: "turn", command, cwd,
         decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }], ...approvalDetails,
       }] }),
-      resolveApproval: async (_session, id, decision) => { resolved.push([id, decision]); return { ok: true }; },
+      resolveApproval: async (_session, id, decision) => {
+        resolved.push([id, decision]);
+        firstAnswer.resolve();
+        return { ok: true };
+      },
     },
   });
-  return { workflow, calls, resolved, route,
+  return { workflow, calls, resolved, route, firstAnswer: firstAnswer.promise,
     command: value => { command = value; },
     screen: () => workflow.reviewToolCall({ workspaceId: "ws", session: "session", tool: "computer_action", args: { action: "click" } }),
     observe: async () => {
@@ -50,15 +55,15 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
   };
 }
 
-test("Approve for me routes the exact pending shell action to Guardian, without a CPA call", async () => {
+for (const meteredReviews of [false, true]) test(`Approve for me routes the exact shell action to Guardian with CPA consent ${meteredReviews ? "on" : "off"}`, async () => {
   const seen = [];
   const state = fixture(undefined, { nativeGuardianReview: async (input) => {
     seen.push(input);
     return { action: "allow", reason: "fixture native verdict", actor: "guardian" };
   } });
   try {
-    assert.equal((await state.workflow.call("chat_model_judges")).meteredReviews, false);
-    assert.equal((await state.screen()).action, "ask", "the app's screen actions are not native shell approvals");
+    await state.workflow.call("chat_model_judges", { meteredReviews });
+    assert.equal((await state.workflow.call("chat_model_judges")).meteredReviews, meteredReviews);
     await state.observe();
     assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
     assert.equal(seen.length, 1);
@@ -83,10 +88,12 @@ test("a changed pending command with the same ID does not receive the old Guardi
   } finally { state.workflow.dispose(); }
 });
 
-test("enabling quota reviews while Guardian is undecided rechecks the pending request", { timeout: 5_000 }, async (t) => {
-  for (const action of ["ask", "deny"]) await t.test(action, async () => {
+test("enabling quota reviews mid-Guardian cannot replace its decision or spend on an undecided review", { timeout: 5_000 }, async (t) => {
+  for (const action of ["ask", "deny", "unavailable"]) await t.test(action, async () => {
     const started = Promise.withResolvers(), guardian = Promise.withResolvers();
+    let reviews = 0;
     const state = fixture(undefined, { nativeGuardianReview: async () => {
+      reviews++;
       started.resolve();
       return guardian.promise;
     } });
@@ -96,13 +103,31 @@ test("enabling quota reviews while Guardian is undecided rechecks the pending re
       await started.promise;
       assert.deepEqual(state.calls, [], "turning the judge on does not enable paid reviews");
       await state.workflow.call("chat_model_judges", { meteredReviews: true });
-      guardian.resolve({ action, reason: "fixture Guardian answer", actor: "guardian" });
-      for (let tick = 0; tick < 3 && !state.resolved.length; tick++) await state.observe();
-      assert.deepEqual(state.resolved, [["permission-1", action === "deny" ? "no" : "yes"]]);
-      assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, action === "deny" ? 0 : 1,
-        "review the undecided request after consent, but never replace a Guardian denial");
+      guardian.resolve(action === "unavailable" ? null : { action, reason: "fixture Guardian answer", actor: "guardian" });
+      let pending;
+      for (let tick = 0; tick < 3; tick++) pending = await state.observe();
+      assert.deepEqual(state.resolved, action === "deny" ? [["permission-1", "no"]] : []);
+      if (action !== "deny") assert.equal(pending[0]?.recommendation?.guardianPending, true);
+      assert.equal(reviews, 1);
+      assert.deepEqual(state.calls, []);
     } finally { guardian.resolve(null); state.workflow.dispose(); }
   });
+});
+
+test("a pending request outside Guardian still needs explicit CPA consent", { timeout: 5_000 }, async () => {
+  const state = fixture(undefined, { approvalDetails: { cwd: undefined }, nativeGuardianReview: async () => assert.fail("unattested shell") });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true });
+    const pending = await state.observe();
+    assert.equal(pending[0]?.recommendation?.quotaBlocked, true);
+    assert.deepEqual(state.resolved, []);
+    assert.deepEqual(state.calls, []);
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
+    await state.observe();
+    await state.firstAnswer;
+    assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
+    assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, 1);
+  } finally { state.workflow.dispose(); }
 });
 
 test("unsupported shell context stays manual and local routine commands require no model", async () => {
