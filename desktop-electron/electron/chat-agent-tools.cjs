@@ -386,10 +386,11 @@ const COMMAND_LIST_DEFS = Object.freeze([{
   description: "List command handles already tracked by this chat, including after a reply was lost. Read-only: starts, stops and probes nothing. "
     + "States are last-observed, not fresh process checks; use read_output or an empty write_stdin on the returned command_id for current output. "
     + "No raw commands or other chats' handles are included. An empty list is not proof that an unobserved operation never ran; do not blindly relaunch it. "
-    + "Handles belong to the current app runtime, not restart-surviving jobs. Set include_verification to recheck declared input files for retained verification receipts; this does not rerun tests or validate the environment.",
+    + "Handles belong to the current app runtime, not restart-surviving jobs. Use verification_only to find commands with receipts, and include_verification to recheck their declared inputs. Neither reruns tests or validates the environment.",
   inputSchema: { type: "object", additionalProperties: false, properties: {
     offset: { type: "integer", minimum: 0, default: 0 },
     limit: { type: "integer", minimum: 1, maximum: 200, default: 40 },
+    verification_only: { type: "boolean", default: false, description: "List only commands with a verification receipt. Pagination applies after filtering." },
     include_verification: { type: "boolean", default: false, description: "Refresh declared file fingerprints for this page's retained receipts (no commands are run)." },
   } },
   annotations: { readOnlyHint: true },
@@ -1238,7 +1239,7 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
   const scriptTool = unifiedFiles ? "Write" : ownFileTools ? "your Write tool" : "apply_patch";
   return paneRulesFor(groups)
     + FAST_EXECUTION_GUIDANCE
-    + (groups.includes("terminal") ? "For a focused test, exec_command's optional verification.inputs records bounded source/test/config fingerprints and observed exit status. Use list_commands with include_verification to check retained receipts before repeating work. These are advisory: undeclared dependencies and environment changes still need judgment; save evidence in the existing task handoff for restarts. " : "")
+    + (groups.includes("terminal") ? "For a focused test, exec_command's optional verification.inputs records bounded source/test/config fingerprints and observed exit status. Use list_commands with verification_only to find retained receipts and include_verification to recheck their inputs. Receipts are advisory: account for undeclared dependencies and environment changes, and save evidence in the task handoff for restarts. " : "")
     // Seen live: an agent whose client deferred these tools (names only, loaded through its tool
     // search) said "there is no list_dir tool" and fell back to dir, never loading it.
     + "Every Coding Tools tool named here is available: if your client lists one as deferred or you do not see it, "
@@ -2545,8 +2546,11 @@ function createChatAgentTools({
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
         return failedCall("offset must be a nonnegative safe integer and limit must be an integer from 1 to 200");
       }
-      const known = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
+      if (args.verification_only !== undefined && typeof args.verification_only !== "boolean") return inputError("verification_only must be a boolean");
       if (args.include_verification !== undefined && typeof args.include_verification !== "boolean") return inputError("include_verification must be a boolean");
+      const known = [...entry.commands.values()]
+        .filter(command => args.verification_only !== true || command.verification)
+        .sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
       const commands = [];
       for (const command of known.slice(offset, offset + limit)) {
         commands.push({

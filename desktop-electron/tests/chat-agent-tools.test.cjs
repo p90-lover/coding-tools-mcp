@@ -1077,6 +1077,47 @@ test("verification receipts retain observed results and never skip repeated sand
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("list_commands filters receipts before pagination without rerunning or implicitly refreshing them", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  sandbox.snapshot = id => ({ ok: true, command_id: id, status: "exited", exit_code: 0, command_ok: true });
+  let now = 10_000;
+  const { tools, calls } = fixture({ root: tree.root, terminal: () => true, sandbox, now: () => ++now });
+  try {
+    const client = await session(tools);
+    const call = (name, args) => callTool(client.url, client.auth, name, args);
+    const check = { cmd: "node --test focused.test.cjs", verification: { inputs: ["src/a.txt"] }, yield_time_ms: 0 };
+    const ordinary = { cmd: "echo fixture", yield_time_ms: 0 };
+    const oldest = (await call("exec_command", check)).structuredContent.command_id;
+    const middle = (await call("exec_command", ordinary)).structuredContent.command_id;
+    const latestCheck = (await call("exec_command", check)).structuredContent.command_id;
+    const newest = (await call("exec_command", ordinary)).structuredContent.command_id;
+
+    const ids = page => page.commands.map(command => command.command_id);
+    const defaults = (await call("list_commands", {})).structuredContent;
+    assert.deepEqual(ids(defaults), [newest, latestCheck, middle, oldest]);
+    assert.deepEqual((await call("list_commands", { verification_only: false })).structuredContent, defaults);
+
+    fs.writeFileSync(path.join(tree.root, "src", "a.txt"), "changed after both checks");
+    const first = (await call("list_commands", { verification_only: true, limit: 1 })).structuredContent;
+    assert.deepEqual(ids(first), [latestCheck]);
+    assert.equal(first.next_offset, 1);
+    assert.equal(first.commands[0].verification.input_status, "unchanged", "lookup uses the retained observation");
+
+    const second = (await call("list_commands", { verification_only: true, offset: 1, limit: 1, include_verification: true })).structuredContent;
+    assert.deepEqual(ids(second), [oldest]);
+    assert.equal(second.next_offset, null);
+    assert.equal(second.commands[0].verification.input_status, "changed");
+    assert.equal(second.safe_to_retry, false);
+    assert.equal((await call("list_commands", { verification_only: "true" })).isError, true);
+    assert.equal(sandbox.started.length, 4);
+    assert.equal(calls.filter(({ body }) => body?.tool === "read_output" || body?.tool === "list_commands").length, 0);
+
+    const other = await session(tools, { id: "filtered-receipts-other" });
+    assert.deepEqual((await callTool(other.url, other.auth, "list_commands", { verification_only: true })).structuredContent.commands, []);
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("verification receipts observe headless completion through read_output", async () => {
   const tree = tempTree();
   const { tools, calls } = fixture({ root: tree.root, terminal: () => true, results: {
