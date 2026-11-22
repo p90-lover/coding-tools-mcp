@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { chatMessageReadable, type ChatTurn } from "./ao-chat";
+import { chatMessageReadable, visibleChatPrompt, type ChatTurn } from "./ao-chat";
 
 /**
  * The page shown by "Open in new window": a read-only, live copy of one chat. The window runs no
@@ -9,15 +9,18 @@ import { chatMessageReadable, type ChatTurn } from "./ao-chat";
  * focus-guarded app API.
  */
 function Transcript({ turns }: { turns: ChatTurn[] }) {
-  return <>{turns.map((turn) => <section key={turn.key} className="turn">
-    {turn.user ? <div className="user">{chatMessageReadable(turn.user.text)}</div> : null}
-    {turn.steps.length ? <ol className="steps">{turn.steps.map((step) => <li key={step.key} className={step.working ? "working" : step.error ? "error" : ""}>
-      <span className="step-name">{step.name}</span>
-      <span className="step-meta">{step.working ? (step.working.activity || "working…") : step.error ? "failed" : step.verdict || step.state}</span>
-    </li>)}</ol> : null}
-    {turn.final?.text ? <div className="answer"><ChatMarkdown text={turn.final.text} /></div>
-      : turn.status === "running" || turn.status === "queued" ? <p className="live">Working…</p> : null}
-  </section>)}</>;
+  return <>{turns.filter(turn => !turn.user?.automatic || turn.runId || turn.user.steers?.length).map((turn) => {
+    const visible = visibleChatPrompt(turn.user);
+    return <section key={turn.key} className="turn">
+      {visible ? <div className="user">{chatMessageReadable(visible)}</div> : null}
+      {turn.steps.length ? <ol className="steps">{turn.steps.map((step) => <li key={step.key} className={step.working ? "working" : step.error ? "error" : ""}>
+        <span className="step-name">{step.name}</span>
+        <span className="step-meta">{step.working ? (step.working.activity || "working…") : step.error ? "failed" : step.verdict || step.state}</span>
+      </li>)}</ol> : null}
+      {turn.final?.text ? <div className="answer"><ChatMarkdown text={turn.final.text} /></div>
+        : turn.status === "running" || turn.status === "queued" ? <p className="live">Working…</p> : null}
+    </section>;
+  })}</>;
 }
 
 /** The body markup alone, for in-place updates that keep the reader's scroll position. */

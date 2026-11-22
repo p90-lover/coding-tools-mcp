@@ -11,8 +11,26 @@
 const fs = require("node:fs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 
-// The same follow-up marker ao-chat.ts (chatMessagesFromDescription) reads.
-const FOLLOW_UP = /\n\nFollow-up \(([^)]+) UTC\):\n/;
+// An automatic follow-up can be first after the opening message is deleted.
+const FOLLOW_UP = /(?:\n\n|^(?=Follow-up \(automatic \d{4}-\d\d-\d\d \d\d:\d\d UTC\):\n))Follow-up \(([^)\n]+) UTC\):\n/;
+const AUTOMATIC_STAMP = /^automatic (\d{4}-\d{2}-\d{2} \d{2}:\d{2})$/;
+const STEER = /\n\n↳ Steer \(([^)]+) UTC\): /;
+const automaticStamp = stamp => AUTOMATIC_STAMP.exec(stamp ?? "")?.[1];
+const chatFollowUp = (stamp, body) => `\n\nFollow-up (${stamp} UTC):\n${body}`;
+
+function withoutAutomaticChatPrompts(description) {
+  const parts = String(description ?? "").split(FOLLOW_UP);
+  let out = parts[0];
+  for (let at = 1; at < parts.length; at += 2) {
+    const [stamp, body] = [parts[at], parts[at + 1]];
+    if (!automaticStamp(stamp)) out += chatFollowUp(stamp, body);
+    else {
+      const steer = body.search(STEER);
+      if (steer >= 0) out += body.slice(steer);
+    }
+  }
+  return out;
+}
 
 /**
  * The description without the user's message at `index` (and the steers sent during its turn);
@@ -28,13 +46,14 @@ function chatDescriptionWithout(description, index) {
   const count = followUps.length + (hasHead ? 1 : 0);
   if (!Number.isSafeInteger(index) || index < 0 || index >= count) throw new Error("That message is no longer in this chat; refresh it");
   if (count === 1) throw new Error("This is the chat's only message; archive or delete the chat instead");
-  const block = (message) => `\n\nFollow-up (${message.stamp} UTC):\n${message.body}`;
-  if (hasHead && index === 0) {
-    const [next, ...rest] = followUps;
-    return next.body + rest.map(block).join("");
+  const block = (message) => chatFollowUp(message.stamp, message.body);
+  if (index === 0) {
+    const [next, ...rest] = hasHead ? followUps : followUps.slice(1);
+    return (automaticStamp(next.stamp) ? block(next).trimStart() : next.body) + rest.map(block).join("");
   }
   const dropped = index - (hasHead ? 1 : 0);
-  return head + followUps.filter((_, at) => at !== dropped).map(block).join("");
+  const kept = head + followUps.filter((_, at) => at !== dropped).map(block).join("");
+  return !hasHead && automaticStamp(followUps[0]?.stamp) ? kept.trimStart() : kept;
 }
 
 /** How many user messages the description holds (the head when it has text, then each follow-up). */
@@ -162,4 +181,5 @@ function createChatEditStore({ file = null, logger = null } = {}) {
   };
 }
 
-module.exports = { chatDescriptionWithout, chatDescriptionWithSteer, chatMessageCount, createChatEditStore };
+module.exports = { FOLLOW_UP, STEER, automaticStamp, chatFollowUp, chatDescriptionWithout, chatDescriptionWithSteer,
+  chatMessageCount, createChatEditStore, withoutAutomaticChatPrompts };
