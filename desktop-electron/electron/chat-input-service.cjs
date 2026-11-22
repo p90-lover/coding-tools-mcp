@@ -3,6 +3,8 @@
 const fs = require("node:fs");
 const { createChatInputStore } = require("./chat-input-store.cjs");
 const { LIMITS, fail, identity, digest, encode, boundedText } = require("./chat-input-schema.cjs");
+const DRAFT_REFUSALS = new Set(["INPUT_INVALID", "INPUT_TOO_LARGE", "INPUT_STORAGE_FULL",
+  "ATTACHMENT_INVALID", "ATTACHMENT_CHANGED", "ATTACHMENT_MISSING", "ATTACHMENT_CORRUPT"]);
 
 function createChatInputService({ file, attachmentsRoot, legacyDraftsFile = null, store = null } = {}) {
   const journal = store ?? createChatInputStore({ file, attachmentsRoot });
@@ -50,7 +52,12 @@ function createChatInputService({ file, attachmentsRoot, legacyDraftsFile = null
       case "draft_get": return { ok: true, ...await load(args) };
       case "draft_save": {
         await load(args);
-        return { ok: true, ...await journal.call("draftSave", { workspaceId, key: args.key, expectedRevision: args.expectedRevision, mutationId: args.mutationId, draft: args.draft }) };
+        try {
+          return { ok: true, ...await journal.call("draftSave", { workspaceId, key: args.key, expectedRevision: args.expectedRevision, mutationId: args.mutationId, draft: args.draft }) };
+        } catch (error) {
+          if (!DRAFT_REFUSALS.has(error?.code)) throw error;
+          return { ok: true, saved: false, reason: error.message };
+        }
       }
       case "draft_conflicts": return { ok: true, conflicts: await journal.call("draftConflicts", { workspaceId, key: args.key }) };
       case "accept": {

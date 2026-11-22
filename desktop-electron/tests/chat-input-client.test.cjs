@@ -265,19 +265,57 @@ test("attachment receipt cannot replace a different file attached during a save"
   assert.equal(client.rebuildAttachmentMessage("Attached image: /selected/a.png.other", original, preserved), "Attached image: /selected/a.png.other");
 });
 
+test("DraftCoalescer saves a correction after the journal definitively refuses a draft", async t => {
+  const { createChatInputService } = require("../electron/chat-input-service.cjs");
+  const { createChatInputStore } = require("../electron/chat-input-store.cjs");
+  const parent = path.resolve(__dirname, "../../aiTemp/chat-input-tests");
+  fs.mkdirSync(parent, { recursive: true });
+  const root = fs.mkdtempSync(path.join(parent, "refused-"));
+  const open = () => createChatInputService({ store: createChatInputStore({
+    file: path.join(root, "inputs.sqlite"), attachmentsRoot: path.join(root, "attachments"), maxStoredBytes: 1024,
+  }) });
+  let service = open();
+  t.after(async () => { await service.close(); fs.rmSync(root, { recursive: true, force: true }); });
+  const calls = [], statuses = [];
+  const moduleCall = (_op, args) => {
+    if (args.action === "draft_save") calls.push(args.draft.text);
+    return service.call(args);
+  };
+  const writer = new client.DraftCoalescer({ key: "one", workspaceId: "project", moduleCall, onStatusChange: status => statuses.push(status) });
+  const change = async text => { writer.queueChange({ text, attachments: [], annotations: [] }); await writer.flush(); };
+  const read = () => client.chatInputDraftGet(moduleCall, "project", "one");
+  await change("last committed draft");
+  const overBudget = "x".repeat(1500);
+  await change(overBudget);
+  assert.equal(writer.getStatus(), "unsaved");
+  assert.equal((await read()).draft.text, "last committed draft");
+  await change("shorter correction");
+  assert.equal(writer.getStatus(), "saved");
+  assert.deepEqual(calls, ["last committed draft", overBudget, "shorter correction"]);
+  assert.deepEqual(statuses, ["saving", "saved", "saving", "unsaved", "saving", "saved"]);
+  await writer.dispose();
+  await service.close();
+  service = open();
+  assert.equal((await read()).draft.text, "shorter correction");
+  assert.equal((await read()).revision, 2);
+});
+
 test("DraftCoalescer retries a lost response with the exact mutation identity", async () => {
   const calls = [];
   const writer = new client.DraftCoalescer({ key: "chat", workspaceId: "project", moduleCall: async (_op, args) => {
     calls.push(args);
     if (calls.length === 1) throw new Error("reply lost");
-    return { ok: true, revision: 1, draft: args.draft, updatedAt: 1, duplicate: true };
+    return { ok: true, revision: args.expectedRevision + 1, draft: args.draft, updatedAt: 1, duplicate: calls.length === 2 };
   } });
   writer.queueChange({ text: "saved once", attachments: [], annotations: [] });
   await writer.flush();
   assert.equal(writer.getStatus(), "unsaved");
+  writer.queueChange({ text: "newer edit", attachments: [], annotations: [] });
   await writer.flush();
   assert.equal(calls[1].mutationId, calls[0].mutationId);
   assert.equal(calls[1].expectedRevision, calls[0].expectedRevision);
+  assert.equal(calls[2].draft.text, "newer edit");
+  assert.equal(calls[2].expectedRevision, 1);
   assert.equal(writer.getStatus(), "saved");
   await writer.dispose();
 });

@@ -113,9 +113,15 @@ export async function chatInputDraftGet(moduleCall: ModuleCallFn, workspaceId: s
   if (response?.ok !== true) throw invalidReceipt();
   return readDraftReceipt(response);
 }
+class DraftSaveRefused extends Error {}
+
 export async function chatInputDraftSave(moduleCall: ModuleCallFn, workspaceId: string, key: string, expectedRevision: number, mutationId: string, draft: SavedChatDraft | null): Promise<DraftSaveResult> {
   const response = await moduleCall("chat_input", { workspaceId, action: "draft_save", key, expectedRevision, mutationId, draft });
   if (response?.ok !== true) throw invalidReceipt();
+  if (response.saved === false) {
+    if (typeof response.reason !== "string" || !response.reason) throw invalidReceipt();
+    throw new DraftSaveRefused(response.reason);
+  }
   return { ...readDraftReceipt(response), duplicate: response.duplicate === true, conflict: response.conflict === true,
     ...(typeof response.conflictId === "string" ? { conflictId: response.conflictId } : {}) };
 }
@@ -224,7 +230,11 @@ export class DraftCoalescer {
           if (this.snapshots.size > 16) this.snapshots.delete(this.snapshots.keys().next().value!);
           if (attempt.draft && result.draft) this.options.onAttachmentsUpdated?.(result.draft.attachments, attempt.draft);
         } catch (error) {
-          this.retry = attempt;
+          if (error instanceof DraftSaveRefused) {
+            this.retry = null;
+            if (this.pending === undefined) this.pending = attempt.draft;
+            else if (draftFingerprint(this.pending) !== attempt.json) continue;
+          } else this.retry = attempt;
           this.setStatus("unsaved", error instanceof Error ? error.message : String(error));
           return;
         }
