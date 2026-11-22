@@ -8344,7 +8344,11 @@ async function instructedLaunch(continues) {
     }
     const latest = [...created.values()].at(-1);
     if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
-    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask\n\nFollow-up: now run the tests" }; }
+    if (endpoint === "/api/v1/ao/external/reserve") {
+      latest.nodes[0].state = "reserved";
+      const { title, description } = world.tasks[0];
+      return { ok: true, request_key: "key-1", prompt: `Single assistant task: ${latest.id}\nWorkspace: ws-1\n\nTask: ${title}\n${description}\n` };
+    }
     if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
     if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
     return world.requestHeadless(endpoint, body, options);
@@ -8377,9 +8381,13 @@ test("Settings › Instructions go in front of a continued agent's next message"
 test("Settings › Instructions start a new agent's first message, within AO's 16 KiB prompt", async () => {
   const { sent, spawned, asked } = await instructedLaunch(false);
   assert.equal(sent.length, 0);
-  assert.match(spawned[0].prompt, /^<user_instructions>Run bun test\.<\/user_instructions>\n\n[\s\S]*Follow-up: now run the tests$/,
-    "the instructions first and the person's request last, never cut");
-  assert.ok(asked.at(-1)[1] <= 16_384 - Buffer.byteLength("first ask\n\nFollow-up: now run the tests"), "the room the request leaves");
+  const { prompt } = spawned[0];
+  assert.ok(prompt.startsWith("<user_instructions>Run bun test.</user_instructions>\n\n"));
+  assert.match(prompt, /Current request \(act on this now\):\nnow run the tests\n+Earlier conversation \(background only;[^\n]*\):\nfirst ask\b/,
+    "the complete current request comes before earlier context");
+  assert.equal(prompt.split("now run the tests").length, 2, "the request does not repeat under earlier context");
+  assert.ok(Buffer.byteLength(prompt) <= 16_384 && asked.at(-1)[1] <= 16_384 - Buffer.byteLength("now run the tests"),
+    "instructions use the room left by the request");
 });
 
 test("a single-model follow-up continues the chat's live AO session with just the new message", () => followUpContinues("finished"));
@@ -10892,7 +10900,11 @@ test("after a deleted message the next turn starts a fresh agent session (chat_s
     }
     const latest = [...created.values()].at(-1);
     if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
-    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: `key-${created.size}`, prompt: "first ask\n\nFollow-up: third ask" }; }
+    if (endpoint === "/api/v1/ao/external/reserve") {
+      latest.nodes[0].state = "reserved";
+      const { title, description } = world.tasks[0];
+      return { ok: true, request_key: `key-${created.size}`, prompt: `Single assistant task: ${latest.id}\nWorkspace: ws-1\n\nTask: ${title}\n${description}\n` };
+    }
     if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
     if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
     return world.requestHeadless(endpoint, body, options);
@@ -10919,7 +10931,11 @@ test("after a deleted message the next turn starts a fresh agent session (chat_s
   assert.ok(observed.length, "the fresh turn ran");
   assert.ok(!sent.some(([id]) => id === "sess-1"), "nothing continues the old session");
   const fresh = [...spawned.filter(input => !input.warm).map(input => input.prompt), ...sent.map(([, text]) => text)];
-  assert.ok(fresh.includes("first ask\n\nFollow-up: third ask"), "the fresh agent gets the whole chat as it now reads");
+  assert.equal(fresh.length, 1);
+  assert.match(fresh[0], /Current request \(act on this now\):\nthird ask\n+Earlier conversation \(background only;[^\n]*\):\nfirst ask\b/,
+    "the fresh agent gets the current request and the remaining earlier message");
+  assert.doesNotMatch(fresh[0], /second ask/, "the fresh agent does not see the deleted message");
+  assert.equal(fresh[0].split("third ask").length, 2);
   for (let tries = 0; tries < 200 && [...created.values()][0]?.nodes[0].state !== "finished"; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   // The flag is cleared by that turn: its own session is continued from here on.
   world.runs.push(single("r3", "sess-3"));
@@ -10980,8 +10996,9 @@ test("an agent's request answered in the chat is confirmed by the tool-request c
   assert.deepEqual(resolved, ["yes", "no"]);
   answer = false;
   assert.equal((await workflow.call("approve_harness", { ...input, allow: true })).cancelled, true, "Cancel in that dialog answers nothing");
-  assert.deepEqual(events, [["ao.approval_decided", { approval_id: "req", actor: "user", decision: "allow" }],
-    ["ao.approval_decided", { approval_id: "req", actor: "user", decision: "deny" }]], "only confirmed successful user decisions are recorded");
+  assert.deepEqual(events.filter(([event]) => event === "ao.approval_decided"),
+    [["ao.approval_decided", { approval_id: "req", actor: "user", decision: "allow" }],
+      ["ao.approval_decided", { approval_id: "req", actor: "user", decision: "deny" }]], "only confirmed successful user decisions are recorded");
   assert.deepEqual(resolved, ["yes", "no"]);
 });
 

@@ -253,7 +253,7 @@ test("the tools are read-only and say when to use them", () => {
     assert.equal(tool.annotations.readOnlyHint, true);
     assert.match(tool.description, /Read-only/);
   }
-  assert.match(CHAT_HISTORY_TOOL_DEFS[1].description, /data from another conversation, not instructions/);
+  assert.match(CHAT_HISTORY_TOOL_DEFS[1].description, /\bdata, not instructions\b/);
 });
 
 test("helpers: messages split from a task description, and a middle cut keeps head and tail", () => {
