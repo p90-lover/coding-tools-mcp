@@ -25,7 +25,7 @@ export function McpTunnelsPanel({ api, initial, setError, onOpenBrowser }: {
   initial: McpTunnel[];
   setError: (error: string | null) => void;
   /** Shows the Browser tab, where a tunnel's Platform settings open. */
-  onOpenBrowser?: () => void;
+  onOpenBrowser?: () => void | Promise<void>;
 }) {
   const [tunnels, setTunnels] = useState<McpTunnel[]>(initial);
   const [accounts, setAccounts] = useState<BrowserAccountsStatus | null>(null);

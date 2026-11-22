@@ -41,12 +41,12 @@ export async function openPlatformInBrowser({ api, accountId, url, showBrowser, 
   api: Pick<LauncherApi, "switchBrowserAccount" | "openBrowserUrl">;
   accountId: string;
   url: string;
-  showBrowser?: () => void;
+  showBrowser?: () => void | Promise<void>;
   wait?: (ms: number) => Promise<void>;
   tries?: number;
 }) {
   await api.switchBrowserAccount(accountId);
-  showBrowser?.();
+  await showBrowser?.();
   for (let attempt = 1; ; attempt++) {
     try {
       return await api.openBrowserUrl(url);

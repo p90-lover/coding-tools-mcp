@@ -155,7 +155,7 @@ export function ChatGptBrowserManagement({ api, browser, setup, setError, onOpen
   setup: BridgeSetup;
   setError: (error: string | null) => void;
   /** Shows the Browser tab: a new account is signed in there. */
-  onOpenBrowser?: () => void;
+  onOpenBrowser?: () => void | Promise<void>;
   active?: boolean;
 }) {
   const [accounts, setAccounts] = useState<BrowserAccountsStatus | null>(null);
@@ -539,7 +539,7 @@ function AccountCard({
   /** Every bound Codex session: a tab's own one gives its tokens, model and effort. */
   threads: CodexThreadBinding[];
   /** Shows the Browser tab: after Use, and for Sign in, whose page opens there. */
-  onOpenBrowser?: () => void;
+  onOpenBrowser?: () => void | Promise<void>;
   account: BrowserAccount;
   /** Ticked for bulk delete; no tick box without `onSelect` (a single account cannot be removed). */
   selected?: boolean;
@@ -602,11 +602,11 @@ function AccountCard({
   // Use and Sign in end in the Browser tab: the account's page (or its sign-in) opens there.
   const use = () => run(`use:${account.id}`, async () => {
     await api.switchBrowserAccount(account.id);
-    onOpenBrowser?.();
+    await onOpenBrowser?.();
   });
   const signInNow = () => run(`signin:${account.id}`, async () => {
     if (!inUse) await api.switchBrowserAccount(account.id);
-    onOpenBrowser?.();
+    await onOpenBrowser?.();
     await api.openLogin();
   });
   // Connect MCP stopped at OpenAI Platform's sign-in. On Windows it happens in the person's Chrome and stays

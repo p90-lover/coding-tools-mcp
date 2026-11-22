@@ -2479,7 +2479,12 @@ test("Platform's sign-in from Chrome is refused untouched for another ChatGPT lo
 // that to Chrome's ChatGPT sign-in, which only showed ChatGPT again.
 test("a tab of the person's own keeps a sign-in Platform starts, and hands ChatGPT's to Chrome", () => {
   const chrome = [];
-  const contents = Object.assign(new EventEmitter(), { page: "", getURL() { return this.page; }, setWindowOpenHandler() {} });
+  let openHandler;
+  const contents = Object.assign(new EventEmitter(), {
+    page: "",
+    getURL() { return this.page; },
+    setWindowOpenHandler(handler) { openHandler = handler; },
+  });
   const tab = { id: "user-tab", view: { webContents: contents } };
   const host = Object.assign(Object.create(BrowserHost.prototype), {
     externalLogin: true,
@@ -2487,6 +2492,7 @@ test("a tab of the person's own keeps a sign-in Platform starts, and hands ChatG
     getBrowserInteractionMode: () => "automatic",
     bindBrowserKeys() {},
     requestChromeLogin: (from) => chrome.push(from),
+    createAuthView: () => ({}),
   });
   host.bindUserTabContents(tab);
   const navigate = (from, to) => {
@@ -2495,16 +2501,28 @@ test("a tab of the person's own keeps a sign-in Platform starts, and hands ChatG
     contents.emit("will-navigate", { preventDefault: () => { prevented = true; } }, to);
     return prevented;
   };
+  const open = (from, to) => {
+    contents.page = from;
+    return openHandler({ url: to });
+  };
   assert.equal(navigate("https://platform.openai.com/login", "https://auth.openai.com/authorize?client_id=x"), false);
   assert.equal(navigate("https://auth.openai.com/log-in", "https://accounts.google.com/o/oauth2/v2/auth"), false);
   assert.equal(navigate("https://platform.openai.com/settings/organization/tunnels", "https://platform.openai.com/login"), false);
+  // Live 2026-11-18: Platform's login continues to chatgpt.com/auth. Handed to Chrome, a signed-in
+  // account only showed ChatGPT's home again, and the Platform sign-in never appeared.
+  assert.equal(navigate("https://platform.openai.com/login", "https://chatgpt.com/auth/login"), false);
+  assert.equal(navigate("https://auth.openai.com/authorize?client_id=x", "https://chatgpt.com/auth/login"), false);
+  assert.equal(open("https://platform.openai.com/login", "https://auth.openai.com/authorize?client_id=x").action, "allow");
+  assert.equal(open("https://platform.openai.com/login", "https://chatgpt.com/auth/login").action, "allow");
   assert.equal(chrome.length, 0);
   assert.equal(navigate("https://chatgpt.com/", "https://auth.openai.com/authorize?client_id=x"), true);
-  assert.equal(navigate("https://platform.openai.com/login", "https://chatgpt.com/auth/login"), true);
-  assert.equal(chrome.length, 2);
+  assert.equal(navigate("https://chatgpt.com/", "https://chatgpt.com/auth/login"), true);
+  assert.equal(open("https://chatgpt.com/", "https://auth.openai.com/authorize?client_id=x").action, "deny");
+  assert.equal(chrome.length, 3);
   assert.equal(navigate("https://chatgpt.com/", "https://auth.openai.com/logout"), false);
   host.getBrowserInteractionMode = () => "manual";
   assert.equal(navigate("https://chatgpt.com/", "https://auth.openai.com/authorize?client_id=x"), false);
+  assert.equal(open("https://chatgpt.com/", "https://auth.openai.com/authorize?client_id=x").action, "allow");
 });
 
 function operationFixture(states = []) {
