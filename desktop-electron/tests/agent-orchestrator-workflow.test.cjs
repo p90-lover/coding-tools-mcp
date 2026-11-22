@@ -4572,6 +4572,7 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   assert.equal(roundTranscript("x", []), "User:\nx\n\nAssistant:\n(no final answer)");
   const long = roundTranscript("x", ["a".repeat(30_000) + "THE END"]);
   assert.ok(long.length <= 24_001 && long.endsWith("THE END"), "a long round keeps its end, where the conclusion is");
+  assert.ok(long.startsWith("User:\nx\n\n"), "long answers cannot displace the round's input");
   const prompt = goalCheckPrompt("make every test pass", transcript);
   assert.match(prompt, /Condition: make every test pass/);
   assert.match(prompt, /only from the transcript/);
@@ -4584,12 +4585,12 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   assert.match(later, /same blocker or the same missing work as the previous verdict/);
   // The evaluator's verdict.
   assert.deepEqual(parseGoalCheck('{"met": true, "reason": "All 40 tests pass, shown in the output."}'), { met: true, stop: false, progress: true, reason: "All 40 tests pass, shown in the output." });
-  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "reason": "Two tests   fail."}\n```'), { met: false, stop: false, progress: true, reason: "Two tests fail." });
-  assert.deepEqual(parseGoalCheck('{"met": false}'), { met: false, stop: false, progress: true, reason: "The condition is not met yet." });
-  // No progress only when the evaluator says so; a met goal always made progress.
+  assert.deepEqual(parseGoalCheck('Sure.\n```json\n{"met": false,\n "progress": true, "reason": "Two tests   fail."}\n```'), { met: false, stop: false, progress: true, reason: "Two tests fail." });
+  assert.throws(() => parseGoalCheck('{"met": false}'), /no progress verdict/);
   assert.equal(parseGoalCheck('{"met": false, "progress": false, "reason": "Still blocked."}').progress, false);
   assert.equal(parseGoalCheck('{"met": true, "progress": false}').progress, true);
-  assert.equal(parseGoalCheck('{"met": false, "progress": "no"}').progress, true, "only a false counts");
+  assert.throws(() => parseGoalCheck('{"met": false, "progress": "no"}'), /no progress verdict/);
+  assert.equal(parseGoalCheck('{"met": false, "stop": true}').stop, true, "an explicit stop does not depend on progress");
   assert.throws(() => parseGoalCheck("I think it is done."), /no verdict/);
   assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
 });
@@ -4674,7 +4675,7 @@ test("/goal starts the chat's first round with the goal and keeps it for the cha
  * The goal evaluator (a CPA model) is a stand-in: met when the round's answer says "ALL DONE".
  */
 async function goalChat({ evaluator = (prompt) => /ALL DONE/.test(prompt)
-  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, reason: "Two tests still fail." }, refuse = () => 0,
+  ? { met: true, reason: "The transcript shows every test passing." } : { met: false, progress: true, reason:"Two tests still fail." }, refuse = () => 0,
   timers = null, request = null, goalsFile = null, now = Date.now, world: restarted = null, models = ["gpt-6-luna", "deepseek-v4", "gemini-3-flash"], modelBenchFile = null } = {}) {
   // `world` given: the app restarting on the same AO state (and `goalsFile`), its goal kept.
   const world = restarted ?? chatWorld({ tasks: [{ id: "task-1", title: "Green build", description: "x", state: "in_progress", clauses: [] }], runs: [] });
@@ -4770,7 +4771,7 @@ test("a goal's next round is cancelled before acceptance when paused, cleared, e
       let release, entered = false, continuing = false, reads = 0;
       const pending = new Promise(resolve => { release = resolve; });
       const { world, workflow } = await goalChat({
-        evaluator: () => { continuing = true; return { met: false, reason: "Finish the remaining tests." }; },
+        evaluator: () => { continuing = true; return { met: false, progress: true, reason:"Finish the remaining tests." }; },
         request: world => async (endpoint, body, ...rest) => {
           if (continuing && !entered) {
             const runRead = endpoint === "/api/v1/ao/read" && !body.run_id;
@@ -4833,7 +4834,7 @@ test("pausing or clearing a goal leaves a round already accepted by run creation
     let release, entered = false, continuing = false;
     const pending = new Promise(resolve => { release = resolve; });
     const { world, workflow } = await goalChat({
-      evaluator: () => { continuing = true; return { met: false, reason: "Finish the remaining tests." }; },
+      evaluator: () => { continuing = true; return { met: false, progress: true, reason:"Finish the remaining tests." }; },
       request: world => async (endpoint, body, ...rest) => {
         const result = await world.requestHeadless(endpoint, body, ...rest);
         if (continuing && !entered && endpoint === "/api/v1/ao/update" && body.change.operation === "create_from_team") {
@@ -5321,7 +5322,7 @@ test("a goal round held on the person and then finished is judged, and the goal 
 test("with \"Let the model judge\" on, a goal round that needs the person or failed is judged, and the judge can end the goal", async () => {
   // The user: "until end and it can safety kill the goal".
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default" };
-  let verdict = { met: false, stop: false, reason: "Nobody will answer: pick the safest option yourself and train on." };
+  let verdict = { met: false, stop: false, progress: true, reason: "Nobody will answer: pick the safest option yourself and train on." };
   const { world, workflow, checks } = await goalChat({ evaluator: () => verdict });
   await workflow.call("chat_model_judges", { enabled: true });
   world.runs.push({ id: "r1", workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", cancelled: false,
@@ -8087,6 +8088,7 @@ test("retrying a chat whose grant is spent gets a fresh grant and continues the 
   assert.equal(spawned.length, 0, "no fresh session that starts the task over");
   assert.equal(sent[0]?.[0], "sess-1", "the agent's own session continues");
   assert.match(sent[0]?.[1] ?? "", /interrupted before it finished.*Continue the same task/s);
+  assert.match(sent[0]?.[1] ?? "", /Current request \(act on this now\):\nd\n/, "an automatic retry reasserts the saved request");
 });
 
 test("manual Retry starts the last answer again with earlier replies but none of its old attempts", async (t) => {
@@ -8127,7 +8129,7 @@ test("manual Retry starts the last answer again with earlier replies but none of
         if (endpoint === "/api/v1/ao/grant") return { ok: true, run: selected, grant: { executable_sha256: digest } };
         if (endpoint === "/api/v1/ao/external/reserve") {
           card.state = "reserved";
-          return { ok: true, request_key: "retry-key", prompt: description };
+          return { ok: true, request_key: "retry-key", prompt: `Single assistant task: fixture\n\nTask: Poem\n${description}\n` };
         }
         if (endpoint === "/api/v1/ao/external/submitted") {
           card.state = "running";
@@ -8156,7 +8158,9 @@ test("manual Retry starts the last answer again with earlier replies but none of
     assert.deepEqual(sent, [], "the existing session must not continue its last attempt");
     assert.equal(spawned.length, 1);
     assert.match(spawned[0].prompt, /The color is cobalt\./, "the earlier answer remains in context");
-    assert.match(spawned[0].prompt, /Use that color in a haiku$/);
+    assert.match(spawned[0].prompt, /Current request \(act on this now\):\nUse that color in a haiku\n/);
+    assert.equal(spawned[0].prompt.split("Use that color in a haiku").length, 2);
+    assert.ok(spawned[0].prompt.indexOf("Use that color in a haiku") < spawned[0].prompt.indexOf("The color is cobalt."));
     assert.doesNotMatch(spawned[0].prompt, /older attempt|Leave this take|do not start over/i);
     assert.deepEqual(world.edits, [], "Retry does not add or change a user message");
   });
@@ -9073,10 +9077,10 @@ test("a follow-up after a permission change starts a fresh session; a refused se
 });
 
 /** The first prompt a chat's fresh session gets after switching from glm-5.3-flash to gemini, given the earlier reply. */
-async function switchedPrompt(earlierAnswer) {
-  const before = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/cline-pass/glm-5.3-flash", permission_profile: ":ao-default" };
-  const after = { ...before, model: "cpa/gemini-3.8-flash-high" };
-  const task = { id: "task-1", title: "Fix auth", description: "find the auth bug", state: "in_progress", clauses: [] };
+async function switchedPrompt(earlierAnswer, { model = "cpa/gemini-3.8-flash-high", message = "now fix it", saved = "find the auth bug" } = {}) {
+  const before = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/fixture-previous", permission_profile: ":ao-default" };
+  const after = { ...before, model };
+  const task = { id: "task-1", title: "Fix auth", description: saved, state: "in_progress", clauses: [] };
   const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
     nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route: before, settings: { name: "Single assistant" },
       receipt: { thread_id: "sess-1", answer: earlierAnswer } }] };
@@ -9092,7 +9096,11 @@ async function switchedPrompt(earlierAnswer) {
     }
     const latest = [...created.values()].at(-1);
     if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
-    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "full prompt" }; }
+    if (endpoint === "/api/v1/ao/external/reserve") {
+      latest.nodes[0].state = "reserved";
+      const savedTask = world.tasks[0];
+      return { ok: true, request_key: "key-1", prompt: `Single assistant task: fixture\n\nTask: ${savedTask.title}\n${savedTask.description}\n\nInstructions:\nKeep the checks focused.\n` };
+    }
     if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
     if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
     return world.requestHeadless(endpoint, body, options);
@@ -9107,9 +9115,10 @@ async function switchedPrompt(earlierAnswer) {
       observe: async (id, expected) => ({ status: "idle", turnId: expected ?? "t1", turnState: "completed", answer: "ok" }),
     },
   });
-  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "now fix it", executionMode: "single", singleRoute: after });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message, executionMode: "single", singleRoute: after });
   for (let tries = 0; tries < 200 && !spawned.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.equal(spawned.length, 1, "another model starts a fresh session");
+  assert.ok(world.tasks[0].description.endsWith(message), "the saved user text is unchanged");
   return spawned[0].prompt;
 }
 
@@ -9171,20 +9180,26 @@ test("a second fresh start with no new replies reuses the chat's handoff summary
   assert.equal(summaries, 1, "no model was asked again for replies it already summarized");
 });
 
-test("a chat switched to another model starts it with what the earlier agent replied", async () => {
-  // Seen live: switching the chat's model started a fresh agent that knew only the user's messages.
-  const prompt = await switchedPrompt("The bug is in auth.ts line 42: the token expiry is compared in seconds.");
-  assert.match(prompt, /auth\.ts line 42/, "the earlier reply goes with it");
-  assert.match(prompt, /Single assistant · cline-pass\/glm-5\.3-flash/, "and says which agent gave it");
-  assert.ok(prompt.endsWith("full prompt"), "the chat's own prompt follows the earlier replies");
+test("a chat switched to DeepSeek or GLM puts the exact request before the handoff", async () => {
+  const message = "Now fix auth.ts and run its test.\nReport the exact result.";
+  for (const model of ["cpa/opencode-go/deepseek-v4-flash", "cpa/cline-pass/glm-5.3-flash"]) {
+    const saved = "Summary of the earlier conversation (compacted 2026-11-21 00:00 UTC):\nEarlier work merely described the bug.";
+    const prompt = await switchedPrompt("The bug is in auth.ts line 42.", { message, model, saved });
+    assert.match(prompt, /Current request \(act on this now\):\nNow fix auth\.ts and run its test\.\nReport the exact result\./);
+    assert.equal(prompt.split(message).length, 2, "do not repeat the newest request as history");
+    assert.ok(prompt.indexOf(message) < prompt.indexOf("Earlier work merely described"));
+    assert.ok(prompt.indexOf(message) < prompt.indexOf("auth.ts line 42"));
+    assert.match(prompt, /Instructions:\nKeep the checks focused\./);
+    assert.match(prompt, /Single assistant · fixture-previous/);
+  }
 });
 
 test("a long handoff never pushes the chat's own prompt past AO's 16 KiB prompt limit", async () => {
-  // AO keeps the first 16 KiB of a prompt: a handoff in front of it must leave the request whole.
   const long = "前".repeat(9_000) + " the newest finding: retry the login flow.";
-  const prompt = await switchedPrompt(long);
-  assert.ok(Buffer.byteLength(prompt, "utf8") <= 16_384, "fits AO's prompt limit");
-  assert.ok(prompt.endsWith("full prompt"), "the person's latest request survives whole");
+  const message = `${"修".repeat(2500)}\nRun the requested tests.`;
+  const prompt = await switchedPrompt(long, { message });
+  assert.ok(Buffer.byteLength(prompt, "utf8") <= 15_360, "fits AO's prompt limit with wrapper headroom");
+  assert.ok(prompt.includes(message), "the person's latest request survives whole");
   assert.match(prompt, /retry the login flow/, "with no summary model, the newest part of the earlier replies is kept");
 });
 

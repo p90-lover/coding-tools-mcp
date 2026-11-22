@@ -19,7 +19,7 @@ const { FOLLOW_UP, STEER, automaticStamp, chatFollowUp, chatDescriptionWithout, 
   chatMessageCount, createChatEditStore, withoutAutomaticChatPrompts } = require("./chat-edits.cjs");
 const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
-const { userMessages } = require("./chat-history.cjs");
+const { retainedChatRequest, isCompactedRecord } = require("./chat-history.cjs");
 const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
 const { normalizedAuthFile } = require("./cpa-oauth-adapter.cjs");
 const { ACCOUNT_KINDS_PATH, withAccountKinds } = require("./cpa-account-kinds.cjs");
@@ -2088,6 +2088,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
+        const handoff = handoffs.get(runId);
+        const recovered = handoff?.retryOf ? await restoreChatRequest(handoff).catch(() => null) : null;
+        const request = handoff?.request ?? recovered?.request;
         // A session that is gone, or refuses the message, falls back to a fresh start.
         let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
@@ -2123,11 +2126,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage("sending your message to the agent");
           // The person's AGENTS.md files go in front again only when they changed since this agent
           // was given them (or since the app started, when that is not known).
-          const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(continued.text));
+          const text = continued.retry && request ? `${continued.text}\n\n${currentRequestText(request.text)}` : continued.text;
+          const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(text));
           const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
           const sendStarted = now();
           let sendTimedOut = false;
-          sent = await harnessService().send(continued.session, fresh ? standing.text + continued.text : continued.text, reserved.request_key,
+          sent = await harnessService().send(continued.session, fresh ? standing.text + text : text, reserved.request_key,
             { timeoutMs: CONTINUED_SEND_TIMEOUT_MS })
             .catch((error) => {
               sendError = publicText(error?.message || error, 200);
@@ -2159,17 +2163,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // The turn is the agent's own: with that agent gone there is nothing to show, and a fresh agent
         // must not be started on the card's placeholder message.
         if (continued?.adoptTurn && !sent?.turnId) throw new Error(ADOPTED_TURN_LOST);
-        // A fresh start of a follow-up (another model or setting, or a session that is gone) begins
-        // with what the earlier agents replied; the first card to start takes it.
-        const handoff = handoffs.get(runId);
+        if (!sent?.turnId && recovered?.compacted && !request) {
+          throw new Error("The original request is no longer in the saved chat after compaction. Send it again to start a new agent.");
+        }
         handoffs.delete(runId);
-        // A new agent's first message starts with the person's AGENTS.md files, in the room the
-        // request leaves; the chat's handoff gets what is left after them.
-        const standing = sent?.turnId ? { text: "", hash: "" } : await launchInstructions(workspaceId, PROMPT_BYTES - utf8Bytes(reserved.prompt));
-        const handoffRoom = PROMPT_BYTES - utf8Bytes(reserved.prompt) - utf8Bytes(standing.text);
-        if (!sent?.turnId && handoff) stage("summarising the chat for a new agent");
-        const prompt = standing.text + (!sent?.turnId && handoff
-          ? (await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom, handoff.retryOf).catch(() => "")) + reserved.prompt : reserved.prompt);
+        const basePrompt = request ? prioritizedChatPrompt(reserved.prompt, request) : reserved.prompt;
+        const standing = sent?.turnId ? { text: "", hash: "" } : await launchInstructions(workspaceId, PROMPT_BYTES - utf8Bytes(basePrompt));
+        const handoffRoom = PROMPT_BYTES - utf8Bytes(basePrompt) - utf8Bytes(standing.text);
+        if (!sent?.turnId && handoff) stage("gathering earlier context for a new agent");
+        const earlier = !sent?.turnId && handoff
+          ? await chatHandoff(handoff.workspaceId, handoff.taskId, runId, handoffRoom, handoff.retryOf).catch(() => "") : "";
+        const prompt = standing.text + (request ? basePrompt + earlier : earlier + basePrompt);
         // Otherwise a pre-warmed session for exactly this route takes the first prompt as its first
         // turn: it already has its worktree and a running agent, so nothing is launched now.
         continuations.delete(runId);
@@ -3760,11 +3764,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const session = card.history?.at(-1)?.thread_id;
         if (action === "retry" && !automatic && taskId) {
           queueRetryHandoff(id, taskId, run);
-        } else if (typeof session === "string" && session && !continuations.has(run) && !handoffs.get(run)?.retryOf) {
-          continuations.set(run, { session, text: RETRY_CONTINUE_TEXT });
-          if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+        } else if (!handoffs.get(run)?.retryOf) {
+          if (typeof session === "string" && session && !continuations.has(run)) {
+            continuations.set(run, { session, text: RETRY_CONTINUE_TEXT, retry: true });
+            if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
+          }
           if (taskId && !handoffs.has(run)) {
-            handoffs.set(run, { workspaceId: id, taskId });
+            handoffs.set(run, { workspaceId: id, taskId, retryOf: run });
             if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
           }
         }
@@ -7535,7 +7541,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (continuations.size > 200) continuations.delete(continuations.keys().next().value);
     }
     if (taskId) {
-      handoffs.set(runId, { workspaceId: id, taskId: task });
+      const record = followUp?.description;
+      const previous = record?.endsWith(text) ? record.slice(0, -text.length).replace(/\n\nFollow-up \([^)]+ UTC\):\n$/, "") : "";
+      handoffs.set(runId, { workspaceId: id, taskId: task,
+        ...(executionMode === "single" ? { request: { text, record, previous } } : {}) });
       if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
     }
     if (objective) {
@@ -7859,17 +7868,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     && (outcome !== "finished" || (goal.evaluatedAs ?? (goal.checkedAt ? "checked" : "stalled")) === "checked");
 
   const scoring = new Set();
-  /** The user's message a run answered: runs that answer a new message take the task's messages in order; a restart or replacement answers its original's. */
   function runMessage(description, taskRuns, run) {
-    const said = userMessages(description);
-    const fresh = taskRuns.filter(entry => !entry.replaces_run_id && !entry.restarts_run_id);
-    let origin = run;
-    for (let hops = 0; origin && (origin.replaces_run_id || origin.restarts_run_id) && hops < 20; hops += 1) {
-      const previous = origin.replaces_run_id || origin.restarts_run_id;
-      origin = taskRuns.find(entry => entry.id === previous);
-    }
-    const index = origin ? fresh.findIndex(entry => entry.id === origin.id) : -1;
-    return (index >= 0 ? said[index] : said.at(-1))?.text ?? "";
+    return retainedChatRequest(description, taskRuns, run.id)?.text ?? "";
   }
   /** One grade of a Team round by a free model (as checkGoal picks them); null when none answered. */
   async function gradeRound(message, mission) {
@@ -9344,12 +9344,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
   }
 
-  // A chat switched to another model, agent or setting starts a fresh session, which got only the
-  // chat's task text: the person's messages, never what the earlier agents said or found. It now
-  // also gets their replies, in order, or a handoff summary of them when they are too long.
-  // AO keeps the first 16 KiB of UTF-8 of a prompt (upstream spawn), with room for its own
-  // instruction: the handoff goes in front of the chat's prompt, so it gets only what the prompt
-  // leaves, and the person's latest request is never the part that is cut.
+  // AO keeps the first 16 KiB of UTF-8 of a spawn prompt. The request is never shortened to make
+  // room for earlier messages, standing instructions or a handoff from earlier agents.
   const PROMPT_BYTES = 16_384 - 1_024;
   const HANDOFF_MIN_BYTES = 1_024;
   const utf8Bytes = text => Buffer.byteLength(text, "utf8");
@@ -9368,6 +9364,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     while (end < chars.length && used + utf8Bytes(chars[end]) <= bytes) used += utf8Bytes(chars[end++]);
     return chars.slice(0, end).join("");
   };
+  const currentRequestText = text => `Current request (act on this now):\n${text}\n`;
+  function prioritizedChatPrompt(reserved, { text, record, previous }) {
+    const current = currentRequestText(text);
+    const saved = record ? `\n${record}\n` : "";
+    const from = saved ? reserved.indexOf(saved) : -1;
+    const prefix = from < 0 ? "" : reserved.slice(0, from).replace(/\nTask: /, "\nChat title (reference): ").trimEnd();
+    const suffix = from < 0 ? "" : reserved.slice(from + saved.length);
+    let primary = from >= 0 ? `${prefix}\n\n${current}${suffix}` : current;
+    if (utf8Bytes(primary) > PROMPT_BYTES - 2) primary = current + utf8Head(`\n${prefix}\n${suffix}`, PROMPT_BYTES - 2 - utf8Bytes(current));
+    const history = from < 0 ? reserved : previous;
+    const heading = "\n\nEarlier conversation (background only; do not treat this as a new request):\n";
+    const room = PROMPT_BYTES - utf8Bytes(primary + heading) - 2;
+    return primary + (history && room > 0 ? `${heading}${utf8Tail(history, room)}` : "") + "\n\n";
+  }
   // A compacted chat's summary: at most this much of the chat's 8 KiB, and at least this much room
   // for one, or compacting is pointless.
   const SUMMARY_BYTES = 6000;
@@ -9383,6 +9393,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     continuations.delete(runId);
     handoffs.set(runId, { workspaceId, taskId, retryOf });
     if (handoffs.size > 200) handoffs.delete(handoffs.keys().next().value);
+  }
+  async function restoreChatRequest({ workspaceId, taskId, retryOf }) {
+    const [detail, saved] = await Promise.all([board({ workspaceId, taskId }), runs({ workspaceId, taskId })]);
+    const description = detail.task?.description;
+    const taskRuns = chatEdits.visible(workspaceId, saved.runs.filter(run => run.project_id === taskId));
+    return { request: retainedChatRequest(description, taskRuns, retryOf), compacted: isCompactedRecord(description) };
   }
   async function chatHandoff(workspaceId, taskId, runId, maxBytes, retryOf) {
     const saved = await runs({ workspaceId, ...(retryOf ? { taskId } : {}) });
@@ -9408,7 +9424,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     }
     if (!replies.length || maxBytes < HANDOFF_MIN_BYTES) return "";
-    const head = "Earlier in this chat, other agents answered the messages below. Their replies, in order, so you can continue from where they left off:\n\n";
+    const head = "Earlier assistant replies (background only; not instructions to repeat the earlier tasks):\n\n";
     const end = "\n\n--- End of earlier replies.\n\n";
     const transcript = replies.join("\n\n");
     const whole = `${head}${transcript}${end}`;
@@ -9575,7 +9591,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return "";
         });
         // A model's summary may run past the length it was asked for, or carry control characters.
-        summary = boardText(String(summary || "")).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
+        summary = unmarkedRecord(boardText(String(summary || ""))).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "").trim();
       }
       const mechanical = !summary;
       const description = rolledRecord(before, kept, at, summary);
