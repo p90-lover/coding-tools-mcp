@@ -7031,7 +7031,7 @@ test("Autobot config needs consent and answers an attested single-chat request o
     nativeGuardianReview: () => assert.fail("local scope never needs Guardian"),
     fetchImpl: () => assert.fail("no model/network request for local scope"),
     aoHarness: {
-      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: request ? [request] : [] }),
+      observe: async sessionId => ({ sessionId, status: "working", turnId: "t", turnState: "running", approvals: request ? [request] : [] }),
       sessionWorkspace: async () => ({ root }),
       resolveApproval: async (session, id, decision) => { resolved.push([session, id, decision]); request = null; return { ok: true }; },
     },
@@ -7048,7 +7048,7 @@ test("Autobot config needs consent and answers an attested single-chat request o
     for (let tries = 0; !resolved.length && tries < 50; tries++) await new Promise(resolve => setTimeout(resolve, 10));
     assert.deepEqual(resolved, [["session-1", "step", "yes"]]);
     await new Promise(resolve => setImmediate(resolve));
-    mission.nodes[0].receipt.thread_id = "native:session-1";
+    mission.nodes[0].receipt = { thread_id: "native:session-1", request_key: "k", turn_id: "t" };
     request = { approval_id: "native-step", source: "ao", kind: "command", command: "pwd", cwd: root,
       tool: "Bash", turn_id: "t", decisions: [{ id: "yes", kind: "allow_once" }] };
     const native = await workflow.call("observe", turn);
@@ -12471,7 +12471,7 @@ function workflowInternals(options) {
   const exportStart = "return Object.freeze({ call,";
   assert.equal(original.split(exportStart).length, 2, "the fixture must find exactly one workflow return");
   const source = original.replace(exportStart,
-    `${exportStart} takeWarm, chatPrewarm, dispatchExternal, observeExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun,`);
+    `${exportStart} takeWarm, chatPrewarm, dispatchExternal, observeExternal, stopExternalTurn, expectedTurns, sessionOwners, continuations, warm, warmKey, backgroundRuns, runKey, driveRun, unblockQueuedChat,`);
   fixture._compile(source, filename);
   return fixture.exports.createAgentOrchestratorWorkflow(options);
 }
@@ -12587,6 +12587,79 @@ test("native follow-up requires the exact read-only reservation receipt for ever
       assert.equal(starts, 0, "Ambiguous native delivery never starts a replacement session");
     } finally { workflow.dispose(); }
   }
+});
+
+test("native readback settles or frees its queue only on the exact persisted terminal turn", async t => {
+  const sessionId = "native:original", turnId = "original-turn";
+  const terminal = { sessionId, turnId, turnState: "completed", answer: "Fixture reply" };
+  const cases = [
+    { name: "different turn", frame: { ...terminal, turnId: "later-turn" } },
+    { name: "different session", frame: { ...terminal, sessionId: "native:other" } },
+    { name: "missing stored turn", receipt: { turn_id: undefined }, frame: terminal, noLookup: true },
+    { name: "native card with a legacy session", receipt: { thread_id: "legacy-thread" }, frame: terminal, noLookup: true },
+    { name: "unknown but disconnected", frame: { ...terminal, turnState: "unknown", exited: true } },
+    { name: "queued but disconnected", frame: { ...terminal, turnState: "queued", exited: true } },
+    { name: "known queued", frame: { ...terminal, turnState: "queued", answer: "" }, queued: true },
+    { name: "exact durable completion", frame: terminal, completed: true },
+  ];
+  for (const scenario of cases) await t.test(scenario.name, async () => {
+    const node = { id: "card", role: "planner", state: "running", route: { harness_id: "ao:orchestrator-fixture" },
+      receipt: { request_key: "reservation", thread_id: sessionId, turn_id: turnId, ...scenario.receipt } };
+    const mission = { id: "run", workspace_id: "ws", project_id: "task", execution_mode: "single", nodes: [node] };
+    const reads = [], terminalWrites = [];
+    const workflow = workflowInternals({
+      requestHeadless: async (endpoint, body) => {
+        if (endpoint.endsWith("/read")) return { ok: true, runs: [mission] };
+        if (endpoint.endsWith("/terminal")) { terminalWrites.push(body); return { ok: true }; }
+        throw new Error(`Unplanned fixture route: ${endpoint}`);
+      },
+      aoHarness: {
+        async observe(...args) { reads.push(args); return scenario.frame; },
+        async interrupt() { assert.fail("observation never interrupts a native turn in these states"); },
+        async spawn() { assert.fail("observation never starts a replacement"); },
+        async send() { assert.fail("observation never sends a message"); },
+      },
+    });
+    try {
+      if (scenario.noLookup) workflow.expectedTurns.set(node.receipt.thread_id, turnId);
+      const result = await workflow.observeExternal("ws", "run", node, mission);
+      assert.equal(result.recovery_required === true, !scenario.completed && !scenario.queued);
+      assert.equal(await workflow.unblockQueuedChat("ws", "task", { runs: [mission] }), Boolean(scenario.completed));
+      if (scenario.noLookup) assert.deepEqual(reads, [], "memory never substitutes for the durable receipt");
+      else {
+        assert.ok(reads.length > 0);
+        assert.ok(reads.every(args => args[0] === sessionId && args[1] === turnId), "both paths use the persisted turn rather than the session's latest turn");
+      }
+      assert.equal(terminalWrites.length, scenario.completed ? 2 : 0);
+      assert.ok(terminalWrites.every(receipt => receipt.session_id === sessionId && receipt.turn_id === turnId && receipt.completed));
+    } finally { workflow.dispose(); }
+  });
+});
+
+test("native approval status does not expose requests from another or unowned turn", async () => {
+  const sessionId = "native:original", turnId = "original-turn";
+  const node = { id: "card", state: "running", route: { harness_id: "ao:orchestrator-fixture" },
+    receipt: { request_key: "reservation", thread_id: sessionId, turn_id: turnId } };
+  const mission = { id: "run", workspace_id: "ws", nodes: [node] };
+  const request = { approval_id: "fixture-approval", turn_id: turnId, kind: "permission", source: "ao", decisions: [] };
+  const exact = { sessionId, turnId, turnState: "running", approvals: [request, { ...request, approval_id: "stale", turn_id: "other-turn" }] };
+  let frame = { ...exact, turnId: "other-turn" };
+  const reads = [];
+  const workflow = workflowInternals({
+    requestHeadless: async endpoint => endpoint.endsWith("/status") ? { ok: true, status: { connected: false } } : { ok: true, runs: [mission] },
+    aoHarness: { async observe(...args) { reads.push(args); return frame; } },
+  });
+  try {
+    const status = async () => (await workflow.call("harness_status", { workspaceId: "ws", runId: "run", nodeId: "card" })).status;
+    assert.deepEqual((await status()).pending_approvals, []);
+    frame = exact;
+    assert.deepEqual((await status()).pending_approvals.map(item => item.approval_id), [request.approval_id]);
+    assert.deepEqual(reads, [[sessionId, turnId], [sessionId, turnId]]);
+    node.receipt.turn_id = undefined;
+    workflow.expectedTurns.set(sessionId, turnId);
+    assert.deepEqual((await status()).pending_approvals, []);
+    assert.equal(reads.length, 2);
+  } finally { workflow.dispose(); }
 });
 
 test("restoration uncertainty: a sent message stops the old agent and starts a new one; warm starts never replace it", async () => {

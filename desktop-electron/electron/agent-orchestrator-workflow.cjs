@@ -2011,6 +2011,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
 
   const validNativeTurnId = value => typeof value === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
+  const NATIVE_TERMINAL_TURNS = new Set(["completed", "failed", "cancelled"]);
+  const nativeExternalCard = node => isNativeSession(node?.receipt?.thread_id) || Boolean(externalAgent(node)?.startsWith("orchestrator-"));
+  const liveNativeFrame = frame => frame && !frame.exited && !frame.agentGone && !frame.recoveryRequired && frame.status !== "unknown";
+  async function observeNativeCard(node) {
+    const { thread_id: session, turn_id: turn, request_key: reservation } = node.receipt ?? {};
+    if (!isNativeSession(session) || !validNativeTurnId(turn) || !reservation) return null;
+    const frame = await harnessService().observe(session, turn);
+    if (frame?.sessionId !== session || frame.turnId !== turn) return null;
+    return { ...frame, approvals: Array.isArray(frame.approvals) ? frame.approvals.filter(approval => approval?.turn_id === turn) : [] };
+  }
   async function nativeSendReceipt(sessionId, { workspaceId, requestId }) {
     const readback = await Promise.resolve().then(() => harnessService().recover?.(sessionId, null, { workspaceId, requestId })).catch(() => null);
     const receipt = readback?.sendReceipt;
@@ -2554,16 +2564,24 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       });
       return { ok: true, run: held?.run, pending_approvals: [] };
     }
-    if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
+    const native = nativeExternalCard(node);
+    if (node.state !== "running" || (!native && !session)) return { ok: true, pending_approvals: [] };
     const ownership = { workspaceId, runId, nodeId: node.id,
-      turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
-    const observed = await harnessService().observe(session, ownership.turnId);
+      turnId: node.receipt?.turn_id || (!native ? expectedTurns.get(session) : undefined), requestKey: node.receipt?.request_key || node.request_key };
+    const observed = await (native ? observeNativeCard(node) : harnessService().observe(session, ownership.turnId));
+    if (native && !observed) return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
     // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
     // the chat's work, never a fresh launch the watchdog may end.
     if (observed?.provisioning !== true) { freshLaunches.delete(session); launchControllerUp.delete(session); }
-    const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
+    const terminal = native ? NATIVE_TERMINAL_TURNS.has(observed.turnState) : TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     // Its start is over (the agent is up, or the start ended): the next cold start may begin.
     if (observed?.provisioning !== true || terminal) releaseColdStartOf(session);
+    if (native && !terminal) {
+      if (!liveNativeFrame(observed) || !["running", "queued"].includes(observed.turnState)) {
+        return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+      }
+      if (observed.turnState === "queued") return { ok: true, pending_approvals: [], session_id: session, quiet: true };
+    }
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
@@ -2843,17 +2861,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const frame = pendingFrames.get(key);
       // A quiet frame is the loop's latest word until its next observation is due (QUIET_OBSERVE_MS
       // and one pass): asking AO again in between would bring back the reads it spared.
-      if (frame && !nativeApproval({ thread_id: frame.node?.receipt?.thread_id }) && !frame.pending.some(nativeApproval)
+      if (frame && !nativeExternalCard(frame.node) && !frame.pending.some(nativeApproval)
         && Date.now() - frame.at < (frame.quiet ? QUIET_OBSERVE_MS + 500 : 1500)) {
         return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending, frame.mission ? frame : null) } };
       }
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
       if (found && externalAgent(found.node)) {
         const session = found.node.receipt?.thread_id;
-        const turn = nativeApproval({ thread_id: session }) ? found.node.receipt?.turn_id || expectedTurns.get(session) : expectedTurns.get(session);
-        const observed = found.node.state === "running" && session
-          ? await harnessService().observe(session, turn).catch(() => ({})) : {};
-        return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed), found) } };
+        const native = nativeExternalCard(found.node);
+        const observed = found.node.state === "running" && (native || session)
+          ? await (native ? observeNativeCard(found.node) : harnessService().observe(session, expectedTurns.get(session))).catch(() => null) : null;
+        const pending = native && (!liveNativeFrame(observed) || observed.turnState !== "running") ? [] : aoPending(found.node, session, observed);
+        return { ok: true, status: { connected: !native || Boolean(observed), pending_approvals: withAdvice(pending, found) } };
       }
     }
     if (!response.status?.pending_approvals) return response;
@@ -8982,13 +9001,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const { run, card } = chatAgentCard(saved, taskId);
     if (!card || !externalAgent(card)) return false;
     const thread = card.receipt.thread_id;
-    const waiting = await Promise.resolve().then(() => harnessService().observe?.(thread, expectedTurns.get(thread))).catch(() => null);
+    const native = nativeExternalCard(card);
+    const waiting = await Promise.resolve().then(() => native ? observeNativeCard(card)
+      : harnessService().observe?.(thread, expectedTurns.get(thread))).catch(() => null);
     if (!waiting) return false;
-    const released = waiting.agentGone === true && await releaseOrphanedTurn(workspaceId, run, card, waiting, { queued: true });
-    const over = released || TERMINAL_TURNS.has(waiting.turnState) || waiting.exited === true;
+    const over = native ? NATIVE_TERMINAL_TURNS.has(waiting.turnState) :
+      (waiting.agentGone === true && await releaseOrphanedTurn(workspaceId, run, card, waiting, { queued: true }))
+        || TERMINAL_TURNS.has(waiting.turnState) || waiting.exited === true;
     const live = backgroundRuns.get(runKey(workspaceId, run.id));
     if (over && !(live && (live.starting || live.driving || live.status === "running"))) {
-      await observe({ workspaceId, runId: run.id, nodeId: card.id }).catch(() => null);
+      const saved = await observe({ workspaceId, runId: run.id, nodeId: card.id }).catch(() => null);
+      if (native && (!saved || saved.recovery_required)) return false;
     }
     return over;
   }
