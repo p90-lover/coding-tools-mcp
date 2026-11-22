@@ -168,22 +168,23 @@ export class DraftCoalescer {
     this.revision = Math.max(this.revision, revision);
     if (savedJson !== undefined) this.savedJson = savedJson === null ? null : draftFingerprint(JSON.parse(savedJson));
   }
-  public pauseForAcceptance(): (receipt?: DurableDraftReceipt, submitted?: SavedChatDraft) => void {
+  public pauseForAcceptance(): (receipt?: DurableDraftReceipt, consumePending?: boolean) => void {
     if (this.handoff) throw new Error("A draft acceptance is already in progress");
     if (this.timer !== null) { clearTimeout(this.timer); this.timer = null; }
     let resume!: () => void;
     this.handoff = new Promise<void>(resolve => { resume = resolve; });
     let released = false;
-    return (receipt, submitted) => {
+    return (receipt, consumePending) => {
       if (released) return;
       released = true;
       if (receipt) {
         this.setKnownRevision(receipt.revision, JSON.stringify(receipt.draft));
-        if (submitted && this.pending !== undefined && draftFingerprint(this.pending) === draftFingerprint(submitted)) this.pending = undefined;
+        if (consumePending) this.pending = undefined;
       }
       this.handoff = null;
       resume();
       if (this.pending !== undefined && !this.disposed) void this.flush();
+      else if (receipt && !this.retry && !this.conflict && !this.disposed) this.setStatus(receipt.draft ? "saved" : "idle");
     };
   }
   public getKnownRevision(): number { return this.revision; }
@@ -193,7 +194,7 @@ export class DraftCoalescer {
   private setStatus(status: DraftStatus, message?: string): void { this.status = status; this.options.onStatusChange?.(status, message); }
   public queueChange(draft: SavedChatDraft | null): void {
     if (this.disposed) return;
-    if (!this.retry && !this.inFlight && this.pending === undefined && this.matchesSaved(draft)) return;
+    if (!this.handoff && !this.retry && !this.inFlight && this.pending === undefined && this.matchesSaved(draft)) return;
     this.pending = draft;
     if (this.conflict) return;
     this.setStatus("saving");

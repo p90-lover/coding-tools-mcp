@@ -14,7 +14,7 @@ const program = ts.transpileModule(`${source.slice(start, end)}\nexports.deliver
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
-function fixture({ acceptError = null, sendError = null, newerDraft = null, pending = true } = {}) {
+function fixture({ acceptError = null, sendError = null, newerDraft = null, pending = true, retypeDuringAcceptance = false } = {}) {
   const state = { sends: [], recoveries: [], notices: [], settled: [], accepted: 0, outgoing: null, card: null };
   const composing = { current: { draft: "submitted input", attachments: [], annotations: [], cacheKey: "first", taskId: "", snapshot: {} } };
   const update = (field, value) => { composing.current = { ...composing.current, [field]: typeof value === "function" ? value(composing.current[field]) : value }; };
@@ -25,6 +25,10 @@ function fixture({ acceptError = null, sendError = null, newerDraft = null, pend
     acceptMessage: async message => {
       state.accepted += 1;
       if (acceptError) throw acceptError;
+      if (retypeDuringAcceptance) {
+        composing.current = { ...composing.current, draft: "other text", snapshot: {} };
+        composing.current = { ...composing.current, draft: message, snapshot: {} };
+      }
       return { inputId: "stable-input-1", destination: { message }, payload: { attachments: composing.current.attachments } };
     },
     sameAttachmentSnapshot: (current, original, accepted) => current === original || current === accepted,
@@ -71,6 +75,53 @@ test("accepted delivery failure preserves newer typing without prepending the ol
   assert.equal(f.composing.current.draft, "newer typing");
   assert.equal(f.state.recoveries.length, 0);
   assert.equal(f.state.settled.at(-1).draft, "newer typing");
+});
+
+test("an older acceptance does not clear a retyped same-text draft", async () => {
+  const f = fixture({ retypeDuringAcceptance: true });
+  assert.equal(await f.deliver("submitted input"), true);
+  assert.deepEqual(f.state.sends.map(input => input.inputId), ["stable-input-1"]);
+  assert.equal(f.composing.current.draft, "submitted input");
+  assert.equal(f.state.settled.at(-1).draft, "submitted input");
+});
+
+test("acceptance cannot claim the saved revision of a different same-text edit", async () => {
+  const start = source.indexOf("  const acceptMessage = async");
+  const end = source.indexOf("  const forgetAcceptedInput =", start);
+  assert.ok(start >= 0 && end > start);
+  const acceptProgram = ts.transpileModule(`${source.slice(start, end)}\nexports.acceptMessage = acceptMessage;`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  for (const retype of [false, true]) {
+    const owner = { draft: "submitted input", attachments: [], annotations: [], cacheKey: "first", snapshot: {} };
+    const composing = { current: owner };
+    const requestLog = [];
+    const writer = {
+      queueChange() {}, matchesSaved: () => true, getKnownRevision: () => 4, preservedDraft: value => value,
+      async flush() {
+        if (retype) composing.current = { ...owner, snapshot: {} };
+      },
+      pauseForAcceptance: () => () => {},
+    };
+    const store = { getExecutionSelection: () => ({ execution: {}, executable: {} }),
+      async accept(request) {
+        requestLog.push(request);
+        return { inputId: request.inputId, payload: request.payload, draft: { revision: 4 } };
+      },
+    };
+    const context = {
+      exports: {}, composing, draftsNow: { current: store },
+      draftBinding: { current: { key: owner.cacheKey, loaded: true, ready: Promise.resolve(), writer } },
+      acceptingInput: { current: false }, pendingAccepts: { current: new Map() }, alive: { current: true },
+      selectedTaskId: "", title: "", savedDraftOf: (text, attachments, annotations) => ({ text, attachments, annotations }),
+      rebuildAttachmentMessage: message => message, buildAcceptDestination: value => value, createUuid: () => "stable-input-1",
+      setAttachments() {}, setPendingRefresh() {},
+    };
+    vm.runInNewContext(acceptProgram, context);
+    await context.exports.acceptMessage(owner.draft, "send", owner, true);
+    assert.equal(requestLog.length, 1);
+    assert.equal(requestLog[0].draftRevision, retype ? undefined : 4);
+  }
 });
 
 test("saved-input recovery reuses its identity and leaves the current draft alone", async () => {

@@ -353,7 +353,7 @@ test("DraftCoalescer defers newer typing until acceptance returns its revision",
   writer.queueChange({ text: "newer typing", attachments: [], annotations: [] });
   const waiting = writer.flush();
   await Promise.resolve(); assert.equal(calls.length, 0);
-  release({ revision: 2, draft: null, updatedAt: 1 }, original);
+  release({ revision: 2, draft: null, updatedAt: 1 }, false);
   await waiting;
   assert.equal(calls.length, 1);
   assert.equal(calls[0].expectedRevision, 2);
@@ -369,10 +369,32 @@ test("DraftCoalescer does not restore the submitted snapshot after acceptance cl
   writer.setKnownRevision(1, JSON.stringify(original));
   const release = writer.pauseForAcceptance();
   writer.queueChange(original);
-  release({ revision: 2, draft: null, updatedAt: 1 }, original);
+  release({ revision: 2, draft: null, updatedAt: 1 }, true);
   await writer.flush();
   assert.equal(calls, 0);
   assert.equal(writer.matchesSaved(null), true);
+  await writer.dispose();
+});
+
+test("DraftCoalescer saves a same-text edit made during acceptance", async () => {
+  const calls = [];
+  const writer = new client.DraftCoalescer({ key: "one", workspaceId: "project", moduleCall: async (_op, args) => {
+    calls.push(args);
+    return { ok: true, revision: args.expectedRevision + 1, draft: args.draft, updatedAt: 1 };
+  } });
+  const original = { text: "submitted", attachments: [], annotations: [] };
+  writer.setKnownRevision(1, JSON.stringify(original));
+  const release = writer.pauseForAcceptance();
+  writer.queueChange({ ...original });
+  const waiting = writer.flush();
+  await Promise.resolve();
+  assert.equal(calls.length, 0);
+  release({ revision: 2, draft: null, updatedAt: 1 }, false);
+  await waiting;
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].expectedRevision, 2);
+  assert.equal(calls[0].draft.text, "submitted");
+  assert.equal(writer.getStatus(), "saved");
   await writer.dispose();
 });
 

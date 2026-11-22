@@ -135,7 +135,7 @@ export function syncChatQueues(workspaceId: string, queues: Record<string, Queue
   for (const listener of queueListeners) listener();
 }
 /** The app's queue for the chats of the open project (AgentOrchestratorSurface's chat_queue calls). */
-import { createUuid, buildAcceptDestination, rebuildAttachmentMessage, DraftCoalescer, mergePersistedAttachments, sameAttachmentSnapshot, type DurableDraftReceipt, type DraftSaveResult, type AcceptInputArgs, type AcceptReceipt, type AcceptMode, type DraftStatus, type SavedChatDraft, type PendingInputPage } from "./chat-input-client";
+import { createUuid, buildAcceptDestination, rebuildAttachmentMessage, DraftCoalescer, mergePersistedAttachments, type DurableDraftReceipt, type DraftSaveResult, type AcceptInputArgs, type AcceptReceipt, type AcceptMode, type DraftStatus, type SavedChatDraft, type PendingInputPage } from "./chat-input-client";
 export type { SavedChatDraft } from "./chat-input-client";
 
 export type ChatQueueActions = {
@@ -1384,7 +1384,26 @@ export function AgentOrchestratorChat({
     return () => window.clearTimeout(timer);
   }, [idleQueued, latest?.id]);
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
-  const [draft, setDraft] = useState(() => CHAT_DRAFTS.get(draftKey)?.snapshot.text ?? "");
+  const [composerDraft, setComposerDraft] = useState(() => ({
+    snapshot: CHAT_DRAFTS.get(draftKey)?.snapshot ?? { text: "" } as DraftSnapshot,
+    attachments: CHAT_ATTACHMENTS.get(draftKey) ?? [],
+    annotations: CHAT_ANNOTATIONS.get(draftKey) ?? [],
+  }));
+  const { snapshot, attachments, annotations } = composerDraft;
+  const draft = snapshot.text;
+  const setDraft = (value: string | ((text: string) => string)) => setComposerDraft(current => {
+    const text = typeof value === "function" ? value(current.snapshot.text) : value;
+    return text === current.snapshot.text ? current : { ...current, snapshot: { text } };
+  });
+  // Storage can replace attachment paths and previews without starting a new edit.
+  const setAttachments = (value: ChatAttachment[] | ((files: ChatAttachment[]) => ChatAttachment[]), keepEdit = false) => setComposerDraft(current => {
+    const files = typeof value === "function" ? value(current.attachments) : value;
+    return files === current.attachments ? current : { ...current, attachments: files, snapshot: keepEdit ? current.snapshot : { text: current.snapshot.text } };
+  });
+  const setAnnotations = (value: DraftAnnotation[] | ((notes: DraftAnnotation[]) => DraftAnnotation[])) => setComposerDraft(current => {
+    const notes = typeof value === "function" ? value(current.annotations) : value;
+    return notes === current.annotations ? current : { ...current, annotations: notes, snapshot: { text: current.snapshot.text } };
+  });
   const [title, setTitle] = useState("");
   const [sending, setSending] = useState(false);
   // CPA refusing the running turn's model, as the line under the chat box reads it (ChatTurnStats):
@@ -1396,7 +1415,6 @@ export function AgentOrchestratorChat({
   // and goes in once the request is answered; it stays shown meanwhile. `sent`: the agent has it.
   // `turnKey`/`messageIndex`: the turn it was sent in, where it stays shown (steerTurnIndex).
   const [pendingSteers, setPendingSteers] = useState<PendingSteer[]>([]);
-  const [attachments, setAttachments] = useState<ChatAttachment[]>(() => CHAT_ATTACHMENTS.get(draftKey) ?? []);
   // The chat box image open in the preview, by its place among the attachments.
   const [previewing, setPreviewing] = useState<number | null>(null);
   const [attachmentWork, setAttachmentWork] = useState(() => ({ count: CHAT_DRAFTS.get(draftKey)?.attaching ?? 0,
@@ -1405,7 +1423,6 @@ export function AgentOrchestratorChat({
   const [attachNote, setAttachNote] = useState(() => CHAT_DRAFTS.get(draftKey)?.attachmentNote ?? "");
   // Words selected in this chat's answers and added to the next message (ChatAnnotations).
   // Ones kept when this chat was last left (another view, another chat) come back with it.
-  const [annotations, setAnnotations] = useState<DraftAnnotation[]>(() => CHAT_ANNOTATIONS.get(draftKey) ?? []);
   const addAnnotation = (text: string, anchor?: DraftAnnotation["anchor"]) => {
     const id = ++annotationIds;
     setAnnotations((current) => [...current, { id, text, comment: "", ...(anchor ? { anchor } : {}) }]);
@@ -1719,12 +1736,10 @@ export function AgentOrchestratorChat({
   // Each chat keeps its own unsent draft. A new composer belongs to its project and pane.
   const draftOwner = useRef(draftKey);
   const composing = useRef({ taskId: selectedTaskId, cacheKey: draftKey, draft, attachments, annotations,
-    snapshot: CHAT_DRAFTS.get(draftKey)?.snapshot ?? { text: draft }, queuedRecovery: [] as DraftRecovery[] });
+    snapshot, queuedRecovery: [] as DraftRecovery[] });
   const queueRecoveries = composing.current.queuedRecovery ?? [];
   composing.current = { taskId: selectedTaskId, cacheKey: draftOwner.current, draft, attachments, annotations,
-    snapshot: composing.current.snapshot.text === draft && composing.current.attachments === attachments
-      && composing.current.annotations === annotations ? composing.current.snapshot : { text: draft },
-    queuedRecovery: queueRecoveries.filter((entry) => !entry.applied) };
+    snapshot, queuedRecovery: queueRecoveries.filter((entry) => !entry.applied) };
   const draftRegistration = useRef<{ key: string; entry: DraftEntry; owner: NonNullable<DraftEntry["owner"]> } | null>(null);
   // Leaving the chat view (the Mission Board, the structure view) unmounts this chat without
   // changing chats: everything unsent is kept for when it comes back.
@@ -1756,9 +1771,7 @@ export function AgentOrchestratorChat({
         attachments: CHAT_ATTACHMENTS.get(draftKey) ?? [], annotations: CHAT_ANNOTATIONS.get(draftKey) ?? [], queuedRecovery: [] as DraftRecovery[] };
       // Unmount can win the queued state render: cleanup already owns the restored composer.
       composing.current = restored;
-      setDraft(restored.draft);
-      setAttachments(restored.attachments);
-      setAnnotations(restored.annotations);
+      setComposerDraft({ snapshot: restored.snapshot, attachments: restored.attachments, annotations: restored.annotations });
       setAttachmentWork({ count: entry.attaching, previews: entry.preparing });
       setAttachNote(entry.attachmentNote ?? "");
       draftOwner.current = draftKey;
@@ -1771,8 +1784,9 @@ export function AgentOrchestratorChat({
       // Update the ref before React commits: leaving the pane now must preserve these files too.
       if (files.length) {
         const next = [...composing.current.attachments, ...files].slice(0, 8);
-        composing.current.attachments = next;
-        setAttachments(next);
+        const snapshot = { text: composing.current.draft };
+        composing.current = { ...composing.current, attachments: next, snapshot };
+        setComposerDraft(current => ({ ...current, attachments: next, snapshot: current.snapshot.text === snapshot.text ? snapshot : { text: current.snapshot.text } }));
       }
       setAttachmentWork({ count: entry.attaching, previews: entry.preparing });
       setAttachNote(entry.attachmentNote ?? "");
@@ -1780,14 +1794,14 @@ export function AgentOrchestratorChat({
     }, restore: (recovery: DraftRecovery) => {
       if (!here() || recovery.applied || composing.current.queuedRecovery.includes(recovery)) return;
       composing.current.queuedRecovery.push(recovery);
-      setDraft((typed) => {
-        if (!here() || !composing.current.queuedRecovery.includes(recovery)) return typed;
-        const base = composing.current.snapshot.sent && typed === composing.current.snapshot.text ? "" : typed;
-        const restored = base.trim() ? `${recovery.text}\n\n${base}` : recovery.text;
-        composing.current.draft = restored;
-        composing.current.snapshot = { text: restored };
+      setComposerDraft(current => {
+        if (!here() || !composing.current.queuedRecovery.includes(recovery)) return current;
+        const base = current.snapshot.sent ? "" : current.snapshot.text;
+        const text = base.trim() ? `${recovery.text}\n\n${base}` : recovery.text;
+        const snapshot = { text };
+        composing.current = { ...composing.current, draft: text, snapshot };
         recovery.applied = true;
-        return restored;
+        return { ...current, snapshot };
       });
       setCard((current) => here() ? { title: "Message", text: `Couldn't ${recovery.failed ?? "queue"} the message: ${recovery.error}` } : current);
     } };
@@ -1876,7 +1890,7 @@ export function AgentOrchestratorChat({
         args?.expectedRevision as number, args?.mutationId as string, args?.draft as SavedChatDraft | null) }),
       onStatusChange: (status, message) => { if (here()) { setDraftStatus(status); setDraftConflictNote(message ?? null); } },
       onAttachmentsUpdated: (files, submitted) => {
-        if (here()) setAttachments(current => mergePersistedAttachments(current, submitted.attachments, files));
+        if (here()) setAttachments(current => mergePersistedAttachments(current, submitted.attachments, files), true);
       },
     });
     binding = { key, project, store, writer, loaded: false, ready: Promise.resolve() };
@@ -1901,7 +1915,7 @@ export function AgentOrchestratorChat({
       for (const file of files) {
         if (!file.image || !file.path || !attachmentPreview) continue;
         void attachmentPreview(file.path).then(preview => {
-          if (here() && preview) setAttachments(list => list.map(item => item === file ? { ...item, preview } : item));
+          if (here() && preview) setAttachments(list => list.map(item => item === file ? { ...item, preview } : item), true);
         }).catch(() => undefined);
       }
     }).catch(error => { if (here()) { setDraftStatus("unsaved"); setDraftConflictNote(refusalText(error)); } });
@@ -1913,11 +1927,11 @@ export function AgentOrchestratorChat({
   useEffect(() => {
     const binding = draftBinding.current;
     if (!binding || binding.key !== draftKey || binding.project !== (projectId ?? "")) return;
-    const value = savedDraftOf(draft, attachments, annotations);
+    const value = savedDraftOf(snapshot.text, attachments, annotations);
     if (!binding.loaded) { if (value) binding.pendingUnloaded = value; return; }
     if (value === null && sendsInFlight.current > 0) return;
     binding.writer.queueChange(value);
-  }, [draftKey, projectId, draft, attachments, annotations]);
+  }, [draftKey, projectId, snapshot, attachments, annotations]);
   useEffect(() => {
     const hide = () => { if (document.visibilityState === "hidden") flushDraft(); };
     window.addEventListener("pagehide", flushDraft);
@@ -2042,6 +2056,7 @@ export function AgentOrchestratorChat({
     if (!store?.accept) throw new Error("Durable chat input storage is unavailable; your message was kept");
     if (acceptingInput.current) throw new Error("This input is still being saved");
     acceptingInput.current = true;
+    const ownsDraft = () => fromComposer && composing.current.cacheKey === owner.cacheKey && composing.current.snapshot === owner.snapshot;
     try {
       const existing = [...pendingAccepts.current.values()].find(item => item.owner.cacheKey === owner.cacheKey
         && item.owner.snapshot === owner.snapshot && item.fromComposer === fromComposer);
@@ -2058,8 +2073,7 @@ export function AgentOrchestratorChat({
           ?? { text: message, attachments: [], annotations: [] };
         if (binding?.key === owner.cacheKey) {
           await binding.ready;
-          const latest = composing.current;
-          if (binding.loaded && fromComposer && latest.cacheKey === owner.cacheKey && latest.snapshot === owner.snapshot) binding.writer.queueChange(payload);
+          if (binding.loaded && ownsDraft()) binding.writer.queueChange(payload);
           await binding.writer.flush();
           payload = binding.writer.preservedDraft(payload);
         }
@@ -2068,7 +2082,7 @@ export function AgentOrchestratorChat({
           ...(selectedTaskId ? { taskId: selectedTaskId } : {}), ...(!selectedTaskId && title.trim() ? { title: title.trim() } : {}),
           ...(goal ? { goal } : {}), ...(restart ? { restart: true } : {}) });
         request = { key: owner.cacheKey, inputId: createUuid(), mode, payload, destination,
-          ...(fromComposer && binding?.key === owner.cacheKey && binding.writer.matchesSaved(payload) ? { draftRevision: binding.writer.getKnownRevision() } : {}) };
+          ...(ownsDraft() && binding?.key === owner.cacheKey && binding.writer.matchesSaved(payload) ? { draftRevision: binding.writer.getKnownRevision() } : {}) };
         pendingAccepts.current.set(request.inputId, { owner, fromComposer, request });
       }
       const resumeDraft = binding?.key === owner.cacheKey ? binding.writer.pauseForAcceptance() : null;
@@ -2076,10 +2090,10 @@ export function AgentOrchestratorChat({
       try {
         accepted = await store.accept(request);
         pendingAccepts.current.delete(request.inputId);
-        resumeDraft?.(accepted.draft, request.payload);
+        resumeDraft?.(accepted.draft, ownsDraft());
       } finally { resumeDraft?.(); }
       if (alive.current && composing.current.cacheKey === owner.cacheKey) {
-        setAttachments(current => mergePersistedAttachments(current, owner.attachments, accepted.payload.attachments));
+        setAttachments(current => mergePersistedAttachments(current, owner.attachments, accepted.payload.attachments), true);
       }
       if (fromComposer && store.pending) {
         owner.snapshot.sent = true;
@@ -2096,13 +2110,11 @@ export function AgentOrchestratorChat({
   /** `restart`: the stuck turn's Restart: stop it and send `message` as its next turn (chat_steer's restart). */
   const deliver = async (message: string, goal?: string, fromComposer = true, restart = false, inputId?: string, capturedOwner?: typeof composing.current) => {
     const owner = capturedOwner ?? composing.current;
-    let acceptedAttachments = owner.attachments;
     if (!inputId) {
       try {
         const initial = !selectedTaskId && carried?.length ? [...carried, message].join("\n\n") : message;
         const accepted = await acceptMessage(initial, (steering || restart) && selectedTaskId ? "steer" : "send", owner, fromComposer, goal, restart);
         inputId = accepted.inputId; message = accepted.destination.message;
-        acceptedAttachments = accepted.payload.attachments;
       } catch (error) {
         if (alive.current && composing.current.cacheKey === owner.cacheKey) say("Not sent", refusalText(error));
         return false;
@@ -2113,9 +2125,7 @@ export function AgentOrchestratorChat({
     if (fromComposer) sendsInFlight.current += 1;
     let handedOff = false;
     const here = () => alive.current && composing.current.taskId === owner.taskId && composing.current.cacheKey === owner.cacheKey;
-    // Only what was sent is cleared: a draft, file or annotation added while it was sending stays.
-    const current = () => fromComposer && here() && composing.current.draft === owner.draft
-      && sameAttachmentSnapshot(composing.current.attachments, owner.attachments, acceptedAttachments) && composing.current.annotations === owner.annotations;
+    const current = () => fromComposer && here() && composing.current.snapshot === owner.snapshot;
     // A steer shows at once, as in Claude Code: the composer clears and the message is in the chat,
     // at the end of the running turn where the turn will show it, its check pulsing while it reaches
     // the agent, which can take seconds (it waits out an approval being answered). It sat in the
@@ -2369,8 +2379,7 @@ export function AgentOrchestratorChat({
       try {
         const accepted = await acceptMessage(text, "queue", owner, true);
         const clearSubmittedDraft = () => {
-          if (alive.current && composing.current.cacheKey === owner.cacheKey && composing.current.draft === owner.draft
-            && composing.current.annotations === owner.annotations && sameAttachmentSnapshot(composing.current.attachments, owner.attachments, accepted.payload.attachments)) {
+          if (alive.current && composing.current.cacheKey === owner.cacheKey && composing.current.snapshot === owner.snapshot) {
             setDraft(""); setAttachments([]); setAnnotations([]); setAttachNote("");
           }
         };
