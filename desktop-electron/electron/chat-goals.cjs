@@ -59,14 +59,17 @@ function goalMessage(objective, round, reason = "") {
  * closing answers come last, so the cut, which keeps the end, keeps them.
  */
 function roundTranscript(message, answers) {
-  const parts = [`User:\n${String(message || "").trim() || "(no message)"}`];
+  const input = `User:\n${utf8Head(String(message || "").trim() || "(no message)", GOAL_MESSAGE_BYTES)}\n\n`;
   const said = (answers ?? []).map((answer) => (typeof answer === "string" ? { label: "", text: answer } : answer))
     .filter((answer) => typeof answer?.text === "string" && answer.text.trim());
-  parts.push(said.length
+  const evidence = said.length
     ? said.map(({ label, text }) => `${label ? `Assistant (${label})` : "Assistant"}:\n${text.trim()}`).join("\n\n")
-    : "Assistant:\n(no final answer)");
-  const text = parts.join("\n\n");
-  return text.length > TRANSCRIPT_LIMIT ? `…${text.slice(-TRANSCRIPT_LIMIT)}` : text;
+    : "Assistant:\n(no final answer)";
+  const room = TRANSCRIPT_LIMIT - input.length;
+  if (evidence.length <= room) return input + evidence;
+  const boundary = evidence.length - room + "Earlier assistant evidence omitted.\n…".length;
+  const start = /[\uDC00-\uDFFF]/.test(evidence[boundary]) ? boundary + 1 : boundary;
+  return `${input}Earlier assistant evidence omitted.\n…${evidence.slice(start)}`;
 }
 
 /**
@@ -111,9 +114,8 @@ function goalCheckPrompt(objective, transcript, { judge = false, ended = "", pre
 }
 
 /**
- * The evaluator's answer as { met, stop, progress, reason }; anything unreadable throws. A met goal
- * is never stopped and always made progress; a verdict that does not say counts as progress, so an
- * evaluator that leaves the field out never stalls a goal.
+ * The evaluator's answer as { met, stop, progress, reason }. An unmet goal can go on only with an
+ * explicit progress verdict; an incomplete check follows the evaluator failure path.
  */
 function parseGoalCheck(text) {
   const raw = String(text ?? "");
@@ -123,7 +125,8 @@ function parseGoalCheck(text) {
   if (typeof parsed?.met !== "boolean") throw new Error("The goal evaluator gave no verdict");
   const reason = String(parsed.reason ?? "").replace(/\s+/g, " ").trim().slice(0, REASON_LIMIT);
   const stop = !parsed.met && parsed.stop === true;
-  const progress = parsed.met || parsed.progress !== false;
+  if (!parsed.met && !stop && typeof parsed.progress !== "boolean") throw new Error("The goal evaluator gave no progress verdict");
+  const progress = parsed.met || parsed.progress === true;
   return { met: parsed.met, stop, progress, reason: reason || (parsed.met ? "The condition is met." : stop ? "The goal cannot go on." : "The condition is not met yet.") };
 }
 

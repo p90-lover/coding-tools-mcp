@@ -5270,9 +5270,9 @@ async function start() {
             if (!missionWorkflowRuntime?.call) throw new Error("Agent Orchestrator is not ready yet");
             return missionWorkflowRuntime.call("board", { workspaceId, ...(taskId ? { taskId } : {}) });
           },
-          runs: (workspaceId) => {
+          runs: (workspaceId, taskId) => {
             if (!missionWorkflowRuntime?.call) throw new Error("Agent Orchestrator is not ready yet");
-            return missionWorkflowRuntime.call("runs", { workspaceId });
+            return missionWorkflowRuntime.call("runs", { workspaceId, ...(taskId ? { taskId } : {}) });
           },
         }),
         // schedule_wakeup: the chat is sent a follow-up after the minutes its agent chose.
