@@ -226,6 +226,35 @@ test("the default transcript shows real task progress for both ordinary and Deep
   }
 });
 
+test("automatic wake prompts stay silent while stored steers, user messages and agent replies still render", () => {
+  const opening = "Wake-up: a person actually typed this";
+  const prompt = "This is the internal wake note for the agent";
+  const description = `${opening}\n\nFollow-up (automatic 2026-10-10 10:00 UTC):\n${prompt}`;
+  const steered = `${description}\n\n↳ Steer (2026-10-10 10:01 UTC): Human steer after the wake`;
+  const full = `${steered}\n\nFollow-up (2026-10-10 11:00 UTC):\nA real later message`;
+  const runs = ["First reply", "Reply to the wake", "Reply to the human"].map((answer, index) => ({
+    id: `silent:${index}`, workspace_id: "ws", project_id: "task", execution_mode: "single",
+    nodes: [{ id: "lead", role: "planner", state: "finished", route: { harness_id: "ao:codex", model: "fixture" }, receipt: { answer } }],
+  }));
+  const render = (pendingMessage, shownRuns) => renderToStaticMarkup(React.createElement(ui.AgentOrchestratorChat, {
+    tasks: [{ id: "task", title: "Task" }], selectedTaskId: "task", pendingMessage, runs: shownRuns, busy: false, approvals: [],
+    loadDescription: async () => pendingMessage, send: async () => {}, openStructure() {}, approve() {}, describeRoute: () => "", retryStart() {},
+  }));
+  const pending = render(description, runs.slice(0, 1));
+  assert.ok(pending.includes(opening));
+  assert.ok(!pending.includes(prompt), "the clock event has no bubble before run creation");
+  const html = render(full, runs);
+  assert.doesNotMatch(html, /This is the internal wake note/);
+  assert.match(html, /Wake-up: a person actually typed this[\s\S]*First reply[\s\S]*Human steer after the wake[\s\S]*Reply to the wake[\s\S]*A real later message[\s\S]*Reply to the human/);
+  const turns = chat.chatTurns(runs, full);
+  assert.equal(turns.at(-1).messageIndex, 2, "hidden inputs still occupy their edit position");
+  for (const output of [chat.chatMarkdown("Task", turns), JSON.stringify(chat.chatTranscript(runs, full))]) {
+    assert.match(output, /Human steer after the wake/);
+    assert.match(output, /Reply to the wake/);
+    assert.doesNotMatch(output, /This is the internal wake note/);
+  }
+});
+
 test("a structured plan updates the same visual task from pending to a checked circle", () => {
   const plans = load("chat-reply-plan.ts", { "./ao-chat": chat });
   const view = load("ChatReplyPlan.tsx");
