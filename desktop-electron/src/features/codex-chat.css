@@ -1564,6 +1564,17 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-workbench-tab:hover .cx-workbench-tab-close, .cx-workbench-tab.is-active .cx-workbench-tab-close { opacity: 1; }
 .cx-workbench-tab-close:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-workbench-add { flex: 0 0 auto; width: 26px; height: 26px; }
+.cx-workbench-plan { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; }
+.cx-workbench-plan-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 16px 0; color: var(--ao-muted); font-size: 12px; }
+.cx-workbench-plan-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px 24px 24px; overflow-wrap: anywhere; }
+.cx-workbench-plan-body .cx-rplan-step-title { white-space: normal; }
+.cx-workbench-plan-body .cx-workbench-empty { margin: 12px 0; }
+.cx-chat:has(> .cx-workbench.is-plan) { container: cx-plan-shell / inline-size; }
+@container cx-plan-shell (max-width: 620px) {
+  .cx-chat > .cx-thread, .cx-chat > .cx-structure:not(.cx-workbench.is-plan) { display: none; }
+  .cx-chat > .cx-workbench.is-plan { flex-grow: 1; min-width: 0; max-width: none; border-left: 0; }
+  .cx-workbench.is-plan > .cx-structure-resize { display: none; }
+}
 /* New-tab page: the panel's tools and recent pages. */
 .cx-newtab { flex: 1 1 auto; min-height: 0; padding: 18px 24px; overflow: auto; }
 .cx-newtab-label { margin: 14px 0 8px; font-size: 13px; font-weight: 600; }

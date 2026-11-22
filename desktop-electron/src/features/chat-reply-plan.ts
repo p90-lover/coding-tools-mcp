@@ -85,6 +85,16 @@ export function agentPlan(items: ChatLiveItem[]): { title: string; status: strin
   return null;
 }
 
+export function agentReplyPlan(items: ChatLiveItem[], live: boolean, error?: string): ReplyPlan | null {
+  const todos = agentPlan(items);
+  if (!todos) return null;
+  const steps = todos.map((todo, index): PlanStep => ({
+    key: `todo:${index}`, title: todo.title, actions: [],
+    state: /^(completed|done)$/i.test(todo.status) ? "done" : /^in_progress$/i.test(todo.status) ? (live ? "running" : error ? "failed" : "pending") : "pending",
+  }));
+  return { source: "agent", steps, done: steps.filter((step) => step.state === "done").length };
+}
+
 /**
  * A turn's work as steps. The agent's own todo list wins when it kept one. Otherwise each message
  * the agent wrote between tool calls opens a step, titled by its first line, and the tool calls
@@ -93,14 +103,8 @@ export function agentPlan(items: ChatLiveItem[]): { title: string; status: strin
  * `error` when the turn ended on one.
  */
 export function replyPlan(items: ChatLiveItem[], live: boolean, error?: string): ReplyPlan {
-  const todos = agentPlan(items);
-  if (todos) {
-    const steps = todos.map((todo, index): PlanStep => ({
-      key: `todo:${index}`, title: todo.title, actions: [],
-      state: /^(completed|done)$/i.test(todo.status) ? "done" : /^in_progress$/i.test(todo.status) ? (live ? "running" : error ? "failed" : "pending") : "pending",
-    }));
-    return { source: "agent", steps, done: steps.filter((step) => step.state === "done").length };
-  }
+  const structured = agentReplyPlan(items, live, error);
+  if (structured) return structured;
   const groups: { key: string; message?: string; items: ChatLiveItem[] }[] = [];
   for (const item of items) {
     if (item.kind === "message" && item.text.trim()) groups.push({ key: item.id, message: item.text, items: [] });

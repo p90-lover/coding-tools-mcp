@@ -5,6 +5,8 @@ import type { JsonObject } from "../api/contracts";
 import { Caret, Icon } from "../icons";
 import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensShort, type ChatAgentSession, type ChatLiveItem, type ChatSubagent } from "./ao-chat";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ReplyPlanView } from "./ChatReplyPlan";
+import type { ReplyPlan } from "./chat-reply-plan";
 import { SubagentHeader, SubagentList, workedFor } from "./chat-subagents";
 import type { ChatPullRequest } from "./chat-summary-panel";
 import { petFlight, petOverlaps } from "./chat-pet-stage";
@@ -17,8 +19,9 @@ import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibil
 // plus a new-tab page with those tools and the pages this chat opened. Everything acts for the
 // user: navigating, stopping a command or typing into it needs no approval, since the user does it.
 
-export type WorkbenchTab = "overview" | "preview" | "terminal" | "changes" | "files" | "subagents" | "new";
+export type WorkbenchTab = "overview" | "preview" | "terminal" | "changes" | "files" | "subagents" | "plan" | "new";
 type PanelTab = { id: string; kind: WorkbenchTab };
+type WorkbenchPlan = { text: string; tasks?: ReplyPlan; live: boolean };
 
 type PreviewState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; errors: number };
 // "app": started through the app's exec_command (live output, stoppable, takes input). "agent": a
@@ -45,7 +48,7 @@ export function isServerProcess(command: Pick<Command, "cmd" | "status" | "backg
   return command.status === "background" || command.background === true || SERVER_COMMAND.test(String(command.cmd ?? ""));
 }
 
-const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", subagents: "Subagents", new: "New tab" };
+const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", subagents: "Subagents", plan: "Plan", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
 let tabSequence = 0;
 const newTab = (kind: WorkbenchTab): PanelTab => ({ id: `tab-${++tabSequence}`, kind });
@@ -351,7 +354,29 @@ function since(startedAt: number, now: number) {
 /** A changed file a reply asked the Changes tab to show: the agent that edited it, the file (none: the whole diff), one id per click. */
 export type ChangesTarget = { sessionId: string; path?: string; requestId: number };
 
-export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, subagents = [], renderWork, changesTarget }: {
+function PlanPane({ plan }: { plan?: WorkbenchPlan }) {
+  const [copyResult, setCopyResult] = useState<{ text: string; message: string } | null>(null);
+  const text = plan?.text;
+  const copied = copyResult?.text === text ? copyResult?.message : undefined;
+  const copy = async () => {
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); setCopyResult({ text, message: "Copied" }); }
+    catch { setCopyResult({ text, message: "Couldn't copy plan" }); }
+  };
+  return <section className="cx-workbench-plan" role="tabpanel" aria-label="Plan">
+    {text ? <div className="cx-workbench-plan-actions">
+      {copied ? <span role="status">{copied}</span> : null}
+      <button type="button" className="cx-text-button" onClick={() => void copy()}>Copy plan</button>
+    </div> : null}
+    <div className="cx-workbench-plan-body" tabIndex={0}>
+      {text ? <ChatMarkdown text={text} /> : null}
+      {plan?.tasks ? <ReplyPlanView plan={plan.tasks} style="plan" live={plan.live} /> : null}
+      {!text && !plan?.tasks?.steps.length ? <p className="cx-workbench-empty"><strong>No plan yet</strong><br />The agent writes the plan here as it explores. Keep chatting.</p> : null}
+    </div>
+  </section>;
+}
+
+export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, subagents = [], renderWork, changesTarget, plan }: {
   sessions: ChatAgentSession[];
   /** The chat's workspace: reaches an agent's worktree even when the app holds no lease for it. */
   workspaceId?: string;
@@ -364,6 +389,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
   renderWork?: RenderWork;
   /** A reply's changed file, opened from its summary (ChatChangedFiles): shown in the Changes tab. */
   changesTarget?: ChangesTarget;
+  plan?: WorkbenchPlan;
 }) {
   const [sessionId, setSessionId] = useState(changesTarget?.sessionId ?? sessions[0]?.id ?? "");
   // The subagent whose work the Subagents tab shows; none shows the list.
@@ -445,7 +471,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
     window.addEventListener("pointerup", up);
   };
 
-  return <aside className="cx-structure cx-workbench" aria-label="Side panel" style={width ? { flexBasis: width } : undefined}>
+  return <aside className={`cx-structure cx-workbench${current?.kind === "plan" ? " is-plan" : ""}`} aria-label="Side panel" style={width ? { flexBasis: width } : undefined}>
     <div className="cx-structure-resize" role="separator" aria-orientation="vertical" aria-label="Resize the side panel" title="Drag to resize · double-click to reset"
       onPointerDown={startResize} onDoubleClick={() => { setWidth(null); try { localStorage.removeItem(PANEL_WIDTH_KEY); } catch { /* fine */ } }} />
     <header className="cx-workbench-head">
@@ -460,7 +486,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
         <button type="button" className="cx-icon-button cx-workbench-add" aria-label="New tab" title="New tab" onClick={addTab}>
           <Icon name="plus" width="14" height="14" /></button>
       </div>
-      {sessions.length > 1 ? <select className="cx-workbench-agent" aria-label="Agent" value={sessionId} onChange={(event) => setSessionId(event.target.value)}>
+      {sessions.length > 1 && current?.kind !== "plan" ? <select className="cx-workbench-agent" aria-label="Agent" value={sessionId} onChange={(event) => setSessionId(event.target.value)}>
         {sessions.map((session) => <option key={session.id} value={session.id}>{session.label}</option>)}
       </select> : null}
       <button type="button" className="cx-icon-button" aria-label="Hide side panel" title="Hide side panel" onClick={onClose}>
@@ -468,6 +494,9 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
     </header>
     {/* The chat's subagents belong to all its agents, so this tab does not follow the agent picker. */}
     {current?.kind === "subagents" ? <SubagentsPane subagents={subagents} selected={subagentId} onSelect={setSubagentId} renderWork={renderWork} />
+      : current?.kind === "plan" ? <PlanPane plan={plan} />
+      : current?.kind === "new" && (sessionId || plan?.text || plan?.tasks?.steps.length)
+      ? <NewTabPage sessionId={sessionId} onTool={show} hasPlan={Boolean(plan?.text || plan?.tasks?.steps.length)} />
       : !sessionId
       ? <p className="cx-workbench-empty">No agent yet. Its pages, changes, files and commands show here.</p>
       : current?.kind === "overview" ? <OverviewPane key={sessionId} session={sessions.find((item) => item.id === sessionId)} sessionId={sessionId} workspaceId={workspaceId} onTool={show}
@@ -476,7 +505,7 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
         : current?.kind === "terminal" ? <TerminalPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
           : current?.kind === "changes" ? <ChangesPane key={`${sessionId}:${changesFor?.requestId ?? ""}`} sessionId={sessionId} workspaceId={workspaceId} target={changesFor} />
             : current?.kind === "files" ? <FilesPane key={sessionId} sessionId={sessionId} workspaceId={workspaceId} />
-              : <NewTabPage sessionId={sessionId} onTool={show} />}
+              : null}
   </aside>;
 }
 
@@ -486,7 +515,7 @@ export function navigatePreview(sessionId: string, url: string) {
 }
 
 /** The new-tab page: the panel's tools and the pages this chat's agent opened. */
-function NewTabPage({ sessionId, onTool }: { sessionId: string; onTool: (kind: WorkbenchTab) => void }) {
+function NewTabPage({ sessionId, onTool, hasPlan }: { sessionId: string; onTool: (kind: WorkbenchTab) => void; hasPlan: boolean }) {
   const recents = RECENT_PAGES.get(sessionId) ?? [];
   const open = (url: string) => {
     navigatePreview(sessionId, url);
@@ -495,10 +524,11 @@ function NewTabPage({ sessionId, onTool }: { sessionId: string; onTool: (kind: W
   return <div className="cx-newtab">
     <p className="cx-newtab-label">Tools</p>
     <div className="cx-newtab-tools">
-      {(["overview", "preview", "changes", "terminal", "files", "subagents"] as const).map((kind) => <button key={kind} type="button" onClick={() => onTool(kind)}>
+      {(sessionId ? ["overview", "preview", "changes", "terminal", "files", "subagents"] as const : []).map((kind) => <button key={kind} type="button" onClick={() => onTool(kind)}>
         <span>{TAB_TITLES[kind]}</span><small>{kind === "overview" ? "Context, changes, tasks and usage" : kind === "preview" ? "The agent's browser" : kind === "changes" ? "Its worktree's diff"
           : kind === "terminal" ? "Commands and a shell" : kind === "subagents" ? "The helpers it started, and their work" : "Browse its worktree"}</small>
       </button>)}
+      {hasPlan ? <button type="button" onClick={() => onTool("plan")}><span>Plan</span><small>Read the plan and tasks</small></button> : null}
     </div>
     <p className="cx-newtab-label">Recents</p>
     {recents.length ? <ul className="cx-newtab-recents">{recents.map((page) => <li key={page.url}>

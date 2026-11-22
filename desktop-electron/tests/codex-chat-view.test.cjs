@@ -2095,6 +2095,51 @@ test("a chat keeps its side panel through questions, remounts and chat switches,
   } finally { workbenchStorage = null; }
 });
 
+test("Open plan shows the requested plan in the Plan tab without answering it, and scopes it to the chat", t => {
+  const storage = workbenchStorage;
+  workbenchStorage = new Map();
+  const plan = { nodeId: "lead", approval_id: "plan-1", source: "ao", kind: "plan", plan: "## First plan\n\n- Verify a fix" };
+  const otherPlan = { ...plan, approval_id: "plan-2", plan: "## Other proposed plan" };
+  let approvalsSent = 0;
+  const { props } = base({ selectedTaskId: "plan-chat", projectId: "plan-project", approvals: [plan, otherPlan], approve: async () => { approvalsSent++; } });
+  const view = mount(props, { effects: true });
+  t.after(() => { view.unmount(); workbenchStorage = storage; });
+  const panel = tree => walk(tree).find(element => element.type === "Workbench");
+  const approvalCard = walk(view.render()).find(element => element.type === "Approval" && element.props.approval.approval_id === "plan-1");
+  assert.equal(panel(view.render()), undefined, "the proposal does not open a panel by itself");
+  approvalCard.props.onOpenPlan(plan.plan);
+  assert.equal(panel(view.render()).props.tab, "plan");
+  assert.equal(panel(view.render()).props.plan.text, plan.plan, "the exact clicked proposal is shown rather than the latest other one");
+  assert.equal(approvalsSent, 0);
+  assert.equal(panel(view.render({ approvals: [] })).props.plan.text, plan.plan, "the read-only plan stays after the review ends");
+  assert.equal(panel(view.render({ selectedTaskId: "other-chat", approvals: [] })), undefined);
+  assert.equal(panel(view.render({ projectId: "other-project", approvals: [] })), undefined);
+  panel(view.render({ approvals: [] })).props.onClose();
+  const settled = { approvals: [] };
+  walk(view.render(settled)).find(element => element.props?.["aria-label"] === "More chat actions").props.onClick({
+    currentTarget: { closest: () => null, getBoundingClientRect: () => ({ right: 600, bottom: 100 }) },
+  });
+  walk(view.render(settled)).find(element => element.type === "ChatMenu").props.menu.items.find(item => item.label === "Plan").run();
+  assert.equal(panel(view.render(settled)).props.plan.text, plan.plan);
+});
+
+test("a completed /plan reply is viewable from the chat menu without a native approval", t => {
+  const before = workbenchStorage;
+  workbenchStorage = new Map();
+  t.after(() => { workbenchStorage = before; });
+  const answer = "## Plan\n\n- Do not change files before review";
+  const { props } = base({ selectedTaskId: "t", pendingMessage: prompts.planMessage("Plan the change"),
+    runs: [run("plan-run", "t", [node("lead", "planner", "finished", { receipt: { answer } })], { execution_mode: "single" })] });
+  const view = mount(props);
+  walk(view.render()).find(element => element.props?.["aria-label"] === "More chat actions").props.onClick({
+    currentTarget: { closest: () => null, getBoundingClientRect: () => ({ right: 600, bottom: 100 }) },
+  });
+  walk(view.render()).find(element => element.type === "ChatMenu").props.menu.items.find(item => item.label === "Plan").run();
+  const pane = walk(view.render()).find(element => element.type === "Workbench");
+  assert.equal(pane.props.tab, "plan");
+  assert.equal(pane.props.plan.text, answer);
+});
+
 test("panel persistence tolerates invalid or blocked storage and preserves batched toggles", () => {
   const { props } = base({ selectedTaskId: "storage-chat", projectId: "storage-project" });
   const panel = (tree) => walk(tree).find((element) => element.type === "Workbench");

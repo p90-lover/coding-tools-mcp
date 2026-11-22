@@ -287,10 +287,11 @@ function waited(since?: string) {
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 
-export function AgentOrchestratorApproval({ approval, busy, approve, actor = "the agent" }: {
+export function AgentOrchestratorApproval({ approval, busy, approve, actor = "the agent", onOpenPlan }: {
   approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => Promise<void>;
   /** Who asks, as Codex names "ChatGPT" in "Allow ChatGPT to run this command?": the card's model. */
   actor?: string;
+  onOpenPlan?: (text: string) => void;
 }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [content, setContent] = useState("{}");
@@ -339,12 +340,15 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
   const supported = !typed || ["command", "file_change", "permissions", "questions", "mcp_form", "mcp_url"].includes(kind || "");
   const nativeCommand = kind === "command";
   if (approval.source === "ao" && approval.kind === "question") return <AoQuestion approval={approval} busy={busy} approve={approve} />;
-  // Claude Code finished planning: show the plan and every way it offered to go on.
   if (approval.source === "ao" && approval.plan) {
+    const plan = approval.plan;
     const when = waited(approval.since);
     return <div className="ao-msg ao-msg-approval ao-msg-plan">
-      <span className="ao-msg-meta">Plan ready · {approval.tool || "ExitPlanMode"}{when ? ` · asked ${when}` : ""}</span>
-      <div className="ao-plan"><ChatMarkdown text={approval.plan} /></div>
+      <span className="ao-msg-meta">Plan ready for review{when ? ` · asked ${when}` : ""}</span>
+      {onOpenPlan ? <div className="ao-plan-preview">
+        <span className="ao-plan-summary">{plan.trim().slice(0, 360)}</span>
+        <button type="button" className="button-secondary" onClick={() => onOpenPlan(plan)}>Open plan</button>
+      </div> : <div className="ao-plan"><ChatMarkdown text={plan} /></div>}
       <p className="ao-hint">The agent waits up to 30 minutes for your answer. Messages you send now arrive after it.</p>
       <fieldset disabled={busy}><div className="ao-msg-actions">
         {(approval.decisions ?? []).map((decision) => <button key={decision.id} type="button"
