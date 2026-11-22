@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createChatHistory, CHAT_HISTORY_TOOL_DEFS, cutMiddle, userMessages } = require("../electron/chat-history.cjs");
+const { createChatHistory, CHAT_HISTORY_TOOL_DEFS, cutMiddle, retainedChatRequest, userMessages } = require("../electron/chat-history.cjs");
 
 const node = (id, fields = {}) => ({ id, role: "planner", state: "finished", x: 0, receipt: { answer: `answer ${id}` }, ...fields });
 /** Two projects: ws1 with a chat the caller (AO session ao-self) is in and one other, ws2 with a private chat. */
@@ -35,7 +35,10 @@ function fixture(projects = data()) {
   const reads = [];
   const history = createChatHistory({
     workspaces: async () => [{ id: "ws1", name: "app" }, { id: "ws2", path: "C:\\work\\secret-repo" }],
-    runs: async (id) => { reads.push(["runs", id]); return { ok: true, runs: projects[id]?.runs ?? [], task_lifecycle: projects[id]?.task_lifecycle ?? [] }; },
+    runs: async (id, taskId) => {
+      reads.push(["runs", id, taskId ?? null]);
+      return { ok: true, runs: (projects[id]?.runs ?? []).filter(run => !taskId || run.project_id === taskId), task_lifecycle: projects[id]?.task_lifecycle ?? [] };
+    },
     board: async (id, taskId) => {
       reads.push(["board", id, taskId ?? null]);
       const tasks = projects[id]?.tasks ?? [];
@@ -102,6 +105,67 @@ test("chat_read returns the chat's turns oldest first: the user's messages with 
   ]);
   assert.equal((await history.call({ session: "ao-self", workspaceId: "ws1", name: "chat_read", args: { chat_id: "missing" }, permit: allow })).isError, true);
   assert.equal((await history.call({ session: "ao-self", workspaceId: "ws1", name: "chat_read", args: {}, permit: allow })).isError, true);
+});
+
+test("direct chat read can reach an older chat without a project-wide listing", async () => {
+  const { history, reads } = fixture();
+  const result = parse(await history.call({ workspaceId: "ws1", name: "chat_read", args: { chat_id: "t-old" } }));
+  assert.equal(result.chat_id, "t-old");
+  assert.equal(result.archived, true);
+  assert.deepEqual(reads, [["runs", "ws1", "t-old"], ["board", "ws1", "t-old"]]);
+});
+
+test("direct session read uses only the named project and still requires its permission", async () => {
+  const projects = data();
+  projects.ws2.runs[0].nodes[0].receipt.thread_id = "ao-private";
+  const { history, reads } = fixture(projects);
+  const args = { session_id: "ao-private", project: "ws2" };
+  const refusal = { isError: true, content: [{ type: "text", text: "Other project not approved." }] };
+  const call = (args, permit) => history.call({ workspaceId: "ws1", name: "chat_read", args, permit });
+  assert.equal(await call(args, async () => refusal), refusal);
+  assert.deepEqual(reads, [], "approval precedes the session ID lookup");
+  assert.equal((await call({ session_id: "ao-private", chat_id: "t-private", project: "ws2" }, allow)).isError, true);
+  assert.deepEqual(reads, [], "ambiguous input cannot start a lookup");
+  const result = parse(await call(args, async projects => { assert.deepEqual(projects.map(p => p.id), ["ws2"]); return true; }));
+  assert.equal(result.chat_id, "t-private");
+  assert.equal(result.turns[0].messages[0].text, "private question");
+  assert.deepEqual(reads, [["runs", "ws2", null], ["runs", "ws2", "t-private"], ["board", "ws2", "t-private"]]);
+});
+
+test("compacted history does not impersonate the user and the newest real follow-up stays with its own reply", async () => {
+  const runs = ["old-1", "old-2", "current"].map(id => ({ id, project_id: "t", nodes: [node(id)] }));
+  const { history } = fixture({ ws1: { runs, tasks: [{ id: "t", description:
+    "Summary of the earlier conversation (compacted 2026-10-22 09:30 UTC):\nBACKGROUND ONLY\n\nFollow-up (2026-10-22 10:00 UTC):\nrun the actual check" }] } });
+  const out = parse(await history.call({ workspaceId: "ws1", name: "chat_read", args: { chat_id: "t" } }));
+  assert.equal(out.earlier_messages_summarized, true);
+  assert.deepEqual(out.turns.map(turn => turn.messages.find(message => message.role === "user")?.text ?? null), [null, null, "run the actual check"]);
+  assert.equal(out.turns.at(-1).messages.at(-1).text, "answer current");
+});
+
+test("recovery uses the retained request for the original run, never the compacted summary or a later pending message", () => {
+  const runs = [
+    { id: "old", nodes: [node("old")] },
+    { id: "answer", nodes: [node("answer", { receipt: { started_at_ms: Date.parse("2026-10-22T10:00:30Z") } })] },
+    { id: "retry", restarts_run_id: "answer", nodes: [node("retry")] },
+  ];
+  const summary = "Summary of the earlier conversation (compacted 2026-10-22 09:30 UTC):\nBACKGROUND ONLY";
+  const text = `${summary}\n\nFollow-up (2026-10-22 10:00 UTC):\nfix the actual defect\n\nFollow-up (2026-10-22 10:01 UTC):\nnot sent yet`;
+  assert.equal(retainedChatRequest(text, runs, "old"), null);
+  assert.equal(retainedChatRequest(text, runs, "missing"), null);
+  assert.deepEqual(retainedChatRequest(text, runs, "retry"), { text: "fix the actual defect", record: text, previous: summary });
+  assert.equal(retainedChatRequest(summary, runs, "retry"), null, "a summary alone never becomes a request");
+});
+
+test("chat_read hides automatic inputs even though recovery can reuse their saved request", async () => {
+  const originated = "Summary of the earlier conversation (compacted 2026-10-22 09:30 UTC):\nold notes";
+  const description = `${originated}\n\nFollow-up (automatic 2026-10-22 10:00 UTC):\nThe goal still needs its live check.\n\n↳ Steer (2026-10-22 10:01 UTC): use the trusted fixture\n\nFollow-up (2026-10-22 11:00 UTC):\ncheck the exact result`;
+  const runs = ["old", "auto", "manual"].map(id => ({ id, project_id: "t", nodes: [node(id)] }));
+  const { history } = fixture({ ws1: { runs, tasks: [{ id: "t", description }] } });
+  const out = parse(await history.call({ workspaceId: "ws1", name: "chat_read", args: { chat_id: "t" } }));
+  assert.deepEqual(out.turns.map(turn => turn.messages.find(message => message.role === "user")?.text ?? null),
+    [null, "[steer at 2026-10-22 10:01 UTC] use the trusted fixture", "check the exact result"]);
+  assert.match(retainedChatRequest(description, runs, "auto").text, /^The goal still needs its live check\./);
+  assert.equal(retainedChatRequest(description, runs, "manual").text, "check the exact result");
 });
 
 test("restart and replacement replies do not consume the next user message or count as new requests", async (t) => {

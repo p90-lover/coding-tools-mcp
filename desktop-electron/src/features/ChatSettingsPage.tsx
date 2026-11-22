@@ -432,7 +432,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
               </Row>
-              <Row label="Allow quota-based reviews" description="Off by default. Turn on to let CPA review approvals using account quota. While off, eligible shell requests can use native Codex Guardian; anything it cannot review waits for you. Approve for me and Let the model judge do not turn CPA reviews on.">
+              <Row label="Allow quota-based reviews" description="Off by default. In Approve for me, eligible shell requests use native Codex Guardian and wait for you if it cannot decide. Turn on to let CPA review other requests using account quota. Approve for me and Let the model judge do not turn CPA reviews on.">
                 <Toggle label="Allow quota-based reviews" checked={chat?.meteredReviews === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { meteredReviews: next })} />
               </Row>
