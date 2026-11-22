@@ -2011,16 +2011,29 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
   maps.inputs ??= new Map();
   let blankKey = options.blankKey, taskId = options.taskId ?? "task-a";
   const key = () => state.taskId || blankKey;
-  const initial = name => rendererCallback("AgentOrchestratorChat.tsx", name, { ...maps, draftKey: taskId || blankKey, useState: value => [typeof value === "function" ? value() : value, () => {}] })[0];
-  const state = { taskId, draft: sharedMaps ? initial("[draft, setDraft]") : "A queued message", attachments: sharedMaps ? initial("[attachments, setAttachments]") : attachments, annotations: sharedMaps ? initial("[annotations, setAnnotations]") : [], card: null }, calls = [], waiting = [];
-  const alive = { current: true }, draftOwner = { current: key() }, draftRegistration = { current: null }, composing = { current: { taskId, cacheKey: key(), draft: state.draft, snapshot: maps.CHAT_DRAFTS.get(key())?.snapshot ?? { text: state.draft }, attachments: state.attachments, annotations: state.annotations, queuedRecovery: [] } };
-  let defer = false, deferDraft = false, replayUpdaters = false, lateSetters = 0, releaseDraft;
-  const set = key => next => { if (!alive.current) lateSetters++; const apply = () => { if (replayUpdaters && typeof next === "function") next(state[key]); state[key] = typeof next === "function" ? next(state[key]) : next; }; if (defer || (deferDraft && key !== "taskId")) waiting.push(apply); else apply(); };
+  const initial = sharedMaps ? rendererCallback("AgentOrchestratorChat.tsx", "[composerDraft, setComposerDraft]", {
+    ...maps, draftKey: taskId || blankKey, useState: initialize => [initialize()],
+  })[0] : { snapshot: { text: "A queued message" }, attachments, annotations: [] };
+  const state = { taskId, ...initial, get draft() { return this.snapshot.text; }, card: null }, calls = [], waiting = [];
+  const alive = { current: true }, draftOwner = { current: key() }, draftRegistration = { current: null }, composing = { current: { taskId, cacheKey: key(), draft: state.draft, snapshot: state.snapshot, attachments: state.attachments, annotations: state.annotations, queuedRecovery: [] } };
+  let defer = false, deferDraft = false, lateSetters = 0, releaseDraft;
+  const update = (apply, deferred) => {
+    if (!alive.current) lateSetters++;
+    if (defer || deferred) waiting.push(apply); else apply();
+  };
+  const set = key => next => update(() => { state[key] = typeof next === "function" ? next(state[key]) : next; }, deferDraft && key !== "taskId");
+  const setComposerDraft = next => update(() => {
+    const { snapshot, attachments, annotations } = state;
+    Object.assign(state, typeof next === "function" ? next({ snapshot, attachments, annotations }) : next);
+  }, deferDraft);
+  const setters = Object.fromEntries(["setDraft", "setAttachments", "setAnnotations"].map(name => [
+    name, rendererCallback("AgentOrchestratorChat.tsx", name, { setComposerDraft }),
+  ]));
   const draftEntry = rendererCallback("AgentOrchestratorChat.tsx", "draftEntry", maps);
   const giveBackToDraft = rendererCallback("AgentOrchestratorChat.tsx", "giveBackToDraft", { draftEntry, refusalText: rendererCallback("AgentOrchestratorChat.tsx", "refusalText", {}) });
   const helpers = { draftEntry, trimDraftEntry: rendererCallback("AgentOrchestratorChat.tsx", "trimDraftEntry", maps), giveBackToDraft };
-  const globals = () => ({ ...maps, ...helpers, sendsInFlight: { current: 0 }, settleSavedDraft() {}, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, attachments: state.attachments, annotations: state.annotations,
-    setDraft: set("draft"), setAttachments: set("attachments"), setAnnotations: set("annotations"), setAttachmentWork() {}, setAttachNote() {}, setCard: set("card") });
+  const globals = () => ({ ...maps, ...helpers, sendsInFlight: { current: 0 }, settleSavedDraft() {}, releaseDraft, composing, draftOwner, draftRegistration, alive, queueRecoveries: composing.current.queuedRecovery ?? [], selectedTaskId: state.taskId, draftKey: key(), draft: state.draft, snapshot: state.snapshot, attachments: state.attachments, annotations: state.annotations,
+    ...setters, setComposerDraft, setAttachmentWork() {}, setAttachNote() {}, setCard: set("card") });
   releaseDraft = rendererCallback("AgentOrchestratorChat.tsx", "releaseDraft", globals());
   const source = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8"), tree = ts.createSourceFile("Chat.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   let assignment; const find = node => { if (ts.isExpressionStatement(node) && node.getText(tree).startsWith("composing.current =") && node.getText(tree).includes("draftOwner.current")) assignment ??= node; ts.forEachChild(node, find); }; find(tree);
@@ -2045,8 +2058,7 @@ function queuedComposer(attachments = [], sharedMaps, options = {}) {
     mount() { renderSnapshot(); rendererCallback("AgentOrchestratorChat.tsx", "effect:draftOwner.current !== draftKey", globals())(); renderSnapshot(); },
     defer: value => { defer = value; }, flush: (count = waiting.length) => { for (const apply of waiting.splice(0, count)) apply(); }, lateSetters: () => lateSetters,
     deferDraft: value => { deferDraft = value; },
-    replayUpdaters: value => { replayUpdaters = value; },
-    type(value) { state.draft = value; renderSnapshot(); }, input(value) { set("draft")(value); },
+    type(value) { setters.setDraft(value); renderSnapshot(); }, input: setters.setDraft,
     unmount() { rendererCallback("AgentOrchestratorChat.tsx", "effect:releaseDraft", globals())()(); alive.current = false; },
     send() {
       const reply = delayedReply();

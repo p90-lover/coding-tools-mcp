@@ -1486,7 +1486,9 @@ test("an unsent draft is saved by the app: read back first, saved after each cha
   assert.match(source, /binding\.writer\.pauseForAcceptance\(\)/, "typing waits for the acceptance revision");
   const deliver = source.slice(source.indexOf("const deliver = async"), source.indexOf("const recoverMessage ="));
   assert.ok(deliver.indexOf("await acceptMessage(") < deliver.indexOf('setDraft("")'), "acceptance precedes clearing the composer");
-  assert.match(deliver, /sameAttachmentSnapshot\(composing\.current\.attachments, owner\.attachments, acceptedAttachments\)/, "new attachments are not cleared");
+  assert.match(deliver, /const current = \(\) => fromComposer && here\(\) && composing\.current\.snapshot === owner\.snapshot;/, "a receipt can clear only its own edit");
+  assert.match(source, /attachments: files, snapshot: keepEdit \? current\.snapshot : \{ text: current\.snapshot\.text \}/,
+    "only storage metadata updates can keep the same edit when attachments change");
   assert.match(deliver, /if \(fromComposer\) settleSavedDraft\(owner, handedOff\);/);
   const submit = source.slice(source.indexOf("const submit = async"), source.indexOf("const queueOf ="));
   assert.match(submit, /const accepted = await acceptMessage\(text, "queue", owner, true\);[\s\S]*?await enqueue\(selectedTaskId, \{[^\n]+inputId: accepted\.inputId/,
