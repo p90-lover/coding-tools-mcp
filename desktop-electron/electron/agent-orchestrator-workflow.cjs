@@ -4854,6 +4854,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const { modelJudges, meteredReviews } = chatPreferences.get();
     return modelJudges && meteredReviews;
   };
+  // Native Guardian's allows, reused for a while: each review spends the ChatGPT plan's quota (about
+  // 0.5% of a Plus 5-hour window per 100, measured 2026-11-23), and an agent asks for the same
+  // command again in the same chat (parallel calls, a check rerun after an edit). That day 9 of
+  // 640 Guardian reviews repeated an earlier request exactly, 6 of them within 10 minutes, mostly
+  // in the same turn. The key is everything Guardian saw or that made the request eligible: the
+  // chat, the user's request (a new message is reviewed afresh), the folder, the shell, the exact
+  // command and its working folder. Only an allow is kept, never a deny or an unclear answer, and the request
+  // must still be the same pending one before a kept allow answers it. An allow older than
+  // GUARDIAN_ALLOW_MS is not reused: one repeat 1.9 hours later was refused.
+  const GUARDIAN_ALLOW_MS = 10 * 60_000;
+  const guardianAllows = new Map(); // sha256(chat, folder, task, request) -> { at, reason }
+  const guardianAllowFields = ["source", "kind", "tool", "command", "cwd", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions"];
+  const guardianAllowKey = (approval, folder, task) => typeof approval.thread_id === "string" && approval.thread_id
+    ? createHash("sha256").update(JSON.stringify([approval.thread_id, folder, task, ...guardianAllowFields.map(field => approval[field] ?? null)])).digest("hex")
+    : null;
   const guardianJudgeScope = (approver, approval) => !approver.autobot && approver.role !== "approver" && approver.settings?.auto_decide === true
     && ["allow_once", "reject_once"].every(kind => approval.decisions?.some(option => option.kind === kind))
     && (!Array.isArray(approval.request?.availableDecisions) || ["accept", "decline"].every(decision => approval.request.availableDecisions.includes(decision)));
@@ -4867,6 +4882,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     await verifyCurrent();
     if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
+    const allowKey = guardianAllowKey(approval, folder, task);
+    const kept = allowKey ? guardianAllows.get(allowKey) : null;
+    if (kept && now() - kept.at < GUARDIAN_ALLOW_MS) {
+      if (!await samePendingApproval(approval, verifyCurrent)) {
+        return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
+      }
+      return { action: "allow", reason: kept.reason, actor: "guardian", reason_code: "native_guardian", guardianCached: true };
+    }
+    if (kept) guardianAllows.delete(allowKey);
     const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
     if (!outcome || !["allow", "deny"].includes(outcome.action)) {
       const result = manual(publicText(outcome?.reason || blocked.reason, 300));
@@ -4878,7 +4902,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!await samePendingApproval(approval, verifyCurrent)) {
       return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
     }
-    return { ...outcome, reason: publicText(outcome.reason, 300) };
+    const reason = publicText(outcome.reason, 300);
+    if (outcome.action === "allow" && allowKey) {
+      guardianAllows.delete(allowKey);
+      guardianAllows.set(allowKey, { at: now(), reason });
+      if (guardianAllows.size > 200) guardianAllows.delete(guardianAllows.keys().next().value);
+    }
+    return { ...outcome, reason };
   }
 
   async function askApproverSteps(input, clock = stepClock(now)) {
@@ -4894,7 +4924,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       reason: "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.",
     });
     check();
-    logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true });
+    logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true,
+      ...(verdict.guardianCached ? { cached: true } : {}) });
     if (verdict.action !== "ask") return { ...verdict, guardianSeal: guardianApprovalSeal(approval) };
     if (!judgeScope) return verdict;
     const unsafe = verdict.guardianAssessment === "high-risk";
@@ -5319,7 +5350,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         // The same request twice at once (an agent's parallel calls) is reviewed once: the second
-        // waits for a later pass, which finds the first one's verdict (reviewVerdicts).
+        // waits for a later pass, which finds the first one's verdict (reviewVerdicts, or Guardian's
+        // kept allow in guardianAllows).
         const request = describeRequest(approval);
         if (jobs.some(job => job.request === request) || [...screening.values()].some(job => job.request === request)) continue;
         if (screening.size + jobs.length >= REVIEW_CONCURRENCY) break;
