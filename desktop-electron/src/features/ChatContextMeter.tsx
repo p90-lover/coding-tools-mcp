@@ -3,7 +3,7 @@ import { getCodingToolsClient } from "../api/client";
 import { cpaProviderOf, providerName } from "./AgentOrchestratorRoleEditor";
 import { FloatingLayer } from "./ChatMenu";
 import { contextFraction, tokensShort } from "./ao-chat";
-import { agoLabel, costLabel, isClineModel, readCpaUsage, servingAccounts, type CpaUsage, type CpaUsageAccount } from "./cpa-usage";
+import { agoLabel, costLabel, isClineModel, readCpaUsage, servingAccounts, type ClineKeyState, type CpaUsage, type CpaUsageAccount } from "./cpa-usage";
 import { useSurfaceHidden } from "./page-visibility";
 
 type Usage = {
@@ -36,19 +36,31 @@ export function currentContext(sessions: Record<string, ChatContextSnapshot> | u
 
 type QuotaWindow = { usedPercent: number; resetsAt: number | null; windowSeconds: number | null };
 type QuotaCredits = { balance: string | null; hasCredits: boolean; unlimited: boolean; overageReached: boolean };
+/** Whether CPA can route to an account now (electron/cpa-quota.cjs). */
+export type CpaAccountState = "ready" | "limited" | "disabled" | "signed-out" | "error";
 export type CpaQuotaAccount = {
-  id: string; label: string; plan: string | null; disabled: boolean; paused: boolean;
-  session: QuotaWindow | null; week: QuotaWindow | null; credits?: QuotaCredits | null; checkedAt: number | null; error: string | null;
+  id: string; provider?: string; label: string; plan: string | null; state?: CpaAccountState; disabled: boolean; paused: boolean;
+  resumesAt?: number | null; session: QuotaWindow | null; week: QuotaWindow | null; credits?: QuotaCredits | null;
+  checkedAt: number | null; error: string | null;
 };
 type CpaQuota = { available: boolean; reason?: string; accounts?: CpaQuotaAccount[] };
 const POLL_MS = 4_000;
-const QUOTA_POLL_MS = 60_000;
+const QUOTA_POLL_MS = 30_000;
 const DETAIL_POLL_MS = 10_000;
 const USAGE_RANGE = "7d";
-const PANEL_WIDTH = 360;
+const PANEL_WIDTH = 340;
 const RING = 18;
+const MAX_CHIPS = 6;
 const modelName = (model?: string) => model?.slice(model.lastIndexOf("/") + 1) ?? "";
 const tone = (fraction: number | null) => fraction === null ? "unknown" : fraction >= 0.85 ? "high" : fraction >= 0.6 ? "mid" : "low";
+
+/** The sign-in accounts with plan limits behind a CPA provider: CPA lists Codex models as OpenAI's and Claude's as Anthropic's. */
+const PLAN_PROVIDERS: Record<string, "codex" | "claude"> = { codex: "codex", openai: "codex", claude: "claude", anthropic: "claude" };
+export const planProviderOf = (provider: string | null | undefined) => PLAN_PROVIDERS[provider?.toLowerCase() ?? ""] ?? null;
+export const accountState = (account: CpaQuotaAccount): CpaAccountState => account.state
+  ?? (account.disabled ? "disabled" : account.error ? "error" : account.paused ? "limited" : "ready");
+const STATE_TEXT: Record<CpaAccountState, string> = { ready: "Ready", limited: "At limit", disabled: "Disabled", "signed-out": "Signed out", error: "Unavailable" };
+const KEY_STATE: Record<ClineKeyState, CpaAccountState> = { ok: "ready", unused: "ready", limited: "limited", disabled: "disabled", "signed-out": "signed-out", error: "error" };
 
 export function resetLabel(at: number | null, now = Date.now()): string {
   if (!at || !Number.isFinite(at) || at <= now) return "";
@@ -58,21 +70,49 @@ export function resetLabel(at: number | null, now = Date.now()): string {
     ? `Resets ${time}` : `Resets ${when.toLocaleDateString(undefined, { month: "short", day: "numeric" })}, ${time}`;
 }
 
+/** "45m", "2h 15m", "Fri 9 AM" or "Oct 21": when a limit resets, short enough to sit beside its meter. */
+export function resetShort(at: number | null, now = Date.now()): string {
+  if (!at || !Number.isFinite(at) || at <= now) return "";
+  const minutes = Math.ceil((at - now) / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 24 * 60) return minutes % 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes / 60}h`;
+  const when = new Date(at);
+  return minutes < 6 * 24 * 60
+    ? `${when.toLocaleDateString(undefined, { weekday: "short" })} ${when.toLocaleTimeString(undefined, { hour: "numeric" })}`
+    : when.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 function Bar({ percent, label }: { percent: number; label: string }) {
   const value = Math.max(0, Math.min(100, percent));
   return <div className={`cx-ctx-bar is-${tone(value / 100)}`} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={value}>
     <span style={{ width: `${value}%` }} />
   </div>;
 }
-function LimitRow({ name, used, resetsAt }: { name: string; used: number; resetsAt: number | null }) {
+/** One limit on one line: name, bar, percent used and when it resets (the full time on hover). */
+function Limit({ name, short, used, resetsAt, now }: { name: string; short: string; used: number; resetsAt: number | null; now: number }) {
   const percent = Math.max(0, Math.min(100, Math.round(used)));
-  const resets = resetLabel(resetsAt);
-  return <div className="cx-ctx-limit" title={resets || undefined}>
-    <div><span>{name}</span><b>{percent}% <em>used</em></b></div>
+  return <div className="cx-ctx-limit" title={resetLabel(resetsAt, now) || undefined}>
+    <span>{short}</span>
     <Bar percent={percent} label={`${name} quota used`} />
-    {resets ? <small>{resets}</small> : null}
+    <b>{percent}%</b>
+    <small>{resetShort(resetsAt, now)}</small>
   </div>;
 }
+
+type Chip = { id: string; label: string; state: CpaAccountState; title: string };
+/** The routing pool: a dot per account or key in its state; picking an account shows its limits. */
+function Chips({ label, chips, selected, onSelect }: { label: string; chips: Chip[]; selected?: string; onSelect?: (id: string) => void }) {
+  const shown = chips.slice(0, MAX_CHIPS);
+  const rest = chips.slice(MAX_CHIPS);
+  return <div className="cx-ctx-chips" role="group" aria-label={label}>
+    {shown.map((chip) => onSelect
+      ? <button key={chip.id} type="button" className={`is-${chip.state}`} aria-pressed={chip.id === selected} title={chip.title}
+        onClick={() => onSelect(chip.id)}><i />{chip.label}</button>
+      : <span key={chip.id} className={`is-${chip.state}`} title={chip.title}><i />{chip.label}</span>)}
+    {rest.length ? <span className="is-more" title={rest.map((chip) => chip.title).join("\n")}>+{rest.length}</span> : null}
+  </div>;
+}
+const shortName = (label: string) => (label.includes("@") ? label.slice(0, label.indexOf("@")) : label) || label;
 
 export function contextGrid(categories: { id: string; tokens: number }[], window: number): string[] {
   const cells: string[] = [];
@@ -103,15 +143,17 @@ function effectiveUsage(snapshot: ChatContextSnapshot | null, launchedWindow?: n
   return reported && launched && reported.contextWindow !== launched ? { ...reported, contextWindow: launched } : reported;
 }
 
+const amount = (value: string) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+
 type PanelProps = {
   sessionId?: string; agentLabel?: string; model?: string; launchedWindow?: number; nextWindow?: number;
   snapshot: ChatContextSnapshot | null; detail: ContextBreakdown | null; quota: CpaQuota | null;
   cpaUsage: CpaUsage | null; daySpend: CpaUsage | null; monthSpend: CpaUsage | null;
-  canCompact: boolean; compacting?: boolean; onCompact: () => void;
+  canCompact: boolean; compacting?: boolean; onCompact: () => void; now?: number;
 };
 
 export function ContextPanelContent({ sessionId, agentLabel, model, launchedWindow, nextWindow, snapshot, detail, quota,
-  cpaUsage, daySpend, monthSpend, canCompact, compacting, onCompact }: PanelProps) {
+  cpaUsage, daySpend, monthSpend, canCompact, compacting, onCompact, now = Date.now() }: PanelProps) {
   const [accountId, setAccountId] = useState("");
   const usage = effectiveUsage(snapshot, launchedWindow);
   const scale = usage?.contextWindow ? Math.max(usage.contextWindow, usage.contextUsed ?? 0, detail?.used ?? 0) : null;
@@ -120,75 +162,91 @@ export function ContextPanelContent({ sessionId, agentLabel, model, launchedWind
   const catalogProvider = cpaProviderOf(model)?.toLowerCase() ?? null;
   const serving = model?.startsWith("cpa/") && base?.available ? servingAccounts(base.accounts ?? [], model, catalogProvider) : [];
   const provider = catalogProvider ?? serving.find((account) => account.provider)?.provider ?? null;
-  const codex = provider === "codex";
+  const planProvider = planProviderOf(provider);
   const cline = isClineModel(provider);
-  const accounts = codex && quota?.available ? quota.accounts ?? [] : [];
-  const account = accounts.find((item) => item.id === accountId) ?? accounts.find((item) => !item.disabled && !item.error) ?? accounts[0];
+  const accounts = planProvider && quota?.available ? (quota.accounts ?? []).filter((item) => (item.provider ?? "codex") === planProvider) : [];
+  const ready = accounts.filter((item) => accountState(item) === "ready");
+  const account = accounts.find((item) => item.id === accountId) ?? ready[0] ?? accounts[0];
+  // The harness's own reading (Codex's app-server reports the limits of the account it signed in with).
   const limits = snapshot?.rateLimits;
-  const limitRows = [
-    { name: "5 hours", used: limits?.primaryUsedPercent, resets: limits?.primaryResetsInSeconds },
-    { name: "Weekly", used: limits?.secondaryUsedPercent, resets: limits?.secondaryResetsInSeconds },
+  const reported = [
+    { name: "5 hours", short: "5h", used: limits?.primaryUsedPercent, resets: limits?.primaryResetsInSeconds },
+    { name: "Weekly", short: "Week", used: limits?.secondaryUsedPercent, resets: limits?.secondaryResetsInSeconds },
   ].filter((row) => typeof row.used === "number" && row.used >= 0);
-  const plan = limitRows.length ? limits?.planLabel || snapshot?.planLabel : account?.plan || snapshot?.planLabel;
-  const credits = (cpaUsage?.apiCredits ?? []).filter((item) => provider && [item.provider, item.service].some((name) => name.toLowerCase() === provider));
+  const planView = reported.length > 0 || (planProvider !== null && (!quota || !quota.available || accounts.length > 0));
+  const plan = reported.length ? limits?.planLabel || snapshot?.planLabel : account?.plan || snapshot?.planLabel;
+  const name = planView && planProvider && accounts.length ? providerName(planProvider) : provider ? providerName(provider) : agentLabel || "Provider";
+  const credits = (cpaUsage?.apiCredits ?? []).filter((item) => provider && [item.provider, item.service].some((value) => value.toLowerCase() === provider));
   const clineQuota = cpaUsage?.accounts?.find((item) => item.quota?.kind === "cline")?.quota;
   const keys = clineQuota?.kind === "cline" ? clineQuota.accounts : [];
   const compactedAt = snapshot?.compactedAt || detail?.compactedAt;
   const next = nextWindow && nextWindow !== usage?.contextWindow ? nextWindow : null;
   const busy = /busy|running|working/i.test(snapshot?.controller ?? "");
   const balance = account?.credits;
-  const balanceAmount = balance?.unlimited ? "Unlimited" : balance?.balance !== null && balance?.balance !== undefined
-    && Number.isFinite(Number(balance.balance)) ? Number(balance.balance).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "Unavailable";
+  const soonest = Math.min(...accounts.filter((item) => accountState(item) === "limited" && item.resumesAt).map((item) => item.resumesAt!));
+  const accountChips: Chip[] = accounts.map((item) => {
+    const state = accountState(item);
+    const back = state === "limited" && item.resumesAt ? resetLabel(item.resumesAt, now).replace(/^Resets/, "Back") : "";
+    return { id: item.id, label: shortName(item.label), state, title: [item.label, item.plan, back || STATE_TEXT[state], item.error].filter(Boolean).join(" · ") };
+  });
+  // The pool is what CPA can route to: a switched-off account or key keeps its chip but isn't counted.
+  const enabled = accounts.filter((item) => accountState(item) !== "disabled").length;
+  const enabledKeys = keys.filter((key) => key.enabled && key.state !== "disabled");
+  const pool = cline ? (enabledKeys.length ? `${enabledKeys.filter((key) => KEY_STATE[key.state] === "ready").length}/${enabledKeys.length} keys ready` : null)
+    : !reported.length && enabled > 1 ? `${ready.length}/${enabled} ready` : null;
+  const showDetails = Boolean(usage || (detail && scale) || serving.length || snapshot?.mcpServers.length || next || snapshot?.carriedFrom);
   return <>
     <header className="cx-ctx-head">
-      <div><strong>Context & usage</strong><small title={model}>{modelName(model) || agentLabel || "No model selected"}</small></div>
+      <strong title={model}>{modelName(model) || agentLabel || "No model selected"}</strong>
       {snapshot?.controller ? <span className={`cx-ctx-state is-${busy ? "busy" : "idle"}`} title={snapshot.controller}>{busy ? "Working" : "Idle"}</span> : null}
     </header>
-    <section className="cx-ctx-provider" aria-label="Current provider usage">
-      <div className="cx-ctx-provider-head"><strong>{provider ? providerName(provider) : agentLabel || "Current provider"}</strong>
-        {plan ? <span className="cx-ctx-plan">{plan}</span> : null}</div>
-      {!limitRows.length && accounts.length > 1 ? <select aria-label="Quota account" value={account?.id ?? ""} onChange={(event) => setAccountId(event.target.value)}>
-        {accounts.map((item) => <option key={item.id} value={item.id}>{item.label}{item.disabled ? " · disabled" : item.paused ? " · at limit" : ""}</option>)}
-      </select> : !limitRows.length && account ? <small className="cx-ctx-account-label">{account.label}</small> : null}
-      {limitRows.length ? limitRows.map((row) => <LimitRow key={row.name} name={row.name} used={row.used!}
-        resetsAt={row.resets && row.resets > 0 ? Date.now() + row.resets * 1000 : null} />) : codex ? <>
-        {account?.session ? <LimitRow name="5 hours" used={account.session.usedPercent} resetsAt={account.session.resetsAt} /> : null}
-        {account?.week ? <LimitRow name="Weekly" used={account.week.usedPercent} resetsAt={account.week.resetsAt} /> : null}
-        {!account?.session && !account?.week ? <p className="cx-ctx-meta">{account?.error || quota?.reason || (quota ? "Quota not reported" : "Checking limits…")}</p> : null}
-        {balance ? <div className="cx-ctx-balance"><span>Credits</span><b>{balanceAmount}</b>
-          {balance.overageReached ? <small>Overage limit reached</small> : null}</div> : null}
-      </> : cline ? <div className="cx-ctx-balance"><span>Keys ready</span><b>{keys.filter((key) => key.enabled && !["limited", "disabled", "signed-out", "error"].includes(key.state)).length} / {keys.length}</b>
-        <small>Cline does not report a quota balance</small></div> : !limitRows.length ? <>
-        {credits.length ? credits.map((item) => <div className="cx-ctx-balance" key={item.id} title={item.reason || (item.kind === "key-budget" ? "This key's remaining spending allowance, not account credits" : "Reported by the provider")}>
+    {model?.startsWith("cpa/") || reported.length ? <section className="cx-ctx-provider" aria-label="Current provider usage">
+      <div className="cx-ctx-provider-head">
+        <strong>{name}</strong>
+        {plan ? <span className="cx-ctx-plan">{plan}</span> : null}
+        {pool ? <small className={`cx-ctx-pool${!cline && !ready.length ? " is-out" : ""}`} title="Accounts CPA can route this model's requests to now">{pool}</small> : null}
+      </div>
+      {planView ? <>
+        {reported.length ? reported.map((row) => <Limit key={row.name} name={row.name} short={row.short} used={row.used!} now={now}
+          resetsAt={row.resets && row.resets > 0 ? now + row.resets * 1000 : null} />) : <>
+          {account?.session ? <Limit name="5 hours" short="5h" used={account.session.usedPercent} resetsAt={account.session.resetsAt} now={now} /> : null}
+          {account?.week ? <Limit name="Weekly" short="Week" used={account.week.usedPercent} resetsAt={account.week.resetsAt} now={now} /> : null}
+          {!account?.session && !account?.week ? <p className="cx-ctx-meta">{!quota ? "Checking limits…" : !quota.available ? quota.reason || "Limits unavailable"
+            : account?.error || "Limits show after this account's next reply"}</p> : null}
+          {accounts.length && !ready.length ? <p className="cx-ctx-meta is-warn">{Number.isFinite(soonest)
+            ? `All accounts at limit · first back in ${resetShort(soonest, now)}` : "No account can take requests"}</p> : null}
+          {balance && (balance.unlimited || balance.balance !== null) ? <div className="cx-ctx-row" title={balance.overageReached ? "Overage limit reached" : "Pays for requests once a limit is full"}>
+            <span>Credits</span><b>{balance.unlimited ? "Unlimited" : amount(balance.balance!)}</b></div> : null}
+          {accountChips.length ? <Chips label="Quota account" chips={accountChips} selected={account?.id} onSelect={setAccountId} /> : null}
+        </>}
+      </> : cline ? (keys.length ? <Chips label="Cline keys" chips={keys.map((key) => ({ id: key.name, label: key.name, state: key.enabled ? KEY_STATE[key.state] : "disabled",
+        title: `${key.name} · ${key.active ? "In use" : key.state}${key.lastError ? ` · ${key.lastError}` : ""}` }))} />
+        : <p className="cx-ctx-meta">Cline reports no quota</p>) : <>
+        {credits.length ? credits.map((item) => <div className="cx-ctx-row" key={item.id} title={item.reason || (item.kind === "key-budget" ? "This key's remaining spending allowance, not account credits" : "Reported by the provider")}>
           <span>{item.kind === "key-budget" ? "Key budget" : "Credits"}{credits.length > 1 ? ` · ${item.label}` : ""}</span>
           <b>{item.balances.length ? item.balances.map((value) => `${Number(value.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${value.currency}`).join(" · ") : "Unavailable"}</b>
-        </div>) : <div className="cx-ctx-balance" title="This provider has no supported balance endpoint available to this API key. Estimated spend is not a credit balance."><span>Credits</span><b className="is-muted">Not exposed</b></div>}
-        {serving.length ? <div className="cx-ctx-inline" title="Estimated at API list prices, not a bill or credit balance"><span>Today · estimated spend</span><b>{spendTotal(daySpend, serving)}</b></div> : null}
-      </> : null}
-    </section>
+        </div>) : <div className="cx-ctx-row" title="This provider has no balance endpoint this API key can read. Estimated spend is not a credit balance."><span>Credits</span><b className="is-muted">Not exposed</b></div>}
+        {serving.length ? <div className="cx-ctx-row" title="Estimated at API list prices, not a bill or credit balance"><span>Today · est.</span><b>{spendTotal(daySpend, serving)}</b></div> : null}
+      </>}
+    </section> : null}
     {usage ? <section className="cx-ctx-context" aria-label="Context window">
-      <div className="cx-ctx-inline"><span>Context</span><b>{fraction === null ? tokensShort(usage.contextUsed) : `${Math.round(fraction * 100)}% used`}</b></div>
+      <div className="cx-ctx-row"><span>Context</span><b>{fraction === null ? tokensShort(usage.contextUsed) : `${Math.round(fraction * 100)}% used`}</b></div>
       {fraction !== null ? <Bar percent={fraction * 100} label="Context window used" /> : null}
-      <small>{tokensShort(usage.contextUsed)}{usage.contextWindow ? ` / ${tokensShort(usage.contextWindow)} tokens` : " tokens"}</small>
-      {next ? <small>Next run · {tokensShort(next)} tokens</small> : null}
-      {usage.cost !== null ? <div className="cx-ctx-inline"><span>This chat</span><b>{usage.currency && usage.currency !== "USD" ? `${usage.cost.toFixed(2)} ${usage.currency}` : `$${usage.cost.toFixed(2)}`}</b></div> : null}
+      <div className="cx-ctx-sub"><span>{tokensShort(usage.contextUsed)}{usage.contextWindow ? ` / ${tokensShort(usage.contextWindow)}` : ""} tokens</span>
+        {usage.cost !== null ? <span title="This chat's cost as the agent reported it">{usage.currency && usage.currency !== "USD" ? `${usage.cost.toFixed(2)} ${usage.currency}` : `$${usage.cost.toFixed(2)}`}</span> : null}</div>
     </section> : <p className="cx-ctx-meta">{sessionId ? "Context not reported yet" : "No agent yet"}</p>}
-    <details className="cx-ctx-details"><summary>Context details</summary>
+    {showDetails ? <details className="cx-ctx-details"><summary>Details</summary>
       {snapshot?.carriedFrom ? <p className="cx-ctx-meta">Last reading from the previous session.</p> : null}
-      {detail && scale ? <dl className="cx-ctx-spend" title={`Estimated from ${detail.counts.messages} messages and ${detail.counts.toolCalls} tool calls${detail.sinceCompaction ? " since compaction" : ""}`}>
-        {detail.categories.map((part) => <span key={part.id} style={{ display: "contents" }}><dt>{part.label}</dt><dd>{tokensShort(part.tokens)}</dd></span>)}
-        <dt>Free space</dt><dd>{tokensShort(Math.max(0, scale - detail.used))}</dd>
-      </dl> : null}
-      {usage ? <dl className="cx-ctx-spend"><dt>Input</dt><dd>{tokensShort(usage.inputTokens)}</dd><dt>Cached</dt><dd>{tokensShort(usage.cachedTokens)}</dd><dt>Output</dt><dd>{tokensShort(usage.outputTokens)}</dd></dl> : null}
-      {snapshot?.mcpServers.length ? <><p className="cx-ctx-meta">Tool servers · {snapshot.mcpServers.length}</p>
-        <ul className="cx-ctx-servers">{snapshot.mcpServers.map((server) => <li key={server.name} title={server.status}>{server.name}</li>)}</ul></> : null}
-    </details>
-    {serving.length ? <details className="cx-ctx-details"><summary>Provider spend <small>{serving.length} {serving.length === 1 ? "account" : "accounts"}</small></summary>
-      <dl className="cx-ctx-spend"><dt>Today</dt><dd>{spendTotal(daySpend, serving)}</dd><dt>7 days</dt><dd>{spendTotal(cpaUsage, serving)}</dd><dt>30 days</dt><dd>{spendTotal(monthSpend, serving)}</dd></dl>
-      <p className="cx-ctx-meta">Estimated at API prices; not remaining credits.</p>
-      {serving.map((item) => <div className="cx-ctx-inline" key={item.id}><span title={item.label}>{item.label}</span><b>{costLabel(item.cost, item.costPartial)}</b></div>)}
+      {detail && scale ? <ul className="cx-ctx-cc-rows" title={`Estimated from ${detail.counts.messages} messages and ${detail.counts.toolCalls} tool calls${detail.sinceCompaction ? " since compaction" : ""}`}>
+        {[...detail.categories.filter((part) => part.tokens > 0), { id: "free", label: "Free", tokens: Math.max(0, scale - detail.used) }].map((part) =>
+          <li key={part.id}><i className={`is-${part.id}`} /><span>{part.label}</span><b>{tokensShort(part.tokens)}</b><em>{Math.round((part.tokens / scale) * 100)}%</em></li>)}
+      </ul> : null}
+      {usage ? <dl className="cx-ctx-spend"><dt>Input</dt><dd>{tokensShort(usage.inputTokens)}</dd><dt>Cached</dt><dd>{tokensShort(usage.cachedTokens)}</dd><dt>Output</dt><dd>{tokensShort(usage.outputTokens)}</dd>
+        {next ? <><dt>Next run window</dt><dd>{tokensShort(next)}</dd></> : null}</dl> : null}
+      {serving.length ? <dl className="cx-ctx-spend" title="Estimated at API list prices; not remaining credits">
+        <dt>Spend today</dt><dd>{spendTotal(daySpend, serving)}</dd><dt>7 days</dt><dd>{spendTotal(cpaUsage, serving)}</dd><dt>30 days</dt><dd>{spendTotal(monthSpend, serving)}</dd></dl> : null}
+      {snapshot?.mcpServers.length ? <ul className="cx-ctx-servers" aria-label="Tool servers">{snapshot.mcpServers.map((server) => <li key={server.name} title={server.status}>{server.name}</li>)}</ul> : null}
     </details> : null}
-    {keys.length ? <details className="cx-ctx-details"><summary>Key details</summary>{keys.map((key) => <div className="cx-ctx-inline" key={key.name}><span>{key.name}</span><b>{key.active ? "In use" : key.state}</b></div>)}</details> : null}
     <footer className="cx-ctx-foot"><span title={compactedAt ? new Date(compactedAt).toLocaleString() : undefined}>{compactedAt ? `Compacted ${agoLabel(Date.parse(compactedAt), false)}` : "Not compacted"}</span>
       <button type="button" disabled={!canCompact || compacting} onClick={onCompact}>{compacting ? "Compacting…" : "Compact"}</button></footer>
   </>;
@@ -205,10 +263,12 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
   const [daySpend, setDaySpend] = useState<CpaUsage | null>(null);
   const [monthSpend, setMonthSpend] = useState<CpaUsage | null>(null);
   const cpaProvider = cpaProviderOf(model)?.toLowerCase() ?? null;
-  const onCpaCodex = cpaProvider === "codex";
+  const onCpa = Boolean(model?.startsWith("cpa/"));
+  const onCpaPlan = onCpa && planProviderOf(cpaProvider) !== null;
   const onCpaCline = isClineModel(cpaProvider);
-  const onCpaOther = Boolean(model?.startsWith("cpa/")) && !onCpaCodex && !onCpaCline;
+  const onCpaOther = onCpa && !onCpaPlan && !onCpaCline;
   const [open, setOpen] = useState<{ left: number; bottom: number } | null>(null);
+  const isOpen = Boolean(open);
   const button = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLDivElement>(null);
   const earlierKey = (previousSessionIds ?? []).slice(0, 3).join(",");
@@ -235,11 +295,14 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
     setUsageReport(null);
     setDaySpend(null);
     setMonthSpend(null);
-    if (!onCpaCodex && !onCpaCline && !onCpaOther) return undefined;
+  }, [model]);
+  // Limits, credits and spend only matter while the panel is open: a closed meter asks CPA nothing.
+  useEffect(() => {
+    if (!isOpen || (!onCpaPlan && !onCpaCline && !onCpaOther)) return undefined;
     let live = true;
     const read = () => {
       if (!live || hidden()) return;
-      if (onCpaCodex) void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "cpa_quota", arguments: {} })
+      if (onCpaPlan) void getCodingToolsClient().apps.call({ moduleId: "agent-orchestrator", operation: "cpa_quota", arguments: {} })
         .then((outer) => { if (live) setQuota((outer.result as CpaQuota | undefined) ?? null); }).catch(() => undefined);
       void readCpaUsage(USAGE_RANGE).then((next) => { if (live) setUsageReport(next); }).catch(() => undefined);
       if (onCpaOther) {
@@ -249,12 +312,9 @@ export function ChatContextMeter({ sessionId, previousSessionIds, agentLabel, mo
     };
     read();
     const timer = window.setInterval(read, QUOTA_POLL_MS);
-    const target = button.current;
-    target?.addEventListener("click", read);
-    return () => { live = false; window.clearInterval(timer); target?.removeEventListener("click", read); };
-  }, [onCpaCodex, onCpaCline, onCpaOther, model, hidden]);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [isOpen, onCpaPlan, onCpaCline, onCpaOther, model, hidden]);
   const [detail, setBreakdown] = useState<ContextBreakdown | null>(null);
-  const isOpen = Boolean(open);
   useEffect(() => { setBreakdown(null); }, [sessionId]);
   useEffect(() => {
     if (!isOpen || !sessionId) return undefined;

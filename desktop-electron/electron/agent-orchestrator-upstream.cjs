@@ -2837,8 +2837,8 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       }));
       return { ok: true, sessions };
     }
-    // The context meter's plan usage limits for chats on CPA's Codex accounts: each account's
-    // 5-hour and weekly use, from CPA Helper (cpa-quota.cjs). Read-only; works with AO stopped.
+    // The context meter's plan limits for chats on CPA's Codex and Claude accounts: each account's
+    // 5-hour and weekly use and whether CPA can route to it (cpa-quota.cjs). Read-only; works with AO stopped.
     if (operation === "cpa_quota") {
       if (!cpaQuota) return { ok: true, available: false, reason: "CPA is not set up in this app" };
       return cpaQuota.read();

@@ -4940,6 +4940,8 @@ async function start() {
     authFile: path.join(app.getPath("home"), ".codex", "auth.json"),
     executable: codexCli.executable,
   });
+  // Its long-lived Codex servers and their private profiles go with the app.
+  app.once("will-quit", () => { void nativeGuardianReview.close(); });
   appPluginsService = createAppPlugins({
     codexCli,
     cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
@@ -5478,11 +5480,11 @@ async function start() {
       } },
       // A GPT model's chat gets unified-agent-tools, and its coding-tools lease leaves out its own file tools.
       fileTools: { forSession: (agent, model) => unifiedAgentTools(logger).forSession(agent, model) },
-      // The context meter's plan usage limits for chats on CPA's Codex accounts (CPA Helper).
+      // The context meter's plan limits and routing state of CPA's Codex and Claude sign-in accounts.
       cpaQuota,
       // Each CPA account's token use and estimated cost; Codex accounts carry those limits too.
       cpaUsage: backendBundles.requireModule(backend, "cpa-usage.cjs").createCpaUsage({
-        getConnection: () => externalServicesController?.cpaConnection(), quota: cpaQuota, logger,
+        getConnection: () => externalServicesController?.cpaConnection(), logger,
       }),
       WebContentsView: taggedWebContentsView("Agent Orchestrator view"), dialog, shell, logger,
     });

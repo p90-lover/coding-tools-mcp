@@ -10,8 +10,13 @@ const WEEK = 7 * 24 * HOUR;
 const KEY = "management-key-kept-private";
 const file = (id) => ({ auth_index: id, name: `codex-${id}-same@example.com-team.json`, email: "same@example.com", type: "codex" });
 const window = (start, seconds = 18000) => ({ used_percent: 10, reset_at_ms: start + seconds * 1000, window_seconds: seconds });
+/** The x-codex-* headers of the account's latest reply, as CPA keeps them in its auth-file listing. */
+const signals = (slot, value) => value ? { [`X-Codex-${slot}-Used-Percent`]: String(value.used_percent),
+  [`X-Codex-${slot}-Window-Minutes`]: String(value.window_seconds / 60),
+  [`X-Codex-${slot}-Reset-At`]: Number.isFinite(value.reset_at_ms) ? String(Math.floor(value.reset_at_ms / 1000)) : String(value.reset_at_ms) } : {};
 const account = (id, primary, secondary = window(NOW - 2 * 24 * HOUR, WEEK / 1000), checked = NOW) => ({
-  auth_index: id, quota: { primary, secondary, checked_ms: checked, plan: "team" },
+  auth_index: id, quota: { observed_at: new Date(checked).toISOString(),
+    signals: { ...signals("Primary", primary), ...signals("Secondary", secondary), "X-Codex-Plan-Type": "team" } },
 });
 const record = (auth, ts, model = "gpt-6", cost = 0.1) => ({ auth, ts, model, cost });
 
@@ -24,9 +29,9 @@ function fixture({ files = [file("a")], quotas = [account("a", window(NOW - HOUR
       const parsed = new URL(url);
       calls.push({ parsed, init });
       let body;
-      if (parsed.pathname.endsWith("/auth-files")) body = { files };
-      else if (parsed.pathname.endsWith("/codex/accounts")) body = { items: quotas };
-      else if (parsed.pathname.endsWith("/rankings")) {
+      if (parsed.pathname.endsWith("/auth-files")) {
+        body = { files: files.map((entry) => ({ ...entry, quota: quotas.find((item) => item.auth_index === entry.auth_index)?.quota })) };
+      } else if (parsed.pathname.endsWith("/rankings")) {
         active++; maxActive = Math.max(maxActive, active);
         await new Promise((resolve) => setImmediate(resolve));
         active--;
@@ -88,7 +93,8 @@ test("weekly windows have their own reset, distinct from the short-hour reset an
 });
 
 test("missing, expired, future and unconfirmed windows never fall back to rolling counts", async () => {
-  const cases = [null, window(NOW - 6 * HOUR), window(NOW + 1),
+  // Codex sends reset times in whole seconds, so the future window starts a second from now.
+  const cases = [null, window(NOW - 6 * HOUR), window(NOW + 1000),
     { used_percent: 20, reset_at_ms: NOW + HOUR, window_seconds: 0 },
     { used_percent: 20, reset_at_ms: Infinity, window_seconds: 18000 }];
   const files = cases.map((_, i) => file(String(i)));
