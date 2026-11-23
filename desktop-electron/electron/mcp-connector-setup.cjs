@@ -201,6 +201,13 @@ async function withPageState(popup, error) {
     const pageState = connectorPageState(state);
     if (pageState) error.pageState = pageState;
   }
+  // Which identity check failed (the page's unverifiedReason), as the log's setupCause
+  // (mcpConnectorFailureCause): "ownership check identity:tunnel-differs". Fixed words only.
+  if (error instanceof Error && error.message === UNVERIFIED_CONNECTOR && !error.ownershipCause && !popup.isDestroyed()) {
+    const reason = await popup.webContents.executeJavaScript(
+      "globalThis.__codingToolsConnectorHelpers?.unverifiedReason?.() ?? null", true).catch(() => null);
+    if (typeof reason === "string" && /^[a-z][a-z-]{1,40}$/.test(reason)) error.ownershipCause = `identity:${reason}`;
+  }
   throw error;
 }
 
@@ -602,6 +609,14 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
   // tab bar, a hidden one and a missing one read the same. Counts, flags and the path only: no tab
   // label, title, account or workspace name.
   let pageFailureState = null;
+  // Which identity check found an existing connector unverified, for the log only (unverifiedReason):
+  // six checks shared one message, so a signed-in owner's automatic setup failing at it on 2026-11-23
+  // could not say whether the card, its name, its saved Tunnel ID or ChatGPT's edit form was wrong.
+  let unverifiedReason = null;
+  const unverifiedBecause = reason => {
+    unverifiedReason = reason;
+    return new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
+  };
   async function personalPageFailure(message, started, sawEmpty = false) {
     const tabs = [...document.querySelectorAll('main [role="tab"]')];
     const shown = tabs.filter(tab => visible(tab));
@@ -682,12 +697,12 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     return { selected: true };
   }
   async function inspectTunnelConnectorIdentity(settings) {
-    const unverified = () => new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
-    if (location.origin !== 'https://chatgpt.com' || !isPluginDetailUrl(location.href)) throw unverified();
+    unverifiedReason = null;
+    if (location.origin !== 'https://chatgpt.com' || !isPluginDetailUrl(location.href)) throw unverifiedBecause('not-plugin-page');
     const pluginPath = location.pathname, main = document.querySelector('main');
-    if (!main || !exactNameIn(main, settings.name)) throw unverified();
+    if (!main || !exactNameIn(main, settings.name)) throw unverifiedBecause('name-not-on-page');
     const read = () => {
-      if (location.pathname !== pluginPath) throw unverified();
+      if (location.pathname !== pluginPath) throw unverifiedBecause('page-moved');
       const root = activeSurface();
       if (root === document) return null;
       // Use the connector configuration component, never tool argument inputs or a page-wide URL.
@@ -695,23 +710,23 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       const names = inputs(root).filter(element => element.id === 'custom-connector-name');
       const saves = allClickable(root).filter(element => !element.disabled && element.getAttribute('aria-disabled') !== 'true'
         && textMatches(element, ['Save', 'Save changes'], true));
-      if (fields.length > 1 || names.length > 1 || saves.length > 1) throw unverified();
+      if (fields.length > 1 || names.length > 1 || saves.length > 1) throw unverifiedBecause('form-ambiguous');
       if (fields.length !== 1 || names.length !== 1 || saves.length !== 1) return null;
-      if (canonicalAppIdentity(names[0].value) !== canonicalAppIdentity(settings.name)) throw unverified();
+      if (canonicalAppIdentity(names[0].value) !== canonicalAppIdentity(settings.name)) throw unverifiedBecause('name-differs');
       // A generic /mcp endpoint cannot establish an opaque tunnel ID. Read the saved Tunnel ID itself.
-      if (fields[0].value !== settings.tunnelId) throw unverified();
+      if (fields[0].value !== settings.tunnelId) throw unverifiedBecause('tunnel-differs');
       return { verified: true, href: pluginPath, name: settings.name, tunnelId: fields[0].value };
     };
     let identity = read();
     if (!identity) {
       const controls = allClickable(main).filter(element => !element.disabled && element.getAttribute('aria-disabled') !== 'true'
         && textMatches(element, [...STRINGS.manage, 'Edit'], true));
-      if (controls.length !== 1) throw unverified();
+      if (controls.length !== 1) throw unverifiedBecause(controls.length ? 'edit-control-ambiguous' : 'no-edit-control');
       await pointerActivateMenu(controls[0]);
       identity = await waitFor(read, 5000);
     }
-    if (!identity) throw unverified();
-    if (visibleDialogs().length && !await closeOpenDialog()) throw unverified();
+    if (!identity) throw unverifiedBecause('form-not-shown');
+    if (visibleDialogs().length && !await closeOpenDialog()) throw unverifiedBecause('dialog-stuck');
     return identity;
   }
   async function createTunnelConnector(settings, phase = 'legacy', workspaceName = null) {
@@ -729,7 +744,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
       if (phase === 'legacy') return { created: false, href: card.getAttribute('href') };
       const href = new URL(card.getAttribute('href'), location.origin);
       if (href.origin !== location.origin || href.username || href.password || !isPluginDetailUrl(href.href)) {
-        throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
+        throw unverifiedBecause('card-link');
       }
       // A card is only a navigation candidate. The host still verifies fresh saved tunnel fields.
       return { prepared: true, existing: true, href: href.pathname + href.search };
@@ -761,6 +776,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     };
     const started = Date.now();
     pageFailureState = null;
+    unverifiedReason = null;
     let personal = null, sawEmpty = false;
     for (let tries = 0; tries < 2 && !personal; tries++) {
       const found = await waitFor(() => {
@@ -810,7 +826,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     if (listed.card) return prepareCard(listed.card);
     const workspaceCard = await lookupWorkspace();
     if (workspaceCard) return prepareCard(workspaceCard);
-    if (phase === 'existing') throw new Error('Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.');
+    if (phase === 'existing') throw unverifiedBecause('no-card');
     if (!isPersonalPluginsPage()) throw new Error('The current ChatGPT connector settings are invalid.');
     if (workspaceName) {
       const currentList = readPersonalDirectory();
@@ -996,6 +1012,7 @@ function extensionHelpersSource({ testLegacy = false } = {}) {
     prepareTunnelConnectorConnection, openTunnelConnectorConsent, confirmTunnelConnectorConsent,
     ${testLegacy ? "createTunnelConnector, ensureTunnelConnectorConnected," : ""}
     pageFailureState: () => pageFailureState,
+    unverifiedReason: () => unverifiedReason,
     findGridArticle, findInput, findManagedAppCard, isPersonalPluginsPage, observeAppConnection, personalPluginsLoaded,
     personalListEmpty, personalListSettledEmpty, openCreateFormStrict, pluginCardLinks, pointerActivate, setInputValue,
     textMatches, visible, waitFor, waitForPersonalPluginsPage, waitForPluginsPageReady, selectWorkspace
@@ -1233,7 +1250,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         : await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.prepareTunnelConnector(${JSON.stringify(settings)}, ${existingOnly}, ${JSON.stringify(workspaceName)})`, true)
           .catch(error => withPageState(popup, error));
       if (prepared?.prepared !== true) throw new Error("ChatGPT did not prepare the exact tunnel connector.");
-      if (existingOnly && prepared.existing !== true) throw new Error(UNVERIFIED_CONNECTOR);
+      if (existingOnly && prepared.existing !== true) throw Object.assign(new Error(UNVERIFIED_CONNECTOR), { ownershipCause: "identity:not-existing" });
       await freshContext();
       let result;
       if (prepared.existing === true) result = { created: false, href: prepared.href };
@@ -1253,10 +1270,11 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       if (prepared.existing && !shared) {
         await freshContext();
         await popup.webContents.executeJavaScript(extensionHelpersSource(), true);
-        const identity = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.inspectTunnelConnectorIdentity(${JSON.stringify(settings)})`, true);
+        const identity = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.inspectTunnelConnectorIdentity(${JSON.stringify(settings)})`, true)
+          .catch(error => withPageState(popup, error));
         await freshContext();
         if (identity?.verified !== true || identity.name !== settings.name || identity.tunnelId !== settings.tunnelId
-          || identity.href !== url.pathname) throw new Error(UNVERIFIED_CONNECTOR);
+          || identity.href !== url.pathname) throw Object.assign(new Error(UNVERIFIED_CONNECTOR), { ownershipCause: "identity:host-check" });
       }
       const createdContext = await freshContext();
       // Retain verified creation for consent retries without replacing other accounts' provenance.

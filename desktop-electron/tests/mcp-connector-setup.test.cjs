@@ -388,6 +388,14 @@ test("the production connector action verifies fresh owner and workspace proof b
         && mcpConnectorCommandFailure(error).code === "stopped" },
     { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, identityMissing: true, error: /existing connector.*tunnel.*unverified/i },
+    // Live 2026-11-23: the log said only connector_identity_unverified. The page's reason now rides along.
+    { name: "an unverified existing connector says which identity check failed, for the log", existing: true, identityMissing: true,
+      unverifiedReason: "tunnel-differs",
+      error: error => /existing connector.*tunnel.*unverified/i.test(error.message) && error.ownershipCause === "identity:tunnel-differs"
+        && mcpConnectorFailureCause(error, mcpConnectorCommandFailure(error)) === "ownership check identity:tunnel-differs" },
+    { name: "a reason that is not one of the page's fixed words is not logged", existing: true, identityMissing: true,
+      unverifiedReason: "Tunnel tunnel_" + "b".repeat(32),
+      error: error => /unverified/i.test(error.message) && error.ownershipCause === undefined },
     { name: "consent is not confirmed after a later workspace switch", change: "consent", error: /context|workspace.*changed/i, submitted: true },
     { name: "a targeted primary account retains the same owner and workspace checks", primary: true },
     { name: "an exact account binding rechecks ownership and consent without creating again", existing: true, bound: true },
@@ -473,6 +481,7 @@ test("the production connector action verifies fresh owner and workspace proof b
             accounts: scenario.mismatch ? {} : { [personalId]: entry(personalId), [businessId]: entry(businessId) } });
         }
         if (script.includes("globalThis.__codingToolsConnectorHelpers =")) return;
+        if (script.includes("unverifiedReason")) return scenario.unverifiedReason ?? null;
         if (script.includes("pageFailureState")) {
           assert(scenario.tabMissing, "page state is read only after a Personal plugins wait failed");
           // What the page left, with fields no log may keep (a label, an account email, a query).
@@ -750,7 +759,11 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     assert.equal(clicks, changed ? 0 : 1, `${changed || "valid"}: validate the current form before Create`);
   }
   const document = { title: "Plugins", body: { innerText: "Plugins" }, querySelectorAll: () => [{ textContent: "Personal", getAttribute: () => "true" }] };
-  const prepareContext = {
+  // The page helper's own: each identity check leaves its reason (unverifiedReason) for the log.
+  const reasons = [];
+  const unverifiedBecause = reason => { reasons.push(reason);
+    return new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted."); };
+  const prepareContext = { unverifiedBecause,
     location: { origin: "https://chatgpt.com" }, URL, document, isPersonalPluginsPage: () => true, isPluginDetailUrl: () => true,
     visible: () => true, textMatches: matches, PERSONAL_VIEW_LABELS: ["Personal"],
     waitFor: async read => read(), personalPluginsLoaded: () => true, clearPluginSearch: async () => {},
@@ -766,6 +779,7 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     ...prepareContext, findManagedAppCard: () => null, pluginCardLinks: () => [], pluginsPageRenderState: () => "empty",
   });
   await assert.rejects(absent(settings, "existing"), /unverified/i, "a missing app must stop before Add or Create is inspected");
+  assert.equal(reasons.pop(), "no-card");
   for (const existingHref of ["/plugins/other", "https://elsewhere.invalid/plugins/existing"]) {
     assert.equal((await prepare({ ...settings, existingHref }, "prepare")).href, "/plugins/existing",
       "a cached pathname supplies no authority or alternate navigation target");
@@ -777,7 +791,7 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     const fields = [nameField, ...(kind === "url-only" ? [{ id: "server-url", value: "https://example.test/mcp", getAttribute: () => null }]
       : kind === "duplicate" ? [field, field] : [field])];
     const root = {}, page = { querySelector: () => root };
-    const inspect = phase("inspectTunnelConnectorIdentity", "async function createTunnelConnector", {
+    const inspect = phase("inspectTunnelConnectorIdentity", "async function createTunnelConnector", { unverifiedBecause,
       location: { origin: "https://chatgpt.com", pathname: "/plugins/existing", href: "https://chatgpt.com/plugins/existing" },
       document: page, isPluginDetailUrl: () => true, exactNameIn: () => true,
       activeSurface: () => root,
@@ -787,7 +801,12 @@ test("guarded renderer phases reject changed controls and unverified existing ca
       pointerActivateMenu: () => { throw new Error("Identity inspection cannot click Create, Save or Connect"); },
     });
     if (kind === "exact") assert.equal((await inspect(settings)).verified, true);
-    else await assert.rejects(inspect(settings), /unverified/i);
+    else {
+      await assert.rejects(inspect(settings), /unverified/i);
+      // Live 2026-11-23: a signed-in owner's automatic setup failed here with nothing saying which check.
+      assert.equal(reasons.pop(), { "wrong-tunnel": "tunnel-differs", "wrong-name": "name-differs", duplicate: "form-ambiguous",
+        "url-only": "no-edit-control", "tool-field": "no-edit-control", "unsaved-create": "no-edit-control" }[kind], kind);
+    }
   }
   const stale = { tunnelConnectorConnected: () => false, tunnelConnectorConnectControl: () => null,
     tunnelConnectorConsent: () => null, pointerActivateMenu: () => { throw new Error("Stale control was clicked"); } };
