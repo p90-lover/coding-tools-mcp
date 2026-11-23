@@ -1345,11 +1345,14 @@ const browserAccountExists = (accountId) => browserAccounts.has(accountId);
 // Where a new Codex session starts (the setting): the account in use, a chosen account, or the
 // least busy account that can take it (takesNewSessions: signed in, sign-in not rejected): fewest
 // tabs open, then fewest sessions used in the last day, then the account in use.
+// "The account in use" that cannot take it gives way to the least busy one that can. Seen 2026-11-23:
+// the account in use was one whose sign-in ChatGPT had rejected two days before, so every new session
+// started there and failed while another account was signed in. "Always <account>" stays that account.
 function newSessionAccount() {
   const { accounts, activeId, settings } = browserAccountsStatus();
-  if (settings.newSessions !== "balance") return browserAccountExists(settings.newSessions) ? settings.newSessions : activeId;
   const open = accounts.filter(takesNewSessions);
-  if (!open.length) return activeId;
+  if (browserAccountExists(settings.newSessions)) return settings.newSessions;
+  if (!open.length || (settings.newSessions !== "balance" && open.some((entry) => entry.id === activeId))) return activeId;
   const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
   const recent = new Map();
   for (const entry of threadAccounts?.list() ?? []) {
