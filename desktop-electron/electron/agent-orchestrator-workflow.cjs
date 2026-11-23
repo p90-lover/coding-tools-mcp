@@ -6511,6 +6511,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The loop's own run reads may be RUN_LOOP_READ_FRESH_MS old: any write through requestHeadless
     // drops them, so what the app changes is read on the next pass all the same.
     const loopRead = { freshMs: RUN_LOOP_READ_FRESH_MS };
+    // The run as this loop (or the one before it, restarted) last read it, and whether the pass that
+    // failed was launching a card: a loop that fails while a card is still at work starts again (see
+    // the catch below), even when its first read after a restart fails too.
+    let seen = state.seen ?? null;
+    let launching = false;
     state.driving = true;
     state.settled = false;
     try {
@@ -6522,9 +6527,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         let saved = await runs({ workspaceId, runId }, loopRead);
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
+        seen = state.seen = mission;
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed orchestrator doesn't report worker capacity. Update the runtime.");
         state.socketRestarts = 0;
         state.timeoutRestarts = 0;
+        state.errorRestarts = 0;
         // Start every ready Native Codex card's harness together first. Launching a Codex process
         // can take minutes on a slow disk; done one card at a time, a sibling worker waited for
         // it and the workers ran one after another instead of in parallel. The launches below
@@ -6537,6 +6544,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const ready = mission.nodes.find(node => node.state === "pending" && parentsReady(mission, node) && (node.role !== "worker" || capacity > 0));
           if (!ready) break;
           let sent;
+          launching = true;
           try {
             if (externalAgent(ready)) sent = await dispatchExternal(workspaceId, runId, ready, mission.revision, true, mission.execution_mode === "single");
             else {
@@ -6563,12 +6571,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             const next = fresh.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
             // Recover only a persisted failed launch. An unknown send is never replayed.
             if (!next?.nodes.some(node => node.id === ready.id && node.state === "held")) throw error;
-            saved = fresh; mission = next; continue;
+            saved = fresh; mission = next; seen = state.seen = mission; launching = false; continue;
           }
+          launching = false;
           if (sent.waiting) { state.detail = "Waiting for a worker slot or current graph revision"; break; }
           saved = await runs({ workspaceId, runId });
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
+          seen = state.seen = mission;
         }
         if (state.stopped) return;
         const active = mission.nodes.filter(node => node.state === "running");
@@ -6661,6 +6671,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           saved = await runs({ workspaceId, runId }, loopRead);
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
+          seen = state.seen = mission;
           // A retry needs a turn: a grant that is gone, or spent (a single chat's one turn was the
           // launch that failed), gets a fresh one through startRun. Relaunching on the spent grant
           // was refused, and the loop ended with the step still "held" and "Retry automatically" on.
@@ -6764,6 +6775,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, false);
         return;
       }
+      // A pass that failed while a card is still at work (or because the local service was too busy
+      // to take the call): the card's agent goes on, and only this loop reviews its requests and
+      // notices its turn end. Ending here left it "held" with nothing watching, and "Retry
+      // automatically" passes over a card still running. Seen live 2026-11-23: four chats' loops
+      // ended in a burst of local load while their agents kept working, and their requests sat
+      // unreviewed for 3.5 hours, until the person opened each chat. The loop starts again after a
+      // pause (2 s, doubling to 60 s) for as long as the card works. A failed launch still stops it
+      // (its card's error is the person's to see), and so does a run that is gone.
+      const busy = error?.code === "HEADLESS_QUEUE_FULL" || /queue is full/i.test(message);
+      const working = !launching && Boolean(seen) && !seen.cancelled
+        && seen.nodes.some(node => ["running", "reserved"].includes(node.state)) && !DRIVE_FINAL.test(message);
+      if (!state.stopped && (busy || working)) {
+        const tries = state.errorRestarts ?? 0;
+        state.errorRestarts = tries + 1;
+        const delay = Math.min(60_000, 2_000 * 2 ** Math.min(tries, 5));
+        state.status = "running";
+        state.detail = "";
+        state.warning = `${busy ? "The app was too busy to check this chat" : "Checking this chat failed"} (${publicText(message, 80)}). The chat keeps going by itself.`;
+        state.warningAt = now();
+        reportRun(workspaceId, runId, state, null);
+        logger?.warn?.("ao.drive_error_retry", { attempt: state.errorRestarts, busy, message: publicText(message, 120) });
+        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); });
+        return;
+      }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
       // With automatic retry on, the run is tried again and has not ended; without it, it has.
       state.settled = !chatPreferences.get().autoRetry;
@@ -6861,6 +6896,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A failed local connection, not a failed run (see driveRun).
   const LOCAL_SOCKET_FAILURE = /EADDRINUSE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOBUFS|socket hang up|other side closed|fetch failed/i;
   const SOCKET_RESTART_LIMIT = 10;
+  // A run loop's failures that starting it again cannot cure: the run is gone, or the installed
+  // orchestrator cannot drive it.
+  const DRIVE_FINAL = /Saved mission is unavailable|AO run not found|doesn't report worker capacity/i;
   /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
   function grantSpent(grant) {
     return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
