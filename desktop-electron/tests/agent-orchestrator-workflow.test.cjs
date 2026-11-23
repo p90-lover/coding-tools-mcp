@@ -12098,6 +12098,10 @@ for (const [label, error, seconds] of [
   ["a provider's 529", "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}", 10],
   ["an agent that died on 429s", "The agent's process stopped mid-turn after: API error 429. Trying again in 30s.. Retry or send a message to continue.", 10],
   ["a launch that failed upstream", "Launch failed: CPA answered 503 Service Unavailable", 10],
+  // 2026-11-23: Google refused some Vertex requests and answered others. Claude Code called it a
+  // sign-in failure ("Authentication required"), so nothing retried; AO now reports the provider's
+  // own words (AO's claudeacp AuthRequiredFailure), and the chat keeps requesting.
+  ["a provider's intermittent 403", "API Error: 403 Access requires an eligible paid billing account in a supported region, subject to our terms and policies.", 10],
 ])
 test(`"Retry automatically" waits less before retrying a failure that never reached the provider (${label})`, async () => {
   // Local start failures have no cooldown to wait out: [2 s, 5 s, 15 s, 30 s], then the usual tail.
