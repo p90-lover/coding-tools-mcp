@@ -190,6 +190,19 @@ test("the managed oauth block carries the Antigravity prompt filter and replaces
   assert.deepEqual(kept.providers.antigravity["sensitive-patterns-replace"], SENSITIVE_PATTERN_REPLACEMENTS.map((entry) => ({ ...entry })));
 });
 
+test("every Antigravity replacement names a capture group the way CPA's Go regexp.Expand reads it", () => {
+  // Go takes $name greedily: $1coding is the group "1coding", which never exists and expands to "".
+  // A group followed by a letter, digit or underscore must be braced, as in ${1}coding.
+  for (const { pattern, replacement } of SENSITIVE_PATTERN_REPLACEMENTS) {
+    const groups = new RegExp(`${pattern.replace(/^\(\?[ims]+\)/u, "")}|`).exec("").length - 1;
+    for (const [, braced, bare] of replacement.matchAll(/\$(?:\{(\w+)\}|(\w+))/gu)) {
+      const name = braced ?? bare;
+      assert.match(name, /^\d+$/u, `"${replacement}" refers to the group "${name}", which ${pattern} lacks`);
+      assert.ok(Number(name) <= groups, `"${replacement}" refers to group ${name}; ${pattern} has ${groups}`);
+    }
+  }
+});
+
 test("installing Provider Manager moves every retired plugin's DLL to one Trash folder",
   { skip: process.platform !== "win32" || process.arch !== "x64" }, () => {
     assert.equal(RETIRED_PLUGINS.includes("cpa-provider-manager"), false);

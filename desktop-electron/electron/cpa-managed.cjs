@@ -242,7 +242,8 @@ const ACCOUNT_KINDS = Object.freeze(["cline", "commandcode-go", "commandcode", "
 // runtime-context paragraphs and identity declarations upstream Gemini intercepts (its 429s), the
 // third-party framework blocks, and the harness names, normalized to a plain coding assistant. Written
 // under oauth.providers.antigravity.sensitive-patterns-replace in CPA's config; the managed block
-// replaces a saved one whole, so a removed pattern never lingers.
+// replaces a saved one whole, so a removed pattern never lingers. CPA expands a replacement with Go's
+// regexp.Expand, which reads $name greedily: a group followed by a word character is braced, ${1}x.
 const SENSITIVE_PATTERN_REPLACEMENTS = Object.freeze([
   { pattern: String.raw`(?i)You are interacting with the user through the [^\n]*`, replacement: "" },
   { pattern: String.raw`(?i)The runtime context names the [^\n]*`, replacement: "" },
@@ -255,11 +256,11 @@ const SENSITIVE_PATTERN_REPLACEMENTS = Object.freeze([
   { pattern: String.raw`(?i)\bYou are an AI agent powered by DeepSeek Harness\.`, replacement: "You are a helpful coding assistant." },
   { pattern: String.raw`(?i)\bYou are a coding agent powered by the [^\n]+? model\.`, replacement: "You are a helpful coding assistant." },
   { pattern: String.raw`(?i)\bopencode\.(session_move|worktree_create|worktree_list|worktree_remove|list_mcp_resources|read_mcp_resource|models|session_rename)\b`, replacement: "$1" },
-  { pattern: String.raw`(?i)(^|[^A-Za-z0-9_./\\-])opencode($|[^A-Za-z0-9_./\\-])`, replacement: "$1coding assistant$2" },
+  { pattern: String.raw`(?i)(^|[^A-Za-z0-9_./\\-])opencode($|[^A-Za-z0-9_./\\-])`, replacement: "${1}coding assistant${2}" },
   { pattern: String.raw`(?i)\bPi documentation\b`, replacement: "Assistant documentation" },
   { pattern: String.raw`(?i)\bpi docs\b`, replacement: "docs" },
   { pattern: String.raw`(?i)\bDeepSeek[-_ ]?Harness\b`, replacement: "coding assistant" },
-  { pattern: String.raw`(?i)(^|[^A-Za-z0-9_./\\-])dsh($|[^A-Za-z0-9_./\\-])`, replacement: "$1coding assistant$2" },
+  { pattern: String.raw`(?i)(^|[^A-Za-z0-9_./\\-])dsh($|[^A-Za-z0-9_./\\-])`, replacement: "${1}coding assistant${2}" },
   { pattern: String.raw`(?i)\b__DSH_BOOT__\b`, replacement: "ASSISTANT_BOOT" },
   { pattern: String.raw`(?i)\b(?:a )?coding agent harness\b`, replacement: "a coding assistant" },
   { pattern: String.raw`(?i)\bthe harness itself\b`, replacement: "the assistant itself" },
