@@ -238,6 +238,39 @@ const PROVIDER_MANAGER_PARTS = Object.freeze({
 // Auth file types that became Provider Manager account kinds (the kind's name is its old type).
 const ACCOUNT_KINDS = Object.freeze(["cline", "commandcode-go", "commandcode", "grok"]);
 
+// Prompt filter CPA's Antigravity (Gemini) provider applies to what an agent's harness sends: the
+// runtime-context paragraphs and identity declarations upstream Gemini intercepts (its 429s), the
+// third-party framework blocks, and the harness names, normalized to a plain coding assistant. Written
+// under oauth.providers.antigravity.sensitive-patterns-replace in CPA's config; the managed block
+// replaces a saved one whole, so a removed pattern never lingers. CPA expands a replacement with Go's
+// regexp.Expand, which reads $name greedily: a group followed by a word character is braced, ${1}x.
+const SENSITIVE_PATTERN_REPLACEMENTS = Object.freeze([
+  { pattern: String.raw`(?i)You are interacting with the user through the [^\n]*`, replacement: "" },
+  { pattern: String.raw`(?i)The runtime context names the [^\n]*`, replacement: "" },
+  { pattern: String.raw`(?i)Current runtime context[^\n]*`, replacement: "" },
+  { pattern: String.raw`(?m)^RFC 2119[^\n]*\n?`, replacement: "" },
+  { pattern: String.raw`(?s)<system[-_](conventions|directive)>.*?</system[-_](conventions|directive)>\n?`, replacement: "" },
+  { pattern: String.raw`(?s)<docs>\s*Pi documentation.*?</docs>\n?`, replacement: "" },
+  { pattern: String.raw`(?i)\bYou are an AI agent running in (?:opencode|coding assistant),\s*a coding agent harness\.`, replacement: "You are a helpful coding assistant." },
+  { pattern: String.raw`(?i)\bYou are a coding assistant running inside pi,\s*a coding agent harness\.`, replacement: "You are a helpful coding assistant." },
+  { pattern: String.raw`(?i)\bYou are an AI agent powered by DeepSeek Harness\.`, replacement: "You are a helpful coding assistant." },
+  { pattern: String.raw`(?i)\bYou are a coding agent powered by the [^\n]+? model\.`, replacement: "You are a helpful coding assistant." },
+  { pattern: String.raw`(?i)\bopencode\.(session_move|worktree_create|worktree_list|worktree_remove|list_mcp_resources|read_mcp_resource|models|session_rename)\b`, replacement: "$1" },
+  { pattern: String.raw`(?i)(^|[^A-Za-z0-9_./\\-])opencode($|[^A-Za-z0-9_./\\-])`, replacement: "${1}coding assistant${2}" },
+  { pattern: String.raw`(?i)\bPi documentation\b`, replacement: "Assistant documentation" },
+  { pattern: String.raw`(?i)\bpi docs\b`, replacement: "docs" },
+  { pattern: String.raw`(?i)\bDeepSeek[-_ ]?Harness\b`, replacement: "coding assistant" },
+  { pattern: String.raw`(?i)(^|[^A-Za-z0-9_./\\-])dsh($|[^A-Za-z0-9_./\\-])`, replacement: "${1}coding assistant${2}" },
+  { pattern: String.raw`(?i)\b__DSH_BOOT__\b`, replacement: "ASSISTANT_BOOT" },
+  { pattern: String.raw`(?i)\b(?:a )?coding agent harness\b`, replacement: "a coding assistant" },
+  { pattern: String.raw`(?i)\bthe harness itself\b`, replacement: "the assistant itself" },
+  { pattern: String.raw`(?i)\bharness changes\b`, replacement: "extension changes" },
+  { pattern: String.raw`(?i)\bYou are (?:Codex|ChatGPT),\s*(?:a coding agent|(?:an agent )?based on GPT-[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)\.`, replacement: "You are a helpful coding assistant." },
+  { pattern: String.raw`(?i)\bYou are Claude Code, Anthropic['’]s official CLI for Claude\.`, replacement: "You are a helpful coding assistant." },
+  { pattern: String.raw`(?i)\bYou are a Claude agent, built on Anthropic['’]s Claude Agent SDK\.`, replacement: "You are a helpful coding assistant." },
+  { pattern: String.raw`(?im)^[ \t]*x-anthropic-billing-header:[ \t]*(?:[A-Za-z_][A-Za-z0-9_]*=[A-Za-z0-9_.:/-]+;[ \t]*)+\r?$`, replacement: "" },
+]);
+
 /** Provider Manager's private folder; each part keeps its state in a subfolder named after it. */
 function providerManagerDataDir(state) {
   return path.join(state, "cpa-provider-manager-data");
@@ -599,6 +632,13 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     `  secret-key: ${yamlString(managementKey)}`,
     "  disable-control-panel: false",
     "  disable-auto-update-panel: true",
+    // The prompt filter CPA's Antigravity provider applies to harness-sent prompts (its 429 trigger).
+    "oauth:",
+    "  providers:",
+    "    antigravity:",
+    "      sensitive-patterns-replace:",
+    ...SENSITIVE_PATTERN_REPLACEMENTS.map((entry) =>
+      `        - pattern: ${yamlString(entry.pattern)}\n          replacement: ${yamlString(entry.replacement)}`),
     "plugins:",
     "  enabled: true",
     `  dir: ${yamlString(pluginDirectory)}`,
@@ -662,7 +702,18 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
   };
   // In v8 api-keys is the upstream provider map; legacy arrays are client keys, now managed above.
   if (Object.prototype.toString.call(saved["api-keys"]) === "[object Object]") merged["api-keys"] = withOpenAICompletionTokens(withOpenAIResponsesRoute(saved["api-keys"]));
-  if (saved.oauth) merged.oauth = { ...saved.oauth, "auth-dir": authDirectory };
+  // Other saved oauth keys (model-alias, excluded-models, other providers) survive; the managed
+  // Antigravity prompt filter replaces only a saved antigravity provider block whole, so a removed
+  // pattern never lingers, and the auth-dir is always the managed one.
+  const savedOauth = isPlainObject(saved.oauth) ? saved.oauth : {};
+  const savedProviders = isPlainObject(savedOauth.providers) ? savedOauth.providers : {};
+  const managedProviders = isPlainObject(managed.oauth) && isPlainObject(managed.oauth.providers) ? managed.oauth.providers : {};
+  merged.oauth = {
+    ...savedOauth,
+    ...(isPlainObject(managed.oauth) ? managed.oauth : {}),
+    providers: { ...savedProviders, ...managedProviders },
+    "auth-dir": authDirectory,
+  };
   // CPA 8 saves the route as requests.proxy-url. Kept beside the managed one above, an old route
   // outlived every change (and a removed one stayed on).
   if (Object.prototype.toString.call(merged.requests) === "[object Object]" && "proxy-url" in merged.requests) {
@@ -857,6 +908,7 @@ function helperPricesPath(stateRoot) {
 module.exports = {
   ACCOUNT_KINDS,
   RETIRED_PLUGINS,
+  SENSITIVE_PATTERN_REPLACEMENTS,
   cpaOnPort,
   endStaleCpa,
   helperPricesPath,

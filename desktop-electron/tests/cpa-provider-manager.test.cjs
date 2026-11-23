@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 const {
-  ACCOUNT_KINDS, RETIRED_PLUGINS, installBundledCommandCodePlugin, mergePluginConfigs, migrateAuthFiles,
+  ACCOUNT_KINDS, RETIRED_PLUGINS, SENSITIVE_PATTERN_REPLACEMENTS, installBundledCommandCodePlugin, mergePluginConfigs, migrateAuthFiles,
   providerManagerDataDir, runtimeConfiguration, stampAccountKind,
 } = require("../electron/cpa-managed.cjs");
 const { ACCOUNT_KINDS_PATH, withAccountKinds } = require("../electron/cpa-account-kinds.cjs");
@@ -160,6 +160,47 @@ test("a saved stale Cline proxy never outlives the managed route in CPA's writte
   assert.deepEqual(direct["cpa-provider-manager"].grok, { "base-url": "https://grok.example.test" });
   const routed = parse(runtimeConfiguration(state, "m".repeat(36), "p".repeat(36), "http://proxy.example.test:10000/")).plugins.configs;
   assert.deepEqual(routed["cpa-provider-manager"].cline, { "runtime-executable": process.execPath, "proxy-url": "http://proxy.example.test:10000/" });
+});
+
+test("the managed oauth block carries the Antigravity prompt filter and replaces a saved one whole", () => {
+  const yaml = globalThis.Bun?.YAML ?? require("js-yaml");
+  const parse = (text) => (yaml.parse ?? yaml.load)(text);
+  const state = tempState("cpa-pm-oauth-filter");
+  // A saved oauth block with a stale pattern and a stale key: the managed one wins whole.
+  fs.writeFileSync(path.join(state, "config.yaml"), JSON.stringify({
+    oauth: { providers: { antigravity: { "sensitive-patterns-replace": [{ pattern: "(?i)stale", replacement: "x" }],
+      "stale-key": true } } },
+  }));
+  const first = parse(runtimeConfiguration(state, "m".repeat(36), "p".repeat(36))).oauth;
+  assert.deepEqual(first.providers.antigravity["sensitive-patterns-replace"], SENSITIVE_PATTERN_REPLACEMENTS.map((entry) => ({ ...entry })));
+  assert.equal("stale-key" in first.providers.antigravity, false, "a removed pattern or key never lingers");
+  assert.equal(first["auth-dir"], path.join(state, "auth"));
+  // A second run writes the same block: idempotent, no key churn.
+  const second = parse(runtimeConfiguration(state, "m".repeat(36), "p".repeat(36))).oauth;
+  assert.deepEqual(second, first);
+  // Other saved oauth keys and providers survive beside the managed antigravity block.
+  fs.writeFileSync(path.join(state, "config.yaml"), JSON.stringify({
+    oauth: { "model-alias": { codex: [{ name: "m", alias: "a" }] }, providers: {
+      antigravity: { "sensitive-patterns-replace": [{ pattern: "(?i)stale", replacement: "x" }] },
+      codex: { "disable-cooling": true } } },
+  }));
+  const kept = parse(runtimeConfiguration(state, "m".repeat(36), "p".repeat(36))).oauth;
+  assert.deepEqual(kept["model-alias"], { codex: [{ name: "m", alias: "a" }] });
+  assert.deepEqual(kept.providers.codex, { "disable-cooling": true });
+  assert.deepEqual(kept.providers.antigravity["sensitive-patterns-replace"], SENSITIVE_PATTERN_REPLACEMENTS.map((entry) => ({ ...entry })));
+});
+
+test("every Antigravity replacement names a capture group the way CPA's Go regexp.Expand reads it", () => {
+  // Go takes $name greedily: $1coding is the group "1coding", which never exists and expands to "".
+  // A group followed by a letter, digit or underscore must be braced, as in ${1}coding.
+  for (const { pattern, replacement } of SENSITIVE_PATTERN_REPLACEMENTS) {
+    const groups = new RegExp(`${pattern.replace(/^\(\?[ims]+\)/u, "")}|`).exec("").length - 1;
+    for (const [, braced, bare] of replacement.matchAll(/\$(?:\{(\w+)\}|(\w+))/gu)) {
+      const name = braced ?? bare;
+      assert.match(name, /^\d+$/u, `"${replacement}" refers to the group "${name}", which ${pattern} lacks`);
+      assert.ok(Number(name) <= groups, `"${replacement}" refers to group ${name}; ${pattern} has ${groups}`);
+    }
+  }
 });
 
 test("installing Provider Manager moves every retired plugin's DLL to one Trash folder",

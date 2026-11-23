@@ -6,7 +6,7 @@ const test = require("node:test");
 const yaml = globalThis.Bun?.YAML ?? require("js-yaml");
 const parse = yaml.parse ?? yaml.load;
 const stringify = yaml.stringify ?? yaml.dump;
-const { refreshConfiguration, runtimeConfiguration } = require("../electron/cpa-managed.cjs");
+const { refreshConfiguration, runtimeConfiguration, SENSITIVE_PATTERN_REPLACEMENTS } = require("../electron/cpa-managed.cjs");
 
 function fixture(t, saved) {
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/cpa-provider-config-"));
@@ -82,7 +82,8 @@ test("v8 provider groups, catalogs and OAuth options survive while managed auth 
   const next = parse(runtimeConfiguration(root, "managed-management", "managed-api"));
   assert.deepEqual(next["api-keys"], saved["api-keys"]);
   assert.deepEqual(next.models, saved.models);
-  assert.deepEqual(next.oauth, { ...saved.oauth, "auth-dir": path.join(root, "auth") });
+  assert.deepEqual(next.oauth, { ...saved.oauth, "auth-dir": path.join(root, "auth"),
+    providers: { ...saved.oauth.providers, antigravity: { "sensitive-patterns-replace": SENSITIVE_PATTERN_REPLACEMENTS } } });
   assert.equal(next.server, undefined);
   assert.equal(next.management, undefined);
   assert.deepEqual(next.access, { "api-keys": ["managed-api"] });
