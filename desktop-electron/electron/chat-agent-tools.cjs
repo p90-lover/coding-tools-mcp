@@ -41,7 +41,7 @@
 //   the user confirms every command and every input sent to one here (unless the session was
 //   launched to bypass permissions). Being sandboxed never approves a command by itself.
 //
-// Tool groups, all under Settings: "agent" (files, search, patches, git, images, plan; on by
+// Tool groups under Plugins > Chat add-ons: "agent" (files, search, patches, git, images, plan; on by
 // default), "terminal" (exec_command, write_stdin, read_output, kill_command; on by default when
 // Codex's sandbox is installed, otherwise only when the user opts in) and "desktop" (screen
 // capture and computer control; off unless the user opts in).
@@ -71,6 +71,7 @@ const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { DUPLICATE_TOOLS: UNIFIED_DUPLICATE_TOOLS, FILE_TOOLS: UNIFIED_FILE_TOOLS, SERVER_NAME: UNIFIED_SERVER } = require("./unified-agent-tools.cjs");
 const { dispatchToolBatch, FAST_EXECUTION_GUIDANCE } = require("./chat-tool-batches.cjs");
+const { createChatToolRegistry, collectChatAddonTools, createChatAddonConflictReporter } = require("./chat-tool-addons.cjs");
 const { VERIFICATION_SCHEMA, prepareVerification, observeVerification, verificationReceipt } = require("./chat-verification.cjs");
 
 const SERVER_NAME = "coding-tools";
@@ -578,9 +579,14 @@ function chatSchema(name, schema) {
   return { ...schema, properties, ...(Array.isArray(schema.required)
     ? { required: schema.required.filter((key) => Object.hasOwn(properties, key) && !optional.has(key)) } : {}) };
 }
-const GROUPS = Object.freeze(["agent", "terminal", "desktop", "preview", "subagents", "chats"]);
-const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(name) ? "terminal" : DESKTOP_TOOLS.has(name) ? "desktop"
-  : PREVIEW_TOOLS.has(name) ? "preview" : SUBAGENT_TOOLS.has(name) ? "subagents" : CHAT_HISTORY_TOOLS.has(name) ? "chats" : null);
+const CHAT_TOOL_ADDONS = createChatToolRegistry({ agent: AGENT_TOOLS, terminal: TERMINAL_TOOLS, desktop: DESKTOP_TOOLS,
+  preview: PREVIEW_TOOLS, subagents: SUBAGENT_TOOLS, chats: CHAT_HISTORY_TOOLS });
+const { groups: GROUPS, groupOf } = CHAT_TOOL_ADDONS;
+const LOCAL_TOOL_NAMES = new Set([
+  ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS, ...GOAL_TOOLS, ...CHAT_HISTORY_TOOLS, ...WATCH_TOOLS, ...MONITOR_TOOLS,
+  "show_in_chat", "open_plan", "schedule_wakeup", "capture_process", "app_processes", "view_app", "generate_image",
+  "computer_guide", "rename_chat", "move_chat", "redact_message", "list_commands", "push_notification", "sleep",
+]);
 /**
  * Whether "Approve for me" leaves a call of this tool to the chat's reviewer: the calls this app
  * itself confirms when nothing reviewed them upstream (a command, typed input, the screen). Every
@@ -1499,6 +1505,8 @@ function createChatAgentTools({
   streamAfterMs = STREAM_AFTER_MS, keepAliveMs = KEEP_ALIVE_MS,
 } = {}) {
   if (typeof requestHeadless !== "function") throw new Error("The headless tool service is required");
+  const reportConflict = createChatAddonConflictReporter(logger, now);
+  for (const conflict of CHAT_TOOL_ADDONS.conflicts) reportConflict(conflict);
   // Identifies this server's lifetime in warm-session keys without exposing any credential.
   const instance = crypto.randomUUID();
   const guides = createComputerGuides({ notesDir: computerGuidesDir, logger });
@@ -1776,15 +1784,8 @@ function createChatAgentTools({
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
       ...(captureApp ? VIEW_APP_DEFS : []), ...(generateImage ? IMAGE_TOOL_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : [])];
-    return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
-      .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
-        && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat" && tool?.name !== "open_plan"
-        && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "generate_image" && tool?.name !== "computer_guide" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
-        && tool?.name !== "list_commands" && !WATCH_TOOLS.has(tool?.name) && !MONITOR_TOOLS.has(tool?.name)
-        && tool?.name !== "push_notification" && tool?.name !== "sleep"), ...own]
-      .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
-        && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
+    return collectChatAddonTools({ registry: CHAT_TOOL_ADDONS, headless: catalog?.tools, local: own, reserved: LOCAL_TOOL_NAMES,
+      allowed: (name, group) => !UNLISTED_TOOLS.has(name) && !duplicateOfHarness(entry, name) && allowed(entry, group), report: reportConflict })
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
       .map(({ name, title, description, inputSchema, annotations }) => ({
@@ -2506,7 +2507,7 @@ function createChatAgentTools({
   async function callTool(entry, params, channel = {}) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
-    if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off in Settings.");
+    if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off under Plugins > Chat add-ons.");
     const group = groupOf(name);
     if (!group || !allowed(entry, group)) return failedCall(`Unknown tool: ${name}`);
     const signal = entry.lifetime.signal;

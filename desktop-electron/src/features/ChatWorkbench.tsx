@@ -12,6 +12,8 @@ import type { ChatPullRequest } from "./chat-summary-panel";
 import { petFlight, petOverlaps } from "./chat-pet-stage";
 import { costLabel, costSourceLabel, readCpaUsage, type CpaUsage, type CpaUsageRange } from "./cpa-usage";
 import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibility";
+import { ChatAddonPicker, CHAT_PANEL_TITLES as TAB_TITLES, type WorkbenchTab } from "./ChatAddonPicker";
+export type { WorkbenchTab } from "./ChatAddonPicker";
 
 // The chat's side panel, as Codex shows one beside a thread: tabs for the page the chat's agent
 // opened in its own browser (a native view drawn over the pane's slot), the changes in its
@@ -19,7 +21,6 @@ import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibil
 // plus a new-tab page with those tools and the pages this chat opened. Everything acts for the
 // user: navigating, stopping a command or typing into it needs no approval, since the user does it.
 
-export type WorkbenchTab = "overview" | "preview" | "terminal" | "changes" | "files" | "subagents" | "plan" | "new";
 type PanelTab = { id: string; kind: WorkbenchTab };
 type WorkbenchPlan = { text: string; tasks?: ReplyPlan; live: boolean; published?: LiveChatPlan | null };
 
@@ -48,7 +49,6 @@ export function isServerProcess(command: Pick<Command, "cmd" | "status" | "backg
   return command.status === "background" || command.background === true || SERVER_COMMAND.test(String(command.cmd ?? ""));
 }
 
-const TAB_TITLES: Record<WorkbenchTab, string> = { overview: "Overview", preview: "Preview", terminal: "Terminal", changes: "Changes", files: "Files", subagents: "Subagents", plan: "Plan", new: "New tab" };
 const PANEL_WIDTH_KEY = "coding-tools:ao:workbench-width";
 let tabSequence = 0;
 const newTab = (kind: WorkbenchTab): PanelTab => ({ id: `tab-${++tabSequence}`, kind });
@@ -499,8 +499,9 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
     {/* The chat's subagents belong to all its agents, so this tab does not follow the agent picker. */}
     {current?.kind === "subagents" ? <SubagentsPane subagents={subagents} selected={subagentId} onSelect={setSubagentId} renderWork={renderWork} />
       : current?.kind === "plan" ? <PlanPane plan={plan} />
-      : current?.kind === "new" && (sessionId || plan?.text || plan?.published || plan?.tasks?.steps.length)
-      ? <NewTabPage sessionId={sessionId} onTool={show} hasPlan={Boolean(plan?.text || plan?.published || plan?.tasks?.steps.length)} />
+      : current?.kind === "new"
+      ? <ChatAddonPicker hasSession={Boolean(sessionId)} onOpen={show} hasPlan={Boolean(plan?.text || plan?.published || plan?.tasks?.steps.length)}
+        recents={sessionId ? <RecentWorkbenchPages sessionId={sessionId} onTool={show} /> : null} />
       : !sessionId
       ? <p className="cx-workbench-empty">No agent yet. Its pages, changes, files and commands show here.</p>
       : current?.kind === "overview" ? <OverviewPane key={sessionId} session={sessions.find((item) => item.id === sessionId)} sessionId={sessionId} workspaceId={workspaceId} onTool={show}
@@ -518,28 +519,19 @@ export function navigatePreview(sessionId: string, url: string) {
   void paneCall("chat_preview_navigate", { sessionId, url }).catch(() => undefined);
 }
 
-/** The new-tab page: the panel's tools and the pages this chat's agent opened. */
-function NewTabPage({ sessionId, onTool, hasPlan }: { sessionId: string; onTool: (kind: WorkbenchTab) => void; hasPlan: boolean }) {
+function RecentWorkbenchPages({ sessionId, onTool }: { sessionId: string; onTool: (kind: WorkbenchTab) => void }) {
   const recents = RECENT_PAGES.get(sessionId) ?? [];
   const open = (url: string) => {
     navigatePreview(sessionId, url);
     onTool("preview");
   };
-  return <div className="cx-newtab">
-    <p className="cx-newtab-label">Tools</p>
-    <div className="cx-newtab-tools">
-      {(sessionId ? ["overview", "preview", "changes", "terminal", "files", "subagents"] as const : []).map((kind) => <button key={kind} type="button" onClick={() => onTool(kind)}>
-        <span>{TAB_TITLES[kind]}</span><small>{kind === "overview" ? "Context, changes, tasks and usage" : kind === "preview" ? "The agent's browser" : kind === "changes" ? "Its worktree's diff"
-          : kind === "terminal" ? "Commands and a shell" : kind === "subagents" ? "The helpers it started, and their work" : "Browse its worktree"}</small>
-      </button>)}
-      {hasPlan ? <button type="button" onClick={() => onTool("plan")}><span>Plan</span><small>Read the plan and tasks</small></button> : null}
-    </div>
-    <p className="cx-newtab-label">Recents</p>
+  return <section aria-label="Recent pages">
+    <p className="cx-newtab-label">Recent pages</p>
     {recents.length ? <ul className="cx-newtab-recents">{recents.map((page) => <li key={page.url}>
       <button type="button" onClick={() => open(page.url)}><span>{page.title || page.url}</span><small>{page.url}</small>
         <time>{new Date(page.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></button>
     </li>)}</ul> : <p className="cx-workbench-empty">Pages the agent opens show here.</p>}
-  </div>;
+  </section>;
 }
 
 const OVERVIEW_POLL_MS = 5_000;
