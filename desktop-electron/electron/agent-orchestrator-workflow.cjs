@@ -383,7 +383,36 @@ const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA
  */
 const DRIVER_INCOMPATIBLE = /chat driver incompatible:\s*read [^:\n]{1,40} version/i;
 
-const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
+/**
+ * When native Guardian cannot decide a shell request, the model judge decides it ("Let the model
+ * judge"), rating the command's risk (low, medium, high, critical) and how clearly the user's request
+ * or standing instructions authorize it (high, medium, low, unknown). Its "allow" counts only for a
+ * risk listed here with one of the authorizations listed for it; anything else is a deny, which
+ * the agent hears with the judge's own reason. The judge's prompt states the same rule
+ * (fallbackJudgeRule), so it answers to the rule it is held to.
+ * Until 2026-11-23 only low risk with high authorization passed: a local update the user's standing
+ * instructions ask for ("install-verified-sha-044.ps1") was denied as "did not confirm".
+ */
+const FALLBACK_JUDGE_ALLOWS = Object.freeze({
+  // As native Guardian's own rule since 0.8.156: a low-risk allow stands unless the user's
+  // authorization is rated low.
+  low: Object.freeze(["high", "medium", "unknown"]),
+  // A step with real effects (an install, a restart, a release step) only when the user asked for it.
+  medium: Object.freeze(["high"]),
+  // High and critical risk are never approved by a model on its own.
+});
+/** Whether the fallback judge's answer clears the request under FALLBACK_JUDGE_ALLOWS. */
+function fallbackJudgeAllows(answer) {
+  return answer?.outcome === "allow" && (FALLBACK_JUDGE_ALLOWS[answer.risk_level] ?? []).includes(answer.user_authorization);
+}
+/** The rule as the judge's prompt states it, from the same table. */
+function fallbackJudgeRule() {
+  const cases = Object.entries(FALLBACK_JUDGE_ALLOWS).filter(([, authorizations]) => authorizations.length)
+    .map(([risk, authorizations]) => `${risk} risk with ${authorizations.join(" or ")} user authorization`);
+  return cases.length ? `Allow only for ${cases.join("; or ")}. Otherwise deny.` : "Deny.";
+}
+
+const REVIEW_SCRIPT =/[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
 // Each name a command mentions costs a disk lookup; a grep listing a dozen .ts files is not a script.
 const REVIEW_SCRIPT_LOOKUPS = 6;
@@ -4219,10 +4248,52 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const base = path.resolve(folder).toLowerCase(), target = path.resolve(candidate).toLowerCase();
     return target === base || target.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
   }
-  /** Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null. */
-  function readOnlyInspection(command, folder, cwd = null) {
+  // The native reviewer (nativeCommandReview) also lets a command create and change files inside the
+  // workspace folder, as Claude Code's auto mode runs "local file operations in your working
+  // directory" unasked. Never a delete, and never the files that steer agents, hooks or CI: an agent
+  // writing AGENTS.md through the shell would be writing the reviewer's own standing instructions.
+  const WRITE_VERBS = new Set(["new-item", "ni", "mkdir", "md", "set-content", "add-content", "ac", "out-file", "copy-item", "cpi", "copy", "cp",
+    "move-item", "mi", "move", "mv", "rename-item", "rni", "ren", "tee-object", "tee"]);
+  // Steps a script takes that write nothing at all: output dropped, strict mode on.
+  const QUIET_VERBS = new Set(["out-null", "set-strictmode"]);
+  // node_modules too: here it is often a junction to another checkout, so a write there leaves the folder.
+  const PROTECTED_WRITE = /(?:^|[\\/])(?:\.git|\.github|\.husky|\.claude|\.codex|\.agents|\.vscode|\.idea|node_modules)(?:[\\/]|$)|(?:^|[\\/])(?:AGENTS\.md|CLAUDE\.md|\.mcp\.json|package\.json)$/i;
+  /**
+   * `text` without its output redirects (`> file`, `>> file`, `2> file`), each checked to write a plain
+   * path inside `folder` that is not protected; null when one is not, or for an input redirect.
+   */
+  function withoutWriteRedirects(text, folder) {
+    let out = "", quote = null;
+    for (let at = 0; at < text.length; at += 1) {
+      const char = text[at];
+      if (quote) { if (char === quote) quote = null; out += char; continue; }
+      if (char === "\"" || char === "'") { quote = char; out += char; continue; }
+      if (char === "<") return null;
+      if (char !== ">") { out += char; continue; }
+      if (/(?:^|\s)[1-6*]$/.test(out)) out = out.slice(0, -1);
+      if (text[at + 1] === ">") at += 1;
+      const target = /^\s*(?:"([^"]*)"|'([^']*)'|([^\s;|&<>"'`(){}]+))/.exec(text.slice(at + 1));
+      const file = target ? target[1] ?? target[2] ?? target[3] : "";
+      if (!file || /[$`]/.test(file) || !insideFolder(file, folder) || PROTECTED_WRITE.test(file)) return null;
+      at += target[0].length;
+      out += " ";
+    }
+    return quote ? null : out;
+  }
+  /**
+   * Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null.
+   * With `writes`, creating and changing files inside the folder counts too (the native reviewer's mode).
+   */
+  function readOnlyInspection(command, folder, cwd = null, { writes = false } = {}) {
     // Errors shown with the output (2>&1) or dropped (2>$null) write no file; any other redirect still fails.
     let text = String(command ?? "").replace(/\s+[12]?>&[12](?=\s|;|\||$)|\s+2>\s*\$null\b/gi, "").trim();
+    let wrote = false;
+    if (writes && folder && /[<>]/.test(text)) {
+      const kept = withoutWriteRedirects(text, folder);
+      if (kept === null) return null;
+      wrote = kept.trim() !== text;
+      text = kept.trim();
+    }
     // A script on several lines: each line is a statement, comment lines are left out. A here-string
     // (@" … "@) can hold anything, so it still goes to the reviewer.
     if (/@["']/.test(text)) return null;
@@ -4310,6 +4381,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
       // number or an operator or switch ((-14), -not).
       if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
+      if (writes && first && WRITE_VERBS.has(first.toLowerCase())) {
+        // A write names only places in the folder (checked below with every value) and none that steers agents.
+        wrote = true;
+        continue;
+      }
+      if (writes && first && QUIET_VERBS.has(first.toLowerCase())) continue;
       if (first && !isQuoted(first) && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first) && !localVariable(first)) return null;
     }
     // Paths stay inside the folder, an option's value (--git-dir=…) and a URL's host aside: a URL is
@@ -4319,7 +4396,81 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .map((value) => /^--?[\w-]+=/.test(value) ? value.slice(value.indexOf("=") + 1) : value)
       .filter((value) => !/^https?:\/\//i.test(value));
     if (!values.every((value) => insideFolder(value, folder))) return null;
+    // A command that writes names no protected place anywhere, nor runs in one: `cd .git; Set-Content
+    // hooks\pre-commit …` would write there through a relative path.
+    // Every word counts here, `.git` included (the values above leave out what reads as a member name).
+    if (wrote && ([...quoted, ...words].some((value) => PROTECTED_WRITE.test(value)) || (cwd && PROTECTED_WRITE.test(cwd)))) return null;
     return "Read-only inspection inside the workspace folder";
+  }
+  // The native reviewer: decides a shell request on this machine, with no model and no quota, before
+  // Guardian or CPA are asked. It clears a command whose every step is read-only inspection, a
+  // routine project command, or a write inside the workspace folder, and it follows the PowerShell
+  // scripts the command runs, recursively, judging each script's own steps the same way. A step it
+  // cannot clear leaves the request to the quota reviewers, exactly as before.
+  const NATIVE_SCRIPT_BYTES = 64 * 1024;
+  const NATIVE_SCRIPT_DEPTH = 3;
+  const NATIVE_SCRIPT_COUNT = 8;
+  const NATIVE_REVIEW_BUDGET_MS = 2_000;
+  const NATIVE_ARG = String.raw`(?:"[^"$\x60]*"|'[^']*'|[^\s"'$\x60;|&<>(){}]+)`;
+  const NATIVE_SCRIPT = String.raw`(?:"([^"$\x60]+\.ps1)"|'([^']+\.ps1)'|([^\s"'$\x60;|&<>(){}]+\.ps1))`;
+  // How a step runs a script: `& 'x.ps1' args`, `.\x.ps1 args`, `powershell -NoProfile -File x.ps1 args`.
+  const NATIVE_INVOCATIONS = [
+    new RegExp(String.raw`^&\s*${NATIVE_SCRIPT}((?:\s+${NATIVE_ARG})*)$`, "i"),
+    new RegExp(String.raw`^()()((?:\.{1,2}[\\/]|[a-z]:[\\/])[^\s"'$\x60;|&<>(){}]*\.ps1)((?:\s+${NATIVE_ARG})*)$`, "i"),
+    new RegExp(String.raw`^(?:powershell|pwsh)(?:\.exe)?(?:\s+-(?:NoProfile|NoLogo|NonInteractive|ExecutionPolicy\s+(?:Bypass|RemoteSigned|Unrestricted)))*\s+-File\s+${NATIVE_SCRIPT}((?:\s+${NATIVE_ARG})*)$`, "i"),
+  ];
+  const unquote = (value) => value.replace(/^(["'])([\s\S]*)\1$/, "$2");
+  /**
+   * Why the native reviewer clears `command` (run in `cwd`, inside `folder`), or null to leave it to
+   * the quota reviewers. Async: it reads the scripts the command runs, within NATIVE_REVIEW_BUDGET_MS.
+   */
+  async function nativeCommandReview(command, folder, cwd = null, { files = fs.promises, budgetMs = NATIVE_REVIEW_BUDGET_MS } = {}) {
+    if (!folder || (cwd && !insideFolder(cwd, folder))) return null;
+    const deadline = now() + budgetMs;
+    const checked = [], seen = new Set();
+    async function review(text, depth) {
+      if (requestDenial(text)) return false;
+      // Each step on its own: a script it runs is set aside to read, a routine project command is
+      // cleared; what is left must be inspection or writes inside the folder, judged as one text so
+      // its variables and blocks keep their meaning.
+      const scripts = [];
+      const steps = [];
+      for (const line of String(text).split(/\r?\n/)) {
+        if (/^\s*#/.test(line)) continue;
+        const chain = commandChain(line);
+        if (chain === null) return false;
+        for (const step of chain) {
+          const invoked = NATIVE_INVOCATIONS.map((pattern) => pattern.exec(step)).find(Boolean);
+          if (invoked) {
+            const args = (invoked[4] ?? "").trim().match(new RegExp(NATIVE_ARG, "g")) ?? [];
+            if (!args.every((arg) => arg.startsWith("-") || insideFolder(unquote(arg), folder))) return false;
+            scripts.push(invoked[1] || invoked[2] || invoked[3]);
+            steps.push("Write-Output");
+          } else steps.push(routineCommand(step) ? "Write-Output" : step);
+        }
+      }
+      const rest = steps.filter((step) => step !== "Write-Output");
+      if (rest.length && !readOnlyInspection(steps.join("; "), folder, cwd, { writes: true })) return false;
+      for (const script of scripts) {
+        const file = path.resolve(cwd || folder, script);
+        const key = file.toLowerCase();
+        if (!insideFolder(file, folder) || depth >= NATIVE_SCRIPT_DEPTH || checked.length >= NATIVE_SCRIPT_COUNT || now() > deadline) return false;
+        // A script that runs itself again adds nothing to check.
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const stat = await files.stat(file).catch(() => null);
+        if (!stat?.isFile() || stat.size > NATIVE_SCRIPT_BYTES) return false;
+        const body = String(await files.readFile(file, "utf8").catch(() => "")).replace(/^﻿/, "");
+        if (!body.trim()) return false;
+        checked.push(path.relative(folder, file) || path.basename(file));
+        if (!await review(body, depth + 1)) return false;
+      }
+      return true;
+    }
+    if (!await review(String(command ?? ""), 0)) return null;
+    return checked.length
+      ? `Checked on this machine, no quota: every step, including ${checked.length === 1 ? "the script" : "the scripts"} ${checked.join(", ")}, reads or writes only inside the workspace folder`
+      : "Checked on this machine, no quota: every step reads or writes only inside the workspace folder";
   }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {
@@ -5077,7 +5228,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       decide ? "Nobody else will look at this request: the outcome must be allow or deny." : "",
       guardianFallback ? `${guardianFallback.guardianUnavailable ? "Native Guardian was unavailable."
         : guardianFallback.guardianAssessment === "low-risk" ? "Native Guardian did not confirm clear authorization."
-          : "Native Guardian did not confirm low risk and clear user authorization."} Review the exact command, its working folder, and the user's request independently. Allow only if the command is low risk and the user's authorization is high; otherwise deny.` : "",
+          : "Native Guardian did not confirm low risk and clear user authorization."} Review the exact command, its working folder, and the user's request independently. ${fallbackJudgeRule()}` : "",
       partial ? "The request above is cut short: it was too long to show whole. Judge from what is shown; deny unless what is shown is enough to tell it is safe." : "",
     ].filter(Boolean).join("\n");
     // The evidence goes last, so the rules above stay first, and it is marked as data: a tool's
@@ -5129,8 +5280,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         let decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
-        if (guardianFallback && decision.action !== "deny" && (decision.action !== "allow" || answer.risk_level !== "low" || answer.user_authorization !== "high")) {
-          decision = { action: "deny", reason: "The model judge did not confirm low risk and clear user authorization." };
+        // The judge's own risk and authorization ratings must fit FALLBACK_JUDGE_ALLOWS. Its rationale
+        // stays in the reason: the fixed "did not confirm" line hid why it would not allow.
+        if (guardianFallback && decision.action !== "deny" && !fallbackJudgeAllows({ ...answer, outcome: decision.action })) {
+          decision = { action: "deny", reason: `The model judge did not clear it (${publicText(String(answer?.risk_level ?? "unrated"), 20)} risk, `
+            + `${publicText(String(answer?.user_authorization ?? "unrated"), 20)} authorization): ${publicText(String(decision.reason || "no reason given"), 200)}` };
         }
         clock.mark("model");
         await verifyCurrent();
@@ -5461,6 +5615,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (prior?.unsent && !resend) return null;
     const sends = resend ? (resend.sends ?? 1) + 1 : 1;
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
+    let native = null;
     let advice = approver.autobot
       ? { ...(await reviewAutobot({ config: approver.autobot, approval,
         hardDenial: blocked ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) } : null,
@@ -5504,6 +5659,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
               && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
             ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
+            // The native reviewer: writes inside the folder and the scripts a command runs, read and
+            // judged here with no model, so no quota (nativeCommandReview).
+            : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
+              && (native = await nativeCommandReview(approval.command, await requestFolder(approval, mission), approval.cwd))
+            ? { action: "allow", actor: "safety_rules", reason_code: "native_review", reason: native }
             // Unresolved, so it waits for the person: a plain "ask" is answered for them after AUTO_ANSWER_MS.
             : !judges && denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
             ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
@@ -10638,7 +10798,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
   return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
-    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, FALLBACK_JUDGE_ALLOWS, fallbackJudgeAllows, fallbackJudgeRule, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
