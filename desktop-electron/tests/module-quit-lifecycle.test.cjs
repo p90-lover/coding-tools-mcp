@@ -51,6 +51,7 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
       recoverAfterCancelledQuit: async () => { recovered.push(context.quitting); } },
     stopCatalogVerificationMonitor() {}, updateController: { stopPeriodicChecks() {} }, autoInstaller: { stop() {} }, cpaUpdater: { stop() {} },
     stopBridgeWatchdog() {}, backendBundles: { stopWatching() {} },
+    nativeChats: { close: async () => { chatHosts.push("stop-native-chats"); } },
     agentOrchestratorUpstream: { stop: async () => { chatHosts.push("stop-ao"); }, endChatHosts: async () => { chatHosts.push("end-chat-hosts"); } },
     antigravityReauth: { stop() {} },
     // ProxyBridge Nova (provider-bootstrap.cjs) ends with a full quit, after everything that may use its gateway.
@@ -89,6 +90,7 @@ test("rejected app quit does not dispose integrations before the active-operatio
   assert.equal(result.ok, false);
   assert.deepEqual(f.disposed, []);
   assert.deepEqual(f.nativeStops, []);
+  assert.deepEqual(f.chatHosts, []);
   assert.deepEqual(f.quits, []);
   assert.deepEqual(f.order, []);
 });
@@ -122,14 +124,14 @@ test("a quit or update with a live ChatGPT turn asks, and Quit anyway goes on", 
 });
 
 // Seen 2026-10-28: chat hosts from three earlier runs, the oldest four days old, each with its agent.
-test("a quit ends AO's chat hosts after AO stops, then Nova; a keep-bridge restart leaves them to be reattached", async () => {
+test("quit and restart close native Chats before AO; a full quit also ends AO's chat hosts before Nova", async () => {
   const quit = fixture();
   assert.equal((await quit.quit()).ok, true);
-  assert.deepEqual(quit.chatHosts, ["stop-ao", "end-chat-hosts", "stop-nova"]);
+  assert.deepEqual(quit.chatHosts, ["stop-native-chats", "stop-ao", "end-chat-hosts", "stop-nova"]);
 
   const restart = fixture();
   assert.equal((await restart.quit({ keepBridge: true })).ok, true);
-  assert.deepEqual(restart.chatHosts, ["stop-ao"]);
+  assert.deepEqual(restart.chatHosts, ["stop-native-chats", "stop-ao"]);
 });
 
 // Seen 2026-11-02 14:21: an install script's keep-bridge quit ({ relaunch: false }) closed 0.8.50, then the

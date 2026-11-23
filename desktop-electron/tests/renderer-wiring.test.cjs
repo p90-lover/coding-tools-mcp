@@ -508,11 +508,10 @@ test("In-Process Apps shows only CPA/AO and refuses a stale retired selection", 
   assert.deepEqual(calls.map(([mode, args]) => [mode, args.moduleId ?? args.handle]), [["call", "cpa"], ["invoke", "cpa"]]);
 });
 
-test("AO is the sole Runtime orchestrator and lets workers pick an AO harness", () => {
-  // The Runtime entry is named Chat and sits first in the sidebar, then its saved teams, its subagents, chat agents'
-  // computer use and Native Codex.
+test("Runtime keeps AO Chat and its harness picker separate from native Chats", () => {
   assert.match(appSource, /<nav className="sidebar-nav"[^>]*>\s*<SidebarGroup label=\{copy\.runtime\}>\s*<SidebarItem active=\{surface === "agent-orchestrator"\}/);
-  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "agent-orchestrator-teams"\}[^\n]*label="Orchestrator Team"[^\n]*\/>\s*<SidebarItem active=\{surface === "subagents"\}[^\n]*label="Subagents"[^\n]*\/>\s*<SidebarItem active=\{surface === "computer-use"\}[^\n]*label="Computer use"[^\n]*\/>\s*<SidebarItem active=\{surface === "native-codex"\}/);
+  assert.match(appSource, /label="Chat" onClick=\{\(\) => navigateSurface\("agent-orchestrator"\)\} \/>\s*<SidebarItem active=\{surface === "chats"\}[^\n]*label="Chats" onClick=\{\(\) => navigateSurface\("chats"\)\} \/>\s*<SidebarItem active=\{surface === "agent-orchestrator-teams"\}[^\n]*label="Orchestrator Team"[^\n]*\/>\s*<SidebarItem active=\{surface === "subagents"\}[^\n]*label="Subagents"[^\n]*\/>\s*<SidebarItem active=\{surface === "computer-use"\}[^\n]*label="Computer use"[^\n]*\/>\s*<SidebarItem active=\{surface === "native-codex"\}/);
+  assert.match(appSource, /keepAlive\("chats", \(\) => \([\s\S]*?<NativeChatsSurface active=\{surface === "chats"\}/);
   assert.doesNotMatch(appSource, /label=\{copy\.structuredOrchestrator\}|surface === "orchestrator"|surface === "paseo"|navigateSurface\("paseo"\)/);
   assert.match(appSource, /setError\(`\$\{next\} is retired and unavailable\.`\)/);
   assert.match(aoSource, /moduleCall\("harnesses"\)/);
