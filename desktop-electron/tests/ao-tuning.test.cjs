@@ -237,3 +237,15 @@ test("the Model scores leaderboard ranks like a benchmark: by the chosen view, t
   assert.equal(scores.passText(entry("a", 5, 0.8, 7)), "80% (4/5)");
   assert.equal(scores.passText({ missions: 2 }), "–", "an older backend's summary has no record");
 });
+
+test("1M input-budget ceilings (872K and 1,047,576) format as 1M and tune Native Codex CPA models to 1M", async () => {
+  const { editor } = await picker(route(), ["cpa/gpt"]);
+  assert.equal(editor.tokensLabel(1_047_576), "1M", "gpt-4.1's 1,047,576 window reads as 1M");
+  assert.equal(editor.capabilityText({ efforts: ["high"], contextLimit: 872_000, contextWindow: { min: 4096, max: 1_000_000 } }), "up to high effort · 1M context");
+  assert.equal(editor.capabilityText({ efforts: ["high"], contextLimit: 1_047_576, contextWindow: { min: 4096, max: 1_047_576 } }), "up to high effort · 1M context");
+  const nativeLuna = editor.routeTuning(route("codex-native", "gpt-6-luna"), { efforts: ["high"], contextLimit: 872_000, contextWindow: { min: 4096, max: 1_000_000 } });
+  assert.equal(nativeLuna.nativeMax, 1_000_000);
+  assert.equal(nativeLuna.fullLimit, 872_000);
+  assert.ok(nativeLuna.presets.includes(1_000_000));
+});
+

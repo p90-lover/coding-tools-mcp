@@ -404,6 +404,7 @@ test("Claude Code through CPA starts on the model id CPA lists to Claude clients
   ], "only Claude Code takes CPA's Claude spelling; a claude-… id and other agents keep the id");
   const back = vm.runInContext("cpaModelFromClaude", context);
   assert.equal(back("claude-fable-5-dd-hsalf-1.4v-keespeed/og-edocnepo(max)"), "opencode-go/deepseek-v4.1-flash(max)");
+  assert.equal(back("claude-fable-5-dd-nogra-4-inimeg(medium)[1m]"), "gemini-4-argon(medium)[1m]");
   assert.equal(back("gpt-6.1-sol"), "gpt-6.1-sol");
   assert.equal(back("claude-fable-5-dd-"), "claude-fable-5-dd-");
 });

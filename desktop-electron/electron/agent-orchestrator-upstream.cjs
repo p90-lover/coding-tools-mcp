@@ -1230,7 +1230,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // the real id (and suffix) for routing.
   const CPA_CLAUDE_ALIAS = "claude-fable-5-dd-";
   const reversed = text => [...text].reverse().join("");
-  const splitSuffix = id => /^(.*?)(\([^()]*\))?$/.exec(id).slice(1, 3).map(part => part ?? "");
+  const splitSuffix = id => /^(.*?)((?:\([^()]*\)|\[1m\])*)$/i.exec(id).slice(1, 3).map(part => part ?? "");
   /** A CPA model id as CPA lists it to Claude Code. */
   function cpaClaudeModel(id) {
     const [base, suffix] = splitSuffix(id);
@@ -2829,9 +2829,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // The open panel's category split reads the timeline back to the last compaction, so
         // only on request and for one session; the 4-second ring poll stays one small read.
         if (args.detail === true && ids.length === 1) {
+          const launched = sessions[id].launchedWindow;
+          const own = sessions[id].usage?.contextWindow ?? 0;
+          const breakdownUsage = sessions[id].usage && launched && own !== launched && !(own < launched && own >= launched * 0.8)
+            ? { ...sessions[id].usage, contextWindow: launched } : sessions[id].usage;
           sessions[id].breakdown = await readContextBreakdown(
             (query) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?${query}`),
-            sessions[id].usage,
+            breakdownUsage,
           ).catch(() => null);
         }
       }));

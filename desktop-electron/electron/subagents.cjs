@@ -266,7 +266,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   // one could no longer read it ("No such subagent in this chat").
   const runsPath = statePath ? path.join(path.dirname(statePath), "subagent-runs.json") : null;
   // A field the views show must be here too, or a restart drops it (effort and harness did, 2026-11-13).
-  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "effort", "harness", "task",
+  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "effort", "contextWindow", "harness", "task",
     "startedAt", "endedAt", "state", "report", "error", "turns", "turnId", "turnStartedAt", "recoveries", "released"];
   let runsSaving = Promise.resolve();
   let runsQueued = false;
@@ -348,7 +348,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   const view = (run) => ({
     subagent_id: run.id, ...(run.kind === "team" ? { team: run.agentId } : { agent: run.agentId }), name: run.agentName,
-    ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}), state: run.state, task: run.task.slice(0, 200),
+    ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
+    ...(run.contextWindow ? { context_window: run.contextWindow } : {}), state: run.state, task: run.task.slice(0, 200),
     elapsed_seconds: Math.round(((run.endedAt ?? now()) - run.startedAt) / 1000), ...(run.turns > 1 ? { turns: run.turns } : {}),
     ...(run.report ? { report: run.report } : {}), ...(run.error ? { error: run.error } : {}), ...(run.stopping ? { stopping: true } : {}),
     // Cut short and coming back (recover): why, and how many tries so far.
@@ -782,7 +783,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const named = String(args.gateway?.model ?? "").match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
     const effort = args.effort ?? named ?? null;
     const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, model: route.model.replace(/^cpa\//, ""), task: brief,
-      ...(typeof effort === "string" && effort ? { effort } : {}), harness: route.harness_id,
+      ...(typeof effort === "string" && effort ? { effort } : {}),
+      ...(Number.isSafeInteger(args.contextWindow) && args.contextWindow > 0 ? { contextWindow: args.contextWindow } : {}), harness: route.harness_id,
       startedAt: now(), endedAt: null, state: "starting", report: "", error: "", turns: 1 };
     remember(run);
     await stopIfParentStopped(run, parent, generation);

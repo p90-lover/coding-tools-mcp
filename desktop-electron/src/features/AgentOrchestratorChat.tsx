@@ -218,8 +218,14 @@ const routeEffortName = (route: RouteFields) => {
   const effort = typeof route.effort === "string" ? route.effort : "";
   return `${!effort ? "Auto" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1)} effort`;
 };
-const routeWindowName = (route: RouteFields) => typeof route.context_window === "number" && route.context_window > 0
-  ? `${Math.round(route.context_window / 1000)}K context` : "the default context";
+const routeWindowName = (route: RouteFields) => {
+  const tokens = typeof route.context_window === "number" && route.context_window > 0 ? route.context_window : 0;
+  if (!tokens) return "the default context";
+  if (tokens === 1_048_576 || tokens === 1_047_576) return "1M context";
+  if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M context`;
+  if (tokens % 1_000 === 0) return `${tokens / 1_000}K context`;
+  return `${Math.round(tokens / 1000)}K context`;
+};
 /**
  * What differs between the agent's route and the picked one, in the composer's own words, and
  * what to pick to get the agent back: "Max effort" / "Medium effort". The note showed the raw
@@ -1994,8 +2000,17 @@ export function AgentOrchestratorChat({
   const agentRoute: RouteFields | null = latest?.execution_mode === "single" && chatLead?.route
     ? { ...(chatLead.route as unknown as RouteFields), ...(resizeHere?.state === "done" ? { context_window: resizeHere.contextWindow } : {}) } : null;
   // Only the person's own pick: a window the composer fills in by itself (a blank card's default,
-  // `adjusted`) must not restart the agent of a chat that was merely opened.
+  // `adjusted`) must not restart the agent of a chat that was merely opened, nor replace an open
+  // chat's unset window or effort with another chat's saved tuning or the new-chat 400K default.
   const pickRoute = (route: ComposerControlsProps["route"], adjusted?: boolean) => {
+    if (adjusted && selectedTaskId && agentRoute) {
+      const kept = { ...route } as Record<string, unknown>;
+      const web = String(route.model ?? "").replace(/^cpa\//, "").startsWith("chatgpt-web/");
+      if (agentRoute.context_window == null && !web) delete kept.context_window;
+      if (agentRoute.effort == null && !web) delete kept.effort;
+      composer?.onRouteChange(kept as ComposerControlsProps["route"], true);
+      return;
+    }
     composer?.onRouteChange(route, adjusted);
     if (adjusted || !selectedTaskId || !resizeAgent || !agentRoute) return;
     const picked = route as unknown as RouteFields;
