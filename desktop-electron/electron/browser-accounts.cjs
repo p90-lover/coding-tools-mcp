@@ -29,6 +29,23 @@ function signedInFromCookies(cookies, nowSeconds = Date.now() / 1000) {
     && (cookie.session === true || !cookie.expirationDate || cookie.expirationDate > nowSeconds));
 }
 
+// CHATGPT_SIGNED_OUT's words (mcp-connector-setup.cjs), as the account card reads them.
+const SIGN_IN_REJECTED = /no longer accepts this account's sign-in/;
+
+/**
+ * Whether "the least busy account" may start a new Codex session on this account (an entry of the
+ * account service's status, with `signedIn`). It takes new sessions, its partition holds a ChatGPT
+ * sign-in (null: not read yet, which counts), and ChatGPT has not rejected that sign-in since its
+ * connector last worked: a bound turn or connector clears the error. Seen 2026-11-23: six of seven
+ * accounts were signed out or rejected, all still "taking new sessions", so balancing would have
+ * started sessions on accounts that cannot answer.
+ */
+function takesNewSessions(entry) {
+  if (!entry || entry.acceptsNewSessions === false || entry.signedIn === false) return false;
+  const error = entry.connector?.error;
+  return !(typeof error === "string" && SIGN_IN_REJECTED.test(error));
+}
+
 const clampTabs = (value) => (Number.isInteger(value) && value >= 1 && value <= MAX_TABS_PER_ACCOUNT ? value : MAX_TABS_PER_ACCOUNT);
 const timestamp = (value) => (Number.isFinite(value) && value > 0 ? value : null);
 
@@ -391,5 +408,5 @@ function createBrowserAccounts({ dataRoot, profile, logger, now = Date.now }) {
 }
 
 module.exports = {
-  createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS, MAX_TABS_PER_ACCOUNT, KEEP_FINISHED_TABS_MINUTES,
+  createBrowserAccounts, signedInFromCookies, takesNewSessions, FIRST_ACCOUNT_ID, MAX_ACCOUNTS, MAX_TABS_PER_ACCOUNT, KEEP_FINISHED_TABS_MINUTES,
 };
