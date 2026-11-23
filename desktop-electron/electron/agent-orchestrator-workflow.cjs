@@ -190,15 +190,17 @@ const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
 // session/request_permission, or Codex's app-server approval), so all three permission modes run
 // there: Ask is the agent's accept-edits mode with the rest asked in the chat, Approve for me sends
 // those requests to this app's reviewer (Codex: its own auto-review), Full access is bypass.
+// agy too since it runs as a chat through Google's own `agy acp` (AO's ACP driver, ported from
+// upstream in AO#61): checked 2026-11-23 on agy 1.5.14, it raised session/request_permission
+// (allow_once / reject_once) before writing a file, and a declined request left the file alone.
 // Every other agent runs in Full access only, which each AO adapter maps onto its bypass flag:
 // in Ask or Approve for me it would never ask (Pi, Unreal Agent, opencode on its own default) or
-// ask in a terminal nobody sees (agy, Cline), and its card would run unchecked or wait for good.
+// ask in a terminal nobody sees (Cline), and its card would run unchecked or wait for good.
 // Those two modes are refused at launch with the agent's reason (fullAccessOnly) and shown so in
 // its permission menu.
-const PERMISSION_AGENTS = new Set(["claude-code", "codex"]);
+const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
 // Why an agent outside PERMISSION_AGENTS can't run in Ask or Approve for me, by agent.
 const FULL_ACCESS_REASONS = {
-  agy: "Antigravity asks for approval in its own terminal, which the chat does not show, so it would wait for good",
   cline: "Cline asks for approval in its own terminal, which the chat does not show, so it would wait for good",
   // AO leaves opencode on its own rules in every mode but bypass, and those allow every tool.
   opencode: "opencode allows every tool by its own default, so it would never ask the chat, and nothing would be reviewed",
@@ -211,10 +213,12 @@ const FULL_ACCESS_ONLY = "Choose Full access, the only mode it runs in.";
 const fullAccessOnly = (agent) => `${FULL_ACCESS_REASONS[agent]
   ?? `${agent} has no way to ask the chat before it runs a tool, so the chat can neither ask you nor review its tools for you`}. ${FULL_ACCESS_ONLY}`;
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
-// agy too, by the user's choice (2026-11-18): its own models run on its Google sign-in, which Google
-// refused here ("not currently available in your location", "Verify your account to continue"), so
-// a chat on one never sent its first message, while the same Gemini models answered through CPA.
-const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode", "agy"]);
+// agy was one from 2026-11-18 (Google refused its sign-in here: "not currently available in your
+// location"). Since 2026-11-23 it runs as a chat on Google's own `agy acp` and its own Google sign-in,
+// the way T3 Code does (Google: permitted for personal use; proxied OAuth tokens are not), so its
+// own models are listed beside CPA's once it is signed in on the Antigravity page; until then its
+// catalog is empty (see models()), never an error that would hide CPA's.
+const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 // Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
 // by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
 // requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
@@ -1735,12 +1739,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
       // Claude Code's and opencode's own catalogs (fable/haiku/opus/opus[1m]/sonnet, provider
-      // aliases) are neither CPA nor WebGPT models, and agy's run on a Google sign-in that may be
-      // refused (CPA_ONLY_AGENTS), so those agents offer only the CPA pool. Codex
-      // keeps its own ChatGPT-account models. For a CPA-only agent a CPA failure is reported,
-      // never silently replaced by its aliases; the renderer drops a rejected catalog and retries.
+      // aliases) are neither CPA nor WebGPT models (CPA_ONLY_AGENTS), so those agents offer only the
+      // CPA pool. Codex keeps its own ChatGPT-account models, agy its Google sign-in's: an agy not
+      // signed in yet lists none of its own, and still lists CPA's. For a CPA-only agent a CPA
+      // failure is reported, never silently replaced by its aliases; the renderer drops a rejected
+      // catalog and retries.
       const cpaOnly = CPA_ONLY_AGENTS.has(agent);
-      const items = cpaOnly ? [] : (await cachedAgentModels(agent, workspaceId))
+      const own = cpaOnly ? [] : agent === "agy"
+        ? await cachedAgentModels(agent, workspaceId).catch(() => [])
+        : await cachedAgentModels(agent, workspaceId);
+      const items = (Array.isArray(own) ? own : [])
         .filter(item => item.id !== "default" && !item.id.startsWith("chatgpt-web/"));
       let catalog = null;
       if (GATEWAY_AGENTS.has(agent)) {
@@ -4957,6 +4965,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const { modelJudges, meteredReviews } = chatPreferences.get();
     return modelJudges && meteredReviews;
   };
+  // Native Guardian's allows, reused for a while: each review spends the ChatGPT plan's quota (about
+  // 0.5% of a Plus 5-hour window per 100, measured 2026-11-23), and an agent asks for the same
+  // command again in the same chat (parallel calls, a check rerun after an edit). That day 9 of
+  // 640 Guardian reviews repeated an earlier request exactly, 6 of them within 10 minutes, mostly
+  // in the same turn. The key is everything Guardian saw or that made the request eligible: the
+  // chat, the user's request (a new message is reviewed afresh), the folder, the shell, the exact
+  // command and its working folder. Only an allow is kept, never a deny or an unclear answer, and the request
+  // must still be the same pending one before a kept allow answers it. An allow older than
+  // GUARDIAN_ALLOW_MS is not reused: one repeat 1.9 hours later was refused.
+  const GUARDIAN_ALLOW_MS = 10 * 60_000;
+  const guardianAllows = new Map(); // sha256(chat, folder, task, request) -> { at, reason }
+  const guardianAllowFields = ["source", "kind", "tool", "command", "cwd", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions"];
+  const guardianAllowKey = (approval, folder, task) => typeof approval.thread_id === "string" && approval.thread_id
+    ? createHash("sha256").update(JSON.stringify([approval.thread_id, folder, task, ...guardianAllowFields.map(field => approval[field] ?? null)])).digest("hex")
+    : null;
   const guardianJudgeScope = (approver, approval) => !approver.autobot && approver.role !== "approver" && approver.settings?.auto_decide === true
     && ["allow_once", "reject_once"].every(kind => approval.decisions?.some(option => option.kind === kind))
     && (!Array.isArray(approval.request?.availableDecisions) || ["accept", "decline"].every(decision => approval.request.availableDecisions.includes(decision)));
@@ -4970,6 +4993,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     await verifyCurrent();
     if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
+    const allowKey = guardianAllowKey(approval, folder, task);
+    const kept = allowKey ? guardianAllows.get(allowKey) : null;
+    if (kept && now() - kept.at < GUARDIAN_ALLOW_MS) {
+      if (!await samePendingApproval(approval, verifyCurrent)) {
+        return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
+      }
+      return { action: "allow", reason: kept.reason, actor: "guardian", reason_code: "native_guardian", guardianCached: true };
+    }
+    if (kept) guardianAllows.delete(allowKey);
     const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
     if (!outcome || !["allow", "deny"].includes(outcome.action)) {
       const result = manual(publicText(outcome?.reason || blocked.reason, 300));
@@ -4981,7 +5013,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!await samePendingApproval(approval, verifyCurrent)) {
       return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
     }
-    return { ...outcome, reason: publicText(outcome.reason, 300) };
+    const reason = publicText(outcome.reason, 300);
+    if (outcome.action === "allow" && allowKey) {
+      guardianAllows.delete(allowKey);
+      guardianAllows.set(allowKey, { at: now(), reason });
+      if (guardianAllows.size > 200) guardianAllows.delete(guardianAllows.keys().next().value);
+    }
+    return { ...outcome, reason };
   }
 
   async function askApproverSteps(input, clock = stepClock(now)) {
@@ -4997,7 +5035,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       reason: "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.",
     });
     check();
-    logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true });
+    logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true,
+      ...(verdict.guardianCached ? { cached: true } : {}) });
     if (verdict.action !== "ask") return { ...verdict, guardianSeal: guardianApprovalSeal(approval) };
     if (!judgeScope) return verdict;
     const unsafe = verdict.guardianAssessment === "high-risk";
@@ -5422,7 +5461,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         // The same request twice at once (an agent's parallel calls) is reviewed once: the second
-        // waits for a later pass, which finds the first one's verdict (reviewVerdicts).
+        // waits for a later pass, which finds the first one's verdict (reviewVerdicts, or Guardian's
+        // kept allow in guardianAllows).
         const request = describeRequest(approval);
         if (jobs.some(job => job.request === request) || [...screening.values()].some(job => job.request === request)) continue;
         if (screening.size + jobs.length >= REVIEW_CONCURRENCY) break;

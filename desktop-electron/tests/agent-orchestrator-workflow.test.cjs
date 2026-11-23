@@ -1491,15 +1491,16 @@ test("CPA models go only to agents that can use them through the gateway", async
   // Aider has no gateway launch support: its own models only.
   assert.deepEqual((await workflow.call("models", { harness: "ao:aider" })).models, ["own-model"]);
   // Claude Code and opencode offer only CPA models: their own aliases (fable/haiku/opus/sonnet)
-  // are neither CPA nor WebGPT. agy too: its own models run on its Google sign-in, which Google
-  // refused ("not currently available in your location"), so it runs every model through CPA's
-  // gateway mode. Codex keeps its ChatGPT-account models next to CPA's.
-  for (const harness of ["ao:claude-code", "ao:opencode", "ao:agy"]) {
+  // are neither CPA nor WebGPT. Codex keeps its ChatGPT-account models next to CPA's, and agy (a
+  // chat on `agy acp` since 2026-11-23) its own Google sign-in's.
+  for (const harness of ["ao:claude-code", "ao:opencode"]) {
     assert.deepEqual((await workflow.call("models", { harness })).models,
       ["cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"], harness);
   }
-  assert.deepEqual((await workflow.call("models", { harness: "ao:codex" })).models,
-    ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"]);
+  for (const harness of ["ao:codex", "ao:agy"]) {
+    assert.deepEqual((await workflow.call("models", { harness })).models,
+      ["own-model", "cpa/gpt-5.5", "cpa/gemini-3.8-flash-high", "cpa/gemini-3.1-pro-low"], harness);
+  }
 });
 
 test("a CPA-only agent reports a CPA failure instead of falling back to its own aliases", async () => {
@@ -1511,10 +1512,10 @@ test("a CPA-only agent reports a CPA failure instead of falling back to its own 
     confirm: async () => true,
   });
   await assert.rejects(workflow.call("models", { harness: "ao:claude-code" }), /CPA model list is unavailable: CPA timed out/);
-  // agy never falls back to its own models, which run on its (refused) Google sign-in.
-  await assert.rejects(workflow.call("models", { harness: "ao:agy" }), /CPA model list is unavailable: CPA timed out/);
-  // Codex still has its own ChatGPT-account models when CPA is down.
-  assert.deepEqual((await workflow.call("models", { harness: "ao:codex" })).models, ["sonnet"]);
+  // Codex still has its own ChatGPT-account models when CPA is down, and agy its own sign-in's.
+  for (const harness of ["ao:codex", "ao:agy"]) {
+    assert.deepEqual((await workflow.call("models", { harness })).models, ["sonnet"], harness);
+  }
 });
 
 // A fake headless service holding one workspace's board, runs and team.
@@ -4354,16 +4355,14 @@ test("permission capabilities use installed AO adapter modes without fabricating
     assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
     assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
     assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
-    // agy in its terminal cannot bring an approval to the chat, and Pi and opencode (on its own
-    // allow-all default) never ask, so Ask and Approve for me are excluded there with that reason;
-    // Full access remains.
-    const fullAccessOnly = harness_id !== "ao:claude-code";
+    // Pi and opencode (on its own allow-all default) never ask, so Ask and Approve for me are
+    // excluded there with that reason; Full access remains. agy asks the chat as `agy acp` (since
+    // 2026-11-23), so it offers all three, like Claude Code.
+    const fullAccessOnly = harness_id !== "ao:claude-code" && harness_id !== "ao:agy";
     assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
       fullAccessOnly ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
     if (fullAccessOnly) for (const mode of capability.excluded_modes) assert.match(mode.reason, /Choose Full access, the only mode it runs in\.$/);
   }
-  assert.match((await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id: "ao:agy" } })).capability.excluded_modes[0].reason,
-    /^Antigravity asks for approval in its own terminal/);
   for (const harness_id of ["ao:pi-not-installed", "codex-native"]) {
     const unsupported = await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } });
     assert.equal(unsupported.capability.supported, false);
@@ -4429,8 +4428,9 @@ test("external dispatch refuses permission tuples the adapter cannot honor", asy
     assert.equal(launched, false);
   }
   // Ask or Approve for me on an agent that can't ask the chat is refused with its reason, never
-  // launched to wait at an approval nobody sees (agy, Cline) or to run unchecked (Pi, Unreal Agent).
-  for (const [agent, why] of [["agy", /^Antigravity asks for approval in its own terminal/], ["pi", /^Pi runs its tools without asking/],
+  // launched to wait at an approval nobody sees (Cline) or to run unchecked (Pi, Unreal Agent).
+  // agy left this list on 2026-11-23: as a chat (`agy acp`) it asks the chat before each tool.
+  for (const [agent, why] of [["pi", /^Pi runs its tools without asking/],
     ["unreal-agent", /^Unreal Agent has no approval channel/], ["cline", /^Cline asks for approval in its own terminal/],
     ["opencode", /^opencode allows every tool by its own default/], ["kimi", /^kimi has no way to ask the chat/]]) {
     for (const reviewer of ["user", "auto_review"]) {

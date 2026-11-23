@@ -38,7 +38,7 @@ const { createConversationActions } = require("./chatgpt-conversation-actions.cj
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { cleanUserAgent } = require("./browser-url.cjs");
 const { mergeGptBrowserAccounts } = require("./gpt-browser-merge.cjs");
-const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
+const { createBrowserAccounts, signedInFromCookies, takesNewSessions, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { automaticSetupGaveWay, createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
@@ -1343,12 +1343,12 @@ const refreshBrowserAccountSignIns = (logger) => browserAccountService.refreshSi
 const browserAccountExists = (accountId) => browserAccounts.has(accountId);
 
 // Where a new Codex session starts (the setting): the account in use, a chosen account, or the
-// least busy account that takes new sessions: fewest tabs open, then fewest sessions used in the
-// last day, then the account in use.
+// least busy account that can take it (takesNewSessions: signed in, sign-in not rejected): fewest
+// tabs open, then fewest sessions used in the last day, then the account in use.
 function newSessionAccount() {
-  const { accounts, activeId, settings } = browserAccounts.status();
+  const { accounts, activeId, settings } = browserAccountsStatus();
   if (settings.newSessions !== "balance") return browserAccountExists(settings.newSessions) ? settings.newSessions : activeId;
-  const open = accounts.filter((entry) => entry.acceptsNewSessions);
+  const open = accounts.filter(takesNewSessions);
   if (!open.length) return activeId;
   const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
   const recent = new Map();
