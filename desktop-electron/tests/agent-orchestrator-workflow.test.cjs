@@ -9085,7 +9085,7 @@ test("a follow-up after a permission change starts a fresh session; a refused se
 });
 
 /** The first prompt a chat's fresh session gets after switching from glm-5.3-flash to gemini, given the earlier reply. */
-async function switchedPrompt(earlierAnswer, { model = "cpa/gemini-3.8-flash-high", message = "now fix it", saved = "find the auth bug" } = {}) {
+async function switchedPrompt(earlierAnswer, { model = "cpa/gemini-3.8-flash-high", message = "now fix it", saved = "find the auth bug", redact = false } = {}) {
   const before = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/fixture-previous", permission_profile: ":ao-default" };
   const after = { ...before, model };
   const task = { id: "task-1", title: "Fix auth", description: saved, state: "in_progress", clauses: [] };
@@ -9116,6 +9116,7 @@ async function switchedPrompt(earlierAnswer, { model = "cpa/gemini-3.8-flash-hig
   const workflow = createAgentOrchestratorWorkflow({
     requestHeadless: request, findCodexExecutable: () => process.execPath,
     resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    handoffRedactionEnabled: () => redact,
     aoHarness: {
       spawn: async input => { spawned.push(input); return "fresh-session"; },
       continuable: async () => true,
@@ -9140,7 +9141,9 @@ test("a second fresh start with no new replies reuses the chat's handoff summary
   const world = chatWorld({ tasks: [task], runs: [previous] });
   const created = new Map();
   const spawned = [];
+  const key = "mstrl_" + "SyntheticSummaryCacheValue42";
   let summaries = 0;
+  let redact = false;
   let route = null;
   const request = async (endpoint, body, options) => {
     if (endpoint === "/api/v1/ao/read" && body.run_id) {
@@ -9165,8 +9168,9 @@ test("a second fresh start with no new replies reuses the chat's handoff summary
       if (String(url).includes("/v1/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "gemini-3.8-flash-high" },
         { id: "test-third" }, { id: "cline-pass/glm-5.3-flash" }] }) };
       summaries += 1;
-      return { ok: true, json: async () => ({ choices: [{ message: { content: "SUMMARY: the token expiry is compared in seconds." } }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: `SUMMARY: the token expiry is compared in seconds. ${key}` } }] }) };
     },
+    handoffRedactionEnabled: () => redact,
     aoHarness: {
       spawn: async input => { spawned.push(input); return `fresh-${spawned.length}`; },
       continuable: async () => true,
@@ -9182,10 +9186,17 @@ test("a second fresh start with no new replies reuses the chat's handoff summary
     assert.equal(spawned.length, before + 1, `${model} starts a fresh session`);
     return spawned.at(-1).prompt;
   };
-  assert.match(await switchTo("cpa/gemini-3.8-flash-high"), /SUMMARY: the token expiry/);
+  const firstHandoff = await switchTo("cpa/gemini-3.8-flash-high");
+  assert.match(firstHandoff, /SUMMARY: the token expiry/);
+  assert.ok(firstHandoff.includes(key));
   assert.equal(summaries, 1);
-  assert.match(await switchTo("cpa/test-third"), /SUMMARY: the token expiry/, "the same summary goes with the next fresh start");
+  assert.ok((await switchTo("cpa/test-third")).includes(key), "the same summary goes with the next fresh start");
   assert.equal(summaries, 1, "no model was asked again for replies it already summarized");
+  redact = true;
+  const protectedHandoff = await switchTo("cpa/gemini-3.8-flash-high");
+  assert.ok(!protectedHandoff.includes(key));
+  assert.match(protectedHandoff, /SUMMARY: the token expiry.*\[hidden: credential\]/);
+  assert.equal(summaries, 2, "a summary made while hiding was off is not reused");
 });
 
 test("a chat switched to DeepSeek or GLM puts the exact request before the handoff", async () => {
@@ -9199,6 +9210,21 @@ test("a chat switched to DeepSeek or GLM puts the exact request before the hando
     assert.ok(prompt.indexOf(message) < prompt.indexOf("auth.ts line 42"));
     assert.match(prompt, /Instructions:\nKeep the checks focused\./);
     assert.match(prompt, /Single assistant · fixture-previous/);
+  }
+});
+
+test("handoff redaction masks earlier messages and replies, including fallback, without changing the newest request", async () => {
+  const key = "mstrl_" + "PlaceholderForOlderContext42";
+  const latest = "mstrl_" + "PlaceholderForCurrentRequest42";
+  const message = `Test the new credential ${latest} verbatim.`;
+  const saved = `Keep the existing endpoint. Previously used ${key}.`;
+  for (const padding of ["", "前".repeat(9_000)]) {
+    const prompt = await switchedPrompt(`${padding} Earlier reply echoed ${key}; retry the login flow.`, { message, saved, redact: true });
+    assert.ok(!prompt.includes(key));
+    assert.ok(prompt.includes(message));
+    assert.match(prompt, /Keep the existing endpoint/);
+    assert.match(prompt, /Earlier reply echoed \[hidden: credential\]; retry the login flow/);
+    assert.ok(Buffer.byteLength(prompt, "utf8") <= 15_360);
   }
 });
 
@@ -9355,22 +9381,62 @@ test("a chat over the board's byte limit in fewer characters compacts too, and a
 
 // A chat for the auto-compact tests: its task text, a summarizer answering `summary` (or failing),
 // and the system prompts the summarizer was sent.
-function compactWorld(description, { summary = "Did the first half.", fail = false } = {}) {
+function compactWorld(description, { summary = "Did the first half.", fail = false, redact = false } = {}) {
   const task = { id: "task-1", title: "Long job", description, state: "in_progress", clauses: [] };
   const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false, nodes: [{ state: "finished" }] }] });
-  const prompts = [];
+  const prompts = [], inputs = [];
   const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless, findCodexExecutable: () => "C:/c.exe",
     resolveHarness: async () => { throw new Error("stop before the background loop"); },
+    handoffRedactionEnabled: () => redact,
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
       if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }] }) };
-      prompts.push(JSON.parse(init.body).messages[0].content);
+      const { messages } = JSON.parse(init.body);
+      prompts.push(messages[0].content);
+      inputs.push(messages[1].content);
       if (fail) return { ok: false, status: 502 };
       return { ok: true, json: async () => ({ choices: [{ message: { content: summary } }] }) };
     },
   });
-  return { world, workflow, prompts };
+  return { world, workflow, prompts, inputs };
 }
+
+test("handoff redaction recognizes credential fields, URL credentials, bearer tokens, and complete private-key blocks", () => {
+  const { redactHandoffCredentials } = require("../electron/chat-redaction.cjs");
+  const marker = "[hidden: credential]";
+  const inputs = [
+    ["API key: example_value_42", `API key: ${marker}`],
+    ["https://example-user:example-pass@example.invalid/path?token=example-token&safe=yes", `https://${marker}@example.invalid/path?token=${marker}&safe=yes`],
+    ["Authorization: Bearer " + "ExampleTokenFromFixture42", `Authorization: Bearer ${marker}`],
+    ["-----BEGIN OPENSSH PRIVATE KEY-----\r\nnot-a-real-key\r\n-----END OPENSSH PRIVATE KEY-----", marker],
+    ["Check where the password comes from in auth.ts and keep [hidden: API key].", "Check where the password comes from in auth.ts and keep [hidden: API key]."],
+  ];
+  for (const [before, expected] of inputs) {
+    assert.equal(redactHandoffCredentials(before), expected);
+    assert.equal(redactHandoffCredentials(expected), expected);
+  }
+});
+
+test("handoff redaction masks model input, output, and local rollovers only when enabled", async () => {
+  const key = "mstrl_" + "SyntheticCompactionFixture42";
+  const old = `${"前".repeat(2700)}\nSafe context here.\nOld key: ${key}\n`;
+  for (const [redact, fail, noRoom] of [[true, false, false], [true, true, false], [true, false, true], [false, false, false]]) {
+    const { world, workflow, inputs, prompts } = compactWorld(old, { redact, fail, summary: `Safe context here. Old key: ${key}` });
+    const message = noRoom ? "z".repeat(7900) : "Continue without using the old credential.";
+    await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message });
+    assert.equal(inputs.length, noRoom ? 0 : 1);
+    if (!noRoom) {
+      assert.equal(inputs[0].includes(key), !redact);
+      assert.equal(prompts[0].includes("Omit credential values"), redact);
+    }
+    const saved = world.tasks[0].description;
+    assert.equal(saved.includes(key), !redact);
+    assert.match(saved, /Safe context here/);
+    if (redact) assert.match(saved, /\[hidden: credential\]/);
+    assert.ok(saved.endsWith(message));
+    assert.ok(Buffer.byteLength(saved, "utf8") <= 8192);
+  }
+});
 
 test("auto-compact leaves room for a goal round's long message, and a summary longer than asked is cut, not refused", async () => {
   // The user's goal stalled "This chat is full; use /compact" right after compacting: the summary
