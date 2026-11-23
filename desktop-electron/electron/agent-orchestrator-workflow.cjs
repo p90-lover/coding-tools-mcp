@@ -270,6 +270,14 @@ function staleWhileRevalidate({ read, now = Date.now, freshMs, staleMs, keep = (
       }
       return reread(key, args, entry);
     },
+    /** The kept value now (as `get` would serve it), or undefined: never waits, not even for a read in flight. */
+    peek(key, args) {
+      const entry = entries.get(key);
+      const age = entry ? now() - entry.at : Infinity;
+      if (entry?.value === undefined || age >= staleMs) return undefined;
+      if (age >= freshMs) void reread(key, args, entry).catch(() => undefined);
+      return entry.value;
+    },
   };
 }
 
@@ -383,7 +391,36 @@ const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA
  */
 const DRIVER_INCOMPATIBLE = /chat driver incompatible:\s*read [^:\n]{1,40} version/i;
 
-const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
+/**
+ * When native Guardian cannot decide a shell request, the model judge decides it ("Let the model
+ * judge"), rating the command's risk (low, medium, high, critical) and how clearly the user's request
+ * or standing instructions authorize it (high, medium, low, unknown). Its "allow" counts only for a
+ * risk listed here with one of the authorizations listed for it; anything else is a deny, which
+ * the agent hears with the judge's own reason. The judge's prompt states the same rule
+ * (fallbackJudgeRule), so it answers to the rule it is held to.
+ * Until 2026-11-23 only low risk with high authorization passed: a local update the user's standing
+ * instructions ask for ("install-verified-sha-044.ps1") was denied as "did not confirm".
+ */
+const FALLBACK_JUDGE_ALLOWS = Object.freeze({
+  // As native Guardian's own rule since 0.8.156: a low-risk allow stands unless the user's
+  // authorization is rated low.
+  low: Object.freeze(["high", "medium", "unknown"]),
+  // A step with real effects (an install, a restart, a release step) only when the user asked for it.
+  medium: Object.freeze(["high"]),
+  // High and critical risk are never approved by a model on its own.
+});
+/** Whether the fallback judge's answer clears the request under FALLBACK_JUDGE_ALLOWS. */
+function fallbackJudgeAllows(answer) {
+  return answer?.outcome === "allow" && (FALLBACK_JUDGE_ALLOWS[answer.risk_level] ?? []).includes(answer.user_authorization);
+}
+/** The rule as the judge's prompt states it, from the same table. */
+function fallbackJudgeRule() {
+  const cases = Object.entries(FALLBACK_JUDGE_ALLOWS).filter(([, authorizations]) => authorizations.length)
+    .map(([risk, authorizations]) => `${risk} risk with ${authorizations.join(" or ")} user authorization`);
+  return cases.length ? `Allow only for ${cases.join("; or ")}. Otherwise deny.` : "Deny.";
+}
+
+const REVIEW_SCRIPT =/[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
 // Each name a command mentions costs a disk lookup; a grep listing a dozen .ts files is not a script.
 const REVIEW_SCRIPT_LOOKUPS = 6;
@@ -504,7 +541,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, handoffRedactionEnabled = () => false, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, agentWindow = null, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, handoffRedactionEnabled = () => false, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -522,6 +559,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
   const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
   const runReads = new Map(); // JSON read key -> { at, pending, read }
+  const answerReads = new Map(); // JSON [workspace, run] -> the reviewer's in-flight fast-lane read (nodeForAnswer)
   // A person's own message (chat_send, chat_steer, and their queued message going out) is admitted
   // ahead of the background polls (headless-host.cjs `admissionControl`). Ten split chats polling on
   // a saturated disk kept a follow-up's reads in the ordinary queue behind their polls until it gave
@@ -563,7 +601,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       || endpoint === "/api/v1/ao/harness/compact" && rest[0]?.status === true
       || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered);
     runReads.clear();
-    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => runReads.clear());
+    answerReads.clear();
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => { runReads.clear(); answerReads.clear(); });
   };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
@@ -725,7 +764,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
   function aoLaunchArgs(workspaceId, node, plain, contextDefault = null, effortDefault = null) {
-    const contextWindow = node.route.context_window ?? contextDefault;
+    const contextWindow = declaredWindow(node.route, node.route.context_window ?? contextDefault);
     // "auto" is the model's own effort: nothing is sent, neither a CPA suffix nor a native effort.
     // Tried 2026-10-22 through CPA: every Cline Pass model refused "(auto)" with a 400 ("Supported
     // reasoning levels are …") while the bare model answered, as every model did.
@@ -792,7 +831,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The app's own terminal follows "Approve for me" too: routine project commands run unasked.
       ...(node.route.approvals_reviewer === "auto_review" ? { autoReview: true } : {}),
       ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
-      // A card left blank gets its model's full known limit (defaultContextWindow).
+      // A card left blank gets its model's full known limit (defaultContextWindow); a pick past
+      // that limit (1M on a model CPA reports at 872K) is declared at the limit (declaredWindow).
       ...(contextWindow != null ? { contextWindow } : {}),
       ...(plain ? { plain: true } : {}),
       // A native model takes its own effort; a CPA model's goes in the body where the harness can send it.
@@ -966,6 +1006,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** continuableSession settled as { usable } or { error }: a check begun ahead of its use never rejects unheard. */
   function continuableOutcome(session) {
     return continuableSession(session).then(usable => ({ usable }), error => ({ error }));
+  }
+  // Sessions whose agent's window was checked against its model's limit since the app started.
+  const windowsChecked = new Set();
+  /**
+   * An agent told a bigger window than its model takes in (a 1M card on an 872K model, launched
+   * before declaredWindow capped it) compacts too late and the upstream refuses its requests. Before
+   * its next message it is set to the limit, stopped and resumed on its own conversation, as a resize
+   * does; the card keeps its pick. `outcome` (continuableOutcome) comes back unchanged when there is
+   * nothing to do or the agent could not be stopped, else the resumed agent's. Once per session.
+   */
+  async function fitAgentWindow(session, route, outcome, onFit) {
+    const limit = windowLimit(route), card = route?.context_window ?? null;
+    if (!limit || (card !== null && card <= limit) || windowsChecked.has(session)) return outcome;
+    windowsChecked.add(session);
+    if (windowsChecked.size > 500) windowsChecked.delete(windowsChecked.values().next().value);
+    const service = harnessService();
+    // Not known (no reading yet): a card past the limit launched its agent at the card's window.
+    const reading = await Promise.resolve(agentWindow?.(session)).catch(() => null);
+    const told = Number.isSafeInteger(reading) && reading > 0 ? reading : null;
+    if (told === null ? card === null : told <= limit) return outcome;
+    onFit?.();
+    try {
+      await service.setContextWindow(session, limit);
+      await service.exitAgent(session);
+    } catch (error) {
+      logger?.warn?.("ao.window_fit_failed", { session, limit, message: publicText(error?.message || error, 200) });
+      return outcome;
+    }
+    logger?.info?.("ao.window_fitted", { session, from: told, to: limit });
+    return continuableOutcome(session);
   }
   // A pre-warm's check, which brings back an agent released while idle, runs one at a time. Several
   // chats opening together (split panes, restored tabs) resumed each one's agent at once: AO answers
@@ -1250,6 +1320,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           ?? catalog.capabilities?.[model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "")], tokens);
         if (refused) throw new Error(refused);
       } else tokens = await defaultContextWindow(id, { route }) ?? 0;
+      // The card keeps the pick (1M); the agent is told no more than its model takes in (872K).
+      tokens = declaredWindow(route, tokens);
       await harnessService().setContextWindow(session, tokens);
       // The agent reads its window when it starts: stopped and resumed, it keeps its conversation.
       // Recorded once it is stopped: one that could not be stopped still runs at its old size, and
@@ -1547,19 +1619,47 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       || typeof provider === "string" && PLUGIN_PROVIDERS.has(provider.trim().toLowerCase()) || pluginModels.has(base);
   };
   const VERBATIM_EFFORT_REASON = "This model is served by a CPA provider plugin, which passes the model name on unchanged, so it takes no reasoning level.";
-  /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
+  /**
+   * The window CPA gives every model it knows no limit for: its GPT-5 template's, copied onto
+   * provider-plugin models and onto every model of a config API key (Claude and Gemini keys, an
+   * OpenAI key's gpt-4o, Mistral's). Real only for the GPT models it was made for (ownGptModel).
+   */
   const CPA_STOCK_WINDOW = 272_000;
   /**
-   * Real context ceilings of models that CPA reports only with its stock window, by the model's
-   * own name (after any provider prefix). Without one, the card offers the client's 2M ceiling as
-   * unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI
-   * Studio key is listed at the stock 272K, though CPA's own catalog gives 1,048,576 for every
-   * Gemini 4 model (Antigravity's and OpenCode's report it): until 2026-11-20 a Gemini 4 Carbon
-   * chat was capped at 272K and its window field refused 1m and every 7-digit size.
+   * A model's own name, comparable across providers and spellings: an Anthropic key's "Claude Opus
+   * 4.6", Antigravity's "claude-opus-4-6-thinking" and "cpa/openai-api/…" twins all name one model.
+   * Lowercase, after any provider prefix, no "(effort)", spaces and dots as dashes, no ISO date, and
+   * no trailing effort word or -thinking/-preview/-latest/-tiered. "max" stays: Qwen3 Max is its own model.
    */
-  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:[.-]\d+)?-flash\b/i, 1_000_000],
-    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/i, 1_048_576]];
-  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
+  const modelFamilyKey = id => {
+    const name = String(id ?? "");
+    return name.slice(name.lastIndexOf("/") + 1).toLowerCase().replace(/\([^()]*\)$/, "").trim()
+      .replace(/[\s._]+/g, "-").replace(/-\d{4}-\d{2}-\d{2}$/, "")
+      .replace(/(?:-(?:minimal|low|medium|high|xhigh|thinking|preview|latest|tiered))+$/, "");
+  };
+  /** GPT-5 and later as CPA's own Codex providers list them (no prefix): their 272K is real. */
+  const ownGptModel = id => !String(id).includes("/") && /^gpt-(?:[5-9]|\d{2,})(?:-|$)/.test(modelFamilyKey(id));
+  /**
+   * Real context ceilings of models that CPA reports only with its stock window, by modelFamilyKey.
+   * Without one, the card offers the client's 2M ceiling as unverified; DeepSeek v4.1 Flash showed
+   * "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI Studio key is listed at the stock 272K,
+   * though CPA's own catalog gives 1,048,576 for every Gemini 4 model: until 2026-11-20 a Gemini 4
+   * Carbon chat was capped at 272K and its window field refused 1m and every 7-digit size.
+   * The rest are from CPA's own model registry (inputTokenLimit/context_length, checked 2026-11-23):
+   * Gemini 2.5-3.x Pro/Flash text models 1,048,576 (its image, TTS, live, embedding and transcribe
+   * models are not matched); Claude 5.x, Fable and Opus 4.7/4.8 1M; older Claude 4 models 200K
+   * (Antigravity's Opus 4.6 reports 200K too). An Anthropic key's "Claude Opus 4.6" ran at the stock
+   * 272K and "Claude Opus 5.5" at 272K of its 1M. OpenAI's gpt-4.1 1,047,576, gpt-4o 128K, o3/o4 200K.
+   */
+  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:-\d+)?-flash\b/, 1_000_000],
+    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/, 1_048_576],
+    [/^gemini-(?:2-5|3(?:-\d+)?)-(?:pro|flash)(?:-lite)?$/, 1_048_576],
+    [/^claude-(?:opus|sonnet|haiku|fable)-(?:[5-9](?:-\d+)?|4-[78])$/, 1_000_000],
+    [/^claude-(?:opus|sonnet|haiku)-4(?:-[0-6])?$/, 200_000],
+    [/^gpt-4-1(?:-mini|-nano)?$/, 1_047_576],
+    [/^gpt-4o(?:-mini)?$/, 128_000],
+    [/^o[34](?:-mini)?$/, 200_000]];
+  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(modelFamilyKey(id)))?.[1];
   /**
    * The largest window a card may set for a model whose catalog reports `limit`. CPA's
    * max_context_window counts what the model takes in: its window less the reply's 128K reserve,
@@ -1576,6 +1676,26 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return !setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum
       ? "This model's context window can't be set to that. Its limit is " + maximum + " tokens." : null;
   }
+  /**
+   * The most an agent is told its window is for `route`'s model: the limit CPA's catalog reports
+   * for it (remembered in knownModels, read synchronously at launch), or null when none is known.
+   * A card may pick 1M for a model CPA reports at 872K (windowCeiling), but the agent was told 1M,
+   * compacted near it, and the upstream refused every request past 872K: "400 Your input exceeds
+   * the context window of this model" in GPT-6.2 Sol chats at 1M (2026-11-21, 2026-11-23), with
+   * no compaction before. So the pick stays the card's and the agent is told the limit.
+   */
+  function windowLimit(route) {
+    const model = String(route?.model ?? "");
+    const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
+      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    const limit = id ? knownModels[id]?.capability?.contextLimit : undefined;
+    return Number.isSafeInteger(limit) && limit >= 4096 ? limit : null;
+  }
+  /** The window an agent is launched or resized with for a card's `tokens`: never past windowLimit. */
+  const declaredWindow = (route, tokens) => {
+    const limit = windowLimit(route);
+    return Number.isSafeInteger(tokens) && tokens > 0 && limit && tokens > limit ? limit : tokens;
+  };
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -1939,16 +2059,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const efforts = CLINE_EFFORTS.get(id) ?? (!verbatim && !reportedLevels.length && /^claude-/i.test(id) ? CLAUDE_SUFFIX_EFFORTS : reportedLevels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
-      // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
-      // window, whatever the model really takes: that number is no limit, so it is left unknown
-      // instead of capping the card (and of becoming its default). A model of CPA's own providers
-      // reporting the stock window may really have it (Codex's GPT models do), so only a known
-      // ceiling (KNOWN_CONTEXT_LIMITS: Gemini 4 from a Vertex key) replaces it there.
+      // CPA gives every model it has no limit for the same stock window, whatever the model really
+      // takes: provider plugins' (cline-pass/…, commandcode-go/…) and every model of a config API
+      // key, 179 of them on 2026-11-23 (an Anthropic key's Claude Opus 4.6 at 272K of its 200K, its
+      // Opus 5.5 at 272K of 1M, Gemini at 272K of 1,048,576, gpt-4o at 272K of 128K). That number is
+      // no limit: a known ceiling replaces it, else the same model's limit on another provider
+      // (below), else it stays unknown instead of capping the card and becoming its default. Only
+      // the GPT models of CPA's own Codex providers really have it (ownGptModel).
       const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
-      const stock = (id.includes("/") || knownContextLimit(id) !== undefined)
-        && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
-      // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
-      const limit = stock ? knownContextLimit(id) : reported;
+      const stock = reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
+      // A real number CPA reports wins; the stock one, or none, gives way to a known ceiling.
+      const real = Number.isSafeInteger(reported) && reported > 0 && !stock;
+      const limit = real ? reported : knownContextLimit(id) ?? (stock && ownGptModel(id) ? reported : undefined);
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
         : "CPA did not advertise reasoning levels for this model." } : {}),
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
@@ -1956,6 +2078,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       ids.push(id);
       if (unavailable[id]) { held[id] = unavailable[id]; delete unavailable[id]; }
       if (ids.length === MAX_LISTED_MODELS) break;
+    }
+    // A model still without a limit takes the same model's on another provider (modelFamilyKey): an
+    // OpenAI key's openai-api/gpt-5 the Codex gpt-5's 272K, an Anthropic key's "Claude Sonnet 4.6"
+    // Antigravity's claude-sonnet-4-6 200K. The smallest one, so no provider is asked past its own.
+    const familyLimits = new Map();
+    for (const id of ids) {
+      const limit = capabilities[id].contextLimit;
+      if (!limit) continue;
+      const family = modelFamilyKey(id);
+      familyLimits.set(family, Math.min(familyLimits.get(family) ?? limit, limit));
+    }
+    for (const id of ids) {
+      const limit = capabilities[id].contextLimit ? undefined : familyLimits.get(modelFamilyKey(id));
+      if (limit) capabilities[id] = { ...capabilities[id], contextLimit: limit };
     }
     // CPA's list is remembered (a model it serves now, with what it reports) and every model it
     // listed lately and left out now is listed again from memory.
@@ -2058,7 +2194,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           throw new Error("This model doesn't support the chosen reasoning effort");
         }
         if (node.route.context_window != null) {
-          const refused = windowRefusal(capability, node.route.context_window);
+          // Judged as launched: a window past the model's known limit runs at it (declaredWindow), so
+          // a card saved before its limit was known (272K on a 200K Claude) is not refused for it.
+          const refused = windowRefusal(capability, declaredWindow(node.route, node.route.context_window));
           if (refused) throw new Error(refused);
         }
       };
@@ -2110,8 +2248,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         let unconfirmed = null;
         const checkStarted = now();
         // checkMs is what the launch still waited for here, after the check that began with it.
-        const outcome = !continued ? { usable: false }
+        let outcome = !continued ? { usable: false }
           : await (continued === early ? earlyCheck : continuableOutcome(continued.session));
+        if (continued && !continued.adoptTurn && outcome.usable && !outcome.error) {
+          outcome = await fitAgentWindow(continued.session, node.route, outcome,
+            () => stage("fitting the chat's agent to its model's context limit"));
+        }
         if (outcome.error && outcome.error.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw outcome.error;
         if (outcome.error) unconfirmed = outcome.error;
         const usable = Boolean(continued) && !outcome.error && Boolean(outcome.usable);
@@ -2551,6 +2693,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const saved = await runs({ workspaceId, runId }, { freshMs });
     const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
+  }
+
+  /**
+   * The run as headless holds it now, for the reviewer's check just before it answers a request. It
+   * is read ahead of the background polls, as Stop reads (readForStop): queued behind every open
+   * chat's polls it took 14-35 s, twice per review, and reviews ran out of their 45 s before the
+   * model was asked (2026-11-23). The reviews of one run share a read while it is in flight; every
+   * write drops it, as it drops the shared reads. A full fast lane falls back to the ordinary read.
+   */
+  function nodeForAnswer(workspaceId, runId, nodeId) {
+    const key = JSON.stringify([workspaceId, runId]);
+    let read = answerReads.get(key);
+    if (!read) {
+      read = Promise.resolve()
+        .then(() => requestHeadless("/api/v1/ao/read", { workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80) }, { admissionControl: true }))
+        .then((response) => {
+          if (response?.ok !== true || !Array.isArray(response.runs)) throw new Error("AO run read failed");
+          return response;
+        }, (error) => {
+          if (error?.code !== "HEADLESS_QUEUE_FULL" && !/queue is full/i.test(String(error?.message ?? ""))) throw error;
+          runReads.delete(key);
+          return runs({ workspaceId, runId });
+        })
+        .finally(() => { if (answerReads.get(key) === read) answerReads.delete(key); });
+      answerReads.set(key, read);
+    }
+    return read.then((saved) => {
+      const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
+      return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
+    });
   }
 
   // Callers only read what comes back (none changes a run in place), so one response is shared.
@@ -4219,10 +4391,52 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const base = path.resolve(folder).toLowerCase(), target = path.resolve(candidate).toLowerCase();
     return target === base || target.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
   }
-  /** Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null. */
-  function readOnlyInspection(command, folder, cwd = null) {
+  // The native reviewer (nativeCommandReview) also lets a command create and change files inside the
+  // workspace folder, as Claude Code's auto mode runs "local file operations in your working
+  // directory" unasked. Never a delete, and never the files that steer agents, hooks or CI: an agent
+  // writing AGENTS.md through the shell would be writing the reviewer's own standing instructions.
+  const WRITE_VERBS = new Set(["new-item", "ni", "mkdir", "md", "set-content", "add-content", "ac", "out-file", "copy-item", "cpi", "copy", "cp",
+    "move-item", "mi", "move", "mv", "rename-item", "rni", "ren", "tee-object", "tee"]);
+  // Steps a script takes that write nothing at all: output dropped, strict mode on.
+  const QUIET_VERBS = new Set(["out-null", "set-strictmode"]);
+  // node_modules too: here it is often a junction to another checkout, so a write there leaves the folder.
+  const PROTECTED_WRITE = /(?:^|[\\/])(?:\.git|\.github|\.husky|\.claude|\.codex|\.agents|\.vscode|\.idea|node_modules)(?:[\\/]|$)|(?:^|[\\/])(?:AGENTS\.md|CLAUDE\.md|\.mcp\.json|package\.json)$/i;
+  /**
+   * `text` without its output redirects (`> file`, `>> file`, `2> file`), each checked to write a plain
+   * path inside `folder` that is not protected; null when one is not, or for an input redirect.
+   */
+  function withoutWriteRedirects(text, folder) {
+    let out = "", quote = null;
+    for (let at = 0; at < text.length; at += 1) {
+      const char = text[at];
+      if (quote) { if (char === quote) quote = null; out += char; continue; }
+      if (char === "\"" || char === "'") { quote = char; out += char; continue; }
+      if (char === "<") return null;
+      if (char !== ">") { out += char; continue; }
+      if (/(?:^|\s)[1-6*]$/.test(out)) out = out.slice(0, -1);
+      if (text[at + 1] === ">") at += 1;
+      const target = /^\s*(?:"([^"]*)"|'([^']*)'|([^\s;|&<>"'`(){}]+))/.exec(text.slice(at + 1));
+      const file = target ? target[1] ?? target[2] ?? target[3] : "";
+      if (!file || /[$`]/.test(file) || !insideFolder(file, folder) || PROTECTED_WRITE.test(file)) return null;
+      at += target[0].length;
+      out += " ";
+    }
+    return quote ? null : out;
+  }
+  /**
+   * Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null.
+   * With `writes`, creating and changing files inside the folder counts too (the native reviewer's mode).
+   */
+  function readOnlyInspection(command, folder, cwd = null, { writes = false } = {}) {
     // Errors shown with the output (2>&1) or dropped (2>$null) write no file; any other redirect still fails.
     let text = String(command ?? "").replace(/\s+[12]?>&[12](?=\s|;|\||$)|\s+2>\s*\$null\b/gi, "").trim();
+    let wrote = false;
+    if (writes && folder && /[<>]/.test(text)) {
+      const kept = withoutWriteRedirects(text, folder);
+      if (kept === null) return null;
+      wrote = kept.trim() !== text;
+      text = kept.trim();
+    }
     // A script on several lines: each line is a statement, comment lines are left out. A here-string
     // (@" … "@) can hold anything, so it still goes to the reviewer.
     if (/@["']/.test(text)) return null;
@@ -4310,6 +4524,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
       // number or an operator or switch ((-14), -not).
       if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
+      if (writes && first && WRITE_VERBS.has(first.toLowerCase())) {
+        // A write names only places in the folder (checked below with every value) and none that steers agents.
+        wrote = true;
+        continue;
+      }
+      if (writes && first && QUIET_VERBS.has(first.toLowerCase())) continue;
       if (first && !isQuoted(first) && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first) && !localVariable(first)) return null;
     }
     // Paths stay inside the folder, an option's value (--git-dir=…) and a URL's host aside: a URL is
@@ -4319,7 +4539,81 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .map((value) => /^--?[\w-]+=/.test(value) ? value.slice(value.indexOf("=") + 1) : value)
       .filter((value) => !/^https?:\/\//i.test(value));
     if (!values.every((value) => insideFolder(value, folder))) return null;
+    // A command that writes names no protected place anywhere, nor runs in one: `cd .git; Set-Content
+    // hooks\pre-commit …` would write there through a relative path.
+    // Every word counts here, `.git` included (the values above leave out what reads as a member name).
+    if (wrote && ([...quoted, ...words].some((value) => PROTECTED_WRITE.test(value)) || (cwd && PROTECTED_WRITE.test(cwd)))) return null;
     return "Read-only inspection inside the workspace folder";
+  }
+  // The native reviewer: decides a shell request on this machine, with no model and no quota, before
+  // Guardian or CPA are asked. It clears a command whose every step is read-only inspection, a
+  // routine project command, or a write inside the workspace folder, and it follows the PowerShell
+  // scripts the command runs, recursively, judging each script's own steps the same way. A step it
+  // cannot clear leaves the request to the quota reviewers, exactly as before.
+  const NATIVE_SCRIPT_BYTES = 64 * 1024;
+  const NATIVE_SCRIPT_DEPTH = 3;
+  const NATIVE_SCRIPT_COUNT = 8;
+  const NATIVE_REVIEW_BUDGET_MS = 2_000;
+  const NATIVE_ARG = String.raw`(?:"[^"$\x60]*"|'[^']*'|[^\s"'$\x60;|&<>(){}]+)`;
+  const NATIVE_SCRIPT = String.raw`(?:"([^"$\x60]+\.ps1)"|'([^']+\.ps1)'|([^\s"'$\x60;|&<>(){}]+\.ps1))`;
+  // How a step runs a script: `& 'x.ps1' args`, `.\x.ps1 args`, `powershell -NoProfile -File x.ps1 args`.
+  const NATIVE_INVOCATIONS = [
+    new RegExp(String.raw`^&\s*${NATIVE_SCRIPT}((?:\s+${NATIVE_ARG})*)$`, "i"),
+    new RegExp(String.raw`^()()((?:\.{1,2}[\\/]|[a-z]:[\\/])[^\s"'$\x60;|&<>(){}]*\.ps1)((?:\s+${NATIVE_ARG})*)$`, "i"),
+    new RegExp(String.raw`^(?:powershell|pwsh)(?:\.exe)?(?:\s+-(?:NoProfile|NoLogo|NonInteractive|ExecutionPolicy\s+(?:Bypass|RemoteSigned|Unrestricted)))*\s+-File\s+${NATIVE_SCRIPT}((?:\s+${NATIVE_ARG})*)$`, "i"),
+  ];
+  const unquote = (value) => value.replace(/^(["'])([\s\S]*)\1$/, "$2");
+  /**
+   * Why the native reviewer clears `command` (run in `cwd`, inside `folder`), or null to leave it to
+   * the quota reviewers. Async: it reads the scripts the command runs, within NATIVE_REVIEW_BUDGET_MS.
+   */
+  async function nativeCommandReview(command, folder, cwd = null, { files = fs.promises, budgetMs = NATIVE_REVIEW_BUDGET_MS } = {}) {
+    if (!folder || (cwd && !insideFolder(cwd, folder))) return null;
+    const deadline = now() + budgetMs;
+    const checked = [], seen = new Set();
+    async function review(text, depth) {
+      if (requestDenial(text)) return false;
+      // Each step on its own: a script it runs is set aside to read, a routine project command is
+      // cleared; what is left must be inspection or writes inside the folder, judged as one text so
+      // its variables and blocks keep their meaning.
+      const scripts = [];
+      const steps = [];
+      for (const line of String(text).split(/\r?\n/)) {
+        if (/^\s*#/.test(line)) continue;
+        const chain = commandChain(line);
+        if (chain === null) return false;
+        for (const step of chain) {
+          const invoked = NATIVE_INVOCATIONS.map((pattern) => pattern.exec(step)).find(Boolean);
+          if (invoked) {
+            const args = (invoked[4] ?? "").trim().match(new RegExp(NATIVE_ARG, "g")) ?? [];
+            if (!args.every((arg) => arg.startsWith("-") || insideFolder(unquote(arg), folder))) return false;
+            scripts.push(invoked[1] || invoked[2] || invoked[3]);
+            steps.push("Write-Output");
+          } else steps.push(routineCommand(step) ? "Write-Output" : step);
+        }
+      }
+      const rest = steps.filter((step) => step !== "Write-Output");
+      if (rest.length && !readOnlyInspection(steps.join("; "), folder, cwd, { writes: true })) return false;
+      for (const script of scripts) {
+        const file = path.resolve(cwd || folder, script);
+        const key = file.toLowerCase();
+        if (!insideFolder(file, folder) || depth >= NATIVE_SCRIPT_DEPTH || checked.length >= NATIVE_SCRIPT_COUNT || now() > deadline) return false;
+        // A script that runs itself again adds nothing to check.
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const stat = await files.stat(file).catch(() => null);
+        if (!stat?.isFile() || stat.size > NATIVE_SCRIPT_BYTES) return false;
+        const body = String(await files.readFile(file, "utf8").catch(() => "")).replace(/^﻿/, "");
+        if (!body.trim()) return false;
+        checked.push(path.relative(folder, file) || path.basename(file));
+        if (!await review(body, depth + 1)) return false;
+      }
+      return true;
+    }
+    if (!await review(String(command ?? ""), 0)) return null;
+    return checked.length
+      ? `Checked on this machine, no quota: every step, including ${checked.length === 1 ? "the script" : "the scripts"} ${checked.join(", ")}, reads or writes only inside the workspace folder`
+      : "Checked on this machine, no quota: every step reads or writes only inside the workspace folder";
   }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {
@@ -4973,7 +5267,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (beforeReview) return beforeReview;
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
-    const catalog = await models();
+    // The launch catalog kept from earlier reads answers at once (it revalidates behind). Each time
+    // CPA's minute-long cache ran out, a review waited for the whole catalog (37 s on 2026-11-23)
+    // inside its 45 s. With none kept, or one offering this card no reviewer, CPA is read as before;
+    // a kept read still in flight is never waited on (it may be the one that hung).
+    const listed = launchCatalogs.peek(JSON.stringify([null, null]), {});
+    const catalog = listed && reviewerModels(approver, listed.models, listed.hidden ?? [], { judge }).length ? listed : await models();
     clock.mark("catalog");
     check();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? [], { judge });
@@ -5077,7 +5376,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       decide ? "Nobody else will look at this request: the outcome must be allow or deny." : "",
       guardianFallback ? `${guardianFallback.guardianUnavailable ? "Native Guardian was unavailable."
         : guardianFallback.guardianAssessment === "low-risk" ? "Native Guardian did not confirm clear authorization."
-          : "Native Guardian did not confirm low risk and clear user authorization."} Review the exact command, its working folder, and the user's request independently. Allow only if the command is low risk and the user's authorization is high; otherwise deny.` : "",
+          : "Native Guardian did not confirm low risk and clear user authorization."} Review the exact command, its working folder, and the user's request independently. ${fallbackJudgeRule()}` : "",
       partial ? "The request above is cut short: it was too long to show whole. Judge from what is shown; deny unless what is shown is enough to tell it is safe." : "",
     ].filter(Boolean).join("\n");
     // The evidence goes last, so the rules above stay first, and it is marked as data: a tool's
@@ -5129,8 +5428,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         let decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
-        if (guardianFallback && decision.action !== "deny" && (decision.action !== "allow" || answer.risk_level !== "low" || answer.user_authorization !== "high")) {
-          decision = { action: "deny", reason: "The model judge did not confirm low risk and clear user authorization." };
+        // The judge's own risk and authorization ratings must fit FALLBACK_JUDGE_ALLOWS. Its rationale
+        // stays in the reason: the fixed "did not confirm" line hid why it would not allow.
+        if (guardianFallback && decision.action !== "deny" && !fallbackJudgeAllows({ ...answer, outcome: decision.action })) {
+          decision = { action: "deny", reason: `The model judge did not clear it (${publicText(String(answer?.risk_level ?? "unrated"), 20)} risk, `
+            + `${publicText(String(answer?.user_authorization ?? "unrated"), 20)} authorization): ${publicText(String(decision.reason || "no reason given"), 200)}` };
         }
         clock.mark("model");
         await verifyCurrent();
@@ -5387,8 +5689,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const said = await withinReview(review => {
           const verifyCurrent = async () => {
             review.check();
-            runReads.delete(JSON.stringify([workspaceId, runId]));
-            const latest = await savedNode(workspaceId, runId, job.node.id);
+            const latest = await nodeForAnswer(workspaceId, runId, job.node.id);
             review.check();
             if (latest.mission?.cancelled || latest.mission?.paused || latest.node?.state !== "running"
               || reviewAttempt(latest.mission, latest.node) !== owner) {
@@ -5461,6 +5762,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (prior?.unsent && !resend) return null;
     const sends = resend ? (resend.sends ?? 1) + 1 : 1;
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
+    let native = null;
     let advice = approver.autobot
       ? { ...(await reviewAutobot({ config: approver.autobot, approval,
         hardDenial: blocked ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) } : null,
@@ -5504,6 +5806,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
               && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
             ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
+            // The native reviewer: writes inside the folder and the scripts a command runs, read and
+            // judged here with no model, so no quota (nativeCommandReview).
+            : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
+              && (native = await nativeCommandReview(approval.command, await requestFolder(approval, mission), approval.cwd))
+            ? { action: "allow", actor: "safety_rules", reason_code: "native_review", reason: native }
             // Unresolved, so it waits for the person: a plain "ask" is answered for them after AUTO_ANSWER_MS.
             : !judges && denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
             ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
@@ -10646,7 +10953,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
   return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
-    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, FALLBACK_JUDGE_ALLOWS, fallbackJudgeAllows, fallbackJudgeRule, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

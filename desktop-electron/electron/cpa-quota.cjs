@@ -145,6 +145,20 @@ function byUse(a, b) {
     || a.index - b.index;
 }
 
+/**
+ * One provider's whole routing pool, past the list's cap: what "X/Y ready" and "first back in"
+ * count. A switched-off account is listed but not in the pool.
+ */
+function poolOf(accounts) {
+  const back = accounts.filter((account) => account.state === "limited" && account.resumesAt).map((account) => account.resumesAt);
+  return {
+    total: accounts.length,
+    enabled: accounts.filter((account) => account.state !== "disabled").length,
+    ready: accounts.filter((account) => account.state === "ready").length,
+    resumesAt: back.length ? Math.min(...back) : null,
+  };
+}
+
 function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.now, logger = console } = {}) {
   let active = null; // { base, key, cached, pending }
 
@@ -177,8 +191,13 @@ function createCpaQuota({ getConnection, fetchImpl = fetchOffThread, now = Date.
     const ranked = (Array.isArray(payload?.files) ? payload.files : []).map((file, index) => ({ account: accountFromAuthFile(file, at), index }))
       .filter((entry) => entry.account).sort(byUse).map((entry) => entry.account);
     const accounts = [];
-    for (const provider of PLAN_PROVIDERS) accounts.push(...ranked.filter((account) => account.provider === provider).slice(0, MAX_ACCOUNTS));
-    return { ok: true, available: true, accounts };
+    const pools = {};
+    for (const provider of PLAN_PROVIDERS) {
+      const all = ranked.filter((account) => account.provider === provider);
+      accounts.push(...all.slice(0, MAX_ACCOUNTS));
+      if (all.length) pools[provider] = poolOf(all);
+    }
+    return { ok: true, available: true, accounts, pools };
   }
 
   /** The accounts' limits, cached CACHE_MS per connection; concurrent reads share one request. */

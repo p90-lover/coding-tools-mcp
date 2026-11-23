@@ -450,6 +450,8 @@ test("dispatchToolBatch handles edge cases: empty, single, non-array", async () 
 
 test("FAST_EXECUTION_GUIDANCE contains all required guidance instructions", () => {
   assert.equal(typeof FAST_EXECUTION_GUIDANCE, "string");
+  assert.match(FAST_EXECUTION_GUIDANCE, /Small: .*Medium: .*Long: .*Very long: /);
+  assert.match(FAST_EXECUTION_GUIDANCE, /one task handoff.*Read it first on resume and check uncertain outcomes/);
   assert.ok(FAST_EXECUTION_GUIDANCE.includes("ReadMany/SearchAndRead") || (FAST_EXECUTION_GUIDANCE.includes("ReadMany") && FAST_EXECUTION_GUIDANCE.includes("SearchAndRead")));
   assert.ok(FAST_EXECUTION_GUIDANCE.includes("focused test"));
   assert.ok(FAST_EXECUTION_GUIDANCE.includes("unchanged passing evidence"));

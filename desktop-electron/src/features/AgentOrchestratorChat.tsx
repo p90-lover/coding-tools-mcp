@@ -26,12 +26,12 @@ import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { ChatScrollToBottom } from "./ChatScrollToBottom";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
-import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
-import { foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart } from "./chat-reply-plan";
+import { FoldedRounds, LivePlanCard, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
+import { agentReplyPlan, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer, EarlierSteps, useWorkWindow } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
-import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
+import { INIT_PROMPT, PLAN_PREFIX, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
@@ -1590,10 +1590,26 @@ export function AgentOrchestratorChat({
   // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
   // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
   const workbenchKey = `coding-tools:ao:workbench:${JSON.stringify([projectId ?? "", selectedTaskId])}`;
+  const offeredPlan = selectedTaskId ? approvals.findLast(approval => approval.source === "ao" && approval.plan?.trim())?.plan : undefined;
+  const [planViews, setPlanViews] = useState(() => new Map<string, { text: string; offer?: string }>());
+  const rememberPlan = useCallback((text: string, onlyNew = false) => {
+    setPlanViews(previous => {
+      const seen = previous.get(workbenchKey);
+      if (seen?.offer === offeredPlan && (onlyNew || seen?.text === text)) return previous;
+      const next = new Map(previous);
+      next.delete(workbenchKey);
+      next.set(workbenchKey, { text, offer: offeredPlan });
+      if (next.size > 12) next.delete(next.keys().next().value!);
+      return next;
+    });
+  }, [offeredPlan, workbenchKey]);
+  useEffect(() => { if (offeredPlan) rememberPlan(offeredPlan, true); }, [offeredPlan, rememberPlan]);
+  const rememberedPlan = planViews.get(workbenchKey);
+  const planText = offeredPlan && offeredPlan !== rememberedPlan?.offer ? offeredPlan : rememberedPlan?.text ?? "";
   const readWorkbench = (): WorkbenchTab | null => {
     try {
       const tab = selectedTaskId ? window.localStorage.getItem(workbenchKey) : null;
-      return tab && ["overview", "preview", "terminal", "changes", "files", "subagents", "new"].includes(tab) ? tab as WorkbenchTab : null;
+      return tab && ["overview", "preview", "terminal", "changes", "files", "subagents", "plan", "new"].includes(tab) ? tab as WorkbenchTab : null;
     } catch { return null; }
   };
   const [workbenchState, setWorkbenchState] = useState(() => ({ key: workbenchKey, tab: readWorkbench() }));
@@ -1613,6 +1629,11 @@ export function AgentOrchestratorChat({
       else window.localStorage.removeItem(workbenchKey);
     } catch { /* keep the panel usable when storage is blocked */ }
   };
+  const openPlan = (text?: string) => {
+    if (!selectedTaskId) return;
+    if (text) rememberPlan(text);
+    setWorkbench("plan");
+  };
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   // A reply's changed file, clicked in its summary: the side panel's Changes tab shows it, in the
@@ -1626,7 +1647,8 @@ export function AgentOrchestratorChat({
   const allComputerRequests = useComputerRequests();
   const computerRequests = useMemo(() => selectedTaskId ? chatComputerRequests(allComputerRequests, agentSessionIds, projectId) : [],
     [selectedTaskId, allComputerRequests, agentSessionIds, projectId]);
-  const livePage = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  const { page: livePage, plan: livePlan } = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null,
+    (tab) => setWorkbench(tab), projectId, workbenchKey);
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
   const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
@@ -1644,6 +1666,23 @@ export function AgentOrchestratorChat({
   // this window has seen (CHAT_WORK holds live polls and turns read back), plus the newest turns'
   // finished cards, read back once each. Older turns count once their work is opened in the chat.
   const [detailsWorkTick, setDetailsWorkTick] = useState(0);
+  const currentPlan = useMemo(() => {
+    let tasks: ReturnType<typeof agentReplyPlan> = null;
+    let drafting = false, reply = "";
+    for (const turn of turns.slice(-DETAILS_READ_TURNS).reverse()) {
+      if (!reply && !turn.user?.automatic && turn.user?.text.startsWith(PLAN_PREFIX)) reply = turn.final?.text ?? "";
+      if (!tasks) {
+        const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
+        drafting = liveTurn(turn);
+        tasks = agentReplyPlan(steps.flatMap(step => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []), drafting,
+          steps.find(step => step.error)?.error);
+      }
+      if (reply && tasks) break;
+    }
+    return { reply, tasks: tasks ?? undefined, live: drafting };
+  }, [turns, detailsWorkTick]);
+  const shownPlan = planText || currentPlan.reply;
+  const hasPlan = Boolean(shownPlan || livePlan || currentPlan.tasks?.steps.length);
   useEffect(() => {
     if (!loadWork) return;
     for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
@@ -2750,6 +2789,7 @@ export function AgentOrchestratorChat({
       { label: "Side panel", checked: workbench !== null, run: () => setWorkbench((open) => (open ? null : "overview")) },
       { kind: "separator" },
     ] as ChatMenuItem[] : []),
+    ...(selectedTaskId && hasPlan ? [{ label: "Plan", checked: workbench === "plan", run: () => openPlan() } as ChatMenuItem] : []),
     ...(thread && chat ? [
       { label: "Rename", shortcut: "Alt+Ctrl+R", run: () => setRenaming(chat.title) },
       { label: thread.pinned ? "Unpin" : "Pin", shortcut: "Alt+Ctrl+P", run: thread.togglePin },
@@ -3262,7 +3302,8 @@ export function AgentOrchestratorChat({
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
                 const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
                 const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
-                return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
+                return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor}
+                  onOpenPlan={selectedTaskId ? openPlan : undefined} />;
               })}
             </div></div> : null}
           </div>
@@ -3327,6 +3368,7 @@ export function AgentOrchestratorChat({
           onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
           // Queued commands and goals show in the bar too now, so Clear all clears all of them.
           onClearAll={() => dequeue(selectedTaskId, null)} />
+        {livePlan ? <div className="cx-inline-plan"><LivePlanCard plan={livePlan} onOpen={() => openPlan()} /></div> : null}
         {goalEditing !== null && commands?.goal ? (() => {
           // The goal bar opened for editing: its target and "Edit goal", the objective in a box that
           // grows with it, then how long it may be, Cancel and Save. Ctrl+Enter saves, Esc cancels.
@@ -3499,7 +3541,11 @@ export function AgentOrchestratorChat({
                 previousSessionIds={agentSessions.slice(1).filter((session) => session.model === agentSessions[0]?.model
                   && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
                 agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
-                launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
+                launchedWindow={agentSessions[0]?.contextWindow}
+                // A pick the agent already has is not a next window, though it runs at less (a 1M pick
+                // on an 872K model, or Codex keeping 5% back).
+                nextWindow={agentRoute && (composer?.route?.context_window ?? null) === (agentRoute.context_window ?? null)
+                  ? undefined : composer?.route?.context_window ?? undefined}
                 canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
               {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
                   nothing typed, Stop shows instead of a disabled Send. It showed only while a card ran, so a step
@@ -3550,7 +3596,8 @@ export function AgentOrchestratorChat({
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
       {workbench && selectedTaskId ? <ChatWorkbench key={workbenchKey} sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
-        subagents={subagents} renderWork={renderSubagentWork} changesTarget={changesTarget?.taskId === selectedTaskId ? changesTarget : undefined} /> : null}
+        plan={{ text: shownPlan, tasks: currentPlan.tasks, live: currentPlan.live, published: livePlan }} subagents={subagents} renderWork={renderSubagentWork}
+        changesTarget={changesTarget?.taskId === selectedTaskId ? changesTarget : undefined} /> : null}
       {responseStyleNotice ? <p role="status" className="cx-note">{responseStyleNotice}</p> : null}
       {responseSettingsOpen ? <div className="cxs-root" role="dialog" aria-label="Response style settings" onKeyDown={event => {
         if (event.key === "Escape") { event.stopPropagation(); setResponseSettingsOpen(false); }

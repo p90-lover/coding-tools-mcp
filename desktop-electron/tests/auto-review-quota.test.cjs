@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
+const { createAgentOrchestratorWorkflow, FALLBACK_JUDGE_ALLOWS, fallbackJudgeAllows, fallbackJudgeRule } = require("../electron/agent-orchestrator-workflow.cjs");
 
 /** A Claude Code chat; `reviewer` "auto_review" is Approve for me, "user" is Ask for approval. */
 function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, approvalDetails = {}, now = Date.now,
@@ -192,7 +192,8 @@ test("an eligible Guardian fallback stays in review and removes the card after t
     nativeGuardianReview: async () => ({ action: "ask", guardianAssessment: "risk-unconfirmed" }),
     modelVerdict: ({ messages }) => {
       assert.match(messages[0].content, /Guardian did not confirm low risk and clear user authorization/);
-      assert.match(messages[0].content, /Allow only if the command is low risk and the user's authorization is high; otherwise deny/);
+      // The judge is told the rule it is held to, from the same table.
+      assert.ok(messages[0].content.includes(fallbackJudgeRule()), "the prompt states FALLBACK_JUDGE_ALLOWS");
       return verdict.promise;
     },
   });
@@ -226,13 +227,15 @@ test("switching on Model Judge rechecks an eligible waiting request only with qu
   } finally { state.workflow.dispose(); }
 });
 
-for (const [name, native, modelVerdict, expectedCalls] of [
+for (const [name, native, verdict, expectedCalls] of [
   ["native denial", { action: "deny", actor: "guardian" }, undefined, 0],
   ["high native risk", { action: "ask", guardianAssessment: "high-risk" }, undefined, 0],
-  ["unconfirmed native risk the model also cannot clear", { action: "ask", guardianAssessment: "risk-unconfirmed" }, async () => ({ outcome: "ask", risk_level: "medium", user_authorization: "unknown" }), 1],
-  ["CPA would allow with unclear authorization", { action: "ask", guardianAssessment: "low-risk" }, async () => ({ outcome: "allow", risk_level: "low", user_authorization: "unknown" }), 1],
-]) test(`Model Judge does not approve ${name}`, { timeout: 5_000 }, async () => {
-  const state = fixture(undefined, { nativeGuardianReview: async () => native, modelVerdict });
+  ["unconfirmed native risk the model also cannot clear", { action: "ask", guardianAssessment: "risk-unconfirmed" }, { outcome: "ask", risk_level: "medium", user_authorization: "unknown" }, 1],
+  ["CPA would allow critical risk", { action: "ask", guardianAssessment: "low-risk" }, { outcome: "allow", risk_level: "critical", user_authorization: "low" }, 1],
+  ["an allow outside the judge's table", { action: "ask", guardianAssessment: "low-risk" },
+    { outcome: "allow", risk_level: "high", user_authorization: "unknown", rationale: "it reinstalls the app" }, 1],
+]) test(`Model Judge does not approve ${name}`, { timeout: 5_000, skip: verdict && fallbackJudgeAllows(verdict) ? "FALLBACK_JUDGE_ALLOWS allows it" : false }, async () => {
+  const state = fixture(undefined, { nativeGuardianReview: async () => native, modelVerdict: verdict && (async () => verdict) });
   try {
     await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
     await state.observe();
@@ -240,6 +243,25 @@ for (const [name, native, modelVerdict, expectedCalls] of [
     assert.deepEqual(await state.observe(), []);
     assert.deepEqual(state.resolved, [["permission-1", "no"]]);
     assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, expectedCalls);
+  } finally { state.workflow.dispose(); }
+});
+
+// Each pair FALLBACK_JUDGE_ALLOWS lists is an allow, the rest of the grid a deny (the judge's answer, not Guardian's).
+for (const risk of ["low", "medium", "high", "critical"]) for (const authorization of ["high", "medium", "low", "unknown"]) {
+  const allowed = (FALLBACK_JUDGE_ALLOWS[risk] ?? []).includes(authorization);
+  assert.equal(fallbackJudgeAllows({ outcome: "allow", risk_level: risk, user_authorization: authorization }), allowed);
+  assert.equal(fallbackJudgeAllows({ outcome: "deny", risk_level: risk, user_authorization: authorization }), false);
+}
+const tableAllow = Object.entries(FALLBACK_JUDGE_ALLOWS).find(([, authorizations]) => authorizations.length);
+test("Model Judge approves what its table allows", { timeout: 5_000, skip: tableAllow ? false : "FALLBACK_JUDGE_ALLOWS is empty" }, async () => {
+  const [risk_level, [user_authorization]] = tableAllow;
+  const state = fixture(undefined, { nativeGuardianReview: async () => ({ action: "ask", guardianAssessment: "low-risk" }),
+    modelVerdict: async () => ({ outcome: "allow", risk_level, user_authorization, rationale: "the user's standing instructions ask for this update" }) });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    await state.observe();
+    await state.firstAnswer;
+    assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
   } finally { state.workflow.dispose(); }
 });
 

@@ -114,7 +114,9 @@
 .ao-permissions-panel > button { margin-right: 8px; }
 .ao-permissions-panel > details { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--ao-line); }
 .ao-msg-approval fieldset { border: 0; margin: 0; padding: 0; }
-/* ExitPlanMode: the plan scrolls inside the card, so its answer buttons stay in view. */
+.ao-plan-preview { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; }
+.ao-plan-preview button { flex: none; }
+.ao-plan-summary { display: -webkit-box; min-width: 0; overflow: hidden; overflow-wrap: anywhere; unicode-bidi: plaintext; white-space: pre-line; color: var(--ao-muted); -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .ao-msg-plan .ao-plan { max-height: min(48vh, 420px); overflow: auto; margin: 8px 0; padding: 4px 12px; border: 1px solid var(--ao-line); border-radius: 8px; }
 .ao-msg-plan .ao-msg-actions { flex-wrap: wrap; }
 /* A question the agent asked (AskUserQuestion): each question with its options, then Send or Skip. */

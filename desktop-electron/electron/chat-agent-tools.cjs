@@ -152,7 +152,7 @@ const AGENT_TOOLS = new Set([
   "git_status", "git_diff", "git_log", "git_show", "git_blame",
   "view_image", "image_info", "compare_images", "ocr_image", "generate_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
-  "show_in_chat", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
+  "show_in_chat", "open_plan", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
   "redact_message", "move_chat", "push_notification",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. It is
@@ -172,6 +172,29 @@ const SHOW_TOOL_DEFS = Object.freeze([{
     },
   },
 }]);
+const PLAN_STATES = Object.freeze(["pending", "in_progress", "completed"]);
+const PLAN_LIMITS = Object.freeze({ goal: 240, done: 360, title: 160, steps: 12 });
+const OPEN_PLAN_DEF = Object.freeze({
+  name: "open_plan", title: "Show the plan in this chat",
+  description: "Show a concrete goal, what will prove it is done, and a short checklist in the current chat while you work. "
+    + "Use it when the user asks to see a plan or the task needs several verifiable steps. Updates replace this session's previous plan. "
+    + "By default it opens the Plan pane; set open to false for progress updates that should leave the pane as it is. "
+    + "Mark steps completed only when you verified them. This is display only: it neither starts work nor grants permission or approves a plan.",
+  inputSchema: {
+    type: "object", additionalProperties: false, required: ["goal", "done_when", "steps"],
+    properties: {
+      goal: { type: "string", minLength: 1, maxLength: PLAN_LIMITS.goal, description: "Specific outcome requested by the user" },
+      done_when: { type: "string", minLength: 1, maxLength: PLAN_LIMITS.done, description: "What you will check to know the outcome is achieved" },
+      steps: { type: "array", minItems: 1, maxItems: PLAN_LIMITS.steps, items: {
+        type: "object", additionalProperties: false, required: ["title", "status"], properties: {
+          title: { type: "string", minLength: 1, maxLength: PLAN_LIMITS.title }, status: { type: "string", enum: PLAN_STATES },
+        },
+      } },
+      open: { type: "boolean", default: true, description: "Bring forward the Plan pane as well as updating the inline plan" },
+    },
+  },
+});
+
 // The app's own agent tool (chat-wakeups.cjs): the chat is sent a follow-up after the minutes the
 // agent chose, so a turn that waits on a build or CI ends instead of polling and paying for each poll.
 const WAKE_TOOL_DEFS = Object.freeze([{
@@ -386,10 +409,11 @@ const COMMAND_LIST_DEFS = Object.freeze([{
   description: "List command handles already tracked by this chat, including after a reply was lost. Read-only: starts, stops and probes nothing. "
     + "States are last-observed, not fresh process checks; use read_output or an empty write_stdin on the returned command_id for current output. "
     + "No raw commands or other chats' handles are included. An empty list is not proof that an unobserved operation never ran; do not blindly relaunch it. "
-    + "Handles belong to the current app runtime, not restart-surviving jobs. Set include_verification to recheck declared input files for retained verification receipts; this does not rerun tests or validate the environment.",
+    + "Handles belong to the current app runtime, not restart-surviving jobs. Use verification_only to find commands with receipts, and include_verification to recheck their declared inputs. Neither reruns tests or validates the environment.",
   inputSchema: { type: "object", additionalProperties: false, properties: {
     offset: { type: "integer", minimum: 0, default: 0 },
     limit: { type: "integer", minimum: 1, maximum: 200, default: 40 },
+    verification_only: { type: "boolean", default: false, description: "List only commands with a verification receipt. Pagination applies after filtering." },
     include_verification: { type: "boolean", default: false, description: "Refresh declared file fingerprints for this page's retained receipts (no commands are run)." },
   } },
   annotations: { readOnlyHint: true },
@@ -1231,14 +1255,15 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false, watches = false,
-  monitors = false, notifies = false, renames = false, moves = false, redacts = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
+  monitors = false, notifies = false, renames = false, moves = false, redacts = false, plans = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either; nor is a GPT session that
   // has unified-agent-tools for them, which is told to use those for every file operation.
   const scriptTool = unifiedFiles ? "Write" : ownFileTools ? "your Write tool" : "apply_patch";
   return paneRulesFor(groups)
     + FAST_EXECUTION_GUIDANCE
-    + (groups.includes("terminal") ? "For a focused test, exec_command's optional verification.inputs records bounded source/test/config fingerprints and observed exit status. Use list_commands with include_verification to check retained receipts before repeating work. These are advisory: undeclared dependencies and environment changes still need judgment; save evidence in the existing task handoff for restarts. " : "")
+    + (plans ? "Live plan: when the user wants a visible plan, use open_plan with a specific goal, a done_when check and verifiable steps. Use open: false for progress updates without bringing the panel forward. This does not approve any work. " : "")
+    + (groups.includes("terminal") ? "For a focused test, exec_command's optional verification.inputs records bounded source/test/config fingerprints and observed exit status. Use list_commands with verification_only to find retained receipts and include_verification to recheck their inputs. Receipts are advisory: account for undeclared dependencies and environment changes, and save evidence in the task handoff for restarts. " : "")
     // Seen live: an agent whose client deferred these tools (names only, loaded through its tool
     // search) said "there is no list_dir tool" and fell back to dir, never loading it.
     + "Every Coding Tools tool named here is available: if your client lists one as deferred or you do not see it, "
@@ -1485,6 +1510,7 @@ function createChatAgentTools({
   const commandMonitors = createCommandMonitors({ now });
   const canMonitor = entry => typeof commandEvents?.monitor === "function" && !entry.subagent && !entry.previewOnly;
   const canNotify = entry => typeof notifyUser === "function" && !entry.previewOnly;
+  const canPlan = entry => !entry.subagent && !entry.previewOnly;
   let server = null;
   let listening = null;
   let port = 0;
@@ -1746,13 +1772,13 @@ function createChatAgentTools({
     const own = [...COMMAND_LIST_DEFS, ...(canWatch(entry) ? WATCH_TOOL_DEFS : []), ...(canMonitor(entry) ? MONITOR_TOOL_DEFS : []),
       ...ATTENTION_TOOL_DEFS.filter(tool => tool.name !== "push_notification" || canNotify(entry)),
       ...(allowed(entry, "preview") ? PREVIEW_TOOL_DEFS : []), ...(allowed(entry, "subagents") ? SUBAGENT_TOOL_DEFS : []), ...SHOW_TOOL_DEFS,
-      ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
+      ...(canPlan(entry) ? [OPEN_PLAN_DEF] : []), ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
       ...(captureApp ? VIEW_APP_DEFS : []), ...(generateImage ? IMAGE_TOOL_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : [])];
     return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
       .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
-        && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat"
+        && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat" && tool?.name !== "open_plan"
         && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
         && tool?.name !== "view_app" && tool?.name !== "generate_image" && tool?.name !== "computer_guide" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
         && tool?.name !== "list_commands" && !WATCH_TOOLS.has(tool?.name) && !MONITOR_TOOLS.has(tool?.name)
@@ -2157,6 +2183,32 @@ function createChatAgentTools({
     return { content: [{ type: "text", text: `Showing ${what} in the chat (it appears within a few seconds).` }] };
   }
 
+  function openPlan(entry, given, inputError) {
+    if (!canPlan(entry)) return failedCall("Unknown tool: open_plan");
+    if (!SESSION_ID.test(entry.aoSession ?? "") || entry.commandState.ended) return failedCall("This chat's active session is not available.");
+    if (Object.keys(given).some(key => !Object.hasOwn(OPEN_PLAN_DEF.inputSchema.properties, key)) ||
+      (given.open !== undefined && typeof given.open !== "boolean")) return inputError("Use only goal, done_when, steps and an optional boolean open.");
+    const line = (value, limit) => typeof value === "string" && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value) ? value.trim() : "";
+    const goal = line(given.goal, PLAN_LIMITS.goal), doneWhen = line(given.done_when, PLAN_LIMITS.done);
+    if (!goal || !doneWhen || !Array.isArray(given.steps) || !given.steps.length || given.steps.length > PLAN_LIMITS.steps) {
+      return inputError("Give a nonempty goal, done_when and a checklist of 1 to 12 steps within the stated limits.");
+    }
+    const steps = [];
+    for (const item of given.steps) {
+      const title = line(item?.title, PLAN_LIMITS.title);
+      if (!title || !PLAN_STATES.includes(item?.status) || Object.keys(item).some(key => key !== "title" && key !== "status")) {
+        return inputError("Each step needs a title and status: pending, in_progress or completed.");
+      }
+      steps.push({ title, status: item.status });
+    }
+    const id = `plan-${++showSequence}`;
+    const at = now();
+    entry.livePlan = { id, at, goal, doneWhen, steps };
+    if (given.open !== false) entry.showRequest = { id, pane: "plan", at };
+    return plainResult({ ok: true, plan_id: id, pane_requested: given.open !== false,
+      message: "Updated the plan in this chat. This does not approve the plan or change permissions." });
+  }
+
   async function commandWatchCall(entry, name, args) {
     if (!canWatch(entry)) return failedCall(`Unknown tool: ${name}`);
     const owner = entry.commandState;
@@ -2479,6 +2531,7 @@ function createChatAgentTools({
       return previews.call(entry.aoSession, name, withoutConsent(given), { permit: (origin) => permitOrigin(entry, origin, signal), signal });
     }
     if (name === "show_in_chat") return showInChat(entry, given);
+    if (name === "open_plan") return openPlan(entry, given, inputError);
     if (name === "schedule_wakeup") return scheduleWakeup(entry, given);
     if (name === "push_notification") return pushNotification(entry, given);
     if (name === "sleep") return sleepCall(entry, given, signal, channel);
@@ -2546,8 +2599,11 @@ function createChatAgentTools({
       if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
         return failedCall("offset must be a nonnegative safe integer and limit must be an integer from 1 to 200");
       }
-      const known = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
+      if (args.verification_only !== undefined && typeof args.verification_only !== "boolean") return inputError("verification_only must be a boolean");
       if (args.include_verification !== undefined && typeof args.include_verification !== "boolean") return inputError("include_verification must be a boolean");
+      const known = [...entry.commands.values()]
+        .filter(command => args.verification_only !== true || command.verification)
+        .sort((left, right) => right.startedAt - left.startedAt || left.id.localeCompare(right.id));
       const commands = [];
       for (const command of known.slice(offset, offset + limit)) {
         commands.push({
@@ -2866,7 +2922,7 @@ function createChatAgentTools({
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
               wakeups: canWake(entry), watches: canWatch(entry), monitors: canMonitor(entry), notifies: canNotify(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
-              unifiedFiles: entry.unifiedFiles === true, computerSteps: Boolean(computerControl) && !setting(reviewComputerSteps) }),
+              unifiedFiles: entry.unifiedFiles === true, plans: canPlan(entry), computerSteps: Boolean(computerControl) && !setting(reviewComputerSteps) }),
           } };
         }
         case "ping": return { jsonrpc: "2.0", id, result: {} };
@@ -3255,6 +3311,7 @@ function createChatAgentTools({
           if (retained?.workspaceId === entry.workspaceId) {
             entry.commands = retained.commands; entry.commandState = retained.commandState; entry.root = retained.root;
             entry.visualization = retained.visualization;
+            entry.livePlan = retained.livePlan;
           }
           // One credential per session: an older one for the same session is retired.
           for (const other of [...sessions.values()]) {
@@ -3265,6 +3322,7 @@ function createChatAgentTools({
             entry.commandState = other.commandState;
             entry.root ??= other.root;
             entry.visualization = other.visualization ?? null;
+            if (other.workspaceId === entry.workspaceId && other.livePlan) entry.livePlan = other.livePlan;
             for (const origin of other.origins) entry.origins.add(origin);
             forget(other.key);
           }
@@ -3425,13 +3483,14 @@ function createChatAgentTools({
       const out = [];
       for (const sessionId of [...new Set(Array.isArray(sessionIds) ? sessionIds : [])].slice(0, 32)) {
         const entry = paneEntry(sessionId, workspaceId);
-        if (!entry) continue;
+        if (!entry || (workspaceId !== null && entry.workspaceId !== workspaceId)) continue;
         const commands = [...entry.commands.values()].sort((left, right) => right.startedAt - left.startedAt);
         // A running command is asked about once per listing; finished ones stay as they ended.
         for (const command of commands) if (command.status === "running") await readCommand(entry, command, "stdout", Number.MAX_SAFE_INTEGER).catch(() => undefined);
         out.push({ sessionId, agent: entry.agent, commands: commands.map(({ id, cmd, workdir, startedAt, status, exitCode, user }) => ({ id, cmd, workdir, startedAt, status, exitCode, user: user === true })),
           // What the agent asked the chat to bring forward (show_in_chat), newest only.
-          ...(entry.showRequest ? { show: { ...entry.showRequest } } : {}) });
+          ...(entry.showRequest ? { show: { ...entry.showRequest } } : {}),
+          ...(workspaceId !== null && entry.livePlan ? { livePlan: { ...entry.livePlan, steps: entry.livePlan.steps.map(step => ({ ...step })) } } : {}) });
       }
       return out;
     },

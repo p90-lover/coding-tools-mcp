@@ -3804,10 +3804,47 @@ test("a card left blank starts with its model's full known window; CPA's stock 2
   assert.equal(carbon.models.capabilities["cpa/gpt-6.1-sol"].contextLimit, 272000, "a 272K a model of CPA's own providers reports is kept");
 });
 
+// CPA gave every model of a config API key its stock 272K (179 of them, 2026-11-23): an Anthropic
+// key's Claude Opus 4.6 overflowed its 200K, its Opus 5.5 and Gemini were held well short of theirs.
+test("an API key's models at CPA's stock window take their real limit: a known one, else the same model's on another provider", async () => {
+  const stock = { context_window: 272000, max_context_window: 272000 };
+  const catalog = { data: [
+    { id: "claude-opus-4-6", owned_by: "anthropic", ...stock },
+    { id: "claude-opus-5-5", owned_by: "anthropic", ...stock },
+    { id: "Claude Sonnet 4.6", owned_by: "anthropic", ...stock },
+    { id: "gemini-2.5-pro", owned_by: "google", ...stock },
+    { id: "gemini-pro", owned_by: "google", ...stock },
+    { id: "gpt-4o", owned_by: "openai", ...stock },
+    { id: "gpt-5", owned_by: "openai", ...stock },
+    { id: "openai-api/gpt-5", ...stock },
+    { id: "kimi-k2.6", context_window: 262144, max_context_window: 262144 },
+    { id: "commandcode-go/kimi-k2.6", ...stock },
+    { id: "openai-api/brand-new-model", ...stock },
+  ] };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async () => ({ ok: true }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models") ? { ok: true, json: async () => catalog } : { ok: false, status: 404, json: async () => ({}) },
+    aoHarness: { spawn: async () => "session" },
+  });
+  const { capabilities } = await workflow.call("models", { harness: "ao:claude-code" });
+  const limits = Object.fromEntries(catalog.data.map(({ id }) => [id, capabilities[`cpa/${id}`]?.contextLimit]));
+  assert.deepEqual(limits, {
+    "claude-opus-4-6": 200000, "claude-opus-5-5": 1000000, "Claude Sonnet 4.6": 200000,
+    "gemini-2.5-pro": 1048576, "gemini-pro": undefined, "gpt-4o": 128000,
+    "gpt-5": 272000, "openai-api/gpt-5": 272000, "kimi-k2.6": 262144, "commandcode-go/kimi-k2.6": 262144,
+    "openai-api/brand-new-model": undefined,
+  });
+  assert.equal(capabilities["cpa/claude-opus-4-6"].contextWindow.max, 200000, "the card can't be set past the real limit");
+  workflow.dispose?.();
+});
+
 // The user (2026-11-11), looking at a window menu that topped out at 872k: "it should up 1m context
 // window". CPA's 872,000 for GPT-6, GPT-5.6 and Claude Fable 5 is their 1M window less the reply's
-// 128K reserve, so the menu and the launch check go up to 1M; a blank card still starts at 872K.
-test("a model CPA reports at a 1M window's input budget may be set up to 1M; other limits stay as reported", async () => {
+// 128K reserve, so the menu goes up to 1M; a blank card still starts at 872K. An agent told 1M
+// compacted past what the upstream takes in ("400 Your input exceeds the context window of this
+// model", GPT-6.2 Sol chats at 1M, 2026-11-21 and 2026-11-23), so it is told the 872K.
+test("a model CPA reports at a 1M window's input budget may be picked up to 1M; its agent is told the reported limit", async () => {
   const catalog = { data: [
     { id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 },
     { id: "gpt-5.5", context_window: 272000, max_context_window: 400000 },
@@ -3832,13 +3869,15 @@ test("a model CPA reports at a 1M window's input budget may be set up to 1M; oth
   const capability = luna.models.capabilities["cpa/gpt-6-luna"];
   assert.equal(capability.contextLimit, 872000, "the reported limit is kept as it is");
   assert.equal(capability.contextWindow.max, 1_000_000, "the menu goes up to the 1M window");
-  assert.equal(luna.launched?.contextWindow, 1_000_000, `a card set to 1M launches with it (${luna.failure?.message ?? "no failure"})`);
+  assert.equal(luna.launched?.contextWindow, 872000, `a card set to 1M launches its agent at the 872K (${luna.failure?.message ?? "no failure"})`);
   assert.equal((await launch("gpt-6-luna")).launched.contextWindow, 872000, "a blank card still starts at the reported 872K");
+  assert.equal((await launch("gpt-6-luna", 500_000)).launched.contextWindow, 500_000, "a smaller pick is told as it is");
+  // A card saved before its model's limit was known (or lowered) runs at the limit, not refused.
   const past = await launch("gpt-6-luna", 1_100_000);
-  assert.equal(past.launched, undefined, "past 1M is refused");
+  assert.equal(past.launched?.contextWindow, 872000, `a pick past the limit runs at it (${past.failure?.message ?? "no failure"})`);
   const gpt5 = await launch("gpt-5.5", 1_000_000);
   assert.equal(gpt5.models.capabilities["cpa/gpt-5.5"].contextWindow.max, 400000, "a limit well short of 1M is not raised");
-  assert.equal(gpt5.launched, undefined, "so 1M is refused there");
+  assert.equal(gpt5.launched?.contextWindow, 400000, "a saved 1M there runs at its 400K");
 });
 
 test("an agent's own models take CPA's real window for the same model, and a no-longer-listed model says so at launch", async () => {
@@ -7338,6 +7377,55 @@ test("each review logs the ms of its steps and how it ended (ao.review_timing)",
   }
 });
 
+test("the reviewer's check before it answers reads the run ahead of the background polls", async () => {
+  // Seen live 2026-11-23: queued behind every open chat's polls, the run read the reviewer makes
+  // before answering took 14-35 s, twice per review, and reviews ran out of their 45 s before the
+  // model was asked ("The review attempt timed out or its owner changed"). Here every ordinary run
+  // read hangs once the review has begun; only the fast lane (as Stop reads) still answers.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "dir", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
+    toolInput: JSON.stringify({ cmd: 'cmd /c dir /b "G:\\Projects\\app\\docs"' }), summary: "exec_command", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], fastReads = [];
+  let reviewing = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      reviewing = true;
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"inside the workspace"}' } }] }) };
+    },
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint.endsWith("/read")) {
+        if (options?.admissionControl === true) fastReads.push(body);
+        else if (reviewing) return new Promise(() => {});
+        return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      }
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved, ["yes"], "answered though the ordinary lane was stuck");
+    assert.ok(fastReads.length >= 1, "the check before answering took the fast lane");
+    assert.ok(fastReads.every(read => read.workspace_id === "ws" && read.run_id === "run"), "it reads only this run");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("the reviewer sees what the worker did in its turn before a request, and a refused request is reviewed again on new evidence", async () => {
   // Seen live 2026-10-22: the agent listed the backend's processes (uvicorn 31332, 65572), then asked
   // to `taskkill /PID 31332 /T /F`; the reviewer denied it for "not enough context to verify that PID
@@ -10239,6 +10327,108 @@ test("a chat's agent is resized to a new window in place, and the next message c
   workflow.dispose?.();
 });
 
+test("a chat's agent resized to 1M on a model CPA reports at 872K is told the 872K, and the next message still continues it", async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", context_window: 500000 };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const done = { id: "r1", project_id: "task-1", execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [done] });
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({ requestHeadless: world.requestHeadless,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models")
+      ? { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 }] }) }
+      : { ok: false, status: 404, json: async () => ({}) },
+    aoHarness: {
+      spawn: async () => { calls.push(["spawn"]); return "warm"; },
+      setContextWindow: async (id, tokens) => { calls.push(["set", id, tokens]); return { ok: true }; },
+      exitAgent: async id => { calls.push(["exit", id]); return { ok: true }; },
+      continuable: async id => { calls.push(["resume", id]); return true; },
+      warmSessions: async () => [],
+    } });
+  const resized = await workflow.call("chat_context_window", { workspaceId: "ws-1", taskId: "task-1", contextWindow: 1_000_000 });
+  assert.equal(resized.contextWindow, 872000);
+  assert.deepEqual(calls, [["set", "sess-1", 872000], ["exit", "sess-1"], ["resume", "sess-1"]], "AO is given the model's limit, not the 1M pick");
+  calls.length = 0;
+  const next = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route, context_window: 1_000_000 }, taskId: "task-1" });
+  assert.equal(next.continues, true, "the card keeps its 1M pick, so its next message continues the agent");
+  assert.equal(calls.some(([kind]) => kind === "spawn"), false);
+  workflow.dispose?.();
+});
+
+// GPT-6.2 Sol chats picked at 1M (2026-11-21, 2026-11-23): agents launched before the cap were told
+// 1M of the model's 872K, compacted too late and were refused. The next message fits the agent first.
+async function windowFitFollowUp({ reading, contextWindow = 1_000_000 }) {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user",
+    context_window: contextWindow };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const previous = { id: "r1", project_id: "task-1", execution_mode: "single", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [previous] });
+  const created = new Map();
+  const calls = [];
+  let observed = false;
+  const request = async (endpoint, body, options) => {
+    if (endpoint === "/api/v1/ao/read" && body.run_id) {
+      const run = created.get(body.run_id) ?? { id: body.run_id, workspace_id: "ws-1", project_id: "task-1", execution_mode: "single", revision: 1,
+        grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "one", role: "planner", state: "pending", parents: [], route }] };
+      created.set(body.run_id, run);
+      return { ok: true, runs: [run], worker_capacity: { [body.run_id]: 1 } };
+    }
+    const latest = [...created.values()].at(-1);
+    if (endpoint === "/api/v1/ao/grant") return { ok: true, run: latest, grant: { executable_sha256: "a".repeat(64) } };
+    if (endpoint === "/api/v1/ao/external/reserve") { latest.nodes[0].state = "reserved"; return { ok: true, request_key: "key-1", prompt: "first ask\n\nFollow-up: go on" }; }
+    if (endpoint === "/api/v1/ao/external/submitted") { latest.nodes[0].state = "running"; latest.nodes[0].receipt = { thread_id: body.session_id }; return { ok: true, run: latest }; }
+    if (endpoint === "/api/v1/ao/external/terminal") { latest.nodes[0].state = "finished"; return { ok: true, run: latest }; }
+    return world.requestHeadless(endpoint, body, options);
+  };
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: request, findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async url => String(url).includes("/v1/models")
+      ? { ok: true, json: async () => ({ data: [{ id: "gpt-6-luna", context_window: 272000, max_context_window: 872000 }] }) }
+      : { ok: false, status: 404, json: async () => ({}) },
+    agentWindow: async id => { calls.push(["read", id]); return reading; },
+    aoHarness: {
+      spawn: async input => { calls.push(["spawn", input.contextWindow]); return "new-session"; },
+      continuable: async id => { calls.push(["resume", id]); return id === "sess-1"; },
+      setContextWindow: async (id, tokens) => { calls.push(["set", id, tokens]); return { ok: true }; },
+      exitAgent: async id => { calls.push(["exit", id]); return { ok: true }; },
+      send: async id => { calls.push(["send", id]); return { turnId: "turn-2", state: "running" }; },
+      observe: async (_id, expected) => { observed = true; return { status: "idle", turnId: expected, turnState: "completed", answer: "done" }; },
+    },
+  });
+  await workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "go on", executionMode: "single", singleRoute: route });
+  for (let tries = 0; tries < 200 && !observed; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+  workflow.dispose?.();
+  return calls;
+}
+
+test("a follow-up fits a chat's agent told 1M on a model CPA reports at 872K before sending, keeping its conversation", async () => {
+  const calls = await windowFitFollowUp({ reading: 1_000_000 });
+  const at = kind => calls.findIndex(([other]) => other === kind);
+  assert.deepEqual(calls.find(([kind]) => kind === "set"), ["set", "sess-1", 872000], JSON.stringify(calls));
+  assert.ok(at("read") < at("set") && at("set") < at("exit") && at("exit") < at("send"), JSON.stringify(calls));
+  assert.ok(calls.slice(at("exit"), at("send")).some(([kind]) => kind === "resume"), "resumed on its own conversation before the message");
+  assert.deepEqual(calls.find(([kind]) => kind === "send"), ["send", "sess-1"]);
+  assert.equal(at("spawn"), -1, "no fresh agent with only a summary");
+  // Codex reports 95% of what it was told: 950,000 of a 1M window is still past the 872K.
+  assert.deepEqual((await windowFitFollowUp({ reading: 950_000 })).find(([kind]) => kind === "set"), ["set", "sess-1", 872000]);
+  // No reading yet: a card past the limit launched its agent at the card's window.
+  assert.deepEqual((await windowFitFollowUp({ reading: null })).find(([kind]) => kind === "set"), ["set", "sess-1", 872000]);
+});
+
+test("a follow-up leaves an agent already within its model's limit as it is", async () => {
+  const fitted = await windowFitFollowUp({ reading: 872000 });
+  assert.equal(fitted.some(([kind]) => kind === "set" || kind === "exit"), false, JSON.stringify(fitted));
+  assert.deepEqual(fitted.find(([kind]) => kind === "send"), ["send", "sess-1"]);
+  const smaller = await windowFitFollowUp({ reading: 500000, contextWindow: 500000 });
+  assert.equal(smaller.some(([kind]) => ["read", "set", "exit"].includes(kind)), false, "a pick within the limit is not even read");
+  assert.deepEqual(smaller.find(([kind]) => kind === "send"), ["send", "sess-1"]);
+});
+
 test("chats opened together bring back their released agents one at a time", async () => {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model" };
   const ids = ["task-1", "task-2", "task-3", "task-4"];
@@ -12049,6 +12239,10 @@ for (const [label, error, seconds] of [
   ["a provider's 529", "API Error: 529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}", 10],
   ["an agent that died on 429s", "The agent's process stopped mid-turn after: API error 429. Trying again in 30s.. Retry or send a message to continue.", 10],
   ["a launch that failed upstream", "Launch failed: CPA answered 503 Service Unavailable", 10],
+  // 2026-11-23: Google refused some Vertex requests and answered others. Claude Code called it a
+  // sign-in failure ("Authentication required"), so nothing retried; AO now reports the provider's
+  // own words (AO's claudeacp AuthRequiredFailure), and the chat keeps requesting.
+  ["a provider's intermittent 403", "API Error: 403 Access requires an eligible paid billing account in a supported region, subject to our terms and policies.", 10],
 ])
 test(`"Retry automatically" waits less before retrying a failure that never reached the provider (${label})`, async () => {
   // Local start failures have no cooldown to wait out: [2 s, 5 s, 15 s, 30 s], then the usual tail.
@@ -12118,6 +12312,35 @@ test("a launch's catalog is served stale while it revalidates, and never a refus
   // Too old to serve: the read is waited for again.
   clock += 31 * 60_000; answer = { models: ["c"] };
   assert.deepEqual(await cache.get("k"), { models: ["c"] });
+});
+
+test("a review peeks at the kept catalog and never waits on a read in flight, even one that hung", async () => {
+  // 2026-11-23: a review waited 37 s for CPA's catalog inside its 45 s once the minute's cache ran
+  // out. peek answers from the kept list at once; with nothing kept it answers nothing, so the
+  // reviewer reads CPA itself rather than join a first read that may never come back.
+  const { staleWhileRevalidate } = require("../electron/agent-orchestrator-workflow.cjs");
+  let clock = 0, reads = 0;
+  const hung = new Promise(() => {});
+  let next = () => hung;
+  const cache = staleWhileRevalidate({ now: () => clock, freshMs: 60_000, staleMs: 30 * 60_000,
+    read: () => { reads += 1; return next(); } });
+  void cache.get("k");
+  assert.equal(cache.peek("k"), undefined, "nothing kept: no answer, and the hung read is not joined");
+  await new Promise(setImmediate);
+  assert.equal(reads, 1);
+  const kept = staleWhileRevalidate({ now: () => clock, freshMs: 60_000, staleMs: 30 * 60_000, read: async () => { reads += 1; return next(); } });
+  next = async () => ({ models: ["codex-auto-review"] });
+  await kept.get("k");
+  next = () => hung;
+  clock += 61_000;
+  assert.deepEqual(kept.peek("k"), { models: ["codex-auto-review"] }, "stale, at once");
+  await new Promise(setImmediate);
+  assert.equal(reads, 3, "and one refresh started behind it");
+  assert.deepEqual(kept.peek("k"), { models: ["codex-auto-review"] }, "the refresh in flight (hung) is not waited on");
+  await new Promise(setImmediate);
+  assert.equal(reads, 3, "one refresh at a time");
+  clock += 30 * 60_000;
+  assert.equal(kept.peek("k"), undefined, "too old to serve");
 });
 
 test("a run loop backed off after headless timed out starts again as soon as headless answers", async () => {
