@@ -90,6 +90,11 @@ const BACKEND_MODULES = Object.freeze([
   // chats after a restart (#706).
   "chat-queue.cjs",
   "chat-drafts.cjs",
+  "chat-input-schema.cjs",
+  "chat-input-store.cjs",
+  "chat-input-worker.cjs",
+  "chat-input-service.cjs",
+  "chat-attachment-store.cjs",
   "chat-resume.cjs",
   // main.cjs gives chat agents computer control through it: the window picker and the control bar.
   "computer-control.cjs",

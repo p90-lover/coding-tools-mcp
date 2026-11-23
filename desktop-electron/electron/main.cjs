@@ -66,6 +66,7 @@ const {
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
+const { createNativeChatsHost } = require("./native-chats-host.cjs");
 const {
   ensurePackagedRuntime,
   preparePackagedRuntime,
@@ -197,6 +198,8 @@ fs.mkdirSync(LAUNCHER_PROFILE.userData, { recursive: true, mode: 0o700 });
 const launcherUserData = fs.realpathSync.native(LAUNCHER_PROFILE.userData);
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
+const nativeChats = createNativeChatsHost({ enabled: IS_DEV_PROFILE && !app.isPackaged, profileRoot: launcherUserData });
+delete process.env.CODING_TOOLS_CHATS_TOKEN;
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
@@ -374,6 +377,15 @@ let chatAgentTools = null;
 let computerControlService = null;
 // Plugins > MCPs: the person's own MCP servers, handed to every chat session next to the app's tools.
 let chatMcpServers = null;
+let chatInputJournal = null;
+function userChatInputs() {
+  chatInputJournal ??= require("./chat-input-service.cjs").createChatInputService({
+    file: path.join(app.getPath("userData"), "integrations", "chat-inputs.sqlite"),
+    attachmentsRoot: path.join(app.getPath("userData"), "chat-attachments", "owned"),
+    legacyDraftsFile: path.join(app.getPath("userData"), "integrations", "chat-drafts.json"),
+  });
+  return chatInputJournal;
+}
 function userMcpServers(logger = null) {
   chatMcpServers ??= require("./chat-mcp-servers.cjs").createChatMcpServers({
     filePath: path.join(app.getPath("userData"), "chat-mcp-servers.json"), logger,
@@ -2242,6 +2254,12 @@ function registerIpc({ logger, stateStore }) {
     getUpdateController: () => updateController,
   });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
+  handle("coding-tools:runtime:chats", async (event, input) => {
+    if (!event.sender.mainFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("Native Chats requires the main app frame");
+    if (["open", "send"].includes(input?.action)) await assertFocusedMainWindowSettled(event, true);
+    else assertFocusedMainWindow(event, false, true);
+    return nativeChats.call(input);
+  });
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
   handle("coding-tools:workspaces:create", async (event, input) => {
     await assertFocusedMainWindowSettled(event, true);
@@ -2952,6 +2970,7 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. Layout still needs a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm", "chat_draft"].includes(input.operation)
+        || (input.operation === "chat_input" && ["draft_get", "draft_save", "draft_conflicts", "get", "list"].includes(input.arguments?.action))
         || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined && input.arguments?.meteredReviews === undefined));
     const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
@@ -4520,6 +4539,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     updateController?.stopPeriodicChecks?.();
     autoInstaller?.stop();
     backendBundles?.stopWatching();
+    await step("native-chats", () => nativeChats.close());
     await step("agent-orchestrator", () => agentOrchestratorUpstream?.stop(), 20_000);
     // Chat hosts outlive AO so a restart can reattach them; a quit ends them, and their agents.
     if (!keepBridge) await step("chat-hosts", () => agentOrchestratorUpstream?.endChatHosts(), 20_000);
@@ -5538,6 +5558,7 @@ async function start() {
       chatQueueFile: path.join(app.getPath("userData"), "integrations", "chat-queue.json"),
       // So do the composers' unsent drafts (chat-drafts.cjs): a crash no longer loses a prompt being written.
       chatDraftsFile: path.join(app.getPath("userData"), "integrations", "chat-drafts.json"),
+      inputJournal: userChatInputs(),
       // So do deleted chat messages (their hidden runs and fresh-session flags).
       chatEditsFile: path.join(app.getPath("userData"), "integrations", "chat-edits.json"),
       archiveFile: path.join(app.getPath("userData"), "integrations", "chat-archive.json"),
@@ -5588,7 +5609,8 @@ async function start() {
         return aoWebCatalogForModel(JSON.parse(await aoWebCatalogOutput(executable)), model);
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
-      aoHarness: agentOrchestratorUpstream.harness,
+      aoHarness: upstreamAtLaunch.harness,
+      readNativeLaunchReceipt: async scope => (await upstreamAtLaunch.call("native_launch_receipt", scope))?.launchReceipt ?? null,
       confirm: confirmAoAction,
       confirmToolRequest,
       confirmRecoverable,

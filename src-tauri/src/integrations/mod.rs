@@ -5,6 +5,7 @@ pub mod ao_lifecycle;
 pub mod ao_team;
 pub mod board;
 pub mod board_sync;
+pub mod chat_input;
 pub mod execution;
 pub mod lease;
 pub mod live;

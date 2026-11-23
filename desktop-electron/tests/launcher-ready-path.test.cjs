@@ -138,7 +138,8 @@ test("launcher startup resolves a linked userData root before setting every app 
   fs.symlinkSync(physical, alias, process.platform === "win32" ? "junction" : "dir");
 
   const configuredPaths = {};
-  let diagnosticPath;
+  const env = { CODING_TOOLS_CHATS_TOKEN: "synthetic-chat-token" };
+  let diagnosticPath, chatsOptions;
   const main = read("electron/main.cjs");
   const startup = main.slice(
     main.indexOf("\nprocess.env.CODEX_CHATGPT_WEB_HOME ="),
@@ -153,11 +154,13 @@ test("launcher startup resolves a linked userData root before setting every app 
       assert.equal(id, "./system-drive.cjs", "the profile setup requires nothing else");
       return require("../electron/system-drive.cjs");
     },
-    process: { env: {}, platform: process.platform },
+    process: { env, platform: process.platform },
     CORE_HOME: path.join(directory, "core"),
     LAUNCHER_PROFILE: { userData: alias, codexHome: path.join(directory, "codex"), displayName: "Test" },
     IS_DEV_PROFILE: false,
+    createNativeChatsHost(options) { chatsOptions = options; },
     app: {
+      isPackaged: true,
       setName() {},
       setAppUserModelId() {},
       setPath(name, value) { configuredPaths[name] = value; },
@@ -166,6 +169,9 @@ test("launcher startup resolves a linked userData root before setting every app 
     installProcessDiagnosticGuards({ filePath }) { diagnosticPath = filePath; },
   });
   assert.equal(configuredPaths.userData, fs.realpathSync.native(physical));
+  assert.equal(chatsOptions.profileRoot, configuredPaths.userData);
+  assert.equal(chatsOptions.enabled, false);
+  assert.equal(Object.hasOwn(env, "CODING_TOOLS_CHATS_TOKEN"), false);
   assert.equal(configuredPaths.logs, path.join(configuredPaths.userData, "logs"));
   assert.equal(diagnosticPath, path.join(configuredPaths.logs, "process-stream-errors.log"));
   assert.equal(fs.readFileSync(path.join(physical, "saved-state.json"), "utf8"), "preserve-user-state");

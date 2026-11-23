@@ -8,6 +8,7 @@ const { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAn
 const { wakePrompt, wakeupAction, createWakeupStore } = require("./chat-wakeups.cjs");
 const { createChatQueueStore, steerReadIn } = require("./chat-queue.cjs");
 const { createChatDraftStore } = require("./chat-drafts.cjs");
+const { createChatInputService } = require("./chat-input-service.cjs");
 const { restartResume } = require("./chat-resume.cjs");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 // CPA requests (model lists, goal checks, reviews) go from a worker thread: a connect or write on
@@ -504,7 +505,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, readNativeLaunchReceipt = null, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, inputJournal = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -594,6 +595,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const chatQueue = createChatQueueStore({ file: chatQueueFile, now, logger });
   // Each composer's unsent draft (chat-drafts.cjs): a crash or restart no longer loses a prompt being written.
   const chatDrafts = createChatDraftStore({ file: chatDraftsFile, now, logger });
+  const chatInputs = inputJournal ?? (chatDraftsFile && chatAttachmentsDir ? createChatInputService({
+    file: path.join(path.dirname(chatDraftsFile), "chat-inputs.sqlite"),
+    attachmentsRoot: path.join(chatAttachmentsDir, "owned"), legacyDraftsFile: chatDraftsFile,
+  }) : null);
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
   const chatEdits = createChatEditStore({ file: chatEditsFile, logger });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
@@ -1334,6 +1339,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // nodeKey -> { at, pending }: the run loop's latest view of an AO card's parked tool requests.
   const pendingFrames = new Map();
   const aoPending = (node, session, observed) => (observed?.approvals || []).map(approval => ({ ...approval, nodeId: node.id, thread_id: session }));
+  const isNativeSession = session => typeof session === "string" && session.startsWith("native:");
+  const nativeApproval = approval => isNativeSession(approval?.thread_id);
   // Any card (orchestrator, worker or reviewer) on an AO harness runs as an AO session.
   const externalAgent = (node) => typeof node?.route?.harness_id === "string"
     && node.route.harness_id.startsWith("ao:") ? node.route.harness_id.slice(3) : null;
@@ -2011,6 +2018,40 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     }
   }
 
+  const validNativeTurnId = value => typeof value === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
+  const NATIVE_TERMINAL_TURNS = new Set(["completed", "failed", "cancelled"]);
+  const nativeExternalCard = node => isNativeSession(node?.receipt?.thread_id) || Boolean(externalAgent(node)?.startsWith("orchestrator-"));
+  const liveNativeFrame = frame => frame && !frame.exited && !frame.agentGone && !frame.recoveryRequired && frame.status !== "unknown";
+  async function observeNativeCard(node) {
+    const { thread_id: session, turn_id: turn, request_key: reservation } = node.receipt ?? {};
+    if (!isNativeSession(session) || !validNativeTurnId(turn) || !reservation) return null;
+    const frame = await harnessService().observe(session, turn);
+    if (frame?.sessionId !== session || frame.turnId !== turn) return null;
+    return { ...frame, approvals: Array.isArray(frame.approvals) ? frame.approvals.filter(approval => approval?.turn_id === turn) : [] };
+  }
+  async function nativeSendReceipt(sessionId, { workspaceId, requestId }) {
+    const readback = await Promise.resolve().then(() => harnessService().recover?.(sessionId, null, { workspaceId, requestId })).catch(() => null);
+    const receipt = readback?.sendReceipt;
+    return receipt?.sessionId === sessionId && receipt.workspaceId === workspaceId && receipt.requestId === requestId
+      && validNativeTurnId(receipt.turnId) ? receipt : null;
+  }
+
+  async function nativeSteerReceipt({ workspaceId, inputId, sessionId, turnId }) {
+    const readback = await Promise.resolve().then(() => harnessService().recover?.(sessionId, turnId, { workspaceId, inputId })).catch(() => null);
+    const receipt = readback?.steerReceipt;
+    return receipt?.state === "accepted" && receipt.workspaceId === workspaceId && receipt.inputId === inputId
+      && receipt.sessionId === sessionId && receipt.turnId === turnId ? receipt : null;
+  }
+
+  async function nativeLaunchReceipt(scope) {
+    const receipt = await Promise.resolve().then(() => readNativeLaunchReceipt?.(scope)).catch(() => null);
+    return receipt?.workspaceId === scope.workspaceId && receipt.agent === scope.agent && receipt.requestId === scope.requestId
+      && isNativeSession(receipt.sessionId) && receipt.sessionId.length <= 128 && validNativeTurnId(receipt.sessionId.slice(7))
+      && validNativeTurnId(receipt.turnId) ? receipt : null;
+  }
+  const unknownNativeDelivery = () => Object.assign(new Error("Native delivery is unknown. The reserved turn was kept and was not sent again."),
+    { code: "NATIVE_DELIVERY_UNKNOWN" });
+
   // plain: a single-model run, whose one card is a plain assistant rather than an AO worker.
   async function dispatchExternal(workspaceId, runId, node, expectedRevision, background, plain = false) {
     const agent = externalAgent(node);
@@ -2028,7 +2069,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // is already being started, or the reservation fails) leaves a resumed agent the idle sweep
       // releases again, as reopening the chat does.
       const early = continuing ? continuations.get(runId) : null;
-      const earlyCheck = early ? continuableOutcome(early.session) : null;
+      const isNativeAgent = Boolean(agent?.startsWith("orchestrator-"));
+      const matchesEngine = target => target.session.startsWith("native:") === isNativeAgent;
+      const earlyCheck = early && matchesEngine(early) ? continuableOutcome(early.session) : null;
       // Checked after the card is reserved: a refusal found before it left the card pending, so the
       // chat said "Starting" for good and the reason lived only in memory. Now it holds the card
       // with the reason, which the chat shows and Retry clears.
@@ -2068,7 +2111,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }, background ? undefined : { localConfirmation: true });
       if (reserved?.ok === true && reserved.waiting) return reserved;
       if (reserved?.ok !== true || typeof reserved.request_key !== "string") throw new Error("AO harness reservation outcome is unknown");
-      let session = null;
+      let session = null, nativeTurnId = null;
       let failure = null;
       // What the launch is doing right now, for the card ("starting a new agent"): it said only
       // "launching" for as long as a launch took, however it went and wherever it waited.
@@ -2096,10 +2139,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // A single-model follow-up continues the chat's live session as its next turn: no new
         // session, worktree or replayed prompt, and the agent keeps what it already read and ran.
         const continued = continuations.get(runId);
+        const nativeContinuation = continued?.session.startsWith("native:");
         const handoff = handoffs.get(runId);
         const recovered = handoff?.retryOf ? await restoreChatRequest(handoff).catch(() => null) : null;
         const request = handoff?.request ?? recovered?.request;
-        // A session that is gone, or refuses the message, falls back to a fresh start.
+        // Only legacy AO may hand off a refusal to a fresh session.
         let sent = null, sendError = null;
         if (continued) stage("reconnecting to the chat's agent");
         // An agent AO could not confirm was back within its wait failed the message ("Couldn't confirm
@@ -2109,6 +2153,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         // the new agent, which starts with the chat so far (the handoff below).
         let unconfirmed = null;
         const checkStarted = now();
+        if (continued && !matchesEngine(continued)) throw new Error("The selected engine does not own the original session. The message was not sent.");
         // checkMs is what the launch still waited for here, after the check that began with it.
         const outcome = !continued ? { usable: false }
           : await (continued === early ? earlyCheck : continuableOutcome(continued.session));
@@ -2116,6 +2161,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (outcome.error) unconfirmed = outcome.error;
         const usable = Boolean(continued) && !outcome.error && Boolean(outcome.usable);
         if (continued) checkMs = now() - checkStarted;
+        if (nativeContinuation && !usable) throw new Error("The original native session could not be continued. The message was not sent to a replacement agent.");
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
           // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
@@ -2137,6 +2183,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           const text = continued.retry && request ? `${continued.text}\n\n${currentRequestText(request.text)}` : continued.text;
           const standing = await launchInstructions(workspaceId, FOLLOW_UP_BYTES - utf8Bytes(text));
           const fresh = standing.text && instructionsGiven.get(continued.session) !== standing.hash;
+          const receiver = { workspaceId, runId, nodeId: node.id, requestId: reserved.request_key };
+          if (nativeContinuation) {
+            if (!chatInputs?.bindNativeSendTarget) throw new Error("Durable native send storage is unavailable; the message was not sent");
+            await chatInputs.bindNativeSendTarget(receiver, continued.session);
+          }
           const sendStarted = now();
           let sendTimedOut = false;
           sent = await harnessService().send(continued.session, fresh ? standing.text + text : text, reserved.request_key,
@@ -2147,6 +2198,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
               return null;
             });
           sendMs = now() - sendStarted;
+          if (nativeContinuation) {
+            const receipt = await nativeSendReceipt(continued.session, receiver);
+            if (!receipt || (validNativeTurnId(sent?.turnId) && sent.turnId !== receipt.turnId)) throw unknownNativeDelivery();
+            nativeTurnId = receipt.turnId;
+            sent = receipt;
+          }
           if (sent?.turnId) givenInstructions(continued.session, standing.hash);
           // A send that ran out of time may still reach the agent: it is stopped (its session,
           // worktree and conversation stay) before the fresh agent starts, so the two never work on
@@ -2214,8 +2271,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           stage(starting);
           const holder = await takeColdStart(count => stage(`waiting for ${count} other agent${count === 1 ? "" : "s"} to finish starting`));
           stage(starting);
-          try { session = await harnessService().spawn({ ...launch, prompt }); }
-          catch (error) { releaseColdStart(holder); throw error; }
+          try {
+            if (!isNativeAgent) session = await harnessService().spawn({ ...launch, prompt, requestId: reserved.request_key });
+            else {
+              const reported = await Promise.resolve().then(() => harnessService().spawn({ ...launch, prompt, requestId: reserved.request_key })).catch(() => null);
+              const receipt = await nativeLaunchReceipt({ workspaceId, agent, requestId: reserved.request_key });
+              if (!receipt || (reported && reported !== receipt.sessionId)) throw unknownNativeDelivery();
+              session = receipt.sessionId;
+              nativeTurnId = receipt.turnId;
+            }
+          } catch (error) { releaseColdStart(holder); throw error; }
           // A brand-new agent holding nothing but this message: the one kind of start the launch
           // watchdog may end (stopStalledLaunch). Its clock starts with the spawn, not the wait above.
           if (session) {
@@ -2237,6 +2302,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const left = (launching.get(workspaceId) ?? 1) - 1;
         if (left > 0) launching.set(workspaceId, left); else launching.delete(workspaceId);
       }
+      if (failure?.code === "NATIVE_DELIVERY_UNKNOWN") throw failure;
       if (session) {
         sessionOwners.set(session, runKey(workspaceId, runId));
         if (sessionOwners.size > 500) sessionOwners.delete(sessionOwners.keys().next().value);
@@ -2252,7 +2318,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         const latest = await runs({ workspaceId, runId }).catch(() => null);
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
-        if (!mission?.cancelled && card && card.state === "reserved" && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped) return false;
+        const stopped = backgroundRuns.get(runKey(workspaceId, runId))?.stopped;
+        const attached = nativeTurnId && card?.state === "running" && card.receipt?.request_key === reserved.request_key
+          && card.receipt.thread_id === session && card.receipt.turn_id === nativeTurnId;
+        if (!stopped && !mission?.cancelled && (card?.state === "reserved" || attached || (nativeTurnId && !mission))) return false;
+        if (nativeTurnId) return (await stopExternalTurn(session, { owner: runKey(workspaceId, runId), turnId: nativeTurnId })) !== false;
         await stopExternalTurn(session, mission?.cancelled || backgroundRuns.get(runKey(workspaceId, runId))?.stopped
           ? { owner: runKey(workspaceId, runId), releaseAgent: true } : null);
         return true;
@@ -2262,6 +2332,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         saved = await requestHeadless("/api/v1/ao/external/submitted", {
           workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: reserved.request_key,
           ...(session ? { session_id: session } : {}),
+          ...(nativeTurnId ? { turn_id: nativeTurnId } : {}),
           // The held card says why: a first chat's start runs detached, so this is the only place it shows.
           ...(!session && failure ? { error: String(failure?.message || failure).slice(0, 400) } : {}),
         });
@@ -2455,7 +2526,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * to it").
    */
   function handBackSteers(workspaceId, runId, session) {
-    const steers = chatQueue.deliveredTo(workspaceId, runId).filter(steer => steer.session === session);
+    const steers = chatQueue.deliveredTo(workspaceId, runId).filter(steer => steer.session === session && !steer.inputId);
     for (const taskId of new Set(steers.map(steer => steer.taskId))) {
       const mine = steers.filter(steer => steer.taskId === taskId);
       chatQueue.forgetDelivered(workspaceId, taskId, mine.map(steer => steer.id));
@@ -2488,22 +2559,48 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   async function observeExternal(workspaceId, runId, node, mission = null) {
     const session = node.receipt?.thread_id;
     if (node.state === "reserved" && !dispatching.has(nodeKey(workspaceId, runId, node.id))) {
+      if (externalAgent(node)?.startsWith("orchestrator-")) {
+        const requestId = node.receipt?.request_key || node.request_key;
+        const receiver = { workspaceId, runId, nodeId: node.id, requestId };
+        if (!requestId || mission?.paused || mission?.cancelled) return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+        let receipt;
+        try {
+          const target = await chatInputs?.readNativeSendTarget?.(receiver);
+          receipt = target ? await nativeSendReceipt(target.sessionId, receiver)
+            : await nativeLaunchReceipt({ workspaceId, agent: externalAgent(node), requestId });
+        } catch { /* Without the target read, the original receiver is uncertain. */ }
+        if (!receipt) return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+        const attached = await requestHeadless("/api/v1/ao/external/submitted", {
+          workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: requestId,
+          session_id: receipt.sessionId, turn_id: receipt.turnId,
+        });
+        if (attached?.ok !== true) throw new Error("Couldn't attach the exact native receipt. The message was not sent again.");
+        return { ...attached, pending_approvals: [] };
+      }
       // The launch was lost before AO returned a session; hold it rather than replay.
       const held = await requestHeadless("/api/v1/ao/external/submitted", {
         workspace_id: workspaceId, run_id: runId, node_id: node.id, request_key: node.receipt?.request_key || node.request_key,
       });
       return { ok: true, run: held?.run, pending_approvals: [] };
     }
-    if (node.state !== "running" || !session) return { ok: true, pending_approvals: [] };
+    const native = nativeExternalCard(node);
+    if (node.state !== "running" || (!native && !session)) return { ok: true, pending_approvals: [] };
     const ownership = { workspaceId, runId, nodeId: node.id,
-      turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
-    const observed = await harnessService().observe(session, ownership.turnId);
+      turnId: node.receipt?.turn_id || (!native ? expectedTurns.get(session) : undefined), requestKey: node.receipt?.request_key || node.request_key };
+    const observed = await (native ? observeNativeCard(node) : harnessService().observe(session, ownership.turnId));
+    if (native && !observed) return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
     // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
     // the chat's work, never a fresh launch the watchdog may end.
     if (observed?.provisioning !== true) { freshLaunches.delete(session); launchControllerUp.delete(session); }
-    const terminal = TERMINAL_TURNS.has(observed.turnState) || observed.exited;
+    const terminal = native ? NATIVE_TERMINAL_TURNS.has(observed.turnState) : TERMINAL_TURNS.has(observed.turnState) || observed.exited;
     // Its start is over (the agent is up, or the start ended): the next cold start may begin.
     if (observed?.provisioning !== true || terminal) releaseColdStartOf(session);
+    if (native && !terminal) {
+      if (!liveNativeFrame(observed) || !["running", "queued"].includes(observed.turnState)) {
+        return { ok: true, run: mission, pending_approvals: [], recovery_required: true };
+      }
+      if (observed.turnState === "queued") return { ok: true, pending_approvals: [], session_id: session, quiet: true };
+    }
     if (!terminal) {
       // The agent's parked tool requests, answerable from the chat or by the reviewer.
       const pending = aoPending(node, session, observed);
@@ -2783,15 +2880,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const frame = pendingFrames.get(key);
       // A quiet frame is the loop's latest word until its next observation is due (QUIET_OBSERVE_MS
       // and one pass): asking AO again in between would bring back the reads it spared.
-      if (frame && Date.now() - frame.at < (frame.quiet ? QUIET_OBSERVE_MS + 500 : 1500)) {
+      if (frame && !nativeExternalCard(frame.node) && !frame.pending.some(nativeApproval)
+        && Date.now() - frame.at < (frame.quiet ? QUIET_OBSERVE_MS + 500 : 1500)) {
         return { ok: true, status: { connected: true, pending_approvals: withAdvice(frame.pending, frame.mission ? frame : null) } };
       }
       const found = await savedNode(clean(workspaceId, 128), clean(runId, 80), clean(nodeId, 80)).catch(() => null);
       if (found && externalAgent(found.node)) {
         const session = found.node.receipt?.thread_id;
-        const observed = found.node.state === "running" && session
-          ? await harnessService().observe(session, expectedTurns.get(session)).catch(() => ({})) : {};
-        return { ok: true, status: { connected: true, pending_approvals: withAdvice(aoPending(found.node, session, observed), found) } };
+        const native = nativeExternalCard(found.node);
+        const observed = found.node.state === "running" && (native || session)
+          ? await (native ? observeNativeCard(found.node) : harnessService().observe(session, expectedTurns.get(session))).catch(() => null) : null;
+        const pending = native && (!liveNativeFrame(observed) || observed.turnState !== "running") ? [] : aoPending(found.node, session, observed);
+        return { ok: true, status: { connected: !native || Boolean(observed), pending_approvals: withAdvice(pending, found) } };
       }
     }
     if (!response.status?.pending_approvals) return response;
@@ -3579,14 +3679,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const approving = chosen ? !offered.kind.startsWith("reject") : allow;
       // The person answered on the request's card; the app may confirm it once more (a dialog the
       // person can turn off with "Don't ask again"), still only from the focused window.
-      if (!await (confirmToolRequest ?? confirm)({
+      const native = nativeApproval(pending);
+      if (native && !pending.turn_id) throw new Error("Native approval is missing its original turn identity");
+      if (!await (native ? confirm : (confirmToolRequest ?? confirm))({
         message: chosen ? `${offered.label}?` : approving ? "Allow this tool request once?" : "Deny this tool request?",
         detail: `Run: ${run}
 Node: ${node}
 Tool: ${pending.tool}
 ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pending.path}` : `Request: ${pending.summary}`}`,
       })) return { ok: false, cancelled: true };
-      await harnessService().resolveApproval(pending.thread_id, approval, decision);
+      if (native) await harnessService().resolveApproval(pending.thread_id, approval, decision, "", { workspaceId: id, turnId: pending.turn_id });
+      else await harnessService().resolveApproval(pending.thread_id, approval, decision);
       // The person has looked at this chat's requests: the next one is the reviewer's again.
       reviewDenials.delete(pending.thread_id);
       rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
@@ -3814,8 +3917,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (newer.some(entry => entry.nodes?.some(card => card.receipt?.thread_id === target.sessionId))) continue;
         sessions.set(target.sessionId, target);
       }
-      const stopped = await Promise.allSettled([...sessions].map(([session, target]) =>
-        stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: true, completed: target.completed })));
+      const stopped = await Promise.allSettled([...sessions].map(async ([session, target]) => {
+        const native = isNativeSession(session);
+        const confirmed = await stopExternalTurn(session, { owner, turnId: target.turnId, releaseAgent: !native, completed: target.completed });
+        if (native && confirmed === false) throw new Error("The original native turn is no longer owned; no shutdown was attempted");
+      }));
       clock.mark("agents");
       await unscheduled;
       const failure = stopped.find(result => result.status === "rejected");
@@ -4459,7 +4565,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const withAdvice = (approvals, card = null) => Array.isArray(approvals)
     // A status read already in flight can return the request after its answer was sent. Do not
     // offer that answered request again; advice alone (including a failed send) never removes it.
-    ? approvals.filter((item) => !approverAdvice.get(item?.approval_id)?.resolved).map((item) => {
+    ? approvals.filter((item) => nativeApproval(item) || !approverAdvice.get(item?.approval_id)?.resolved).map((item) => {
+      if (nativeApproval(item)) return item;
       // Modern native commands carry escalation scope separately from item/permissions requests.
       const request = item?.request;
       const scoped = item?.kind === "command" && request
@@ -5251,7 +5358,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** Whether a pending request waits on the person, not on a reviewer that answers it for them. */
   function approvalNeedsPerson(mission, node, approval) {
-    if (["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
+    if (nativeApproval(approval) || ["question", "plan"].includes(approval?.kind) || !(approval?.kind === "command" || approval?.source === "ao")) return true;
     const approver = cardApprover(mission, node);
     if (!approver || approver.settings?.auto_decide !== true) return true;
     // "Approve for me" answers what its reviewer allows or denies. What the reviewer cannot decide
@@ -5348,6 +5455,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const approver = cardApprover(mission, active[index]);
       if (!approver) continue;
       for (const approval of result?.pending_approvals ?? []) {
+        if (!approval || nativeApproval(approval)) continue;
         // A question the agent asked is the person's to answer: never screened or answered for them.
         // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
@@ -5701,7 +5809,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const { node, pending } of waiting) {
       for (const approval of pending) {
         const id = approval?.approval_id;
-        if (!id) continue;
+        if (!id || nativeApproval(approval)) continue;
         live.add(id);
         if (!pendingSeen.has(id)) pendingSeen.set(id, at);
         if (!answersForPerson(node, mission) || autoAnswered.has(id)) continue;
@@ -7144,8 +7252,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // and takes its answer, and one that turn already took within STEER_REPEAT_MS is not sent again.
   const STEER_REPEAT_MS = 30_000;
   const steersInFlight = new Map(); // JSON [workspace, task, text] -> the steer on its way
-  function chatSteer(input = {}, { fromQueue = false } = {}) {
-    if (input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input, fromQueue);
+  function chatSteer(input = {}, { fromQueue = false, bindNativeSteer } = {}) {
+    if (input?.inputId || input?.restart === true || input?.goal !== undefined) return chatSteerOnce(input, { fromQueue, bindNativeSteer });
     const key = JSON.stringify([clean(input.workspaceId, 128), clean(input.taskId, 128), boardText(clean(input.message, 8192, false))]);
     const earlier = steersInFlight.get(key);
     if (earlier) {
@@ -7157,7 +7265,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // The steer itself, as its caller's answer: no wait is added in front of it (the chat's note reads
   // the message count while the caller carries on).
   function steerTracked(key, input, fromQueue) {
-    const mine = chatSteerOnce(input, fromQueue);
+    const mine = chatSteerOnce(input, { fromQueue });
     steersInFlight.set(key, mine);
     const forget = () => { if (steersInFlight.get(key) === mine) steersInFlight.delete(key); };
     mine.then(forget, forget);
@@ -7192,7 +7300,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
   }
   /** `restart`: the person pressed Restart on a stuck turn, so it is restarted whatever its quiet time. */
-  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal } = {}, fromQueue = false) {
+  async function chatSteerOnce({ workspaceId, taskId, message, restart = false, goal, inputId } = {}, { fromQueue = false, bindNativeSteer } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
     // /goal sent mid-turn steers its condition in, as Claude Code does; that turn is the goal's first round.
     const objective = goal === undefined ? null : cleanObjective(goal);
@@ -7203,9 +7311,27 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A single chat steers its one card; a team steers its orchestrator, never an arbitrary worker.
     const { run, card } = chatAgentCard(await runs({ workspaceId: id }), task);
     if (!card) return { ok: true, steered: false, reason: "No agent is working in this chat to steer" };
+    const session = card.receipt.thread_id;
+    if (typeof session === "string" && session.startsWith("native:")) {
+      if (!inputId) throw new Error("Native steering needs a saved input identity");
+      if (restart || objective) throw new Error("This native route does not support restart or goal steering");
+      const turnId = card.receipt.turn_id;
+      if (!validNativeTurnId(turnId)) return { ok: true, steered: false, waiting: true, starting: true, reason: "The native turn has no confirmed identity yet." };
+      const target = { taskId: task, runId: run.id, nodeId: card.id, sessionId: session, turnId };
+      if ((await bindNativeSteer?.(target))?.bound !== true) throw new Error("The native steer receiver was not saved");
+      const result = await harnessService().steer(session, text, inputId, { workspaceId: id, turnId });
+      if (result?.steered === false) return { ok: true, steered: false, reason: "The native agent is not taking steering for that turn" };
+      if (result?.steered !== true || result.turnId !== turnId || result.inputId !== inputId) throw new Error("Native steer acknowledgement is unconfirmed");
+      if (!await nativeSteerReceipt({ workspaceId: id, sessionId: session, turnId, inputId })) {
+        throw Object.assign(new Error("The native steer receipt is unconfirmed. Your input remains saved and will not be replayed."), { code: "NATIVE_DELIVERY_UNKNOWN" });
+      }
+      const receipt = { taskId: task, sessionId: session, turnId, inputId };
+      if (result.duplicate) return { ok: true, steered: true, duplicate: true, runId: run.id, nodeId: card.id, ...receipt };
+      return { ...steered(id, task, run, card, text, objective, inputId), ...receipt };
+    }
     // This turn already took the same message moments ago: it is not handed over (or noted) again,
     // unless the agent has asked a question since that what was typed answers (below).
-    const repeat = !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
+    const repeat = !inputId && !objective && restart !== true && chatQueue.deliveredTo(id, run.id)
       .some(steer => steer.taskId === task && steer.message === text && now() - steer.at < STEER_REPEAT_MS);
     const skipRepeat = () => {
       logger?.info?.("ao.steer_repeat_skipped", { workspaceId: id, taskId: task });
@@ -7226,7 +7352,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       const response = await requestHeadless("/api/v1/ao/harness/steer", { workspace_id: id, run_id: run.id, node_id: card.id, text });
       if (response?.ok !== true || response.steered !== true) return { ok: true, steered: false, reason: "The agent's turn already ended" };
-      return steered(id, task, run, card, text, objective);
+      return steered(id, task, run, card, text, objective, inputId);
     }
     // Steering a turn that waits on an approval or a question cancelled that request ("Tool use
     // aborted"), and the agent lost the step it asked about. While one waits, the steer waits for it
@@ -7302,7 +7428,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // A chat's session is created in the background (spawn's async): its card runs, with the session,
     // while the agent is still starting, and AO has no controller to steer yet. The message waits
     // for the turn like a queued one instead of failing.
-    const result = await harnessService().steer(card.receipt.thread_id, text, `steer-${randomUUID()}`).catch((error) => {
+    const result = await harnessService().steer(card.receipt.thread_id, text, inputId || `steer-${randomUUID()}`).catch((error) => {
       if (/CHAT_CONTROLLER_NOT_READY/.test(String(error?.message))) return { steered: false, starting: true };
       throw error;
     });
@@ -7310,18 +7436,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { ok: true, steered: false, waiting: true, starting: true, reason: "The agent is still starting. Your message is sent after its turn." };
     }
     if (!result.steered) return { ok: true, steered: false, reason: "The agent's turn already ended" };
-    return steered(id, task, run, card, text, objective);
+    return steered(id, task, run, card, text, objective, inputId);
   }
 
   /** A steer that reached the card's turn: its goal and its note in the chat's transcript. */
-  function steered(id, task, run, card, text, objective) {
+  function steered(id, task, run, card, text, objective, inputId) {
     // The goal is judged when the steered run settles (goalAfterRun), like a goal sent as a new turn.
     if (objective) { goals.set(id, task, objective); goals.update(id, task, { round: 1, lastRunId: run.id }); }
     // Kept until the turn shows the agent read it: a turn that dies first (its agent never answered,
     // or never really started) hands it back to the chat's queue as the next turn (queueAfterRun).
     // Before, such a steer was simply gone.
     try {
-      chatQueue.delivered(id, task, { message: text, runId: run.id, session: card.receipt?.thread_id, ...(objective ? { goal: objective } : {}) });
+      chatQueue.delivered(id, task, { message: text, runId: run.id, session: card.receipt?.thread_id, ...(inputId ? { inputId } : {}), ...(objective ? { goal: objective } : {}) });
     } catch { /* best effort */ }
     const stamp = new Date().toISOString().replace("T", " ").slice(0, 16);
     // `messages`: how many messages the chat had when the steer went in; it belongs under the last.
@@ -7444,7 +7570,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   /** `adoptTurn` ({ session, turnId }, internal callers only): the run takes that turn of the chat's
    *  live agent instead of sending the message (adoptAutonomousTurns). */
-  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId } = {}, checkCurrent = () => {}, { supersedeRetry = false, adoptTurn = null, automatic = false } = {}, clock = stepClock(now)) {
+  async function sendSteps({ workspaceId, taskId, title, message, executable, executionMode, singleRoute, teamId, teamRevision, deferStart, goal, rewind, afterRunId, inputId } = {}, checkCurrent = () => {}, { supersedeRetry = false, adoptTurn = null, automatic = false } = {}, clock = stepClock(now)) {
     checkCurrent();
     const id = clean(workspaceId, 128);
     if (taskId && sessionCompactions.get(runKey(id, clean(taskId, 128)))?.status === "in_progress") {
@@ -7521,7 +7647,22 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let followUp = null;
     let rewindBefore;
     // The board's revision as this send's own write left it (createTeamRun's first try needs no read).
-    let boardRevision;
+    let boardRevision, acceptedInput;
+    const acceptTaskAndRun = async (revision, taskTitle, description, existingTask) => {
+      const response = await requestHeadless("/api/v1/ao/update", { workspace_id: id, confirm: true, change: {
+        operation: "accept_chat_input", input: { input_id: clean(inputId, 128), expected_board_revision: revision,
+          ...(existingTask ? { task_id: existingTask } : {}), title: taskTitle, description, message: text, run_id: randomUUID(),
+          ...(executionMode === "single" ? { execution_mode: "single", single_route: singleRoute, worker_limit: 1 }
+            : { team_id: team.id, team_revision: team.revision, worker_limit: team.worker_limit || 3,
+              ...(executionMode === "team" ? { execution_mode: "team" } : {}) }) },
+      } }, { localConfirmation: true });
+      if (response?.ok !== true || response.input_id !== inputId || typeof response.task_id !== "string" || !response.task_id
+        || response.run?.workspace_id !== id || typeof response.run_id !== "string" || !response.run_id || response.run_id !== response.run.id
+        || response.task_id !== response.run.project_id || existingTask && response.task_id !== existingTask) {
+        throw new Error("Chat input acceptance returned an invalid receipt; do not resend");
+      }
+      return response;
+    };
     if (taskId) {
       task = clean(taskId, 128);
       // The chat's last single-model turn ran in an AO session; a follow-up on the same model
@@ -7626,10 +7767,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         const saidBefore = String(detail.task.description || "");
         checkCurrent(false, true);
-        const written = await write(id, { expected_revision: detail.revision,
-          change: { operation: "edit", id: task, title: detail.task.title, description } });
-        boardRevision = written?.revision;
-        followUp = { before: saidBefore, description };
+        if (inputId && !rewind) {
+          acceptedInput = await acceptTaskAndRun(detail.revision, detail.task.title, description, task);
+        } else {
+          const written = await write(id, { expected_revision: detail.revision,
+            change: { operation: "edit", id: task, title: detail.task.title, description } });
+          boardRevision = written?.revision;
+          followUp = { before: saidBefore, description };
+        }
       });
       clock.mark("write");
       if (rewind) {
@@ -7647,10 +7792,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       let created;
       await withBoardRetry(async () => {
         const before = await board({ workspaceId: id });
-        created = await write(id, { expected_revision: before.revision, change: {
-          operation: "create", title: startTitle, description: text,
-        } });
-        boardRevision = created?.revision;
+        if (inputId) {
+          acceptedInput = await acceptTaskAndRun(before.revision, startTitle, text);
+          created = { task: { id: acceptedInput.task_id } };
+        } else {
+          created = await write(id, { expected_revision: before.revision, change: {
+            operation: "create", title: startTitle, description: text,
+          } });
+          boardRevision = created?.revision;
+        }
       });
       clock.mark("write");
       // The service answers a create with the task it made (board_sync::apply_scoped). The send used
@@ -7661,9 +7811,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!task) throw new Error("Couldn't find the new chat's task. Refresh the board.");
     }
 
+    if (acceptedInput?.duplicate === true) return { ok: true, taskId: task, runId: acceptedInput.run_id, run: acceptedInput.run, status: "recovered" };
     let runId, createdRun;
     try {
-      ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
+      if (acceptedInput) { runId = acceptedInput.run_id; createdRun = acceptedInput.run; }
+      else ({ runId, run: createdRun } = await createTeamRun(id, task, team, { executionMode, singleRoute }, true, checkCurrent, { boardRevision }));
       clock.mark("create");
     } catch (error) {
       if (followUp) await withdrawFollowUp(id, task, runsBefore, followUp, rewind ? 0 : 3).catch(() => undefined);
@@ -9005,13 +9157,17 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const { run, card } = chatAgentCard(saved, taskId);
     if (!card || !externalAgent(card)) return false;
     const thread = card.receipt.thread_id;
-    const waiting = await Promise.resolve().then(() => harnessService().observe?.(thread, expectedTurns.get(thread))).catch(() => null);
+    const native = nativeExternalCard(card);
+    const waiting = await Promise.resolve().then(() => native ? observeNativeCard(card)
+      : harnessService().observe?.(thread, expectedTurns.get(thread))).catch(() => null);
     if (!waiting) return false;
-    const released = waiting.agentGone === true && await releaseOrphanedTurn(workspaceId, run, card, waiting, { queued: true });
-    const over = released || TERMINAL_TURNS.has(waiting.turnState) || waiting.exited === true;
+    const over = native ? NATIVE_TERMINAL_TURNS.has(waiting.turnState) :
+      (waiting.agentGone === true && await releaseOrphanedTurn(workspaceId, run, card, waiting, { queued: true }))
+        || TERMINAL_TURNS.has(waiting.turnState) || waiting.exited === true;
     const live = backgroundRuns.get(runKey(workspaceId, run.id));
     if (over && !(live && (live.starting || live.driving || live.status === "running"))) {
-      await observe({ workspaceId, runId: run.id, nodeId: card.id }).catch(() => null);
+      const saved = await observe({ workspaceId, runId: run.id, nodeId: card.id }).catch(() => null);
+      if (native && (!saved || saved.recovery_required)) return false;
     }
     return over;
   }
@@ -9063,6 +9219,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Take the current head after every read: edits and replacement adds keep their order.
       const [next] = chatQueue.list(workspaceId, taskId);
       if (!next) return;
+      if (next.inputId) {
+        const input = await chatInputs?.get(workspaceId, next.inputId);
+        if (!input) throw new Error("Durable chat input storage is unavailable");
+        if (["unknown", "dispatching"].includes(input.state)) {
+          chatQueue.update(workspaceId, taskId, next.id, { note: "Delivery is unknown. The input is saved and will not be sent again automatically." });
+          return;
+        }
+        if (["accepted", "completed", "cancelled"].includes(input.state)) {
+          chatQueue.remove(workspaceId, taskId, [next.id]);
+          armQueue(workspaceId, taskId, QUEUE_FREED_MS);
+          return;
+        }
+      }
       const latest = saved.runs.filter(run => run.project_id === taskId).at(-1);
       if (chatWorking(workspaceId, taskId, saved.runs)) {
         if (!next.steer || next.sending) {
@@ -9071,7 +9240,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return;
         }
         if (!steer) { armQueue(workspaceId, taskId, QUEUE_STEER_WAITS[Math.min(steerTries.get(next.id) ?? 0, 2)], true); return; }
-        const result = await chatSteer({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}) }, { fromQueue: true })
+        const result = await dispatchChatInput({ workspaceId, taskId, message: next.message, ...(next.inputId ? { inputId: next.inputId } : {}), ...(next.goal ? { goal: next.goal } : {}) }, true, { fromQueue: true })
           .catch(error => ({ steered: false, waiting: true, error }));
         if (result.steered === true) {
           chatQueue.remove(workspaceId, taskId, [next.id]);
@@ -9089,7 +9258,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       // A `sending` mark seen here is an earlier app session's, whose send never answered (this
       // session's sends hold `draining`): it went if the chat already ends with it.
-      if (next.sending && await queuedMessageInChat(workspaceId, taskId, next)) {
+      if (!next.inputId && next.sending && await queuedMessageInChat(workspaceId, taskId, next)) {
         chatQueue.remove(workspaceId, taskId, [next.id]);
         logger?.info?.("ao.chat_queue.sent_before_restart", { workspaceId, taskId });
         armQueue(workspaceId, taskId, QUEUE_FREED_MS);
@@ -9100,7 +9269,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       chatQueue.update(workspaceId, taskId, next.id, { sending: now() });
       steerTries.delete(next.id);
       try {
-        const result = await personChatSend({ workspaceId, taskId, message: next.message, ...(next.goal ? { goal: next.goal } : {}),
+        const result = await dispatchChatInput({ workspaceId, taskId, message: next.message, ...(next.inputId ? { inputId: next.inputId } : {}), ...(next.goal ? { goal: next.goal } : {}),
           ...queuedSelection(next, latest), ...(next.executable ? { executable: next.executable } : {}), deferStart: true });
         if (result?.ok === false) throw new Error(String(result.reason || "The queued message could not be sent"));
         chatQueue.remove(workspaceId, taskId, [next.id]);
@@ -9146,7 +9315,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * of its chat's queue, and the queue's next message is sent.
    */
   async function queueAfterRun(workspaceId, runId, outcome) {
-    const steers = outcome ? chatQueue.deliveredTo(workspaceId, runId) : [];
+    const steers = outcome ? chatQueue.deliveredTo(workspaceId, runId).filter(entry => !entry.inputId) : [];
     if (steers.length) {
       // Explicit Stop must not start another turn. Successful turns only replay input the timeline
       // shows still unread; a missing or unavailable timeline is not evidence for sending it twice.
@@ -9183,6 +9352,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (action === "set") return { ok: true, kept: chatDrafts.set(id, name, draft) };
     throw new Error("Unknown draft action");
   }
+  function dispatchChatInput(args, steer = false, { fromQueue = false, ...options } = {}) {
+    const execute = (input, bindNativeSteer) => steer ? asPerson(() => chatSteer(input, { fromQueue, bindNativeSteer })) : personChatSend(input, options);
+    if (!args.inputId) return execute(args);
+    if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+    return chatInputs.dispatch(args, execute, { steer, reconcile: ({ workspaceId, inputId }) => asPerson(() =>
+      requestHeadless("/api/v1/ao/update", { workspace_id: workspaceId, confirm: true,
+        change: { operation: "read_chat_input_receipt", input_id: inputId } }, { localConfirmation: true })),
+      reconcileSteer: nativeSteerReceipt,
+    });
+  }
   /** chat_queue: the chat view's add, remove and clear; `list` reads one chat's queue. */
   async function chatQueueCall({ workspaceId, taskId, action, item, ids, front, itemId, message } = {}) {
     const id = clean(workspaceId, 128), task = clean(taskId, 128);
@@ -9192,11 +9371,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!text.trim()) throw new Error("Type a message to queue");
       // One already going out takes nothing more: what was joined to it would be lost with its send.
       const target = clean(itemId, 80);
-      if (chatQueue.list(id, task).find(entry => entry.id === target)?.sending) return { ok: true, updated: false, queue: chatQueue.list(id, task) };
+      if (chatQueue.list(id, task).some(entry => entry.id === target && (entry.sending || entry.inputId))) return { ok: true, updated: false, queue: chatQueue.list(id, task) };
       const updated = chatQueue.update(id, task, target, { message: text });
       return { ok: true, updated: Boolean(updated), queue: chatQueue.list(id, task) };
     }
     if (action === "add") {
+      if (item?.inputId) {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        const saved = await chatInputs.get(id, item.inputId);
+        if (saved.destination.taskId !== task || saved.destination.message !== item.message) throw new Error("The saved input belongs to a different chat or message");
+        if (saved.state !== "queued") throw new Error("This input is not queued; reconcile its saved delivery receipt");
+        item = { ...item, id: saved.inputId, message: saved.destination.message,
+          selection: saved.destination, ...(saved.destination.goal ? { goal: saved.destination.goal } : {}) };
+      }
       const added = chatQueue.add(id, task, item, { front: front === true });
       // Queued while the chat was free (its send was refused for now): it goes as soon as it can.
       void drainQueue(id, task).catch(() => undefined);
@@ -9204,9 +9391,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     if (action === "remove") {
       if (!Array.isArray(ids) || ids.some(entry => typeof entry !== "string")) throw new Error("Choose the queued messages to remove");
+      for (const entry of chatQueue.list(id, task).filter(entry => ids.includes(entry.id) && entry.inputId)) {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        const saved = await chatInputs.get(id, entry.inputId);
+        if (!["accepted", "completed", "failed", "cancelled"].includes(saved.state)) await chatInputs.cancel(id, entry.inputId);
+      }
       return { ok: true, removed: chatQueue.remove(id, task, ids), queue: chatQueue.list(id, task) };
     }
-    if (action === "clear") return { ok: true, removed: chatQueue.remove(id, task, null), queue: [] };
+    if (action === "clear") {
+      for (const entry of chatQueue.list(id, task).filter(entry => entry.inputId)) {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        const saved = await chatInputs.get(id, entry.inputId);
+        if (!["accepted", "completed", "failed", "cancelled"].includes(saved.state)) await chatInputs.cancel(id, entry.inputId);
+      }
+      return { ok: true, removed: chatQueue.remove(id, task, null), queue: [] };
+    }
     if (action === "list") return { ok: true, queue: chatQueue.list(id, task) };
     throw new Error("Choose add, remove, clear or list");
   }
@@ -9250,6 +9449,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const { workspaceId, taskId } of chatQueue.chats()) {
       if (typeof workspaceId === "string" && typeof taskId === "string") armQueue(workspaceId, taskId, QUEUE_RESTORE_MS);
     }
+    if (chatInputs) void (async () => {
+      let after = 0;
+      do {
+        const page = await chatInputs.pending(after);
+        if (wakeupsDisposed) return;
+        for (const entry of page.items) {
+          const taskId = entry.destination.taskId;
+          if (!taskId || chatQueue.list(entry.workspaceId, taskId).some(item => item.inputId === entry.inputId)) continue;
+          try {
+            chatQueue.add(entry.workspaceId, taskId, { id: entry.inputId, inputId: entry.inputId, message: entry.destination.message,
+              selection: entry.destination, steer: entry.mode === "steer", ...(entry.destination.goal ? { goal: entry.destination.goal } : {}),
+              ...(entry.state === "queued" ? {} : { note: "Delivery is unknown. This input will not be replayed automatically." }) });
+            if (entry.state === "queued") armQueue(entry.workspaceId, taskId, QUEUE_RESTORE_MS);
+          } catch (error) { logger?.warn?.("chat_input.queue_restore_failed", { code: error.code ?? "QUEUE_FULL" }); }
+        }
+        if (!page.hasMore) return;
+        after = page.cursor;
+      } while (!wakeupsDisposed);
+    })().catch(error => logger?.warn?.("chat_input.restore_failed", { code: error.code ?? "INPUT_STORE_FAILED" }));
   }
 
   // ---- /loop (chat-loops.cjs) ----
@@ -9880,11 +10098,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   /** Interrupt acknowledges a signal; only an exited or settled, non-working turn releases ownership. */
   async function stopExternalTurn(session, ownership = null) {
+    const native = isNativeSession(session), turnId = ownership?.turnId;
+    if (native && !validNativeTurnId(turnId)) throw new Error("Stop requires the exact native turn identity");
     for (;;) {
       const pending = sessionStops.get(session);
       if (!pending) break;
       const stopped = await pending;
-      if (stopped !== false && (!ownership?.releaseAgent || pending.releasesAgent)) return;
+      if (stopped !== false && (!native || pending.turnId === turnId) && (!ownership?.releaseAgent || pending.releasesAgent)) return;
       // Another waiter may have installed the host-release upgrade while this one resumed.
     }
     const job = Promise.resolve().then(async () => {
@@ -9903,7 +10123,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           || (ownership?.isStalled && !ownership.isStalled(current))) return false;
         alreadyExited = current?.exited === true;
       }
-      if (!ownership?.completed && !alreadyExited) {
+      if (native && !ownership?.completed && !alreadyExited) {
+        const receipt = await service.interrupt(session, { turnId });
+        if (receipt?.turnId !== turnId || !["cancelled", "completed", "failed"].includes(receipt.state)) {
+          throw new Error("The exact native turn stop could not be confirmed; its session was not shut down");
+        }
+      } else if (!ownership?.completed && !alreadyExited) {
         // A Stop that also ends the agent (releaseAgent) does not depend on the interrupt: the agent's
         // host is shut down next, and that shutdown is confirmed (exitAgent). Seen live (2026-10-22):
         // Stop on an agent still launching, its model retrying 429s, waited the whole settle window
@@ -9963,6 +10188,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
     });
     job.releasesAgent = ownership?.releaseAgent === true;
+    job.turnId = turnId;
     sessionStops.set(session, job);
     try { return await job; }
     finally { if (sessionStops.get(session) === job) sessionStops.delete(session); }
@@ -10399,6 +10625,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return ended;
   }
   function dispose() {
+    if (!inputJournal) void chatInputs?.close().catch(error => logger?.warn?.("chat_input.close_failed", { code: error.code ?? "INPUT_STORE_FAILED" }));
     archiveSweep.disposed = true;
     for (const timer of coldStarts.values()) if (timer) clearTimer(timer);
     coldStarts.clear();
@@ -10460,9 +10687,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   async function call(operation, args = {}) {
     switch (operation) {
-      case "chat_send": return personChatSend(args, { supersedeRetry: true });
+      case "chat_send": return dispatchChatInput(args, false, { supersedeRetry: true });
       case "chat_recover": return chatRecover(args);
-      case "chat_steer": return asPerson(() => chatSteer(args));
+      case "chat_steer": return dispatchChatInput(args, true);
       case "chat_prewarm": return chatPrewarm(args);
       case "chat_context_window": return chatSetContextWindow(args);
       case "turn_timeline": return turnTimeline(args);
@@ -10507,6 +10734,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       case "chat_queue": return chatQueueCall(args);
       case "chat_draft": return chatDraftCall(args);
+      case "chat_input": {
+        if (!chatInputs) throw new Error("Durable chat input storage is unavailable");
+        return chatInputs.call(args);
+      }
       case "chat_delete_message": return chatDeleteMessage(args);
       case "chat_goal": return chatGoal(args);
       case "chat_wakeup": return chatWakeup(args);
@@ -10636,7 +10867,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Resolves once every wake-up and /loop change so far is on disk (saved off the main thread too). */
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
-  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
+  const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved(), chatInputs?.saved()]);
   return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
     startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }

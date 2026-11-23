@@ -39,6 +39,7 @@ function cleanItem(item, makeId, at) {
   const selection = item.selection && typeof item.selection === "object" && !Array.isArray(item.selection) ? item.selection : null;
   return {
     id: text(item.id, 80) || makeId(),
+    ...(typeof item.inputId === "string" && item.inputId ? { inputId: text(item.inputId, 128) } : {}),
     what, message, at: Number.isFinite(item.at) ? item.at : at,
     ...(goal ? { goal } : {}), ...(typed ? { typed } : {}),
     ...(item.steer === true ? { steer: true } : {}),
@@ -151,6 +152,7 @@ function createChatQueueStore({ file = null, now = Date.now, logger = null } = {
     delivered(workspaceId, taskId, steer) {
       const entry = { id: makeId(), message: text(steer.message, MESSAGE_LIMIT), runId: text(steer.runId, 80), at: now(),
         ...(steer.session ? { session: text(steer.session, 128) } : {}),
+        ...(steer.inputId ? { inputId: text(steer.inputId, 128) } : {}),
         ...(steer.goal ? { goal: text(steer.goal, MESSAGE_LIMIT) } : {}),
         ...(steer.selection ? { selection: steer.selection } : {}) };
       save(workspaceId, taskId, { delivered: [...delivered(workspaceId, taskId), entry].slice(-DELIVERED_LIMIT) });

@@ -2008,15 +2008,17 @@ export function goalFeedback(text: string): { objective: string; reason: string 
  * The app keeps the queue (chat-queue.cjs): `id` is its item's, `steer` steers it into the working
  * agent rather than waiting for the turn, and `note` says why its last send failed.
  */
-// `note`: why the app's last try to send it failed; `sending`: when the app began sending it (chat-queue.cjs).
-export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string; id?: string; steer?: boolean; note?: string; sending?: number };
+// `note`: why the app's last try to send it failed; `sending`: when the app began sending it (chat-queue.cjs);
+// `inputId`: stable captured UUID of accepted durable input (chat-input-service.cjs).
+export type QueuedChatMessage = { what: string; message: string; goal?: string; typed?: string; id?: string; steer?: boolean; note?: string; sending?: number; inputId?: string };
 /**
  * Adds to one chat's queue. A plain message joins a plain message queued just before it (they are
- * sent together); anything else (a command, a goal) waits for a turn of its own. Nothing is replaced.
+ * sent together); anything else (a command, a goal) waits for a turn of its own. Immutable accepted
+ * inputs (having inputId) are never merged. Nothing is replaced.
  */
 export function chatQueueAdd(queue: QueuedChatMessage[], item: QueuedChatMessage): QueuedChatMessage[] {
   const last = queue[queue.length - 1];
-  if (last && item.what === "Message" && last.what === "Message") {
+  if (!last?.inputId && !item.inputId && last && item.what === "Message" && last.what === "Message") {
     // Annotated messages join into one block, numbered across both: two blocks each counting from 1
     // read as one set of annotations to the agent, and the second showed raw in the chat.
     const before = chatAnnotationsSplit(last.message), after = chatAnnotationsSplit(item.message);
@@ -2111,6 +2113,8 @@ export type ChatAttachment = {
   preview?: string;
   /** An image marked up in the preview: its pin lines, sent ahead of the message (Codex's order). */
   markup?: string;
+  /** Immutable app-owned SHA-256 blob ID (chat-attachment-store.cjs). */
+  blobId?: string;
 };
 
 /** Attachments appended to the message: a file path agents read themselves, or a small text file inline. */

@@ -282,7 +282,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   readySlowMs = 30000, readyLimitMs = AO_READY_TIMEOUT_MS, readyHardMs = readyLimitMs * AO_READY_PATIENCE,
   readyStallMs = AO_START_STALL_MS, readyProgressMaxMs = AO_START_PROGRESS_MAX_MS,
   startCooldownMs = AO_START_COOLDOWN_MS, provisionResumeWaitsMs = PROVISION_RESUME_WAITS_MS,
-  gatewayKey = async () => null, gatewayKeyChecksMs = GATEWAY_KEY_CHECKS_MS }) {
+  gatewayKey = async () => null, gatewayKeyChecksMs = GATEWAY_KEY_CHECKS_MS,
+  composeRuntime = null }) {
+  if (composeRuntime !== null && typeof composeRuntime !== "function") throw new TypeError("The host engine composer must be a function");
   let child = null;
   let gateway = null;
   let view = null;
@@ -2936,7 +2938,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return fs.existsSync(path.join(folder, process.platform === "win32" ? "ao.cmd" : "ao")) ? folder : null;
   }
 
-  return createOrchestratorHandler({ runtime: { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder } });
+  const legacy = { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder };
+  // Only trusted host code supplies a composer; never load a runtime from chat arguments or settings.
+  return createOrchestratorHandler({ runtime: composeRuntime ? composeRuntime(legacy) : legacy });
 }
 
 /**

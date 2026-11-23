@@ -29,6 +29,7 @@ import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
 import { NativeCodexPanel } from "./features/NativeCodexPanel";
 import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
 import { ChatPages } from "./features/ChatPages";
+import { NativeChatsSurface } from "./features/NativeChatsSurface";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
 import { ComputerUseSurface } from "./features/ComputerUseSurface";
@@ -893,6 +894,7 @@ function LauncherShell({
             <nav className="sidebar-nav" aria-label={copy.workspace}>
               <SidebarGroup label={copy.runtime}>
                 <SidebarItem active={surface === "agent-orchestrator"} icon="chat" label="Chat" onClick={() => navigateSurface("agent-orchestrator")} />
+                <SidebarItem active={surface === "chats"} icon="chat" label="Chats" onClick={() => navigateSurface("chats")} />
                 <SidebarItem active={surface === "agent-orchestrator-teams"} icon="team" label="Orchestrator Team" onClick={() => navigateSurface("agent-orchestrator-teams")} />
                 <SidebarItem active={surface === "subagents"} icon="git" label="Subagents" onClick={() => navigateSurface("subagents")} />
                 <SidebarItem active={surface === "computer-use"} icon="cursor" label="Computer use" onClick={() => navigateSurface("computer-use")} />
@@ -1144,6 +1146,11 @@ function LauncherShell({
                 <SurfaceHiddenContext.Provider value={surface !== "agent-orchestrator"}>
                   <ChatPages language={language} setError={setError} />
                 </SurfaceHiddenContext.Provider>
+              </section>
+            ))}
+            {keepAlive("chats", () => (
+              <section className="gpb-chat" aria-label="Coding Tools Chats">
+                <NativeChatsSurface active={surface === "chats"} />
               </section>
             ))}
             {keepAlive("agent-orchestrator-teams", () => (
