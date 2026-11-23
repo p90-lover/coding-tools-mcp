@@ -500,7 +500,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, agentWindow = null, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -721,7 +721,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
   function aoLaunchArgs(workspaceId, node, plain, contextDefault = null, effortDefault = null) {
-    const contextWindow = node.route.context_window ?? contextDefault;
+    const contextWindow = declaredWindow(node.route, node.route.context_window ?? contextDefault);
     // "auto" is the model's own effort: nothing is sent, neither a CPA suffix nor a native effort.
     // Tried 2026-10-22 through CPA: every Cline Pass model refused "(auto)" with a 400 ("Supported
     // reasoning levels are …") while the bare model answered, as every model did.
@@ -788,7 +788,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The app's own terminal follows "Approve for me" too: routine project commands run unasked.
       ...(node.route.approvals_reviewer === "auto_review" ? { autoReview: true } : {}),
       ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
-      // A card left blank gets its model's full known limit (defaultContextWindow).
+      // A card left blank gets its model's full known limit (defaultContextWindow); a pick past
+      // that limit (1M on a model CPA reports at 872K) is declared at the limit (declaredWindow).
       ...(contextWindow != null ? { contextWindow } : {}),
       ...(plain ? { plain: true } : {}),
       // A native model takes its own effort; a CPA model's goes in the body where the harness can send it.
@@ -962,6 +963,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** continuableSession settled as { usable } or { error }: a check begun ahead of its use never rejects unheard. */
   function continuableOutcome(session) {
     return continuableSession(session).then(usable => ({ usable }), error => ({ error }));
+  }
+  // Sessions whose agent's window was checked against its model's limit since the app started.
+  const windowsChecked = new Set();
+  /**
+   * An agent told a bigger window than its model takes in (a 1M card on an 872K model, launched
+   * before declaredWindow capped it) compacts too late and the upstream refuses its requests. Before
+   * its next message it is set to the limit, stopped and resumed on its own conversation, as a resize
+   * does; the card keeps its pick. `outcome` (continuableOutcome) comes back unchanged when there is
+   * nothing to do or the agent could not be stopped, else the resumed agent's. Once per session.
+   */
+  async function fitAgentWindow(session, route, outcome, onFit) {
+    const limit = windowLimit(route), card = route?.context_window ?? null;
+    if (!limit || (card !== null && card <= limit) || windowsChecked.has(session)) return outcome;
+    windowsChecked.add(session);
+    if (windowsChecked.size > 500) windowsChecked.delete(windowsChecked.values().next().value);
+    const service = harnessService();
+    // Not known (no reading yet): a card past the limit launched its agent at the card's window.
+    const reading = await Promise.resolve(agentWindow?.(session)).catch(() => null);
+    const told = Number.isSafeInteger(reading) && reading > 0 ? reading : null;
+    if (told === null ? card === null : told <= limit) return outcome;
+    onFit?.();
+    try {
+      await service.setContextWindow(session, limit);
+      await service.exitAgent(session);
+    } catch (error) {
+      logger?.warn?.("ao.window_fit_failed", { session, limit, message: publicText(error?.message || error, 200) });
+      return outcome;
+    }
+    logger?.info?.("ao.window_fitted", { session, from: told, to: limit });
+    return continuableOutcome(session);
   }
   // A pre-warm's check, which brings back an agent released while idle, runs one at a time. Several
   // chats opening together (split panes, restored tabs) resumed each one's agent at once: AO answers
@@ -1246,6 +1277,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           ?? catalog.capabilities?.[model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "")], tokens);
         if (refused) throw new Error(refused);
       } else tokens = await defaultContextWindow(id, { route }) ?? 0;
+      // The card keeps the pick (1M); the agent is told no more than its model takes in (872K).
+      tokens = declaredWindow(route, tokens);
       await harnessService().setContextWindow(session, tokens);
       // The agent reads its window when it starts: stopped and resumed, it keeps its conversation.
       // Recorded once it is stopped: one that could not be stopped still runs at its old size, and
@@ -1543,19 +1576,47 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       || typeof provider === "string" && PLUGIN_PROVIDERS.has(provider.trim().toLowerCase()) || pluginModels.has(base);
   };
   const VERBATIM_EFFORT_REASON = "This model is served by a CPA provider plugin, which passes the model name on unchanged, so it takes no reasoning level.";
-  /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
+  /**
+   * The window CPA gives every model it knows no limit for: its GPT-5 template's, copied onto
+   * provider-plugin models and onto every model of a config API key (Claude and Gemini keys, an
+   * OpenAI key's gpt-4o, Mistral's). Real only for the GPT models it was made for (ownGptModel).
+   */
   const CPA_STOCK_WINDOW = 272_000;
   /**
-   * Real context ceilings of models that CPA reports only with its stock window, by the model's
-   * own name (after any provider prefix). Without one, the card offers the client's 2M ceiling as
-   * unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI
-   * Studio key is listed at the stock 272K, though CPA's own catalog gives 1,048,576 for every
-   * Gemini 4 model (Antigravity's and OpenCode's report it): until 2026-11-20 a Gemini 4 Carbon
-   * chat was capped at 272K and its window field refused 1m and every 7-digit size.
+   * A model's own name, comparable across providers and spellings: an Anthropic key's "Claude Opus
+   * 4.6", Antigravity's "claude-opus-4-6-thinking" and "cpa/openai-api/…" twins all name one model.
+   * Lowercase, after any provider prefix, no "(effort)", spaces and dots as dashes, no ISO date, and
+   * no trailing effort word or -thinking/-preview/-latest/-tiered. "max" stays: Qwen3 Max is its own model.
    */
-  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:[.-]\d+)?-flash\b/i, 1_000_000],
-    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/i, 1_048_576]];
-  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
+  const modelFamilyKey = id => {
+    const name = String(id ?? "");
+    return name.slice(name.lastIndexOf("/") + 1).toLowerCase().replace(/\([^()]*\)$/, "").trim()
+      .replace(/[\s._]+/g, "-").replace(/-\d{4}-\d{2}-\d{2}$/, "")
+      .replace(/(?:-(?:minimal|low|medium|high|xhigh|thinking|preview|latest|tiered))+$/, "");
+  };
+  /** GPT-5 and later as CPA's own Codex providers list them (no prefix): their 272K is real. */
+  const ownGptModel = id => !String(id).includes("/") && /^gpt-(?:[5-9]|\d{2,})(?:-|$)/.test(modelFamilyKey(id));
+  /**
+   * Real context ceilings of models that CPA reports only with its stock window, by modelFamilyKey.
+   * Without one, the card offers the client's 2M ceiling as unverified; DeepSeek v4.1 Flash showed
+   * "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI Studio key is listed at the stock 272K,
+   * though CPA's own catalog gives 1,048,576 for every Gemini 4 model: until 2026-11-20 a Gemini 4
+   * Carbon chat was capped at 272K and its window field refused 1m and every 7-digit size.
+   * The rest are from CPA's own model registry (inputTokenLimit/context_length, checked 2026-11-23):
+   * Gemini 2.5-3.x Pro/Flash text models 1,048,576 (its image, TTS, live, embedding and transcribe
+   * models are not matched); Claude 5.x, Fable and Opus 4.7/4.8 1M; older Claude 4 models 200K
+   * (Antigravity's Opus 4.6 reports 200K too). An Anthropic key's "Claude Opus 4.6" ran at the stock
+   * 272K and "Claude Opus 5.5" at 272K of its 1M. OpenAI's gpt-4.1 1,047,576, gpt-4o 128K, o3/o4 200K.
+   */
+  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:-\d+)?-flash\b/, 1_000_000],
+    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/, 1_048_576],
+    [/^gemini-(?:2-5|3(?:-\d+)?)-(?:pro|flash)(?:-lite)?$/, 1_048_576],
+    [/^claude-(?:opus|sonnet|haiku|fable)-(?:[5-9](?:-\d+)?|4-[78])$/, 1_000_000],
+    [/^claude-(?:opus|sonnet|haiku)-4(?:-[0-6])?$/, 200_000],
+    [/^gpt-4-1(?:-mini|-nano)?$/, 1_047_576],
+    [/^gpt-4o(?:-mini)?$/, 128_000],
+    [/^o[34](?:-mini)?$/, 200_000]];
+  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(modelFamilyKey(id)))?.[1];
   /**
    * The largest window a card may set for a model whose catalog reports `limit`. CPA's
    * max_context_window counts what the model takes in: its window less the reply's 128K reserve,
@@ -1572,6 +1633,26 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return !setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum
       ? "This model's context window can't be set to that. Its limit is " + maximum + " tokens." : null;
   }
+  /**
+   * The most an agent is told its window is for `route`'s model: the limit CPA's catalog reports
+   * for it (remembered in knownModels, read synchronously at launch), or null when none is known.
+   * A card may pick 1M for a model CPA reports at 872K (windowCeiling), but the agent was told 1M,
+   * compacted near it, and the upstream refused every request past 872K: "400 Your input exceeds
+   * the context window of this model" in GPT-6.2 Sol chats at 1M (2026-11-21, 2026-11-23), with
+   * no compaction before. So the pick stays the card's and the agent is told the limit.
+   */
+  function windowLimit(route) {
+    const model = String(route?.model ?? "");
+    const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
+      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    const limit = id ? knownModels[id]?.capability?.contextLimit : undefined;
+    return Number.isSafeInteger(limit) && limit >= 4096 ? limit : null;
+  }
+  /** The window an agent is launched or resized with for a card's `tokens`: never past windowLimit. */
+  const declaredWindow = (route, tokens) => {
+    const limit = windowLimit(route);
+    return Number.isSafeInteger(tokens) && tokens > 0 && limit && tokens > limit ? limit : tokens;
+  };
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -1931,16 +2012,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const efforts = CLINE_EFFORTS.get(id) ?? (!verbatim && !reportedLevels.length && /^claude-/i.test(id) ? CLAUDE_SUFFIX_EFFORTS : reportedLevels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
-      // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
-      // window, whatever the model really takes: that number is no limit, so it is left unknown
-      // instead of capping the card (and of becoming its default). A model of CPA's own providers
-      // reporting the stock window may really have it (Codex's GPT models do), so only a known
-      // ceiling (KNOWN_CONTEXT_LIMITS: Gemini 4 from a Vertex key) replaces it there.
+      // CPA gives every model it has no limit for the same stock window, whatever the model really
+      // takes: provider plugins' (cline-pass/…, commandcode-go/…) and every model of a config API
+      // key, 179 of them on 2026-11-23 (an Anthropic key's Claude Opus 4.6 at 272K of its 200K, its
+      // Opus 5.5 at 272K of 1M, Gemini at 272K of 1,048,576, gpt-4o at 272K of 128K). That number is
+      // no limit: a known ceiling replaces it, else the same model's limit on another provider
+      // (below), else it stays unknown instead of capping the card and becoming its default. Only
+      // the GPT models of CPA's own Codex providers really have it (ownGptModel).
       const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
-      const stock = (id.includes("/") || knownContextLimit(id) !== undefined)
-        && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
-      // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
-      const limit = stock ? knownContextLimit(id) : reported;
+      const stock = reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
+      // A real number CPA reports wins; the stock one, or none, gives way to a known ceiling.
+      const real = Number.isSafeInteger(reported) && reported > 0 && !stock;
+      const limit = real ? reported : knownContextLimit(id) ?? (stock && ownGptModel(id) ? reported : undefined);
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
         : "CPA did not advertise reasoning levels for this model." } : {}),
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
@@ -1948,6 +2031,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       ids.push(id);
       if (unavailable[id]) { held[id] = unavailable[id]; delete unavailable[id]; }
       if (ids.length === MAX_LISTED_MODELS) break;
+    }
+    // A model still without a limit takes the same model's on another provider (modelFamilyKey): an
+    // OpenAI key's openai-api/gpt-5 the Codex gpt-5's 272K, an Anthropic key's "Claude Sonnet 4.6"
+    // Antigravity's claude-sonnet-4-6 200K. The smallest one, so no provider is asked past its own.
+    const familyLimits = new Map();
+    for (const id of ids) {
+      const limit = capabilities[id].contextLimit;
+      if (!limit) continue;
+      const family = modelFamilyKey(id);
+      familyLimits.set(family, Math.min(familyLimits.get(family) ?? limit, limit));
+    }
+    for (const id of ids) {
+      const limit = capabilities[id].contextLimit ? undefined : familyLimits.get(modelFamilyKey(id));
+      if (limit) capabilities[id] = { ...capabilities[id], contextLimit: limit };
     }
     // CPA's list is remembered (a model it serves now, with what it reports) and every model it
     // listed lately and left out now is listed again from memory.
@@ -2050,7 +2147,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           throw new Error("This model doesn't support the chosen reasoning effort");
         }
         if (node.route.context_window != null) {
-          const refused = windowRefusal(capability, node.route.context_window);
+          // Judged as launched: a window past the model's known limit runs at it (declaredWindow), so
+          // a card saved before its limit was known (272K on a 200K Claude) is not refused for it.
+          const refused = windowRefusal(capability, declaredWindow(node.route, node.route.context_window));
           if (refused) throw new Error(refused);
         }
       };
@@ -2102,8 +2201,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         let unconfirmed = null;
         const checkStarted = now();
         // checkMs is what the launch still waited for here, after the check that began with it.
-        const outcome = !continued ? { usable: false }
+        let outcome = !continued ? { usable: false }
           : await (continued === early ? earlyCheck : continuableOutcome(continued.session));
+        if (continued && !continued.adoptTurn && outcome.usable && !outcome.error) {
+          outcome = await fitAgentWindow(continued.session, node.route, outcome,
+            () => stage("fitting the chat's agent to its model's context limit"));
+        }
         if (outcome.error && outcome.error.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw outcome.error;
         if (outcome.error) unconfirmed = outcome.error;
         const usable = Boolean(continued) && !outcome.error && Boolean(outcome.usable);

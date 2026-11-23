@@ -141,10 +141,15 @@ function spendTotal(report: CpaUsage | null | undefined, accounts: CpaUsageAccou
     priced.length < rows.length || rows.some((account) => account.costPartial));
 }
 
+// The launched window stands over the agent's report, except a report a little under it: Codex
+// gives 95% of the window it was told, keeping the rest back, and compacts against that. Claude
+// Code over ACP says 200K for a model it does not know, whatever it was told.
 function effectiveUsage(snapshot: ChatContextSnapshot | null, launchedWindow?: number) {
   const launched = snapshot?.launchedWindow || launchedWindow || null;
   const reported = snapshot?.usage ?? null;
-  return reported && launched && reported.contextWindow !== launched ? { ...reported, contextWindow: launched } : reported;
+  const own = reported?.contextWindow ?? 0;
+  return reported && launched && own !== launched && !(own < launched && own >= launched * 0.8)
+    ? { ...reported, contextWindow: launched } : reported;
 }
 
 const amount = (value: string) => Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });

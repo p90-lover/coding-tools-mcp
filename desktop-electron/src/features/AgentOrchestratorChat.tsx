@@ -3484,7 +3484,11 @@ export function AgentOrchestratorChat({
                 previousSessionIds={agentSessions.slice(1).filter((session) => session.model === agentSessions[0]?.model
                   && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
                 agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
-                launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
+                launchedWindow={agentSessions[0]?.contextWindow}
+                // A pick the agent already has is not a next window, though it runs at less (a 1M pick
+                // on an 872K model, or Codex keeping 5% back).
+                nextWindow={agentRoute && (composer?.route?.context_window ?? null) === (agentRoute.context_window ?? null)
+                  ? undefined : composer?.route?.context_window ?? undefined}
                 canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
               {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
                   nothing typed, Stop shows instead of a disabled Send. It showed only while a card ran, so a step

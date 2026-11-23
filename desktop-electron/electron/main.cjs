@@ -5589,6 +5589,12 @@ async function start() {
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
+      // The window a session's agent was told (what the context meter shows): the one this app
+      // launched or resized it with, else the agent's own latest report. Codex reports 95% of it.
+      agentWindow: async (session) => {
+        const reading = (await agentOrchestratorUpstream.call("chat_context", { sessionIds: [session] }))?.sessions?.[session];
+        return reading?.launchedWindow || reading?.usage?.contextWindow || null;
+      },
       confirm: confirmAoAction,
       confirmToolRequest,
       confirmRecoverable,

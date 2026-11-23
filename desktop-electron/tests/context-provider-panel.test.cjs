@@ -83,6 +83,12 @@ test("context panel shows reported limits before a first reply and honors the la
   assert.match(waiting, /Context not reported yet/);
   const launched = render({ launchedWindow: 500000 });
   assert.match(launched, /36% used/);
+  // Codex reports 95% of the window it was told and compacts against that, so its own number shows.
+  const codex = render({ launchedWindow: 400000, snapshot: { ...snapshot, usage: { ...snapshot.usage, contextUsed: 190000, contextWindow: 380000 } } });
+  assert.match(codex, /50% used/);
+  // Claude Code over ACP says 200K for a model it does not know: the launched window stands.
+  const unknown = render({ launchedWindow: 1000000, snapshot: { ...snapshot, usage: { ...snapshot.usage, contextWindow: 200000 } } });
+  assert.match(unknown, /18% used/);
   const native = render({ model: "gpt-fixture" });
   assert.doesNotMatch(native, /cx-ctx-provider/, "a model not on CPA has no provider card to fill");
 });
