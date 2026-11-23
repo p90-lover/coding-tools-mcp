@@ -3872,10 +3872,15 @@ class BrowserHost {
     });
   }
 
-  openLogin() {
+  /**
+   * `again`: sign in even though the session reads as signed in. ChatGPT can revoke a sign-in whose
+   * /api/auth/session still answers with a token (2026-11-17: every backend call 401 token_revoked);
+   * Connect MCP then says so, and the account's card offers this.
+   */
+  openLogin({ again = false } = {}) {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT sign-in verification");
-    if (this.externalLogin) return this.openPasskeyLogin();
-    if (this.state.authenticated) {
+    if (this.externalLogin) return this.openPasskeyLogin({ again });
+    if (this.state.authenticated && !again) {
       this.activateHomeSurface();
       this.show();
       return Promise.resolve(this.snapshot());
@@ -3921,9 +3926,9 @@ class BrowserHost {
     return tracked;
   }
 
-  openPasskeyLogin() {
+  openPasskeyLogin({ again = false } = {}) {
     requireAutomaticBrowserInspection(this, "Automated ChatGPT passkey import");
-    if (this.state.authenticated) {
+    if (this.state.authenticated && !again) {
       this.activateHomeSurface();
       this.show();
       return Promise.resolve(this.snapshot());

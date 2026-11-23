@@ -25,6 +25,8 @@ const BROWSER_BUSY = "Finish the active browser or setup operation";
 // Electron wraps a main-process error as "Error invoking remote method '<channel>': Error: …".
 const ipcErrorText = (cause: unknown) => (cause && typeof cause === "object" && "message" in cause ? String(cause.message) : String(cause))
   .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
+// CHATGPT_SIGNED_OUT (electron/mcp-connector-setup.cjs): ChatGPT rejected a sign-in its session still reports.
+const SIGN_IN_REJECTED = /no longer accepts this account's sign-in/;
 
 const accountName = (account: BrowserAccount) => account.email ?? account.label;
 // A loading/idle page is not a signed-out account. Keep each partition's own sign-in evidence.
@@ -597,6 +599,9 @@ function AccountCard({
         ? { tone: "warn", label: mcpAccess.label, detail: "" }
         : connectorText(account.connector);
   const signIn = signedIn === null ? "Checking sign-in…" : signedIn ? "Signed in" : "Not signed in";
+  // Live 2026-11-17: ChatGPT revoked accounts' sign-ins while /api/auth/session still gave a token, so
+  // their cards said "Signed in". Connect MCP tells (CHATGPT_SIGNED_OUT); the card then asks to sign in again.
+  const rejected = signedIn === true && connector.tone === "error" && SIGN_IN_REJECTED.test(connector.detail);
   const fill = Math.min(100, Math.round((tabs.length / account.maxTabs) * 100));
 
   // Use and Sign in end in the Browser tab: the account's page (or its sign-in) opens there.
@@ -607,7 +612,7 @@ function AccountCard({
   const signInNow = () => run(`signin:${account.id}`, async () => {
     if (!inUse) await api.switchBrowserAccount(account.id);
     onOpenBrowser?.();
-    await api.openLogin();
+    await api.openLogin(rejected ? { again: true } : undefined);
   });
   // Connect MCP stopped at OpenAI Platform's sign-in. On Windows it happens in the person's Chrome and stays
   // in this account's session, then Connect runs again; elsewhere Platform's login opens in the Browser tab.
@@ -672,6 +677,23 @@ function AccountCard({
                   {isRunning(`signin:${account.id}`) ? "Opening…" : "Sign in"}
                 </button>
               ) : null}
+            </dd>
+          </div>
+        ) : null}
+        {rejected ? (
+          <div>
+            <dt>Sign-in</dt>
+            <dd>
+              <span className="cbm-tone is-warn">ChatGPT rejected this sign-in</span>
+              <button
+                className="cbm-link"
+                disabled={isRunning(`signin:${account.id}`) || (!inUse && (switching || removing)) || (inUse && chatRunning)}
+                onClick={() => void signInNow()}
+                title="Signs this account in again, replacing the sign-in ChatGPT no longer accepts"
+                type="button"
+              >
+                {isRunning(`signin:${account.id}`) ? "Opening…" : "Sign in again"}
+              </button>
             </dd>
           </div>
         ) : null}

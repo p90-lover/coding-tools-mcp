@@ -105,6 +105,26 @@ test("fresh active-page authentication is honored by both single and bulk MCP ha
   }
 });
 
+// Live 2026-11-17: an account ChatGPT signed out still read "Signed in". Once Connect MCP reports it, the card says so.
+test("a card whose sign-in ChatGPT rejected asks to sign in again, and does", async () => {
+  const { CHATGPT_SIGNED_OUT } = require("../electron/mcp-connector-setup.cjs");
+  const ui = fixture();
+  const logins = [];
+  ui.api.openLogin = async (options) => { logins.push(options); return {}; };
+  const again = "Sign in again";
+  assert(!nodes(ui.card("second")).some(node => node.type === "button" && text(node) === again));
+  ui.accounts[1].connector = { okAt: null, error: CHATGPT_SIGNED_OUT, errorAt: Date.now() };
+  const card = ui.card("second");
+  assert.match(text(card), /ChatGPT rejected this sign-in/);
+  button(card, again).props.onClick();
+  await ui.flush(); await ui.flush();
+  assert.deepEqual(ui.calls.switches, ["second"]);
+  assert.equal(ui.calls.browserOpened, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(logins)), [{ again: true }]);
+  ui.accounts[1].connector = { okAt: null, error: "MCP ownership metadata is unavailable or exceeded its bound.", errorAt: Date.now() };
+  assert(!nodes(ui.card("second")).some(node => node.type === "button" && text(node) === again), "other failures do not ask");
+});
+
 test("an account MCP button sends its exact ID and does not retain another sign-in's result", async () => {
   const ui = fixture();
   button(ui.card("second"), "Connect MCP").props.onClick();

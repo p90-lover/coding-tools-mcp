@@ -102,7 +102,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   closeBrowserTab: (tabId) => ipcRenderer.invoke("launcher:browser-tab-close", tabId),
   copyManualPrompt: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-copy", tabId),
   confirmManualSent: (tabId) => ipcRenderer.invoke("launcher:manual-prompt-sent", tabId),
-  openLogin: () => ipcRenderer.invoke("launcher:browser-login"),
+  openLogin: (options) => ipcRenderer.invoke("launcher:browser-login", options?.again === true ? { again: true } : undefined),
   checkSignIn: () => ipcRenderer.invoke("launcher:browser-check-auth"),
   chatGptDesktopStatus: () => ipcRenderer.invoke("launcher:chatgpt-desktop-status"),
   openChatGptDesktop: (slotId) => ipcRenderer.invoke("launcher:chatgpt-desktop-open", slotId),
