@@ -16,7 +16,9 @@ import "./features/link-preview.css";
 
 installShimmerTicker();
 installEntranceSettle();
-installLinkPreview();
+// A link's hover card reads the page through the main process (App route, no cookies).
+const links = window.codingTools?.links;
+installLinkPreview(document, links ? { load: (url) => links.preview({ url }) } : {});
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
