@@ -122,6 +122,7 @@ export interface JsonObject {
 export interface CodingToolsApi {
   readonly runtime: {
     status(): Promise<JsonObject>;
+    chats(input: JsonObject): Promise<JsonObject>;
   };
   readonly workspaces: {
     list(input?: PageRequest): Promise<Page<WorkspaceSummary>>;

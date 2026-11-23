@@ -313,6 +313,7 @@ const { invokeContract } = require("./ipc-schema.cjs");
 const codingToolsApi = Object.freeze({
   runtime: Object.freeze({
     status: () => invokeContract(ipcRenderer, "runtime.status"),
+    chats: (input) => invokeContract(ipcRenderer, "runtime.chats", input),
   }),
   workspaces: Object.freeze({
     list: (input = {}) => invokeContract(ipcRenderer, "workspaces.list", input),

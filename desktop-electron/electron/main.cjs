@@ -66,6 +66,7 @@ const {
 } = require("./logging.cjs");
 const { RuntimeHost } = require("./runtime.cjs");
 const { createCodingToolsShellBridge } = require("./coding-tools-shell-bridge.cjs");
+const { createNativeChatsHost } = require("./native-chats-host.cjs");
 const {
   ensurePackagedRuntime,
   preparePackagedRuntime,
@@ -197,6 +198,8 @@ fs.mkdirSync(LAUNCHER_PROFILE.userData, { recursive: true, mode: 0o700 });
 const launcherUserData = fs.realpathSync.native(LAUNCHER_PROFILE.userData);
 if (process.platform !== "win32") fs.chmodSync(launcherUserData, 0o700);
 app.setPath("userData", launcherUserData);
+const nativeChats = createNativeChatsHost({ enabled: IS_DEV_PROFILE && !app.isPackaged, profileRoot: launcherUserData });
+delete process.env.CODING_TOOLS_CHATS_TOKEN;
 app.setAppLogsPath(path.join(launcherUserData, "logs"));
 installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
@@ -2251,6 +2254,12 @@ function registerIpc({ logger, stateStore }) {
     getUpdateController: () => updateController,
   });
   handle("coding-tools:runtime:status", (event) => codingTools.runtimeStatus(event));
+  handle("coding-tools:runtime:chats", async (event, input) => {
+    if (!event.sender.mainFrame || event.senderFrame !== event.sender.mainFrame) throw new Error("Native Chats requires the main app frame");
+    if (["open", "send"].includes(input?.action)) await assertFocusedMainWindowSettled(event, true);
+    else assertFocusedMainWindow(event, false, true);
+    return nativeChats.call(input);
+  });
   handle("coding-tools:workspaces:list", (event, input) => codingTools.listWorkspaces(event, input));
   handle("coding-tools:workspaces:create", async (event, input) => {
     await assertFocusedMainWindowSettled(event, true);
@@ -4529,6 +4538,7 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
     updateController?.stopPeriodicChecks?.();
     autoInstaller?.stop();
     backendBundles?.stopWatching();
+    await step("native-chats", () => nativeChats.close());
     await step("agent-orchestrator", () => agentOrchestratorUpstream?.stop(), 20_000);
     // Chat hosts outlive AO so a restart can reattach them; a quit ends them, and their agents.
     if (!keepBridge) await step("chat-hosts", () => agentOrchestratorUpstream?.endChatHosts(), 20_000);

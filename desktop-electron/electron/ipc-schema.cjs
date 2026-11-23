@@ -676,6 +676,19 @@ const CONTRACTS = Object.freeze({
     request: emptyObject,
     response: genericObject,
   }),
+  "runtime.chats": Object.freeze({
+    channel: "coding-tools:runtime:chats",
+    request: Object.freeze({ type: "object", required: Object.freeze(["action"]), additionalProperties: false,
+      properties: Object.freeze({
+        action: Object.freeze({ type: "string", enum: Object.freeze(["status", "open", "list", "read", "send", "receipt"]) }),
+        sessionId: Object.freeze({ type: "string", maxLength: 71 }),
+        inputId: Object.freeze({ type: "string", maxLength: 128 }),
+        text: Object.freeze({ type: "string", maxLength: 16384 }),
+        before: Object.freeze({ type: "integer", minimum: 1 }),
+        after: Object.freeze({ type: "string", maxLength: 64 }),
+      }) }),
+    response: genericObject,
+  }),
   "workspaces.list": Object.freeze({
     channel: "coding-tools:workspaces:list",
     request: pageRequest,
