@@ -70,7 +70,7 @@ const uiImports = { "./chat-response-style": responseStyles, "./response-style-m
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
-  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] },
+  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => ({ page: null, plan: null }), useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu, "./chat-list-settings": load("chat-list-settings.ts") }) };
 const ui = load("AgentOrchestratorChat.tsx", uiImports);
@@ -953,6 +953,42 @@ test("a question the person answered shows as Claude Code shows one: the questio
   assert.equal(tidy.length, 1, "the answered request keeps its own row");
 });
 
+test("a plan review card offers Open plan separately from the original approval decisions", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown });
+  const proposal = `## Proposal\n\n${"A line of planning detail. ".repeat(20)}\n\nFULL_PLAN_TAIL`;
+  const props = { approval: { nodeId: "lead", approval_id: "review", source: "ao", kind: "plan", plan: proposal,
+    decisions: [{ id: "accept", kind: "allow_once", label: "Yes, and manually approve edits" },
+      { id: "reject", kind: "reject_once", label: "No, keep planning" }] }, busy: false, approve() {} };
+  const view = overrides => renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { ...props, ...overrides }));
+  const compact = view({ onOpenPlan() {}, busy: true });
+  assert.match(compact, /Plan ready for review/);
+  assert.match(compact, /<button type="button" class="button-secondary">Open plan<\/button>/);
+  assert.match(compact, /<fieldset disabled="">.*Yes, and manually approve edits.*No, keep planning/);
+  assert.doesNotMatch(compact, /FULL_PLAN_TAIL/);
+  assert.match(view({}), /FULL_PLAN_TAIL/, "review surfaces without a side panel keep the full inline plan");
+});
+
+test("the Plan pane shows full Markdown and real tasks without needing a live agent session", () => {
+  const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null },
+    "./ao-chat": chat, "./ChatMarkdown": markdown, "./ChatReplyPlan": load("ChatReplyPlan.tsx") });
+  const reply = load("chat-reply-plan.ts", { "./ao-chat": chat });
+  const tasks = reply.agentReplyPlan([{ kind: "plan", plan: [{ text: "Inspect the handler", status: "completed" }, { text: "Run the regression", status: "pending" }] }], false);
+  const props = { sessions: [], tab: "plan", onTab() {}, onClose() {} };
+  const view = plan => renderToStaticMarkup(React.createElement(workbench.ChatWorkbench, { ...props, plan }));
+  const result = view({ text: "## Verification\n\n- Read the handler\n- Keep the final line", tasks, live: false });
+  assert.match(result, /role="tab" aria-selected="true">Plan<\/button>/);
+  assert.match(result, /role="tabpanel" aria-label="Plan"/);
+  assert.match(result, /Copy plan<\/button>/);
+  assert.match(result, /<h[1-6]><span>Verification<\/span><\/h[1-6]>/);
+  assert.match(result, /Keep the final line/);
+  assert.match(result, /Inspect the handler/);
+  assert.match(result, /Run the regression/);
+  assert.doesNotMatch(result, /No agent yet/);
+  assert.match(view(undefined), /No plan yet/);
+  assert.doesNotMatch(view({ text: "", tasks, live: false }), /Copy plan|No plan yet/);
+  assert.equal(reply.agentReplyPlan([{ kind: "command", text: "ordinary tool output" }], false), null);
+});
+
 test("the side panel opens on an Overview of the chat: environment, context, changes, background tasks and usage", () => {
   const workbench = load("ChatWorkbench.tsx", { "../api/client": client, "../icons": { Icon: () => null }, "./ao-chat": chat,
     "./cpa-usage": load("cpa-usage.ts", { "../api/client": client }), "./page-visibility": visibility });
@@ -1114,6 +1150,17 @@ test("the side panel opens only when the agent is asked to show something (show_
   assert.equal(workbench.autoOpenTab([], false), null);
   assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], false), "terminal", "show_in_chat on a command opens the Terminal");
   assert.equal(workbench.autoOpenTab(["show:show-3:preview"], false), "preview", "and on its page the Preview");
+  assert.equal(workbench.autoOpenTab(["show:plan-4:plan"], false), "plan", "an explicit open_plan request brings forward Plan");
+  assert.equal(workbench.autoOpenTab(["plan:existing:progress"], false), null, "a plan update without a reveal request does not open anything");
+  const livePlan = { id: "plan-4", at: 26, goal: "Verify a change", doneWhen: "The regression passes", steps: [] };
+  const record = { sessionId: "chat", show: { id: "plan-4", pane: "plan", at: 24 }, livePlan };
+  const seen = new Set();
+  assert.equal(workbench.takeWorkbenchReveal([record], seen, true, 20, true, false), "plan", "a fresh request can arrive before the first status read");
+  assert.equal(workbench.takeWorkbenchReveal([{ ...record, livePlan: { ...livePlan, id: "plan-6" } }], seen, false, 20, true, false), null,
+    "a progress update cannot reopen a panel the person closed");
+  assert.equal(workbench.takeWorkbenchReveal([record], new Set(), true, 31, true, false), null, "reopening a chat does not replay an old reveal");
+  assert.equal(workbench.takeWorkbenchReveal([{ ...record, livePlan: undefined }], new Set(), false, 20, true, false), null);
+  assert.equal(workbench.takeWorkbenchReveal([record], new Set(), false, 20, false, false), null);
   assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal", "show:show-4:preview"], true), "preview",
     "the newest request wins");
   assert.equal(workbench.autoOpenTab(["show:show-5:window"], false), null, "a pane it does not know opens nothing");
