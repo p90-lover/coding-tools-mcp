@@ -68,19 +68,21 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport s
   }
   // Claude Code lists only CPA models; a Claude model through CPA keeps CPA's advertised efforts and
   // takes a window up to its reported limit (its picker was off). A CPA alias with no reported limit
-  // ("Claude Opus 5.5") offers the client's 2M ceiling, said to be unverified.
+  // takes its model's known one ("Claude Opus 5.5", 1M); an unknown one offers the client's 2M
+  // ceiling, said to be unverified.
   const claude = createAgentOrchestratorWorkflow({
     aoHarness: { models: async () => { throw Error("Claude Code's own aliases are not listed"); } },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
     fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "claude-sonnet-4-6", context_window: 200000,
-      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }, { slug: "Claude Opus 5.5" }] }) }),
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }, { slug: "Claude Opus 5.5" }, { slug: "Brand New Model" }] }) }),
   });
   const catalog = (await claude.call("models", { harness: "ao:claude-code" })).capabilities;
   const caps = catalog["cpa/claude-sonnet-4-6"];
   assert.deepEqual(caps.efforts, ["low", "high"]);
   assert.deepEqual(caps.contextWindow, { min: 4096, max: 200000, kind: "context" });
-  assert.deepEqual(catalog["cpa/Claude Opus 5.5"].contextWindow, { min: 4096, max: 2000000, kind: "context" });
-  assert.match(catalog["cpa/Claude Opus 5.5"].contextReason, /unverified/);
+  assert.deepEqual(catalog["cpa/Claude Opus 5.5"].contextWindow, { min: 4096, max: 1000000, kind: "context" });
+  assert.deepEqual(catalog["cpa/Brand New Model"].contextWindow, { min: 4096, max: 2000000, kind: "context" });
+  assert.match(catalog["cpa/Brand New Model"].contextReason, /unverified/);
   // agy takes no window on CPA's models: its gateway variables carry none, so the chip says why
   // (windowlessReason). Its own catalog failing here (not signed in) leaves CPA's listed.
   const agy = (await claude.call("models", { harness: "ao:agy" })).capabilities["cpa/claude-sonnet-4-6"];
@@ -303,7 +305,9 @@ test("a launch that fails before returning a session saves the launcher's reason
 
 test("persisted CPA tuning is checked against the current model capabilities before dispatch", async () => {
   await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { effort: "xhigh" }), /doesn't support the chosen reasoning effort/i);
-  await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { context_window: 1048576 }), /context.*262144|context.*limit/i);
+  // A window saved past the model's limit, or one the limit later came down under (CPA's stock 272K
+  // on a 200K Claude, now known), runs at the limit: the agent is told no more than the model takes.
+  assert.equal((await dispatched("codex", "cpa/gpt-5.5", { context_window: 1048576 })).contextWindow, 262144);
 });
 
 test("upstream spawn preserves context and the effort on Chat/TUI fallback, the effort going in a CPA session's body", async () => {
