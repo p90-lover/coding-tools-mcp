@@ -5349,11 +5349,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const approver = cardApprover(mission, active[index]);
       if (!approver) continue;
       for (const approval of result?.pending_approvals ?? []) {
+        if (!approval || nativeApproval(approval)) continue;
         // A question the agent asked is the person's to answer: never screened or answered for them.
         // So is a plan (ExitPlanMode): its "allow once" choice switches Claude to asking before every
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
-        const screened = !nativeApproval(approval) && !["question", "plan"].includes(approval?.kind)
-          && (approval?.kind === "command" || approval?.source === "ao") && (!approver.autobot || approval?.source === "ao");
+        const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao")
+          && (!approver.autobot || approval.source === "ao");
         if (!screened || !approval.approval_id || !rescreen(approverAdvice.get(approval.approval_id)) || screening.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
