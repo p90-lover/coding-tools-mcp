@@ -1086,10 +1086,17 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     arm(budget);
     const navigation = (_event, value, inPlace, mainFrame) => {
       if (mainFrame === false) return;
+      let url = null;
+      try { url = new URL(value); } catch {}
+      // ChatGPT rewrites the plugins page's own address in place as it settles (?view=personal
+      // becomes ?directoryTab=personal): the same document and session, so no account change, which
+      // a different workspace's plugins/list request would show (selectionVersion). Counted, one that
+      // landed during freshContext's session read stopped the setup as "authentication or workspace
+      // context changed"; a signed-in workspace owner's automatic check failed that way on 2026-11-23.
+      if (inPlace && url?.origin === "https://chatgpt.com" && url.pathname === expectedPath) return;
       navigationVersion++;
       if (navigating) return;
-      let url;
-      try { url = new URL(value); } catch { changedTo(value); return; }
+      if (!url) { changedTo(value); return; }
       // Platform's page signs in by itself once it has loaded: on 2026-11-09 it went from the
       // tunnels page to /login, and the setup stopped there on every Connect. That round trip
       // through OpenAI's sign-in belongs to the Platform step; the user it signs in is still
@@ -1193,10 +1200,16 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
         const current = await popup.webContents.executeJavaScript(chatGptMcpContextScript(before.activeAccountId), true);
         checkHost();
         const after = observer.snapshot();
-        if (navigationChanged || version !== navigationVersion || !matches(after)
-          || current.userId !== context.userId || current.workspaceId !== context.workspaceId
-          || current.workspaceRole !== context.workspaceRole || current.workspaceStructure !== context.workspaceStructure) {
-          throw new Error("The MCP authentication or workspace context changed. Retry in the intended workspace.");
+        // Which check moved, for the log only (mcpConnectorFailureCause): the card keeps one message.
+        const moved = navigationChanged || version !== navigationVersion ? "navigation"
+          : !matches(after) ? (after.error ? "observer" : after.activeAccountId !== context.workspaceId ? "account"
+            : after.selectionVersion !== initial.selectionVersion ? "selection" : "metadata")
+          : current.userId !== context.userId ? "user" : current.workspaceId !== context.workspaceId ? "workspace"
+          : current.workspaceRole !== context.workspaceRole ? "role"
+          : current.workspaceStructure !== context.workspaceStructure ? "structure" : null;
+        if (moved) {
+          throw Object.assign(new Error("The MCP authentication or workspace context changed. Retry in the intended workspace."),
+            { ownershipCause: `context:${moved}` });
         }
         if (shared) {
           if (current.workspaceStructure !== "workspace" || shared.workspaceId !== current.workspaceId

@@ -5,7 +5,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
 const { CHATGPT_SIGNED_OUT, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
-const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
+const { mcpConnectorCommandFailure, mcpConnectorFailureCause } = require("../electron/mcp-connector-command.cjs");
 
 function fakeMcpNetwork() {
   const debuggerClient = new EventEmitter(), bodies = new Map(), bodyWaits = new Map(), commands = [];
@@ -410,6 +410,14 @@ test("the production connector action verifies fresh owner and workspace proof b
     // Browser" while it was signed in: the Browser's own page (no ChatGPT tab open, a failed load)
     // answered "signed out" without asking. The setup's page proves the session for every account.
     { name: "the shown account connects though the Browser's own page cannot vouch for its sign-in", shownPageSignedOut: true },
+    // Live 2026-11-23: a signed-in workspace owner's automatic check failed as "authentication or workspace
+    // context changed". ChatGPT rewrites /plugins?view=personal to ?directoryTab=personal in place as the
+    // page settles; one that lands during freshContext's session read is the same page and session.
+    { name: "ChatGPT's own same-page address rewrite during a session read is no context change", inPlaceMove: "/plugins?directoryTab=personal" },
+    { name: "a same-document move to another page during a session read still stops the setup, and says why", inPlaceMove: "/",
+      error: error => error.message === "The MCP authentication or workspace context changed. Retry in the intended workspace."
+        && error.ownershipCause === "context:navigation"
+        && mcpConnectorFailureCause(error, mcpConnectorCommandFailure(error)) === "ownership check context:navigation" },
   ]) await t.test(scenario.name, async () => {
     const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
     fs.mkdirSync(work, { recursive: true });
@@ -437,7 +445,7 @@ test("the production connector action verifies fresh owner and workspace proof b
       ...(scenario.oversized ? { padding: "x".repeat(64 * 1024) } : {}) });
     fs.writeFileSync(bindingPath, original);
     const network = fakeMcpNetwork(), counts = { create: 0, open: 0, confirm: 0 };
-    let platformVisits = 0, blockedRedirects = 0;
+    let platformVisits = 0, blockedRedirects = 0, sessionReads = 0;
     let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     let workspaceRole = scenario.shared ? "standard-user" : scenario.creatorRole ?? "account-owner", publishing = false, held = false, publisherResult;
     const runtimeHost = runtime();
@@ -456,6 +464,11 @@ test("the production connector action verifies fresh owner and workspace proof b
           const entry = id => ({ can_access_with_session: true, account: { account_id: id, account_user_role: workspaceRole,
             structure: id === personalId ? "personal" : "workspace", plan_type: id === personalId ? "free" : "team", name: "Fixture workspace", is_deactivated: false } });
           const requested = script.match(/activeAccountId: "([a-f0-9-]+)"/)?.[1] || accountId;
+          // The second read is freshContext's first: the page moves in place while it runs.
+          if (scenario.inPlaceMove && ++sessionReads === 2) {
+            url = `https://chatgpt.com${scenario.inPlaceMove}`;
+            contents.emit("did-start-navigation", {}, url, true, true);
+          }
           return chatGptMcpContext({ user: { id: userId }, auth: { chatgpt_user_id: userId }, activeAccountId: requested,
             accounts: scenario.mismatch ? {} : { [personalId]: entry(personalId), [businessId]: entry(businessId) } });
         }

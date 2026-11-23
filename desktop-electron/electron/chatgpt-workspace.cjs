@@ -118,12 +118,13 @@ async function inspectChatGptAccount({ BrowserWindow, partition, workspaceId, as
   arm(budget);
   const navigation = (_event, value, inPlace, mainFrame) => {
     if (mainFrame === false) return;
+    let url = null;
+    try { url = new URL(value); } catch {}
+    // ChatGPT's in-place rewrite of the page's own address (?view=personal becomes ?directoryTab=personal)
+    // changes no context, also while fresh() reads the session (as in mcp-connector-setup's navigation).
+    if (inPlace && url?.origin === "https://chatgpt.com" && url.pathname === expectedPath) return;
     version++;
     if (loading) return;
-    try {
-      const url = new URL(value);
-      if (inPlace && url.origin === "https://chatgpt.com" && url.pathname === expectedPath) return;
-    } catch {}
     changedTo(value);
   };
   const check = () => {

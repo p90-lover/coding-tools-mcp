@@ -112,6 +112,11 @@ function fixture(options = {}) {
     Object.assign(contents, { state, setWindowOpenHandler() {}, executeJavaScript: async script => {
       if (script.includes('fetch("/api/auth/session"')) {
         const id = script.match(/activeAccountId: "([a-f0-9-]+)"/)?.[1];
+        // ChatGPT settles the page's address in place while the session read runs (fresh() included).
+        if (options.rewriteDuringRead && contents.loaded) {
+          const page = new URL(contents.loaded);
+          contents.emit("did-start-navigation", {}, `${page.origin}${page.pathname}?directoryTab=personal`, true, true);
+        }
         return setup.chatGptMcpContext({ user: { id: profile.userId }, auth: { chatgpt_user_id: profile.userId }, activeAccountId: id,
           accounts: Object.fromEntries(Object.entries(profile.memberships).map(([key, role]) => [key, {
             can_access_with_session: true, account: { account_id: key, account_user_role: role, structure: "workspace",
@@ -137,6 +142,7 @@ function fixture(options = {}) {
       destroy: () => { state.destroyed = true; }, loadURL: async url => {
         if (url === "about:blank") { contents.rendererInitialized = true; return; }
         contents.emit("did-start-navigation", {}, url, false, true);
+        contents.loaded = url;
         if (options.redirect) {
           const destination = "https://frame.invalid/redirect", mainFrame = options.redirect === "unknown" ? undefined : options.redirect === "main";
           const event = { preventDefault() { calls.push(["blocked-redirect", partition]); }, ...(options.details ? { url: destination, isMainFrame: mainFrame } : {}) };
@@ -254,6 +260,12 @@ test("consent, uncertain mutation, and changed context failures cannot fall back
 
 test("same-page directory filters keep the verified workspace inspection usable", async () => {
   const f = fixture({ owner: true, filterNavigation: true });
+  const result = await f.run();
+  assert.equal(result.connected, true);
+});
+
+test("a same-page address rewrite during a fresh session read keeps the inspection usable", async () => {
+  const f = fixture({ owner: true, rewriteDuringRead: true });
   const result = await f.run();
   assert.equal(result.connected, true);
 });
