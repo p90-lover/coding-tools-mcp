@@ -102,7 +102,18 @@ function chatDescriptionRedacted(description, secrets, label) {
   return { description: parts.join(""), hidden, refused: refused.length };
 }
 
+function redactHandoffCredentials(text) {
+  const marker = "[hidden: credential]";
+  return text
+    .replace(/-----BEGIN ((?:[A-Z0-9]+ ){0,4}PRIVATE KEY(?: BLOCK)?)-----(?:(?!-----BEGIN |-----END )[\s\S])*-----END \1-----/g, marker)
+    .replace(/(\b[a-z][a-z0-9+.-]{0,31}:\/\/)[^\s:/?#"'`<>@]+:[^\s/?#"'`<>@]+@/gi, `$1${marker}@`)
+    .replace(/([?&](?:api[_-]?key|access_token|refresh_token|client_secret|token|password)=)[^&\s#"'`<>\[]+/gi, `$1${marker}`)
+    .replace(/(\bBearer[ \t]+|\bAuthorization[ \t]*:[ \t]*Basic[ \t]+)[A-Za-z0-9._~+/-]{12,}=*/gi, `$1${marker}`)
+    .replace(/\b(?:mstrl_[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|(?:AKIA|ASIA)[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])/g, marker)
+    .replace(/(\b(?:api[ _-]?key|access[ _-]?token|refresh[ _-]?token|client[ _-]?secret|password|passphrase)["']?[ \t]*[:=][ \t]*)(?:"[^"\r\n]+"|'[^'\r\n]+'|[A-Za-z0-9][^\s"'`,;}\]]{5,})/gi, `$1${marker}`);
+}
+
 module.exports = {
   DEFAULT_REDACT_LIST, HIDDEN, MAX_SECRET, MAX_SECRETS,
-  acceptableSecret, chatDescriptionRedacted, hiddenMarker, redactList, redactionLabel,
+  acceptableSecret, chatDescriptionRedacted, hiddenMarker, redactList, redactionLabel, redactHandoffCredentials,
 };

@@ -5509,6 +5509,7 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       findCodexExecutable: () => codexCli.executable() || findInstalledCodexExecutable?.() || null,
       nativeGuardianReview,
+      handoffRedactionEnabled: () => stateStore.read().chatAgentRedactSecrets === true,
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
       // Files the person attached (saved by launcher:save-attachment): reading one needs no review.

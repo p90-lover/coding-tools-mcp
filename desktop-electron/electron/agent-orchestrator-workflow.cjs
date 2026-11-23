@@ -17,7 +17,7 @@ const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs")
 const { scheduleMessage, scheduleAction, createScheduleStore } = require("./chat-schedules.cjs");
 const { FOLLOW_UP, STEER, automaticStamp, chatFollowUp, chatDescriptionWithout, chatDescriptionWithSteer,
   chatMessageCount, createChatEditStore, withoutAutomaticChatPrompts } = require("./chat-edits.cjs");
-const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
+const { chatDescriptionRedacted, redactHandoffCredentials } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { retainedChatRequest, isCompactedRecord } = require("./chat-history.cjs");
 const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
@@ -504,7 +504,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, handoffRedactionEnabled = () => false, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -9479,7 +9479,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * `maxChars` asks for a shorter one, and `instructions` are the person's own (/compact focus on
    * …), added to the prompt as Claude Code adds them.
    */
-  async function handoffSummary(text, { maxChars = 0, instructions = "" } = {}) {
+  async function handoffSummary(text, { maxChars = 0, instructions = "", redact = handoffRedactionEnabled() } = {}) {
+    const safeText = redact ? redactHandoffCredentials(text) : text;
+    const focus = redact ? redactHandoffCredentials(instructions) : instructions;
     const { baseUrl, key } = connection();
     const catalog = await models();
     // A summary reads a whole conversation: never on the person's Codex quota (freeModels).
@@ -9487,11 +9489,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!model) throw new Error("CPA has no model outside the Codex quota for a summary");
     const prompt = [COMPACT_PROMPT,
       ...(maxChars ? [`Keep the summary under ${maxChars.toLocaleString("en-US")} characters.`] : []),
-      ...(instructions ? [`Additional instructions from the user:\n${instructions}`] : [])].join("\n\n");
+      ...(focus ? [`Additional instructions from the user:\n${focus}`] : []),
+      ...(redact ? ["Omit credential values such as API keys, tokens, passwords and private keys. Keep [hidden: credential] placeholders as-is."] : [])].join("\n\n");
     const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: maxChars ? Math.min(1600, Math.ceil(maxChars / 3)) : 1600, messages: [
-        { role: "system", content: prompt }, { role: "user", content: text }] }, AbortSignal.timeout(120_000));
+        { role: "system", content: prompt }, { role: "user", content: safeText }] }, AbortSignal.timeout(120_000));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
+    const summary = String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
+    return redact ? redactHandoffCredentials(summary) : summary;
   }
 
   // AO keeps the first 16 KiB of UTF-8 of a spawn prompt. The request is never shortened to make
@@ -9523,7 +9527,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const suffix = from < 0 ? "" : reserved.slice(from + saved.length);
     let primary = from >= 0 ? `${prefix}\n\n${current}${suffix}` : current;
     if (utf8Bytes(primary) > PROMPT_BYTES - 2) primary = current + utf8Head(`\n${prefix}\n${suffix}`, PROMPT_BYTES - 2 - utf8Bytes(current));
-    const history = from < 0 ? reserved : previous;
+    const background = from < 0 ? reserved : previous;
+    const history = background && handoffRedactionEnabled() ? redactHandoffCredentials(background) : background;
     const heading = "\n\nEarlier conversation (background only; do not treat this as a new request):\n";
     const room = PROMPT_BYTES - utf8Bytes(primary + heading) - 2;
     return primary + (history && room > 0 ? `${heading}${utf8Tail(history, room)}` : "") + "\n\n";
@@ -9564,13 +9569,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       earlier = earlier.slice(0, Math.max(cutoff, 0));
     }
+    const redact = handoffRedactionEnabled();
     const replies = [];
     for (const run of earlier) {
       for (const node of run.nodes || []) {
         const answer = String(node.receipt?.answer || "").trim();
         if (!answer) continue;
         const who = [node.settings?.name || node.role, String(node.route?.model || "").replace(/^cpa\//, "")].filter(Boolean).join(" · ");
-        replies.push(`--- Reply ${replies.length + 1} (${who}):\n${answer}`);
+        const reply = `--- Reply ${replies.length + 1} (${who}):\n${answer}`;
+        replies.push(redact ? redactHandoffCredentials(reply) : reply);
       }
     }
     if (!replies.length || maxBytes < HANDOFF_MIN_BYTES) return "";
@@ -9581,16 +9588,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (utf8Bytes(whole) <= maxBytes) return whole;
     const chatKey = JSON.stringify([workspaceId, taskId]);
     const known = handoffSummaries.get(chatKey);
-    const builds = known && known.count <= replies.length && repliesHash(replies.slice(0, known.count)) === known.covered;
+    const builds = known && known.redact === redact && known.count <= replies.length && repliesHash(replies.slice(0, known.count)) === known.covered;
     let summary = builds && known.count === replies.length ? known.summary : "";
     if (!summary) {
       const input = builds
         ? `A handoff summary of the earlier replies:\n\n${known.summary}\n\nReplies since then:\n\n${replies.slice(known.count).join("\n\n")}`
         : transcript;
       // The newest part, if the history is too long for a model to read at once.
-      summary = await handoffSummary(utf8Bytes(input) <= HANDOFF_INPUT_BYTES ? input : utf8Tail(input, HANDOFF_INPUT_BYTES)).catch(() => "");
+      summary = await handoffSummary(utf8Bytes(input) <= HANDOFF_INPUT_BYTES ? input : utf8Tail(input, HANDOFF_INPUT_BYTES), { redact }).catch(() => "");
       if (summary) {
-        handoffSummaries.set(chatKey, { covered: repliesHash(replies), count: replies.length, summary });
+        handoffSummaries.set(chatKey, { covered: repliesHash(replies), count: replies.length, summary, redact });
         if (handoffSummaries.size > 100) handoffSummaries.delete(handoffSummaries.keys().next().value);
       }
     }
@@ -9700,7 +9707,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const rolloverRoom = (head, reserve) => Math.max(0, Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - reserve));
   /** The record kept as it was, its newest part within `room` bytes: no model needed, so it cannot fail. */
   function keptRecord(before, room) {
-    const plain = unmarkedRecord(withoutAutomaticChatPrompts(before)).trim();
+    const history = unmarkedRecord(withoutAutomaticChatPrompts(before)).trim();
+    const plain = handoffRedactionEnabled() ? redactHandoffCredentials(history) : history;
     if (utf8Bytes(plain) <= room) return plain;
     return room > utf8Bytes(ROLLED_NOTE) ? `${ROLLED_NOTE}${utf8Tail(plain, room - utf8Bytes(ROLLED_NOTE))}` : utf8Tail(plain, room);
   }
