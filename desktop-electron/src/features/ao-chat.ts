@@ -2255,3 +2255,22 @@ export function sendRefusedForNow(cause: unknown): "busy" | "unfocused" | "full"
   return /still running/i.test(why) ? "busy" : /focused app window/i.test(why) ? "unfocused"
     : /HEADLESS_CAPACITY|HEADLESS_QUEUE_FULL|launcher queue is full/.test(why) ? "full" : "";
 }
+
+/** How long after a read ends an open team agent's conversation is read again while it works. */
+export const AGENT_CONVERSATION_POLL_MS = 2000;
+const AGENT_CONVERSATION_RETRY_MAX_MS = 60_000;
+
+/**
+ * When an open team agent's conversation (AgentConversation) is read next, after `failures` reads in
+ * a row failed, the last with `cause`; null: never again while it stays open. An agent running in
+ * Terminal UI mode has no chat conversation, and AO answers every read of it SESSION_MODE_MISMATCH:
+ * on 2026-11-23 such a pane asked about 100 times in 75 s, each read taking one of the launcher's
+ * request slots in the minute ~180 requests failed HEADLESS_CAPACITY. Other failures wait longer each
+ * time (4 s, 8 s ... up to a minute), as a busy service needs.
+ */
+export function agentConversationNextReadMs(cause: unknown, failures: number): number | null {
+  const why = cause && typeof cause === "object" && "message" in cause ? String((cause as { message: unknown }).message) : String(cause ?? "");
+  if (/SESSION_MODE_MISMATCH/.test(why)) return null;
+  if (!(failures > 0)) return AGENT_CONVERSATION_POLL_MS;
+  return Math.min(AGENT_CONVERSATION_RETRY_MAX_MS, AGENT_CONVERSATION_POLL_MS * 2 ** Math.min(failures, 16));
+}

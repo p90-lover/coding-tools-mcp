@@ -118,9 +118,10 @@ export function workerRoute(harness: string, model: string, permission: NativePe
  * for me with the reason, and a chat keeps its mode when it moves there. Dropping that mode instead
  * (until 0.8.137) left the chat on the agent's own permissions ("Custom"), which AO ran as its
  * "auto": opencode then allowed every tool unasked, and Pi was refused with nothing left to pick.
- * Native Codex takes the modes on its own route.
+ * Native Codex takes the modes on its own route. Antigravity joined on 2026-11-23, running as a
+ * chat through Google's `agy acp`, which asks before it edits or runs anything.
  */
-export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex"]);
+export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex", "ao:agy"]);
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;

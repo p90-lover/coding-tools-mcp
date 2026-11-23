@@ -24,6 +24,11 @@ const MAX_WAITING = 1000;
 const MAX_SERVERS = 2;
 const REVIEWS_PER_SERVER = 8;
 const IDLE_CLOSE_MS = 2 * 60_000;
+// Codex's own auto-review model, the one Codex Desktop's Guardian sessions run on. Codex 0.171 runs
+// Guardian on the model of the thread under review, so the review thread starts on it. Until
+// 2026-11-23 it started on Codex's default chat model (gpt-6.2-sol), and 400 reviews moved a Plus
+// account's 5-hour window by 2%. A Codex that refuses the name gets its default model instead.
+const REVIEW_MODEL = "codex-auto-review";
 const SHELLS = new Map([["Bash", "bash"], ["PowerShell", "powershell"]]);
 
 async function readNativeAccount(authFile, now = Date.now()) {
@@ -236,7 +241,7 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
 
   /** A new server, registered at once so that concurrent reviews share it while it signs in. */
   function newServer(binary, account, key) {
-    const entry = { key, active: 0, dead: false, retired: false, stale: false, idleTimer: null, root: null, server: null, ready: null, gone: null };
+    const entry = { key, active: 0, dead: false, retired: false, stale: false, idleTimer: null, root: null, server: null, ready: null, gone: null, reviewModel: REVIEW_MODEL };
     servers.add(entry);
     entry.ready = (async () => {
       await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
@@ -284,8 +289,17 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
   async function runReview(entry, action, task, signal, probeUsage) {
     await entry.ready;
     const server = entry.server;
-    const started = await server.request("thread/start", { cwd: entry.root, modelProvider: "openai", sandbox: "read-only",
-      approvalPolicy: "on-request", approvalsReviewer: "auto_review", ephemeral: true }, signal);
+    const thread = { cwd: entry.root, modelProvider: "openai", sandbox: "read-only", approvalPolicy: "on-request", approvalsReviewer: "auto_review", ephemeral: true };
+    let started = null;
+    if (entry.reviewModel) {
+      try { started = await server.request("thread/start", { ...thread, model: entry.reviewModel }, signal); }
+      catch (error) {
+        // Only Codex refusing the model falls back, once per server; anything else fails the review.
+        if (signal.aborted || entry.dead || !Number.isSafeInteger(error?.rpcCode)) throw error;
+        entry.reviewModel = null;
+      }
+    }
+    started ??= await server.request("thread/start", thread, signal);
     const threadId = started?.thread?.id;
     if (typeof threadId !== "string" || !threadId || started?.modelProvider !== "openai") {
       throw Object.assign(new Error("Codex did not confirm an isolated thread on its direct provider."), { notIsolated: true });
