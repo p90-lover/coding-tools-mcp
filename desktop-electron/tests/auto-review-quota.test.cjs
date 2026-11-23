@@ -8,7 +8,8 @@ const path = require("node:path");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
 /** A Claude Code chat; `reviewer` "auto_review" is Approve for me, "user" is Ask for approval. */
-function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, approvalDetails = {},
+function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, approvalDetails = {}, now = Date.now,
+  task = () => "I authorize the migration in this test workspace",
   modelVerdict = async () => ({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "fixture verdict" }),
 } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
@@ -22,6 +23,7 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
   const workflow = createAgentOrchestratorWorkflow({
     chatPreferencesFile: preferences,
     nativeGuardianReview,
+    now,
     findCodexExecutable: () => process.execPath,
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
@@ -32,7 +34,7 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
         : { choices: [{ message: { content: JSON.stringify(await modelVerdict(JSON.parse(init.body))) } }] } };
     },
     requestHeadless: async (endpoint, body) => endpoint.endsWith("/read") ? { ok: true, runs: [run] }
-      : body?.tool === "workflow_list" ? { ok: true, operation: { state: "completed", result: { ok: true, task: { description: "I authorize the migration in this test workspace" } } } }
+      : body?.tool === "workflow_list" ? { ok: true, operation: { state: "completed", result: { ok: true, task: { description: task() } } } }
         : { ok: true },
     aoHarness: {
       sessionWorkspace: async () => ({ projectFolder: cwd }),
@@ -88,6 +90,73 @@ test("a changed pending command with the same ID does not receive the old Guardi
     assert.equal(pending.length, 1);
     assert.deepEqual(state.resolved, []);
     assert.deepEqual(state.calls, []);
+  } finally { state.workflow.dispose(); }
+});
+
+// Each native Guardian review spends plan quota (about 0.5% of a Plus 5-hour window per 100). On
+// 2026-11-23, 9 of a day's 640 Guardian reviews repeated an earlier request in the same chat exactly.
+test("Guardian's allow answers the same command again in the same chat without another review", { timeout: 5_000 }, async () => {
+  const details = {};
+  let reviews = 0;
+  const state = fixture(undefined, { approvalDetails: details, nativeGuardianReview: async () => {
+    reviews++;
+    return { action: "allow", reason: "fixture native verdict", actor: "guardian", reason_code: "native_guardian" };
+  } });
+  try {
+    await state.observe();
+    details.approval_id = "permission-2";
+    await state.observe();
+    assert.deepEqual(state.resolved, [["permission-1", "yes"], ["permission-2", "yes"]]);
+    assert.equal(reviews, 1, "the repeat is answered from Guardian's kept allow");
+    state.command("python tools/migrate.py --dry-run");
+    details.approval_id = "permission-3";
+    await state.observe();
+    assert.deepEqual(state.resolved.at(-1), ["permission-3", "yes"]);
+    assert.equal(reviews, 2, "another command is reviewed");
+    assert.deepEqual(state.calls, [], "no CPA review either");
+  } finally { state.workflow.dispose(); }
+});
+
+test("a Guardian deny or unclear answer is never kept for the same command", { timeout: 5_000 }, async (t) => {
+  for (const action of ["deny", "ask"]) await t.test(action, async () => {
+    const details = {};
+    let reviews = 0;
+    const state = fixture(undefined, { approvalDetails: details, nativeGuardianReview: async () => {
+      reviews++;
+      return { action, reason: "fixture Guardian answer", actor: "guardian" };
+    } });
+    try {
+      await state.observe();
+      details.approval_id = "permission-2";
+      await state.observe();
+      assert.equal(reviews, 2, "the same command is reviewed again");
+      assert.ok(state.resolved.every(([, decision]) => decision !== "yes"), "nothing was allowed");
+    } finally { state.workflow.dispose(); }
+  });
+});
+
+test("a kept Guardian allow lapses after ten minutes and never outlives the user's request", { timeout: 5_000 }, async () => {
+  const details = {};
+  let at = Date.now(), request = "I authorize the migration in this test workspace", reviews = 0;
+  const state = fixture(undefined, { approvalDetails: details, now: () => at, task: () => request, nativeGuardianReview: async () => {
+    reviews++;
+    return { action: "allow", reason: "fixture native verdict", actor: "guardian", reason_code: "native_guardian" };
+  } });
+  try {
+    await state.observe();
+    at += 9 * 60_000;
+    details.approval_id = "permission-2";
+    await state.observe();
+    assert.equal(reviews, 1, "reused within ten minutes of Guardian's answer");
+    at += 60_000 + 1;
+    details.approval_id = "permission-3";
+    await state.observe();
+    assert.equal(reviews, 2, "an allow older than ten minutes is not reused");
+    request = "Stop. Do not run the migration again.";
+    details.approval_id = "permission-4";
+    await state.observe();
+    assert.equal(reviews, 3, "a new message from the user is reviewed afresh");
+    assert.deepEqual(state.resolved.map(([id]) => id), ["permission-1", "permission-2", "permission-3", "permission-4"]);
   } finally { state.workflow.dispose(); }
 });
 
