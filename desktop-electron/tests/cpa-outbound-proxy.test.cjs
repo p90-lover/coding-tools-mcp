@@ -90,7 +90,8 @@ test("CPA config follows the selected authenticated global profile", async () =>
   assert.equal(fs.statSync(pluginDirectory).isDirectory(), true);
   // CPA skips a plugin that has no configs entry: Provider Manager is listed, and it alone.
   assert.match(config, /^    cpa-provider-manager:\r?\n      enabled: true$/m);
-  assert.deepEqual([...config.matchAll(/^ {4}([\w-]+):\r?$/gm)].map((match) => match[1]), ["cpa-provider-manager"]);
+  const configsBlock = config.split(/^  configs:\r?$/m)[1];
+  assert.deepEqual([...configsBlock.matchAll(/^ {4}([\w-]+):\r?$/gm)].map((match) => match[1]), ["cpa-provider-manager"]);
   // CPA Helper keeps its data under CPA's state, never in CPA's working directory.
   assert.ok(config.includes(`      data-dir: ${JSON.stringify(path.join(root, "cpa", "cpa-provider-manager-data"))}`));
   assert.ok(config.includes(`        helper: ${JSON.stringify(path.join(root, "cpa", "cpa-helper-data"))}`));
