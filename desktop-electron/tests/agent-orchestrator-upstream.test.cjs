@@ -13,13 +13,15 @@ const handler = require("../../app-handler/agent-orchestrator/handler.cjs");
 const { invokeContract } = require("../electron/ipc-schema.cjs");
 const { createCodingToolsAppsHost } = require("../../app-handler/host.cjs");
 
-test("upstream AO gateway runs trusted UI requests automatically and blocks untrusted or remote access", async () => {
+test("upstream AO gateway tracks trusted mutations and blocks untrusted or remote access", { timeout: 5000 }, async () => {
   const fixtureRoot = path.resolve(__dirname, "../../aiTemp/ao-gateway-tests");
   fs.mkdirSync(fixtureRoot, { recursive: true });
   fs.writeFileSync(path.join(fixtureRoot, "index.html"), "<h1>Original renderer fixture</h1>");
   const received = [];
+  const releases = [];
+  let pendingMutations = 0;
   const daemon = http.createServer((request, response) => {
-    received.push(request.url);
+    received.push([request.url, pendingMutations]);
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ projects: [] }));
   });
@@ -27,6 +29,12 @@ test("upstream AO gateway runs trusted UI requests automatically and blocks untr
   const gateway = createAgentOrchestratorGateway({
     rendererRoot: fixtureRoot, daemonPort: daemon.address().port,
     getStatus: () => ({ state: "ready" }), desktopRequest: async () => "version",
+    beginMutation: () => {
+      const finished = Promise.withResolvers();
+      pendingMutations += 1;
+      releases.push(finished.promise);
+      return () => { pendingMutations -= 1; finished.resolve(); };
+    },
   });
   try {
     const { origin, openUrl } = await gateway.listen();
@@ -43,8 +51,12 @@ test("upstream AO gateway runs trusted UI requests automatically and blocks untr
       method: "POST", headers: { cookie, origin, "content-type": "application/json" },
       body: JSON.stringify({ agentIds: [], purpose: "display" }),
     })).status, 200);
+    await Promise.all(releases);
     assert.equal((await fetch(`${origin}/api/v1/sessions`, { method: "POST", headers: { cookie, origin } })).status, 200);
-    assert.deepEqual(received, ["/api/v1/projects", "/api/v1/agents/readiness/ensure", "/api/v1/sessions"]);
+    await Promise.all(releases);
+    assert.equal(pendingMutations, 0);
+    assert.equal(releases.length, 2);
+    assert.deepEqual(received, [["/api/v1/projects", 0], ["/api/v1/agents/readiness/ensure", 1], ["/api/v1/sessions", 1]]);
   } finally {
     await gateway.close();
     await new Promise((resolve) => daemon.close(resolve));
@@ -2705,7 +2717,9 @@ function contextPersistenceHarness({ files = new Map(), beforeWrite = async () =
   const vm = require("node:vm");
   const source = fs.readFileSync(path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs"), "utf8").replace(/\r\n/g, "\n");
   const persistence = source.slice(source.indexOf("  let contextReadings ="), source.indexOf("  function rememberLaunchWindow"));
-  const stop = source.slice(source.indexOf("  async function stop()"), source.indexOf("  async function desktopRequest"));
+  // The daemon's own stop (the handler's public stop is daemonProcess.stop, which runs this one).
+  assert.ok(source.includes("  async function stopDaemon()"), "the daemon stop the persistence drain lives in");
+  const stop = source.slice(source.indexOf("  async function stopDaemon()"), source.indexOf("  async function desktopRequest"));
   const call = source.slice(source.indexOf("  async function call(operation"), source.indexOf("  function aoShimFolder"));
   const steady = source.slice(source.indexOf("const SNAPSHOT_CONTEXT_TOKENS"), source.indexOf("module.exports ="));
   const identity = source.match(/const sessionId = [\s\S]+?\n  };/)[0];
@@ -2751,7 +2765,7 @@ function contextPersistenceHarness({ files = new Map(), beforeWrite = async () =
       return { usage: { contextUsed: captured, contextWindow: 400000 }, compactedAt: null };
     },
   };
-  const api = vm.runInNewContext(`${persistence}\n${identity}\n${steady}\n${stop}\n${call}\n({call,stop})`, context);
+  const api = vm.runInNewContext(`${persistence}\n${identity}\n${steady}\n${stop}\n${call}\n({call,stop:stopDaemon})`, context);
   const settle = async () => { for (let i = 0; i < 60; i++) await Promise.resolve(); };
   return {
     files, writes, timers, context, settle, stop: api.stop,

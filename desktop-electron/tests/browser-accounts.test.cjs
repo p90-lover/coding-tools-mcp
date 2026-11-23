@@ -43,6 +43,34 @@ test("main balances new sessions with the sign-in-aware status and rule", () => 
   assert.match(body, /accounts\.filter\(takesNewSessions\)/);
 });
 
+// Live 2026-11-23: "The account in use" was an account whose sign-in ChatGPT rejected on 11-21, so every
+// new session started there and failed while another account was signed in.
+test("the account in use that cannot take a session gives way to one that can; Always <account> stays", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const body = source.slice(source.indexOf("function newSessionAccount()"), source.indexOf("async function routeIdleAccountPartition"));
+  const rejected = { okAt: 1, error: CHATGPT_SIGNED_OUT, errorAt: 2 };
+  const pick = ({ newSessions, activeId = "dead", accounts, tabs = {} }) => {
+    const context = {
+      takesNewSessions, Date,
+      browserAccountsStatus: () => ({ accounts, activeId, settings: { newSessions } }),
+      browserAccountExists: id => accounts.some(entry => entry.id === id),
+      browserAccounts: { partitionOf: id => `persist:${id}` },
+      browserHost: { tabCount: partition => tabs[partition.slice("persist:".length)] ?? 0 },
+      threadAccounts: { list: () => [] },
+    };
+    vm.runInNewContext(`${body}\nresult = newSessionAccount();`, context);
+    return context.result;
+  };
+  const account = (id, fields = {}) => ({ id, acceptsNewSessions: true, signedIn: true, connector: null, ...fields });
+  const live = [account("dead", { connector: rejected }), account("busy"), account("quiet")];
+  assert.equal(pick({ newSessions: "active", accounts: live, tabs: { busy: 2 } }), "quiet", "a rejected account in use gives way to the least busy live one");
+  assert.equal(pick({ newSessions: "active", accounts: [account("dead", { signedIn: false }), account("busy")] }), "busy", "a signed-out account in use gives way too");
+  assert.equal(pick({ newSessions: "active", activeId: "busy", accounts: live, tabs: { busy: 2 } }), "busy", "a live account in use keeps the session");
+  assert.equal(pick({ newSessions: "active", accounts: [account("dead", { connector: rejected })] }), "dead", "with no live account it stays where it was");
+  assert.equal(pick({ newSessions: "dead", accounts: live }), "dead", "Always <account> is kept as chosen");
+  assert.equal(pick({ newSessions: "balance", activeId: "busy", accounts: live, tabs: { busy: 2 } }), "quiet", "balance is unchanged");
+});
+
 // Test files stay in the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
 function tempRoot(t) {
   const root = path.join(__dirname, "..", "..", "aiTemp", "browser-accounts-tests", crypto.randomUUID());

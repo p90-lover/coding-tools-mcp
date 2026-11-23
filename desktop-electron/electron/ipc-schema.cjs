@@ -796,6 +796,17 @@ const CONTRACTS = Object.freeze({
     request: historySearchRequest,
     response: historySearchResponse,
   }),
+  // A chat link's hover card: the page's title, description and icon (link-preview.cjs).
+  "links.preview": Object.freeze({
+    channel: "coding-tools:links:preview",
+    request: Object.freeze({
+      type: "object",
+      required: Object.freeze(["url"]),
+      properties: Object.freeze({ url: Object.freeze({ type: "string", minLength: 1, maxLength: 4096 }) }),
+      additionalProperties: false,
+    }),
+    response: genericObject,
+  }),
   "nativeCodex.status": Object.freeze({
     channel: "coding-tools:native-codex:status",
     request: nativeCodexStatusRequest,
