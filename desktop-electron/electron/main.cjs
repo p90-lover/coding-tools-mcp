@@ -4940,6 +4940,8 @@ async function start() {
     authFile: path.join(app.getPath("home"), ".codex", "auth.json"),
     executable: codexCli.executable,
   });
+  // Its long-lived Codex servers and their private profiles go with the app.
+  app.once("will-quit", () => { void nativeGuardianReview.close(); });
   appPluginsService = createAppPlugins({
     codexCli,
     cpaStateDir: path.join(app.getPath("userData"), "integrations", "state", "cpa"),
