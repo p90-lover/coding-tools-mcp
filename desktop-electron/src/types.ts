@@ -1202,7 +1202,8 @@ export interface LauncherApi {
   closeBrowserTab(tabId: string): Promise<BrowserState>;
   copyManualPrompt(tabId: string): Promise<BrowserState>;
   confirmManualSent(tabId: string): Promise<BrowserState>;
-  openLogin(): Promise<BrowserState>;
+  /** `again`: sign in even though the session reads as signed in (ChatGPT rejected it). */
+  openLogin(options?: { again?: boolean }): Promise<BrowserState>;
   /** Checks the saved ChatGPT sign-in without leaving a login in progress; refreshes it when signed in. */
   checkSignIn(): Promise<BrowserState>;
   openPasskeyLogin(): Promise<BrowserState>;

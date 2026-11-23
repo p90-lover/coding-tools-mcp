@@ -3107,8 +3107,9 @@ function registerIpc({ logger, stateStore }) {
   handle("launcher:browser-tab-close", (_event, tabId) => browserHost.closeTab(tabId));
   handle("launcher:manual-prompt-copy", (_event, tabId) => browserHost.copyManualPrompt(tabId));
   handle("launcher:manual-prompt-sent", (_event, tabId) => browserHost.confirmManualSent(tabId));
-  handle("launcher:browser-login", async () => {
-    const browser = await browserHost.openLogin();
+  // `again`: the account's card after ChatGPT rejected a sign-in its session still reports (openLogin).
+  handle("launcher:browser-login", async (_event, options) => {
+    const browser = await browserHost.openLogin({ again: options?.again === true });
     if (browser.authenticated) {
       signInRetryWait.clear();
       const state = stateStore.update({ sessionRefreshReminderAt: nextSessionRefreshReminderAt() });

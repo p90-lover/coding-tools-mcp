@@ -2596,6 +2596,22 @@ test("logout and sign-in stop a running MCP connector setup before they take the
   assert.deepEqual(calls, ["stop:ChatGPT logout", "run:ChatGPT logout", "stop:ChatGPT sign-in", "run:ChatGPT passkey login"]);
 });
 
+// Live 2026-11-17: ChatGPT revoked accounts' sign-ins while /api/auth/session still gave a token. Sign in
+// skipped an account that read as signed in, so the card's Sign in again needs `again` to really sign in.
+test("signing in again runs the sign-in for an account that reads as signed in; plain sign-in only shows it", async () => {
+  const calls = [];
+  const host = Object.assign(Object.create(BrowserHost.prototype), {
+    externalLogin: true, state: { authenticated: true }, loginOperation: null, sessionRefreshOperation: null, manualOperationStop: null,
+    activateHomeSurface: () => calls.push("home"), show: () => calls.push("show"), snapshot: () => ({ shown: true }),
+    withManualOperation: async (name) => { calls.push(`run:${name}`); return name; },
+  });
+  assert.deepEqual(await host.openLogin(), { shown: true });
+  assert.deepEqual(calls, ["home", "show"], "a signed-in account is only shown");
+  calls.length = 0;
+  assert.equal(await host.openLogin({ again: true }), "ChatGPT passkey login");
+  assert.deepEqual(calls, ["run:ChatGPT passkey login"], "again: Chrome's sign-in runs and replaces the session");
+});
+
 test("a sign-in the page asks for after its own Log out checks the session before opening", async () => {
   const calls = [];
   const contents = { session: {} };
