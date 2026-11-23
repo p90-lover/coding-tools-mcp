@@ -3693,3 +3693,20 @@ test("permission team saves update the shared catalog without replacing a newer 
     if (action === "unchanged") { assert.equal(f.state.draftTeam.id, "team-a"); assert.match(f.notice(), /Permissions saved/); }
   });
 });
+
+// Live 2026-11-23: a Team graph pane on an agent in Terminal UI mode asked for its conversation about
+// 100 times in 75 s (every answer SESSION_MODE_MISMATCH), each read taking a launcher request slot in
+// the minute ~180 requests failed HEADLESS_CAPACITY. On an interval, a slow service also stacked reads.
+test("an open team agent's conversation stops asking a Terminal UI agent and backs off on failures", () => {
+  const mismatch = new Error("IPC_TRANSPORT_FAILED: apps.call failed: this session was created in Terminal UI mode and has no chat conversation (SESSION_MODE_MISMATCH)");
+  assert.equal(chat.agentConversationNextReadMs(mismatch, 1), null, "a Terminal UI agent is not read again");
+  assert.equal(chat.agentConversationNextReadMs(mismatch.message, 3), null, "a plain message counts too");
+  const full = new Error("HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)");
+  assert.deepEqual([0, 1, 2, 3, 5, 40].map((failures) => chat.agentConversationNextReadMs(full, failures)),
+    [chat.AGENT_CONVERSATION_POLL_MS, 4000, 8000, 16000, 60000, 60000], "2 s after a good read, then doubling to a minute");
+  const view = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const body = view.slice(view.indexOf("export function AgentConversation("), view.indexOf("const CHAT_WORK = new Map"));
+  assert.doesNotMatch(body, /setInterval/, "reads never overlap: the next starts after the last ends");
+  assert.match(body, /agentConversationNextReadMs\(cause, failures\)/);
+  assert.match(body, /if \(wait === null\) \{ setTerminal\(true\)/);
+});

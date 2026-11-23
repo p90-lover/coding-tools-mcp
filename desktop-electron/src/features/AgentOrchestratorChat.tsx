@@ -42,7 +42,7 @@ import {
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
   chatScheduleParse, scheduleCountdown, scheduleLabel, scheduleWhen, type ChatSchedule,
-  sendRefusedForNow,
+  sendRefusedForNow, AGENT_CONVERSATION_POLL_MS, agentConversationNextReadMs,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -707,25 +707,40 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
   </ol>;
 }
 
-const AGENT_CONVERSATION_POLL_MS = 2000;
-
 /**
  * One team agent's conversation, opened from its card on the Team graph as Claude Code and Codex
  * open a teammate or subagent: what it was asked, its thinking, tool calls and replies (its turn's
- * timeline, the chat's own renderer), read again every two seconds while it works.
+ * timeline, the chat's own renderer), read again two seconds after each read while it works. Reads
+ * never overlap: on an interval, a pane on a slow service (25 s reads) kept a dozen reads in flight.
+ * A failed read waits longer each time, and an agent in Terminal UI mode is not read again
+ * (agentConversationNextReadMs).
  */
 export function AgentConversation({ runId, nodeId, live, loadWork }: { runId: string; nodeId: string; live: boolean; loadWork: LoadWork }) {
   const [items, setItems] = useState<ChatLiveItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [terminal, setTerminal] = useState(false);
   useEffect(() => {
-    let current = true;
+    let current = true, timer = 0, failures = 0;
+    setTerminal(false);
+    const later = (ms: number) => { if (current && live) timer = window.setTimeout(read, ms); };
     const read = () => void loadWork(runId, nodeId).then(
-      (next) => { if (current) { setItems(next); setError(null); } },
-      (cause: unknown) => { if (current) setError(cause instanceof Error ? cause.message : String(cause)); });
+      (next) => { if (!current) return; failures = 0; setItems(next); setError(null); later(AGENT_CONVERSATION_POLL_MS); },
+      (cause: unknown) => {
+        if (!current) return;
+        failures += 1;
+        const wait = agentConversationNextReadMs(cause, failures);
+        if (wait === null) { setTerminal(true); setError(null); return; }
+        setError(cause instanceof Error ? cause.message : String(cause));
+        later(wait);
+      });
     read();
-    const timer = live ? window.setInterval(read, AGENT_CONVERSATION_POLL_MS) : 0;
-    return () => { current = false; if (timer) window.clearInterval(timer); };
+    return () => { current = false; window.clearTimeout(timer); };
   }, [runId, nodeId, live, loadWork]);
+  if (terminal) {
+    return <div className="cx-agent-conversation">
+      <p className="cx-workbench-empty">This agent runs in a terminal (Terminal UI mode), so it has no chat conversation to show here.</p>
+    </div>;
+  }
   return <div className="cx-agent-conversation">
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
     {items === null ? <p className="cx-workbench-empty">Reading its conversation…</p>
