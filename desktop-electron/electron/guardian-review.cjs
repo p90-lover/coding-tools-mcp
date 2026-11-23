@@ -160,15 +160,21 @@ function usage(result) {
   return { primary: percent(limits?.primary), secondary: percent(limits?.secondary) };
 }
 
+const ALLOWED_AUTHORIZATION = new Set(["high", "medium", "unknown"]);
+
 function verdict(result, callId) {
   const assessment = result?.assessment;
   if (result?.callId !== callId || !assessment) return pending("Guardian gave no verdict for this exact action. Check it yourself.");
   const reason = String(assessment.rationale || "Native Codex Guardian verdict").slice(0, 300);
   if (assessment.outcome === "deny") return { action: "deny", reason, actor: "guardian", reason_code: "native_guardian" };
-  if (assessment.outcome === "allow" && assessment.riskLevel === "low" && assessment.userAuthorization === "high") {
+  // A low-risk allow goes through, as it does in Codex itself, whose policy has Guardian answer a
+  // low-risk action with the outcome alone and so often leave the authorization "unknown" (16% of
+  // benign reviews when measured). An authorization Guardian rated "low" (signs the user did not ask
+  // for it), or one it did not rate at all, still waits for the user.
+  if (assessment.outcome === "allow" && assessment.riskLevel === "low" && ALLOWED_AUTHORIZATION.has(assessment.userAuthorization)) {
     return { action: "allow", reason, actor: "guardian", reason_code: "native_guardian" };
   }
-  const unresolved = pending("Guardian did not confirm low risk and clear user authorization. Check this request yourself.");
+  const unresolved = pending("Guardian did not confirm low risk with no sign the user did not ask for it. Check this request yourself.");
   if (assessment.outcome === "allow" || assessment.outcome === "ask") {
     const risk = assessment.riskLevel;
     return { ...unresolved, guardianAssessment: risk === "low" ? "low-risk"

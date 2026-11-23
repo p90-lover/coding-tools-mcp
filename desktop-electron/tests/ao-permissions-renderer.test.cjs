@@ -605,6 +605,24 @@ test("quota-based reviews are read from main without changing them and published
   assert.equal(exports.knownQuotaReviews(), false);
 });
 
+// 2026-11-23: the approval card's own "Allow quota-based reviews" switch saves through main and tells
+// open chats; main refusing (a click outside the focused window) leaves the switch as main had it.
+test("the card's quota switch saves through main and publishes what main kept", async () => {
+  const source = fs.readFileSync(path.resolve(__dirname, "../src/features/quota-reviews.ts"), "utf8");
+  const exports = {}, calls = [], window = new EventTarget();
+  const client = { apps: { call: async request => { calls.push(request); return { result: { ok: true, modelJudges: true, meteredReviews: request.arguments.meteredReviews === true } }; } } };
+  vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText,
+    { exports, window, Event, require: name => name === "../api/client" ? { getCodingToolsClient: () => client } : {} });
+  const seen = [];
+  exports.onQuotaReviews(value => seen.push(value));
+  assert.equal(await exports.setQuotaReviews(true), true);
+  assert.deepEqual(plain(calls), [{ moduleId: "agent-orchestrator", operation: "chat_model_judges", arguments: { meteredReviews: true } }]);
+  assert.deepEqual(seen, [true]);
+  client.apps.call = async () => { throw new Error("Click into the Coding Tools window and try again"); };
+  await assert.rejects(exports.setQuotaReviews(false), /Click into the Coding Tools window/);
+  assert.equal(exports.knownQuotaReviews(), true, "a refused change is not published");
+});
+
 test("successful permission save announces exact scope without a visible footer; errors remain visible", async () => {
   const view = renderer("AgentOrchestratorPermissions.tsx");
   const message = "Selected for next attempt; shared grants unchanged; runtime acknowledgement required.";
