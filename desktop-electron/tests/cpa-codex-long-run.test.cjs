@@ -101,6 +101,24 @@ test("CPA managed config keeps the original panel and turns on long-run keep-ali
   assert.equal(cpaLongRunYamlLines().includes("debug: false"), false);
 });
 
+test("a saved config's grouped cooldown cannot switch quota cooldowns off", () => {
+  // Seen live 2026-11-23: the saved routing.cooldown said disable-cooling: true, which CPA reads over
+  // the flat key, so every request tried two spent Codex accounts (429, resets 2.5 h away) first.
+  const jsYaml = require("js-yaml");
+  const directory = temporaryDirectory("coding-tools-cpa-cooldown-");
+  fs.writeFileSync(path.join(directory, "config.yaml"), JSON.stringify({
+    "config-version": 8,
+    routing: { strategy: "weighted-round-robin", "session-affinity": true,
+      cooldown: { "disable-cooling": true, "save-cooldown-status": true, "transient-error-cooldown-seconds": -1 },
+      retry: { "request-retry": 3, "max-retry-interval": 30 } },
+  }));
+  const config = jsYaml.load(runtimeConfiguration(directory, "m".repeat(36), "p".repeat(36)));
+  assert.deepEqual(config.routing.cooldown, { "disable-cooling": false, "save-cooldown-status": true, "transient-error-cooldown-seconds": -1 });
+  assert.equal(config["disable-cooling"], undefined, "no flat copy beside the grouped one CPA reads");
+  assert.equal(config.routing.strategy, "weighted-round-robin", "the rest of the person's routing stays");
+  assert.deepEqual(config.routing.retry, { "request-retry": 3, "max-retry-interval": 30 });
+});
+
 test("supervisor reconnects after a crash, keeps desired run across durable state, and stops when asked", async () => {
   const clock = fakeClock();
   const statePath = path.join(temporaryDirectory("coding-tools-long-run-state-"), "state.json");

@@ -270,6 +270,14 @@ function staleWhileRevalidate({ read, now = Date.now, freshMs, staleMs, keep = (
       }
       return reread(key, args, entry);
     },
+    /** The kept value now (as `get` would serve it), or undefined: never waits, not even for a read in flight. */
+    peek(key, args) {
+      const entry = entries.get(key);
+      const age = entry ? now() - entry.at : Infinity;
+      if (entry?.value === undefined || age >= staleMs) return undefined;
+      if (age >= freshMs) void reread(key, args, entry).catch(() => undefined);
+      return entry.value;
+    },
   };
 }
 
@@ -522,6 +530,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
   const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
   const runReads = new Map(); // JSON read key -> { at, pending, read }
+  const answerReads = new Map(); // JSON [workspace, run] -> the reviewer's in-flight fast-lane read (nodeForAnswer)
   // A person's own message (chat_send, chat_steer, and their queued message going out) is admitted
   // ahead of the background polls (headless-host.cjs `admissionControl`). Ten split chats polling on
   // a saturated disk kept a follow-up's reads in the ordinary queue behind their polls until it gave
@@ -563,7 +572,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       || endpoint === "/api/v1/ao/harness/compact" && rest[0]?.status === true
       || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered);
     runReads.clear();
-    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => runReads.clear());
+    answerReads.clear();
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => { runReads.clear(); answerReads.clear(); });
   };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
@@ -2551,6 +2561,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const saved = await runs({ workspaceId, runId }, { freshMs });
     const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
+  }
+
+  /**
+   * The run as headless holds it now, for the reviewer's check just before it answers a request. It
+   * is read ahead of the background polls, as Stop reads (readForStop): queued behind every open
+   * chat's polls it took 14-35 s, twice per review, and reviews ran out of their 45 s before the
+   * model was asked (2026-11-23). The reviews of one run share a read while it is in flight; every
+   * write drops it, as it drops the shared reads. A full fast lane falls back to the ordinary read.
+   */
+  function nodeForAnswer(workspaceId, runId, nodeId) {
+    const key = JSON.stringify([workspaceId, runId]);
+    let read = answerReads.get(key);
+    if (!read) {
+      read = Promise.resolve()
+        .then(() => requestHeadless("/api/v1/ao/read", { workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80) }, { admissionControl: true }))
+        .then((response) => {
+          if (response?.ok !== true || !Array.isArray(response.runs)) throw new Error("AO run read failed");
+          return response;
+        }, (error) => {
+          if (error?.code !== "HEADLESS_QUEUE_FULL" && !/queue is full/i.test(String(error?.message ?? ""))) throw error;
+          runReads.delete(key);
+          return runs({ workspaceId, runId });
+        })
+        .finally(() => { if (answerReads.get(key) === read) answerReads.delete(key); });
+      answerReads.set(key, read);
+    }
+    return read.then((saved) => {
+      const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
+      return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
+    });
   }
 
   // Callers only read what comes back (none changes a run in place), so one response is shared.
@@ -4973,7 +5013,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (beforeReview) return beforeReview;
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
-    const catalog = await models();
+    // The launch catalog kept from earlier reads answers at once (it revalidates behind). Each time
+    // CPA's minute-long cache ran out, a review waited for the whole catalog (37 s on 2026-11-23)
+    // inside its 45 s. With none kept, or one offering this card no reviewer, CPA is read as before;
+    // a kept read still in flight is never waited on (it may be the one that hung).
+    const listed = launchCatalogs.peek(JSON.stringify([null, null]), {});
+    const catalog = listed && reviewerModels(approver, listed.models, listed.hidden ?? [], { judge }).length ? listed : await models();
     clock.mark("catalog");
     check();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? [], { judge });
@@ -5387,8 +5432,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const said = await withinReview(review => {
           const verifyCurrent = async () => {
             review.check();
-            runReads.delete(JSON.stringify([workspaceId, runId]));
-            const latest = await savedNode(workspaceId, runId, job.node.id);
+            const latest = await nodeForAnswer(workspaceId, runId, job.node.id);
             review.check();
             if (latest.mission?.cancelled || latest.mission?.paused || latest.node?.state !== "running"
               || reviewAttempt(latest.mission, latest.node) !== owner) {

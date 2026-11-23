@@ -722,6 +722,7 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     else delete merged.requests;
   }
   mergeManagedPayload(merged, managed.payload);
+  managedQuotaCooldown(merged);
   return cpaConfigText(merged, yaml);
 }
 
@@ -746,6 +747,18 @@ function codexMinimumOutputSelectors() {
 }
 
 const isPlainObject = (value) => Object.prototype.toString.call(value) === "[object Object]";
+
+/**
+ * Quota cooldowns stay on (cpaLongRunYamlLines). CPA 8 reads a saved `routing.cooldown` over the
+ * flat key and drops the flat one, so the managed value goes where CPA reads it: a hand-set
+ * `disable-cooling: true` there (in every saved config since 2026-10-20) outlived each restart.
+ */
+function managedQuotaCooldown(merged) {
+  if (isPlainObject(merged.routing) && isPlainObject(merged.routing.cooldown)) {
+    merged.routing = { ...merged.routing, cooldown: { ...merged.routing.cooldown, "disable-cooling": false } };
+    delete merged["disable-cooling"];
+  } else merged["disable-cooling"] = false;
+}
 
 /** A payload rule's identity: its models (empty fields dropped, as CPA saves them filled in) and its params' paths. */
 function payloadRuleIdentity(rule) {

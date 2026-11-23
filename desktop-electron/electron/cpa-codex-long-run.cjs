@@ -86,6 +86,10 @@ function cpaLongRunYamlLines() {
     // provider's error (which the chat shows) instead of being waited out.
     "request-retry: 3",
     "max-retry-interval: 30",
+    // A spent account rests until its reset (CPA reads it from the 429). With cooling off, every
+    // request tried both spent Codex accounts first, two 429s of 2-10 s each before the one with
+    // quota answered (2026-11-23, resets 2.5 h away), and Approve for me's reviews ran out of time.
+    "disable-cooling: false",
     "save-cooldown-status: true",
     // A transient upstream error (a 502, an unreachable upstream, a 408 or 5xx) took the model away
     // for a minute and more per failure (Cline Pass's deepseek-v4.1-flash after six 502s): CPA
