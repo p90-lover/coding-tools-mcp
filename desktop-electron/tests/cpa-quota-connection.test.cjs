@@ -2,13 +2,14 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createCpaQuota, STALE_MS } = require("../electron/cpa-quota.cjs");
+const { createCpaQuota } = require("../electron/cpa-quota.cjs");
 
 const NOW = 1_800_000_000_000;
 const first = { baseUrl: "http://127.0.0.1:8317", managementKey: "fixture-first" };
 const second = { baseUrl: "http://127.0.0.1:8318", managementKey: "fixture-second" };
-const account = (label, checkedAt = NOW) => ({ auth_index: "same-index", email: label, quota: { checked_ms: checkedAt } });
-const response = (items) => ({ ok: true, status: 200, json: async () => ({ items }) });
+const account = (label, checkedAt = NOW) => ({ provider: "codex", auth_index: "same-index", email: label,
+  quota: { observed_at: new Date(checkedAt).toISOString(), signals: { "X-Codex-Primary-Used-Percent": "10", "X-Codex-Primary-Window-Minutes": "300" } } });
+const response = (files) => ({ ok: true, status: 200, json: async () => ({ files }) });
 
 function fixture(fetchImpl) {
   let connection = first;
@@ -52,7 +53,7 @@ test("changing either the CPA origin or management key invalidates cached accoun
       connect(changed);
       const result = await quota.read();
       assert.equal(calls.length, 2);
-      assert.equal(calls[1].url, `${changed.baseUrl}/v0/management/cpa-helper/codex/accounts`);
+      assert.equal(calls[1].url, `${changed.baseUrl}/v0/management/auth-files`);
       assert.equal(result.accounts[0].label, `Bearer ${changed.managementKey}`);
       await quota.read();
       assert.equal(calls.length, 2, "the new connection still gets a cache");
@@ -76,12 +77,12 @@ test("a changed connection starts its own read and rejects an older response tha
   connect(second);
   const current = await quota.read();
   assert.equal(current.accounts[0].label, "new@example.test");
-  old.resolve(response([account("old@example.test", NOW - STALE_MS)]));
+  old.resolve(response([account("old@example.test", NOW - 60_000)]));
   const superseded = await before;
   assert.equal(superseded.available, false, "a late response must not redisplay the old account");
   assert.match(superseded.reason, /connection changed/i);
   assert.equal((await quota.read()).accounts[0].label, "new@example.test");
-  assert.equal(calls.length, 2, "the superseded account is not refreshed or cached on the new connection");
+  assert.equal(calls.length, 2, "the superseded account is not cached on the new connection");
 });
 
 test("disconnecting while a read is pending rejects its late account list", { timeout: 5_000 }, async () => {
@@ -94,30 +95,14 @@ test("disconnecting while a read is pending rejects its late account list", { ti
   assert.equal((await before).available, false);
 });
 
-test("an older background refresh cannot invalidate the new connection's cache", async () => {
-  const refreshing = deferred();
-  const { quota, calls, connect } = fixture(async (_url, init) => init.method === "POST"
-    ? refreshing.promise : response([account("current@example.test", init.headers.Authorization === `Bearer ${first.managementKey}` ? NOW - STALE_MS : NOW)]));
+test("reading limits never asks CPA to contact a provider or change anything", async () => {
+  const { quota, calls, connect } = fixture(async () => response([account("stale@example.test", NOW - 3_600_000)]));
   await quota.read();
-  assert.equal(calls.filter((call) => call.method === "POST").length, 1);
-  connect(second);
-  const current = await quota.read();
-  refreshing.resolve(response([]));
-  await settle();
-  assert.deepEqual(await quota.read(), current);
-  assert.equal(calls.filter((call) => call.method === "GET").length, 2);
-});
-
-test("refresh throttles belong to the connection, not just its reused account index", async () => {
-  const { quota, calls, connect } = fixture(async (_url, init) => response(init.method === "GET"
-    ? [account("stale@example.test", NOW - STALE_MS)] : []));
-  await quota.read();
-  await settle();
   connect(second);
   await quota.read();
   await settle();
-  const refreshes = calls.filter((call) => call.method === "POST");
-  assert.deepEqual(refreshes.map((call) => call.headers.Authorization), [`Bearer ${first.managementKey}`, `Bearer ${second.managementKey}`]);
+  assert.deepEqual(calls.map((call) => [call.method, new URL(call.url).pathname]),
+    [["GET", "/v0/management/auth-files"], ["GET", "/v0/management/auth-files"]], "an old reading is shown as it is, not refreshed");
 });
 
 test("unchanged connections still share concurrent reads even when the connection object is replaced", async () => {

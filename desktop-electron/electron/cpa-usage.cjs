@@ -2,12 +2,13 @@
 const { fetchOffThread } = require("./off-thread-run.cjs");
 
 const { MODEL_PRICES } = require("./cpa-model-prices.cjs");
-const { accountOf } = require("./cpa-quota.cjs");
+const { accountFromAuthFile } = require("./cpa-quota.cjs");
 const { withAccountKinds } = require("./cpa-account-kinds.cjs");
 
 // Each CPA account's token use, request count and estimated cost, for the CPA accounts view and
-// the chat's context meter, with what is known of its quota (Codex: CPA Helper's 5-hour and weekly
-// windows, through cpa-quota.cjs; Cline Pass: the switcher's per-key activity).
+// the chat's context meter, with what is known of its quota (Codex: the 5-hour and weekly windows
+// CPA's auth-file listing keeps from the account's latest reply, read by cpa-quota.cjs; Cline
+// Pass: the switcher's per-key activity).
 //
 // Where the numbers come from: CPA v8 keeps no usage totals of its own. Its management API only
 // offers /v0/management/usage-queue, a pop-once queue that holds a record for 60 s, so reading it
@@ -207,7 +208,7 @@ function clineQuotaOf(payload) {
   return { kind: "cline", reported: false, mode, accounts };
 }
 
-/** CPA Helper's Codex quota for one account (cpa-quota.cjs), without its id and label. */
+/** A Codex account's quota (cpa-quota.cjs), without its id and label. */
 function codexQuotaOf(account) {
   if (!account) return null;
   return {
@@ -222,7 +223,7 @@ function codexQuotaOf(account) {
  *
  * authRows: rankings?group=auth items; modelsByAuth: Map of the row key -> rankings?group=model
  * items for that account; modelRows: rankings?group=model items overall; authFiles: CPA's
- * auth-files listing (null when unreadable); codexAccounts: cpa-quota.cjs accounts; cline: the
+ * auth-files listing (null when unreadable); codexAccounts: codexAccountsOf(authFiles); cline: the
  * switcher's /api/accounts payload (null when unavailable).
  */
 function aggregateUsage({ authRows = [], modelsByAuth = new Map(), modelRows = [], authFiles = null, codexAccounts = [], cline = null } = {}) {
@@ -306,6 +307,11 @@ function aggregateUsage({ authRows = [], modelsByAuth = new Map(), modelRows = [
   return { accounts, totals, models };
 }
 
+/** The Codex accounts of CPA's auth-files listing with the windows of their latest reply. */
+function codexAccountsOf(files, at) {
+  return (Array.isArray(files) ? files : []).map((file) => accountFromAuthFile(file, at)).filter((account) => account?.provider === "codex");
+}
+
 /** `fn` over `items`, at most `limit` at a time; the results keep the items' order. */
 async function mapLimited(items, limit, fn) {
   const results = new Array(items.length);
@@ -379,7 +385,7 @@ async function readApiCredits(config, fetchImpl = fetchOffThread) {
   });
 }
 
-function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThread, now = Date.now, logger = console } = {}) {
+function createCpaUsage({ getConnection, fetchImpl = fetchOffThread, now = Date.now, logger = console } = {}) {
   const cache = new Map(); // range -> { at, value }
   const pending = new Map(); // range or turn key -> Promise
   let recordReads = 0;
@@ -465,10 +471,9 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
     if (!byAuth.ok) return withoutUsage(`CPA answered HTTP ${byAuth.status}`);
     const authRows = Array.isArray(byAuth.body?.items) ? byAuth.body.items.slice(0, MAX_ACCOUNTS) : [];
 
-    const [modelListing, fileListing, codex, splits, apiCredits] = await Promise.all([
+    const [modelListing, fileListing, splits, apiCredits] = await Promise.all([
       optional(target, `/cpa-helper/rankings?${query({ group: "model" })}`),
       optional(target, "/auth-files").then((listing) => withAccountKinds(listing, () => optional(target, "/cpa-provider-manager/api/kinds"))),
-      quota?.read ? quota.read().catch(() => null) : null,
       mapLimited(authRows.slice(0, MAX_SPLIT_ACCOUNTS).filter((row) => row?.key), SPLIT_CONCURRENCY, async (row) => {
         const listing = await optional(target, `/cpa-helper/rankings?${query({ group: "model", auth: String(row.key) })}`);
         return [String(row.key), Array.isArray(listing?.items) ? listing.items : null];
@@ -483,7 +488,7 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
     const result = aggregateUsage({
       authRows, modelsByAuth: new Map(splits), authFiles,
       modelRows: Array.isArray(modelListing?.items) ? modelListing.items : [],
-      codexAccounts: codex?.available && Array.isArray(codex.accounts) ? codex.accounts : [],
+      codexAccounts: codexAccountsOf(authFiles, now()),
       cline: cline && Array.isArray(cline.accounts) ? cline : null,
     });
     return { ok: true, available: true, range, from, refreshedAt: now(), source: "CPA Helper", ...result, ...(range === "7d" ? { apiCredits } : {}) };
@@ -492,15 +497,11 @@ function createCpaUsage({ getConnection, quota = null, fetchImpl = fetchOffThrea
   async function loadWindow(range) {
     const target = connection();
     if (!target) return { ok: true, available: false, reason: "CPA is not running" };
-    // The chat meter's quota reader caps its account list. Cards need every account's cached window,
-    // without triggering extra upstream quota refreshes.
-    const [files, quotas] = await Promise.all([
-      optional(target, "/auth-files").then((listing) => withAccountKinds(listing, () => optional(target, "/cpa-provider-manager/api/kinds"))),
-      optional(target, "/cpa-helper/codex/accounts"),
-    ]);
+    // Every account's window comes from the listing itself: the chat meter's quota reader caps its list.
+    const files = await optional(target, "/auth-files").then((listing) => withAccountKinds(listing, () => optional(target, "/cpa-provider-manager/api/kinds")));
     if (!Array.isArray(files?.files)) return { ok: true, available: false, reason: "CPA accounts are unavailable" };
     const at = now();
-    const byId = new Map((Array.isArray(quotas?.items) ? quotas.items : []).map(accountOf).map((account) => [account.id, account]));
+    const byId = new Map(codexAccountsOf(files.files, at).map((account) => [account.id, account]));
     const accounts = await mapLimited(files.files, SPLIT_CONCURRENCY, async (file) => {
       const id = text(String(file?.auth_index ?? file?.authIndex ?? ""), 64);
       const codex = byId.get(id);

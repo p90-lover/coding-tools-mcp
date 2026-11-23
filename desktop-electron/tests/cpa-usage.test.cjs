@@ -158,11 +158,11 @@ test("Cline Pass: the switcher's keys show their activity, a key at its limit is
   assert.equal(alone.accounts[0].quota.accounts.length, 4);
 });
 
-function fixture({ routes = {}, connection = { baseUrl: "http://127.0.0.1:8317", managementKey: KEY }, quota = null } = {}) {
+function fixture({ routes = {}, connection = { baseUrl: "http://127.0.0.1:8317", managementKey: KEY } } = {}) {
   const calls = [];
   let clock = NOW;
   const usage = createCpaUsage({
-    getConnection: () => connection, now: () => clock, logger: { warn() {} }, quota,
+    getConnection: () => connection, now: () => clock, logger: { warn() {} },
     fetchImpl: async (url, init) => {
       calls.push({ url, auth: init.headers.Authorization });
       const parsed = new URL(url);
@@ -177,16 +177,16 @@ function fixture({ routes = {}, connection = { baseUrl: "http://127.0.0.1:8317",
 }
 
 test("reads CPA Helper with the management key over a range, splits accounts by model and caches", async () => {
-  const codexQuota = { read: async () => ({ available: true, accounts: [{ id: "idx-codex", plan: "pro", paused: true, session: null, week: null, checkedAt: null, error: null }] }) };
   const { usage, calls, advance } = fixture({
-    quota: codexQuota,
     routes: {
       "/v0/management/cpa-helper/rankings?auth": { body: { group: "auth", items: [agg("idx-codex"), agg("idx-cline")] } },
       "/v0/management/cpa-helper/rankings?model": { body: { group: "model", items: [agg("gpt-5")] } },
       "/v0/management/cpa-helper/rankings?model&idx-codex": { body: { items: [agg("gpt-5", { cost_usd: 2, unpriced: 0 })] } },
       "/v0/management/cpa-helper/rankings?model&idx-cline": { status: 500, body: null },
       "/v0/management/auth-files": { body: { files: [
-        { name: "codex.json", auth_index: "idx-codex", provider: "codex", email: "c@example.com", access_token: "should-not-pass" },
+        // The plan from its sign-in, and CPA's cooldown after a 429: the account is resting.
+        { name: "codex.json", auth_index: "idx-codex", provider: "codex", email: "c@example.com", access_token: "should-not-pass",
+          id_token: { plan_type: "pro" }, unavailable: true, next_retry_after: new Date(NOW + 60_000).toISOString() },
         { name: "cline-pass-switcher.json", auth_index: "idx-cline", type: "cline", label: "Cline Pass" },
       ] } },
       "/v0/management/cline-pass-switcher/api/accounts": { body: { mode: "roundrobin", accounts: [{ name: "a", key: "cline-key-should-not-pass", enabled: true }], stats: {} } },

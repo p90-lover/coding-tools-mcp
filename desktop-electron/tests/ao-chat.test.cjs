@@ -2374,7 +2374,7 @@ function childPoll(file, selector, options = {}) {
     readCpaUsage: async range => { calls.push(`usage:${range}`); return { available: false }; },
     sessionId: "session", sessionIds: ["session"], workspaceId: "workspace", earlierKey: "", currentContext: (sessions, id) => sessions?.[id],
     wanted: true, key: "cpa/model", from: 1, running: true, active: true, isOpen: true, run: { subagent_id: "subagent" }, range: "24h",
-    onCpaCodex: true, onCpaCline: false, onCpaOther: false, USAGE_RANGE: "7d", session: {},
+    onCpaPlan: true, onCpaCline: false, onCpaOther: false, USAGE_RANGE: "7d", session: {},
     POLL_MS: 4000, QUOTA_POLL_MS: 60000, DETAIL_POLL_MS: 10000, PROCESSES_POLL_MS: 4000, SUBAGENTS_POLL_MS: 3000,
     OVERVIEW_POLL_MS: 5000, SUBAGENT_WORK_POLL_MS: 2000, PREVIEW_POLL_MS: 1500, COMMANDS_POLL_MS: 2000, OUTPUT_POLL_MS: 1000,
     button: { current: { addEventListener: (_event, fn) => clicks.add(fn), removeEventListener: (_event, fn) => clicks.delete(fn) } },
@@ -2407,7 +2407,7 @@ function childPoll(file, selector, options = {}) {
 test("chat child refreshes skip hidden surfaces, minimized windows and hidden pages, then resume", async t => {
   for (const [file, selector, expected] of [
     ["ChatContextMeter.tsx", "effect:const earlier = earlierKey", ["chat_context"]],
-    ["ChatContextMeter.tsx", "effect:setQuota(null)", ["cpa_quota", "usage:7d"]],
+    ["ChatContextMeter.tsx", "effect:operation: \"cpa_quota\"", ["cpa_quota", "usage:7d"]],
     ["ChatContextMeter.tsx", "effect:let pending = false", ["chat_context"]],
     ["ChatTurnStats.tsx", "effect:const [first, ...rest]", ["chat_turn_stats"]],
     ["ChatWorkbench.tsx", "effect:!wanted", ["chat_processes"]],
