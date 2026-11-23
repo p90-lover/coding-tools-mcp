@@ -966,7 +966,7 @@ function BrowserSettings({ accounts, isRunning, run, api }: {
       </div>
       <p className="cbm-muted">
         {accounts.settings.newSessions === "balance"
-          ? "A new session goes to the account with the fewest open tabs, then the fewest sessions today, among accounts that take new sessions."
+          ? "A new session goes to the account with the fewest open tabs, then the fewest sessions today, among signed-in accounts that take new sessions. An account whose sign-in ChatGPT rejected is skipped until it is signed in again."
           : "A session stays on the account it started on; move it below."}
       </p>
     </section>
