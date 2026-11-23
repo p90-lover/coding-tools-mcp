@@ -70,7 +70,7 @@ test("managed CPA keeps saved user settings and extra plugin registrations while
       cline: { "runtime-executable": process.execPath },
     });
     assert.deepEqual(config.plugins.configs["user-own-plugin"], { enabled: true, strategy: "saved-user-setting" });
-    assert.equal(config["disable-cooling"], true);
+    assert.equal(config["disable-cooling"], false, "quota cooldowns are managed: a spent account rests until its reset");
     assert.equal(config["request-retry"], 8);
     assert.equal(config.debug, true);
     assert.equal(config["logging-to-file"], false, "an older build's saved file logging is turned off");

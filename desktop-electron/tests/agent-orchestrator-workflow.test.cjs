@@ -7338,6 +7338,55 @@ test("each review logs the ms of its steps and how it ended (ao.review_timing)",
   }
 });
 
+test("the reviewer's check before it answers reads the run ahead of the background polls", async () => {
+  // Seen live 2026-11-23: queued behind every open chat's polls, the run read the reviewer makes
+  // before answering took 14-35 s, twice per review, and reviews ran out of their 45 s before the
+  // model was asked ("The review attempt timed out or its owner changed"). Here every ordinary run
+  // read hangs once the review has begun; only the fast lane (as Stop reads) still answers.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "dir", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
+    toolInput: JSON.stringify({ cmd: 'cmd /c dir /b "G:\\Projects\\app\\docs"' }), summary: "exec_command", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], fastReads = [];
+  let reviewing = false;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url) => {
+      reviewing = true;
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"inside the workspace"}' } }] }) };
+    },
+    requestHeadless: async (endpoint, body, options) => {
+      if (endpoint.endsWith("/read")) {
+        if (options?.admissionControl === true) fastReads.push(body);
+        else if (reviewing) return new Promise(() => {});
+        return { ok: true, runs: [mission], worker_capacity: { run: 1 } };
+      }
+      return { ok: true, run: mission };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 200 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved, ["yes"], "answered though the ordinary lane was stuck");
+    assert.ok(fastReads.length >= 1, "the check before answering took the fast lane");
+    assert.ok(fastReads.every(read => read.workspace_id === "ws" && read.run_id === "run"), "it reads only this run");
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("the reviewer sees what the worker did in its turn before a request, and a refused request is reviewed again on new evidence", async () => {
   // Seen live 2026-10-22: the agent listed the backend's processes (uvicorn 31332, 65572), then asked
   // to `taskkill /PID 31332 /T /F`; the reviewer denied it for "not enough context to verify that PID
@@ -12052,6 +12101,35 @@ test("a launch's catalog is served stale while it revalidates, and never a refus
   // Too old to serve: the read is waited for again.
   clock += 31 * 60_000; answer = { models: ["c"] };
   assert.deepEqual(await cache.get("k"), { models: ["c"] });
+});
+
+test("a review peeks at the kept catalog and never waits on a read in flight, even one that hung", async () => {
+  // 2026-11-23: a review waited 37 s for CPA's catalog inside its 45 s once the minute's cache ran
+  // out. peek answers from the kept list at once; with nothing kept it answers nothing, so the
+  // reviewer reads CPA itself rather than join a first read that may never come back.
+  const { staleWhileRevalidate } = require("../electron/agent-orchestrator-workflow.cjs");
+  let clock = 0, reads = 0;
+  const hung = new Promise(() => {});
+  let next = () => hung;
+  const cache = staleWhileRevalidate({ now: () => clock, freshMs: 60_000, staleMs: 30 * 60_000,
+    read: () => { reads += 1; return next(); } });
+  void cache.get("k");
+  assert.equal(cache.peek("k"), undefined, "nothing kept: no answer, and the hung read is not joined");
+  await new Promise(setImmediate);
+  assert.equal(reads, 1);
+  const kept = staleWhileRevalidate({ now: () => clock, freshMs: 60_000, staleMs: 30 * 60_000, read: async () => { reads += 1; return next(); } });
+  next = async () => ({ models: ["codex-auto-review"] });
+  await kept.get("k");
+  next = () => hung;
+  clock += 61_000;
+  assert.deepEqual(kept.peek("k"), { models: ["codex-auto-review"] }, "stale, at once");
+  await new Promise(setImmediate);
+  assert.equal(reads, 3, "and one refresh started behind it");
+  assert.deepEqual(kept.peek("k"), { models: ["codex-auto-review"] }, "the refresh in flight (hung) is not waited on");
+  await new Promise(setImmediate);
+  assert.equal(reads, 3, "one refresh at a time");
+  clock += 30 * 60_000;
+  assert.equal(kept.peek("k"), undefined, "too old to serve");
 });
 
 test("a run loop backed off after headless timed out starts again as soon as headless answers", async () => {
