@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ModelJudgesToggle } from "./ModelJudgesToggle";
+import { ModelJudgesToggle, QuotaReviewsToggle } from "./ModelJudgesToggle";
 
 // The agent's questions and tool requests as the Codex desktop app asks them (its approval card and
 // request_user_input card, from the app's own markup and words, with "ChatGPT" read as the card's
@@ -72,7 +72,11 @@ export type AoApproval = {
   nodeId: string; approval_id: string; kind?: string; method?: string; path?: string; reason?: string; command?: string; cwd?: string;
   thread_id?: string; turn_id?: string; item_id?: string; request?: Record<string, unknown>;
   permissions?: Record<string, unknown>; seconds_remaining?: number;
-  recommendation?: { action: "allow" | "deny" | "ask"; reason: string };
+  /**
+   * `quotaBlocked`: it waits because Allow quota-based reviews is off. `guardianWaitForJudge`: Guardian
+   * left it to the model judge, which needs that switch too.
+   */
+  recommendation?: { action: "allow" | "deny" | "ask"; reason: string; quotaBlocked?: boolean; guardianWaitForJudge?: boolean };
   /** "Approve for me": the reviewer is checking it, or has answered and is sending its answer. */
   awaiting_review?: boolean;
   /** An AO agent's parked tool request (e.g. Claude Code's Bash): its tool name and AO's summary. */
@@ -269,6 +273,9 @@ function AoAsk({ approval, busy, approve, actor }: {
       {approval.recommendation?.reason ? <div className="cdx-row"><span>Reviewer</span><p>{approval.recommendation.reason}</p></div> : null}
       {/* The reviewer left it to you: the model can judge this and every later one instead. */}
       {approval.recommendation?.reason ? <div className="cdx-row"><span /><ModelJudgesToggle /></div> : null}
+      {/* It waits on Allow quota-based reviews: the switch it needs is here too, not only in Settings. */}
+      {approval.recommendation?.quotaBlocked || approval.recommendation?.guardianWaitForJudge
+        ? <div className="cdx-row"><span /><QuotaReviewsToggle /></div> : null}
       {approval.dependencyNote ? <p className={`cdx-reason ao-dependency-note is-${approval.dependencyNote.tone}`}
         role={approval.dependencyNote.tone === "warn" ? "alert" : "note"}>{approval.dependencyNote.text}</p> : null}
       <CdxOptions name={title} options={options} picked={sent ? [sent] : []} onPick={send} disabled={busy || Boolean(sent)} />

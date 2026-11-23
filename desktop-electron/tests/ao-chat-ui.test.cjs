@@ -45,7 +45,7 @@ const petHome = load("chat-pet-home.ts");
 const house = load("chat-pet-house.tsx", { "./Clawd": clawd });
 const pet = load("ChatPet.tsx", { "./ao-chat": chat, "./Clawd": clawd, "./chat-pet-stage": load("chat-pet-stage.ts"), "./chat-pet-home": petHome,
   "./chat-pet-motion": load("chat-pet-motion.ts"), "./chat-pet-house": house, "./ChatMenu": menu, "./page-visibility": visibility });
-const judges = load("ModelJudgesToggle.tsx", { "../api/client": client });
+const judges = load("ModelJudgesToggle.tsx", { "../api/client": client, "./quota-reviews": load("quota-reviews.ts", { "../api/client": client }) });
 // Settings › Chat's mission switch, as this computer keeps it: on unless `saved` is "off".
 const viewSettings = (saved = null) => load("chat-view-settings.ts", {}, { localStorage: { getItem: () => saved, setItem() {} } });
 const responseStyles = load("chat-response-style.ts", { "./chat-reply-plan": load("chat-reply-plan.ts", { "./ao-chat": chat }) });
@@ -880,6 +880,20 @@ test("an AO agent's question and tool request show as Codex's cards: numbered op
   // Clicking an option answers at once, as Claude Code's prompt does: no Submit or Deny button.
   assert.doesNotMatch(ask, />Submit </);
   assert.doesNotMatch(ask, /cdx-foot/);
+});
+
+// Live 2026-11-23: cards read "Quota-based reviews are off" or "Native Guardian could not decide" with Let the
+// model judge on, and their only switch was the judge's. The switch such a request waits on is on its card.
+test("a request waiting on quota-based reviews offers that switch on its card", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  const approval = { nodeId: "one", approval_id: "req", kind: "command", source: "ao", tool: "Bash", command: "pwd" };
+  const card = (recommendation) => renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: { ...approval, recommendation }, busy: false, approve() {} }));
+  const quota = /<span>Allow quota-based reviews<\/span>/; // the switch itself, not the judge tooltip naming it
+  const blocked = card({ action: "ask", reason: "Quota-based reviews are off. CPA reviews use account quota. This request needs your approval.", quotaBlocked: true });
+  assert.match(blocked, quota);
+  assert.match(blocked, /Let the model judge/, "the judge's switch stays beside it");
+  assert.match(card({ action: "ask", reason: "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.", guardianWaitForJudge: true }), quota);
+  assert.doesNotMatch(card({ action: "ask", reason: "The reviewer left this to you." }), quota, "only where the request waits on it");
 });
 
 test("AO and native approval commands share directly scrollable cards without extra viewer controls", () => {

@@ -22,6 +22,16 @@ export function refreshQuotaReviews(): Promise<boolean> {
     .then((outer) => publishQuotaReviews(((outer as { result?: { meteredReviews?: unknown } }).result ?? outer as { meteredReviews?: unknown }).meteredReviews === true));
 }
 
+/**
+ * Turns the switch on or off in main (the person's click: main takes it only from the focused window),
+ * then publishes what main kept. Turned on, main reviews again at once every request it held for it.
+ */
+export function setQuotaReviews(on: boolean): Promise<boolean> {
+  return getCodingToolsClient().apps
+    .call({ moduleId: "agent-orchestrator", operation: "chat_model_judges", arguments: { meteredReviews: on } })
+    .then((outer) => publishQuotaReviews(((outer as { result?: { meteredReviews?: unknown } }).result ?? outer as { meteredReviews?: unknown }).meteredReviews === true));
+}
+
 /** Calls `listener` whenever the switch changes in this window. Returns the unsubscribe. */
 export function onQuotaReviews(listener: (on: boolean | null) => void): () => void {
   if (typeof window === "undefined" || typeof window.addEventListener !== "function") return () => {};
