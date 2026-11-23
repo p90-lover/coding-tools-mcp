@@ -722,7 +722,19 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     else delete merged.requests;
   }
   mergeManagedPayload(merged, managed.payload);
-  return (yaml.stringify ?? yaml.dump)(merged);
+  return cpaConfigText(merged, yaml);
+}
+
+/**
+ * The config as CPA can read it. Bun's YAML writer (the CPA wrapper runs on Bun) writes one-line flow
+ * YAML and leaves some strings unquoted there, such as the Antigravity prompt filter's "(?i)\bword\b"
+ * patterns; Go's yaml.v3, which CPA parses with, stops at their "?" ("did not find expected ',' or
+ * '}'"). From 0.8.154 every restart wrote that config, and CPA exited at once, in a loop (2026-11-23).
+ * JSON is YAML that Go reads, with every string quoted. js-yaml's block output (Node) is read as is.
+ */
+function cpaConfigText(config, yaml) {
+  if (yaml && yaml === globalThis.Bun?.YAML) return `${JSON.stringify(config, null, 2)}\n`;
+  return (yaml.stringify ?? yaml.dump)(config);
 }
 
 const CODEX_MIN_OUTPUT_TOKENS = 16;
