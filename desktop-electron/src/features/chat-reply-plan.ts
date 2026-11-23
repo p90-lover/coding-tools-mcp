@@ -35,6 +35,10 @@ export type PlanStep = {
 };
 /** `agent`: the agent's own todo list (TodoWrite, update_plan); `work`: steps read from its messages and tool calls. */
 export type ReplyPlan = { source: "agent" | "work"; steps: PlanStep[]; done: number };
+export type LiveChatPlan = {
+  id: string; at: number; goal: string; doneWhen: string;
+  steps: { title: string; status: "pending" | "in_progress" | "completed" }[];
+};
 
 const WORK_KINDS = new Set(["tool", "command", "edit"]);
 const TITLE_MAX = 96;

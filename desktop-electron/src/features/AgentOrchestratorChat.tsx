@@ -26,7 +26,7 @@ import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { ChatScrollToBottom } from "./ChatScrollToBottom";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
-import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
+import { FoldedRounds, LivePlanCard, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
 import { agentReplyPlan, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer, EarlierSteps, useWorkWindow } from "./ChatToolParts";
@@ -1632,7 +1632,8 @@ export function AgentOrchestratorChat({
   const allComputerRequests = useComputerRequests();
   const computerRequests = useMemo(() => selectedTaskId ? chatComputerRequests(allComputerRequests, agentSessionIds, projectId) : [],
     [selectedTaskId, allComputerRequests, agentSessionIds, projectId]);
-  const livePage = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  const { page: livePage, plan: livePlan } = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null,
+    (tab) => setWorkbench(tab), projectId, workbenchKey);
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
   const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
@@ -1666,7 +1667,7 @@ export function AgentOrchestratorChat({
     return { reply, tasks: tasks ?? undefined, live: drafting };
   }, [turns, detailsWorkTick]);
   const shownPlan = planText || currentPlan.reply;
-  const hasPlan = Boolean(shownPlan || currentPlan.tasks?.steps.length);
+  const hasPlan = Boolean(shownPlan || livePlan || currentPlan.tasks?.steps.length);
   useEffect(() => {
     if (!loadWork) return;
     for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
@@ -3352,6 +3353,7 @@ export function AgentOrchestratorChat({
           onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
           // Queued commands and goals show in the bar too now, so Clear all clears all of them.
           onClearAll={() => dequeue(selectedTaskId, null)} />
+        {livePlan ? <div className="cx-inline-plan"><LivePlanCard plan={livePlan} onOpen={() => openPlan()} /></div> : null}
         {goalEditing !== null && commands?.goal ? (() => {
           // The goal bar opened for editing: its target and "Edit goal", the objective in a box that
           // grows with it, then how long it may be, Cancel and Save. Ctrl+Enter saves, Esc cancels.
@@ -3575,7 +3577,7 @@ export function AgentOrchestratorChat({
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
       {workbench && selectedTaskId ? <ChatWorkbench key={workbenchKey} sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
-        plan={{ text: shownPlan, tasks: currentPlan.tasks, live: currentPlan.live }} subagents={subagents} renderWork={renderSubagentWork}
+        plan={{ text: shownPlan, tasks: currentPlan.tasks, live: currentPlan.live, published: livePlan }} subagents={subagents} renderWork={renderSubagentWork}
         changesTarget={changesTarget?.taskId === selectedTaskId ? changesTarget : undefined} /> : null}
       {responseStyleNotice ? <p role="status" className="cx-note">{responseStyleNotice}</p> : null}
       {responseSettingsOpen ? <div className="cxs-root" role="dialog" aria-label="Response style settings" onKeyDown={event => {

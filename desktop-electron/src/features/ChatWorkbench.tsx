@@ -5,8 +5,8 @@ import type { JsonObject } from "../api/contracts";
 import { Caret, Icon } from "../icons";
 import { chatSubagents, contextFraction, subagentActive, subagentTitle, tokensShort, type ChatAgentSession, type ChatLiveItem, type ChatSubagent } from "./ao-chat";
 import { ChatMarkdown } from "./ChatMarkdown";
-import { ReplyPlanView } from "./ChatReplyPlan";
-import type { ReplyPlan } from "./chat-reply-plan";
+import { LivePlanCard, ReplyPlanView } from "./ChatReplyPlan";
+import type { LiveChatPlan, ReplyPlan } from "./chat-reply-plan";
 import { SubagentHeader, SubagentList, workedFor } from "./chat-subagents";
 import type { ChatPullRequest } from "./chat-summary-panel";
 import { petFlight, petOverlaps } from "./chat-pet-stage";
@@ -21,7 +21,7 @@ import { onWindowFocus, useSurfaceHidden, windowUnfocused } from "./page-visibil
 
 export type WorkbenchTab = "overview" | "preview" | "terminal" | "changes" | "files" | "subagents" | "plan" | "new";
 type PanelTab = { id: string; kind: WorkbenchTab };
-type WorkbenchPlan = { text: string; tasks?: ReplyPlan; live: boolean };
+type WorkbenchPlan = { text: string; tasks?: ReplyPlan; live: boolean; published?: LiveChatPlan | null };
 
 type PreviewState = { url: string; title: string; loading: boolean; canGoBack: boolean; canGoForward: boolean; errors: number };
 // "app": started through the app's exec_command (live output, stoppable, takes input). "agent": a
@@ -34,7 +34,7 @@ type Command = {
 };
 const isAgentShell = (command: Command | undefined) => command?.source === "agent";
 /** A pane the agent asked the chat to bring forward (its show_in_chat tool), newest per session. */
-type ShowRequest = { id: string; pane: "terminal" | "preview"; commandId?: string; at?: number };
+type ShowRequest = { id: string; pane: "terminal" | "preview" | "plan"; commandId?: string; at?: number };
 /** Still running: an app command, an agent's command mid-call, or one it left running in the background. */
 const isLive = (command: Command | undefined) => command?.status === "running" || command?.status === "background";
 // Commands that start something which keeps serving: dev servers, file servers, watchers.
@@ -71,7 +71,7 @@ function rememberPage(sessionId: string, url: string, title: string) {
 export function autoOpenTab(fresh: string[], _open: boolean): WorkbenchTab | null {
   const asked = fresh.filter((item) => item.startsWith("show:")).at(-1);
   const pane = asked?.slice(asked.lastIndexOf(":") + 1);
-  return pane === "preview" || pane === "terminal" ? pane : null;
+  return pane === "preview" || pane === "terminal" || pane === "plan" ? pane : null;
 }
 
 /** A row of the chat details' Processes: an app or terminal of this chat, running or offline. */
@@ -214,28 +214,41 @@ export function startsNewChat(sessionIds: string[], polled: Set<string>): boolea
   return !sessionIds.some((id) => polled.has(id));
 }
 
-/**
- * Watches what a chat's agents have open (their preview page, their commands) and opens the side
- * panel when one asks to show its preview or a command (show_in_chat; see autoOpenTab). Each request
- * opens it once; closing the panel is respected until the agent asks again. Returns the page the
- * agent's browser shows, which the header's browser chip offers back.
- */
-export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void, workspaceId?: string): LivePage | null {
+type LiveWorkbenchState = { page: LivePage | null; plan: LiveChatPlan | null };
+type WorkbenchSignals = { sessionId: string; show?: ShowRequest; livePlan?: LiveChatPlan };
+
+export function takeWorkbenchReveal(sessions: WorkbenchSignals[], seen: Set<string>, firstRead: boolean,
+  visitedAt: number, planAllowed: boolean, open: boolean): WorkbenchTab | null {
+  const fresh: ShowRequest[] = [];
+  for (const { show, livePlan } of sessions) {
+    if (!show?.id || seen.has(show.id)) continue;
+    seen.add(show.id);
+    if (show.pane === "plan" && (!planAllowed || !livePlan || (show.at ?? 0) < visitedAt)) continue;
+    if (!firstRead || show.pane === "plan") fresh.push(show);
+  }
+  return autoOpenTab(fresh.sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map(show => `show:${show.id}:${show.pane}`), open);
+}
+
+/** Opens explicit pane requests once, and reads the plan through the existing chat status poll. */
+export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen: (tab: WorkbenchTab) => void,
+  workspaceId?: string, viewKey?: string): LiveWorkbenchState {
   const hidden = useSurfaceHidden();
-  // The page an agent's browser shows now, if any: the chat offers it back when the panel is hidden.
-  const [livePage, setLivePage] = useState<LivePage | null>(null);
+  const key = JSON.stringify([viewKey, workspaceId, sessionIds]);
+  const view = viewKey ?? key;
+  const visit = useRef({ view, at: Date.now() });
+  if (visit.current.view !== view) visit.current = { view, at: Date.now() };
+  const keyNow = useRef(key);
+  keyNow.current = key;
+  const [state, setState] = useState<(LiveWorkbenchState & { key: string }) | null>(null);
   const seen = useRef(new Set<string>());
   const polled = useRef(new Set<string>());
-  // The latest panel state and callback, read by the poll without restarting it: a restart on each
-  // open/close swallowed whatever the agent did in its first tick.
   const openNow = useRef(open);
   openNow.current = open;
   const onOpenNow = useRef(onOpen);
   onOpenNow.current = onOpen;
-  const key = sessionIds.join(",");
   useEffect(() => {
-    setLivePage(null);
     if (!sessionIds.length) return undefined;
+    const visitedAt = visit.current.at;
     let live = true;
     const tick = async () => {
       if (!live || hidden()) return;
@@ -243,39 +256,26 @@ export function useWorkbenchAutoOpen(sessionIds: string[], open: boolean, onOpen
         const [previews, processes] = await Promise.all([
           paneCall("chat_preview_state", { sessionIds }), paneCall("chat_processes", { sessionIds, ...(workspaceId ? { workspaceId } : {}) }),
         ]);
-        if (!live) return;
+        if (!live || key !== keyNow.current) return;
         const shown = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
-          .find(([, state]) => state.url && state.url !== "about:blank");
-        setLivePage((current) => {
-          const next = shown ? { sessionId: shown[0], url: shown[1].url, title: shown[1].title } : null;
-          return current?.url === next?.url && current?.title === next?.title && current?.sessionId === next?.sessionId ? current : next;
-        });
-        const pages = Object.entries((previews.previews as Record<string, PreviewState> | undefined) ?? {})
-          .filter(([, state]) => state.url && state.url !== "about:blank").map(([id, state]) => `page:${id}:${new URL(state.url).origin}`);
-        // Asked again on every tick, so a command that turns out to be long-running (a server) can
-        // open the pane later even though it was too young to the first time it was seen.
-        const at = Date.now();
-        const listed = (processes.sessions as { commands: Command[]; show?: ShowRequest }[] | undefined) ?? [];
-        const commands = listed.flatMap((session) => session.commands).filter((command) => !command.user && opensTerminal(command, at)).map((command) => `cmd:${command.id}`);
-        // What the agent asked the chat to show (show_in_chat), whatever the process is.
-        const shows = listed.map((session) => session.show).filter((show): show is ShowRequest => Boolean(show?.id))
-          .map((show) => `show:${show.id}:${show.pane}`);
-        const fresh = [...pages, ...commands, ...shows].filter((item) => !seen.current.has(item));
-        for (const item of fresh) seen.current.add(item);
-        // What was already there when the chat opened does not open the panel by itself.
+          .find(([id, value]) => sessionIds.includes(id) && value.url && value.url !== "about:blank");
+        const page = shown ? { sessionId: shown[0], url: shown[1].url, title: shown[1].title } : null;
+        const listed = ((processes.sessions as WorkbenchSignals[] | undefined) ?? []).filter(session => sessionIds.includes(session.sessionId));
+        const plan = workspaceId ? listed.flatMap(({ livePlan }) => livePlan ? [livePlan] : []).sort((a, b) => b.at - a.at)[0] ?? null : null;
+        setState(current => current?.key === key && current.plan?.id === plan?.id && current.page?.url === page?.url
+          && current.page?.title === page?.title && current.page?.sessionId === page?.sessionId ? current : { key, page, plan });
         const newChat = startsNewChat(sessionIds, polled.current);
         if (newChat) polled.current = new Set(sessionIds);
         else for (const id of sessionIds) polled.current.add(id);
-        if (newChat) return;
-        const tab = autoOpenTab(fresh, openNow.current);
+        const tab = takeWorkbenchReveal(listed, seen.current, newChat, visitedAt, Boolean(workspaceId), openNow.current);
         if (tab) onOpenNow.current(tab);
       } catch { /* the next tick tries again */ }
     };
     const stop = startWorkbenchPoll(tick, 4000, hidden);
     return () => { live = false; stop(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key, workspaceId, hidden]);
-  return livePage;
+  }, [key, hidden]);
+  return state?.key === key ? state : { page: null, plan: null };
 }
 
 /** A page a chat agent's browser has open (its preview keeps running while the panel is hidden). */
@@ -357,21 +357,25 @@ export type ChangesTarget = { sessionId: string; path?: string; requestId: numbe
 function PlanPane({ plan }: { plan?: WorkbenchPlan }) {
   const [copyResult, setCopyResult] = useState<{ text: string; message: string } | null>(null);
   const text = plan?.text;
-  const copied = copyResult?.text === text ? copyResult?.message : undefined;
+  const published = plan?.published;
+  const copyText = text || (published ? [`Goal: ${published.goal}`, `Done when: ${published.doneWhen}`, "",
+    ...published.steps.map(step => `- [${step.status === "completed" ? "x" : " "}] ${step.title}`)].join("\n") : "");
+  const copied = copyResult?.text === copyText ? copyResult?.message : undefined;
   const copy = async () => {
-    if (!text) return;
-    try { await navigator.clipboard.writeText(text); setCopyResult({ text, message: "Copied" }); }
-    catch { setCopyResult({ text, message: "Couldn't copy plan" }); }
+    if (!copyText) return;
+    try { await navigator.clipboard.writeText(copyText); setCopyResult({ text: copyText, message: "Copied" }); }
+    catch { setCopyResult({ text: copyText, message: "Couldn't copy plan" }); }
   };
   return <section className="cx-workbench-plan" role="tabpanel" aria-label="Plan">
-    {text ? <div className="cx-workbench-plan-actions">
+    {copyText ? <div className="cx-workbench-plan-actions">
       {copied ? <span role="status">{copied}</span> : null}
       <button type="button" className="cx-text-button" onClick={() => void copy()}>Copy plan</button>
     </div> : null}
     <div className="cx-workbench-plan-body" tabIndex={0}>
+      {published ? <LivePlanCard plan={published} /> : null}
       {text ? <ChatMarkdown text={text} /> : null}
-      {plan?.tasks ? <ReplyPlanView plan={plan.tasks} style="plan" live={plan.live} /> : null}
-      {!text && !plan?.tasks?.steps.length ? <p className="cx-workbench-empty"><strong>No plan yet</strong><br />The agent writes the plan here as it explores. Keep chatting.</p> : null}
+      {!published && plan?.tasks ? <ReplyPlanView plan={plan.tasks} style="plan" live={plan.live} /> : null}
+      {!text && !published && !plan?.tasks?.steps.length ? <p className="cx-workbench-empty"><strong>No plan yet</strong><br />The agent writes the plan here as it explores. Keep chatting.</p> : null}
     </div>
   </section>;
 }
@@ -495,8 +499,8 @@ export function ChatWorkbench({ sessions, tab, onTab, onClose, workspaceId, suba
     {/* The chat's subagents belong to all its agents, so this tab does not follow the agent picker. */}
     {current?.kind === "subagents" ? <SubagentsPane subagents={subagents} selected={subagentId} onSelect={setSubagentId} renderWork={renderWork} />
       : current?.kind === "plan" ? <PlanPane plan={plan} />
-      : current?.kind === "new" && (sessionId || plan?.text || plan?.tasks?.steps.length)
-      ? <NewTabPage sessionId={sessionId} onTool={show} hasPlan={Boolean(plan?.text || plan?.tasks?.steps.length)} />
+      : current?.kind === "new" && (sessionId || plan?.text || plan?.published || plan?.tasks?.steps.length)
+      ? <NewTabPage sessionId={sessionId} onTool={show} hasPlan={Boolean(plan?.text || plan?.published || plan?.tasks?.steps.length)} />
       : !sessionId
       ? <p className="cx-workbench-empty">No agent yet. Its pages, changes, files and commands show here.</p>
       : current?.kind === "overview" ? <OverviewPane key={sessionId} session={sessions.find((item) => item.id === sessionId)} sessionId={sessionId} workspaceId={workspaceId} onTool={show}

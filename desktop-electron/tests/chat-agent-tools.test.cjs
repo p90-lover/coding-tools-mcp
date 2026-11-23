@@ -561,7 +561,7 @@ test("a chat agent's tool list leaves out routing, revision and consent fields a
   try {
     const { url, auth } = await session(tools, { agent: "codex" });
     const list = (await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth)).body.result.tools;
-    assert.deepEqual(list.map((entry) => entry.name).filter((name) => name !== "show_in_chat"), ["read_file", "search_text"],
+    assert.deepEqual(list.map((entry) => entry.name).filter((name) => name !== "show_in_chat" && name !== "open_plan"), ["read_file", "search_text"],
       "grep_text runs search_text and tool_search names headless's catalog, so neither is listed");
     const read = list.find((entry) => entry.name === "read_file").inputSchema;
     assert.deepEqual(Object.keys(read.properties), ["path"]);
@@ -620,7 +620,7 @@ test("Claude Code is not offered the file, git and plan tools its own harness ha
   try {
     const claude = await session(tools, { agent: "claude-code" });
     const listed = (await post(claude.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, claude.auth)).body.result.tools.map((entry) => entry.name);
-    assert.deepEqual(listed, ["view_image", "show_in_chat"], "read_file, apply_patch, git_status and update_plan are Claude Code's own");
+    assert.deepEqual(listed, ["view_image", "show_in_chat", "open_plan"], "read_file, apply_patch, git_status and update_plan are Claude Code's own");
     const init = await post(claude.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, claude.auth);
     assert.match(init.body.result.instructions, /use your own tools: Read, Grep, Glob, Edit, Write, and Bash for git/);
     assert.doesNotMatch(init.body.result.instructions, /read_file|search_text|apply_patch/, "it is not told about tools it is not shown");
@@ -630,7 +630,7 @@ test("Claude Code is not offered the file, git and plan tools its own harness ha
 
     const codex = await session(tools, { agent: "codex" });
     const codexListed = (await post(codex.url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, codex.auth)).body.result.tools.map((entry) => entry.name);
-    assert.deepEqual(codexListed, ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"], "other agents keep them");
+    assert.deepEqual(codexListed, ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat", "open_plan"], "other agents keep them");
   } finally {
     tree.cleanup?.();
   }
@@ -647,7 +647,7 @@ test("a GPT session with unified-agent-tools is not offered read_file or apply_p
     assert.equal(lease.bind("ao-1"), true);
     const [{ url, headers }] = lease.servers;
     const auth = { authorization: headers.Authorization };
-    assert.deepEqual(await listed(url, auth), ["git_status", "view_image", "update_plan", "show_in_chat"],
+    assert.deepEqual(await listed(url, auth), ["git_status", "view_image", "update_plan", "show_in_chat", "open_plan"],
       "read_file and apply_patch are unified-agent-tools' Read and Edit");
     const init = await post(url, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "1" } } }, auth);
     assert.match(init.body.result.instructions, /use the unified-agent-tools tools for every file operation: Read, ReadMany, Grep/);
@@ -661,11 +661,11 @@ test("a GPT session with unified-agent-tools is not offered read_file or apply_p
     restored = fixture({ root: tree.root, statePath });
     await restored.tools.listen();
     const kept = (await restored.tools.renew("ao-1")).servers[0];
-    assert.deepEqual(await listed(kept.url, { authorization: kept.headers.Authorization }), ["git_status", "view_image", "update_plan", "show_in_chat"],
+    assert.deepEqual(await listed(kept.url, { authorization: kept.headers.Authorization }), ["git_status", "view_image", "update_plan", "show_in_chat", "open_plan"],
       "a resume after a restart keeps it");
     const switched = (await restored.tools.renew("ao-1", { unifiedFiles: false })).servers[0];
     assert.deepEqual(await listed(switched.url, { authorization: switched.headers.Authorization }),
-      ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"], "a resume without them gets the file tools back");
+      ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat", "open_plan"], "a resume without them gets the file tools back");
   } finally { await restored?.tools.close(); await first.tools.close(); tree.cleanup(); }
 });
 
@@ -690,7 +690,7 @@ test("the MCP endpoint answers initialize, lists the agent tools and calls them 
 
     const reply = await post(url, { jsonrpc: "2.0", id: 2, method: "tools/list" }, auth);
     assert.deepEqual(reply.body.result.tools.map((entry) => entry.name),
-      ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"],
+      ["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat", "open_plan"],
       "terminal and desktop tools are off by default (with them monitor and sleep; push_notification needs a notifier); request_permissions, the default cwd, task board, native Codex, history, operation store, sandbox and harness tools are never offered");
     assert.equal(Object.hasOwn(reply.body.result.tools[0], "outputSchema"), false);
     assert.deepEqual(reply.body.result.tools[0].annotations, { readOnlyHint: true });
@@ -1519,6 +1519,51 @@ test("show_in_chat brings the Terminal forward on a command the agent started, a
     assert.notEqual((await tools.processes(["show-owner"], "ws1"))[0].show.id, show.id, "each request is new, so it shows again");
     tools.forgetSession("show-owner");
   } finally { await tools.close(); tree.cleanup(); }
+});
+
+test("open_plan updates one bound chat plan and only opens the pane on request", async () => {
+  const { tools, calls, confirmations } = fixture();
+  try {
+    const owner = await session(tools, { id: "live-plan-owner" });
+    const other = await session(tools, { id: "live-plan-other" });
+    const input = { goal: "Show plans in chat", done_when: "The Plan pane displays the verified checklist", steps: [
+      { title: "Trace the UI", status: "completed" }, { title: "Check the preview", status: "pending" },
+    ] };
+    const call = args => callTool(owner.url, owner.auth, "open_plan", args);
+    assert.ok((await listed(owner.url, owner.auth)).includes("open_plan"));
+    for (const invalid of [{ ...input, session_id: "live-plan-other" }, { ...input, open: "true" },
+      { ...input, goal: " " }, { ...input, steps: [{ title: "Verify", status: "approved" }] }]) {
+      assert.equal((await call(invalid)).isError, true);
+    }
+    const list = async () => (await tools.processes(["live-plan-owner"], "ws1"))[0];
+    assert.equal((await list()).livePlan, undefined);
+    const first = (await call(input)).structuredContent;
+    assert.equal(first.pane_requested, true);
+    const initial = await list();
+    assert.equal(initial.livePlan.goal, input.goal);
+    assert.equal(initial.livePlan.doneWhen, input.done_when);
+    assert.deepEqual(initial.livePlan.steps, input.steps);
+    assert.equal(initial.show.pane, "plan");
+    assert.equal(initial.show.id, first.plan_id);
+    assert.equal((await tools.processes(["live-plan-owner"], "ws2")).length, 0);
+    assert.equal((await tools.processes(["live-plan-owner"]))[0].livePlan, undefined);
+    assert.equal((await tools.processes(["live-plan-other"], "ws1"))[0].livePlan, undefined);
+    const progress = (await call({ ...input, steps: [{ title: "Check scope", status: "in_progress" }], open: false })).structuredContent;
+    const updated = await list();
+    assert.equal(progress.pane_requested, false);
+    assert.deepEqual(updated.livePlan.steps, [{ title: "Check scope", status: "in_progress" }]);
+    assert.equal(updated.livePlan.id, progress.plan_id);
+    assert.deepEqual(updated.show, initial.show, "updates never create a new reveal request unless requested");
+    const sub = await tools.lease({ agent: "codex", workspaceId: "ws1", subagent: true });
+    sub.bind("live-plan-subagent");
+    const [{ url, headers }] = sub.servers;
+    const auth = { authorization: headers.Authorization };
+    assert.ok(!(await listed(url, auth)).includes("open_plan"));
+    assert.equal((await callTool(url, auth, "open_plan", input)).isError, true);
+    assert.equal(calls.filter(c => c.endpoint === "/api/v1/tools/call").length, 0);
+    assert.equal(confirmations.length, 0);
+    assert.ok(other.lease, "another chat can be open without inheriting the plan");
+  } finally { await tools.close(); }
 });
 
 test("schedule_wakeup hands the chat's own session to the app's scheduler and tells the agent to end its turn", async () => {
@@ -2581,7 +2626,7 @@ test("desktop tools are hidden and refused unless the user opts in, and every sc
     assert.match((await callTool(before.url, before.auth, "capture_screenshot")).content[0].text, /Unknown tool/,
       "a session started without the desktop group does not gain it");
     const opted = await session(tools, { id: "ao-2" });
-    assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat"].includes(name)),
+    assert.deepEqual((await listed(opted.url, opted.auth)).filter((name) => !["read_file", "apply_patch", "git_status", "view_image", "update_plan", "show_in_chat", "open_plan"].includes(name)),
       ["capture_screenshot", "list_windows", "computer_snapshot", "computer_action", "vision_status", "capture_process"]);
     const init = await post(opted.url, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} }, opted.auth);
     assert.match(init.body.result.instructions, /each call is reviewed before it runs/);

@@ -70,7 +70,7 @@ const uiImports = { "./chat-response-style": responseStyles, "./response-style-m
   "./AgentOrchestratorComposerControls": { AgentOrchestratorComposerControls: () => null },
   "./AgentOrchestratorApproval": { AgentOrchestratorApproval: () => null },
   // The side panel opens on demand; the chat only needs its auto-open hook to exist here.
-  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => {}, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] },
+  "./ChatWorkbench": { ChatWorkbench: () => null, useWorkbenchAutoOpen: () => ({ page: null, plan: null }), useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] },
   "./ComputerControlCard": { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] },
   "./ChatThreadList": load("ChatThreadList.tsx", { "./ao-chat": chat, "../icons": { Icon: () => null }, "./ChatMenu": menu, "./chat-list-settings": load("chat-list-settings.ts") }) };
 const ui = load("AgentOrchestratorChat.tsx", uiImports);
@@ -1136,6 +1136,17 @@ test("the side panel opens only when the agent is asked to show something (show_
   assert.equal(workbench.autoOpenTab([], false), null);
   assert.equal(workbench.autoOpenTab(["show:show-1:terminal"], false), "terminal", "show_in_chat on a command opens the Terminal");
   assert.equal(workbench.autoOpenTab(["show:show-3:preview"], false), "preview", "and on its page the Preview");
+  assert.equal(workbench.autoOpenTab(["show:plan-4:plan"], false), "plan", "an explicit open_plan request brings forward Plan");
+  assert.equal(workbench.autoOpenTab(["plan:existing:progress"], false), null, "a plan update without a reveal request does not open anything");
+  const livePlan = { id: "plan-4", at: 26, goal: "Verify a change", doneWhen: "The regression passes", steps: [] };
+  const record = { sessionId: "chat", show: { id: "plan-4", pane: "plan", at: 24 }, livePlan };
+  const seen = new Set();
+  assert.equal(workbench.takeWorkbenchReveal([record], seen, true, 20, true, false), "plan", "a fresh request can arrive before the first status read");
+  assert.equal(workbench.takeWorkbenchReveal([{ ...record, livePlan: { ...livePlan, id: "plan-6" } }], seen, false, 20, true, false), null,
+    "a progress update cannot reopen a panel the person closed");
+  assert.equal(workbench.takeWorkbenchReveal([record], new Set(), true, 31, true, false), null, "reopening a chat does not replay an old reveal");
+  assert.equal(workbench.takeWorkbenchReveal([{ ...record, livePlan: undefined }], new Set(), false, 20, true, false), null);
+  assert.equal(workbench.takeWorkbenchReveal([record], new Set(), false, 20, false, false), null);
   assert.equal(workbench.autoOpenTab(["page:ao-1:http://localhost:8000", "show:show-2:terminal", "show:show-4:preview"], true), "preview",
     "the newest request wins");
   assert.equal(workbench.autoOpenTab(["show:show-5:window"], false), null, "a pane it does not know opens nothing");

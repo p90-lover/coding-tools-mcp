@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import type { ChatStyle, PlanStep, ReplyPlan } from "./chat-reply-plan";
+import type { ChatStyle, LiveChatPlan, PlanStep, ReplyPlan } from "./chat-reply-plan";
 
 /**
  * A reply's steps in the chat style picked from the header menu (chat-reply-plan): Codex's plan
@@ -60,6 +60,25 @@ export function ReplyPlanView({ plan, style: preference, live }: { plan: ReplyPl
         </div>
       </li>)}
     </ol> : null}
+  </section>;
+}
+
+export function LivePlanCard({ plan, onOpen }: { plan: LiveChatPlan; onOpen?: () => void }) {
+  const current = plan.steps.findIndex(step => step.status === "in_progress");
+  return <section className="cx-rplan is-plan cx-live-plan" aria-label="Current plan">
+    <header className="cx-rplan-head">
+      <span className="cx-rplan-title">Plan</span>
+      <span className="cx-rplan-count">{plan.steps.filter(step => step.status === "completed").length} of {plan.steps.length} done</span>
+      {onOpen ? <button type="button" className="cx-text-button" onClick={onOpen}>Open plan</button> : null}
+    </header>
+    <div className="cx-live-plan-outcome"><strong>Goal</strong><span>{plan.goal}</span></div>
+    <div className="cx-live-plan-outcome"><strong>Done when</strong><span>{plan.doneWhen}</span></div>
+    <ol className="cx-rplan-steps">{plan.steps.map((step, index) => {
+      const state = step.status === "completed" ? "done" : step.status === "in_progress" ? "running" : "pending";
+      return <li key={index} className={`cx-rplan-step is-${state}`} aria-current={index === current ? "step" : undefined}>
+        <StepMark state={state} /><span className="cx-rplan-step-title">{step.title}</span>
+      </li>;
+    })}</ol>
   </section>;
 }
 

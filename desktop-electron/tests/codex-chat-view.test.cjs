@@ -50,6 +50,7 @@ const run = (id, taskId, nodes, extra = {}) => ({ id, project_id: taskId, cancel
 
 // The page the agent's browser has open, as useWorkbenchAutoOpen reports it (null: none).
 let openPage = null;
+let livePlan = null;
 let workbenchStorage = null;
 // A stuck turn's recovery: its Provider stays in the tree (so a test can read the value the chat
 // gives it), and its value is what TurnRunning reads.
@@ -140,7 +141,7 @@ function mount(props, { effects = false, objectUrls, responseEvents } = {}) {
         : name === "./AgentOrchestratorApproval" ? { AgentOrchestratorApproval: "Approval" } : name === "./HarnessLogo" ? { ModelLogo: "ModelLogo" }
           // The picker's short name: the model id without its "cpa/<provider>/" prefix.
           : name === "./AgentOrchestratorRoleEditor" ? { cpaProviderOf: () => null, modelShortLabel: (model) => ({ group: "", name: model.replace(/^cpa\/(?:[^/]+\/)?/, "") }) }
-          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => openPage, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
+          : name === "./ChatWorkbench" ? { ChatWorkbench: "Workbench", useWorkbenchAutoOpen: () => ({ page: openPage, plan: livePlan }), useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
           : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: (text) => text }
           : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
             // The parts the chat shares with the DeepSeek view; its Providers wrap the chat.
@@ -2121,6 +2122,29 @@ test("Open plan shows the requested plan in the Plan tab without answering it, a
   });
   walk(view.render(settled)).find(element => element.type === "ChatMenu").props.menu.items.find(item => item.label === "Plan").run();
   assert.equal(panel(view.render(settled)).props.plan.text, plan.plan);
+});
+
+test("a published live plan stays in the chat and the Plan pane shows the same updated checklist", t => {
+  const before = workbenchStorage;
+  workbenchStorage = new Map();
+  livePlan = { id: "plan-1", at: 1, goal: "Make the goal readable", doneWhen: "The regression passes",
+    steps: [{ title: "Read the existing pane", status: "completed" }, { title: "Run the regression", status: "in_progress" }] };
+  t.after(() => { workbenchStorage = before; livePlan = null; });
+  const { props } = base({ selectedTaskId: "t", projectId: "ws", working: true });
+  const view = mount(props);
+  const inline = () => walk(view.render()).find(element => element.props?.className === "cx-inline-plan");
+  const panel = () => walk(view.render()).find(element => element.type === "Workbench");
+  assert.match(text(inline()), /1 of 2 done.*GoalMake the goal readable.*Done whenThe regression passes/);
+  assert.equal(panel(), undefined, "an inline update cannot open the panel by itself");
+  walk(inline()).find(element => element.type === "button" && text(element) === "Open plan").props.onClick();
+  assert.equal(panel().props.tab, "plan");
+  assert.equal(panel().props.plan.published, livePlan);
+  livePlan = { ...livePlan, id: "plan-2", steps: [{ title: "Run the regression", status: "completed" }] };
+  assert.match(text(inline()), /1 of 1 done/);
+  assert.doesNotMatch(text(inline()), /Read the existing pane/);
+  assert.equal(panel().props.plan.published, livePlan);
+  assert.equal(walk(view.render()).filter(element => element.props?.className === "cx-inline-plan").length, 1);
+  assert.ok(!walk(view.render()).some(element => element.type === "Approval"));
 });
 
 test("a completed /plan reply is viewable from the chat menu without a native approval", t => {

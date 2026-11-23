@@ -1569,6 +1569,13 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-workbench-plan-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px 24px 24px; overflow-wrap: anywhere; }
 .cx-workbench-plan-body .cx-rplan-step-title { white-space: normal; }
 .cx-workbench-plan-body .cx-workbench-empty { margin: 12px 0; }
+.cx-inline-plan { flex: 0 0 auto; min-width: 0; margin: 0 16px; }
+.cx-inline-plan .cx-rplan-steps { max-height: min(18vh, 156px); overflow: auto; }
+.cx-live-plan .cx-rplan-head { align-items: center; }
+.cx-live-plan .cx-rplan-head button { margin-left: auto; }
+.cx-live-plan-outcome { display: flex; gap: 6px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
+.cx-live-plan-outcome strong { flex: 0 0 auto; }
+.cx-live-plan .cx-rplan-step-title { white-space: normal; overflow-wrap: anywhere; }
 .cx-chat:has(> .cx-workbench.is-plan) { container: cx-plan-shell / inline-size; }
 @container cx-plan-shell (max-width: 620px) {
   .cx-chat > .cx-thread, .cx-chat > .cx-structure:not(.cx-workbench.is-plan) { display: none; }
