@@ -7426,6 +7426,100 @@ test("the reviewer's check before it answers reads the run ahead of the backgrou
   }
 });
 
+test("a run loop that fails while its card works starts again, so the card's requests are still reviewed", async () => {
+  // Seen live 2026-11-23: in a burst of local load four chats' loops ended "held" while their agents
+  // worked on, "Retry automatically" passed over the running cards, and each chat's next request sat
+  // unreviewed for 3.5 hours until the person opened it. Here the loop's run reads fail once the card
+  // works: first the local service is too busy, then an error the loop has no name for.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "dir", source: "ao", kind: "permission", tool: "mcp__coding-tools__exec_command",
+    toolInput: JSON.stringify({ cmd: 'cmd /c dir /b "G:\\Projects\\app\\docs"' }), summary: "exec_command", decisions };
+  for (const failure of [
+    () => Object.assign(new Error("Headless launcher queue is full; wait for pending work to finish"), { code: "HEADLESS_QUEUE_FULL" }),
+    () => new Error("Unexpected end of JSON input"),
+  ]) {
+    const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+      { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+    const resolved = [], updates = [], retries = [];
+    let reads = 0, failUntil = 0, asking = false;
+    const workflow = createAgentOrchestratorWorkflow({
+      findCodexExecutable: () => process.execPath,
+      resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+      cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+      logger: { info() {}, warn: (event, fields) => { if (event === "ao.drive_error_retry") retries.push(fields); } },
+      onRunState: (update) => updates.push(update),
+      fetchImpl: async (url) => {
+        if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+        return { ok: true, json: async () => ({ choices: [{ message: { content: '{"action":"allow","reason":"inside the workspace"}' } }] }) };
+      },
+      requestHeadless: async (endpoint, body, options) => {
+        // The start's own read and the loop's first pass answer; for a while after that every
+        // ordinary run read fails, the loop's own among them.
+        if (endpoint.endsWith("/read") && options?.admissionControl !== true) {
+          if (++reads === 2) failUntil = Date.now() + 3_000;
+          else if (Date.now() < failUntil) throw failure();
+        }
+        return endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission };
+      },
+      aoHarness: {
+        // The request arrives only after the loop has failed.
+        observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: asking && !resolved.length ? [request] : [] }),
+        resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+      },
+      confirm: async () => true,
+    });
+    try {
+      await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+      for (let tries = 0; tries < 600 && !retries.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.ok(retries.length >= 1, "the failed pass was logged as a restart");
+      asking = true;
+      for (let tries = 0; tries < 1_500 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+      assert.deepEqual(resolved, ["yes"], "the request that came after the failure was reviewed and answered");
+      const status = await workflow.call("run_status", { workspaceId: "ws", runId: "run" });
+      assert.equal(status.status, "running", "never held for a click while the card works");
+      assert.equal(status.driven, true, "a loop watches the card again");
+      assert.ok(!updates.some(update => update.attention === "error"), "never reported as a failed step");
+    } finally {
+      mission.nodes[0].state = "finished";
+      workflow.dispose();
+    }
+  }
+});
+
+test("a run loop whose run is gone still ends held, though its card was working", async () => {
+  // The restart above is for a card at work; a run deleted under the loop has nothing left to watch.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const updates = [], retries = [];
+  let reads = 0;
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    logger: { info() {}, warn: (event, fields) => { if (event === "ao.drive_error_retry") retries.push(fields); } },
+    onRunState: (update) => updates.push(update),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read")
+      ? { ok: true, runs: ++reads >= 3 ? [] : [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: { observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: [] }) },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && !updates.some(update => update.attention === "error"); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(retries.length, 0, "not restarted");
+    assert.ok(updates.some(update => update.attention === "error" && /Saved mission is unavailable/.test(update.detail ?? "")), "reported to the person as before");
+    assert.equal((await workflow.call("run_status", { workspaceId: "ws", runId: "run" })).driven, false);
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});
+
 test("the reviewer sees what the worker did in its turn before a request, and a refused request is reviewed again on new evidence", async () => {
   // Seen live 2026-10-22: the agent listed the backend's processes (uvicorn 31332, 65572), then asked
   // to `taskkill /PID 31332 /T /F`; the reviewer denied it for "not enough context to verify that PID

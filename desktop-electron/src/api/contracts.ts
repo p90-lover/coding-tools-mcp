@@ -119,6 +119,19 @@ export interface JsonObject {
   readonly [key: string]: JsonValue;
 }
 
+/**
+ * A web page's preview for a link's hover card. Images are small data: URLs read by the main
+ * process; `reason` is why there is none (`private`, `credentials`, `timeout`, `network`, `http-404`…).
+ */
+export type LinkPreview =
+  | {
+    readonly ok: true; readonly kind: "page"; readonly url: string; readonly host: string;
+    readonly title: string; readonly description: string; readonly siteName: string;
+    readonly icon: string | null; readonly image: string | null;
+  }
+  | { readonly ok: true; readonly kind: "file"; readonly url: string; readonly host: string; readonly contentType: string; readonly size?: number }
+  | { readonly ok: false; readonly url: string; readonly host: string; readonly reason: string };
+
 export interface CodingToolsApi {
   readonly runtime: {
     status(): Promise<JsonObject>;
@@ -189,6 +202,10 @@ export interface CodingToolsApi {
       readonly cursor?: number;
       readonly limit?: number;
     }): Promise<Page<JsonObject>>;
+  };
+  /** A link's hover card (electron/link-preview.cjs). */
+  readonly links: {
+    preview(input: { readonly url: string }): Promise<LinkPreview>;
   };
   readonly nativeCodex: {
     status(input?: { readonly workspaceId?: string }): Promise<JsonObject>;

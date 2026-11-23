@@ -102,6 +102,7 @@ const {
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironmentAsync } = require("./managed-external-services.cjs");
 const { fetchFollowingRedirects } = require("./managed-components.cjs");
+const { createLinkPreviewService } = require("./link-preview.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
@@ -298,6 +299,8 @@ let quitLogger = null;
 let launcherRuntimeRoot = null;
 // Runtime > RTK (rtk.cjs), made once the logger exists; IPC reads it from here.
 let rtkService = null;
+// The chat's link hover cards (link-preview.cjs), made on the first hover.
+let linkPreviewService = null;
 /** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
 const QUIT_EXIT_GRACE_MS = 10_000;
 let codexBridgeConnectInFlight = null;
@@ -1355,11 +1358,14 @@ const browserAccountExists = (accountId) => browserAccounts.has(accountId);
 // Where a new Codex session starts (the setting): the account in use, a chosen account, or the
 // least busy account that can take it (takesNewSessions: signed in, sign-in not rejected): fewest
 // tabs open, then fewest sessions used in the last day, then the account in use.
+// "The account in use" that cannot take it gives way to the least busy one that can. Seen 2026-11-23:
+// the account in use was one whose sign-in ChatGPT had rejected two days before, so every new session
+// started there and failed while another account was signed in. "Always <account>" stays that account.
 function newSessionAccount() {
   const { accounts, activeId, settings } = browserAccountsStatus();
-  if (settings.newSessions !== "balance") return browserAccountExists(settings.newSessions) ? settings.newSessions : activeId;
   const open = accounts.filter(takesNewSessions);
-  if (!open.length) return activeId;
+  if (browserAccountExists(settings.newSessions)) return settings.newSessions;
+  if (!open.length || (settings.newSessions !== "balance" && open.some((entry) => entry.id === activeId))) return activeId;
   const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
   const recent = new Map();
   for (const entry of threadAccounts?.list() ?? []) {
@@ -2488,6 +2494,15 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
+  // A link's hover card. The page is read on the App route without cookies, never by the window;
+  // the service asks only public hosts and follows each redirect itself.
+  handle("coding-tools:links:preview", (event, input) => {
+    assertFocusedMainWindow(event, false);
+    linkPreviewService ??= createLinkPreviewService({
+      fetchPage: (url, options) => fetchThroughLauncherNetwork(url, options),
+    });
+    return linkPreviewService.preview(input.url);
+  });
   let nativeApprovalPromptInFlight = false;
   handle("coding-tools:native-codex:status", async (event, input) => {
     const snapshot = await codingTools.nativeCodexStatus(event, input);

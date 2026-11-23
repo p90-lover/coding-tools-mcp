@@ -114,6 +114,7 @@ function createHarness(hooks = {}) {
     "./ao-daemon-log.cjs": require("../electron/ao-daemon-log.cjs"),
     "./chat-redaction.cjs": require("../electron/chat-redaction.cjs"),
     "./orchestrator-handler.cjs": require("../electron/orchestrator-handler.cjs"),
+    "./ao-process-handler.cjs": require("../electron/ao-process-handler.cjs"),
     // The launcher's ao.db compaction has its own module; these fixtures have no database.
     "./ao-db-maintenance.cjs": { compactAoDatabase: async () => ({ action: "none" }) },
     "./chat-agent-shell.cjs": require("../electron/chat-agent-shell.cjs"),
@@ -181,7 +182,10 @@ function createHarness(hooks = {}) {
           child.signalCode = signal;
           child.emit("exit", code, signal);
         };
-        child.kill = () => { child.kills += 1; child.exit(null, "SIGTERM"); };
+        child.kill = () => {
+          child.kills += 1;
+          if (!hooks.kill?.(child)) child.exit(null, "SIGTERM");
+        };
         children.push(child);
         events.push(`spawn ${child.pid}`);
         return child;
@@ -263,7 +267,7 @@ function createHarness(hooks = {}) {
       }
       assert.equal(endpoint.pathname, "/readyz");
       await hooks.readyFetch?.(child);
-      return { ok: true, json: async () => { await hooks.readyBody?.(child); return { pid: child.pid, status: "ready" }; } };
+      return { ok: true, json: async () => { await hooks.readyBody?.(child); return { pid: hooks.readyPid?.(child) ?? child.pid, status: "ready" }; } };
     },
   };
   vm.runInNewContext(fs.readFileSync(sourcePath, "utf8"), sandbox, { filename: sourcePath });
@@ -606,6 +610,39 @@ test("concurrent stops share cleanup and a new start waits for the old gateway",
   assert.equal(ready.pid, harness.children[1].pid);
   assert.equal(harness.requests.filter(({ url }) => url.endsWith("/shutdown")).length, 1);
   assert.ok(harness.events.indexOf(`gateway closed ${harness.gateways[0].origin}`) < harness.events.indexOf(`spawn ${harness.children[1].pid}`));
+});
+
+test("replacement waits for the owned daemon to exit after a kill request", async (context) => {
+  const killed = deferred();
+  const harness = createHarness({
+    shutdown: () => { throw new Error("Graceful shutdown failed"); },
+    kill: (child) => {
+      if (child !== harness.children[0]) return false;
+      killed.resolve();
+      return true;
+    },
+  });
+  const { controller, children } = harness;
+  context.after(async () => { if (children[0].exitCode === null && children[0].signalCode === null) children[0].exit(); await controller.stop(); });
+  await controller.start();
+  const stopping = controller.stop();
+  await killed.promise;
+  const starting = controller.start();
+  await nextTurn();
+  assert.equal(children.length, 1);
+  children[0].exit(null, "SIGTERM");
+  await stopping;
+  assert.equal((await starting).pid, children[1].pid);
+});
+
+test("shutdown never POSTs to a listener that no longer identifies as the owned daemon", async () => {
+  let moved = false;
+  const { controller, children, requests } = createHarness({ readyPid: (child) => moved ? child.pid + 1 : child.pid });
+  await controller.start();
+  moved = true;
+  assert.equal((await controller.stop()).state, "stopped");
+  assert.equal(children[0].kills, 1);
+  assert.ok(requests.every(({ url }) => !url.endsWith("/shutdown")));
 });
 
 test("recovery after daemon exit closes the old gateway and loads a fresh view URL", async (context) => {
@@ -1384,7 +1421,7 @@ test("stopping a chat whose agent is still starting cancels the start, so its qu
 // 2026-11-12: AO started at 01:40:34, CPA's configuration was written at 01:43:22. AO reads CPA's
 // key from its own environment, so it ran without one, and every CPA chat from 07:11 until the app
 // was closed failed "persistent ACP host: agent requires authentication".
-function gatewayKeyWorld({ working = false, checks = [] } = {}) {
+function gatewayKeyWorld({ working = false, checks = [], beforeSessions, beforeLaunch, shutdown } = {}) {
   const world = { envKey: "", cpaKey: "key-one", working, launches: [] };
   world.h = createHarness({
     getWorkspaces: async () => [], missionCall: async () => ({ ok: true }),
@@ -1392,14 +1429,18 @@ function gatewayKeyWorld({ working = false, checks = [] } = {}) {
     extraEnv: async () => (world.envKey ? { CODING_TOOLS_CPA_KEY: world.envKey } : {}),
     gatewayKey: async () => world.cpaKey,
     gatewayKeyChecksMs: checks,
+    shutdown,
     api: async (endpoint, options) => {
       if (endpoint.pathname === "/api/v1/settings") return { chatHarnesses: ["claude-code"] };
       if (endpoint.pathname === "/api/v1/sessions" && options?.method === "POST") {
         world.launches.push(JSON.parse(options.body));
+        await beforeLaunch?.();
         return { session: { id: `session-${world.launches.length}` } };
       }
       if (endpoint.pathname === "/api/v1/sessions") {
-        return { sessions: world.working ? [{ id: "busy", status: "working", isTerminated: false }] : [] };
+        const sessions = world.working ? [{ id: "busy", status: "working", isTerminated: false }] : [];
+        await beforeSessions?.();
+        return { sessions };
       }
     },
   });
@@ -1445,6 +1486,59 @@ test("with an agent mid-turn AO is not restarted for the key: the CPA chat says 
     assert.equal(world.h.children.length, 2, "once idle, the next CPA chat brings the key in");
     assert.equal(world.launches.length, 2);
   } finally { await world.h.controller.stop(); }
+});
+
+test("CPA key refresh defers while a chat launch is in flight", async () => {
+  const launched = deferred();
+  const release = deferred();
+  const world = gatewayKeyWorld({ beforeLaunch: () => { launched.resolve(); return release.promise; } });
+  const { controller, children } = world.h;
+  try {
+    await controller.start();
+    const chat = controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "m", prompt: "hi" });
+    await launched.promise;
+    world.envKey = "key-one";
+    await assert.rejects(world.spawnCpa(), /once no agent is mid-turn/);
+    assert.equal(children.length, 1);
+    release.resolve();
+    await chat;
+  } finally { release.resolve(); await controller.stop(); }
+});
+
+test("a chat launch during the idle probe invalidates the CPA key refresh even after its response", async () => {
+  const reading = deferred();
+  const release = deferred();
+  const world = gatewayKeyWorld({ beforeSessions: () => { reading.resolve(); return release.promise; } });
+  const { controller, children } = world.h;
+  try {
+    await controller.start();
+    world.envKey = "key-one";
+    const cpa = assert.rejects(world.spawnCpa(), /once no agent is mid-turn/);
+    await reading.promise;
+    await controller.harness.spawn({ workspaceId: "ws", agent: "claude-code", model: "m", prompt: "hi" });
+    release.resolve();
+    await cpa;
+    assert.equal(children.length, 1);
+    assert.equal(world.launches.length, 1);
+  } finally { release.resolve(); await controller.stop(); }
+});
+
+test("an explicit stop cancels a CPA key refresh before it can restart AO", async () => {
+  const shuttingDown = deferred();
+  const release = deferred();
+  const world = gatewayKeyWorld({ shutdown: () => { shuttingDown.resolve(); return release.promise; } });
+  const { controller, children } = world.h;
+  try {
+    await controller.start();
+    world.envKey = "key-one";
+    const cpa = assert.rejects(world.spawnCpa(), /once no agent is mid-turn/);
+    await shuttingDown.promise;
+    const stopping = controller.stop();
+    release.resolve();
+    await cpa;
+    assert.equal((await stopping).state, "stopped");
+    assert.equal(children.length, 1);
+  } finally { release.resolve(); await controller.stop(); }
 });
 
 test("AO is not restarted when CPA has no key to give, and picks the key up on its own after it started", async () => {
