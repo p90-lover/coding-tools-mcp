@@ -153,6 +153,7 @@ test("applyAppLayoutAction and createAppLayoutStore persist and broadcast edits"
     );
 
     const afterReset = await store.reset();
+    await store.saved();
     assert.ok(
       !afterReset.layers
         .find((layer) => layer.id === "sidebar")
