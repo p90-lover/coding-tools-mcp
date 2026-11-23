@@ -346,6 +346,9 @@ const codingToolsApi = Object.freeze({
   history: Object.freeze({
     search: (input) => invokeContract(ipcRenderer, "history.search", input),
   }),
+  links: Object.freeze({
+    preview: (input) => invokeContract(ipcRenderer, "links.preview", input),
+  }),
   nativeCodex: Object.freeze({
     status: (input = {}) => invokeContract(ipcRenderer, "nativeCodex.status", input),
     connect: (input) => invokeContract(ipcRenderer, "nativeCodex.connect", input),
