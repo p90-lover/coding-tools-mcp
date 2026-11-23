@@ -2,146 +2,146 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createCpaQuota, accountOf, STALE_MS } = require("../electron/cpa-quota.cjs");
+const { createCpaQuota, accountFromAuthFile, CACHE_MS } = require("../electron/cpa-quota.cjs");
 
 const KEY = "mgmt-key-never-leaves";
 const NOW = 1_800_000_000_000;
+const seconds = (ms) => String(Math.floor(ms / 1000));
 
-function item(overrides = {}) {
+/** A Codex account as CPA 8.0.63+ lists it: the latest reply's x-codex-* headers under quota.signals. */
+function codex(overrides = {}, signals = {}) {
   return {
-    name: "codex-a.json", auth_index: "a1", email: "me@example.com", plan: "plus", priority: 0, disabled: false,
-    access_token: "should-not-pass", // never in CPA Helper's list, but must not leak if it were
-    quota: { plan: "plus", checked_ms: NOW - 10_000,
-      primary: { used_percent: 42.4, reset_at_ms: NOW + 3_600_000, window_seconds: 18_000 },
-      secondary: { used_percent: 97.5, reset_at_ms: NOW + 86_400_000, window_seconds: 604_800 } },
+    name: "codex-a.json", provider: "codex", auth_index: "a1", email: "me@example.com", status: "active", disabled: false, unavailable: false,
+    access_token: "should-not-pass", id_token: { plan_type: "plus", chatgpt_account_id: "acct" },
+    quota: { observed_at: new Date(NOW - 10_000).toISOString(), signals: {
+      "X-Codex-Primary-Used-Percent": "42.4", "X-Codex-Primary-Window-Minutes": "300", "X-Codex-Primary-Reset-At": seconds(NOW + 3_600_000),
+      "X-Codex-Secondary-Used-Percent": "97.5", "X-Codex-Secondary-Window-Minutes": "10080", "X-Codex-Secondary-Reset-At": seconds(NOW + 86_400_000),
+      "X-Codex-Plan-Type": "plus", ...signals } },
+    ...overrides,
+  };
+}
+function claude(overrides = {}, signals = {}) {
+  return {
+    name: "claude-b.json", provider: "claude", auth_index: "c1", email: "claude@example.com", status: "active", account_type: "max",
+    quota: { observed_at: new Date(NOW - 5_000).toISOString(), signals: {
+      "Anthropic-Ratelimit-Unified-5h-Utilization": "0.31", "Anthropic-Ratelimit-Unified-5h-Reset": seconds(NOW + 7_200_000),
+      "Anthropic-Ratelimit-Unified-7d-Utilization": "0.6", "Anthropic-Ratelimit-Unified-7d-Reset": seconds(NOW + 3 * 86_400_000),
+      "Anthropic-Ratelimit-Unified-Status": "allowed", ...signals } },
     ...overrides,
   };
 }
 
-function fixture({ items = [item()], status = 200, connection = { baseUrl: "http://127.0.0.1:8317", managementKey: KEY } } = {}) {
+function fixture({ files = [codex()], status = 200, connection = { baseUrl: "http://127.0.0.1:8317", managementKey: KEY } } = {}) {
   const calls = [];
   let clock = NOW;
   const quota = createCpaQuota({
     getConnection: () => connection, now: () => clock, logger: { warn() {} },
     fetchImpl: async (url, init) => {
-      calls.push({ url, method: init.method, auth: init.headers.Authorization, body: init.body ? JSON.parse(init.body) : null });
-      return { ok: status >= 200 && status < 300, status, json: async () => ({ items }) };
+      calls.push({ url, method: init.method, auth: init.headers.Authorization });
+      return { ok: status >= 200 && status < 300, status, json: async () => ({ files }) };
     },
   });
   return { quota, calls, advance: (ms) => { clock += ms; } };
 }
 
-test("reads CPA Helper's Codex accounts with the management key and returns only their limits", async () => {
-  const { quota, calls } = fixture();
+test("reads each account's limits from CPA's auth-file listing with one GET and returns no token", async () => {
+  const { quota, calls } = fixture({ files: [codex(), claude(), { name: "gemini.json", provider: "gemini-cli", auth_index: "g1" }] });
   const result = await quota.read();
-  assert.equal(calls[0].url, "http://127.0.0.1:8317/v0/management/cpa-helper/codex/accounts");
-  assert.equal(calls[0].auth, `Bearer ${KEY}`);
+  assert.deepEqual(calls.map((call) => [call.method, call.url, call.auth]),
+    [["GET", "http://127.0.0.1:8317/v0/management/auth-files", `Bearer ${KEY}`]], "nothing is asked upstream, nothing is written");
   assert.equal(result.available, true);
-  assert.deepEqual(result.accounts, [{
-    id: "a1", label: "me@example.com", plan: "plus", disabled: false, paused: false,
-    session: { usedPercent: 42.4, resetsAt: NOW + 3_600_000, windowSeconds: 18_000 },
-    week: { usedPercent: 97.5, resetsAt: NOW + 86_400_000, windowSeconds: 604_800 },
+  assert.deepEqual(result.accounts.map((account) => [account.provider, account.id]), [["codex", "a1"], ["claude", "c1"]], "only plan providers");
+  assert.deepEqual(result.accounts[0], {
+    id: "a1", provider: "codex", label: "me@example.com", plan: "plus", state: "ready", disabled: false, paused: false, resumesAt: null,
+    session: { usedPercent: 42.4, resetsAt: Number(seconds(NOW + 3_600_000)) * 1000, windowSeconds: 18_000 },
+    week: { usedPercent: 97.5, resetsAt: Number(seconds(NOW + 86_400_000)) * 1000, windowSeconds: 604_800 },
     credits: null, checkedAt: NOW - 10_000, error: null,
-  }]);
+  });
   const text = JSON.stringify(result);
-  assert.ok(!text.includes(KEY) && !text.includes("should-not-pass"), "no key or token reaches the renderer");
+  assert.ok(!text.includes(KEY) && !text.includes("should-not-pass") && !text.includes("acct"), "no key, token or account id reaches the renderer");
 });
 
-test("a fresh read is cached; a stale or unchecked account is refreshed once per window", async () => {
-  const { quota, calls, advance } = fixture({ items: [item(), item({ auth_index: "b2", email: "two@example.com", quota: null }),
-    item({ auth_index: "c3", disabled: true, quota: null })] });
-  await quota.read();
-  await new Promise((resolve) => setImmediate(resolve));
-  const refreshes = calls.filter((call) => call.method === "POST");
-  assert.deepEqual(refreshes.map((call) => call.body), [{ auth_index: "b2" }], "only the enabled account never checked");
-  assert.equal(refreshes[0].url, "http://127.0.0.1:8317/v0/management/cpa-helper/codex/refresh");
-  const gets = () => calls.filter((call) => call.method === "GET").length;
-  await quota.read();
-  assert.equal(gets(), 2, "a refresh makes the next read fetch the new numbers");
-  await quota.read();
-  assert.equal(gets(), 2, "otherwise a read is cached for a short while");
-  advance(30_000);
-  await quota.read();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(calls.filter((call) => call.method === "POST").length, 1, "not refreshed again within STALE_MS");
-  advance(STALE_MS);
-  await quota.read();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(calls.filter((call) => call.method === "POST").length, 3, "after STALE_MS both enabled accounts are stale");
+test("Claude's five-hour and weekly utilization become percents; its plan is the account type", () => {
+  const account = accountFromAuthFile(claude(), NOW);
+  assert.equal(account.plan, "max");
+  assert.deepEqual([account.session.usedPercent, account.session.windowSeconds], [31, 18_000]);
+  assert.deepEqual([account.week.usedPercent, account.week.windowSeconds], [60, 604_800]);
+  assert.equal(account.credits, null);
 });
 
-test("quota refresh is minute-paced, bounded and fair across more than four accounts", async () => {
-  assert.equal(STALE_MS, 60_000);
-  const items = Array.from({ length: 9 }, (_, i) => item({ auth_index: `key${i}`, quota: null }));
-  const { quota, calls, advance } = fixture({ items });
-  for (let i = 0; i < 3; i++) {
-    await quota.read(); await new Promise((resolve) => setImmediate(resolve)); advance(30_000);
+test("Codex windows are told apart by length, not slot: a weekly-only plan sends its week as primary", () => {
+  const weeklyOnly = accountFromAuthFile(codex({}, { "X-Codex-Primary-Used-Percent": "12", "X-Codex-Primary-Window-Minutes": "10080",
+    "X-Codex-Secondary-Used-Percent": undefined, "X-Codex-Secondary-Window-Minutes": undefined }), NOW);
+  assert.equal(weeklyOnly.session, null);
+  assert.equal(weeklyOnly.week.usedPercent, 12);
+  const relative = accountFromAuthFile(codex({}, { "X-Codex-Primary-Reset-At": undefined, "X-Codex-Primary-Reset-After-Seconds": "600" }), NOW);
+  assert.equal(relative.session.resetsAt, NOW - 10_000 + 600_000, "reset-after counts from when the reply was seen");
+  assert.equal(accountFromAuthFile(codex({}, { "X-Codex-Primary-Used-Percent": "140" }), NOW).session.usedPercent, 100);
+  const unseen = accountFromAuthFile(codex({ quota: undefined }), NOW);
+  assert.deepEqual([unseen.session, unseen.week, unseen.checkedAt, unseen.state], [null, null, null, "ready"], "no reply since CPA started: no reading yet");
+});
+
+test("an account's credits reach the meter exactly as chatgpt.com sent them", () => {
+  const credits = accountFromAuthFile(codex({}, { "X-Codex-Credits-Balance": "51249.6137980000", "X-Codex-Credits-Has-Credits": "True",
+    "X-Codex-Credits-Unlimited": "False" }), NOW).credits;
+  assert.deepEqual(credits, { balance: "51249.6137980000", hasCredits: true, unlimited: false, overageReached: false });
+  assert.equal(accountFromAuthFile(codex({}, { "X-Codex-Credits-Balance": "lots", "X-Codex-Credits-Unlimited": "true" }), NOW).credits.balance, null, "only a number is shown");
+  assert.equal(accountFromAuthFile(codex(), NOW).credits, null, "a reply without credit headers reports none");
+});
+
+test("routing state: at a limit or cooling down until a time, disabled, signed out or failing", () => {
+  const full = accountFromAuthFile(codex({}, { "X-Codex-Primary-Used-Percent": "100" }), NOW);
+  assert.deepEqual([full.state, full.paused, full.resumesAt], ["limited", true, Number(seconds(NOW + 3_600_000)) * 1000]);
+  const cooling = accountFromAuthFile(codex({ unavailable: true, next_retry_after: new Date(NOW + 90_000).toISOString() }), NOW);
+  assert.deepEqual([cooling.state, cooling.resumesAt], ["limited", NOW + 90_000], "CPA's own cooldown after a 429");
+  const over = accountFromAuthFile(codex({ unavailable: true, next_retry_after: new Date(NOW - 1).toISOString() }), NOW);
+  assert.equal(over.state, "ready", "a cooldown already over");
+  const refused = accountFromAuthFile(claude({}, { "Anthropic-Ratelimit-Unified-Status": "rejected", "Retry-After": "120" }), NOW);
+  assert.deepEqual([refused.state, refused.resumesAt], ["limited", NOW - 5_000 + 120_000]);
+  assert.equal(accountFromAuthFile(codex({ disabled: true }), NOW).state, "disabled");
+  for (const message of ["unauthorized", "HTTP 401", "Encountered invalidated oauth token", "refresh token expired"]) {
+    const out = accountFromAuthFile(codex({ status: "error", status_message: message }), NOW);
+    assert.equal(out.state, "signed-out", message);
+    assert.match(out.error, /^Signed out: .*sign in to this account again in CPA\.$/i);
   }
-  const refreshed = calls.filter((c) => c.method === "POST").map((c) => c.body.auth_index);
-  assert.equal(new Set(refreshed).size, 9, "later accounts must not starve behind retries");
-  assert.ok(refreshed.length <= 12, "at most four accounts per read");
+  const failing = accountFromAuthFile(codex({ status: "error", status_message: "HTTP 500" }), NOW);
+  assert.deepEqual([failing.state, failing.error], ["error", "HTTP 500"]);
+  assert.equal(accountFromAuthFile(codex({ id_token: { plan_type: "free_workspace" } }, { "X-Codex-Plan-Type": undefined }), NOW).plan, null, "not a plan");
+  assert.equal(accountFromAuthFile({ provider: "codex", auth_index: 7, name: "codex-x.json" }, NOW).label, "codex-x");
+  assert.equal(accountFromAuthFile(codex({ runtime_only: true }), NOW), null, "a config API key has no plan windows");
 });
 
-test("working accounts come first, so many signed-out ones cannot hide them past the cap", async () => {
+test("accounts CPA can use come first, so many signed-out ones cannot hide them past the cap", async () => {
   // Seen live 2026-10-24: nine signed-out and three unchecked accounts filled the first 12, and the
   // one working Plus account, at 100% of its 5-hour window, was never shown.
-  const signedOut = Array.from({ length: 12 }, (_, at) => item({ auth_index: `out${at}`, email: `out${at}@example.com`,
-    quota: { error: "HTTP 401: Encountered invalidated oauth token", checked_ms: NOW - 2 * STALE_MS } }));
-  const unchecked = item({ auth_index: "new", email: "new@example.com", quota: null });
-  const disabled = item({ auth_index: "off", email: "off@example.com", disabled: true });
-  const plus = item({ auth_index: "plus", email: "plus@example.com", priority: -1,
-    quota: { plan: "plus", checked_ms: NOW - 10_000, primary: { used_percent: 100 }, secondary: { used_percent: 16 } } });
-  const { quota, calls, advance } = fixture({ items: [...signedOut, disabled, unchecked, plus] });
+  const signedOut = Array.from({ length: 12 }, (_, at) => codex({ auth_index: `out${at}`, email: `out${at}@example.com`, status: "error", status_message: "HTTP 401" }));
+  const unseen = codex({ auth_index: "new", email: "new@example.com", quota: undefined });
+  const disabled = codex({ auth_index: "off", email: "off@example.com", disabled: true });
+  const full = codex({ auth_index: "full", email: "full@example.com" }, { "X-Codex-Primary-Used-Percent": "100" });
+  const working = codex({ auth_index: "plus", email: "plus@example.com" });
+  const { quota } = fixture({ files: [...signedOut, disabled, full, unseen, working, claude()] });
   const { accounts } = await quota.read();
-  assert.equal(accounts.length, 12);
-  assert.deepEqual(accounts.slice(0, 3).map((account) => account.id), ["plus", "new", "off"], "working, unchecked, disabled, then errors");
-  assert.equal(accounts[0].session.usedPercent, 100, "an exhausted account is still shown first: it is the one to watch");
-  assert.deepEqual(accounts.slice(3).map((account) => account.id), signedOut.slice(0, 9).map((entry) => entry.auth_index), "CPA's order within a rank");
-  // Accounts past the cap are still re-checked (one signed in again must not stay hidden), the
-  // unchecked one first, within the per-read refresh budget.
-  const refreshed = () => calls.filter((call) => call.method === "POST").map((call) => call.body.auth_index);
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(refreshed(), ["new", "out0", "out1", "out2"], "the unchecked one first, four per read");
-  for (let read = 0; read < 3; read += 1) {
-    advance(30_000);
-    await quota.read();
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.ok(refreshed().includes("out11"), "an account past the cap is re-checked too");
-  assert.ok(!refreshed().includes("off"), "never refresh a disabled account");
-  assert.ok(refreshed().includes("plus"), "the working account also refreshes after one minute");
+  const codexIds = accounts.filter((account) => account.provider === "codex").map((account) => account.id);
+  assert.equal(codexIds.length, 12, "capped per provider");
+  assert.deepEqual(codexIds.slice(0, 4), ["plus", "new", "full", "off"], "ready with a reading, ready unseen, at limit, disabled, then errors");
+  assert.deepEqual(codexIds.slice(4), signedOut.slice(0, 8).map((entry) => entry.auth_index), "CPA's order within a rank");
+  assert.deepEqual(accounts.filter((account) => account.provider === "claude").map((account) => account.id), ["c1"], "another provider is not crowded out");
 });
 
-test("an account's credits (CPA Helper 0.1.1) reach the meter exactly as chatgpt.com sent them", () => {
-  // Past a full window every request is paid from them: 7 credits a minute, seen 2026-10-24.
-  const credits = { balance: "51249.6137980000", has_credits: true, unlimited: false, overage_limit_reached: false };
-  assert.deepEqual(accountOf(item({ quota: { ...item().quota, credits } })).credits,
-    { balance: "51249.6137980000", hasCredits: true, unlimited: false, overageReached: false });
-  assert.equal(accountOf(item({ quota: { ...item().quota, credits: { balance: "lots", unlimited: true } } })).credits.balance, null, "only a number is shown");
-  assert.equal(accountOf(item()).credits, null, "an older CPA Helper reports none");
+test("a read is cached for a short while per connection", async () => {
+  const { quota, calls, advance } = fixture();
+  await quota.read();
+  await quota.read();
+  assert.equal(calls.length, 1);
+  advance(CACHE_MS);
+  await quota.read();
+  assert.equal(calls.length, 2);
 });
 
-test("an account at its limit, a disabled one and one with an error are told apart", () => {
-  assert.equal(accountOf(item({ priority: -1 })).paused, true);
-  assert.equal(accountOf(item({ disabled: true })).disabled, true);
-  const failed = accountOf(item({ quota: { error: "HTTP 500", checked_ms: NOW } }));
-  assert.equal(failed.error, "HTTP 500");
-  assert.equal(failed.session, null);
-  // As the installed app saw it: every account's sign-in expired, before any quota check.
-  for (const error of ["unauthorized", "HTTP 401", "Encountered invalidated oauth token"]) {
-    assert.match(accountOf(item({ quota: { error } })).error, /^Signed out: .*Sign in to it again in CPA\.$/, error);
-  }
-  assert.equal(accountOf(item({ plan: "oauth", quota: null })).plan, null, "a credential type is not a plan");
-  assert.equal(accountOf(item({ quota: { plan: "unknown" } })).plan, null);
-  assert.equal(accountOf(item({ quota: { plan: "pro" } })).plan, "pro");
-  assert.equal(accountOf({ auth_index: 7, name: "codex-x.json" }).label, "codex-x.json");
-  assert.equal(accountOf(item({ quota: { primary: { used_percent: 140 } } })).session.usedPercent, 100);
-});
-
-test("without CPA, without the plugin or with a refused key it says why, and the key goes only to loopback", async () => {
+test("without CPA or with a refused key it says why, and the key goes only to loopback", async () => {
   assert.deepEqual(await fixture({ connection: null }).quota.read(), { ok: true, available: false, reason: "CPA is not running" });
-  assert.match((await fixture({ status: 404 }).quota.read()).reason, /Plan limits aren.t tracked: Provider Manager no longer reads account quota/);
   assert.match((await fixture({ status: 401 }).quota.read()).reason, /refused the management key/);
+  assert.match((await fixture({ status: 500 }).quota.read()).reason, /HTTP 500/);
   const remote = fixture({ connection: { baseUrl: "http://cpa.example.com:8317", managementKey: KEY } });
   assert.equal((await remote.quota.read()).available, false);
   assert.equal(remote.calls.length, 0, "a non-loopback CPA never receives the key");
