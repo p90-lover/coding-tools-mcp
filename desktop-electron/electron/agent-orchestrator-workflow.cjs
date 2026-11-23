@@ -4834,17 +4834,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return chatPreferences.get().meteredReviews ? null : { action: "ask", unresolved: true, quotaBlocked: true, reason };
   }
 
-  const guardianApprovalFields = ["turn_id", "kind", "source", "tool", "command", "cwd", "path", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions", "decisions"];
+  const guardianApprovalFields = ["thread_id", "turn_id", "kind", "source", "tool", "command", "cwd", "path", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions", "decisions"];
+  const guardianApprovalSeal = approval => createHash("sha256").update(JSON.stringify({
+    ...Object.fromEntries(guardianApprovalFields.map(field => [field, approval[field]])),
+    availableDecisions: approval.request?.availableDecisions,
+  })).digest("hex");
   async function samePendingApproval(approval, verifyCurrent) {
     const observed = await harnessService().observe(approval.thread_id, approval.turn_id).catch(() => null);
     await verifyCurrent();
     const current = observed?.turnId === approval.turn_id && observed.approvals?.find(value => value.approval_id === approval.approval_id);
-    return Boolean(current) && guardianApprovalFields.every(field => JSON.stringify(current[field]) === JSON.stringify(approval[field]));
+    if (!current || (current.thread_id !== undefined && current.thread_id !== approval.thread_id)) return false;
+    return guardianApprovalSeal({ ...current, thread_id: approval.thread_id }) === guardianApprovalSeal(approval);
   }
   const guardianScope = (approver, approval, partial) => !partial && !approver.settings?.instructions?.trim() && approval.source === "ao"
     && approval.turn_id && !approval.guardianUnsupported && !approval.guardianRequiresHuman;
   const guardianShell = (approval) => approval.kind === "command" && ["Bash", "PowerShell"].includes(approval.tool)
     && typeof approval.cwd === "string" && path.isAbsolute(approval.cwd);
+  const guardianJudgeEnabled = () => {
+    const { modelJudges, meteredReviews } = chatPreferences.get();
+    return modelJudges && meteredReviews;
+  };
+  const guardianJudgeScope = (approver, approval) => !approver.autobot && approver.role !== "approver" && approver.settings?.auto_decide === true
+    && ["allow_once", "reject_once"].every(kind => approval.decisions?.some(option => option.kind === kind))
+    && (!Array.isArray(approval.request?.availableDecisions) || ["accept", "decline"].every(decision => approval.request.availableDecisions.includes(decision)));
 
   async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, blocked) {
     const manual = reason => ({ ...blocked, reason });
@@ -4858,7 +4870,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
     if (!outcome || !["allow", "deny"].includes(outcome.action)) {
       const result = manual(publicText(outcome?.reason || blocked.reason, 300));
-      return !signal?.aborted && outcome?.guardianUnavailable === true ? { ...result, guardianUnavailable: true } : result;
+      if (signal?.aborted) return result;
+      if (outcome?.guardianUnavailable === true) return { ...result, guardianUnavailable: true };
+      if (outcome?.guardianAssessment) return { ...result, guardianAssessment: outcome.guardianAssessment };
+      return result;
     }
     if (!await samePendingApproval(approval, verifyCurrent)) {
       return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
@@ -4866,20 +4881,57 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return { ...outcome, reason: publicText(outcome.reason, 300) };
   }
 
-  async function askApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock = stepClock(now)) {
+  async function askApproverSteps(input, clock = stepClock(now)) {
+    const { approver, mission, approval, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} } = input;
     check();
-    if (!approver.autobot && guardianScope(approver, approval, partial) && guardianShell(approval) && !gitPushRequest(approval.command)) {
-      const verdict = await reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, {
-        action: "ask", unresolved: true, guardianPending: true,
-        reason: "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.",
-      });
-      check();
-      logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true });
-      return verdict;
+    if (approver.autobot || !guardianScope(approver, approval, partial) || !guardianShell(approval) || gitPushRequest(approval.command)) {
+      return askCpaApproverSteps(input, clock);
     }
+    const judgeScope = Boolean(nativeGuardianReview) && guardianJudgeScope(approver, approval);
+    const beganWithConsent = judgeScope && judge && guardianJudgeEnabled();
+    const verdict = await reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, {
+      action: "ask", unresolved: true, guardianPending: true,
+      reason: "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.",
+    });
+    check();
+    logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true });
+    if (verdict.action !== "ask") return { ...verdict, guardianSeal: guardianApprovalSeal(approval) };
+    if (!judgeScope) return verdict;
+    const unsafe = verdict.guardianAssessment === "high-risk";
+    if (!unsafe && !verdict.guardianUnavailable && !["low-risk", "risk-unconfirmed"].includes(verdict.guardianAssessment)) return verdict;
+    const manual = { ...verdict, guardianWaitForJudge: true };
+    if (!beganWithConsent || !guardianJudgeEnabled()) return manual;
+    const changed = { ...verdict, reason: "The original request changed or is no longer pending. No new answer was sent." };
+    if (!await samePendingApproval(approval, verifyCurrent)) return changed;
+    if (!guardianJudgeEnabled()) return manual;
+    const guardedDecision = { guardianFallbackAdvice: verdict, guardianSeal: guardianApprovalSeal(approval) };
+    if (unsafe) return { action: "deny", reason: "Guardian identified high risk. The command was not approved.",
+      actor: "guardian", reason_code: "guardian_risk_unconfirmed", ...guardedDecision };
+    let stale = false;
+    const verifyExact = async () => {
+      if (!await samePendingApproval(approval, verifyCurrent)) {
+        stale = true;
+        throw new Error(changed.reason);
+      }
+    };
+    let answer;
+    try {
+      answer = await askCpaApproverSteps({ ...input, decide: true, judge: true, verifyCurrent: verifyExact }, clock, verdict);
+    } catch {
+      check();
+      if (stale) return changed;
+      answer = { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason: "Neither Guardian nor the model judge could confirm this command." };
+    }
+    if (answer === verdict || !guardianJudgeEnabled()) return manual;
+    return { ...answer, ...guardedDecision };
+  }
+
+  async function askCpaApproverSteps({ approver, mission, approval, decide = false, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} }, clock, guardianFallback = null) {
+    check();
     if (approver.autobot && !autobotMayMeter()) return { action: "ask", unresolved: true, quotaBlocked: true, reason: "Autobot model fallback is off." };
-    const quotaBlocked = quotaReviewBlocked();
-    if (quotaBlocked) return quotaBlocked;
+    const blocked = () => guardianFallback && !guardianJudgeEnabled() ? guardianFallback : quotaReviewBlocked();
+    const beforeReview = blocked();
+    if (beforeReview) return beforeReview;
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
     const catalog = await models();
@@ -4984,6 +5036,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       'Answer with JSON only: {"risk_level":"low"|"medium"|"high"|"critical","user_authorization":"high"|"medium"|"low"|"unknown","outcome":"allow"|"deny","rationale":"<one sentence for the user>"}.',
       // Asked again after an "ask" (an older reviewer's answer, or a card's own model): this time it decides.
       decide ? "Nobody else will look at this request: the outcome must be allow or deny." : "",
+      guardianFallback ? `${guardianFallback.guardianUnavailable ? "Native Guardian was unavailable."
+        : guardianFallback.guardianAssessment === "low-risk" ? "Native Guardian did not confirm clear authorization."
+          : "Native Guardian did not confirm low risk and clear user authorization."} Review the exact command, its working folder, and the user's request independently. Allow only if the command is low risk and the user's authorization is high; otherwise deny.` : "",
       partial ? "The request above is cut short: it was too long to show whole. Judge from what is shown; deny unless what is shown is enough to tell it is safe." : "",
     ].filter(Boolean).join("\n");
     // The evidence goes last, so the rules above stay first, and it is marked as data: a tool's
@@ -4996,6 +5051,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await verifyCurrent();
     clock.mark("verify");
     check();
+    const afterContext = blocked();
+    if (afterContext) return afterContext;
     const known = reviewVerdicts.get(verdictKey);
     if (known && now() - known.at < REVIEW_CACHE_MS && (known.action === "allow" || !evidence)) {
       logger?.info?.("ao.approval_reviewed", { cached: true, action: known.action, tool: String(approval.tool ?? approval.kind ?? "").slice(0, 80),
@@ -5006,10 +5063,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let failure = null;
     for (const model of candidates) {
       if (approver.autobot && !autobotMayMeter()) return { action: "ask", unresolved: true, quotaBlocked: true, reason: "Autobot model fallback is off." };
-      if (quotaReviewBlocked()) return quotaReviewBlocked();
+      const beforeCall = blocked();
+      if (beforeCall) return beforeCall;
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
+        const modelSignal = guardianFallback && signal ? AbortSignal.any([signal, AbortSignal.timeout(left)]) : signal ?? AbortSignal.timeout(left);
         const response = await chatCompletion(baseUrl, key,
           // Codex's policy first, then this request (Codex puts the policy in the session's developer message).
           // Room for a reasoning model to think first: at 400 a fallback reviewer (OpenCode Go's GPT-6
@@ -5018,21 +5077,27 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           // to the person. The answer itself is one short JSON line.
           { model, temperature: 0, max_tokens: 2000,
             ...(reviewEfforts[model] ? { reasoning_effort: reviewEfforts[model] } : {}),
-            messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }, signal ?? AbortSignal.timeout(left));
+            messages: [{ role: "user", content: `${instructions}\n\n${fullPrompt}` }] }, modelSignal);
         check();
         if (!response.ok) throw await modelCallFailure(response, `Command approver ${model} returned HTTP ${response.status}`);
         const choice = (await response.json())?.choices?.[0];
         check();
-        if (quotaReviewBlocked()) return quotaReviewBlocked();
+        const afterCall = blocked();
+        if (afterCall) return afterCall;
         const text = String(choice?.message?.content ?? "");
         if (!text.includes("{")) throw new Error(`Command approver ${model} gave no answer${choice?.finish_reason === "length" ? " (it ran out of tokens)" : ""}`);
         const answer = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
-        const decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
+        let decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
+        if (guardianFallback && decision.action !== "deny" && (decision.action !== "allow" || answer.risk_level !== "low" || answer.user_authorization !== "high")) {
+          decision = { action: "deny", reason: "The model judge did not confirm low risk and clear user authorization." };
+        }
         clock.mark("model");
         await verifyCurrent();
         check();
+        const beforeVerdict = blocked();
+        if (beforeVerdict) return beforeVerdict;
         reviewerAnswered(model);
         const reason = String(decision.reason || "").slice(0, 300);
         // The reason otherwise lived only in the run's latest note, so a wrong deny could not be traced.
@@ -5050,7 +5115,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         reviewerFailed(model, error);
       }
     }
-    if (quotaReviewBlocked()) return quotaReviewBlocked();
+    const afterReview = blocked();
+    if (afterReview) return afterReview;
     throw failure;
   }
 
@@ -5156,7 +5222,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const advice = approverAdvice.get(approval.approval_id);
     // "Let the model judge": an answer that may not have reached AO is sent again (resendDue), so
     // the card shows it being reviewed, not Allow/Deny for the person, until its sends run out.
-    if (resendPending(advice)) return false;
+    if (resendPending(advice) || (advice?.guardianWaitForJudge && guardianJudgeEnabled())) return false;
     // Answered and sent, while AO still lists it for a moment: not the person's. Old enough to be
     // overdue, it read "waiting for approval · waiting for you for 8m 22s" with Continue (restart
     // the agent) offered, a second after "Let the model judge" allowed it (seen live 2026-11-09).
@@ -5193,6 +5259,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const again = !decided.autobot && chatPreferences.get().modelJudges && sends < DELIVERY_TRIES;
     return { action: "ask", unresolved: true, unsent: decided.action, sends, uncertain, unsentAt: now(),
       decided: { action: decided.action, reason: decided.reason, actor: decided.actor, reason_code: decided.reason_code, unavailable: decided.unavailable,
+        guardianSeal: decided.guardianSeal, guardianFallbackAdvice: decided.guardianFallbackAdvice,
         ...(decided.autobot ? { autobot: true } : {}) },
       reason: again ? `${uncertain ? "The reviewer's answer may not have reached the agent" : "The reviewer's answer couldn't be sent"};`
         + ` it is sent again while the request still waits (Let the model judge is on). It said ${decided.action}: ${decided.reason}`
@@ -5223,15 +5290,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /**
    * Whether a request is screened (again): one never screened, or one the reviewer left to the
    * person before "Let the model judge" was on. Turning the judge on from that request's own card
-   * did nothing: its "ask" was kept, so no pass looked at it again and the turn waited for an hour
-   * (seen live 2026-11-04, a `git -C … push`). Quota consent can reopen an unsupported request,
-   * not an undecided Guardian request. A decided answer is never replaced; if delivery failed,
-   * it is sent again only when due (resendDue).
+   * did nothing: its "ask" was kept, so no pass looked at it again. Only an eligible Guardian
+   * request left pending before both settings were on can be reopened by those settings.
+   * A decided answer is only resent when delivery failed and a resend is due.
    */
   const rescreen = (advice) => !advice || resendDue(advice)
-    || (advice.action === "ask" && !advice.resolved && !advice.unsent && !advice.guardianPending
-      && (advice.quotaBlocked ? (advice.autobot ? autobotMayMeter() : chatPreferences.get().meteredReviews)
-        : !advice.judged && chatPreferences.get().modelJudges));
+    || (advice.action === "ask" && !advice.resolved && !advice.unsent
+      && (advice.guardianPending ? advice.guardianWaitForJudge && guardianJudgeEnabled()
+        : advice.quotaBlocked ? (advice.autobot ? autobotMayMeter() : chatPreferences.get().meteredReviews)
+          : !advice.judged && chatPreferences.get().modelJudges));
   async function screenApprovals(workspaceId, runId, mission, active, observed) {
     for (const [id, job] of [...screening]) if (now() - job.at > SCREEN_PASS_STALE_MS) screening.delete(id);
     const jobs = [];
@@ -5247,7 +5314,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // edit, which flooded the reviewer and the person, and the reviewer never saw the plan.
         const screened = !["question", "plan"].includes(approval?.kind) && (approval?.kind === "command" || approval?.source === "ao")
           && (!approver.autobot || approval.source === "ao");
-        if (!screened || !approval.approval_id || !rescreen(approverAdvice.get(approval.approval_id)) || screening.has(approval.approval_id)) continue;
+        const previous = approverAdvice.get(approval.approval_id);
+        if (!screened || !approval.approval_id || !rescreen(previous) || screening.has(approval.approval_id)) continue;
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         // The same request twice at once (an agent's parallel calls) is reviewed once: the second
@@ -5257,7 +5325,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (screening.size + jobs.length >= REVIEW_CONCURRENCY) break;
         // Only the first try counts: a review that keeps hanging was restarted every stale pass, and
         // a deadline measured from the latest try was never reached.
-        if (!reviewStarted.has(approval.approval_id)) reviewStarted.set(approval.approval_id, now());
+        if (previous?.guardianWaitForJudge) approverAdvice.delete(approval.approval_id);
+        if (previous?.guardianWaitForJudge || !reviewStarted.has(approval.approval_id)) reviewStarted.set(approval.approval_id, now());
         if (reviewStarted.size > 500) reviewStarted.delete(reviewStarted.keys().next().value);
         jobs.push({ approver, node: active[index], approval, request });
       }
@@ -5273,6 +5342,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         && reviewAttempt(mission, job.node) === owner;
       screening.set(id, mark);
       try {
+        const twoStageReview = job.approver.autobot || (guardianJudgeEnabled() && guardianJudgeScope(job.approver, job.approval)
+          && guardianScope(job.approver, job.approval, false) && guardianShell(job.approval) && !gitPushRequest(job.approval.command));
         const said = await withinReview(review => {
           const verifyCurrent = async () => {
             review.check();
@@ -5288,7 +5359,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return screenOne(workspaceId, runId, mission, job, {
             ...review, verifyCurrent, sending: (advice, sends) => { mark.sending = advice; mark.sends = sends; },
           });
-        }, current, job.approver.autobot ? 2 * REVIEW_BUDGET_MS : REVIEW_BUDGET_MS);
+        }, current, twoStageReview ? 2 * REVIEW_BUDGET_MS : REVIEW_BUDGET_MS);
         if (said) note = said;
       } catch (error) {
         if (!current()) return;
@@ -5414,13 +5485,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     await verifyCurrent();
     check();
+    if (advice.guardianSeal) {
+      if (advice.guardianSeal !== guardianApprovalSeal(approval) || !await samePendingApproval(approval, verifyCurrent)) {
+        keepAdvice({ action: "ask", unresolved: true, guardianPending: true, reason: "The original request changed or is no longer pending. No new answer was sent." });
+        return null;
+      }
+      if (advice.guardianFallbackAdvice && !guardianJudgeEnabled()) {
+        keepAdvice({ ...advice.guardianFallbackAdvice, guardianWaitForJudge: true });
+        return null;
+      }
+    }
     if (advice.autobotMetered && !autobotMayMeter()) {
       advice = { action: "ask", unresolved: true, judged: true, autobot: true, reason: "Autobot model fallback was turned off." };
     }
     // The preference may change while the model or the owner check is in flight. "Let the model
     // judge": a decide pass that failed or still said "ask" is a deny, never the person's: the
-    // request sat on the card though the switch was on. An absent or inconclusive native review
-    // cannot be escalated to a paid review or turned into a denial.
+    // request sat on the card though the switch was on. A native hold not eligible for opted-in
+    // fallback must still wait for the person.
     const judgesNow = chatPreferences.get().modelJudges;
     if (advice.action === "ask" && advice.reviewed && !advice.quotaBlocked && !advice.guardianPending && judgesNow) {
       advice = { action: "deny", reviewed: true, reason: `The reviewer could not decide, so it was denied (Let the model judge is on): ${publicText(advice.reason || "no reason given", 200)}` };

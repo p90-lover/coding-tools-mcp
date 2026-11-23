@@ -8,13 +8,15 @@ const path = require("node:path");
 const { createAgentOrchestratorWorkflow } = require("../electron/agent-orchestrator-workflow.cjs");
 
 /** A Claude Code chat; `reviewer` "auto_review" is Approve for me, "user" is Ask for approval. */
-function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, approvalDetails = {} } = {}) {
+function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, approvalDetails = {},
+  modelVerdict = async () => ({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "fixture verdict" }),
+} = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer };
   const node = { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session", request_key: "key" } };
   const run = { id: "run", workspace_id: "ws", project_id: "task", revision: 1, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [node] };
   const calls = [], resolved = [];
-  const firstAnswer = Promise.withResolvers();
+  const firstAnswer = Promise.withResolvers(), firstModelCall = Promise.withResolvers();
   let command = "python tools/migrate.py --apply";
   const cwd = path.resolve(__dirname, "..");
   const workflow = createAgentOrchestratorWorkflow({
@@ -24,9 +26,10 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
     fetchImpl: async (url, init) => {
       calls.push(String(url));
+      if (String(url).endsWith("/chat/completions")) firstModelCall.resolve();
       return { ok: true, json: async () => String(url).endsWith("/models")
         ? { data: [{ id: "codex-auto-review" }, { id: "test-model" }] }
-        : { choices: [{ message: { content: JSON.stringify({ outcome: "allow", rationale: "fixture verdict" }) } }] } };
+        : { choices: [{ message: { content: JSON.stringify(await modelVerdict(JSON.parse(init.body))) } }] } };
     },
     requestHeadless: async (endpoint, body) => endpoint.endsWith("/read") ? { ok: true, runs: [run] }
       : body?.tool === "workflow_list" ? { ok: true, operation: { state: "completed", result: { ok: true, task: { description: "I authorize the migration in this test workspace" } } } }
@@ -44,7 +47,7 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
       },
     },
   });
-  return { workflow, calls, resolved, route, firstAnswer: firstAnswer.promise,
+  return { workflow, calls, resolved, route, firstAnswer: firstAnswer.promise, firstModelCall: firstModelCall.promise,
     command: value => { command = value; },
     screen: () => workflow.reviewToolCall({ workspaceId: "ws", session: "session", tool: "computer_action", args: { action: "click" } }),
     observe: async () => {
@@ -112,6 +115,84 @@ test("enabling quota reviews mid-Guardian cannot replace its decision or spend o
       assert.deepEqual(state.calls, []);
     } finally { guardian.resolve(null); state.workflow.dispose(); }
   });
+});
+
+test("an eligible Guardian fallback stays in review and removes the card after the harness accepts the answer", { timeout: 5_000 }, async () => {
+  const verdict = Promise.withResolvers();
+  const state = fixture(undefined, {
+    nativeGuardianReview: async () => ({ action: "ask", guardianAssessment: "risk-unconfirmed" }),
+    modelVerdict: ({ messages }) => {
+      assert.match(messages[0].content, /Guardian did not confirm low risk and clear user authorization/);
+      assert.match(messages[0].content, /Allow only if the command is low risk and the user's authorization is high; otherwise deny/);
+      return verdict.promise;
+    },
+  });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    const pending = await state.observe();
+    assert.equal(pending[0]?.awaiting_review, true, "the chat must not render an Allow/Deny prompt while the fallback reviews");
+    await state.firstModelCall;
+    assert.equal((await state.observe())[0]?.awaiting_review, true);
+    assert.deepEqual(state.resolved, []);
+    assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, 1);
+    verdict.resolve({ outcome: "allow", risk_level: "low", user_authorization: "high" });
+    await state.firstAnswer;
+    assert.deepEqual(await state.observe(), [], "acknowledgment clears the card even if the harness snapshot still lists it");
+    assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
+  } finally { verdict.resolve({ outcome: "deny" }); state.workflow.dispose(); }
+});
+
+test("switching on Model Judge rechecks an eligible waiting request only with quota consent", { timeout: 5_000 }, async () => {
+  const state = fixture(undefined, { nativeGuardianReview: async () => ({ action: "ask", guardianAssessment: "low-risk" }) });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: false, meteredReviews: true });
+    assert.equal((await state.observe())[0]?.recommendation?.guardianPending, true);
+    assert.deepEqual(state.calls, []);
+    await state.workflow.call("chat_model_judges", { enabled: true });
+    await state.observe();
+    await state.firstAnswer;
+    assert.deepEqual(await state.observe(), []);
+    assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
+    assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, 1);
+  } finally { state.workflow.dispose(); }
+});
+
+for (const [name, native, modelVerdict, expectedCalls] of [
+  ["native denial", { action: "deny", actor: "guardian" }, undefined, 0],
+  ["high native risk", { action: "ask", guardianAssessment: "high-risk" }, undefined, 0],
+  ["unconfirmed native risk the model also cannot clear", { action: "ask", guardianAssessment: "risk-unconfirmed" }, async () => ({ outcome: "ask", risk_level: "medium", user_authorization: "unknown" }), 1],
+  ["CPA would allow with unclear authorization", { action: "ask", guardianAssessment: "low-risk" }, async () => ({ outcome: "allow", risk_level: "low", user_authorization: "unknown" }), 1],
+]) test(`Model Judge does not approve ${name}`, { timeout: 5_000 }, async () => {
+  const state = fixture(undefined, { nativeGuardianReview: async () => native, modelVerdict });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    await state.observe();
+    await state.firstAnswer;
+    assert.deepEqual(await state.observe(), []);
+    assert.deepEqual(state.resolved, [["permission-1", "no"]]);
+    assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, expectedCalls);
+  } finally { state.workflow.dispose(); }
+});
+
+for (const invalidation of ["consent revoked", "request changed"]) test(`a paid Guardian fallback never answers after ${invalidation}`, { timeout: 5_000 }, async () => {
+  const verdict = Promise.withResolvers();
+  const state = fixture(undefined, {
+    nativeGuardianReview: async () => ({ action: "ask", guardianUnavailable: true }),
+    modelVerdict: () => verdict.promise,
+  });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    await state.observe();
+    await state.firstModelCall;
+    assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, 1);
+    if (invalidation === "consent revoked") await state.workflow.call("chat_model_judges", { meteredReviews: false });
+    else state.command("python tools/migrate.py --different");
+    verdict.resolve({ outcome: "allow", risk_level: "low", user_authorization: "high" });
+    const pending = await state.observe();
+    assert.equal(pending[0]?.recommendation?.guardianPending, true, "the invalidated verdict was discarded, not left in flight");
+    assert.deepEqual(state.resolved, []);
+    assert.equal(state.calls.filter(url => url.endsWith("/chat/completions")).length, 1);
+  } finally { verdict.resolve({ outcome: "deny" }); state.workflow.dispose(); }
 });
 
 test("a pending request outside Guardian still needs explicit CPA consent", { timeout: 5_000 }, async () => {

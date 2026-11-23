@@ -28,12 +28,15 @@ test("the Claude hook supplies context once for the matching unchanged call, nev
   assert.deepEqual(takeGuardianContext(session, "one", "PowerShell", tool_input, true, 2000), { requiresHuman: true });
 });
 
-async function fixture(t, { badCall = false, asksForTool = false, authKind = "chatgpt", assessment = { outcome: "allow", riskLevel: "low", userAuthorization: "high" } } = {}) {
+async function fixture(t, { badCall = false, asksForTool = false, authKind = "chatgpt", assessment = { outcome: "allow", riskLevel: "low", userAuthorization: "high" }, holdReview, onExecutable } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "guardian-review-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const requests = [];
   let childOptions;
-  const review = createGuardianReview({ platform: "win32", stateDir: path.join(root, "state"), executable: () => path.join(root, "codex.exe"),
+  const review = createGuardianReview({ platform: "win32", stateDir: path.join(root, "state"), executable: () => {
+    onExecutable?.();
+    return path.join(root, "codex.exe");
+  },
     env: { OPENAI_API_KEY: "unused", CODEX_HOME: "not-the-reviewer-home", ANTHROPIC_API_KEY: "unused" },
     prepareAccount: async () => ({ accessToken: "fixture", chatgptAccountId: "fixture-account" }),
     spawnProcess(file, args, options) {
@@ -59,6 +62,7 @@ async function fixture(t, { badCall = false, asksForTool = false, authKind = "ch
         else if (method === "thread/guardianReview") {
           if (asksForTool) return deliver({ id: 7654, method: "item/commandExecution/requestApproval", params: {} });
           result = { callId: badCall ? "different-call" : callId, assessment };
+          if (holdReview) return holdReview(options).then(() => deliver({ id, result }));
         }
         deliver({ id, result });
       });
@@ -84,6 +88,38 @@ test("native Guardian reviews the recorded command in an isolated thread and nev
   assert.equal(items[0].role, "user");
   assert.equal(JSON.parse(items[1].arguments).cmd, request.approval.command);
   assert.deepEqual(requests.map(entry => entry.method), ["initialize", "initialized", "account/login/start", "account/read", "thread/start", "thread/inject_items", "thread/guardianReview"]);
+  assert.deepEqual(await fs.readdir(path.join(root, "state")), []);
+});
+
+test("Guardian reviews four requests in parallel and waits for a slot without opening cancelled work", { timeout: 5000 }, async (t) => {
+  const wave = Promise.withResolvers(), release = Promise.withResolvers(), validated = Promise.withResolvers();
+  const children = [];
+  let eligible = 0;
+  const { review, request, requests, root } = await fixture(t, {
+    onExecutable: () => { if (++eligible === 6) validated.resolve(); },
+    holdReview: (opts) => {
+      children.push(opts.cwd);
+      if (children.length === 4) wave.resolve();
+      return release.promise;
+    },
+  });
+  const cancel = new AbortController();
+  const ask = (i, signal) => review({ ...request, signal, approval: { ...request.approval, command: `Write-Output 'request ${i}'` } });
+  const replies = Array.from({ length: 4 }, (_, i) => ask(i));
+  try {
+    await Promise.race([wave.promise, ...replies]);
+    assert.equal(children.length, 4, "overlapping requests must not be dropped");
+    assert.equal(new Set(children).size, 4, "each concurrent review has a separate profile");
+    replies.push(ask(4, cancel.signal), ask(5));
+    await validated.promise;
+    assert.equal(children.length, 4, "additional requests must wait until there is a slot");
+    cancel.abort();
+    assert.equal((await replies[4]).action, "ask");
+  } finally { release.resolve(); await Promise.all(replies); }
+  assert.deepEqual((await Promise.all(replies)).map(result => result.action), ["allow", "allow", "allow", "allow", "ask", "allow"]);
+  assert.equal(new Set(children).size, 5);
+  assert.deepEqual(requests.filter(entry => entry.method === "thread/inject_items").map(entry =>
+    JSON.parse(entry.params.items.at(-1).arguments).cmd).sort(), [0, 1, 2, 3, 5].map(i => `Write-Output 'request ${i}'`));
   assert.deepEqual(await fs.readdir(path.join(root, "state")), []);
 });
 
