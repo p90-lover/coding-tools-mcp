@@ -1992,9 +1992,12 @@ function createChatAgentTools({
       });
     }
     let current;
-    try { current = await computerControl.status(); } catch { current = { state: "stopped" }; }
+    try { current = await computerControl.status(); } catch { current = null; }
     const controlled = current?.state && current.state !== "stopped" ? computerControl.controlled() : null;
     if (name === "computer_select_window") {
+      const cancelled = () => failedCall("This chat's tool call was cancelled.", { execution_status: "not_started" });
+      if (signal?.aborted) return cancelled();
+      if (!current?.state) return failedCall("Could not read desktop control status; no selection was started.");
       let target = null;
       try { target = (await computerControl.targets()).find((item) => item.window_id === Number(args.window_id) && item.pid === Number(args.pid)) ?? null; } catch { target = null; }
       if (!target) return failedCall("That window is not open any more, or it is this app's own; call computer_list_windows again.");
@@ -2007,13 +2010,28 @@ function createChatAgentTools({
       if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
       const permission = grantedApp(target.appName, answer);
       const guide = await guides.brief(target.app);
-      // The window already under control: headless selects it (and brings it forward when asked);
-      // without a session to name, the agent is given the current one.
-      if (controlled && controlled.window_id === target.window_id && controlled.pid === target.pid) {
-        return args.session_id ? null : plainResult({ ...current, app: target.appName, permission, guide, note: "Control is already on for this window; use this session_id." });
-      }
+      if (signal?.aborted) return cancelled();
+      const activate = args.activate === true;
+      const sameWindow = controlled?.window_id === target.window_id && controlled?.pid === target.pid;
       try {
-        const status = await computerControl.start({ workspaceId: entry.workspaceId, target, agent: agentName(entry), model: await pillModel(entry) });
+        const model = sameWindow ? null : await pillModel(entry);
+        if (signal?.aborted) return cancelled();
+        const latest = await computerControl.status();
+        if (signal?.aborted) return cancelled();
+        const owner = latest?.state !== "stopped" ? computerControl.controlled() : null;
+        if (latest?.state !== current.state || latest?.session_id !== current.session_id
+          || owner?.window_id !== controlled?.window_id || owner?.pid !== controlled?.pid
+          || (latest?.target && (latest.target.window_id !== owner?.window_id || latest.target.pid !== owner?.pid))) {
+          return failedCall("Desktop control changed during selection. Check computer_status before selecting again.",
+            { code: "CONTROL_SESSION_CHANGED", execution_status: "not_started" });
+        }
+        if (sameWindow) {
+          if (!latest.session_id) return failedCall("The selected window no longer has a control session.");
+          if (activate && !args.session_id) args.session_id = latest.session_id;
+          return args.session_id ? null : plainResult({ ...latest, app: target.appName, permission, guide, note: "Control is already on for this window; use this session_id." });
+        }
+        const status = await computerControl.start({ workspaceId: entry.workspaceId, target, agent: agentName(entry), model, activate, signal,
+          expectedStatus: { state: latest.state, session_id: latest.session_id } });
         return plainResult({ ...status, app: target.appName, permission, guide, note: "Control is on for this window; use this session_id with the other computer_* tools." });
       } catch (error) { return failedCall(`Control did not start: ${errorMessage(error)}`); }
     }

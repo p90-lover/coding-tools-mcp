@@ -2726,7 +2726,7 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
       if (answer.allowed) allowed.add(`${request.workspaceId}:${request.aoSession}:${request.target.app}`);
       return answer;
     },
-    start: async ({ target, agent, model }) => { starts.push({ ...target, agent, model }); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
+    start: async ({ target, agent, model, activate }) => { starts.push({ ...target, agent, model, activate }); state = "active"; controlled = target; return { state, session_id: "lease-1" }; },
     // The control pill: each call it names, with how many headless calls had gone out when it began and ended.
     activity: ({ agent, model, tool, waiting }) => {
       const shown = { agent, model, tool, waiting, began: calls.length, proceeded: null, ended: null, outcome: null };
@@ -2755,8 +2755,8 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
     assert.equal(picked.isError, false);
     assert.equal(asks.length, 1);
     assert.deepEqual([asks[0].agent, asks[0].target.app, asks[0].workspaceId, asks[0].aoSession], ["Claude Code", "notepad.exe", "ws1", "ao-1"]);
-    assert.deepEqual(starts.map((item) => [item.window_id, item.agent, item.model]), [[7, "Claude Code", "cpa/gpt-6.1-sol"]],
-      "control starts on the window it asked for, the pill naming the agent and its model");
+    assert.deepEqual(starts.map((item) => [item.window_id, item.agent, item.model, item.activate]), [[7, "Claude Code", "cpa/gpt-6.1-sol", false]],
+      "control starts on the window it asked for without activating by default");
     assert.equal(picked.structuredContent.session_id, "lease-1");
     assert.equal(picked.structuredContent.app, "Notepad");
 
@@ -2783,6 +2783,11 @@ test("computer use asks to use the app, as Codex does: the agent names a window,
 
     const gone = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 99, pid: 1 });
     assert.match(gone.content[0].text, /not open any more/);
+
+    answer = { allowed: true };
+    const activated = await callTool(chat.url, chat.auth, "computer_select_window", { window_id: 8, pid: 80, activate: true });
+    assert.equal(activated.isError, false);
+    assert.deepEqual(starts.map((item) => [item.window_id, item.activate]), [[7, false], [8, true]]);
   } finally { await tools.close(); tree.cleanup(); }
 });
 
@@ -2949,6 +2954,9 @@ test("computer use asks on a card in the chat, Codex's own, and keeps Always all
       return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: false, permission_mode: "p", approval_mode: "a", tool_profile: "t" }] };
     }
     if (endpoint === "/api/v1/computer/start") return { status: { state: "active", session_id: "lease-1" } };
+    if (endpoint === "/api/v1/computer/status?heartbeat=true") {
+      return { status: { state: "active", session_id: "lease-1", overlay_ready: true } };
+    }
     return {};
   };
   class FakeWindow {
@@ -2959,7 +2967,7 @@ test("computer use asks on a card in the chat, Codex's own, and keeps Always all
     isVisible() { return true; }
   }
   const make = () => createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1], onRequests: (list) => published.push(list), approvalsFile,
-    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+    processAlive: () => true, screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
   const control = make();
   const settle = async () => { for (let tick = 0; tick < 50 && !control.requests().length; tick += 1) await new Promise(setImmediate); };
   try {
@@ -3091,12 +3099,12 @@ test("the control bar's Stop reaches the app on a data: page: it renames the pag
   }
   const request = async (endpoint, body) => {
     calls.push(endpoint);
-    if (endpoint === "/api/v1/computer/targets") return { targets: [{ window_id: 7, pid: 70, title: "Calculator" }] };
-    if (endpoint === "/api/v1/workspaces") return { workspaces: [{ id: "ws", name: "proj", screen_capture_enabled: true }] };
+    if (endpoint === "/api/v1/computer/start") return { status: { state: "active", session_id: "lease" } };
+    if (endpoint === "/api/v1/computer/status?heartbeat=true") return { status: { state: "active", session_id: "lease", overlay_ready: true } };
     return {};
   };
   const control = createComputerControl({ request, BrowserWindow: FakeWindow, ownPids: () => [1],
-    screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
+    processAlive: () => true, screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1000, height: 800 } }) } });
   try {
     // The bar opens once the person has let the chat use the app (askApp's card, tested above).
     await control.start({ workspaceId: "ws", target: { window_id: 7, pid: 70, title: "Calculator", app: "calc.exe" } });
