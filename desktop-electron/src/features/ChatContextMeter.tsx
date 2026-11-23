@@ -43,7 +43,9 @@ export type CpaQuotaAccount = {
   resumesAt?: number | null; session: QuotaWindow | null; week: QuotaWindow | null; credits?: QuotaCredits | null;
   checkedAt: number | null; error: string | null;
 };
-type CpaQuota = { available: boolean; reason?: string; accounts?: CpaQuotaAccount[] };
+/** A provider's whole pool; the account list stops at 12 per provider. */
+type CpaPool = { total: number; enabled: number; ready: number; resumesAt: number | null };
+type CpaQuota = { available: boolean; reason?: string; accounts?: CpaQuotaAccount[]; pools?: Partial<Record<"codex" | "claude", CpaPool>> };
 const POLL_MS = 4_000;
 const QUOTA_POLL_MS = 30_000;
 const DETAIL_POLL_MS = 10_000;
@@ -101,15 +103,17 @@ function Limit({ name, short, used, resetsAt, now }: { name: string; short: stri
 
 type Chip = { id: string; label: string; state: CpaAccountState; title: string };
 /** The routing pool: a dot per account or key in its state; picking an account shows its limits. */
-function Chips({ label, chips, selected, onSelect }: { label: string; chips: Chip[]; selected?: string; onSelect?: (id: string) => void }) {
+function Chips({ label, chips, unlisted = 0, selected, onSelect }: { label: string; chips: Chip[]; unlisted?: number; selected?: string; onSelect?: (id: string) => void }) {
   const shown = chips.slice(0, MAX_CHIPS);
   const rest = chips.slice(MAX_CHIPS);
+  const more = rest.length + unlisted;
+  const moreTitle = [...rest.map((chip) => chip.title), ...(unlisted ? [`${unlisted} more not listed`] : [])].join("\n");
   return <div className="cx-ctx-chips" role="group" aria-label={label}>
     {shown.map((chip) => onSelect
       ? <button key={chip.id} type="button" className={`is-${chip.state}`} aria-pressed={chip.id === selected} title={chip.title}
         onClick={() => onSelect(chip.id)}><i />{chip.label}</button>
       : <span key={chip.id} className={`is-${chip.state}`} title={chip.title}><i />{chip.label}</span>)}
-    {rest.length ? <span className="is-more" title={rest.map((chip) => chip.title).join("\n")}>+{rest.length}</span> : null}
+    {more ? <span className="is-more" title={moreTitle}>+{more}</span> : null}
   </div>;
 }
 const shortName = (label: string) => (label.includes("@") ? label.slice(0, label.indexOf("@")) : label) || label;
@@ -165,7 +169,9 @@ export function ContextPanelContent({ sessionId, agentLabel, model, launchedWind
   const planProvider = planProviderOf(provider);
   const cline = isClineModel(provider);
   const accounts = planProvider && quota?.available ? (quota.accounts ?? []).filter((item) => (item.provider ?? "codex") === planProvider) : [];
+  const whole = planProvider && quota?.available ? quota.pools?.[planProvider] : undefined;
   const ready = accounts.filter((item) => accountState(item) === "ready");
+  const readyCount = whole?.ready ?? ready.length;
   const account = accounts.find((item) => item.id === accountId) ?? ready[0] ?? accounts[0];
   // The harness's own reading (Codex's app-server reports the limits of the account it signed in with).
   const limits = snapshot?.rateLimits;
@@ -183,17 +189,18 @@ export function ContextPanelContent({ sessionId, agentLabel, model, launchedWind
   const next = nextWindow && nextWindow !== usage?.contextWindow ? nextWindow : null;
   const busy = /busy|running|working/i.test(snapshot?.controller ?? "");
   const balance = account?.credits;
-  const soonest = Math.min(...accounts.filter((item) => accountState(item) === "limited" && item.resumesAt).map((item) => item.resumesAt!));
+  const soonest = whole ? whole.resumesAt ?? NaN
+    : Math.min(...accounts.filter((item) => accountState(item) === "limited" && item.resumesAt).map((item) => item.resumesAt!));
   const accountChips: Chip[] = accounts.map((item) => {
     const state = accountState(item);
     const back = state === "limited" && item.resumesAt ? resetLabel(item.resumesAt, now).replace(/^Resets/, "Back") : "";
     return { id: item.id, label: shortName(item.label), state, title: [item.label, item.plan, back || STATE_TEXT[state], item.error].filter(Boolean).join(" · ") };
   });
   // The pool is what CPA can route to: a switched-off account or key keeps its chip but isn't counted.
-  const enabled = accounts.filter((item) => accountState(item) !== "disabled").length;
+  const enabled = whole?.enabled ?? accounts.filter((item) => accountState(item) !== "disabled").length;
   const enabledKeys = keys.filter((key) => key.enabled && key.state !== "disabled");
   const pool = cline ? (enabledKeys.length ? `${enabledKeys.filter((key) => KEY_STATE[key.state] === "ready").length}/${enabledKeys.length} keys ready` : null)
-    : !reported.length && enabled > 1 ? `${ready.length}/${enabled} ready` : null;
+    : !reported.length && enabled > 1 ? `${readyCount}/${enabled} ready` : null;
   const showDetails = Boolean(usage || (detail && scale) || serving.length || snapshot?.mcpServers.length || next || snapshot?.carriedFrom);
   return <>
     <header className="cx-ctx-head">
@@ -204,7 +211,7 @@ export function ContextPanelContent({ sessionId, agentLabel, model, launchedWind
       <div className="cx-ctx-provider-head">
         <strong>{name}</strong>
         {plan ? <span className="cx-ctx-plan">{plan}</span> : null}
-        {pool ? <small className={`cx-ctx-pool${!cline && !ready.length ? " is-out" : ""}`} title="Accounts CPA can route this model's requests to now">{pool}</small> : null}
+        {pool ? <small className={`cx-ctx-pool${!cline && !readyCount ? " is-out" : ""}`} title="Accounts CPA can route this model's requests to now">{pool}</small> : null}
       </div>
       {planView ? <>
         {reported.length ? reported.map((row) => <Limit key={row.name} name={row.name} short={row.short} used={row.used!} now={now}
@@ -213,11 +220,12 @@ export function ContextPanelContent({ sessionId, agentLabel, model, launchedWind
           {account?.week ? <Limit name="Weekly" short="Week" used={account.week.usedPercent} resetsAt={account.week.resetsAt} now={now} /> : null}
           {!account?.session && !account?.week ? <p className="cx-ctx-meta">{!quota ? "Checking limits…" : !quota.available ? quota.reason || "Limits unavailable"
             : account?.error || "Limits show after this account's next reply"}</p> : null}
-          {accounts.length && !ready.length ? <p className="cx-ctx-meta is-warn">{Number.isFinite(soonest)
+          {accounts.length && !readyCount ? <p className="cx-ctx-meta is-warn">{Number.isFinite(soonest)
             ? `All accounts at limit · first back in ${resetShort(soonest, now)}` : "No account can take requests"}</p> : null}
           {balance && (balance.unlimited || balance.balance !== null) ? <div className="cx-ctx-row" title={balance.overageReached ? "Overage limit reached" : "Pays for requests once a limit is full"}>
             <span>Credits</span><b>{balance.unlimited ? "Unlimited" : amount(balance.balance!)}</b></div> : null}
-          {accountChips.length ? <Chips label="Quota account" chips={accountChips} selected={account?.id} onSelect={setAccountId} /> : null}
+          {accountChips.length ? <Chips label="Quota account" chips={accountChips} unlisted={Math.max(0, (whole?.total ?? 0) - accounts.length)}
+            selected={account?.id} onSelect={setAccountId} /> : null}
         </>}
       </> : cline ? (keys.length ? <Chips label="Cline keys" chips={keys.map((key) => ({ id: key.name, label: key.name, state: key.enabled ? KEY_STATE[key.state] : "disabled",
         title: `${key.name} · ${key.active ? "In use" : key.state}${key.lastError ? ` · ${key.lastError}` : ""}` }))} />

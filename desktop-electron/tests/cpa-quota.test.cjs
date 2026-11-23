@@ -128,6 +128,18 @@ test("accounts CPA can use come first, so many signed-out ones cannot hide them 
   assert.deepEqual(accounts.filter((account) => account.provider === "claude").map((account) => account.id), ["c1"], "another provider is not crowded out");
 });
 
+test("the routing pool's totals count every account, including those past the list's cap", async () => {
+  // Seen live 2026-11-23: 13+ Codex accounts served requests, the list held 12 ready ones, and the
+  // panel said "12/12 ready" while one more failed 55 of its 57 requests.
+  const signedOut = Array.from({ length: 12 }, (_, at) => codex({ auth_index: `out${at}`, email: `out${at}@example.com`, status: "error", status_message: "HTTP 401" }));
+  const full = codex({ auth_index: "full", email: "full@example.com" }, { "X-Codex-Primary-Used-Percent": "100" });
+  const files = [...signedOut, codex({ auth_index: "off", disabled: true }), full, codex({ auth_index: "new", quota: undefined }), codex({ auth_index: "plus" }), claude()];
+  const { accounts, pools } = await fixture({ files }).quota.read();
+  assert.equal(accounts.filter((account) => account.provider === "codex").length, 12);
+  assert.deepEqual(pools.codex, { total: 16, enabled: 15, ready: 2, resumesAt: Number(seconds(NOW + 3_600_000)) * 1000 }, "a switched-off account is not in the pool");
+  assert.deepEqual(pools.claude, { total: 1, enabled: 1, ready: 1, resumesAt: null });
+});
+
 test("a read is cached for a short while per connection", async () => {
   const { quota, calls, advance } = fixture();
   await quota.read();

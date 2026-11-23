@@ -65,6 +65,17 @@ test("Claude sign-in accounts show their limits too, and a pool with nobody read
   assert.match(render({}), /Checking limits…/);
 });
 
+test("the pool counts every account CPA has, not only the ones the reader lists", () => {
+  const listed = Array.from({ length: 12 }, (_, at) => codexAccount({ id: `a${at}`, label: `a${at}@example.com` }));
+  const html = render({ quota: { available: true, accounts: listed, pools: { codex: { total: 14, enabled: 14, ready: 12, resumesAt: null } } } });
+  assert.match(html, /cx-ctx-pool"[^>]*>12\/14 ready/, "two failing accounts past the list still count");
+  assert.match(html, /class="is-more" title="[^"]*2 more not listed">\+8</, "6 chips shown, 6 listed and 2 unlisted behind +8");
+  const out = codexAccount({ id: "a", state: "limited", paused: true, resumesAt: NOW + 90 * 60000 });
+  const back = render({ quota: { available: true, accounts: [out], pools: { codex: { total: 3, enabled: 2, ready: 0, resumesAt: NOW + 20 * 60000 } } } });
+  assert.match(back, /cx-ctx-pool is-out[^>]*>0\/2 ready/);
+  assert.match(back, /All accounts at limit · first back in 20m/, "the soonest account back may be one not listed");
+});
+
 test("context panel shows reported limits before a first reply and honors the launched context window", () => {
   const limits = { primaryUsedPercent: 10, secondaryUsedPercent: 20, planLabel: "Max", primaryResetsInSeconds: null, secondaryResetsInSeconds: null };
   const waiting = render({ snapshot: { ...snapshot, usage: null, rateLimits: limits } });
