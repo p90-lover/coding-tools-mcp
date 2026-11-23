@@ -1,5 +1,32 @@
 import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
+import { knownQuotaReviews, onQuotaReviews, refreshQuotaReviews, setQuotaReviews } from "./quota-reviews";
+
+const QUOTA_DETAIL = "Reviews by a CPA model use your accounts' quota (Native Guardian uses a little too). While this is off, a request Guardian can't decide, or that needs a CPA review, waits for you even with Let the model judge on. Turned on, those waiting requests are reviewed at once. The same switch is in Settings > Chat";
+
+/**
+ * "Allow quota-based reviews", on a request that waits on it. Live 2026-11-23: with Let the model judge
+ * on and this off, cards read "Quota-based reviews are off" or "Native Guardian could not decide" and
+ * waited, while the only switch on them was the judge's, which was already on.
+ */
+export function QuotaReviewsToggle() {
+  const [on, setOn] = useState<boolean | null>(() => knownQuotaReviews());
+  useEffect(() => {
+    let live = true;
+    const unsubscribe = onQuotaReviews((value) => { if (live) setOn(value); });
+    refreshQuotaReviews().then((value) => { if (live) setOn(value); }, () => { /* keeps the last known */ });
+    return () => { live = false; unsubscribe(); };
+  }, []);
+  const flip = (next: boolean) => {
+    setOn(next);
+    setQuotaReviews(next).then(setOn, () => setOn(!next));
+  };
+  return <label className="cx-auto-retry cx-model-judges cx-quota-reviews" title={QUOTA_DETAIL}>
+    <input type="checkbox" role="switch" checked={on === true} disabled={on === null} onChange={(event) => flip(event.target.checked)} />
+    <span className="cx-switch" aria-hidden="true" />
+    <span>Allow quota-based reviews</span>
+  </label>;
+}
 
 /**
  * "Let the model judge" (chat_model_judges): what would wait for you, a request the command reviewer

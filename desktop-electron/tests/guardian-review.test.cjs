@@ -205,6 +205,21 @@ test("no valid approval when the identity or Guardian verdict is missing or the 
   }
 });
 
+test("a low-risk allow goes through unless Guardian rated the user's authorization low or did not rate it", async (t) => {
+  // 2026-11-23: only "high" authorization was allowed; 47 of 300 benign reviews came back
+  // allow/low/unknown (Codex's policy answers a low-risk action with the outcome alone) and waited for the user.
+  for (const [userAuthorization, expected] of [["high", "allow"], ["medium", "allow"], ["unknown", "allow"], ["low", "ask"], [undefined, "ask"]]) {
+    const { review, request } = await fixture(t, { assessment: { outcome: "allow", riskLevel: "low", userAuthorization } });
+    const verdict = await review(request);
+    assert.equal(verdict.action, expected, `authorization ${userAuthorization}`);
+    if (expected === "ask") assert.equal(verdict.guardianAssessment, "low-risk");
+  }
+  for (const riskLevel of ["medium", "high"]) {
+    const { review, request } = await fixture(t, { assessment: { outcome: "allow", riskLevel, userAuthorization: "unknown" } });
+    assert.equal((await review(request)).action, "ask", `risk ${riskLevel}`);
+  }
+});
+
 test("uncertain cwd, non-shell and unavailable auth do not start a reviewer", async (t) => {
   const { review, request, requests } = await fixture(t);
   assert.equal((await review({ ...request, approval: { ...request.approval, cwd: path.dirname(request.folder) } })).action, "ask");
