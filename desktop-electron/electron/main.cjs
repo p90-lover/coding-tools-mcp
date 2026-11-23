@@ -385,6 +385,16 @@ async function savedMcpServers(list) {
   await userMcpServers().saved();
   return list;
 }
+// Runtime > App layout (app-layout.cjs): the architecture map and layer editor shared by the tab and chat agents.
+let appLayoutService = null;
+function appLayoutStore(logger = null) {
+  appLayoutService ??= require("./app-layout.cjs").createAppLayoutStore({
+    filePath: path.join(app.getPath("userData"), "app-layout.json"),
+    logger,
+    onChange: (next) => send("launcher:app-layout-changed", next),
+  });
+  return appLayoutService;
+}
 // The person's unified-agent-tools (vendor/unified-agent-tools), for every chat that runs a GPT model.
 let gptFileTools = null;
 function unifiedAgentTools(logger = null) {
@@ -4210,6 +4220,20 @@ function registerIpc({ logger, stateStore }) {
     if (enabled === true) await assertFocusedMainWindowSettled(event, true);
     return savedMcpServers(userMcpServers(logger).setEnabled(String(id), enabled === true));
   });
+  // Runtime > App layout: read and edit the Coding Tools category/layer map.
+  handle("launcher:app-layout", () => appLayoutStore(logger).get());
+  handle("launcher:app-layout-edit", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
+    const updated = await appLayoutStore(logger).act(input);
+    await appLayoutStore(logger).saved();
+    return updated;
+  });
+  handle("launcher:app-layout-reset", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
+    const reset = await appLayoutStore(logger).reset();
+    await appLayoutStore(logger).saved();
+    return reset;
+  });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
       || key === "chatAgentTools" || key === "chatAgentDesktopTools" || key === "chatAgentTerminalTools" || key === "chatAgentPreviewTools"
@@ -5337,6 +5361,8 @@ async function start() {
             return missionWorkflowRuntime.chatMoveTool(request);
           },
         },
+        // app_layout: lets chat agents read or edit the Runtime > App layout layers live.
+        appLayout: appLayoutStore(logger),
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         // The person's notes for computer_guide: <app>.md (chrome.md, notepad.md) or <topic>.md, read on each call.

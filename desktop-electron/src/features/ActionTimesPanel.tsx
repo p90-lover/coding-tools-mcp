@@ -43,6 +43,7 @@ function tabLabel(tab: string, copy: Copy): string {
     "agent-orchestrator-original": "Agent Orchestrator",
     subagents: "Subagents",
     "computer-use": "Computer use",
+    "app-layout": "App layout",
     "native-codex": copy.nativeCodex,
     browser: copy.browser,
     "chatgpt-browser-management": "ChatGPT browser management",

@@ -93,6 +93,8 @@ const BACKEND_MODULES = Object.freeze([
   "chat-resume.cjs",
   // main.cjs gives chat agents computer control through it: the window picker and the control bar.
   "computer-control.cjs",
+  // Runtime > App layout and the app_layout MCP tool for chat agents.
+  "app-layout.cjs",
 ]);
 
 function sha256File(filePath) {
