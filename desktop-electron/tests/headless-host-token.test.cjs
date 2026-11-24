@@ -257,3 +257,50 @@ test("stale token files are removed before a start: only older token-*.txt files
   ]);
   assert.doesNotThrow(() => removeStaleTokenFiles(path.join(directory, "missing"), { before: Date.now() }), "a missing folder is not an error");
 });
+
+test("Refresh restarts the service: a restart after a shutdown starts it again, while a quit's shutdown stays final", async (t) => {
+  // Bug hunt 2026-11-24 #1: shutdown() set `stopping` for good, so "Refresh headless" (shutdown,
+  // then ensureStarted) left every tool call failing with "stopping" until the app restarted.
+  const { base, binaryRoot } = startupFixture(t, FAKE_SERVICE);
+  const logger = { info() {}, warn() {}, error() {} };
+  const host = new HeadlessHost({ app: { getPath: () => path.join(base, "profile"), isPackaged: false }, logger, sourceRoot: base, binaryRoot });
+  try {
+    await host.ensureStarted();
+    const first = host.child.pid;
+    const control = await host.restart("part-refresh");
+    assert.ok(control?.endpoint, "the refreshed service is ready");
+    assert.notEqual(host.child.pid, first, "a new service process");
+    assert.equal((await host.request("/api/v1/anything")).ok, true);
+    await host.shutdown("launcher-quit");
+    await assert.rejects(host.ensureStarted(), /stopping/, "after a quit nothing starts it again");
+  } finally { await host.shutdown("restart-test"); }
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  assert.match(main, /headless: \(\) => headlessHost\?\.restart\("part-refresh"\)/, "Refresh headless uses restart");
+});
+
+test("a shutdown while the service is still being spawned stops it instead of leaving it running", async (t) => {
+  // Bug hunt 2026-11-24 #2: shutdown() found no child yet and returned; start() then published a
+  // service nobody would stop (a second headless after a backend restart, or one outliving quit).
+  const { base, binaryRoot } = startupFixture(t, FAKE_SERVICE);
+  const { EventEmitter } = require("node:events");
+  let release;
+  const spawned = new Promise((resolve) => { release = resolve; });
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4242, exitCode: null, killed: 0,
+    stdin: Object.assign(new EventEmitter(), { end() {} }), stderr: new EventEmitter(),
+    kill() { this.killed += 1; this.exitCode = 1; setImmediate(() => { this.emit("exit", 1, null); this.emit("close", 1, null); }); return true; },
+  });
+  const logger = { info() {}, warn() {}, error() {} };
+  const host = new HeadlessHost({ app: { getPath: () => path.join(base, "profile"), isPackaged: false }, logger, sourceRoot: base, binaryRoot,
+    spawnProcess: () => spawned });
+  const starting = host.ensureStarted();
+  starting.catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopping = host.shutdown("launcher-quit");
+  release(child);
+  await stopping;
+  await assert.rejects(starting, /stopping/);
+  assert.equal(child.killed, 1, "the late child is stopped");
+  assert.equal(host.child, null);
+  assert.equal(host.control, null);
+});

@@ -770,7 +770,7 @@ async function refreshPart(part, logger) {
     },
     "agent-orchestrator": async () => { await agentOrchestratorUpstream?.stop(); return agentOrchestratorUpstream?.start(); },
     cpa: () => externalServicesController.restart("cpa"),
-    headless: async () => { await headlessHost?.shutdown("part-refresh"); return headlessHost?.ensureStarted(); },
+    headless: () => headlessHost?.restart("part-refresh"),
     // Reload the whole backend tier from the active bundle; the core keeps running.
     backend: () => backendControl.restart("part-refresh"),
   };

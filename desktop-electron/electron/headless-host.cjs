@@ -294,6 +294,12 @@ class HeadlessHost {
       stdio: ["pipe", "ignore", "pipe"],
       windowsHide: true,
     });
+    if (this.stopping) {
+      // A shutdown arrived while Windows was still starting it: stop it rather than publish a
+      // service nobody will stop.
+      child.kill();
+      throw new Error("Local execution service is stopping");
+    }
     const childClosed = new Promise(resolve => child.once("close", resolve));
     child.stderr?.on("data", chunk => {
       if (!captureStartup) return; // Keep draining after readiness without retaining service logs.
@@ -582,8 +588,17 @@ class HeadlessHost {
     }
   }
 
+  /** Refresh: stop the service and start a new one. A plain shutdown (quit) stays final. */
+  async restart(reason = "part-refresh") {
+    await this.shutdown(reason);
+    this.stopping = false;
+    return this.ensureStarted();
+  }
+
   async shutdown(reason = "launcher-quit") {
     this.stopping = true;
+    // A start still spawning sees `stopping` and stops its own child; wait for it to settle.
+    if (this.starting) await this.starting.catch(() => {});
     const child = this.child;
     const control = this.control;
     if (!child) return { ok: true, stopped: false };
