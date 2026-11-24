@@ -275,3 +275,17 @@ test("Guardian reads the sign-in of the Codex home the app gives its agents", as
   assert.match(main, /authFile: path\.join\(LAUNCHER_PROFILE\.codexHome, "auth\.json"\)/);
   assert.doesNotMatch(main, /authFile: path\.join\(app\.getPath\("home"\), "\.codex"/);
 });
+
+test("profiles a quit left behind are removed when the next run opens its first server", async (t) => {
+  // Bug hunt 2026-11-24 R5: will-quit does not wait for close(), so a quit soon after a review left
+  // its private Codex profile (with its sign-in) behind, and nothing ever removed it.
+  const { root, review, request } = await fixture(t);
+  await fs.mkdir(path.join(root, "state", "review-leftover", "sessions"), { recursive: true });
+  await fs.writeFile(path.join(root, "state", "review-leftover", "auth.json"), "{}");
+  await fs.writeFile(path.join(root, "state", "keep.txt"), "not a profile");
+  assert.equal((await review(request)).action, "allow");
+  const left = await fs.readdir(path.join(root, "state"));
+  assert.ok(!left.includes("review-leftover"), JSON.stringify(left));
+  assert.ok(left.includes("keep.txt"), "only review profiles are removed");
+  assert.equal(left.filter((name) => name.startsWith("review-")).length, 1, "the live server's profile stays");
+});

@@ -241,12 +241,23 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
     return entry.gone;
   }
 
+  // The app's quit does not wait for close(), so a quit soon after a review leaves that server's
+  // profile (with its sign-in) behind. This run's first server clears what an earlier run left,
+  // before any profile of its own exists; one still held by a process is left for the next run.
+  let leftoversSwept = null;
+  async function sweepLeftovers() {
+    const names = await fs.readdir(stateDir).catch(() => []);
+    await Promise.all(names.filter((name) => /^review-[A-Za-z0-9]+$/.test(name))
+      .map((name) => fs.rm(path.join(stateDir, name), { recursive: true, force: true, maxRetries: 2 }).catch(() => {})));
+  }
+
   /** A new server, registered at once so that concurrent reviews share it while it signs in. */
   function newServer(binary, account, key) {
     const entry = { key, active: 0, dead: false, retired: false, stale: false, idleTimer: null, root: null, server: null, ready: null, gone: null, reviewModel: REVIEW_MODEL };
     servers.add(entry);
     entry.ready = (async () => {
       await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
+      await (leftoversSwept ??= sweepLeftovers());
       entry.root = await fs.mkdtemp(path.join(stateDir, "review-"));
       if (entry.retired) throw new Error("The native reviewer pool is closed");
       entry.server = openReviewServer(binary, entry.root, env, new AbortController().signal, spawnProcess, () => {
