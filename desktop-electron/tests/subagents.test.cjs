@@ -1261,3 +1261,19 @@ test("a subagent's effort label is the effort its agent was given, never a saved
   assert.equal(body.spawned.effort, "high");
   assert.equal(body.shown.effort, "high");
 });
+
+test("a finished subagent whose release failed is not left stopping", async () => {
+  // Bug hunt 2026-11-24 W4: stop() set `stopping` up front and cleared it only on success, so a
+  // completed child whose exit AO refused stayed "stopping" for good and every message to it failed.
+  const w = world({ settings: { releaseWhenDone: false } });
+  try {
+    const child = parse(await w.service.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read one" }));
+    w.sessions.set(child.subagent_id, { turnState: "completed", answer: "Done" });
+    await w.service.call("chat-1", "ws-1", "subagent_result", { subagent_id: child.subagent_id, wait_seconds: 0 });
+    w.harness.exitAgent = async () => ({ ok: false });
+    await assert.rejects(w.service.stopParent("chat-1"), /shutdown is unconfirmed/);
+    const saved = w.service.runs().find(run => run.subagent_id === child.subagent_id);
+    assert.equal(saved.state, "completed");
+    assert.equal(saved.stopping, undefined, "not shown as stopping");
+  } finally { w.cleanup(); }
+});

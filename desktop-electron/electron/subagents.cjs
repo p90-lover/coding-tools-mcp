@@ -869,6 +869,9 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
       return run;
     }).catch(error => {
       if (ACTIVE.has(run.state) && !run.stopState) run.error = String(error?.message ?? error).slice(0, 500);
+      // A finished run is not stopping anything: nothing else would clear the flag (check() looks at
+      // active runs only), and every later message to it would be refused.
+      if (!ACTIVE.has(run.state)) run.stopping = false;
       throw error;
     }).finally(() => { run.stopPromise = null; });
     return run.stopPromise;
