@@ -529,6 +529,8 @@ function createChatPreferences(file) {
   return {
     get: () => ({ autoRetry: saved.autoRetry === true, modelJudges: saved.modelJudges === true,
       meteredReviews: saved.meteredReviews === true,
+      // "Local auto-review" (chatAutoReview): on unless the person turned it off.
+      autoReview: saved.autoReview !== false,
       autoCompact: saved.autoCompact !== false, autoCompactPercent: autoCompactPercent(saved.autoCompactPercent),
       questionTimeout: questionTimeoutSeconds(saved.questionTimeout) }),
     /** Takes effect at once; resolves when the change is on disk, so a restart right after keeps it. */
@@ -541,7 +543,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, agentWindow = null, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, handoffRedactionEnabled = () => false, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, agentWindow = null, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, handoffRedactionEnabled = () => false, logger = null, autoReview = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -2681,6 +2683,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const ownership = { workspaceId, runId, nodeId: node.id,
       turnId: node.receipt?.turn_id || expectedTurns.get(session), requestKey: node.receipt?.request_key || node.request_key };
     const observed = await harnessService().observe(session, ownership.turnId);
+    // Commands the local auto-review plugin reviewed: their outcomes, once they have run.
+    pluginOutcomes(session, observed?.timeline);
     // Its agent is up: a later start of this session (an idle agent brought back) is a resume of
     // the chat's work, never a fresh launch the watchdog may end.
     if (observed?.provisioning !== true) { freshLaunches.delete(session); launchControllerUp.delete(session); }
@@ -3800,6 +3804,8 @@ Tool: ${pending.tool}
 ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pending.path}` : `Request: ${pending.summary}`}`,
       })) return { ok: false, cancelled: true };
       await harnessService().resolveApproval(pending.thread_id, approval, decision);
+      // Their verdict teaches the local auto-review plugin, when it reviewed this request.
+      pluginPersonAnswered(approval, approving);
       // The person has looked at this chat's requests: the next one is the reviewer's again.
       reviewDenials.delete(pending.thread_id);
       rememberAnswer(approval, requestText(pending), chosen ? offered.label : approving ? "Allow once" : "Deny");
@@ -3830,6 +3836,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       throw new Error("Couldn't confirm your answer was sent. Check the card before you retry.");
     }
     if (pending.thread_id) reviewDenials.delete(pending.thread_id);
+    if (!typed) pluginPersonAnswered(approval, allow);
     logger?.info?.("ao.approval_decided", { approval_id: approval, actor: "user", decision: typed ? "typed_reply" : allow ? "allow" : "deny" });
     return result;
   }
@@ -5792,6 +5799,110 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }));
     return note;
   }
+  // The local auto-review plugin (auto-review-host.cjs, the user's design of 2026-11-24): on an
+  // "Approve for me" card it is asked first about the agent's own shell commands. Its approve or
+  // decline settles the request with its reason; what it cannot settle (a new command it hands to
+  // the person, one to simplify, one it cannot read) goes on to the existing reviewers exactly as
+  // before, unless its blocklist matched. The app's own safety rules run before it and still win.
+  // It learns from what it hears back: each allowed command's outcome, and the person's own answer.
+  const pluginReviews = new Map(); // approval_id -> { decisionId, command, thread, at, advice, allowed, reported, before }
+  const pluginClaimed = new Set(); // timeline activity ids already reported as an outcome
+  const PLUGIN_OUTCOME_MS = 60 * 60_000;
+  /** Whether the plugin is asked about this request: an "Approve for me" card's own shell command, with the setting on. */
+  function pluginScreens(approver, mission, node, approval) {
+    return Boolean(autoReview) && chatPreferences.get().autoReview && !approver.autobot && approver.role !== "approver"
+      && liveRoute(mission, node)?.approvals_reviewer === "auto_review"
+      && approval.kind === "command" && typeof approval.command === "string" && approval.command.trim() !== ""
+      // The app's exec_command (an MCP tool) keeps its own confirm and reviewer, as routineCommand does.
+      && !/^mcp__/.test(String(approval.tool ?? ""));
+  }
+  /** The plugin's verdict as reviewer advice, or null when the existing reviewers go on as before. */
+  async function pluginAdvice(approval) {
+    const known = pluginReviews.get(approval.approval_id);
+    // A request screened again (Let the model judge turned on beside it) is not counted twice.
+    if (known && known.command === approval.command) return known.advice;
+    const shell = /^powershell$/i.test(String(approval.tool ?? "")) ? "powershell" : /^bash$/i.test(String(approval.tool ?? "")) ? "bash" : undefined;
+    const result = await Promise.resolve(autoReview.review({ command: approval.command,
+      ...(typeof approval.cwd === "string" && approval.cwd ? { cwd: approval.cwd } : {}), appId: "coding-tools", ...(shell ? { shell } : {}) }))
+      .catch(() => null);
+    if (!result || typeof result !== "object" || typeof result.decisionId !== "string") return null;
+    const why = publicText(result.reason || "no reason given", 300);
+    const advice = result.verdict === "approve"
+      ? { action: "allow", actor: "auto_review_plugin", reason_code: publicText(result.settlement || "auto_review", 40), reason: `Auto-review: ${why}` }
+      : result.blocklist
+        ? { action: "deny", actor: "auto_review_plugin", reason_code: "declined_by_blocklist",
+          reason: `Auto-review blocklist (${publicText(result.blocklist.category || "blocked", 40)}): ${publicText(result.blocklist.reason || why, 300)}` }
+        // A decline it learned (rule, regression) settles it; one for text it could not read does not.
+        : result.verdict === "decline" && ["rule", "regression"].includes(result.layer)
+          ? { action: "deny", actor: "auto_review_plugin", reason_code: publicText(result.settlement || "auto_review", 40), reason: `Auto-review: ${why}` }
+          : null;
+    pluginReviews.set(approval.approval_id, { decisionId: result.decisionId, command: approval.command, thread: approval.thread_id,
+      at: now(), advice, allowed: null, reported: false, before: new Set() });
+    while (pluginReviews.size > 500) pluginReviews.delete(pluginReviews.keys().next().value);
+    logger?.info?.("ao.auto_review_plugin", { approval_id: approval.approval_id, verdict: publicText(result.verdict, 20),
+      settlement: publicText(result.settlement, 40), layer: publicText(result.layer, 20), settles: Boolean(advice) });
+    return advice;
+  }
+  /** A request the plugin reviewed was answered (by anyone): an allowed one's outcome is looked for. */
+  function pluginAnswered(approvalId, allowed) {
+    const entry = pluginReviews.get(approvalId);
+    if (entry && entry.allowed === null) entry.allowed = allowed;
+  }
+  /** The person answered a request the plugin reviewed: their verdict goes back to it (record_override). */
+  function pluginPersonAnswered(approvalId, allowed) {
+    const entry = pluginReviews.get(approvalId);
+    if (!entry || entry.overridden) return;
+    entry.overridden = true;
+    entry.allowed = allowed;
+    void Promise.resolve(autoReview?.recordOverride?.({ decisionId: entry.decisionId, userVerdict: allowed ? "approve" : "decline" })).catch(() => undefined);
+  }
+  /**
+   * An allowed command's outcome, read from the session's timeline: its tool call finished
+   * ("completed": exit code 0) or failed (the shell tool reports a non-zero exit as a failure; its
+   * exact code is not in the timeline, so 1). Calls that had already finished before it was allowed
+   * are an earlier run of the same command, never its outcome.
+   */
+  function pluginOutcomes(session, timeline) {
+    if (!pluginReviews.size || !Array.isArray(timeline)) return;
+    const finished = timeline.filter(item => item?.kind === "command" && typeof item.text === "string" && /^(?:completed|failed)$/i.test(String(item.status))
+      && !pluginClaimed.has(item.id));
+    for (const [id, entry] of pluginReviews) {
+      if (now() - entry.at > PLUGIN_OUTCOME_MS) { pluginReviews.delete(id); continue; }
+      if (entry.thread !== session || entry.reported || entry.allowed === false) continue;
+      const want = entry.command.trim();
+      const same = item => item.text === want || (item.text.length >= 200 && want.startsWith(item.text.replace(/…$/, "")));
+      if (entry.allowed !== true) {
+        for (const item of finished) if (same(item)) entry.before.add(item.id);
+        continue;
+      }
+      const ran = finished.find(item => same(item) && !entry.before.has(item.id));
+      if (!ran) continue;
+      entry.reported = true;
+      pluginClaimed.add(ran.id);
+      while (pluginClaimed.size > 1000) pluginClaimed.delete(pluginClaimed.values().next().value);
+      void Promise.resolve(autoReview?.recordOutcome?.({ decisionId: entry.decisionId, exitCode: /^completed$/i.test(String(ran.status)) ? 0 : 1 }))
+        .catch(() => undefined);
+    }
+  }
+  /**
+   * The plugin's answer to an agent question nobody answered, as the question's reply, or null to
+   * keep the recommended answer. Only a single choice or yes/no field: free text and several fields
+   * stay with the recommended answer.
+   */
+  async function pluginQuestionAnswer(approval) {
+    if (!autoReview || !chatPreferences.get().autoReview || approval.mode === "url") return null;
+    const fields = Array.isArray(approval.fields) ? approval.fields : [];
+    if (fields.length !== 1 || typeof fields[0]?.key !== "string") return null;
+    const [field] = fields;
+    const options = field.type === "choice" && Array.isArray(field.options) ? field.options
+      : field.type === "boolean" ? [{ label: "Yes", value: true }, { label: "No", value: false }] : [];
+    if (!options.length) return null;
+    const question = [approval.message, field.title, field.question].filter(text => typeof text === "string" && text.trim()).join("\n");
+    const result = await Promise.resolve(autoReview.answerQuestion({ question: publicText(question, 4000),
+      options: options.map(option => publicText(option?.label ?? option?.value ?? "", 200)), appId: "coding-tools" })).catch(() => null);
+    if (result?.verdict !== "answer" || !Number.isSafeInteger(result.choiceIndex) || result.choiceIndex < 0 || result.choiceIndex >= options.length) return null;
+    return { action: "accept", content: { [field.key]: options[result.choiceIndex].value }, reason: publicText(result.reason || "routine question", 200) };
+  }
   /** Screens and, with auto-decide, answers one request; returns the run's note about it, if any. */
   async function screenOne(workspaceId, runId, mission, { approver, node, approval, request }, { check, signal, verifyCurrent, sending }) {
     check();
@@ -5824,6 +5935,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const sends = resend ? (resend.sends ?? 1) + 1 : 1;
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
     let native = null;
+    let plugin = null;
     let advice = approver.autobot
       ? { ...(await reviewAutobot({ config: approver.autobot, approval,
         hardDenial: blocked ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) } : null,
@@ -5842,6 +5954,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       : exhausted
       ? judges ? { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so this request was not judged (Let the model judge is on)` }
         : { action: "ask", unresolved: true, reason: `The command reviewer couldn't answer after ${REVIEW_TRIES} tries, so check it yourself` }
+      // The local auto-review plugin first, for a request the safety rules did not block and it can
+      // read whole; null (it cannot settle it, or is off or absent) goes on as before.
+      : !blocked && !incomplete && pluginScreens(approver, mission, node, approval) && (plugin = await pluginAdvice(approval))
+      ? plugin
       : routineAppTool(approval.tool)
       ? { action: "allow", actor: "safety_rules", reason_code: "routine_tool", reason: routineAppTool(approval.tool) }
       : githubRead(approval.tool)
@@ -5961,6 +6077,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       check();
       if (sent) {
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
+        pluginAnswered(approval.approval_id, advice.action === "allow");
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action, ...(sends > 1 ? { sends } : {}) });
         return `Reviewer ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
@@ -5978,6 +6095,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (sent) {
         logger?.info?.("ao.approval_decided", { approval_id: approval.approval_id, actor: advice.actor ?? "reviewer", reason_code: advice.reason_code ?? "model_decision", decision: advice.action, ...(sends > 1 ? { sends } : {}) });
         approverAdvice.set(approval.approval_id, { ...advice, resolved: true, resolvedAt: now() });
+        pluginAnswered(approval.approval_id, advice.action === "allow");
         return `Command approver ${advice.action === "allow" ? "allowed" : "denied"}: ${advice.reason}`;
       }
       keepAdvice(unsentAnswer(advice, sends, false, `The command approver's answer couldn't be sent, so check it yourself. It said ${advice.action}: ${advice.reason}`));
@@ -6099,15 +6217,20 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const why = denial ? safetyReason(denial) : advice?.reason || "the command reviewer raised a block";
         try {
           if (approval.source === "ao" && approval.kind === "question") {
-            const answer = recommendedAnswer(approval);
+            // The local auto-review plugin answers a routine question it recognizes; otherwise the
+            // recommended answer, as before.
+            const planned = await pluginQuestionAnswer(approval);
+            const answer = planned ?? recommendedAnswer(approval);
             await harnessService().resolveInput(approval.thread_id, id, answer.action, answer.content)
               .catch(() => harnessService().resolveInput(approval.thread_id, id, "decline"));
-            note = `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
+            note = planned ? `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so auto-review answered it: ${planned.reason}`
+              : `Nobody answered the agent's question in ${Math.round(wait / 1000)} seconds, so it got the recommended answer`;
           } else if (approval.source === "ao") {
             const blocked = verdict === "deny";
             const decision = approval.kind === "plan" ? planDecision(approval, node, mission) : aoDecision(approval, !blocked);
             if (!decision) continue;
             await harnessService().resolveApproval(approval.thread_id, id, decision, blocked ? reviewerDenial(why, denial ? {} : advice) : "");
+            pluginAnswered(id, !blocked);
             note = blocked ? `Denied: ${publicText(why, 160)}`
               : approval.kind === "plan" ? "Nobody answered in 20 seconds, so the plan was accepted" : "Approve for me allowed the request once";
           } else if (approval.kind === "command") {
@@ -6117,6 +6240,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
               workspace_id: workspaceId, run_id: runId, node_id: node.id, approval_id: id, allow, confirm: false,
               approver_reason: allow ? "Approve for me: the review raised no block" : why, approver_request: request,
             });
+            pluginAnswered(id, allow);
             note = allow ? "Approve for me allowed the command once" : `Denied: ${publicText(why, 160)}`;
           }
           logger?.info?.("ao.auto_answered", { approval_id: id, actor: "timeout_policy", decision: verdict ?? approval.kind,
@@ -6377,6 +6501,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     }
     return { ok: true, seconds: chatPreferences.get().questionTimeout };
   }
+  /**
+   * chat_auto_review: reads "Local auto-review", or sets it with `enabled` (on unless the person
+   * turned it off), with whether the plugin is installed and its stats. Off, "Approve for me" works
+   * exactly as without the plugin. The plugin's own switch, blocklist, rules and learning are never
+   * changed from here: they are shared with the other apps that use it, and only its own settings
+   * change them.
+   */
+  async function chatAutoReview({ enabled } = {}) {
+    if (enabled !== undefined) {
+      if (typeof enabled !== "boolean") throw new Error("Choose on or off");
+      const changed = chatPreferences.get().autoReview !== enabled;
+      await chatPreferences.set({ autoReview: enabled });
+      if (changed) logger?.info?.("ao.auto_review_plugin_switched", { enabled });
+    }
+    const available = Boolean(autoReview?.available?.());
+    const stats = available ? await Promise.resolve(autoReview.getStats?.()).catch(() => null) : null;
+    return { ok: true, enabled: chatPreferences.get().autoReview, available, stats: stats ?? null };
+  }
+  /** The plugin's stats as they change (its stats event, at most once a second); returns the unsubscribe. */
+  const onAutoReviewStats = (listener) => autoReview?.onStats?.(listener) ?? (() => {});
   /**
    * chat_auto_compact: compatibility storage for older callers, not native model-token control.
    * Record rollover is required only at the board's hard byte limit, regardless of these values.
@@ -10984,6 +11128,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       case "chat_model_judges": return chatModelJudges(args);
       case "agent_instructions": return agentInstructionsCall(args);
       case "chat_question_timeout": return chatQuestionTimeout(args);
+      case "chat_auto_review": return chatAutoReview(args);
       case "chat_auto_compact": return chatAutoCompact(args);
       case "compact_chat": return compactSession(args);
       case "chat_diff": return chatDiff(args);
@@ -11114,7 +11259,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const wakeupsSaved = () => Promise.all([wakeups.saved(), loops.saved()]);
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
-  return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
+  return Object.freeze({ call, configureChatAutobot, onAutoReviewStats, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
     startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
