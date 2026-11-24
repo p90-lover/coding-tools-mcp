@@ -561,6 +561,7 @@ class RuntimeSupervisor {
     this.startPromise = null;
     this.stopPromise = null;
     this.restartHistory = { daemon: [], tunnel: [] };
+    this.recoveryFailures = { daemon: 0, tunnel: 0 }; // recoveries that failed in a row
     this.restartTimers = { daemon: null, tunnel: null };
     this.tunnelMonitorTimer = null;
     this.tunnelMonitorInFlight = false;
@@ -1981,6 +1982,7 @@ class RuntimeSupervisor {
       }
       this.restartHistory.daemon = [];
       this.restartHistory.tunnel = [];
+      this.recoveryFailures = { daemon: 0, tunnel: 0 };
       this.writeState("ready");
       this.publishOperation?.({
         name: "runtime-start",
@@ -2021,20 +2023,29 @@ class RuntimeSupervisor {
     if (this.stopping) return;
     if (this.restartTimers[name]) return;
     const attempts = this.recordRestart(name);
-    if (attempts > MAX_RESTARTS_PER_WINDOW) {
+    // Crashes counted in a 60 s window miss a recovery that is slow to fail: waiting for a daemon's
+    // proxy takes ~60 s (a tunnel up to 120 s), so each attempt found the window empty and a daemon
+    // that never became healthy was respawned once a minute forever. Failed attempts in a row count too.
+    const failedInRow = this.recoveryFailures[name] ?? 0;
+    if (attempts > MAX_RESTARTS_PER_WINDOW || failedInRow >= MAX_RESTARTS_PER_WINDOW) {
       const cause = this.lastChildFailure[name];
-      const message = `${name} stopped more than ${MAX_RESTARTS_PER_WINDOW} times in 60 seconds; automatic restart is disabled`
+      const message = (failedInRow >= MAX_RESTARTS_PER_WINDOW
+        ? `${name} could not be restarted ${failedInRow} times in a row; automatic restart is disabled`
+        : `${name} stopped more than ${MAX_RESTARTS_PER_WINDOW} times in 60 seconds; automatic restart is disabled`)
         + (cause ? `; last failure: ${cause}` : "");
       this.tryWriteState("failed", message);
       this.publishOperation?.({ name: "runtime-recovery", status: "failed", message });
       return;
     }
-    const delay = Math.min(attempts * 1_000, 5_000);
+    const delay = Math.min(Math.max(attempts, failedInRow + 1) * 1_000, 5_000);
     this.restartTimers[name] = setTimeout(() => {
       this.restartTimers[name] = null;
-      const recovery = this.recover(name).catch((error) => {
+      const recovery = this.recover(name).then(() => {
+        this.recoveryFailures[name] = 0;
+      }, (error) => {
         const message = errorMessage(error);
         this.logger.error(`runtime.${name}_recovery_failed`, { message });
+        this.recoveryFailures[name] += 1;
         if (this.tryWriteState("failed", message)) this.scheduleRecovery(name);
       });
       this.recoveryTasks.add(recovery);

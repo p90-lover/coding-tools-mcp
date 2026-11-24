@@ -3029,3 +3029,33 @@ test("the bridge daemon starts from a worker, and a stop issued while it starts 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("recovery gives up after five failed attempts in a row, however long each takes to fail", async (t) => {
+  // Bug hunt 2026-11-24 S3: the cap counted attempts within 60 s, but a failing daemon recovery waits
+  // ~60 s for the proxy (a tunnel up to 120 s): every attempt found the window empty, so a daemon that
+  // never became healthy was respawned about once a minute forever.
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-slow-recovery-"));
+  const operations = [];
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root, coreHome: root, browserDescriptorPath: path.join(root, "launcher.json"),
+    publishOperation: operation => operations.push(operation),
+  });
+  let attempts = 0;
+  supervisor.recover = async () => { attempts += 1; t.mock.timers.setTime(Date.now() + 61_000); throw new Error("proxy never became ready"); };
+  const flush = async () => { for (let index = 0; index < 5; index++) await new Promise(resolve => setImmediate(resolve)); };
+  try {
+    supervisor.scheduleRecovery("daemon");
+    for (let cycle = 0; cycle < 12 && supervisor.restartTimers.daemon; cycle++) {
+      t.mock.timers.tick(120_000);
+      await flush();
+    }
+    assert.equal(attempts, MAX_RESTARTS_PER_WINDOW, `tried ${attempts} times`);
+    assert.equal(supervisor.restartTimers.daemon, null);
+    assert.match(operations.at(-1)?.message ?? "", /automatic restart is disabled/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
