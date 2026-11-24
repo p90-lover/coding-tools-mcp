@@ -2731,7 +2731,8 @@ function registerIpc({ logger, stateStore }) {
       throw new Error("Choose an absolute folder path");
     }
     const resolved = path.resolve(folder);
-    if (!fs.statSync(resolved, { throwIfNoEntry: false })?.isDirectory()) throw new Error("This folder no longer exists");
+    // Off the main thread: on an offline share or a spun-down disk a sync stat froze every window.
+    if (!(await fs.promises.stat(resolved).catch(() => null))?.isDirectory()) throw new Error("This folder no longer exists");
     const failure = await shell.openPath(resolved);
     if (failure) throw new Error(failure);
     return true;
@@ -2757,7 +2758,7 @@ function registerIpc({ logger, stateStore }) {
     assertFocusedMainWindow(event, false);
     if (typeof file !== "string" || file.length > 4096 || !path.isAbsolute(file)) throw new Error("Choose an absolute file path");
     const resolved = path.resolve(file);
-    if (!fs.statSync(resolved, { throwIfNoEntry: false })?.isFile()) throw new Error("This file no longer exists");
+    if (!(await fs.promises.stat(resolved).catch(() => null))?.isFile()) throw new Error("This file no longer exists");
     shell.showItemInFolder(resolved);
     return true;
   });

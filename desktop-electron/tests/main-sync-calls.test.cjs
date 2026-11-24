@@ -43,7 +43,9 @@ const ALLOWED = {
   "keysmith-ipc.cjs": 3, "keysmith-managed.cjs": 11, "logging.cjs": 8, "loopback-mesh.cjs": 1,
   // +1: the off-system-drive temporary folder is made once at startup, before any window or child
   // exists (system-drive.cjs): Chromium's helpers read TEMP as they start.
-  "main.cjs": 25,
+  // main.cjs 25 -> 23 (bug hunt 2026-11-24 I3): Open folder and Reveal file stat the path off the main
+  // thread; on an offline share or a spun-down disk the sync stat froze every window.
+  "main.cjs": 23,
   "managed-components.cjs": 46, "managed-external-services.cjs": 1, "mcp-connector-setup.cjs": 1, "original-ui.cjs": 1,
   "process-tree.cjs": 3, "profile.cjs": 3, "provider-network.cjs": 3, "proxy-gateway-retire.cjs": 2,
   "proxybridge-nova.cjs": 5, "register-host.cjs": 9,
