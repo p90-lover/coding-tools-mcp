@@ -86,6 +86,20 @@ test("pruning removes only what nothing has touched for a week, oldest first, an
   assert.deepEqual(await pruneTemp(path.join(fixtureRoot, "missing")), []);
 });
 
+test("Codex's and Claude Code's homes stay where they are, even on the system drive", () => {
+  // The person keeps ~\.codex and ~\.claude on C: (sign-ins and history): never redirect or refuse them.
+  const homes = { ...onC, USERPROFILE: "C:\\Users\\a", HOME: "C:\\Users\\a", CODEX_HOME: "C:\\Users\\a\\.codex", CLAUDE_CONFIG_DIR: "C:\\Users\\a\\.claude" };
+  const result = systemDriveRedirects({ env: homes, dataRoot, platform: "win32" });
+  for (const name of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]) {
+    assert.equal(name in result.env, false, `${name} is left alone`);
+  }
+  assert.equal(Object.keys(CACHE_VARIABLES).some((name) => /CODEX|CLAUDE/i.test(name)), false);
+  // Only the app's own data root and the updater's download folder go through the guard.
+  const sources = ["main.cjs", "update.cjs"].map((file) => fs.readFileSync(path.join(__dirname, "../electron", file), "utf8")).join("\n");
+  assert.doesNotMatch(sources, /guardWritePath\([^)]*(codexHome|CODEX_HOME|claude)/i);
+  assert.doesNotMatch(sources, /checkDataRoot\([^)]*(codexHome|CODEX_HOME|claude)/i);
+});
+
 test("main sets the redirects before anything starts and prunes after startup", () => {
   const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
   const redirect = main.indexOf("systemDrive.systemDriveRedirects({ env: process.env, dataRoot: launcherUserData })");
