@@ -15537,3 +15537,22 @@ test("Autobot's model fallback never allows high-risk or unauthorized requests o
     assert.deepEqual(resolved, ["yes"]);
   } finally { workflow.dispose(); }
 });
+
+test("a compaction that never reports completion stops holding the chat after its deadline", async () => {
+  // Bug hunt 2026-11-24 W6: a compaction the provider failed internally (its controller still up)
+  // read "in_progress" forever, so every send, queued message, wake-up and schedule waited for good.
+  let observations = 0;
+  const { world, workflow, advance, queue } = queueChat({ state: "finished", aoHarness: {
+    compact: async () => ({ compactedAt: "earlier" }),
+    compactionStatus: async () => { observations += 1; return { status: "in_progress" }; },
+  } });
+  try {
+    await workflow.call("compact_chat", { workspaceId: "ws-1", taskId: "task-1" });
+    await workflow.call("chat_queue", { workspaceId: "ws-1", taskId: "task-1", action: "add", item: { what: "Message", message: "continue after compaction" } });
+    for (let minute = 0; minute < 20; minute += 1) await advance(60_000);
+    assert.equal((await queue()).length, 1, "a compaction still within its deadline keeps the chat waiting");
+    for (let minute = 0; minute < 15; minute += 1) await advance(60_000);
+    assert.equal(world.updates.length, 1, "past its deadline the chat takes the queued message");
+    assert.deepEqual(await queue(), []);
+  } finally { workflow.dispose(); }
+});

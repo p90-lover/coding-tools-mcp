@@ -8121,6 +8121,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
 
   // A chat is working when its latest run is being driven or has a card running.
   const sessionCompactions = new Map();
+  // The longest a compaction may hold its chat without reporting completion (observeCompletion).
+  const COMPACTION_DEADLINE_MS = 30 * 60_000;
   function pendingCompactionStop(workspaceId, runId, nodeId = null) {
     const pending = [...sessionCompactions].filter(([, entry]) => entry.status === "in_progress"
       && entry.scope.workspace_id === workspaceId && entry.scope.run_id === runId
@@ -10091,12 +10093,23 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (sessionCompactions.get(key) !== entry) throw new Error("The chat session changed while compacting");
     entry.starting = false;
     let observations = 0;
+    const startedAt = now();
     const observeCompletion = async () => {
-      if (++observations > 120 || sessionCompactions.get(key) !== entry || entry.status !== "in_progress") return;
+      if (sessionCompactions.get(key) !== entry || entry.status !== "in_progress") return;
+      // A compaction the provider failed inside (its controller still up) reads in_progress forever,
+      // and every send, queued message, wake-up and schedule waited on it. Past the deadline the chat
+      // is released; a send then goes to the agent, which reports whatever state it is in.
+      if (now() - startedAt > COMPACTION_DEADLINE_MS) {
+        sessionCompactions.delete(key);
+        logger?.warn?.("ao.compaction_unconfirmed", { minutes: Math.round((now() - startedAt) / 60_000) });
+        return;
+      }
+      observations += 1;
       try { await compactSession({ workspaceId: id, taskId: task, status: true, compactionId: entry.id }); }
       catch { /* An uncertain read is not completion; the next observation may recover. */ }
       if (sessionCompactions.get(key) === entry && entry.status === "in_progress") {
-        entry.timer = setTimer(observeCompletion, 1000);
+        // Every second for two minutes, then every 15 s until the deadline.
+        entry.timer = setTimer(observeCompletion, observations < 120 ? 1000 : 15_000);
         entry.timer?.unref?.();
       }
     };
