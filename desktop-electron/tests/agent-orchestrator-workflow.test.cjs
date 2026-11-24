@@ -10398,6 +10398,8 @@ test("a chat's agent is resized to a new window in place, and the next message c
   assert.deepEqual({ ...resized }, { ok: true, resized: true, contextWindow: 300000, resumed: true });
   assert.deepEqual(calls, [["set", "sess-1", 300000], ["exit", "sess-1"], ["resume", "sess-1"]],
     "AO saves the window, then the agent is stopped and resumed on its own conversation");
+  assert.equal((await workflow.call("runs", { workspaceId: "ws-1" })).runs[0].nodes[0].route.context_window, 300000,
+    "the resized window is projected onto the chat's visible run so switching chats and automatic follow-ups keep it");
   calls.length = 0;
   const next = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single", singleRoute: { ...route, context_window: 300000 }, taskId: "task-1" });
   assert.equal(next.continues, true, "the next message continues the resized agent, not a fresh one with a summary");
@@ -14860,6 +14862,46 @@ test("a delayed goal team pick preserves a newer pick or replacement goal", asyn
     assert.deepEqual(goal.route, action === "team" ? null : route);
   });
 });
+
+test("knownModels sanitizes legacy 272K CPA stock windows on non-Codex-GPT models, and a follow-up with the catalog's default effort continues a card launched before the catalog loaded", async (t) => {
+  const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "known-windows-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const knownModelsFile = path.join(dir, "cpa-known-models.json");
+  const seen = Date.now();
+  fs.writeFileSync(knownModelsFile, JSON.stringify({ models: {
+    "claude-sonnet-4-6-20260514": { seen, capability: { efforts: ["low", "high"], contextLimit: 272000, contextWindow: { min: 4096, max: 272000 } } },
+    "claude-opus-4-6[1m]": { seen, capability: { efforts: ["low", "high"], contextLimit: 272000, contextWindow: { min: 4096, max: 272000 } } },
+    "gemini-2.0-flash": { seen, capability: { efforts: ["low", "high"], contextLimit: 272000, contextWindow: { min: 4096, max: 272000 } } },
+    "o3-pro": { seen, capability: { efforts: ["high"], contextLimit: 272000, contextWindow: { min: 4096, max: 272000 } } },
+  } }));
+  const unconfigured = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local",
+    model: "cpa/cline-pass/deepseek-v4.1-flash", permission_profile: ":ao-default" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const done = { id: "r1", project_id: "task-1", execution_mode: "single",
+    nodes: [{ id: "one", role: "planner", state: "finished", parents: [], route: unconfigured, receipt: { thread_id: "sess-1" } }] };
+  const world = chatWorld({ tasks: [task], runs: [done] });
+  const workflow = createAgentOrchestratorWorkflow({
+    knownModelsFile,
+    requestHeadless: world.requestHeadless,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "cline-pass/deepseek-v4.1-flash", owned_by: "cline" }] }) }),
+    aoHarness: { continuable: async id => id === "sess-1", spawn: async () => "warm", warmSessions: async () => [] },
+  });
+  t.after(() => workflow.dispose());
+  const listed = await workflow.call("models", { harness: "ao:claude-code" });
+  assert.equal(listed.capabilities["cpa/claude-sonnet-4-6-20260514"]?.contextLimit, 200_000);
+  assert.equal(listed.capabilities["cpa/claude-opus-4-6[1m]"]?.contextLimit, 1_000_000);
+  assert.equal(listed.capabilities["cpa/gemini-2.0-flash"]?.contextLimit, 1_048_576);
+  assert.equal(listed.capabilities["cpa/o3-pro"]?.contextLimit, 200_000);
+  // DeepSeek V4.1 Flash's startEffort is "high": a card sent before the catalog loaded (no effort on route)
+  // still continues its live session when the composer sends "high" on the next message.
+  const prewarm = await workflow.call("chat_prewarm", { workspaceId: "ws-1", executionMode: "single",
+    singleRoute: { ...unconfigured, effort: "high" }, taskId: "task-1" });
+  assert.equal(prewarm.continues, true);
+  const subArgs = await workflow.subagentLaunchArgs("ws-1", { harness_id: "ao:claude-code", model: "cpa/claude-fable-5" }, "Explorer");
+  assert.equal(subArgs.contextWindow, 1_000_000, "subagents without an explicit window receive the model's known full limit as contextWindow");
+});
+
 
 test("a paused goal accepts a validated team and leaves its route intact when validation fails", async (t) => {
   const { workflow } = await goalChat({ now: () => 1_000_000 });

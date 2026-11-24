@@ -31,7 +31,7 @@ const PREFLIGHT_FAILURES = new Map([
   ["connector_identity_unverified", "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted."],
   ["busy", "Browser account switching or shutdown is in progress"],
   ["busy", "Wait for the current runtime setup to finish before connecting MCP."],
-  ["busy", "Automatic MCP setup is waiting for the focused, idle app and current account."],
+  ["busy", "Automatic MCP setup is waiting for an idle browser and the current account."],
   ["verification_required", "Sign in to this account in the Browser tab before connecting MCP."],
   ["creation_failed", "The account's MCP tunnel is not ready. Reconnect it before creating the connector."],
   ["creation_failed", "The account's MCP tunnel changed or is not ready."],
@@ -96,6 +96,27 @@ const CHATGPT_PAGE_FAILURES = new Set([
   "The tunnel has no valid tunnel ID.",
 ]);
 
+// Which identity check stopped an existing connector (the setup's identity:<reason>), in words the card
+// and the account's saved error keep. The one message covered every check, so on 2026-11-23 a signed-in
+// owner's account said only "…identity is unverified…" for days: the log line naming the check had
+// rotated out of memory. Fixed words only, one sentence per check, so the saved text alone tells them apart.
+const IDENTITY_CHECKS = new Map([
+  ["no-card", "ChatGPT's plugin list did not show this connector."],
+  ["not-existing", "ChatGPT did not offer an existing connector to check."],
+  ["card-link", "This connector's card in ChatGPT did not link to its plugin page."],
+  ["not-plugin-page", "ChatGPT did not open this connector's plugin page."],
+  ["name-not-on-page", "This connector's plugin page did not show its name."],
+  ["page-moved", "This connector's plugin page changed during the check."],
+  ["form-ambiguous", "This connector's plugin page showed more than one settings form."],
+  ["name-differs", "The connector in ChatGPT is saved with a different name."],
+  ["tunnel-differs", "The connector in ChatGPT is saved with a different Tunnel ID."],
+  ["edit-control-ambiguous", "This connector's plugin page showed more than one Edit control."],
+  ["no-edit-control", "This connector's plugin page showed no Edit control."],
+  ["form-not-shown", "ChatGPT did not open this connector's settings."],
+  ["dialog-stuck", "A ChatGPT dialog stayed open after the check."],
+  ["host-check", "The connector's details changed between the page's check and the app's."],
+]);
+
 // ChatGPT's own error line on its connector form follows this prefix. Its words stay out (they
 // could carry page data); the card says where it stopped instead of the catch-all.
 const CHATGPT_FORM_ERROR = "ChatGPT connector creation failed: ";
@@ -134,6 +155,11 @@ function mcpConnectorCommandFailure(error, action = "create") {
   if (alias) return { ...PREFLIGHT_FAILURES.get(alias) };
   const known = PREFLIGHT_FAILURES.get(text);
   if (known) {
+    // An existing connector that failed its identity check names the check (IDENTITY_CHECKS).
+    const cause = error?.ownershipCause;
+    const check = known.code === "connector_identity_unverified" && typeof cause === "string" && cause.startsWith("identity:")
+      ? IDENTITY_CHECKS.get(cause.slice("identity:".length)) : null;
+    if (check) return { ...known, message: `${known.message} ${check}` };
     // A setup window that moved names where it went (navigationPlace: host and path only).
     const place = ["workspace_context_changed", "platform_sign_in_required"].includes(known.code)
       && typeof error?.navigatedTo === "string" && /^[A-Za-z0-9./_-]{1,340}$/.test(error.navigatedTo) ? error.navigatedTo : null;

@@ -428,6 +428,33 @@ pub fn focus_local_target() -> Result<()> {
         .ok_or_else(|| error("CONTROL_NOT_ARMED", "No locally enabled target"))?;
     native::focus(&lease.target)
 }
+pub fn focus_local_target_in_session(session_id: &str) -> Result<()> {
+    let lease = state()
+        .lease
+        .as_ref()
+        .filter(|lease| lease.id == session_id)
+        .cloned()
+        .ok_or_else(|| {
+            error(
+                "CONTROL_NOT_ARMED",
+                "The selected session is no longer active",
+            )
+        })?;
+    check_same_lease(&lease, false)?;
+    if let Err(error) = native::focus(&lease.target) {
+        let mut s = state();
+        if s.lease
+            .as_ref()
+            .is_some_and(|current| current.id == lease.id)
+        {
+            s.stop("Foreground activation failed");
+            drop(s);
+            wake();
+        }
+        return Err(error);
+    }
+    check_same_lease(&lease, false)
+}
 pub fn local_preview() -> Result<Value> {
     // A preview never makes an agent's call wait: it is skipped while one runs.
     let _busy = try_exclusive().ok_or_else(|| {

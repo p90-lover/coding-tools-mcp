@@ -41,7 +41,7 @@
 //   the user confirms every command and every input sent to one here (unless the session was
 //   launched to bypass permissions). Being sandboxed never approves a command by itself.
 //
-// Tool groups, all under Settings: "agent" (files, search, patches, git, images, plan; on by
+// Tool groups under Plugins > Chat add-ons: "agent" (files, search, patches, git, images, plan; on by
 // default), "terminal" (exec_command, write_stdin, read_output, kill_command; on by default when
 // Codex's sandbox is installed, otherwise only when the user opts in) and "desktop" (screen
 // capture and computer control; off unless the user opts in).
@@ -71,6 +71,7 @@ const { GUIDE_TOOL_DEFS, createComputerGuides } = require("./computer-guides.cjs
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
 const { DUPLICATE_TOOLS: UNIFIED_DUPLICATE_TOOLS, FILE_TOOLS: UNIFIED_FILE_TOOLS, SERVER_NAME: UNIFIED_SERVER } = require("./unified-agent-tools.cjs");
 const { dispatchToolBatch, FAST_EXECUTION_GUIDANCE } = require("./chat-tool-batches.cjs");
+const { createChatToolRegistry, collectChatAddonTools, createChatAddonConflictReporter } = require("./chat-tool-addons.cjs");
 const { VERIFICATION_SCHEMA, prepareVerification, observeVerification, verificationReceipt } = require("./chat-verification.cjs");
 
 const SERVER_NAME = "coding-tools";
@@ -153,7 +154,7 @@ const AGENT_TOOLS = new Set([
   "view_image", "image_info", "compare_images", "ocr_image", "generate_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "open_plan", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
-  "redact_message", "move_chat", "push_notification",
+  "redact_message", "move_chat", "push_notification", "app_layout",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. It is
 // the only way the side panel opens without a click: pages, commands and subagents never open it by
@@ -342,6 +343,50 @@ const MOVE_TOOL_DEFS = Object.freeze([{
     properties: {
       project: { type: "string", maxLength: 200, description: "The project's name or id" },
       path: { type: "string", maxLength: 1024, description: "The project's folder, an absolute path" },
+    },
+  },
+}]);
+// Runtime > App layout (app-layout.cjs): the whole Coding Tools architecture map across 6 core
+// categories, 4 layers (sidebar, settings, mcp-tools, services) and current overlaps. Both the
+// user in the App layout tab and chat models can read or edit it live.
+const APP_LAYOUT_TOOL_DEFS = Object.freeze([{
+  name: "app_layout", title: "Read or edit Coding Tools' App layout",
+  description: "Read or edit the Coding Tools App layout shown in Runtime > App layout: the 6 core categories, the 4 layers "
+    + "(sidebar, settings, mcp-tools, services) and the overlaps list. Use action \"get\" (optionally with section \"all\", "
+    + "\"overview\", \"categories\", \"sidebar\", \"settings\", \"mcp-tools\", \"services\" or \"overlaps\") to read it; "
+    + "\"update_overview\", \"upsert_category\", \"remove_category\", \"upsert_category_item\", \"remove_category_item\", "
+    + "\"upsert_layer_row\", \"remove_layer_row\", \"upsert_overlap\", \"remove_overlap\", \"replace\" or \"reset\" to edit it. "
+    + "Edits update the App layout tab live.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    properties: {
+      action: {
+        type: "string",
+        enum: ["get", "update_overview", "upsert_category", "remove_category", "upsert_category_item", "remove_category_item",
+          "upsert_layer_row", "remove_layer_row", "upsert_overlap", "remove_overlap", "replace", "reset"],
+        default: "get",
+        description: "The operation to perform on the App layout",
+      },
+      section: {
+        type: "string",
+        enum: ["all", "overview", "categories", "sidebar", "settings", "mcp-tools", "services", "overlaps"],
+        description: "For action \"get\": which section to read (defaults to \"all\")",
+      },
+      title: { type: "string", maxLength: 180, description: "Title for update_overview, category, item, or layer row" },
+      subtitle: { type: "string", maxLength: 500, description: "Subtitle for update_overview" },
+      id: { type: "string", maxLength: 80, description: "ID of the category, item, row, or overlap to upsert or remove" },
+      categoryId: { type: "string", maxLength: 80, description: "Target category ID for upsert_category_item or remove_category_item" },
+      itemId: { type: "string", maxLength: 80, description: "Item ID for remove_category_item" },
+      layerId: { type: "string", maxLength: 80, description: "Target layer ID (\"sidebar\", \"settings\", \"mcp-tools\", \"services\", or a custom layer ID)" },
+      layerTitle: { type: "string", maxLength: 180, description: "Title when creating or renaming a layer in upsert_layer_row" },
+      layerEli5: { type: "string", maxLength: 400, description: "ELI5 summary when creating or updating a layer in upsert_layer_row" },
+      rowId: { type: "string", maxLength: 80, description: "Row ID for remove_layer_row" },
+      overlapId: { type: "string", maxLength: 80, description: "Overlap ID for remove_overlap" },
+      category: { type: "object", description: "Category object ({ id, title, eli5, items }) for upsert_category" },
+      item: { type: "object", description: "Category item object ({ id, title, surfaceId, summary, bullets }) for upsert_category_item" },
+      row: { type: "object", description: "Layer row object ({ id, category, title, surfaceId, controllingSwitch, currentLocation, belongsIn, items, note }) for upsert_layer_row" },
+      overlap: { type: "object", description: "Overlap object ({ id, item, currentLocation, belongsIn, why }) for upsert_overlap" },
+      layout: { type: "object", description: "Full layout object for action \"replace\"" },
     },
   },
 }]);
@@ -578,9 +623,14 @@ function chatSchema(name, schema) {
   return { ...schema, properties, ...(Array.isArray(schema.required)
     ? { required: schema.required.filter((key) => Object.hasOwn(properties, key) && !optional.has(key)) } : {}) };
 }
-const GROUPS = Object.freeze(["agent", "terminal", "desktop", "preview", "subagents", "chats"]);
-const groupOf = (name) => (AGENT_TOOLS.has(name) ? "agent" : TERMINAL_TOOLS.has(name) ? "terminal" : DESKTOP_TOOLS.has(name) ? "desktop"
-  : PREVIEW_TOOLS.has(name) ? "preview" : SUBAGENT_TOOLS.has(name) ? "subagents" : CHAT_HISTORY_TOOLS.has(name) ? "chats" : null);
+const CHAT_TOOL_ADDONS = createChatToolRegistry({ agent: AGENT_TOOLS, terminal: TERMINAL_TOOLS, desktop: DESKTOP_TOOLS,
+  preview: PREVIEW_TOOLS, subagents: SUBAGENT_TOOLS, chats: CHAT_HISTORY_TOOLS });
+const { groups: GROUPS, groupOf } = CHAT_TOOL_ADDONS;
+const LOCAL_TOOL_NAMES = new Set([
+  ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS, ...GOAL_TOOLS, ...CHAT_HISTORY_TOOLS, ...WATCH_TOOLS, ...MONITOR_TOOLS,
+  "show_in_chat", "open_plan", "schedule_wakeup", "capture_process", "app_processes", "view_app", "generate_image",
+  "computer_guide", "rename_chat", "move_chat", "redact_message", "app_layout", "list_commands", "push_notification", "sleep",
+]);
 /**
  * Whether "Approve for me" leaves a call of this tool to the chat's reviewer: the calls this app
  * itself confirms when nothing reviewed them upstream (a command, typed input, the screen). Every
@@ -1255,7 +1305,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false, watches = false,
-  monitors = false, notifies = false, renames = false, moves = false, redacts = false, plans = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
+  monitors = false, notifies = false, renames = false, moves = false, redacts = false, plans = false, appLayouts = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either; nor is a GPT session that
   // has unified-agent-tools for them, which is told to use those for every file operation.
@@ -1387,6 +1437,9 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Secrets: when a message from the user contains a secret of a kind redact_message lists (a key, a password, a token), "
         + "call redact_message with it first, so the chat stops storing and showing it; never repeat it in your reply. "
       : "")
+    + (appLayouts
+      ? "App layout: Runtime > App layout shows the whole Coding Tools architecture across 6 categories, 4 layers (sidebar, settings, mcp-tools, services) and current overlaps; call app_layout to read or edit any category, layer row, or overlap live. "
+      : "")
     + "Large results are paged; ask for less per call.";
 }
 
@@ -1469,6 +1522,8 @@ function createChatAgentTools({
   // move_chat's service ({ projects(): [{ id, name, path }], move({ workspaceId, session, targetWorkspaceId }) });
   // without it the tool is not offered.
   chatMoves = null,
+  // app_layout's store ({ get(section), act(input), reset() }): without it the tool is not offered.
+  appLayout = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1499,6 +1554,8 @@ function createChatAgentTools({
   streamAfterMs = STREAM_AFTER_MS, keepAliveMs = KEEP_ALIVE_MS,
 } = {}) {
   if (typeof requestHeadless !== "function") throw new Error("The headless tool service is required");
+  const reportConflict = createChatAddonConflictReporter(logger, now);
+  for (const conflict of CHAT_TOOL_ADDONS.conflicts) reportConflict(conflict);
   // Identifies this server's lifetime in warm-session keys without exposing any credential.
   const instance = crypto.randomUUID();
   const guides = createComputerGuides({ notesDir: computerGuidesDir, logger });
@@ -1775,16 +1832,10 @@ function createChatAgentTools({
       ...(canPlan(entry) ? [OPEN_PLAN_DEF] : []), ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
-      ...(captureApp ? VIEW_APP_DEFS : []), ...(generateImage ? IMAGE_TOOL_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : [])];
-    return [...(Array.isArray(catalog?.tools) ? catalog.tools : [])
-      .filter((tool) => !PREVIEW_TOOLS.has(tool?.name) && !SUBAGENT_TOOLS.has(tool?.name) && !GOAL_TOOLS.has(tool?.name)
-        && !CHAT_HISTORY_TOOLS.has(tool?.name) && tool?.name !== "show_in_chat" && tool?.name !== "open_plan"
-        && tool?.name !== "schedule_wakeup" && tool?.name !== "capture_process" && tool?.name !== "app_processes"
-        && tool?.name !== "view_app" && tool?.name !== "generate_image" && tool?.name !== "computer_guide" && tool?.name !== "rename_chat" && tool?.name !== "move_chat" && tool?.name !== "redact_message"
-        && tool?.name !== "list_commands" && !WATCH_TOOLS.has(tool?.name) && !MONITOR_TOOLS.has(tool?.name)
-        && tool?.name !== "push_notification" && tool?.name !== "sleep"), ...own]
-      .filter((tool) => typeof tool?.name === "string" && !UNLISTED_TOOLS.has(tool.name) && !duplicateOfHarness(entry, tool.name)
-        && groupOf(tool.name) && allowed(entry, groupOf(tool.name)))
+      ...(captureApp ? VIEW_APP_DEFS : []), ...(generateImage ? IMAGE_TOOL_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : []),
+      ...(appLayout ? APP_LAYOUT_TOOL_DEFS : [])];
+    return collectChatAddonTools({ registry: CHAT_TOOL_ADDONS, headless: catalog?.tools, local: own, reserved: LOCAL_TOOL_NAMES,
+      allowed: (name, group) => !UNLISTED_TOOLS.has(name) && !duplicateOfHarness(entry, name) && allowed(entry, group), report: reportConflict })
       // outputSchema is left out: clients would validate structuredContent against it, and the
       // agent gains nothing from it.
       .map(({ name, title, description, inputSchema, annotations }) => ({
@@ -2018,9 +2069,12 @@ function createChatAgentTools({
       });
     }
     let current;
-    try { current = await computerControl.status(); } catch { current = { state: "stopped" }; }
+    try { current = await computerControl.status(); } catch { current = null; }
     const controlled = current?.state && current.state !== "stopped" ? computerControl.controlled() : null;
     if (name === "computer_select_window") {
+      const cancelled = () => failedCall("This chat's tool call was cancelled.", { execution_status: "not_started" });
+      if (signal?.aborted) return cancelled();
+      if (!current?.state) return failedCall("Could not read desktop control status; no selection was started.");
       let target = null;
       try { target = (await computerControl.targets()).find((item) => item.window_id === Number(args.window_id) && item.pid === Number(args.pid)) ?? null; } catch { target = null; }
       if (!target) return failedCall("That window is not open any more, or it is this app's own; call computer_list_windows again.");
@@ -2033,13 +2087,28 @@ function createChatAgentTools({
       if (signal?.aborted) return failedCall("This chat's tool call was cancelled.");
       const permission = grantedApp(target.appName, answer);
       const guide = await guides.brief(target.app);
-      // The window already under control: headless selects it (and brings it forward when asked);
-      // without a session to name, the agent is given the current one.
-      if (controlled && controlled.window_id === target.window_id && controlled.pid === target.pid) {
-        return args.session_id ? null : plainResult({ ...current, app: target.appName, permission, guide, note: "Control is already on for this window; use this session_id." });
-      }
+      if (signal?.aborted) return cancelled();
+      const activate = args.activate === true;
+      const sameWindow = controlled?.window_id === target.window_id && controlled?.pid === target.pid;
       try {
-        const status = await computerControl.start({ workspaceId: entry.workspaceId, target, agent: agentName(entry), model: await pillModel(entry) });
+        const model = sameWindow ? null : await pillModel(entry);
+        if (signal?.aborted) return cancelled();
+        const latest = await computerControl.status();
+        if (signal?.aborted) return cancelled();
+        const owner = latest?.state !== "stopped" ? computerControl.controlled() : null;
+        if (latest?.state !== current.state || latest?.session_id !== current.session_id
+          || owner?.window_id !== controlled?.window_id || owner?.pid !== controlled?.pid
+          || (latest?.target && (latest.target.window_id !== owner?.window_id || latest.target.pid !== owner?.pid))) {
+          return failedCall("Desktop control changed during selection. Check computer_status before selecting again.",
+            { code: "CONTROL_SESSION_CHANGED", execution_status: "not_started" });
+        }
+        if (sameWindow) {
+          if (!latest.session_id) return failedCall("The selected window no longer has a control session.");
+          if (activate && !args.session_id) args.session_id = latest.session_id;
+          return args.session_id ? null : plainResult({ ...latest, app: target.appName, permission, guide, note: "Control is already on for this window; use this session_id." });
+        }
+        const status = await computerControl.start({ workspaceId: entry.workspaceId, target, agent: agentName(entry), model, activate, signal,
+          expectedStatus: { state: latest.state, session_id: latest.session_id } });
         return plainResult({ ...status, app: target.appName, permission, guide, note: "Control is on for this window; use this session_id with the other computer_* tools." });
       } catch (error) { return failedCall(`Control did not start: ${errorMessage(error)}`); }
     }
@@ -2503,10 +2572,29 @@ function createChatAgentTools({
     }
   }
 
+  /** app_layout: reads or edits the Coding Tools App layout (app-layout.cjs), updating the App layout tab live. */
+  async function appLayoutCall(given) {
+    if (!appLayout) return failedCall("Unknown tool: app_layout");
+    const { formatAppLayoutSummary } = require("./app-layout.cjs");
+    const action = typeof given?.action === "string" && given.action.trim() ? given.action.trim() : "get";
+    try {
+      const value = action === "get"
+        ? await appLayout.get(given.section ?? "all")
+        : await appLayout.act({ ...given, action });
+      if (action !== "get") await appLayout.saved?.();
+      const text = action === "get" && given.section && given.section !== "all"
+        ? JSON.stringify(value, null, 2)
+        : formatAppLayoutSummary(value, given.section ?? "all");
+      return { content: [{ type: "text", text }], structuredContent: value };
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+  }
+
   async function callTool(entry, params, channel = {}) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
-    if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off in Settings.");
+    if (!isEnabled()) return failedCall("The app's tools for chat agents are turned off under Plugins > Chat add-ons.");
     const group = groupOf(name);
     if (!group || !allowed(entry, group)) return failedCall(`Unknown tool: ${name}`);
     const signal = entry.lifetime.signal;
@@ -2548,6 +2636,7 @@ function createChatAgentTools({
     if (name === "rename_chat") return renameChat(entry, given);
     if (name === "move_chat") return moveChat(entry, given, signal);
     if (name === "redact_message") return redactMessage(entry, given);
+    if (name === "app_layout") return appLayoutCall(given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
@@ -2921,7 +3010,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), watches: canWatch(entry), monitors: canMonitor(entry), notifies: canNotify(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
+              wakeups: canWake(entry), watches: canWatch(entry), monitors: canMonitor(entry), notifies: canNotify(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), appLayouts: Boolean(appLayout), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
               unifiedFiles: entry.unifiedFiles === true, plans: canPlan(entry), computerSteps: Boolean(computerControl) && !setting(reviewComputerSteps) }),
           } };
         }

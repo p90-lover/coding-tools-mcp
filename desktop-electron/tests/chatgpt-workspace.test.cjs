@@ -237,6 +237,25 @@ test("same-workspace owner is preferred, publishes there, and connects the origi
   assert(f.contexts.some(value => value.partition === "persist:member" && value.context.planType === "team"));
 });
 
+// Background checks (2026-11-24): an automatic check's lock gives way to chats (yieldsToChats), and its
+// Publish click runs as a step changing ChatGPT, which a stop lets finish (browser whileChangingChatGpt).
+test("an automatic check's lock yields to chats, a Connect's does not, and Publish finishes before any stop", async () => {
+  for (const yieldsToChats of [true, undefined]) {
+    const f = fixture({ owner: true });
+    const lock = f.input.browserHost.withManualOperation, changed = [];
+    let options;
+    f.input.browserHost.withManualOperation = (name, action, opts) => { options = opts; return lock(name, action); };
+    f.input.browserHost.whileChangingChatGpt = async step => {
+      const before = f.calls.length;
+      try { return await step(); } finally { changed.push(...f.calls.slice(before)); }
+    };
+    if (yieldsToChats) f.input.yieldsToChats = true;
+    assert.equal((await f.run()).connected, true);
+    assert.deepEqual({ ...options }, { preserveSurface: false, stoppable: true, yieldsToChats: yieldsToChats === true });
+    assert.deepEqual(changed, [["publish", "persist:owner"]], "only the Publish click is a change step here");
+  }
+});
+
 test("a member or admin uses fresh exact existing connector identity before looking for an owner", async () => {
   for (const role of ["standard-user", "account-admin"]) {
     const f = fixture({ existingVerified: true });

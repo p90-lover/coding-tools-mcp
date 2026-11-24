@@ -45,7 +45,8 @@ test("models are named as people know them", () => {
 });
 
 /** A control whose pill is a stand-in window recording what the app did to it. */
-function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3, 4, 5), fileIcon = undefined, processAlive = () => true } = {}) {
+function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3, 4, 5), fileIcon = undefined, processAlive = () => true,
+  load = () => Promise.resolve(), startReply = (status) => status, heartbeatReply = (status) => status } = {}) {
   const made = [];
   class FakeWindow {
     constructor(options) {
@@ -66,9 +67,9 @@ function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3
     setBounds(bounds) { this.bounds = { ...bounds }; }
     moveTop() { this.raised += 1; }
     on() {} showInactive() { this.shownInactive = true; } destroy() { this.destroyed = true; }
-    loadURL(url) { this.url = url; return Promise.resolve(); }
+    loadURL(url) { this.url = url; return load(); }
     isDestroyed() { return Boolean(this.destroyed); }
-    isVisible() { return true; }
+    isVisible() { return this.shownInactive === true && !this.isDestroyed(); }
     /** The page renamed itself, as its buttons do. */
     retitle(title) { let prevented = false; this.handlers["page-title-updated"]({ preventDefault: () => { prevented = true; } }, title); return prevented; }
   }
@@ -81,13 +82,21 @@ function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3
   const requests = [];
   // Headless as the pill sees it: control on after a start, off after a stop, and the agent's last
   // frame (`agent.frame`) reported by the heartbeat and served by /computer/frame.
-  const agent = { armed: false, frame: null, frameFails: false };
+  const agent = { armed: false, sessionId: "lease", frame: null, frameFails: false };
   const request = async (endpoint, body, options = {}) => {
     requests.push(endpoint);
-    if (endpoint === "/api/v1/computer/start") { agent.armed = true; return { status: { state: "active", session_id: "lease" } }; }
+    if (endpoint === "/api/v1/computer/start") {
+      agent.armed = true;
+      return { status: await startReply({ state: "active", session_id: agent.sessionId, overlay_ready: false }) };
+    }
     if (endpoint === "/api/v1/computer/stop") { agent.armed = false; return {}; }
     if (endpoint.startsWith("/api/v1/computer/status")) {
-      return { status: agent.armed ? { state: "active", last_snapshot_id: agent.frame?.snapshot_id ?? null } : { state: "stopped" } };
+      const heartbeat = endpoint.includes("heartbeat=true");
+      const status = agent.armed
+        ? { state: "active", session_id: agent.sessionId, overlay_ready: heartbeat, last_snapshot_id: agent.frame?.snapshot_id ?? null }
+        : { state: "stopped" };
+      if (heartbeat) assert.equal(options.localConfirmation, true, "only the visible local monitor renews input");
+      return { status: heartbeat ? await heartbeatReply(status) : status };
     }
     if (endpoint.startsWith("/api/v1/computer/frame")) {
       assert.equal(options.localConfirmation, true, "only the app's own UI reads the agent's frame");
@@ -105,6 +114,111 @@ function pill({ cursor = { x: 2500, y: 10 }, now = () => Date.UTC(2026, 10, 7, 3
 const argumentsOf = (window, name) => window.scripts.filter((code) => code.startsWith(`window.${name}(`)).map((code) => JSON.parse(`[${code.slice(name.length + 8, -1)}]`));
 const calls = (window, name) => argumentsOf(window, name).map(([first]) => first);
 const settle = () => new Promise(setImmediate);
+const selection = { workspaceId: "ws", target: { window_id: 7, pid: 70, title: "Fixture", app: "fixture.exe" } };
+
+test("selection waits for the visible monitor and its matching heartbeat", async () => {
+  const loaded = Promise.withResolvers();
+  const acknowledged = Promise.withResolvers();
+  const { control, made, requests } = pill({ load: () => loaded.promise, heartbeatReply: () => acknowledged.promise });
+  let selected = false;
+  const started = control.start(selection).then((status) => { selected = true; return status; });
+  try {
+    await settle();
+    assert.equal(selected, false, "an armed backend is not ready while the bar is loading");
+    assert.equal(made[0].isVisible(), false);
+    assert.equal(requests.some((endpoint) => endpoint.includes("heartbeat=true")), false);
+    loaded.resolve();
+    await settle();
+    assert.ok(made[0].isVisible());
+    assert.ok(requests.some((endpoint) => endpoint.includes("heartbeat=true")));
+    assert.equal(selected, false, "even a visible bar waits for the heartbeat reply");
+    assert.equal(control.controlled(), null, "no other call can reuse the unready lease");
+    await assert.rejects(control.start(selection), /control is changing/i);
+    assert.equal(requests.filter((endpoint) => endpoint === "/api/v1/computer/start").length, 1);
+    acknowledged.resolve({ state: "active", session_id: "lease", overlay_ready: true });
+    assert.deepEqual(await started, { state: "active", session_id: "lease", overlay_ready: true });
+  } finally {
+    loaded.resolve();
+    acknowledged.resolve(null);
+    await control.stop();
+    await started.catch(() => undefined);
+  }
+});
+
+test("Stop during a pending Start never reopens the monitor on a late reply", async () => {
+  const reply = Promise.withResolvers();
+  const { control, made, requests, agent } = pill({ startReply: () => reply.promise });
+  const started = control.start(selection);
+  const rejected = assert.rejects(started, /stopped|cancelled/i);
+  try {
+    await settle();
+    assert.ok(requests.includes("/api/v1/computer/start"));
+    assert.equal(agent.armed, true);
+    await control.stop();
+    reply.resolve({ state: "active", session_id: "lease", overlay_ready: false });
+    await rejected;
+    assert.equal(agent.armed, false);
+    assert.equal(made.length, 0);
+    assert.equal(control.controlled(), null);
+    assert.equal(requests.filter((endpoint) => endpoint === "/api/v1/computer/stop").length, 1);
+  } finally { control.dispose(); }
+});
+
+test("cancelling a selection during its heartbeat closes the monitor before any late acknowledgement", async () => {
+  const acknowledged = Promise.withResolvers();
+  const { control, made, agent, requests } = pill({ heartbeatReply: () => acknowledged.promise });
+  const abort = new AbortController();
+  const rejected = assert.rejects(control.start({ ...selection, signal: abort.signal }), /cancelled/i);
+  try {
+    await settle();
+    assert.ok(requests.some((endpoint) => endpoint.includes("heartbeat=true")));
+    abort.abort();
+    await rejected;
+    assert.equal(agent.armed, false);
+    assert.equal(made[0].isVisible(), false);
+    acknowledged.resolve({ state: "active", session_id: "lease", overlay_ready: true });
+    await settle();
+    assert.equal(control.controlled(), null);
+  } finally { control.dispose(); }
+});
+
+test("a failed or stalled local monitor tears down its own selection", async (t) => {
+  await t.test("renderer cannot load", async () => {
+    const { control, made, agent } = pill({ load: () => Promise.reject(new Error("renderer load failed")) });
+    try {
+      await assert.rejects(control.start(selection), /renderer load failed/);
+      assert.equal(made[0].destroyed, true);
+      assert.equal(agent.armed, false);
+    } finally { control.dispose(); }
+  });
+  await t.test("renderer exceeds the readiness deadline", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+    const loaded = Promise.withResolvers();
+    const { control, made, agent, requests } = pill({ load: () => loaded.promise });
+    const rejected = assert.rejects(control.start(selection), /monitor.*ready/i);
+    try {
+      await settle();
+      t.mock.timers.tick(5_001);
+      await rejected;
+      loaded.resolve();
+      await settle();
+      assert.equal(agent.armed, false);
+      assert.equal(made[0].isVisible(), false);
+      assert.equal(requests.some((endpoint) => endpoint.includes("heartbeat=true")), false);
+    } finally { control.dispose(); }
+  });
+});
+
+test("a replacement session cannot acknowledge readiness for the selected lease", async () => {
+  const replacement = { state: "active", session_id: "replacement", overlay_ready: true };
+  const { control, made, agent, requests } = pill({ heartbeatReply: () => { agent.sessionId = replacement.session_id; return replacement; } });
+  try {
+    await assert.rejects(control.start(selection), /monitor.*ready/i);
+    assert.equal(made[0].isVisible(), false);
+    assert.equal(agent.armed, true, "cleanup must not stop the replacement lease");
+    assert.ok(!requests.includes("/api/v1/computer/stop"));
+  } finally { control.dispose(); }
+});
 
 test("the pill sits on the screen the person is using, above full-screen apps, names agent, model and app, and never takes the focus", async () => {
   const { control, made } = pill();

@@ -714,14 +714,33 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * null: the chat's last run was a single model on exactly this route and its card is done (a
    * stopped one too: Stop only interrupts the turn, and continuable() checks the agent is there).
    */
+  function effectiveCardRoute(card, chat = null) {
+    if (!card?.route) return null;
+    const resized = chat && card.receipt?.thread_id
+      ? chatEdits.resizedWindow(chat.workspaceId, chat.taskId, card.receipt.thread_id) : undefined;
+    return resized === undefined ? card.route : { ...card.route, context_window: resized };
+  }
+  function implicitCardEffort(route) {
+    if (!route || route.effort || !String(route.model ?? "").startsWith(CPA_MODEL_PREFIX)) return null;
+    const baseModel = route.model.slice(CPA_MODEL_PREFIX.length)
+      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    const efforts = CLINE_EFFORTS.get(baseModel) ?? knownModels[baseModel]?.capability?.efforts;
+    return startEffort(route.model, efforts);
+  }
+  function routeMatchesCard(route, other) {
+    return ROUTE_IDENTITY.every(field => {
+      const left = route?.[field] ?? null, right = other?.[field] ?? null;
+      if (left === right) return true;
+      return field === "effort" && left === null && right !== null && right === implicitCardEffort(route);
+    });
+  }
   function continuationCard(previous, executionMode, singleRoute, chat = null) {
     const card = executionMode === "single" && singleRoute ? resumableChatCard(previous) : null;
     if (!card) return null;
     // An agent resized in place (chat_context_window) runs with the window it was resized to, not
     // the one its card was started with.
-    const resized = chat ? chatEdits.resizedWindow(chat.workspaceId, chat.taskId, card.receipt.thread_id) : undefined;
-    const route = resized === undefined ? card.route : { ...card.route, context_window: resized };
-    return ROUTE_IDENTITY.every(field => (route?.[field] ?? null) === (singleRoute[field] ?? null)) ? card : null;
+    const route = effectiveCardRoute(card, chat);
+    return routeMatchesCard(route, singleRoute) ? card : null;
   }
   /** The chat's single-model card whose AO agent a follow-up could go on with, whatever its route. */
   function resumableChatCard(previous) {
@@ -1268,7 +1287,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       // Only the window changed: the chat's own agent is resized to it (chat_context_window), which
       // the same pick asks for. Warming a new agent for that route was a spare model process.
-      if (!live && agent && windowOnlyChange(agent.route, singleRoute)) {
+      if (!live && agent && windowOnlyChange(effectiveCardRoute(agent, { workspaceId: id, taskId: task }), singleRoute)) {
         return { ok: true, warmed: false, reason: "The chat's agent is resized to the new window" };
       }
       return chatPrewarmRoute(id, singleRoute, true);
@@ -1283,8 +1302,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const chatResizes = new Map();
   const resizeKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
   /** Whether two routes differ in nothing that decides how an agent is launched but its window. */
-  const windowOnlyChange = (route, other) => ROUTE_IDENTITY.every(field => field === "context_window"
-    || (route?.[field] ?? null) === (other?.[field] ?? null));
+  const windowOnlyChange = (route, other) => routeMatchesCard({ ...route, context_window: other?.context_window ?? null }, other);
   /**
    * chat_context_window: resize the chat's agent to `contextWindow` (tokens, or null for the model's
    * default) now, keeping what it knows. AO saves the window with the session; the agent is stopped
@@ -1633,9 +1651,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    */
   const modelFamilyKey = id => {
     const name = String(id ?? "");
-    return name.slice(name.lastIndexOf("/") + 1).toLowerCase().replace(/\([^()]*\)$/, "").trim()
-      .replace(/[\s._]+/g, "-").replace(/-\d{4}-\d{2}-\d{2}$/, "")
-      .replace(/(?:-(?:minimal|low|medium|high|xhigh|thinking|preview|latest|tiered))+$/, "");
+    return name.slice(name.lastIndexOf("/") + 1).toLowerCase().replace(/(?:\([^()]*\)|\[1m\])+$/, "").trim()
+      .replace(/[\s._]+/g, "-")
+      .replace(/(?:-(?:\d{4}-\d{2}-\d{2}|20\d{6}|1m|minimal|low|medium|high|xhigh|ultra|auto|none|thinking|nothinking|preview|latest|tiered))+$/, "");
   };
   /** GPT-5 and later as CPA's own Codex providers list them (no prefix): their 272K is real. */
   const ownGptModel = id => !String(id).includes("/") && /^gpt-(?:[5-9]|\d{2,})(?:-|$)/.test(modelFamilyKey(id));
@@ -1653,13 +1671,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    */
   const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:-\d+)?-flash\b/, 1_000_000],
     [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/, 1_048_576],
-    [/^gemini-(?:2-5|3(?:-\d+)?)-(?:pro|flash)(?:-lite)?$/, 1_048_576],
-    [/^claude-(?:opus|sonnet|haiku|fable)-(?:[5-9](?:-\d+)?|4-[78])$/, 1_000_000],
-    [/^claude-(?:opus|sonnet|haiku)-4(?:-[0-6])?$/, 200_000],
+    [/^gemini-(?:2-[05]|3(?:-\d+)?)-(?:pro|flash)(?:-lite)?$/, 1_048_576],
+    [/^claude-(?:opus|sonnet|haiku|fable)-(?:[5-9](?:-\d+)?|4-[78])(?:-|$)/, 1_000_000],
+    [/^claude-(?:(?:opus|sonnet|haiku)-4(?:-[0-6])?|3(?:-[57])?-(?:opus|sonnet|haiku))$/, 200_000],
     [/^gpt-4-1(?:-mini|-nano)?$/, 1_047_576],
     [/^gpt-4o(?:-mini)?$/, 128_000],
-    [/^o[34](?:-mini)?$/, 200_000]];
-  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(modelFamilyKey(id)))?.[1];
+    [/^o[134](?:-pro|-mini|-deep-research)?$/, 200_000]];
+  const knownContextLimit = id => {
+    const raw = String(id ?? ""), family = modelFamilyKey(raw);
+    if ((/\[1m\]/i.test(raw) || /(?:^|-)1m(?:-|$|\()/i.test(raw)) && /^claude-/.test(family)) return 1_000_000;
+    return KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(family))?.[1];
+  };
   /**
    * The largest window a card may set for a model whose catalog reports `limit`. CPA's
    * max_context_window counts what the model takes in: its window less the reply's 128K reserve,
@@ -1688,7 +1710,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const model = String(route?.model ?? "");
     const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
       .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
-    const limit = id ? knownModels[id]?.capability?.contextLimit : undefined;
+    let limit = id ? knownModels[id]?.capability?.contextLimit ?? knownContextLimit(id) : undefined;
+    if (limit === undefined && id) {
+      const family = modelFamilyKey(id);
+      for (const [other, entry] of Object.entries(knownModels)) {
+        const candidate = entry?.capability?.contextLimit;
+        if (Number.isSafeInteger(candidate) && candidate >= 4096 && modelFamilyKey(other) === family) {
+          limit = limit === undefined ? candidate : Math.min(limit, candidate);
+        }
+      }
+    }
     return Number.isSafeInteger(limit) && limit >= 4096 ? limit : null;
   }
   /** The window an agent is launched or resized with for a card's `tokens`: never past windowLimit. */
@@ -1883,8 +1914,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (saved && typeof saved === "object" && !Array.isArray(saved)) {
         for (const [id, entry] of Object.entries(saved).slice(0, MAX_LISTED_MODELS)) {
           if (id && id.length <= 128 && Number.isFinite(entry?.seen) && entry.capability && typeof entry.capability === "object") {
+            const capability = { ...entry.capability };
+            const known = knownContextLimit(id);
+            if (capability.contextLimit === CPA_STOCK_WINDOW && !ownGptModel(id)) {
+              if (known) capability.contextLimit = known; else delete capability.contextLimit;
+            } else if (!capability.contextLimit && known) capability.contextLimit = known;
             // A date ahead of the clock (it was once set wrong) would never expire or refresh.
-            kept[id] = { seen: Math.min(entry.seen, now()), capability: entry.capability, ...(entry.plugin ? { plugin: true } : {}) };
+            kept[id] = { seen: Math.min(entry.seen, now()), capability, ...(entry.plugin ? { plugin: true } : {}) };
           }
         }
       }
@@ -4671,6 +4707,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (short === "sleep") return "Waits in this turn for at most 100 seconds; it runs nothing";
     if (short === "rename_chat") return "Names this chat after the task it works on; it runs nothing";
     if (short === "redact_message") return "Hides secrets you pasted in this chat's messages; it runs nothing and changes no files";
+    if (short === "app_layout") return "Reads or edits Coding Tools' App layout map; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
@@ -8082,11 +8119,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // The next round runs as the last one did: the same Single model route, or the chat's team.
   const SINGLE_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
   /** How a chat's next turn the app sends itself runs: on `route` when one was picked, else as `previous` did (its Single route, or the chat's team). */
-  const followUpSelection = (previous, route = null) => (route && typeof route === "object"
-    ? { executionMode: "single", singleRoute: { ...route } }
-    : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
-      ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
-      : {});
+  const followUpSelection = (previous, route = null) => {
+    if (route && typeof route === "object") return { executionMode: "single", singleRoute: { ...route } };
+    if (previous?.execution_mode !== "single" || !previous.nodes?.[0]?.route) return {};
+    const effective = effectiveCardRoute(previous.nodes[0],
+      previous.workspace_id && previous.project_id ? { workspaceId: previous.workspace_id, taskId: previous.project_id } : null);
+    return {
+      executionMode: "single",
+      singleRoute: Object.fromEntries(Object.entries(effective).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)),
+    };
+  };
   // Chats whose next goal round is being started. A resume and a settling round (or two resumes)
   // both passed the "chat is working" check before either round existed, so the chat got the same
   // round message twice and ran two turns at once on one agent: one failed "restoration could not
@@ -10920,8 +10962,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * AO's spawn arguments for a subagent (subagents.cjs) on `route`, as a single chat card's: its
    * model through CPA's gateway, effort and window honoured, a plain session.
    */
-  const subagentLaunchArgs = (workspaceId, route, name) => aoLaunchArgs(clean(workspaceId, 128),
-    { id: "subagent", role: "worker", route, settings: { name } }, true);
+  const subagentLaunchArgs = (workspaceId, route, name) => {
+    const agent = externalAgent({ route });
+    const model = String(route?.model ?? "");
+    const viaCpa = model.startsWith(CPA_MODEL_PREFIX);
+    const slash = model.indexOf("/");
+    const unqualifiedOpenCode = agent === "opencode" && !viaCpa
+      && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
+    const windowed = GATEWAY_AGENTS.has(agent) && agent !== "agy" && agent !== "unreal-agent"
+      && (agent !== "pi" || viaCpa) && !unqualifiedOpenCode;
+    return aoLaunchArgs(clean(workspaceId, 128),
+      { id: "subagent", role: "worker", route, settings: { name } }, true, windowed ? windowLimit(route) : null);
+  };
   /**
    * A saved team run as a subagent (subagents.cjs): the team works on the task as a chat of its own
    * (chat_send in team mode, started in the background as a /goal round is), and its closing cards'

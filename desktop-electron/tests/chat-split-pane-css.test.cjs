@@ -43,9 +43,11 @@ test("a narrow chat keeps its buttons whole: they never shrink, and what the hea
   assert.doesNotMatch(fs.readFileSync(path.resolve(__dirname, "../src/features/ChatBranchBar.tsx"), "utf8"), /<Caret/,
     "no down arrow on the branch either (asked for 2026-11-03); the chat box's chips lost theirs in #986");
   for (const px of [560, 400, 300]) assert.doesNotMatch(container(px), /\.ao-composer-controls \{[^}]*(order|flex-basis)/, `no ${px} px tier piles the chips onto rows of their own`);
-  assert.match(container(300), /\[aria-label="Preview"\], \[aria-label="Show cards"\], \[aria-label="Show side panel"\]\) \{ display: none; \}/);
-  assert.match(chat, /const NARROW_HEAD_PX = 300;/, "the More menu takes them over at the same width");
-  for (const label of ['label: "Preview"', 'label: "Show cards"', 'label: "Side panel"']) assert.ok(chat.includes(label), `the More menu has ${label} when narrow`);
+  assert.match(container(300), /\.cx-browser-chip, \[aria-label="Show cards"\]\) \{ display: none; \}/);
+  assert.match(chat, /const NARROW_HEAD_PX = 300;/, "the More menu takes over Show cards at the same width");
+  assert.ok(chat.includes('label: "Show cards"'), "the More menu still has Show cards when narrow");
+  assert.match(chat, /aria-label="Chat add-ons"/);
+  assert.doesNotMatch(container(300), /\[aria-label="Chat add-ons"\]/, "the single add-on launcher stays reachable in a narrow chat");
 });
 
 // The same day, after #914: under ~720 px the one-row chat box cut the permission and model names

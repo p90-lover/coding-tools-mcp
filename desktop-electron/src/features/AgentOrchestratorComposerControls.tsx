@@ -252,7 +252,8 @@ export function AgentOrchestratorComposerControls({
       const current = latest.current;
       if (current.harness_id !== route.harness_id || current.model !== route.model) return;
       // A late catalog fits restored preferences too; existing chat picks keep priority over them.
-      const next = tunedRoute(current, loaded[current.model]);
+      const currentBase = current.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+      const next = tunedRoute(current, loaded[current.model] ?? loaded[currentBase]);
       // Reported as an adjustment: it is this chat's fit, not a pick the next new chat should start on.
       if (next.context_window !== current.context_window || next.effort !== current.effort) onRouteChange(next, true);
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
@@ -278,10 +279,12 @@ export function AgentOrchestratorComposerControls({
   }
   const harness = harnesses.find(item => item.id === route.harness_id);
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
-  const capability = caps[route.model];
+  const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+  const capability = caps[route.model] ?? caps[baseModel];
   const { efforts, context, fullLimit, presets, fixed } = routeTuning(route, models === null ? undefined : capability);
-  const millionTokenMax = !fixed && context?.max === 1_048_576 ? context.max : null;
-  const lastChoice = millionTokenMax ?? fullLimit;
+  const millionTokenMax = !fixed && (context?.max === 1_048_576 || context?.max === 1_047_576) ? context.max : null;
+  const topLimit = fullLimit && context?.max === 1_000_000 && fullLimit < 1_000_000 && fullLimit + 128_000 >= 1_000_000 ? 1_000_000 : fullLimit;
+  const lastChoice = millionTokenMax ?? topLimit;
   const windowChoices = [...new Set([
     ...presets.filter(tokens => !millionTokenMax || tokens !== 1_000_000),
     ...(lastChoice ? [lastChoice] : []),
@@ -303,14 +306,13 @@ export function AgentOrchestratorComposerControls({
   // known runs at the agent's own window, which the chip calls "Auto" like an unpicked effort.
   const startWindow = models === null ? null : defaultWindow(route, capability);
   const shownWindow = fixed || route.context_window || startWindow || fullLimit;
-  const windowLabel = shownWindow ? (shownWindow === 1_048_576 ? "1M" : contextText(shownWindow)) : "Auto";
+  const windowLabel = shownWindow ? (shownWindow === 1_048_576 || shownWindow === 1_047_576 ? "1M" : contextText(shownWindow)) : "Auto";
   // No "Default" effort either: unpicked, a model runs at its own effort, which the chip names
   // when the model's id carries it ("Gemini 3.8 Flash High" -> High) and otherwise calls "Auto".
   const modelEffort = ownEffort(route.model);
   const effortLabel = route.effort ? effortWord(route.effort) : modelEffort ? effortWord(modelEffort) : "Auto";
   // A picked model the harness no longer offers (CPA dropped cline-pass/deepseek-v4.1-flash when
   // Cline stopped serving it) must not look as if it would run; the send is refused up front too.
-  const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
   const unlisted = Boolean(route.model) && models !== null && models.length > 0 && !models.includes(route.model) && !models.includes(baseModel);
   const modelName = modelLabel(route.model, route.provider_id === "cliproxyapi-antigravity") || "Choose model";
   // The chip shows the model's name only; who serves it is in the menu's groups and the tooltip.

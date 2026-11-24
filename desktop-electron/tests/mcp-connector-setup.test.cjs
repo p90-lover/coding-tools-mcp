@@ -459,7 +459,11 @@ test("the production connector action verifies fresh owner and workspace proof b
     const runtimeHost = runtime();
     // What the browser's stopOperationFor aborts for the person's own sign-in, logout or removal.
     const stop = new AbortController();
+    // Steps that change ChatGPT (Create, consent) run through the browser's whileChangingChatGpt, so a
+    // stop for a chat or the person's sign-in lets them finish (background checks, 2026-11-24).
+    let changing = 0;
     const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: !scenario.shownPageSignedOut }),
+      whileChangingChatGpt: async step => { changing++; try { return await step(); } finally { changing--; } },
       operationSignal: () => stop.signal,
       currentOperation: () => held ? "MCP connector creation" : null,
       withManualOperation: async (_name, work) => { const previous = held; held = true; try { return await work(); } finally { held = previous; } } };
@@ -496,6 +500,7 @@ test("the production connector action verifies fresh owner and workspace proof b
         const phase = script.match(/__codingToolsConnectorHelpers\.(\w+)\(/)?.[1];
         if (phase === "selectWorkspace") { accountId = businessId; select(accountId); return { selected: true }; }
         if (phase === "prepareTunnelConnector") {
+          assert.equal(changing, 0, "reading the plugin list changes nothing");
           if (scenario.tabMissing) throw new Error("ChatGPT did not expose one Personal plugins tab.");
           if (scenario.change === "reuse-prepare-workspace-reject") {
             accountId = personalId; select(accountId);
@@ -517,6 +522,7 @@ test("the production connector action verifies fresh owner and workspace proof b
           }
           return { prepared: true };
         }
+        if (phase === "submitPreparedTunnelConnector") assert.equal(changing, 1, "Create runs as a change step");
         if (phase === "submitPreparedTunnelConnector" || phase === "createTunnelConnector") { counts.create++; return { created: true, href: "/plugins/plugin_fixture" }; }
         if (phase === "inspectTunnelConnectorIdentity") {
           if (scenario.change === "reuse-workspace-reject") {
@@ -533,12 +539,14 @@ test("the production connector action verifies fresh owner and workspace proof b
           return { connected: false };
         }
         if (phase === "openTunnelConnectorConsent") {
+          assert.equal(changing, 1, "opening the consent runs as a change step");
           counts.open++;
           if (scenario.change === "role" && !publishing) workspaceRole = "account-admin";
           if (scenario.change === "consent") { accountId = businessId; select(accountId); }
           return { consentReady: true };
         }
         if (phase === "confirmTunnelConnectorConsent") {
+          assert.equal(changing, 1, "confirming the consent runs as a change step");
           if (scenario.consentError) throw new Error("fixture consent failed");
           counts.confirm++; return { connected: true };
         }
@@ -1094,13 +1102,13 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   context.publishOperation = value => operations.push(value);
   accounts.add("other"); removeDuringSave = false; records.length = 0;
   let admitted = true;
-  const admission = () => { if (!admitted) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account."); };
+  const admission = () => { if (!admitted) throw new Error("Automatic MCP setup is waiting for an idle browser and the current account."); };
   context.createWorkspaceConnector = async options => {
     options.assertCurrent();
     admitted = false;
     options.assertCurrent();
   };
-  await assert.rejects(connectAccountMcp("other", admission), error => /waiting for the focused, idle app/.test(error.message) && error.gaveWay === true);
+  await assert.rejects(connectAccountMcp("other", admission), error => /waiting for an idle browser/.test(error.message) && error.gaveWay === true);
   assert.deepEqual(records, [], "a setup that gave way leaves the account's connector state as it was");
   assert.equal(operations.at(-1).status, "cancelled");
   admitted = true;

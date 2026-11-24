@@ -977,6 +977,22 @@ test("picking an unconfigured model uses its own default window, not the previou
   assert.equal(routes.at(-1).context_window, undefined, "an unconfigured model with an unknown limit uses the agent's default");
 });
 
+test("1M models with 872K or 1,047,576 input budgets list one 1M top choice without a duplicate 872k or 1,047,576 row", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", context_window: 1_000_000 };
+  const caps = {
+    "cpa/gpt-6-luna": { efforts: ["high"], contextLimit: 872_000, contextWindow: { min: 4096, max: 1_000_000 } },
+    "cpa/gpt-4.1": { efforts: ["high"], contextLimit: 1_047_576, contextWindow: { min: 4096, max: 1_047_576 } },
+  };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const lunaMenu = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(Object.keys(caps), caps)), "Context window");
+  assert.deepEqual(optionsIn(lunaMenu).map(row => text(row.props.children)), ["32k", "64k", "128k", "200k", "272k", "400k", "1M"]);
+  const gpt41Menu = menuNamed(view.render("AgentOrchestratorComposerControls", { ...props, route: { ...route, model: "cpa/gpt-4.1", context_window: 1_047_576 } }, composerState(Object.keys(caps), caps)), "Context window");
+  assert.deepEqual(optionsIn(gpt41Menu).map(row => text(row.props.children)), ["32k", "64k", "128k", "200k", "272k", "400k", "1M"]);
+  assert.equal(text(gpt41Menu.props.label), "1M");
+});
+
+
 function tuningStorage() {
   const values = new Map();
   return { values, getItem: key => values.get(key) ?? null, setItem: (key, value) => values.set(key, value) };

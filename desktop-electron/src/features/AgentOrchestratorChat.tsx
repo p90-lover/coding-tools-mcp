@@ -218,8 +218,14 @@ const routeEffortName = (route: RouteFields) => {
   const effort = typeof route.effort === "string" ? route.effort : "";
   return `${!effort ? "Auto" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1)} effort`;
 };
-const routeWindowName = (route: RouteFields) => typeof route.context_window === "number" && route.context_window > 0
-  ? `${Math.round(route.context_window / 1000)}K context` : "the default context";
+const routeWindowName = (route: RouteFields) => {
+  const tokens = typeof route.context_window === "number" && route.context_window > 0 ? route.context_window : 0;
+  if (!tokens) return "the default context";
+  if (tokens === 1_048_576 || tokens === 1_047_576) return "1M context";
+  if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M context`;
+  if (tokens % 1_000 === 0) return `${tokens / 1_000}K context`;
+  return `${Math.round(tokens / 1000)}K context`;
+};
 /**
  * What differs between the agent's route and the picked one, in the composer's own words, and
  * what to pick to get the agent back: "Max effort" / "Medium effort". The note showed the raw
@@ -1994,8 +2000,17 @@ export function AgentOrchestratorChat({
   const agentRoute: RouteFields | null = latest?.execution_mode === "single" && chatLead?.route
     ? { ...(chatLead.route as unknown as RouteFields), ...(resizeHere?.state === "done" ? { context_window: resizeHere.contextWindow } : {}) } : null;
   // Only the person's own pick: a window the composer fills in by itself (a blank card's default,
-  // `adjusted`) must not restart the agent of a chat that was merely opened.
+  // `adjusted`) must not restart the agent of a chat that was merely opened, nor replace an open
+  // chat's unset window or effort with another chat's saved tuning or the new-chat 400K default.
   const pickRoute = (route: ComposerControlsProps["route"], adjusted?: boolean) => {
+    if (adjusted && selectedTaskId && agentRoute) {
+      const kept = { ...route } as Record<string, unknown>;
+      const web = String(route.model ?? "").replace(/^cpa\//, "").startsWith("chatgpt-web/");
+      if (agentRoute.context_window == null && !web) delete kept.context_window;
+      if (agentRoute.effort == null && !web) delete kept.effort;
+      composer?.onRouteChange(kept as ComposerControlsProps["route"], true);
+      return;
+    }
     composer?.onRouteChange(route, adjusted);
     if (adjusted || !selectedTaskId || !resizeAgent || !agentRoute) return;
     const picked = route as unknown as RouteFields;
@@ -2780,13 +2795,11 @@ export function AgentOrchestratorChat({
   }, [attachments, preparing]);
 
   const chatRoot = useRef<HTMLDivElement>(null);
-  /** `narrow`: the head is too narrow for Preview, Show cards and Side panel (codex-chat.css hides them), so the menu has them. */
+  /** `narrow`: the head is too narrow for Show cards, so the menu has it. */
   const headerMenu = (narrow = false): ChatMenuItem[] => [
-    ...(narrow && selectedTaskId ? [
-      { label: "Preview", checked: workbench === "preview", run: () => setWorkbench((open) => (open === "preview" ? null : "preview")) },
-      ...(structure || latest ? [{ label: "Show cards", checked: showStructure,
-        ...(latest ? { run: () => structure ? setShowStructure((value) => !value) : openStructure(latest.id) } : { reason: "This chat has no mission yet" }) }] : []),
-      { label: "Side panel", checked: workbench !== null, run: () => setWorkbench((open) => (open ? null : "overview")) },
+    ...(narrow && selectedTaskId && (structure || latest) ? [
+      { label: "Show cards", checked: showStructure,
+        ...(latest ? { run: () => structure ? setShowStructure((value) => !value) : openStructure(latest.id) } : { reason: "This chat has no mission yet" }) },
       { kind: "separator" },
     ] as ChatMenuItem[] : []),
     ...(selectedTaskId && hasPlan ? [{ label: "Plan", checked: workbench === "plan", run: () => openPlan() } as ChatMenuItem] : []),
@@ -3107,11 +3120,6 @@ export function AgentOrchestratorChat({
             title={`Agent's browser: ${livePage.url}\nClick to show`} onClick={() => setWorkbench("preview")}>
             <span className="cx-browser-dot" aria-hidden="true" /><Icon name="browser" width="13" height="13" />
             <span>{livePage.title || (() => { try { return new URL(livePage.url).host; } catch { return livePage.url; } })()}</span></button> : null}
-          {/* Preview, as Claude Code's header has it: the chat's browser in one click, open page or not
-              (the user found it only behind Side panel → Overview → Preview). */}
-          {selectedTaskId && !(livePage && workbench !== "preview") ? <button type="button" className="cx-icon-button" aria-pressed={workbench === "preview"}
-            title="Preview: the chat's browser" aria-label="Preview" onClick={() => setWorkbench((open) => (open === "preview" ? null : "preview"))}>
-            <Icon name="globe" width="16" height="16" /></button> : null}
           {selectedTaskId ? <button type="button" className="cx-icon-button cx-compact-toggle" aria-pressed={compactActivity}
             title={compactActivity ? "Show every step" : "Compact activity"}
             aria-label="Compact activity" onClick={toggleCompact}>
@@ -3119,11 +3127,9 @@ export function AgentOrchestratorChat({
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
-          {/* The side panel opens on its Overview, as Claude Code's side column: context, changes,
-              tasks and usage, each a click from its tab (the browser chip still opens Preview). */}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Show side panel"
-            aria-label="Show side panel" onClick={() => setWorkbench((open) => (open ? null : "overview"))}>
-            <Icon name="browser" width="16" height="16" /></button> : null}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Chat add-ons"
+            aria-label="Chat add-ons" onClick={() => setWorkbench((open) => (open ? null : "new"))}>
+            <Icon name="plug" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
           {selectedTaskId ? <button type="button" ref={detailsToggle} className="cx-icon-button" data-details-toggle=""

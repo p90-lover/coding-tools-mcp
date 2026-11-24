@@ -13,7 +13,8 @@ function load(file, imports = {}, globals = {}) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, { exports, structuredClone, crypto: { randomUUID },
-    require: name => name === "react" || name === "react/jsx-runtime" ? require(name) : imports[name] ?? {}, ...globals });
+    require: name => name === "react" || name === "react/jsx-runtime" ? require(name)
+      : imports[name] ?? (name === "./ChatAddonPicker" ? load("ChatAddonPicker.tsx") : {}), ...globals });
   return exports;
 }
 const chat = load("ao-chat.ts");
