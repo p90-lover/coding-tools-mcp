@@ -62,8 +62,21 @@ function createChatWindows({ BrowserWindow, logger = console }) {
         return { open: true };
       }
       window.setTitle(title);
-      const replaced = await replaceBody(window, body).catch(() => false);
-      if (!replaced) await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(page)}`).catch(() => undefined);
+      // The person can close the window while it refreshes: a refresh it never answers then ends
+      // with the window, and a closed window is reported closed instead of being used (Electron
+      // throws "Object has been destroyed").
+      let onClosed;
+      const closed = new Promise((resolve) => { onClosed = () => resolve("closed"); window.once("closed", onClosed); });
+      const gone = () => window.isDestroyed() ? (windows.get(key) === window && windows.delete(key), true) : false;
+      try {
+        const replaced = await Promise.race([replaceBody(window, body).catch(() => false), closed]);
+        if (replaced === "closed" || gone()) return { open: false };
+        if (!replaced) await Promise.race([window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(page)}`).catch(() => undefined), closed]);
+        if (gone()) return { open: false };
+      } finally {
+        // Every update passes here: its listener must not outlive it.
+        window.removeListener("closed", onClosed);
+      }
       if (mode === "open") { if (window.isMinimized()) window.restore(); window.show(); window.focus(); }
       return { open: true };
     },

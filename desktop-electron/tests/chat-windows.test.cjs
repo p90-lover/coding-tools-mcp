@@ -64,3 +64,28 @@ test("malformed requests are refused", async () => {
   await assert.rejects(windows.show(request("open", { page: 42 })), /page is invalid/);
   await assert.rejects(windows.show(null), /request is invalid/);
 });
+
+test("a window closed while it is being refreshed is reported closed, not used", async () => {
+  // Bug hunt 2026-11-24 I1: after the awaited refresh, show() called isMinimized/restore/show/focus
+  // on a window the person had just closed; Electron throws "Object has been destroyed".
+  const { BrowserWindow, created } = fakeElectron();
+  const windows = createChatWindows({ BrowserWindow, logger: {} });
+  await windows.show(request());
+  const [window] = created;
+  window.isMinimized = function () { if (this.destroyed) throw new Error("Object has been destroyed"); return false; };
+  window.webContents.executeJavaScript = async () => { window.close(); return true; };
+  assert.deepEqual(await windows.show(request("open")), { open: false });
+  // A refresh that never answers because its window closed does not hold the call.
+  await windows.show(request());
+  const second = created.at(-1);
+  second.webContents.executeJavaScript = () => new Promise(() => {});
+  const pending = windows.show(request("open"));
+  setImmediate(() => second.close());
+  assert.deepEqual(await pending, { open: false });
+  // Refreshes of an open window leave no listener behind.
+  await windows.show(request());
+  const third = created.at(-1);
+  const before = third.listenerCount("closed");
+  for (let index = 0; index < 20; index++) await windows.show(request("update"));
+  assert.equal(third.listenerCount("closed"), before);
+});
