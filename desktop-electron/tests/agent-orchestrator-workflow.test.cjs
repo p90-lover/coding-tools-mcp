@@ -15488,3 +15488,52 @@ test("a reviewer model that hangs leaves time for the next one and is benched", 
     workflow.dispose();
   }
 });
+
+test("Autobot's model fallback never allows high-risk or unauthorized requests on its own", async () => {
+  // Bug hunt 2026-11-24 R2: with Guardian unavailable, Autobot asked the model without the fallback
+  // judge's rule, so {risk_level: "high", user_authorization: "unknown", outcome: "allow"} was sent
+  // as an allow, against FALLBACK_JUDGE_ALLOWS ("never approved by a model on its own").
+  const root = process.cwd();
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model", permission_profile: ":ao-default",
+    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" };
+  const request = { approval_id: "risky", source: "ao", kind: "command", command: "npm publish --access public", cwd: root,
+    tool: "Bash", turn_id: "t", decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }] };
+  const mission = { id: "run", workspace_id: "ws", project_id: "chat", execution_mode: "single", nodes: [
+    { id: "one", role: "planner", state: "running", route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const resolved = [], asked = [];
+  let answer = { risk_level: "high", user_authorization: "unknown", outcome: "allow", rationale: "looks fine" };
+  const workflow = createAgentOrchestratorWorkflow({
+    confirm: async () => true,
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    requestHeadless: async endpoint => endpoint.endsWith("/read") ? { ok: true, runs: [mission] }
+      : { operation: { state: "completed", result: { ok: true, task: { id: "chat", description: "Publish when I say so" } } } },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      asked.push(JSON.parse(init.body).model);
+      return { ok: true, json: async () => ({ choices: [{ message: { content: JSON.stringify(answer) } }] }) };
+    },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      sessionWorkspace: async () => ({ root }),
+      resolveApproval: async (session, id, decision) => { resolved.push(decision); return { ok: true }; },
+    },
+  });
+  const scope = { workspaceId: "ws", taskId: "chat" };
+  try {
+    await workflow.call("chat_model_judges", { enabled: true });
+    assert.equal((await workflow.configureChatAutobot({ ...scope, selected: ["location"] })).enabled, true);
+    await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
+    for (let tries = 0; tries < 100 && !asked.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    for (let tries = 0; tries < 20; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(asked.length > 0, "the model was asked");
+    assert.notDeepEqual(resolved, ["yes"], "a high-risk, unauthorized request is never allowed by the model alone");
+    // A low-risk request the user clearly asked for is still allowed through the same fallback.
+    answer = { risk_level: "low", user_authorization: "high", outcome: "allow", rationale: "the user asked to publish" };
+    request.approval_id = "safe";
+    request.command = "npm run lint";
+    resolved.length = 0;
+    await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
+    for (let tries = 0; tries < 100 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(resolved, ["yes"]);
+  } finally { workflow.dispose(); }
+});

@@ -5255,7 +5255,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   async function askApproverSteps(input, clock = stepClock(now)) {
     const { approver, mission, approval, partial = false, judge = false, check = () => {}, signal, verifyCurrent = async () => {} } = input;
     check();
-    if (approver.autobot || !guardianScope(approver, approval, partial) || !guardianShell(approval) || gitPushRequest(approval.command)) {
+    // Autobot asks the model only once Guardian is unavailable: that answer is a fallback judge's, and
+    // FALLBACK_JUDGE_ALLOWS applies to it as to any other (a high-risk or unauthorized allow is denied).
+    if (approver.autobot) {
+      return askCpaApproverSteps(input, clock, { action: "ask", unresolved: true, guardianUnavailable: true,
+        reason: "Guardian is unavailable and the model judge did not clear this request. Check it yourself." });
+    }
+    if (!guardianScope(approver, approval, partial) || !guardianShell(approval) || gitPushRequest(approval.command)) {
       return askCpaApproverSteps(input, clock);
     }
     const judgeScope = Boolean(nativeGuardianReview) && guardianJudgeScope(approver, approval);
