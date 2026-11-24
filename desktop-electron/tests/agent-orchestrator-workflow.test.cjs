@@ -15412,3 +15412,31 @@ test("a team chat's waiting rename keeps waiting when a read of its runs fails",
     assert.equal(world.tasks.find((entry) => entry.id === "task-1").title, waiting.title, "applied once the read shows nothing left to reserve");
   } finally { workflow.dispose(); }
 });
+
+test("a steer waiting on a request does not go in when a later look at the agent fails", async () => {
+  // Bug hunt 2026-11-24 W2: an observe that failed inside the wait read as "nothing asked", so the
+  // steer went into a turn still waiting on an approval, which wedges AO's chat for minutes.
+  const route = { harness_id: "ao:claude-code", model: "cpa/test-model" };
+  const task = { id: "task-1", title: "Fix auth", description: "first ask", state: "in_progress", clauses: [] };
+  const world = chatWorld({ tasks: [task], runs: [{ id: "r1", project_id: "task-1", cancelled: false,
+    nodes: [{ id: "one", role: "planner", state: "running", route, receipt: { thread_id: "sess-1" } }] }] });
+  let clock = 1_000_000, observed = 0;
+  const steered = [];
+  const pending = [{ approval_id: "a1", kind: "tool", tool: "mcp__coding-tools__read_output" }];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: world.requestHeadless, now: () => clock,
+    setTimer: (resolve, ms) => { clock += ms; resolve(); return 0; },
+    aoHarness: {
+      observe: async () => {
+        observed += 1;
+        if (observed === 2) throw new Error("AO timed out");
+        return { turnId: "t1", turnState: "running", status: "working", lastActivityAt: clock, timeline: [], approvals: pending };
+      },
+      steer: async (session, text) => { steered.push([session, text]); return { steered: true }; },
+    },
+  });
+  const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "check the logs too" });
+  assert.equal(result.steered, false);
+  assert.equal(result.waiting, true);
+  assert.deepEqual(steered, [], "never steered into the waiting request");
+});

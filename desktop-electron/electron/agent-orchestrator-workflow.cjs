@@ -7663,6 +7663,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     for (const deadline = now() + STEER_ANSWER_WAIT_MS; !fromQueue && asking(waiting) && now() < deadline;) {
       await new Promise(resolve => setTimer(resolve, STEER_ANSWER_POLL_MS));
       waiting = await observeCard();
+      // Unread mid-wait is no answer: the request may still be open, and steering into it wedges AO.
+      if (waiting === null) {
+        return { ok: true, steered: false, waiting: true, reason: "Couldn't read the agent's state. Your message is sent once it can be read." };
+      }
     }
     if (asking(waiting)) {
       return { ok: true, steered: false, waiting: true, reason: "The agent is waiting for an answer. Your message is sent once you answer." };
