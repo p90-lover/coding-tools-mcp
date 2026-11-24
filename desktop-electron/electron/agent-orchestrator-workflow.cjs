@@ -4707,6 +4707,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (short === "sleep") return "Waits in this turn for at most 100 seconds; it runs nothing";
     if (short === "rename_chat") return "Names this chat after the task it works on; it runs nothing";
     if (short === "redact_message") return "Hides secrets you pasted in this chat's messages; it runs nothing and changes no files";
+    if (short === "app_layout") return "Reads or edits Coding Tools' App layout map; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";

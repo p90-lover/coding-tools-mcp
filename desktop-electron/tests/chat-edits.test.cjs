@@ -181,4 +181,3 @@ test("an in-place resized session projects its updated context window onto visib
   assert.equal(visible[1].nodes[0].route.context_window, 200_000, "another chat's card is untouched");
   assert.equal(runs[0].nodes[0].route.context_window, 200_000, "the runs read from AO are not mutated");
 });
-

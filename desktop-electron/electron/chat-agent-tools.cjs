@@ -154,7 +154,7 @@ const AGENT_TOOLS = new Set([
   "view_image", "image_info", "compare_images", "ocr_image", "generate_image",
   "update_plan", "get_plan", "get_current_time", "tool_search", "server_info",
   "show_in_chat", "open_plan", "schedule_wakeup", "app_processes", "view_app", "get_goal", "create_goal", "update_goal", "rename_chat",
-  "redact_message", "move_chat", "push_notification",
+  "redact_message", "move_chat", "push_notification", "app_layout",
 ]);
 // The app's own agent tool (not headless's): brings a pane of the chat forward for the user. It is
 // the only way the side panel opens without a click: pages, commands and subagents never open it by
@@ -343,6 +343,50 @@ const MOVE_TOOL_DEFS = Object.freeze([{
     properties: {
       project: { type: "string", maxLength: 200, description: "The project's name or id" },
       path: { type: "string", maxLength: 1024, description: "The project's folder, an absolute path" },
+    },
+  },
+}]);
+// Runtime > App layout (app-layout.cjs): the whole Coding Tools architecture map across 6 core
+// categories, 4 layers (sidebar, settings, mcp-tools, services) and current overlaps. Both the
+// user in the App layout tab and chat models can read or edit it live.
+const APP_LAYOUT_TOOL_DEFS = Object.freeze([{
+  name: "app_layout", title: "Read or edit Coding Tools' App layout",
+  description: "Read or edit the Coding Tools App layout shown in Runtime > App layout: the 6 core categories, the 4 layers "
+    + "(sidebar, settings, mcp-tools, services) and the overlaps list. Use action \"get\" (optionally with section \"all\", "
+    + "\"overview\", \"categories\", \"sidebar\", \"settings\", \"mcp-tools\", \"services\" or \"overlaps\") to read it; "
+    + "\"update_overview\", \"upsert_category\", \"remove_category\", \"upsert_category_item\", \"remove_category_item\", "
+    + "\"upsert_layer_row\", \"remove_layer_row\", \"upsert_overlap\", \"remove_overlap\", \"replace\" or \"reset\" to edit it. "
+    + "Edits update the App layout tab live.",
+  inputSchema: {
+    type: "object", additionalProperties: false,
+    properties: {
+      action: {
+        type: "string",
+        enum: ["get", "update_overview", "upsert_category", "remove_category", "upsert_category_item", "remove_category_item",
+          "upsert_layer_row", "remove_layer_row", "upsert_overlap", "remove_overlap", "replace", "reset"],
+        default: "get",
+        description: "The operation to perform on the App layout",
+      },
+      section: {
+        type: "string",
+        enum: ["all", "overview", "categories", "sidebar", "settings", "mcp-tools", "services", "overlaps"],
+        description: "For action \"get\": which section to read (defaults to \"all\")",
+      },
+      title: { type: "string", maxLength: 180, description: "Title for update_overview, category, item, or layer row" },
+      subtitle: { type: "string", maxLength: 500, description: "Subtitle for update_overview" },
+      id: { type: "string", maxLength: 80, description: "ID of the category, item, row, or overlap to upsert or remove" },
+      categoryId: { type: "string", maxLength: 80, description: "Target category ID for upsert_category_item or remove_category_item" },
+      itemId: { type: "string", maxLength: 80, description: "Item ID for remove_category_item" },
+      layerId: { type: "string", maxLength: 80, description: "Target layer ID (\"sidebar\", \"settings\", \"mcp-tools\", \"services\", or a custom layer ID)" },
+      layerTitle: { type: "string", maxLength: 180, description: "Title when creating or renaming a layer in upsert_layer_row" },
+      layerEli5: { type: "string", maxLength: 400, description: "ELI5 summary when creating or updating a layer in upsert_layer_row" },
+      rowId: { type: "string", maxLength: 80, description: "Row ID for remove_layer_row" },
+      overlapId: { type: "string", maxLength: 80, description: "Overlap ID for remove_overlap" },
+      category: { type: "object", description: "Category object ({ id, title, eli5, items }) for upsert_category" },
+      item: { type: "object", description: "Category item object ({ id, title, surfaceId, summary, bullets }) for upsert_category_item" },
+      row: { type: "object", description: "Layer row object ({ id, category, title, surfaceId, controllingSwitch, currentLocation, belongsIn, items, note }) for upsert_layer_row" },
+      overlap: { type: "object", description: "Overlap object ({ id, item, currentLocation, belongsIn, why }) for upsert_overlap" },
+      layout: { type: "object", description: "Full layout object for action \"replace\"" },
     },
   },
 }]);
@@ -585,7 +629,7 @@ const { groups: GROUPS, groupOf } = CHAT_TOOL_ADDONS;
 const LOCAL_TOOL_NAMES = new Set([
   ...PREVIEW_TOOLS, ...SUBAGENT_TOOLS, ...GOAL_TOOLS, ...CHAT_HISTORY_TOOLS, ...WATCH_TOOLS, ...MONITOR_TOOLS,
   "show_in_chat", "open_plan", "schedule_wakeup", "capture_process", "app_processes", "view_app", "generate_image",
-  "computer_guide", "rename_chat", "move_chat", "redact_message", "list_commands", "push_notification", "sleep",
+  "computer_guide", "rename_chat", "move_chat", "redact_message", "app_layout", "list_commands", "push_notification", "sleep",
 ]);
 /**
  * Whether "Approve for me" leaves a call of this tool to the chat's reviewer: the calls this app
@@ -1261,7 +1305,7 @@ function paneRulesFor(groups) {
 }
 
 function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview = false, subagents = "", wakeups = false, watches = false,
-  monitors = false, notifies = false, renames = false, moves = false, redacts = false, plans = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
+  monitors = false, notifies = false, renames = false, moves = false, redacts = false, plans = false, appLayouts = false, ownFileTools = false, unifiedFiles = false, computerSteps = false } = {}) {
   // An agent whose harness has its own file, search, edit and git tools (Claude Code) is not given
   // ours (HARNESS_DUPLICATE_TOOLS), so it is not told about them either; nor is a GPT session that
   // has unified-agent-tools for them, which is told to use those for every file operation.
@@ -1393,6 +1437,9 @@ function instructionsFor(groups, { bypass = false, sandboxed = false, autoReview
       ? "Secrets: when a message from the user contains a secret of a kind redact_message lists (a key, a password, a token), "
         + "call redact_message with it first, so the chat stops storing and showing it; never repeat it in your reply. "
       : "")
+    + (appLayouts
+      ? "App layout: Runtime > App layout shows the whole Coding Tools architecture across 6 categories, 4 layers (sidebar, settings, mcp-tools, services) and current overlaps; call app_layout to read or edit any category, layer row, or overlap live. "
+      : "")
     + "Large results are paged; ask for less per call.";
 }
 
@@ -1475,6 +1522,8 @@ function createChatAgentTools({
   // move_chat's service ({ projects(): [{ id, name, path }], move({ workspaceId, session, targetWorkspaceId }) });
   // without it the tool is not offered.
   chatMoves = null,
+  // app_layout's store ({ get(section), act(input), reset() }): without it the tool is not offered.
+  appLayout = null,
   // Whether the command approver's safety rules block a request's text (never answered for the user).
   blockedCommand = () => false,
   // Runs the terminal's commands in Codex's Windows sandbox (chat-sandbox.cjs) when it is installed.
@@ -1783,7 +1832,8 @@ function createChatAgentTools({
       ...(canPlan(entry) ? [OPEN_PLAN_DEF] : []), ...(canWake(entry) ? WAKE_TOOL_DEFS : []), ...(canGoal(entry) ? GOAL_TOOL_DEFS : []),
       ...(canRename(entry) ? RENAME_TOOL_DEFS : []), ...(canMove(entry) ? MOVE_TOOL_DEFS : []), ...(canRedact(entry) ? redactToolDefs(redactKinds()) : []), ...CAPTURE_PROCESS_DEFS,
       ...(allowed(entry, "chats") ? CHAT_HISTORY_TOOL_DEFS : []), ...(appProcesses ? APP_PROCESSES_DEFS : []),
-      ...(captureApp ? VIEW_APP_DEFS : []), ...(generateImage ? IMAGE_TOOL_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : [])];
+      ...(captureApp ? VIEW_APP_DEFS : []), ...(generateImage ? IMAGE_TOOL_DEFS : []), ...(computerControl ? GUIDE_TOOL_DEFS : []),
+      ...(appLayout ? APP_LAYOUT_TOOL_DEFS : [])];
     return collectChatAddonTools({ registry: CHAT_TOOL_ADDONS, headless: catalog?.tools, local: own, reserved: LOCAL_TOOL_NAMES,
       allowed: (name, group) => !UNLISTED_TOOLS.has(name) && !duplicateOfHarness(entry, name) && allowed(entry, group), report: reportConflict })
       // outputSchema is left out: clients would validate structuredContent against it, and the
@@ -2522,6 +2572,25 @@ function createChatAgentTools({
     }
   }
 
+  /** app_layout: reads or edits the Coding Tools App layout (app-layout.cjs), updating the App layout tab live. */
+  async function appLayoutCall(given) {
+    if (!appLayout) return failedCall("Unknown tool: app_layout");
+    const { formatAppLayoutSummary } = require("./app-layout.cjs");
+    const action = typeof given?.action === "string" && given.action.trim() ? given.action.trim() : "get";
+    try {
+      const value = action === "get"
+        ? await appLayout.get(given.section ?? "all")
+        : await appLayout.act({ ...given, action });
+      if (action !== "get") await appLayout.saved?.();
+      const text = action === "get" && given.section && given.section !== "all"
+        ? JSON.stringify(value, null, 2)
+        : formatAppLayoutSummary(value, given.section ?? "all");
+      return { content: [{ type: "text", text }], structuredContent: value };
+    } catch (error) {
+      return failedCall(errorMessage(error));
+    }
+  }
+
   async function callTool(entry, params, channel = {}) {
     const name = params?.name;
     if (typeof name !== "string" || !name || name.length > 128) return failedCall("A tool name is required");
@@ -2567,6 +2636,7 @@ function createChatAgentTools({
     if (name === "rename_chat") return renameChat(entry, given);
     if (name === "move_chat") return moveChat(entry, given, signal);
     if (name === "redact_message") return redactMessage(entry, given);
+    if (name === "app_layout") return appLayoutCall(given);
     // Subagents are the app's own (subagents.cjs): no worktree is needed to start or read one.
     if (group === "subagents") {
       const found = await Promise.resolve().then(() => sessionWorkspace?.(entry.aoSession, entry.workspaceId)).catch(() => null);
@@ -2940,7 +3010,7 @@ function createChatAgentTools({
             serverInfo: { name: SERVER_NAME, title: "Coding Tools", version: String(version) },
             instructions: instructionsFor(entry.groups.filter((group) => allowed(entry, group)), { bypass: entry.bypass, sandboxed: sandboxed(), autoReview: reviewedUpstream(entry),
               subagents: allowed(entry, "subagents") ? (() => { try { return subagents.describe(); } catch { return ""; } })() : "",
-              wakeups: canWake(entry), watches: canWatch(entry), monitors: canMonitor(entry), notifies: canNotify(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
+              wakeups: canWake(entry), watches: canWatch(entry), monitors: canMonitor(entry), notifies: canNotify(entry), renames: canRename(entry), moves: canMove(entry), redacts: canRedact(entry), appLayouts: Boolean(appLayout), ownFileTools: Boolean(HARNESS_DUPLICATE_TOOLS[entry.agent]),
               unifiedFiles: entry.unifiedFiles === true, plans: canPlan(entry), computerSteps: Boolean(computerControl) && !setting(reviewComputerSteps) }),
           } };
         }

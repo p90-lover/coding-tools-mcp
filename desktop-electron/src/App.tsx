@@ -33,6 +33,7 @@ import { ChatAddonSettings } from "./features/ChatAddonSettings";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
 import { ComputerUseSurface } from "./features/ComputerUseSurface";
+import { AppLayoutSurface } from "./features/AppLayoutSurface";
 import { AntigravityCliSurface } from "./features/AntigravityCliSurface";
 import { ChatGptDesktopSurface } from "./features/ChatGptDesktopSurface";
 import { EmailSurface } from "./features/EmailSurface";
@@ -898,6 +899,7 @@ function LauncherShell({
                 <SidebarItem active={surface === "subagents"} icon="git" label="Subagents" onClick={() => navigateSurface("subagents")} />
                 <SidebarItem active={surface === "computer-use"} icon="cursor" label="Computer use" onClick={() => navigateSurface("computer-use")} />
                 <SidebarItem active={surface === "native-codex"} icon="terminal" label={copy.nativeCodex} onClick={() => navigateSurface("native-codex")} />
+                <SidebarItem active={surface === "app-layout"} icon="layers" label="App layout" onClick={() => navigateSurface("app-layout")} />
               </SidebarGroup>
               <SidebarGroup label={copy.workspace}>
                 <SidebarItem
@@ -1160,6 +1162,13 @@ function LauncherShell({
                 desktopOn={snapshot.state.chatAgentDesktopTools === true}
                 reviewSteps={snapshot.state.computerReviewSteps === true}
                 setPreference={(key, value) => void api!.setPreference(key, value).then(updateState).catch((cause) => setError(messageOf(cause)))}
+                setError={setError}
+              />
+            ))}
+            {keepAlive("app-layout", () => (
+              <AppLayoutSurface
+                active={surface === "app-layout"}
+                navigateSurface={navigateSurface}
                 setError={setError}
               />
             ))}

@@ -248,4 +248,3 @@ test("1M input-budget ceilings (872K and 1,047,576) format as 1M and tune Native
   assert.equal(nativeLuna.fullLimit, 872_000);
   assert.ok(nativeLuna.presets.includes(1_000_000));
 });
-

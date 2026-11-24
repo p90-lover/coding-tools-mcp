@@ -1,0 +1,252 @@
+.app-layout-surface .al-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.app-layout-surface .al-header-copy {
+  flex: 1 1 480px;
+}
+
+.app-layout-surface .al-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.app-layout-surface .al-stats-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.app-layout-surface .al-stat-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--surface-card, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.app-layout-surface .al-stat-pill strong,
+.app-layout-surface .al-stat-pill code {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #f5f5f7);
+}
+
+.app-layout-surface .al-stat-pill span {
+  font-size: 12px;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.app-layout-surface .al-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.app-layout-surface .al-tabs {
+  flex-wrap: wrap;
+}
+
+.app-layout-surface .al-search {
+  min-width: 260px;
+  flex: 1 1 260px;
+  max-width: 380px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  background: var(--surface-input, rgba(0, 0, 0, 0.22));
+  color: var(--text-primary, #f5f5f7);
+  font-size: 13px;
+}
+
+.app-layout-surface .al-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.app-layout-surface .al-section-head-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.app-layout-surface .al-editor-card {
+  padding: 16px;
+  margin-bottom: 18px;
+  border-radius: 12px;
+  background: var(--surface-card, rgba(255, 255, 255, 0.05));
+  border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.16));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app-layout-surface .al-editor-card h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.app-layout-surface .al-editor-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.app-layout-surface .al-category-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 14px;
+}
+
+.app-layout-surface .al-category-card {
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--surface-card, rgba(255, 255, 255, 0.035));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.app-layout-surface .al-category-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.app-layout-surface .al-category-head h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+}
+
+.app-layout-surface .al-category-head p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.app-layout-surface .al-category-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.app-layout-surface .al-category-item {
+  padding: 11px 12px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.06));
+}
+
+.app-layout-surface .al-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-layout-surface .al-item-summary {
+  margin: 4px 0 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.app-layout-surface .al-bullet-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.app-layout-surface .al-layer-eli5 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.app-layout-surface .al-layer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.app-layout-surface .al-layer-row {
+  padding: 14px 16px;
+  border-radius: 11px;
+  background: var(--surface-card, rgba(255, 255, 255, 0.035));
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.app-layout-surface .al-layer-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.app-layout-surface .al-layer-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.app-layout-surface .al-switch-chip {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.app-layout-surface .al-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.app-layout-surface .al-location-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.16);
+  font-size: 12.5px;
+}
+
+.app-layout-surface .al-location-grid small {
+  display: block;
+  font-size: 11px;
+  color: var(--text-secondary, #a1a1aa);
+  margin-bottom: 2px;
+}
+
+.app-layout-surface .al-row-note {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary, #a1a1aa);
+}
