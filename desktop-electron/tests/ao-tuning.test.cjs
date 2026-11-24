@@ -139,6 +139,7 @@ test("Surface caches model capability catalogs for AO harnesses and Native Codex
       : name === "./chat-split" ? splitRules()
       : name === "./chat-pages" ? { ChatPagesContext: null, chatPageKey: key => key }
       : name === "../i18n" ? { copyFor: () => ({}) }
+      : name === "./AgentOrchestratorPermissions" ? { startsApproveForMe: route => route }
       : name === "./AgentOrchestratorRoleEditor" ? { workerRoute: () => ({}), emptyRoleSettings: () => ({}), NATIVE_HARNESS: "codex-native" } : {},
   });
   surface.AgentOrchestratorSurface({ language: "en", setError() {} });

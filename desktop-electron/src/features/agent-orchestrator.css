@@ -771,6 +771,13 @@ pre.cdx-command:focus-visible { outline: 2px solid var(--ao-blue, #2f6fdd); outl
 .cdx-row { display: grid; grid-template-columns: 56px 1fr; gap: 8px; font-size: 12px; line-height: 16px; }
 .cdx-row > span { color: var(--cdx-tertiary); }
 .cdx-row > p { margin: 0; color: var(--cdx-secondary); overflow-wrap: anywhere; }
+/* "Approve for me" on a request in an Ask for approval chat: a link-weight action inside the row's text. */
+.cdx-inline-action { padding: 0; border: 0; background: none; color: var(--ao-blue, #2f6fdd); font: inherit; font-weight: 500; cursor: pointer; }
+.cdx-inline-action:hover:not(:disabled) { text-decoration: underline; }
+.cdx-inline-action:focus-visible { outline: 2px solid var(--ao-blue, #2f6fdd); outline-offset: 2px; border-radius: 2px; }
+.cdx-inline-action:disabled { color: var(--cdx-tertiary); cursor: default; }
+.cdx-ask-mode-note { display: block; margin-top: 2px; }
+.cdx-ask-mode-note.is-error { color: var(--ao-red, #c0392b); }
 .cdx-options { display: flex; flex-direction: column; gap: 2px; margin-top: 2px; }
 .cdx-option { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 4px 8px; border: 0; border-radius: 8px; background: transparent;
   color: var(--cdx-text); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }

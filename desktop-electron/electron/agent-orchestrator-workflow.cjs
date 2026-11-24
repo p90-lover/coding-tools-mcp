@@ -2427,11 +2427,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
       const stopIfAbandoned = async () => {
         if (!session) return false;
+        const stopped = Boolean(backgroundRuns.get(runKey(workspaceId, runId))?.stopped);
         const latest = await runs({ workspaceId, runId }).catch(() => null);
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
-        if (!mission?.cancelled && card && card.state === "reserved" && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped) return false;
-        await stopExternalTurn(session, mission?.cancelled || backgroundRuns.get(runKey(workspaceId, runId))?.stopped
+        if (!stopped && !mission) return false;
+        if (!mission?.cancelled && !stopped && card && (card.state === "reserved"
+          || (card.state === "running" && (!card.receipt?.thread_id || card.receipt.thread_id === session)))) {
+          return false;
+        }
+        await stopExternalTurn(session, mission?.cancelled || stopped
           ? { owner: runKey(workspaceId, runId), releaseAgent: true } : null);
         return true;
       };
@@ -3956,14 +3961,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       stopConfirmed = action === "stop" && result.run.id === run && result.run.cancelled === true
         && Array.isArray(result.run.nodes) && !result.run.nodes.some(node => ["running", "reserved"].includes(node.state));
     } catch (error) {
-      // Stop the local loop and known owned agents even when saved mission cancellation
-      // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
-      if (action !== "stop") throw error;
-      const saved = await readForStop().catch(() => null);
-      const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
-      if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
-      logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
-      result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
+      if (action === "retry" || action === "retry_auto") {
+        const saved = await readForStop().catch(() => null);
+        const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
+        const target = nodeId ? mission?.nodes?.find(node => node.id === clean(nodeId, 80)) : mission?.nodes?.[0];
+        if (mission && !mission.cancelled && target?.state === "pending" && (target.history?.length ?? 0) > 0) {
+          result = { ok: true, run: mission };
+        } else {
+          throw error;
+        }
+      } else {
+        // Stop the local loop and known owned agents even when saved mission cancellation
+        // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
+        if (action !== "stop") throw error;
+        const saved = await readForStop().catch(() => null);
+        const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
+        if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
+        logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
+        result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
+      }
     }
     clock.mark("control");
     if (action === "stop") releaseNativePreviews(id, run);
@@ -5234,7 +5250,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!outcome || !["allow", "deny"].includes(outcome.action)) {
       const result = manual(publicText(outcome?.reason || blocked.reason, 300));
       if (signal?.aborted) return result;
-      if (outcome?.guardianUnavailable === true) return { ...result, guardianUnavailable: true };
+      if (outcome?.guardianUnavailable === true) {
+        return { ...result, guardianUnavailable: true, ...(outcome.guardianTimedOut ? { guardianTimedOut: true } : {}) };
+      }
       if (outcome?.guardianAssessment) return { ...result, guardianAssessment: outcome.guardianAssessment };
       return result;
     }
@@ -5270,7 +5288,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const unsafe = verdict.guardianAssessment === "high-risk";
     if (!unsafe && !verdict.guardianUnavailable && !["low-risk", "risk-unconfirmed"].includes(verdict.guardianAssessment)) return verdict;
     const manual = { ...verdict, guardianWaitForJudge: true };
-    if (!beganWithConsent || !guardianJudgeEnabled()) return manual;
+    if (!beganWithConsent || !guardianJudgeEnabled()) {
+      if (verdict.guardianTimedOut && approval?.approval_id && (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1 < REVIEW_TRIES) {
+        throw new Error(verdict.reason || "Native Codex Guardian timed out.");
+      }
+      return manual;
+    }
     const changed = { ...verdict, reason: "The original request changed or is no longer pending. No new answer was sent." };
     if (!await samePendingApproval(approval, verifyCurrent)) return changed;
     if (!guardianJudgeEnabled()) return manual;
@@ -5287,9 +5310,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let answer;
     try {
       answer = await askCpaApproverSteps({ ...input, decide: true, judge: true, verifyCurrent: verifyExact }, clock, verdict);
-    } catch {
+    } catch (error) {
       check();
       if (stale) return changed;
+      if (approval?.approval_id && (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1 < REVIEW_TRIES) throw error;
       answer = { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason: "Neither Guardian nor the model judge could confirm this command." };
     }
     if (answer === verdict || !guardianJudgeEnabled()) return manual;
@@ -6242,11 +6266,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
     if (retryCancelled(mission.workspace_id, mission.id)) return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
-    const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
-    const error = String(node?.receipt?.error || "");
+    const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry")
+      ?? mission.nodes.find(entry => entry.state === "held")
+      ?? mission.nodes.find(entry => entry.state === "pending" && (entry.history?.length ?? 0) > 0);
+    const error = String((node?.state === "pending" ? node.history?.at(-1)?.error : node?.receipt?.error) || "");
+    const attempt = node?.state === "pending" ? (node.history?.length ?? 0) : (node?.history?.length ?? 0) + 1;
     return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error) && !ROUTE_REFUSED.test(error)
       && !DRIVER_INCOMPATIBLE.test(error)
-      && !pickedModelSince(mission) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+      && !pickedModelSince(mission) && attempt <= AUTO_RETRY_LIMIT;
   }
   /**
    * The model the person picked for the chat's goal (chat_goal "route") since this single-model round
@@ -6582,7 +6609,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           seen = state.seen = mission;
         }
         if (state.stopped) return;
-        const active = mission.nodes.filter(node => node.state === "running");
+        const active = mission.nodes.filter(node => node.state === "running"
+          || (node.state === "reserved" && externalAgent(node) && !dispatching.has(nodeKey(workspaceId, runId, node.id))));
         for (const [id] of observing) if (!active.some(node => node.id === id)) observing.delete(id);
         for (const [id] of quietUntil) if (!active.some(node => node.id === id)) quietUntil.delete(id);
         for (const [id] of observationState) if (!active.some(node => node.id === id)) observationState.delete(id);
@@ -6681,8 +6709,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             // Taken over by a person's message meanwhile: that send retires the run instead.
             if (state.stopped) return;
             setTimeout(() => {
-              void startRun({ workspaceId, runId, executable }).catch(error => logger?.warn?.("ao.retry_start_failed",
-                { message: publicText(error?.message || error, 200) }));
+              void startRun({ workspaceId, runId, executable }).catch(error => {
+                logger?.warn?.("ao.retry_start_failed", { message: publicText(error?.message || error, 200) });
+                const current = backgroundRuns.get(runKey(workspaceId, runId)) ?? state;
+                if (!current.stopped) scheduleAutoRetry(workspaceId, runId, executable, current);
+              });
             }, 0);
             return;
           }
@@ -6857,7 +6888,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function scheduleAutoRetry(workspaceId, runId, executable, state, tries = 0) {
     if (!chatPreferences.get().autoRetry) return;
     const key = runKey(workspaceId, runId);
-    const current = () => !autoRetryDisposed && !state.stopped && backgroundRuns.get(key) === state;
+    const current = () => {
+      const active = backgroundRuns.get(key);
+      return !autoRetryDisposed && !state.stopped && (active === state || (active?.status === "failed" && !active.stopped));
+    };
     const mission = async () => (await runs({ workspaceId, runId })).runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
     const later = (ms, work) => {
       const timer = setTimer(() => { autoRetryTimers.delete(timer); work(); }, ms);
@@ -6869,24 +6903,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // the same moment and then waited for a click with "Retry automatically" on (2026-10-31).
     const failedTry = (error) => {
       logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200), tries: tries + 1 });
-      if (current() && tries + 1 < AUTO_RETRY_LIMIT) later(autoRetryPause(tries + 1), () => scheduleAutoRetry(workspaceId, runId, executable, state, tries + 1));
+      if (current() && tries + 1 < AUTO_RETRY_LIMIT) {
+        later(autoRetryPause(tries + 1), () => scheduleAutoRetry(workspaceId, runId, executable, backgroundRuns.get(key) ?? state, tries + 1));
+      }
     };
     void (async () => {
       const failed = await mission();
       if (!current() || !autoRetryAllowed(failed)) return;
       // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second
       // (2 s and 5 s for a failure that never reached the provider).
-      const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
-      const attempt = (held?.history?.length ?? 0) + 1;
+      const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry")
+        ?? failed.nodes.find(node => node.state === "held")
+        ?? failed.nodes.find(node => node.state === "pending" && (node.history?.length ?? 0) > 0);
+      const lastReceipt = held?.state === "pending" ? held.history?.at(-1) : held?.receipt;
+      const attempt = Math.max(1, held?.state === "pending" ? (held.history?.length ?? 0) : (held?.history?.length ?? 0) + 1);
       // Counted from when the step failed, as autoRetryStep counts it.
-      const failedAt = Number(held?.receipt?.finished_at_ms);
+      const failedAt = Number(lastReceipt?.finished_at_ms);
       const since = Number.isFinite(failedAt) && failedAt > 0 ? Math.max(0, now() - Math.min(failedAt, now())) : 0;
-      later(Math.max(0, autoRetryPause(attempt, localFailure(String(held?.receipt?.error || ""))) - since), () => {
+      later(Math.max(0, autoRetryPause(attempt, localFailure(String(lastReceipt?.error || ""))) - since), () => {
         void (async () => {
           const latest = await mission();
           if (!current() || !autoRetryAllowed(latest)) return;
           logger?.info?.("ao.auto_retry_restart", { attempt });
-          await startRun({ workspaceId, runId, executable });
+          await startRun({ workspaceId, runId, executable }, { fromAutoRetry: true });
         })().catch(failedTry);
       });
     })().catch(failedTry);
@@ -6909,7 +6948,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * `known`: the run as the caller just made it (chat_send's new run), so the start does not read
    * it again first. Only this app's own callers pass it; the renderer's start_run cannot.
    */
-  async function startRun(input = {}, { known = null } = {}) {
+  async function startRun(input = {}, { known = null, fromAutoRetry = false, retryState = null } = {}) {
     if (!input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["workspaceId", "runId", "executable"].includes(key))) {
       throw new Error("Renderer credential or unsupported AO start field was refused");
@@ -6920,10 +6959,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const selectedExecutable = codexExecutable(executable);
     const key = runKey(id, run);
     const existing = backgroundRuns.get(key);
-    if (existing?.starting || existing?.driving || existing?.status === "running") {
+    if (existing && existing !== retryState && (existing.starting || existing.driving || existing.status === "running")) {
       return { ok: true, started: false, status: existing.status };
     }
-    const state = { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
+    if (retryState && (retryState.stopped || existing !== retryState)) {
+      return { ok: true, started: false, status: existing?.status ?? "held" };
+    }
+    const state = retryState ?? { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
+    state.starting = true;
     backgroundRuns.set(key, state);
     try {
       // A run the caller has just made, and nothing has touched since, is not read again.
@@ -6994,11 +7037,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       void driveRun(id, run, selectedExecutable, state);
       return { ok: true, started: true, status: "running" };
     } catch (error) {
+      if (!fromAutoRetry && !autoRetryDisposed && !state.stopped && LOCAL_TIMEOUT.test(`${error?.message ?? error}`)) {
+        const message = `${error?.message ?? error}`;
+        const restarts = state.timeoutRestarts ?? 0;
+        state.timeoutRestarts = restarts + 1;
+        state.timeouts = (state.timeouts ?? 0) + 1;
+        const delay = Math.min(60_000, 2_000 * 2 ** Math.min(restarts, 5));
+        state.status = "running";
+        state.starting = false;
+        state.detail = "";
+        state.settled = false;
+        state.warning = `A tool call timed out (${publicText(message, 80)})${state.timeouts > 1 ? `, ${state.timeouts} times` : ""}. The chat keeps going by itself.`;
+        state.warningAt = now();
+        reportRun(id, run, state, null);
+        logger?.warn?.("ao.start_timeout_retry", { attempt: state.timeoutRestarts, message: publicText(message, 120) });
+        backOffDrive(id, run, delay, () => {
+          if (!state.stopped && !autoRetryDisposed) {
+            void startRun({ workspaceId: id, runId: run, executable }, { retryState: state }).catch(() => undefined);
+          }
+        });
+        return { ok: true, started: true, status: "running" };
+      }
       state.status = "failed";
       state.starting = false;
       state.detail = publicText(error?.message || error, 500);
-      state.settled = true;
+      state.settled = !chatPreferences.get().autoRetry;
       reportRun(id, run, state, null, "error");
+      if (!fromAutoRetry && !state.stopped) scheduleAutoRetry(id, run, selectedExecutable, state);
       throw error;
     }
   }
@@ -8224,8 +8289,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Another turn started first (a wakeup, a queued message; see chatSend): that turn is the
       // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled. A
       // run that only reads busy (no newer turn) is tried again shortly (deferGoalRound).
-      if (/still running/.test(message)) {
-        deferGoalRound(id, task, previous, "still_running");
+      if (/still running|Workflow revision changed|AO (?:run|board) revision/i.test(message)
+        || LOCAL_TIMEOUT.test(message) || LOCAL_SOCKET_FAILURE.test(message)
+        || error?.code === "HEADLESS_QUEUE_FULL" || /queue is full/i.test(message)) {
+        deferGoalRound(id, task, previous, /still running/.test(message) ? "still_running" : "transient_timeout");
         return;
       }
       // A full chat says why it could not compact (the note was only "use /compact" before).
@@ -8347,7 +8414,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!previous || latest?.id !== previous.id || !runSettled(previous) || chatWorking(workspaceId, task, saved.runs)) return;
         return goalAfterRun(workspaceId, retry.runId, "finished");
       });
-      void next.catch((error) => { logger?.warn?.("ao.goal_retry_failed", { message: publicText(error?.message || error, 200) }); });
+      void next.catch((error) => {
+        logger?.warn?.("ao.goal_retry_failed", { message: publicText(error?.message || error, 200) });
+        if (still() && !goals.get(workspaceId, task)?.retry) {
+          goalLater(workspaceId, task, GOAL_RETRY_DELAY_MS, retry.runId, Boolean(retry.check));
+        }
+      });
     }, Math.max(0, retry.at - now()));
     timer?.unref?.();
     goalTimers.set(key, timer);
