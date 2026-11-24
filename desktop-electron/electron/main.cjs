@@ -369,6 +369,11 @@ let agentOrchestratorResourceRoot = null;
 /** Stops the AO change push wired up with the current upstream module. */
 let aoChangeWatch = null;
 let missionWorkflowRuntime = null;
+/**
+ * The local auto-review plugin for "Approve for me" (auto-review-host.cjs), made once with the first
+ * workflow and kept across backend restarts; its stats are pushed to the window as they change.
+ */
+let autoReviewHost = null;
 /** The saved settings (launcher-state.json), made at startup; a quit waits for its last save. */
 let launcherStateStore = null;
 /** The app's tool server for AO chat agents; one per app run, kept across backend restarts. */
@@ -2977,7 +2982,8 @@ function registerIpc({ logger, stateStore }) {
     // the agent pre-warm and the Retry automatically switch unset. Layout still needs a visible window.
     const passiveAoLayout = input.moduleId === "agent-orchestrator"
       && (["upstream_bounds", "upstream_hide", "chat_preview_show", "chat_preview_hide", "chat_preview_snapshot", "archived_chats", "chat_prewarm", "chat_draft"].includes(input.operation)
-        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined && input.arguments?.meteredReviews === undefined));
+        || (["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"].includes(input.operation) && input.arguments?.enabled === undefined && input.arguments?.percent === undefined && input.arguments?.seconds === undefined && input.arguments?.meteredReviews === undefined)
+        || (input.operation === "chat_auto_review" && input.arguments?.enabled === undefined));
     const readOnly = appsHost.isReadOnly(input.moduleId, input.operation);
     // These two status clocks also run while minimized. Only the trusted main frame may read them.
     const backgroundRead = readOnly && input.moduleId === "agent-orchestrator"
@@ -5556,7 +5562,15 @@ async function start() {
       return upstreamAtLaunch.start();
     }).catch((error) => logger.warn("ao.surviving_chats_failed", { detail: String(error?.message ?? error).slice(0, 300) }));
     missionWorkflowRuntime?.dispose();
+    if (!autoReviewHost) {
+      // Nothing starts until the first review or the settings' stats ask for it; a missing plugin
+      // (CODING_TOOLS_AUTO_REVIEW_PATH, else G:\Projects\auto-review-plugin) leaves Approve for me as it was.
+      autoReviewHost = require("./auto-review-host.cjs").createAutoReviewHost({ logger });
+      autoReviewHost.onStats((stats) => send("launcher:auto-review-stats", stats));
+    }
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
+      // "Approve for me" asks the local auto-review plugin first (Settings › Chat › Local auto-review).
+      autoReview: autoReviewHost,
       findCodexExecutable: () => codexCli.executable() || findInstalledCodexExecutable?.() || null,
       nativeGuardianReview,
       handoffRedactionEnabled: () => stateStore.read().chatAgentRedactSecrets === true,
@@ -6165,6 +6179,8 @@ async function start() {
 
   app.on("activate", () => showMainWindow());
   app.on("will-quit", () => missionWorkflowRuntime?.dispose());
+  // Saves what the plugin still holds (its debounced flush) before the app exits.
+  app.on("will-quit", () => { void autoReviewHost?.close(); });
   app.on("before-quit", (event) => {
     if (exitCommitted) return;
     event.preventDefault();

@@ -267,6 +267,41 @@
   color: var(--cxs-text-secondary, var(--cxs-text));
   font-size: 13px;
 }
+/* Local auto-review's stats, under its switch: a small table, its trend and the commands that still reach you. */
+.cxs-auto-review-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 16px 12px;
+  min-width: 0;
+}
+.cxs-auto-review-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.cxs-auto-review-table th,
+.cxs-auto-review-table td {
+  padding: 3px 6px;
+  text-align: right;
+  font-weight: 400;
+}
+.cxs-auto-review-table thead th {
+  color: var(--cxs-text-secondary);
+}
+.cxs-auto-review-table tbody th {
+  text-align: left;
+  font-weight: 500;
+}
+.cxs-auto-review-top {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 12px;
+}
+.cxs-auto-review-top code {
+  overflow-wrap: anywhere;
+}
 /* A shortcut's keys in Keyboard shortcuts: read-only, in the controls' border and corners. */
 .cxs-kbd {
   display: inline-block;

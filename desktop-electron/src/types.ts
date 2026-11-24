@@ -1200,6 +1200,8 @@ export interface LauncherApi {
   onRegisterChanged(listener: (status: RegisterStatus) => void): () => void;
   /** AO pushed a change: session ids whose conversation or state moved, "<workspace>:<run>" run keys. */
   onAoChanged?(listener: (change: { sessions: string[]; runs: string[]; moved?: { from: string; to: string; taskId: string }[] }) => void): () => void;
+  /** The local auto-review plugin's stats, pushed as its decisions change them (Settings › Chat › Local auto-review). */
+  onAutoReviewStats?(listener: (stats: unknown) => void): () => void;
   chatGptDesktopStatus(): Promise<ChatGptDesktopStatus>;
   openChatGptDesktop(slotId: string): Promise<ChatGptDesktopStatus>;
   newChatGptDesktopSignIn(): Promise<ChatGptDesktopStatus>;

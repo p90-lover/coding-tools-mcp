@@ -311,6 +311,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   onProviderNetworkChanged: (listener) => subscription("launcher:provider-network-changed", listener),
   onNovaChanged: (listener) => subscription("launcher:nova-changed", listener),
   onAoChanged: (listener) => subscription("launcher:ao-changed", listener),
+  onAutoReviewStats: (listener) => subscription("launcher:auto-review-stats", listener),
 });
 
 const { invokeContract } = require("./ipc-schema.cjs");

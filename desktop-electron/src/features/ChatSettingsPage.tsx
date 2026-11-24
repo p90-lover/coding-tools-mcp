@@ -7,6 +7,7 @@ import { CHAT_PAGE_LIMIT, saveChatPagePreferences, useChatPagePreferences, type 
 import { archiveDayLabel, dayChoices, onChatListSettings, readChatListSettings, saveChatListSettings, VISIBLE_CHOICES } from "./chat-list-settings";
 import { onMissionWork, readMissionWork, saveMissionWork } from "./chat-view-settings";
 import { publishQuotaReviews } from "./quota-reviews";
+import { AutoReviewStatsPanel } from "./AutoReviewStats";
 import { ResponseStyleSettings } from "./ResponseStyleSettings";
 import { SHORTCUTS } from "./ChatThreadList";
 import "./chat-settings.css";
@@ -155,7 +156,9 @@ function AllowedApps({ onError }: { onError: (message: string) => void }) {
 const COMPACT_CHOICES = [50, 60, 70, 80, 90, 95, 100];
 
 /** The chat's own preferences, kept by the bridge (agent-orchestrator-workflow.cjs), as Claude Code's settings. */
-type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; meteredReviews: boolean; questionTimeout: number };
+type ChatPreferences = { autoCompact: boolean; percent: number; autoRetry: boolean; modelJudges: boolean; meteredReviews: boolean; questionTimeout: number;
+  // "Local auto-review" (chat_auto_review): its switch, whether the plugin is installed, and its stats when the page opened.
+  autoReview: boolean; autoReviewAvailable: boolean; autoReviewStats: unknown };
 // "Agent questions": how long a question waits before it is answered for you (chat_question_timeout).
 // 0 keeps it, and the agent paused on it, until you answer.
 const QUESTION_TIMEOUT_DEFAULT = 30;
@@ -274,11 +277,13 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
   }, [api]);
   useEffect(() => {
     let live = true;
-    void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges"), chatCall("chat_question_timeout")])
-      .then(([compact, retry, judges, questions]) => {
+    void Promise.all([chatCall("chat_auto_compact"), chatCall("chat_auto_retry"), chatCall("chat_model_judges"), chatCall("chat_question_timeout"),
+      chatCall("chat_auto_review").catch(() => ({} as Record<string, unknown>))])
+      .then(([compact, retry, judges, questions, review]) => {
         publishQuotaReviews(judges.meteredReviews === true);
         if (live) setChat({ autoCompact: compact.autoCompact !== false, percent: Number(compact.percent) || 95, autoRetry: retry.autoRetry === true, modelJudges: judges.modelJudges === true, meteredReviews: judges.meteredReviews === true,
-          questionTimeout: questionSeconds(questions.seconds) });
+          questionTimeout: questionSeconds(questions.seconds),
+          autoReview: review.enabled !== false, autoReviewAvailable: review.available === true, autoReviewStats: review.stats ?? null });
       }, () => undefined);
     return () => { live = false; };
   }, []);
@@ -304,6 +309,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
       ...(operation === "chat_auto_retry" ? { autoRetry: result.autoRetry === true } : {}),
       ...(operation === "chat_model_judges" ? { modelJudges: result.modelJudges === true, meteredReviews: result.meteredReviews === true } : {}),
       ...(operation === "chat_question_timeout" ? { questionTimeout: questionSeconds(result.seconds) } : {}),
+      ...(operation === "chat_auto_review" ? { autoReview: result.enabled !== false, autoReviewAvailable: result.available === true, autoReviewStats: result.stats ?? current.autoReviewStats } : {}),
     })));
   };
   // The chat list's own settings, shared with its popover in the sidebar.
@@ -440,6 +446,11 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <Toggle label="Let the model judge" checked={chat?.modelJudges === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { enabled: next })} />
               </Row>
+              <Row label="Local auto-review" description="In Approve for me, a local reviewer with no model and no quota answers the agent's shell commands it has learned are safe, declines what its blocklist or failures rule out, and answers routine questions. What it can't settle goes on as before">
+                <Toggle label="Local auto-review" checked={chat?.autoReview !== false} disabled={!chat || !chat.autoReviewAvailable}
+                  onChange={(next) => setChatPreference("chat_auto_review", { enabled: next })} />
+              </Row>
+              {chat ? <AutoReviewStatsPanel initial={chat.autoReviewStats} available={chat.autoReviewAvailable} /> : null}
               <Row label="Agent questions" description={chat?.questionTimeout === 0
                 ? "A question the agent asks waits for your answer, and the agent pauses until you answer it"
                 : "With Approve for me or Full access, a question nobody answers gets its recommended answer after this many seconds"}>
