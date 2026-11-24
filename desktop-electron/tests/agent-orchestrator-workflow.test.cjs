@@ -15385,3 +15385,30 @@ test("Full access answers a request again when its first answer could not be sen
     workflow.dispose();
   }
 });
+
+test("a team chat's waiting rename keeps waiting when a read of its runs fails", async () => {
+  // Bug hunt 2026-11-24 W1: whenTaskIdle treated a failed read as "no open run" and applied the edit
+  // at once, voiding the team's grant: every later worker was refused ("AO graph or revision changed").
+  const { world, workflow, advance, gate } = wakeChat();
+  try {
+    const team = { id: "r2", workspace_id: "ws-1", project_id: "task-1", execution_mode: "team", cancelled: false, team: { id: "team-1", revision: 1 }, nodes: [
+      { id: "lead", role: "planner", parents: [], state: "running", history: [], receipt: { thread_id: "sess-2" } },
+      { id: "work", role: "worker", parents: ["lead"], state: "pending", history: [], receipt: {} }] };
+    world.runs.push(team);
+    const edits = world.edits.length;
+    const waiting = await workflow.chatTitleTool({ workspaceId: "ws-1", session: "sess-2", title: "Ship the release notes" });
+    assert.equal(waiting.renamed, false);
+    await goalSettle();
+    const failed = Promise.reject(new Error("AO is busy"));
+    failed.catch(() => {});
+    gate.read = failed;
+    await advance(20_000);
+    await goalSettle();
+    assert.equal(world.edits.length, edits, "an unread run is not an idle one");
+    gate.read = null;
+    team.nodes[1].state = "running";
+    await advance(20_000);
+    await goalSettle(() => world.edits.length > edits);
+    assert.equal(world.tasks.find((entry) => entry.id === "task-1").title, waiting.title, "applied once the read shows nothing left to reserve");
+  } finally { workflow.dispose(); }
+});

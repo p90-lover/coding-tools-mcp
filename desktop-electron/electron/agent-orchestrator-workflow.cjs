@@ -7153,7 +7153,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (idleStopped) return;
       const saved = await runs({ workspaceId }).catch(() => null);
       if (idleStopped) return;
-      const open = saved?.runs.some(run => run.project_id === taskId && grantAtRisk(run));
+      // A read that failed shows nothing: count it as open and look again at the next poll.
+      const open = !Array.isArray(saved?.runs) || saved.runs.some(run => run.project_id === taskId && grantAtRisk(run));
       if (!open) return apply();
       if (now() - started > TASK_IDLE_LIMIT_MS) return;
       const timer = setTimer(() => { taskIdleTimers.delete(timer); whenTaskIdle(workspaceId, taskId, apply, started); }, TASK_IDLE_POLL_MS);
