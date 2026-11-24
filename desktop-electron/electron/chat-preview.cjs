@@ -37,6 +37,8 @@ const VISUALIZE_STYLE = `:root{--background:Canvas;--foreground:CanvasText;--car
 const LIVE_PANEL_URL = "about:blank#live-panel";
 // A page script that does not answer within this fails the call.
 const EVALUATE_TIMEOUT_MS = 5_000;
+// The longest a page may take to answer any other DevTools command (a click, a key, a screenshot).
+const PROTOCOL_TIMEOUT_MS = 15_000;
 // A full-page screenshot is cut at this height (CSS pixels).
 const MAX_SHOT_HEIGHT = 6_000;
 const MAX_SHOT_WIDTH = 1_280;
@@ -231,7 +233,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * and `blockedPorts()` the app's own loopback service ports.
  */
 function createChatPreviews({ createView, attachView, detachView, contentSize = () => [VIEWPORT.width, VIEWPORT.height], isVisible = () => true,
-  blockedPorts = () => [], logger = console, now = Date.now, openContextMenu = null } = {}) {
+  blockedPorts = () => [], logger = console, now = Date.now, openContextMenu = null, protocolTimeoutMs = PROTOCOL_TIMEOUT_MS } = {}) {
   if (typeof createView !== "function") throw new Error("createView is required");
   const previews = new Map(); // key -> preview
   let shown = null; // { key, bounds }
@@ -404,7 +406,7 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
     try { if (!contents.isDestroyed()) contents.close?.(); } catch { /* already closed */ }
   }
 
-  async function protocol(preview, method, params = {}) {
+  async function protocol(preview, method, params = {}, timeoutMs = protocolTimeoutMs) {
     const debug = preview.view.webContents.debugger;
     if (!preview.debuggerReady) {
       if (!debug.isAttached()) debug.attach("1.3");
@@ -414,22 +416,25 @@ function createChatPreviews({ createView, attachView, detachView, contentSize = 
         debug.on("detach", () => { preview.debuggerReady = false; });
       }
     }
-    return debug.sendCommand(method, params);
+    // Input.* and Page.captureScreenshot wait for the renderer: a page stuck in a loop never answers
+    // them, so every call is bounded and fails the tool call instead of hanging it.
+    let timer;
+    try {
+      return await Promise.race([
+        debug.sendCommand(method, params),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new PreviewError("The page did not answer in time")), timeoutMs); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** A page script's value; a page that never answers fails the call instead of hanging it. */
   async function evaluate(preview, expression) {
-    let timer;
-    try {
-      const answer = await Promise.race([
-        protocol(preview, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, timeout: EVALUATE_TIMEOUT_MS }),
-        new Promise((_, reject) => { timer = setTimeout(() => reject(new PreviewError("The page did not answer in time")), EVALUATE_TIMEOUT_MS + 1_000); }),
-      ]);
-      if (answer?.exceptionDetails) throw new PreviewError(`The page script failed: ${answer.exceptionDetails.text ?? "exception"}`);
-      return answer?.result?.value;
-    } finally {
-      clearTimeout(timer);
-    }
+    const answer = await protocol(preview, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true, timeout: EVALUATE_TIMEOUT_MS },
+      Math.max(protocolTimeoutMs, EVALUATE_TIMEOUT_MS + 1_000));
+    if (answer?.exceptionDetails) throw new PreviewError(`The page script failed: ${answer.exceptionDetails.text ?? "exception"}`);
+    return answer?.result?.value;
   }
 
   async function loadOnce(contents, url) {

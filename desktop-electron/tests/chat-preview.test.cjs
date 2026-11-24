@@ -1145,3 +1145,26 @@ test("the PR row reads gh again when a turn ends, so a pull request the agent ju
   await env.tools.pullRequest({ sessionId: "ao-1", refreshKey: "1:idle:t1" });
   assert.equal(runs.length, 2, "reopening the details within 2 minutes reads nothing");
 });
+test("a page that stops answering fails a click or screenshot instead of hanging it", async () => {
+  // Bug hunt 2026-11-24 C4: only Runtime.evaluate had a timeout; Input.* and Page.captureScreenshot
+  // wait for the renderer, so a page stuck in a loop hung the agent's tool call for good.
+  const views = [];
+  const service = createChatPreviews({
+    createView: () => { const view = fakeView({}); views.push(view); return view; },
+    attachView() {}, detachView() {}, contentSize: () => [1600, 1000], blockedPorts: () => [], logger: { warn() {} },
+    protocolTimeoutMs: 50,
+  });
+  try {
+    assert.equal((await service.call("s1", "preview_open", { url: "http://localhost:5173/" }, { permit: async () => true })).isError, false);
+    const real = views[0].webContents.debugger.sendCommand.bind(views[0].webContents.debugger);
+    views[0].webContents.debugger.sendCommand = (method, params) =>
+      /^(Input\.|Page\.captureScreenshot|Emulation\.)/.test(method) ? new Promise(() => {}) : real(method, params);
+    const started = Date.now();
+    const click = await service.call("s1", "preview_click", { x: 1, y: 1 });
+    assert.equal(click.isError, true);
+    assert.match(click.content[0].text, /did not answer/);
+    const shot = await service.call("s1", "preview_screenshot", {});
+    assert.equal(shot.isError, true);
+    assert.ok(Date.now() - started < 2_000, "both fail within their bound");
+  } finally { service.closeAll(); }
+});
