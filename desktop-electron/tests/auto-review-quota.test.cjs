@@ -374,3 +374,111 @@ test("quota-review consent is separate from model judge and persists across work
     assert.equal((await second.workflow.call("chat_model_judges")).modelJudges, true);
   } finally { second.workflow.dispose(); }
 });
+
+test("a timed-out Guardian review retries automatically when CPA consent is off, and CPA fallback also retries on transient failure", { timeout: 5_000 }, async () => {
+  let at = 1_000_000, guardianCalls = 0;
+  const unpaved = fixture(undefined, {
+    now: () => at,
+    nativeGuardianReview: async () => {
+      if (++guardianCalls === 1) return { action: "ask", guardianUnavailable: true, guardianTimedOut: true, reason: "Native Codex Guardian is unavailable." };
+      return { action: "allow", reason: "recovered on retry", actor: "guardian", reason_code: "native_guardian" };
+    },
+  });
+  try {
+    await unpaved.workflow.call("chat_model_judges", { enabled: true, meteredReviews: false });
+    const firstPending = await unpaved.observe();
+    assert.equal(firstPending[0]?.awaiting_review, true, "first timeout stays in review for automatic retry");
+    assert.deepEqual(unpaved.resolved, []);
+    at += 5_000;
+    await unpaved.observe();
+    await unpaved.firstAnswer;
+    assert.deepEqual(unpaved.resolved, [["permission-1", "yes"]]);
+    assert.equal(guardianCalls, 2);
+    assert.deepEqual(unpaved.calls, []);
+  } finally { unpaved.workflow.dispose(); }
+
+  let cpaTries = 0;
+  const fallback = fixture(undefined, {
+    now: () => at,
+    nativeGuardianReview: async () => ({ action: "ask", guardianUnavailable: true, guardianTimedOut: true, reason: "Native Codex Guardian is unavailable." }),
+    modelVerdict: async () => {
+      if (++cpaTries === 1) throw new Error("CPA timed out");
+      return { outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "approved on second try" };
+    },
+  });
+  try {
+    await fallback.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    await fallback.observe();
+    assert.deepEqual(fallback.resolved, [], "first CPA failure retries instead of immediately denying");
+    at += 5_000;
+    await fallback.observe();
+    await fallback.firstAnswer;
+    assert.deepEqual(fallback.resolved, [["permission-1", "yes"]]);
+    assert.equal(cpaTries, 2);
+  } finally { fallback.workflow.dispose(); }
+});
+
+test("submitted timeout after launch keeps the launched agent alive and startRun/goal retries recover from headless timeouts", { timeout: 5_000 }, async () => {
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const node = { id: "one", role: "planner", state: "pending", parents: [], history: [{ error: "The agent could not start", finished_at_ms: 1_000 }], route, receipt: {} };
+  const run = { id: "run", workspace_id: "ws", project_id: "task", revision: 1, execution_mode: "single",
+    grant: { executable_sha256: "a".repeat(64), turns_started: 0, max_turns: 4, expires_at_ms: Date.now() + 3_600_000 }, nodes: [node] };
+  let stoppedSessions = 0, submittedCalls = 0, grantCalls = 0;
+  const timers = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    setTimer: (fn, ms) => { const entry = { fn, ms, unref() {} }; timers.push(entry); return entry; },
+    clearTimer: () => {},
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [{ id: "test-model" }] }) }),
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/grant") {
+        if (++grantCalls === 1) throw new Error("Headless request timed out");
+        return { ok: true, run, grant: run.grant };
+      }
+      if (endpoint === "/api/v1/ao/control" && body?.action === "retry") {
+        if (node.state === "pending") throw new Error("Mission control failed; refresh its saved state");
+        node.state = "pending";
+        return { ok: true, run };
+      }
+      if (endpoint === "/api/v1/ao/external/reserve") {
+        node.state = "reserved";
+        node.request_key = "req-1";
+        return { ok: true, run, request_key: "req-1", prompt: "go" };
+      }
+      if (endpoint === "/api/v1/ao/external/submitted") {
+        node.state = "running";
+        node.receipt = { thread_id: body.session_id, request_key: body.request_key };
+        if (++submittedCalls === 1) throw new Error("Headless request timed out");
+        return { ok: true, run };
+      }
+      return { ok: true, runs: [run], worker_capacity: { run: 1 } };
+    },
+    aoHarness: {
+      spawn: async () => "s-live",
+      stop: async () => { stoppedSessions++; return { ok: true }; },
+      kill: async () => { stoppedSessions++; return { ok: true }; },
+      observe: async () => ({ status: "working", turnId: "t-1", turnState: "running", approvals: [], quiet: true }),
+    },
+    confirm: async () => true,
+  });
+  try {
+    // Reconciles controlRun("retry") when the card was already moved to "pending" with prior history.
+    const retried = await workflow.call("control_run", { workspaceId: "ws", runId: "run", action: "retry" });
+    assert.equal(retried.ok, true);
+    // startRun backs off on Headless request timed out instead of failing the run.
+    run.grant = null;
+    const started = await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    assert.equal(started.status, "running");
+    assert.equal(grantCalls, 1);
+    run.grant = { executable_sha256: "a".repeat(64), turns_started: 0, max_turns: 4, expires_at_ms: Date.now() + 3_600_000 };
+    const startBackoff = timers.shift();
+    assert.ok(startBackoff, "startRun scheduled a timeout backoff retry");
+    startBackoff.fn();
+    for (let tick = 0; tick < 60 && submittedCalls === 0; tick++) await new Promise(resolve => setImmediate(resolve));
+    assert.equal(submittedCalls, 1);
+    assert.equal(stoppedSessions, 0, "newly launched session was not killed when submitted timed out");
+  } finally { workflow.dispose(); }
+});

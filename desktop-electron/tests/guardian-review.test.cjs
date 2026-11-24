@@ -244,3 +244,37 @@ test("uncertain cwd, non-shell and unavailable auth do not start a reviewer", as
   assert.match(outcome.reason, /ChatGPT sign-in/);
   assert.equal(outcome.guardianUnavailable, true);
 });
+
+test("queue, account-read, and server timeouts or repeated server crashes report Guardian timed out and unavailable", async (t) => {
+  const { request } = await fixture(t);
+  const slowAccount = createGuardianReview({
+    platform: "win32", stateDir: path.join(request.folder, "slow-account"),
+    executable: () => path.join(request.folder, "codex.exe"),
+    limits: { workMs: 30, queueMs: 30 },
+    prepareAccount: async () => new Promise(resolve => setTimeout(() => resolve({ accessToken: "t", chatgptAccountId: "a" }), 80)),
+    spawnProcess: () => assert.fail("timed out reading account"),
+  });
+  t.after(() => slowAccount.close());
+  const accountTimedOut = await slowAccount(request);
+  assert.equal(accountTimedOut.guardianUnavailable, true);
+  assert.equal(accountTimedOut.guardianTimedOut, true);
+
+  const crashing = createGuardianReview({
+    platform: "win32", stateDir: path.join(request.folder, "crashing"),
+    executable: () => path.join(request.folder, "codex.exe"),
+    limits: { workMs: 200, queueMs: 100 },
+    prepareAccount: async () => ({ accessToken: "t", chatgptAccountId: "a" }),
+    spawnProcess() {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.kill = () => child.emit("close");
+      setImmediate(() => child.emit("close"));
+      return child;
+    },
+  });
+  t.after(() => crashing.close());
+  const crashedOutcome = await crashing(request);
+  assert.equal(crashedOutcome.guardianUnavailable, true);
+  assert.equal(crashedOutcome.guardianTimedOut, true);
+});
