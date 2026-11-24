@@ -235,4 +235,10 @@ test("only Claude Code's own task output files are read", () => {
   assert.equal(backgroundOutputPath("/tmp/other/tasks/b1.output", "b1"), null);
   assert.equal(backgroundOutputPath("relative/claude/tasks/b1.output", "b1"), null);
   assert.equal(backgroundOutputPath(undefined, "b1"), null);
+  // Bug hunt 2026-11-24 C3: a network or device path would make the app open a remote share
+  // (Windows sends the person's NTLM credentials to it, and a dead host holds a thread for minutes).
+  for (const remote of ["\\\\evil.example\\claude\\tasks\\b1.output", "//evil.example/claude/tasks/b1.output",
+    "\\\\?\\UNC\\evil\\claude\\tasks\\b1.output", "\\\\.\\pipe\\claude\\tasks\\b1.output"]) {
+    assert.equal(backgroundOutputPath(remote, "b1"), null, remote);
+  }
 });

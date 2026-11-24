@@ -114,6 +114,9 @@ const taskIdOf = (input) => [input.task_id, input.bash_id, input.shell_id].find(
  */
 function backgroundOutputPath(raw, taskId) {
   if (typeof raw !== "string" || !path.isAbsolute(raw.trim())) return null;
+  // Never a network share or device path: opening one sends the person's Windows credentials to
+  // that host, and an unreachable host holds a file-system thread for minutes.
+  if (/^[\\/]{2}/.test(raw.trim())) return null;
   const resolved = path.resolve(raw.trim());
   if (path.basename(resolved) !== `${taskId}.output` || path.basename(path.dirname(resolved)) !== "tasks") return null;
   return resolved.split(/[\\/]/).some((part) => /^claude(?:-[\w.-]+)?$/i.test(part)) ? resolved : null;
