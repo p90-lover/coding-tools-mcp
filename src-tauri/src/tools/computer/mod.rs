@@ -434,11 +434,19 @@ pub fn focus_local_target_in_session(session_id: &str) -> Result<()> {
         .as_ref()
         .filter(|lease| lease.id == session_id)
         .cloned()
-        .ok_or_else(|| error("CONTROL_NOT_ARMED", "The selected session is no longer active"))?;
+        .ok_or_else(|| {
+            error(
+                "CONTROL_NOT_ARMED",
+                "The selected session is no longer active",
+            )
+        })?;
     check_same_lease(&lease, false)?;
     if let Err(error) = native::focus(&lease.target) {
         let mut s = state();
-        if s.lease.as_ref().is_some_and(|current| current.id == lease.id) {
+        if s.lease
+            .as_ref()
+            .is_some_and(|current| current.id == lease.id)
+        {
             s.stop("Foreground activation failed");
             drop(s);
             wake();
