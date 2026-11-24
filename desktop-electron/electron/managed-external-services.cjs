@@ -712,10 +712,12 @@ function createManagedExternalServicesController({
   }
 
   function dispose({ keepPersistent = false } = {}) {
+    // The components stop first: one that needs attention throws ("stop needs attention"), the quit
+    // is refused and the app stays open, so this wrapper must still be whole and refreshing then.
+    managedController.dispose({ keepPersistent });
     disposed = true;
     for (const watch of diskWatches) watch.close();
     clearTimeout(refreshTimer); refreshTimer = null;
-    managedController.dispose({ keepPersistent });
     baseController.dispose();
   }
 

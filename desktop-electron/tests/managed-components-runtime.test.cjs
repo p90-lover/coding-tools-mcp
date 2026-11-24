@@ -1814,3 +1814,17 @@ test("the creation time of a running process is read on Windows, and is null for
     `this test's own start time (${at}, Node started ${Math.round(started)})`);
   assert.equal(await windowsProcessStartedAt(0), null);
 });
+
+test("a quit refused by a component needing attention leaves the services wrapper working", () => {
+  // Bug hunt 2026-11-24 S8: dispose() set disposed and closed the disk watches first, then the
+  // managed controller threw ("stop needs attention") and the base controller was never disposed:
+  // the quit failed, the app stayed open with a wrapper that no longer refreshed, and every later
+  // quit failed the same way.
+  const source = require("node:fs").readFileSync(require("node:path").join(__dirname, "../electron/managed-external-services.cjs"), "utf8");
+  const body = source.slice(source.indexOf("function dispose({ keepPersistent = false } = {}) {"));
+  const stop = body.indexOf("managedController.dispose({ keepPersistent });");
+  assert.ok(stop > 0);
+  assert.ok(stop < body.indexOf("disposed = true;"), "the components stop before the wrapper marks itself disposed");
+  assert.ok(stop < body.indexOf("watch.close()"), "and before it closes its disk watches");
+  assert.ok(stop < body.indexOf("baseController.dispose();"));
+});
