@@ -1205,3 +1205,79 @@ test("Update starts its workers off the app's main thread, detached, with the wo
     forget();
   }
 });
+
+test("a failed download leaves no stage behind, and a check that ends mid-install leaves the install alone", async () => {
+  // Bug hunt 2026-11-24 R6: a stage() that threw (download error, bad pack hash) left its stage
+  // folder with the partial pack in the install. R7: a periodic check that finished while an install
+  // was downloading set the state back to available (or error, dropping the candidate).
+  const root = tempRoot();
+  try {
+    const installRoot = path.join(root, "install");
+    const assets = path.join(root, "assets");
+    writeTree(installRoot, { "Coding Tools.exe": "exe", "resources/app.asar": "v1" });
+    writeTree(path.join(root, "next"), { "Coding Tools.exe": "exe", "resources/app.asar": "v2" });
+    writeRuntime(installRoot, "0.8.0");
+    writeRuntime(path.join(root, "next"), "0.8.0");
+    const built = await buildAppUpdate({ appRoot: path.join(root, "next"), output: assets, version: "0.8.0", electron: "41.10.7" });
+    fs.writeFileSync(path.join(assets, "SHA256SUMS.txt"), `${built.sums.join("\n")}\n`);
+    const names = fs.readdirSync(assets);
+    const fromUrl = (url) => path.join(assets, decodeURIComponent(url.split("/").pop()));
+    let mode = "fail";
+    let releaseDownload = null;
+    let fetchNext = null;
+    const controller = createAppUpdateController({
+      currentVersion: "0.7.0", electronVersion: "41.10.7", platform: "win32", arch: "x64", packaged: true,
+      executablePath: path.join(installRoot, "Coding Tools.exe"), logsDirectory: path.join(root, "logs"),
+      publish: () => {}, logger: null, closeForUpdate: async () => ({ ok: true }), closeBlocker: () => null,
+      dependencies: {
+        fetchRelease: async () => (fetchNext ? fetchNext : [release("0.8.0", names)]),
+        downloadText: async (url) => fs.readFileSync(fromUrl(url), "utf8"),
+        downloadFile: async (url, destination) => {
+          if (mode === "fail") { fs.writeFileSync(destination, "partial"); throw new Error("connection reset"); }
+          await new Promise((resolve) => { releaseDownload = resolve; });
+          fs.copyFileSync(fromUrl(url), destination);
+        },
+        spawnWorker: () => ({ pid: 4242, unref() {} }),
+      },
+    });
+    assert.equal((await controller.checkNow()).status, "available");
+    await assert.rejects(controller.beginInstall(), /connection reset/);
+    const stages = () => fs.readdirSync(path.join(installRoot, STAGE_DIRECTORY)).filter((name) => name.startsWith("stage-"));
+    assert.deepEqual(stages(), [], "the failed stage and its partial pack are removed");
+    assert.equal(controller.getState().status, "available");
+
+    // A check already under way when Update is clicked, which fails while the update downloads.
+    mode = "slow";
+    let failFetch;
+    fetchNext = new Promise((_resolve, reject) => { failFetch = reject; });
+    fetchNext.catch(() => {});
+    const checking = controller.checkNow();
+    const installing = controller.beginInstall();
+    for (let tries = 0; tries < 200 && !releaseDownload; tries++) await new Promise((resolve) => setTimeout(resolve, 5));
+    failFetch(new Error("GitHub 502"));
+    await checking;
+    assert.equal(controller.getState().status, "downloading", "the install's state stands");
+    fetchNext = null;
+    releaseDownload();
+    assert.equal(await installing, true, "and the install finishes with its candidate");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Update clicked while the app update downloads joins it instead of starting the GUI update", async () => {
+  // Bug hunt 2026-11-24 R8.
+  const calls = [];
+  const fake = (name, status) => ({
+    getState: () => ({ status }), checkNow: async () => ({ status }), checkOnce: async () => ({ status }),
+    beginInstall: async () => { calls.push(name); return true; }, startPeriodicChecks() {}, stopPeriodicChecks() {},
+    getRendererPath: () => "index.html",
+  });
+  for (const status of ["downloading", "installing"]) {
+    calls.length = 0;
+    const before = [];
+    await combineUpdateControllers(fake("app", status), fake("gui", "available")).beginInstall({ beforeAppInstall: async () => before.push(1) });
+    assert.deepEqual(calls, ["app"], status);
+    assert.deepEqual(before, [], "nothing is stopped again for the install already under way");
+  }
+});

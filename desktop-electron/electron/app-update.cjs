@@ -488,8 +488,13 @@ function createAppUpdateController({
     checked = true;
     checking = (async () => {
       if (state.status !== "available") transition({ status: "checking" });
+      // Update may be clicked while this check runs (its state was "available"): an install under
+      // way owns the state and the candidate, and a check that ends meanwhile changes neither.
+      const installing = () => pending !== null;
       try {
-        const selected = selectAppRelease(await deps.fetchRelease(), currentVersion, tag);
+        const releases = await deps.fetchRelease();
+        if (installing()) return state;
+        const selected = selectAppRelease(releases, currentVersion, tag);
         if (!selected) {
           candidate = null;
           return transition({ status: "up-to-date" });
@@ -514,6 +519,7 @@ function createAppUpdateController({
           ...(failure ? { failedAttempts: failure.failures, failedAt: failure.at, failureMessage: failure.message } : {}),
         });
       } catch (error) {
+        if (installing()) return state;
         candidate = null;
         const message = error instanceof Error ? error.message : String(error);
         logger?.warn("launcher.app_update_check_failed", { message });
@@ -523,7 +529,7 @@ function createAppUpdateController({
     try { return await checking; } finally { checking = null; }
   }
 
-  async function stage(available) {
+  async function stage(available, onStage) {
     const checksums = await deps.downloadText(available.checksumsUrl);
     const manifestText = await deps.downloadText(available.manifestUrl, MAX_MANIFEST_BYTES);
     const manifestHash = crypto.createHash("sha256").update(manifestText).digest("hex");
@@ -568,6 +574,8 @@ function createAppUpdateController({
       }
     }
     const stageRoot = fs.mkdtempSync(path.join(updateRoot, "stage-"));
+    // Known to the caller from here on, so a download or verification that fails later is removed.
+    onStage?.(stageRoot);
     const filesRoot = path.join(stageRoot, "files");
     let downloaded = 0;
     const downloadShare = (bytes) => report(CHECK_SHARE + (1 - CHECK_SHARE) * (plan.downloadBytes ? bytes / plan.downloadBytes : 1));
@@ -622,9 +630,10 @@ function createAppUpdateController({
       const available = candidate;
       transition({ status: "downloading", version: available.version, progress: 0 });
       let staged = null;
+      let stageRoot = null;
       let child = null;
       try {
-        staged = await stage(available);
+        staged = await stage(available, (folder) => { stageRoot = folder; });
         child = await deps.spawnWorker(executablePath, staged.workerPath, staged.jobPath);
         if (!Number.isInteger(child?.pid) || child.pid <= 0) throw new Error("The update worker did not start");
         child.unref?.();
@@ -635,7 +644,8 @@ function createAppUpdateController({
         return true;
       } catch (error) {
         try { child?.kill(); } catch {}
-        if (staged) await fs.promises.rm(staged.stageRoot, { recursive: true, force: true }).catch(() => undefined);
+        const folder = staged?.stageRoot ?? stageRoot;
+        if (folder) await fs.promises.rm(folder, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 }).catch(() => undefined);
         transition({ status: "available", version: available.version });
         logger?.warn("launcher.app_update_failed", { message: error instanceof Error ? error.message : String(error) });
         throw error;
@@ -692,6 +702,9 @@ function combineUpdateControllers(appUpdates, guiUpdates) {
     // `beforeAppInstall` runs only when the whole app is replaced (it quits): a renderer-only update
     // reloads in place and leaves running ChatGPT turns alone (Codex review of #653).
     async beginInstall({ beforeAppInstall } = {}) {
+      // An app update already downloading or installing (the auto-installer started it): join it,
+      // never start the GUI-only update beside it.
+      if (["downloading", "installing"].includes(appUpdates.getState().status)) return appUpdates.beginInstall();
       if (appUpdates.getState().status !== "available") {
         const appState = await appUpdates.checkNow({ force: true });
         if (appState.status !== "available") return guiUpdates.beginInstall();
