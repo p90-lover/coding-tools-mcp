@@ -98,6 +98,7 @@ This project is indexed by GitNexus as **coding-tools-mcp** (32223 symbols, 8076
 
 - Do not use the C: drive for storage: no builds, caches, scratch, test fixtures, downloads, backups, logs, installer temp or rollback copies. The project, its worktrees and the app's data live on G:; the installed app lives on H:.
 - Never fall back to C:. `os.tmpdir()`, `%TEMP%`, `%TMP%` and `%LOCALAPPDATA%` point at C: on this machine, so code and scripts must not default to them. Use an explicit root on the project's or the app's drive (the repo's `aiTemp/`, the app's data root) and fail loudly when none is set.
+- The app enforces this in `desktop-electron/electron/system-drive.cjs`. At startup it refuses a data root that really lands on the system drive (junctions followed) while another drive exists. It points TEMP/TMP, rtk's history and package/build/model caches (`CACHE_VARIABLES`) at the data root for every child. New write paths outside the data root go through `guardWritePath`, which redirects to a fallback off C: or throws `SystemDriveWriteError`. `CODEX_HOME` and Claude Code's `~/.claude` hold sign-ins and history; they still default to the profile until the person chooses to move them.
 - A silent install (`/S /D=H:\Apps\Coding Tools`) copies the old install to `%TEMP%` as a rollback: set `TEMP`/`TMP` to a folder on H: (outside the install folder) before running it.
 - Keep scratch, backups and Trash out of `H:\Apps\Coding Tools`: every update copies that whole folder.
 

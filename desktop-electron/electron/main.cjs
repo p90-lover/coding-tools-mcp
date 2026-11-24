@@ -193,6 +193,15 @@ if (process.platform === "win32") {
   // Match the packaged appId so Windows associates taskbar entries with Coding Tools.
   app.setAppUserModelId(IS_DEV_PROFILE ? "dev.codingtools.fullharness.dev" : "dev.codingtools.fullharness");
 }
+// The data root is the parent of everything the app writes: refuse to start with it on the system
+// drive while another drive could hold it (system-drive.cjs checkDataRoot), before anything is made.
+const systemDrive = require("./system-drive.cjs");
+const dataRootCheck = systemDrive.checkDataRoot(LAUNCHER_PROFILE.userData, { env: process.env });
+if (!dataRootCheck.ok) {
+  dialog.showErrorBox(LAUNCHER_PROFILE.displayName, dataRootCheck.message);
+  app.exit(1);
+  process.exit(1);
+}
 fs.mkdirSync(LAUNCHER_PROFILE.userData, { recursive: true, mode: 0o700 });
 // Native child processes must use the physical profile path across Windows junctions.
 const launcherUserData = fs.realpathSync.native(LAUNCHER_PROFILE.userData);
@@ -203,11 +212,10 @@ installProcessDiagnosticGuards({
   filePath: path.join(launcherUserData, "logs", "process-stream-errors.log"),
   persist: process.env.CODING_TOOLS_PERSIST_LOGS === "1",
 });
-// Temporary files and rtk's history stay off the system drive (system-drive.cjs). Set before anything
-// starts, so the update worker and installer, AO and its agents, CPA and the bridge all inherit them.
-// The folder must exist first: Chromium's helper processes read TEMP as they start (a startup-only
-// sync call). If it can't be made, the inherited temporary folder stays.
-const systemDrive = require("./system-drive.cjs");
+// Temporary files, rtk's history and package/model caches stay off the system drive (system-drive.cjs).
+// Set before anything starts, so the update worker and installer, AO and its agents, CPA and the bridge
+// all inherit them. The folder must exist first: Chromium's helper processes read TEMP as they start (a
+// startup-only sync call). If it can't be made, the inherited temporary folder stays.
 const systemDriveRedirect = systemDrive.systemDriveRedirects({ env: process.env, dataRoot: launcherUserData });
 try {
   if (systemDriveRedirect.tempDir) fs.mkdirSync(systemDriveRedirect.tempDir, { recursive: true });

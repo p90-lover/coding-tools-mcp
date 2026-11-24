@@ -6,6 +6,7 @@ const { spawnSync } = require("node:child_process");
 const { Readable, Transform } = require("node:stream");
 const { pipeline } = require("node:stream/promises");
 const { getOffThread, spawnOffThread } = require("./off-thread-run.cjs");
+const { guardWritePath } = require("./system-drive.cjs");
 
 const REPOSITORY = "p90-lover/coding-tools-mcp";
 const RELEASE_API_URL = `https://api.github.com/repos/${REPOSITORY}/releases?per_page=20`;
@@ -496,7 +497,8 @@ function createUpdateController({
     const available = candidate;
     pending = (async () => {
       transition({ status: "downloading", version: available.version });
-      const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "coding-tools-update-"));
+      // main.cjs points TEMP at the data root; if that failed, refuse rather than download to the system drive.
+      const tempRoot = fs.mkdtempSync(path.join(guardWritePath(os.tmpdir()), "coding-tools-update-"));
       try {
         const checksums = await deps.downloadText(available.checksumsUrl);
         const expected = expectedChecksum(checksums, available.assetName);

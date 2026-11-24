@@ -3,7 +3,12 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { systemDriveRedirects, pruneTemp, driveOf, DAY_MS } = require("../electron/system-drive.cjs");
+const {
+  systemDriveRedirects, pruneTemp, driveOf, DAY_MS,
+  CACHE_VARIABLES, physicalDriveOf, guardWritePath, SystemDriveWriteError, checkDataRoot,
+} = require("../electron/system-drive.cjs");
+
+const pick = (object, keys) => Object.fromEntries(keys.filter((key) => key in object).map((key) => [key, object[key]]));
 
 // Test folders live in the repository's aiTemp, never the system temporary folder.
 const fixtureRoot = path.resolve(__dirname, "../../aiTemp", `system-drive-${process.pid}`);
@@ -16,7 +21,7 @@ test("temporary files and rtk's history move to the data root when they would la
   const result = systemDriveRedirects({ env: onC, dataRoot, platform: "win32" });
   assert.equal(result.tempDir, "G:\\AppData\\Coding Tools\\tmp");
   assert.equal(result.rtkDir, "G:\\AppData\\Coding Tools\\rtk");
-  assert.deepEqual(result.env, {
+  assert.deepEqual(pick(result.env, ["TEMP", "TMP", "TMPDIR", "RTK_DB_PATH"]), {
     TEMP: "G:\\AppData\\Coding Tools\\tmp", TMP: "G:\\AppData\\Coding Tools\\tmp", TMPDIR: "G:\\AppData\\Coding Tools\\tmp",
     RTK_DB_PATH: "G:\\AppData\\Coding Tools\\rtk\\history.db",
   });
@@ -25,7 +30,8 @@ test("temporary files and rtk's history move to the data root when they would la
 });
 
 test("a person's own choices off the system drive are kept", () => {
-  const own = systemDriveRedirects({ env: { ...onC, TEMP: "D:\\temp", TMP: "D:\\temp", RTK_DB_PATH: "E:\\rtk.db" }, dataRoot, platform: "win32" });
+  const ownCaches = Object.fromEntries(Object.keys(CACHE_VARIABLES).map((name) => [name, `E:\\cache\\${name}`]));
+  const own = systemDriveRedirects({ env: { ...onC, ...ownCaches, GOTMPDIR: "D:\\gotmp", TEMP: "D:\\temp", TMP: "D:\\temp", RTK_DB_PATH: "E:\\rtk.db" }, dataRoot, platform: "win32" });
   assert.deepEqual(own.env, {});
   assert.equal(own.tempDir, null);
   // One of the pair still on C: moves both, so no child is left on the system drive.
@@ -89,4 +95,79 @@ test("main sets the redirects before anything starts and prunes after startup", 
   assert.ok(assign < main.indexOf("await app.whenReady()"), "before the app is ready, so no child inherits the system drive's folder");
   assert.match(main, /fs\.mkdirSync\(systemDriveRedirect\.tempDir, \{ recursive: true \}\)/);
   assert.match(main, /systemDrive\.pruneTemp\(systemDriveRedirect\.tempDir\)/);
+});
+
+test("package, build and model caches move to the data root when unset or on the system drive", () => {
+  const env = systemDriveRedirects({ env: { ...onC, npm_config_cache: "C:\\Users\\a\\AppData\\Local\\npm-cache", PIP_CACHE_DIR: "F:\\pip" }, dataRoot, platform: "win32" }).env;
+  assert.equal(env.npm_config_cache, "G:\\AppData\\Coding Tools\\cache\\npm");
+  assert.equal(env.GOCACHE, "G:\\AppData\\Coding Tools\\cache\\go-build");
+  assert.equal(env.HF_HOME, "G:\\AppData\\Coding Tools\\cache\\huggingface");
+  assert.equal(env.GOTMPDIR, "G:\\AppData\\Coding Tools\\tmp", "Go's build scratch follows TEMP");
+  assert.equal("PIP_CACHE_DIR" in env, false, "a cache the person already put off the system drive stays");
+  // Sign-ins and installed programs are not caches: never moved behind the person's back.
+  for (const name of ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "CARGO_HOME", "PLAYWRIGHT_BROWSERS_PATH"]) assert.equal(name in env, false, name);
+});
+
+// A fake file system: `links` maps a folder to where it really is; `present` lists what exists.
+const fakeDisk = ({ links = {}, present = [] } = {}) => ({
+  realpath(target) {
+    const key = target.toLowerCase();
+    for (const [link, real] of Object.entries(links)) {
+      if (key === link.toLowerCase() || key.startsWith(`${link.toLowerCase()}\\`)) return real + target.slice(link.length);
+    }
+    if (present.some((p) => p.toLowerCase() === key)) return target;
+    throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+  },
+  exists: (target) => present.some((p) => p.toLowerCase() === target.toLowerCase()),
+});
+
+test("the physical drive follows junctions and walks up to the nearest folder that exists", () => {
+  const disk = fakeDisk({ links: { "C:\\Users\\a\\.ao": "G:\\AppData\\.ao" }, present: ["C:\\", "C:\\Users", "G:\\"] });
+  assert.equal(physicalDriveOf("C:\\Users\\a\\.ao\\new\\folder", disk), "G", "a junction to G: counts as G:");
+  assert.equal(physicalDriveOf("C:\\Users\\a\\not-yet\\made", disk), "C");
+  assert.equal(physicalDriveOf("Z:\\nowhere", disk), "Z", "a missing drive still names its letter");
+  // The real file system: a path that doesn't exist yet under this test's folder is on its drive.
+  assert.equal(physicalDriveOf(path.join(fixtureRoot, "later", "deep")), driveOf(path.resolve(fixtureRoot)) || physicalDriveOf(fixtureRoot));
+});
+
+test("the write guard keeps off-system paths, redirects to the fallback, and refuses the system drive", () => {
+  const disk = fakeDisk({ links: { "C:\\Users\\a\\.coding-tools": "G:\\AppData\\.coding-tools" }, present: ["C:\\", "G:\\", "H:\\"] });
+  const env = { SystemDrive: "C:" };
+  const guard = (target, extra = {}) => guardWritePath(target, { env, platform: "win32", ...disk, ...extra });
+  assert.equal(guard("G:\\AppData\\Coding Tools\\logs"), "G:\\AppData\\Coding Tools\\logs");
+  assert.equal(guard("C:\\Users\\a\\.coding-tools\\runtime"), "C:\\Users\\a\\.coding-tools\\runtime", "behind a junction to G: is fine");
+  assert.equal(guard("C:\\Users\\a\\AppData\\Local\\Temp", { fallback: "G:\\AppData\\Coding Tools\\tmp" }), "G:\\AppData\\Coding Tools\\tmp");
+  assert.throws(() => guard("C:\\Users\\a\\AppData\\Local\\Temp"), (error) => error instanceof SystemDriveWriteError && error.code === "SYSTEM_DRIVE_WRITE");
+  assert.throws(() => guard("C:\\x", { fallback: "C:\\also-c" }), SystemDriveWriteError, "a fallback on the system drive is no escape");
+  // Opt-outs: the person's setting, CI runners, and a PC with only a system drive.
+  assert.equal(guard("C:\\x", { env: { ...env, CODING_TOOLS_ALLOW_SYSTEM_DRIVE: "1" } }), "C:\\x");
+  assert.equal(guard("C:\\x", { env: { ...env, GITHUB_ACTIONS: "true" } }), "C:\\x");
+  assert.equal(guard("C:\\x", { exists: (target) => target === "C:\\" }), "C:\\x");
+  assert.equal(guardWritePath("/tmp/x", { env, platform: "linux" }), "/tmp/x");
+});
+
+test("startup refuses a data root on the system drive when another drive can hold it", () => {
+  const disk = fakeDisk({ links: { "C:\\Users\\a\\AppData\\Roaming\\Coding Tools": "G:\\AppData\\Coding Tools" }, present: ["C:\\", "G:\\", "H:\\"] });
+  const env = { SystemDrive: "C:" };
+  const check = (root, extra = {}) => checkDataRoot(root, { env, platform: "win32", ...disk, ...extra });
+  assert.deepEqual(check("C:\\Users\\a\\AppData\\Roaming\\Coding Tools"), { ok: true }, "junctioned to G: passes");
+  assert.deepEqual(check("H:\\Coding Tools"), { ok: true });
+  const refused = check("C:\\Users\\b\\AppData\\Roaming\\Coding Tools");
+  assert.equal(refused.ok, false);
+  assert.deepEqual(refused.drives, ["G", "H"]);
+  assert.match(refused.message, /CODING_TOOLS_LAUNCHER_DATA_DIR/);
+  assert.match(refused.message, /G: or H:/);
+  const single = check("C:\\Data", { exists: (target) => target === "C:\\" });
+  assert.equal(single.ok, true);
+  assert.match(single.warning, /system drive/);
+  assert.equal(check("C:\\Data", { env: { ...env, CODING_TOOLS_ALLOW_SYSTEM_DRIVE: "1" } }).ok, true);
+});
+
+test("main checks the data root before making any folder, and the updater guards its download folder", () => {
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const check = main.indexOf("systemDrive.checkDataRoot(LAUNCHER_PROFILE.userData");
+  assert.ok(check > 0 && check < main.indexOf("fs.mkdirSync(LAUNCHER_PROFILE.userData"), "checked before the data folder is made");
+  assert.match(main, /if \(!dataRootCheck\.ok\) \{\s*dialog\.showErrorBox/);
+  const update = fs.readFileSync(path.join(__dirname, "../electron/update.cjs"), "utf8");
+  assert.match(update, /mkdtempSync\(path\.join\(guardWritePath\(os\.tmpdir\(\)\)/);
 });
