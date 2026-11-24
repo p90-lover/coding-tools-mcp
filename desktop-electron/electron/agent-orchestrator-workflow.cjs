@@ -10797,6 +10797,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * At most once an hour; a session an active run owns is never touched.
    */
   const OLD_SESSION_SWEEP_MS = 60 * 60_000;
+  // How many runs a project's read holds (its newest; AO's read limit).
+  const PROJECT_READ_RUNS = 100;
   let oldSessionSweepAt = 0;
   async function endOldSessions(read) {
     const days = archive.days(), service = aoHarness;
@@ -10811,8 +10813,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
       }
     }
+    // A project's read holds its newest PROJECT_READ_RUNS runs, and fewer when they pass AO's 768 KB
+    // read budget: a cut read may leave out a chat whose session is still its agent's context. Only
+    // a project whose read is under the count and has a run of every listed (not deleted) chat is
+    // swept; the others keep their idle sessions, which only take disk space.
+    const known = ({ saved, deleted }) => {
+      if ((saved.runs?.length ?? 0) >= PROJECT_READ_RUNS) return false;
+      const withRuns = new Set((saved.runs ?? []).map(run => run.project_id));
+      return (saved.task_lifecycle ?? []).every(life => deleted.has(life.task_id) || life.visibility === "deleted" || withRuns.has(life.task_id));
+    };
+    const complete = [...read.entries()].filter(([, entry]) => known(entry)).map(([id]) => id);
+    if (!complete.length) return 0;
     let ended = 0;
-    for (const session of await service.staleSessions([...read.keys()], days * 24 * 60 * 60_000)) {
+    for (const session of await service.staleSessions(complete, days * 24 * 60 * 60_000)) {
       if (kept.has(session) || sessionOwners.has(session)) continue;
       try { await service.kill(session); ended += 1; }
       catch (error) { logger?.warn?.("ao.old_session_end_failed", { message: publicText(error?.message || error, 200) }); }

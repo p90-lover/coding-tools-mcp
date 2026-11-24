@@ -263,3 +263,32 @@ test("an archived chat whose runs left the project's read still counts down and 
     fs.rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test("a project whose read is full keeps its old sessions: an active chat past the window may still use one", async () => {
+  // Bug hunt 2026-11-24 W5: the sweep kept only sessions named in the project read, which holds the
+  // newest 100 runs. In a busy project an active chat outside that window had its agent ended and
+  // its next message started without the agent's context.
+  const now = 50 * DAY;
+  const card = (session) => ({ id: "n", role: "planner", state: "finished", receipt: { thread_id: session }, history: [] });
+  const busy = Array.from({ length: 100 }, (_, index) => ({ id: `r${index}`, workspace_id: "busy", project_id: `goal-${index % 3}`, revision: 1, nodes: [card(`goal-${index}`)] }));
+  const quiet = [{ id: "q1", workspace_id: "quiet", project_id: "kept", revision: 1, nodes: [card("quiet-live")] }];
+  // A read cut by its size: under 100 runs, but a listed chat has none in it.
+  const cut = [{ id: "c1", workspace_id: "cut", project_id: "shown", revision: 1, nodes: [card("cut-live")] }];
+  const asked = [], killed = [];
+  const workflow = createAgentOrchestratorWorkflow({ now: () => now,
+    requestHeadless: async (endpoint, body) => {
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: structuredClone(body.workspace_id === "busy" ? busy : body.workspace_id === "cut" ? cut : quiet),
+        task_lifecycle: body.workspace_id === "cut" ? [{ workspace_id: "cut", task_id: "shown", revision: 1, visibility: "active" }, { workspace_id: "cut", task_id: "older", revision: 1, visibility: "active" }] : [] };
+      throw new Error(`Unexpected ${endpoint}`);
+    },
+    aoHarness: {
+      staleSessions: async (workspaceIds) => { asked.push(workspaceIds); return workspaceIds.includes("busy") ? ["older-chat", "quiet-old"] : ["quiet-old"]; },
+      kill: async (session) => { killed.push(session); return { ok: true }; },
+    },
+  });
+  await workflow.call("archive_settings", { days: 7, idleDays: 0 });
+  await workflow.call("archived_chats", { workspaceIds: ["busy", "cut", "quiet"] });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(asked, [["quiet"]], "only projects whose every chat is known are swept");
+  assert.deepEqual(killed, ["quiet-old"]);
+});
