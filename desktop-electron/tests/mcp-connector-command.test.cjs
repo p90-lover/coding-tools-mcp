@@ -1093,3 +1093,40 @@ test("a signed-out session and a security check read as what they are, and the l
   assert.equal(mcpConnectorFailureCause(Object.assign(new Error(CHATGPT_SIGNED_OUT), { ownershipCause: "chatgpt:signed_out" }),
     mcpConnectorCommandFailure(new Error(CHATGPT_SIGNED_OUT))), "ownership check chatgpt:signed_out");
 });
+
+// Live 2026-11-23: an owner's existing connector failed its identity check, and the account kept only
+// "…identity is unverified…": the check that stopped it (identity:<reason>) was in the in-memory log,
+// which rotated before anyone read it. The card and the account's saved error now name the check.
+test("an unverified existing connector names the identity check that stopped it, in fixed words", () => {
+  const UNVERIFIED = "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted.";
+  const setup = fs.readFileSync(path.join(__dirname, "../electron/mcp-connector-setup.cjs"), "utf8");
+  // Every reason the page (unverifiedBecause) or the host (ownershipCause "identity:…") can give.
+  const reasons = new Set();
+  for (const [, args] of setup.matchAll(/unverifiedBecause\(([^)]*)\)/g)) {
+    for (const [, reason] of args.matchAll(/'([a-z]+(?:-[a-z]+)*)'/g)) reasons.add(reason);
+  }
+  for (const [, reason] of setup.matchAll(/ownershipCause: "identity:([a-z-]+)"/g)) reasons.add(reason);
+  assert.ok(reasons.has("no-card") && reasons.has("no-edit-control") && reasons.has("host-check"), [...reasons].join(","));
+
+  const said = new Map();
+  for (const reason of reasons) {
+    const error = Object.assign(new Error(UNVERIFIED), { ownershipCause: `identity:${reason}` });
+    const failure = mcpConnectorCommandFailure(error);
+    assert.equal(failure.code, "connector_identity_unverified", reason);
+    assert.ok(failure.message.startsWith(`${UNVERIFIED} `), `${reason}: ${failure.message}`);
+    const words = failure.message.slice(UNVERIFIED.length + 1);
+    assert.match(words, /^[A-Z][^<>{}]{10,120}\.$/, `${reason} has its own sentence`);
+    assert.ok(!said.has(words), `${reason} and ${said.get(words)} read the same`);
+    said.set(words, reason);
+    assert.equal(mcpConnectorFailureCause(error, failure), `ownership check identity:${reason}`, "the log line is unchanged");
+  }
+
+  // Nothing else reaches the card: no cause, an unknown one, or another check's cause on this message.
+  for (const ownershipCause of [undefined, null, "identity:PRIVATE TEXT", "identity:not-a-known-check", "chatgpt:no_account", "identity:"]) {
+    assert.deepEqual(mcpConnectorCommandFailure(Object.assign(new Error(UNVERIFIED), { ownershipCause })),
+      { code: "connector_identity_unverified", message: UNVERIFIED }, String(ownershipCause));
+  }
+  // Only this message takes the words: another known failure with an identity cause keeps its own.
+  const ownership = "MCP ownership metadata is unavailable or exceeded its bound.";
+  assert.equal(mcpConnectorCommandFailure(Object.assign(new Error(ownership), { ownershipCause: "identity:no-card" })).message, ownership);
+});
