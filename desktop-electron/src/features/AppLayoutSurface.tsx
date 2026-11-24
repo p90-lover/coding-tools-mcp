@@ -9,6 +9,7 @@ import type {
   AppLayoutSnapshot,
   Surface,
 } from "../types";
+import { AppFlow } from "./AppFlow";
 import "./app-layout.css";
 
 // Runtime > App layout (the sidebar tab): the whole picture of Coding Tools across its 6 core
@@ -17,7 +18,7 @@ import "./app-layout.css";
 // chat models (via `mcp__coding-tools__app_layout`) can read and edit any category, layer row,
 // or overlap; model edits push live through `onAppLayoutChanged`.
 
-export type AppLayoutFilter = "all" | "categories" | "sidebar" | "settings" | "mcp-tools" | "services" | "overlaps";
+export type AppLayoutFilter = "flow" | "all" | "categories" | "sidebar" | "settings" | "mcp-tools" | "services" | "overlaps";
 
 type EditorState =
   | { kind: "overview"; title: string; subtitle: string }
@@ -816,6 +817,7 @@ export const INITIAL_APP_LAYOUT: AppLayoutSnapshot = {
 };
 
 const FILTER_TABS: { id: AppLayoutFilter; label: string }[] = [
+  { id: "flow", label: "How it works" },
   { id: "all", label: "Whole picture" },
   { id: "categories", label: "6 Categories" },
   { id: "sidebar", label: "Layer 1: Sidebar" },
@@ -863,7 +865,8 @@ export function AppLayoutSurface({
   setError: (error: string | null) => void;
 }) {
   const [layout, setLayout] = useState<AppLayoutSnapshot>(INITIAL_APP_LAYOUT);
-  const [filter, setFilter] = useState<AppLayoutFilter>("all");
+  // How it works (the animated flow) first: the lists below explain the same parts in words.
+  const [filter, setFilter] = useState<AppLayoutFilter>("flow");
   const [query, setQuery] = useState("");
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1062,6 +1065,10 @@ export function AppLayoutSurface({
             onChange={(event) => setQuery(event.target.value)}
           />
         </div>
+
+        {filter === "flow" ? (
+          <AppFlow active={active} canOpen={(surface) => canOpenSurface(surface)} onOpen={navigateSurface} />
+        ) : null}
 
         {editor ? (
           <div className="al-editor-card" role="region" aria-label="Edit app layout">

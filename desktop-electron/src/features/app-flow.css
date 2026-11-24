@@ -1,0 +1,215 @@
+/* Runtime > App layout > How it works (AppFlow.tsx). Every animation here runs once (no
+   `infinite`): an endless one keeps the compositor drawing every frame. Only transform and
+   opacity move, so nothing reflows while the flow plays. */
+
+.app-flow {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.app-flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.app-flow-head p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.app-flow-steps {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.app-flow-step {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 6px;
+  min-width: 0;
+  /* Steps arrive one after another when the page opens. */
+  animation: app-flow-enter 360ms ease-out both;
+  animation-delay: calc(var(--app-flow-index, 0) * 60ms);
+}
+
+.app-flow-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto 1fr;
+  column-gap: 10px;
+  row-gap: 4px;
+  align-content: start;
+  width: 100%;
+  height: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--color-text-primary);
+  background: var(--color-background-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: transform 180ms ease, border-color 180ms ease, background-color 180ms ease;
+}
+
+.app-flow-card:hover,
+.app-flow-card:focus-visible {
+  transform: translateY(-2px);
+  border-color: var(--color-border-heavy);
+}
+
+.app-flow-card:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 2px;
+}
+
+.app-flow-number {
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background: var(--color-background-control);
+  transition: background-color 180ms ease, color 180ms ease;
+}
+
+.app-flow-card strong {
+  font-size: var(--text-base);
+}
+
+.app-flow-does {
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.app-flow-step.is-selected .app-flow-card {
+  border-color: var(--color-border-focus);
+}
+
+.app-flow-step.is-current .app-flow-card {
+  background: var(--color-background-control-active);
+  transform: translateY(-3px) scale(1.02);
+}
+
+.app-flow-step.is-current .app-flow-number,
+.app-flow-step.is-done .app-flow-number {
+  color: var(--color-background-elevated);
+  background: var(--color-text-accent);
+}
+
+/* The hand-off under each step: a short track a dot runs along once, and what is passed. */
+.app-flow-handoff {
+  display: grid;
+  gap: 4px;
+  padding: 0 4px;
+}
+
+.app-flow-track {
+  position: relative;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: var(--color-border);
+}
+
+.app-flow-packet {
+  position: absolute;
+  top: -2px;
+  left: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-text-accent);
+  opacity: 0;
+  transform: translateX(-8px);
+}
+
+.app-flow-handoff.is-sending .app-flow-packet,
+.app-flow-step:hover .app-flow-packet,
+.app-flow-step:focus-within .app-flow-packet {
+  animation: app-flow-carry 820ms ease-in-out 1 both;
+}
+
+.app-flow-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+  transition: color 180ms ease;
+}
+
+.app-flow-handoff.is-sending .app-flow-label {
+  color: var(--color-text-accent);
+}
+
+.app-flow-handoff.is-return .app-flow-track {
+  background: var(--color-border-light);
+}
+
+.app-flow-detail {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-background-surface);
+}
+
+.app-flow-detail p {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.app-flow-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--text-xs);
+  color: var(--color-text-tertiary);
+}
+
+@keyframes app-flow-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes app-flow-carry {
+  0% { opacity: 0; transform: translateX(-8px); }
+  15% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(calc(100cqw + 8px)); }
+}
+
+/* The track is a size container so the dot can run its whole width. */
+.app-flow-track {
+  container-type: inline-size;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-flow-step,
+  .app-flow-card,
+  .app-flow-number,
+  .app-flow-label,
+  .app-flow-packet {
+    animation: none !important;
+    transition: none !important;
+  }
+  .app-flow-card:hover,
+  .app-flow-card:focus-visible,
+  .app-flow-step.is-current .app-flow-card {
+    transform: none;
+  }
+}

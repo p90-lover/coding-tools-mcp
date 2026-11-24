@@ -40,6 +40,8 @@ function load({ states = [], launcher = {} } = {}) {
     },
     "react/jsx-runtime": { jsx: element, jsxs: element, Fragment: "Fragment" },
     "./app-layout.css": {},
+    // How it works (AppFlow.tsx) is tested on its own (app-flow.test.cjs).
+    "./AppFlow": { AppFlow: (props) => ({ type: "app-flow", props: { ...props, children: [] } }) },
   };
   const { outputText } = ts.transpileModule(fs.readFileSync(SOURCE, "utf8"), {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX },
