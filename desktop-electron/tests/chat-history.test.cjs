@@ -272,3 +272,18 @@ test("helpers: messages split from a task description, and a middle cut keeps he
     }
   }
 });
+
+test("chat_read gives at most one placeholder once the budget is nearly spent, and counts the rest as left out", async () => {
+  // Bug hunt 2026-11-24 C7: with less budget left than the omission note takes, every older message
+  // became a one-character "…" until the budget ran out: up to ~30 messages that told the agent nothing.
+  const runs = [
+    ...Array.from({ length: 40 }, (_, index) => ({ id: `old${index}`, project_id: "t", nodes: [node(`old${index}`, { receipt: { answer: "x".repeat(100) } })] })),
+    { id: "new", project_id: "t", nodes: [node("new", { receipt: { answer: "y".repeat(375) } })] },
+  ];
+  const { history } = fixture({ ws1: { runs, tasks: [{ id: "t", description: "hello" }] } });
+  const read = parse(await history.call({ workspaceId: "ws1", name: "chat_read", args: { chat_id: "t", max_chars: 1000, max_turns: 50 } }));
+  const messages = read.turns.flatMap((turn) => turn.messages);
+  const placeholders = messages.filter((message) => message.text.length <= 1);
+  assert.ok(placeholders.length <= 1, `${placeholders.length} placeholder messages`);
+  assert.ok(read.messages_omitted_for_length > 0, "the rest are counted as left out");
+});

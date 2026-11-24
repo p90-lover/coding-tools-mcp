@@ -343,7 +343,9 @@ function createChatHistory({ workspaces, board, runs } = {}) {
         const message = chosen[index].messages[at];
         if (budget <= 0) { dropped += 1; continue; }
         const { text, cut } = cutMiddle(message.text, Math.min(perMessage, budget));
-        budget -= text.length;
+        // Too little left for even the omission note: one "…" marks where the read stops, and every
+        // older message is counted as left out rather than shown as another "…".
+        budget = cut && text.length <= 1 ? 0 : budget - text.length;
         messages.unshift({ ...message, text, ...(cut ? { cut: true } : {}) });
       }
       if (!messages.length) continue;
