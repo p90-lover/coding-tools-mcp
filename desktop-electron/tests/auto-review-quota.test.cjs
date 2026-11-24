@@ -402,19 +402,22 @@ test("a timed-out Guardian review retries automatically when CPA consent is off,
     now: () => at,
     nativeGuardianReview: async () => ({ action: "ask", guardianUnavailable: true, guardianTimedOut: true, reason: "Native Codex Guardian is unavailable." }),
     modelVerdict: async () => {
-      if (++cpaTries === 1) throw new Error("CPA timed out");
+      if (++cpaTries <= 2) throw new Error("CPA timed out");
       return { outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "approved on second try" };
     },
   });
   try {
     await fallback.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
     await fallback.observe();
+    for (let wait = 0; wait < 100 && cpaTries < 2; wait++) await new Promise(resolve => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(cpaTries, 2);
     assert.deepEqual(fallback.resolved, [], "first CPA failure retries instead of immediately denying");
     at += 5_000;
     await fallback.observe();
     await fallback.firstAnswer;
     assert.deepEqual(fallback.resolved, [["permission-1", "yes"]]);
-    assert.equal(cpaTries, 2);
+    assert.equal(cpaTries, 3);
   } finally { fallback.workflow.dispose(); }
 });
 
