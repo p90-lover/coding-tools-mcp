@@ -7826,7 +7826,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const stalledNote = stalled?.note;
     if (stalled) {
       invalidateGoal(stalled);
-      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0 });
+      goals.update(id, task, { status: "active", note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0, waits: 0 });
     }
     const still = goalGuard(id, task, stalled);
     try {
@@ -8211,9 +8211,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const fresh = goal.deferred?.runId !== previous.id;
     const since = fresh ? now() : goal.deferred.since;
     if (now() - since >= GOAL_DEFER_LIMIT_MS) {
-      goals.update(id, task, { status: "stalled", deferred: null,
-        note: "The next round could not start: the chat still shows a turn running. Stop it, then /goal resume" });
       logger?.warn?.("ao.goal_round_stalled", { task: task.slice(0, 8), round: goal.round, reason });
+      goalBackoff(id, task, previous.id, "The next round could not start: the chat still shows a turn running (stopping it lets the goal go on)", { deferred: null });
       return;
     }
     if (fresh) logger?.info?.("ao.goal_round_deferred", { task: task.slice(0, 8), round: goal.round, reason });
@@ -8280,9 +8279,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         return;
       }
-      if (result?.ok === false) { goals.update(id, task, { status: "stalled", note: String(result.reason || "The next round could not start") }); return; }
-      goals.update(id, task, { lastRunId: String(result.runId || ""), deferred: null, note: result.status === "failed" ? String(result.detail || "The next round could not start") : "" });
-      if (result.status === "failed") goals.update(id, task, { status: "stalled" });
+      if (result?.ok === false) { goalBackoff(id, task, previous?.id, String(result.reason || "The next round could not start")); return; }
+      goals.update(id, task, { lastRunId: String(result.runId || ""), deferred: null, note: "" });
+      if (result.status === "failed") goalBackoff(id, task, String(result.runId || previous?.id || ""), String(result.detail || "The next round could not start"));
     } catch (error) {
       if (!still()) return;
       const message = String(error?.message || error);
@@ -8295,8 +8294,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         deferGoalRound(id, task, previous, /still running/.test(message) ? "still_running" : "transient_timeout");
         return;
       }
-      // A full chat says why it could not compact (the note was only "use /compact" before).
-      goals.update(id, task, { status: "stalled", note: /chat is full/.test(message) ? `${message.slice(0, 240)} Use /compact, then /goal resume.` : message.slice(0, 300) });
+      // A full chat says why it could not compact (the note was only "use /compact" before). Either
+      // way the goal waits and tries again (goalBackoff), as a disk that was full or a revision that
+      // changed under the start clears by itself; both stalled goals for good (2026-11).
+      goalBackoff(id, task, previous?.id, /chat is full/.test(message) ? `${message.slice(0, 240)} /compact lets it go on` : message.slice(0, 300));
     } finally {
       if (!accepted && goals.get(id, task) === goal && goal.round === round
         && goal.lastMessage === message && goal.lastRunId === before.lastRunId) {
@@ -8375,6 +8376,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const GOAL_QUICK_STALL = 8;
   const GOAL_RETRY_DELAY_MS = 30_000;
   const GOAL_CHECK_RETRY_MS = 2 * 60_000;
+  // goalBackoff's waits, one per stop in a row; the last repeats.
+  const GOAL_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000, 60 * 60_000];
   const goalTimers = new Map();
   let goalsDisposed = false;
   const goalTimerKey = (workspaceId, task) => JSON.stringify([workspaceId, task]);
@@ -8388,6 +8391,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function goalLater(workspaceId, task, delay, runId, check = false) {
     goals.update(workspaceId, task, { retry: { at: now() + delay, runId, check } });
     armGoalRetry(workspaceId, task);
+  }
+  /**
+   * A goal ends only when it is met, or when the person stops, pauses, clears or limits it (the user,
+   * 2026-11-24: "it should keep running until the goal is actually met"). What used to stall it on its
+   * own (rounds that failed, checks that failed, the checker giving up, rounds without progress, a
+   * round that would not start, a used-up quota) now waits and goes on, longer each time in a row:
+   * a goal blocked by something outside it costs at most one round an hour (GOAL_BACKOFF_MS), where
+   * it once ran 480 rounds in 14 days. A round that makes progress starts the waits over. `check`:
+   * the pause ends in a new check of `runId` instead of a new round.
+   */
+  function goalBackoff(workspaceId, task, runId, reason, fields = {}, check = false) {
+    const goal = goals.get(workspaceId, task);
+    if (goalsDisposed || goal?.status !== "active") return;
+    const waits = (goal.waits ?? 0) + 1;
+    const delay = GOAL_BACKOFF_MS[Math.min(waits, GOAL_BACKOFF_MS.length) - 1];
+    const said = String(reason || "").trim().replace(/[.\s]*$/, ".");
+    goals.update(workspaceId, task, { ...fields, waits,
+      note: `${said} Not met yet: ${check ? "checking again" : "the next round starts"} in ${delay / 60_000} min.` });
+    logger?.info?.("ao.goal_backoff", { task: task.slice(0, 8), round: goal.round, waits, delayMs: delay, check });
+    goalLater(workspaceId, task, delay, runId || goal.lastRunId || "", check);
   }
   /**
    * One timer per chat. Nothing happens if the goal was paused, edited to another state or cleared
@@ -8569,15 +8592,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // (a region or privacy setting, see REQUEST_REFUSED) pauses it the same way.
       const errors = outcome === "stopped" ? [] : mission.nodes.map(node => String(node.receipt?.error || ""));
       const spent = errors.find(error => QUOTA_EXHAUSTED.test(error));
+      // It waits (goalBackoff) rather than pausing: quotas reset, and a model switch takes over at once.
       if (spent) {
-        goals.update(workspaceId, task, { status: "paused", evaluatedRunId: runId, evaluatedAs: "stalled",
-          note: `Paused: the model's quota is used up${quotaResets(spent)}. Switch model, then /goal resume` });
+        goalBackoff(workspaceId, task, runId, `The model's quota is used up${quotaResets(spent)}; switching model takes over at once`,
+          { evaluatedRunId: runId, evaluatedAs: "stalled" });
         return;
       }
       const refused = errors.find(error => REQUEST_REFUSED.test(error));
       if (refused) {
-        goals.update(workspaceId, task, { status: "paused", evaluatedRunId: runId, evaluatedAs: "stalled",
-          note: `Paused: the provider refused the request (${refusedReason(refused)}). Fix that or switch model, then /goal resume` });
+        goalBackoff(workspaceId, task, runId, `The provider refused the request (${refusedReason(refused)}); fixing that or switching model takes over at once`,
+          { evaluatedRunId: runId, evaluatedAs: "stalled" });
         return;
       }
       // A round held only because the app restarted under it, or one "Retry automatically" runs
@@ -8602,8 +8626,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (outcome === "failed") {
         const failures = (goal.failedRounds ?? 0) + 1;
         if (failures >= GOAL_FAILED_ROUNDS) {
-          goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", failedRounds: failures,
-            note: `${failures} rounds in a row failed; retry the last one, or /goal resume` });
+          const error = mission.nodes.map(node => node.receipt?.error).find(Boolean);
+          goalBackoff(workspaceId, task, runId, `${failures} rounds in a row failed`, { evaluatedRunId: runId, evaluatedAs: "stalled", failedRounds: failures,
+            feedback: `The last ${failures} rounds failed${error ? ` (${publicText(error, 300)})` : ""}. Find another way around it and carry on.` });
           return;
         }
         if (!judge) {
@@ -8615,7 +8640,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           return;
         }
       }
-      if (outcome === "held" && !judge) { goals.update(workspaceId, task, { status: "stalled", evaluatedRunId: runId, evaluatedAs: "stalled", note: "The last round needs you; answer it, then /goal resume" }); return; }
+      // A round waiting on the person stays theirs to answer, but the goal stays active: not marked
+      // judged, so once it is answered and settles, that settle is judged and the goal goes on by itself.
+      if (outcome === "held" && !judge) {
+        const note = "The last round is waiting for your answer; the goal goes on once it is answered";
+        if (goal.note !== note) goals.update(workspaceId, task, { note });
+        return;
+      }
       // The agent asked to be woken later (schedule_wakeup): as Claude Code defers its check while
       // background work runs, the goal is judged when the agent has woken and finished, not now.
       if (wakeups.get(workspaceId, task)?.runId === runId) return;
@@ -8637,7 +8668,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const failures = (goal.checkFailures ?? 0) + 1;
         const reason = publicText(error?.message || error, 200);
         if (failures >= GOAL_FAILED_ROUNDS) {
-          goals.update(workspaceId, task, { status: "stalled", checkFailures: 0, note: `The goal could not be checked (${reason}); resume tries again` });
+          goalBackoff(workspaceId, task, runId, `The goal could not be checked ${failures} times in a row (${reason})`, { checkFailures: 0 }, true);
           return;
         }
         goals.update(workspaceId, task, { checkFailures: failures, note: `The goal could not be checked (${reason}); checking again shortly` });
@@ -8649,20 +8680,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const stuckRounds = check.progress ? 0 : (goal.stuckRounds ?? 0) + 1;
       goals.update(workspaceId, task, { evaluatedRunId: runId, evaluatedAs: "checked", checkedAt: now(), checkFailures: 0,
         failedRounds: outcome === "failed" ? (goal.failedRounds ?? 0) + 1 : 0,
-        agentBlockedRounds: goal.agentBlockedRunId === runId ? (goal.agentBlockedRounds ?? 0) : 0, stuckRounds, note: "", retry: null });
-      if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "" }); return; }
-      // Ended by the evaluator ("Let the model judge"): going on was unsafe or pointless. Stalled, as
-      // Codex's blocked: nothing more runs, and the person can still resume it.
-      if (check.stop) { goals.update(workspaceId, task, { status: "stalled", note: `Ended by the goal checker: ${check.reason}`, feedback: "" }); return; }
+        agentBlockedRounds: goal.agentBlockedRunId === runId ? (goal.agentBlockedRounds ?? 0) : 0, stuckRounds, note: "", retry: null,
+        ...(check.progress ? { waits: 0 } : {}) });
+      if (check.met) { goals.update(workspaceId, task, { status: "achieved", note: check.reason, feedback: "", waits: 0 }); return; }
       goals.update(workspaceId, task, { feedback: check.reason });
+      // The evaluator would end it ("Let the model judge"), but the goal is not met: it waits and goes
+      // on with that verdict as the agent's instruction. It used to stall here for good.
+      if (check.stop) { goalBackoff(workspaceId, task, runId, `The goal checker would stop: ${check.reason}`); return; }
       // GOAL_FAILED_ROUNDS rounds in a row without progress: the agent is stuck on something it cannot
-      // change, and another round would only report it again (seen live: 480 rounds over 14 days on a
-      // refused approval and an unavailable account). Stalled, as Codex's blocked, whether or not the
-      // model judges: the reason says what blocks it, and resume (or the person's next message, which
-      // may clear it) carries on with this verdict as the agent's instruction.
+      // change (seen live: 480 rounds over 14 days on a refused approval and an unavailable account).
+      // It waits longer each time instead of stalling, with the verdict as the agent's instruction.
       if (stuckRounds >= GOAL_FAILED_ROUNDS) {
-        goals.update(workspaceId, task, { status: "stalled",
-          note: `No progress in ${stuckRounds} rounds in a row: ${check.reason} Clear what blocks it, then /goal resume` });
+        goalBackoff(workspaceId, task, runId, `No progress in ${stuckRounds} rounds in a row: ${check.reason}`);
         return;
       }
       if (goal.rounds > 0 && goal.round >= goal.rounds) {
@@ -8675,9 +8704,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       const quickRounds = Number.isFinite(goal.roundStartedAt) && now() - goal.roundStartedAt < GOAL_QUICK_ROUND_MS ? (goal.quickRounds ?? 0) + 1 : 0;
       goals.update(workspaceId, task, { quickRounds });
       if (quickRounds >= GOAL_QUICK_STALL) {
-        goals.update(workspaceId, task, { status: "stalled", quickRounds: 0,
-          note: `${quickRounds} rounds in a row ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal; check what the agent says it needs, then /goal resume` });
         logger?.warn?.("ao.goal_quick_rounds_stalled", { task: task.slice(0, 8), round: goal.round, quickRounds });
+        goalBackoff(workspaceId, task, runId, `${quickRounds} rounds in a row ended within ${GOAL_QUICK_ROUND_MS / 60_000} minutes without meeting the goal`, { quickRounds: 0 });
         return;
       }
       const pause = GOAL_QUICK_PAUSES_MS[Math.min(quickRounds, GOAL_QUICK_PAUSES_MS.length - 1)];
@@ -8789,7 +8817,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // Resuming carries on now: a pause still waiting is dropped.
     dropGoalRetry(id, task);
     invalidateGoal(goal);
-    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0 });
+    goals.update(id, task, { status: "active", rounds, note: "", failedRounds: 0, checkFailures: 0, agentBlockedRounds: 0, agentBlockedRunId: "", quickRounds: 0, stuckRounds: 0, waits: 0 });
     const still = goalGuard(id, task, goal);
     // The next round starts in the background: setting it up (board writes, a compaction when the
     // chat is full, the run's creation) took up to a minute, and the goal bar's Resume sat frozen
