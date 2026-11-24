@@ -15440,3 +15440,51 @@ test("a steer waiting on a request does not go in when a later look at the agent
   assert.equal(result.waiting, true);
   assert.deepEqual(steered, [], "never steered into the waiting request");
 });
+
+test("a reviewer model that hangs leaves time for the next one and is benched", async () => {
+  // Bug hunt 2026-11-24 R1: the review window's signal replaced the per-model timeout, so a hung
+  // codex-auto-review used the whole 45 s window: the card's own model was never asked, and the hung
+  // one was never benched (its abort read as the window's), so every retry hung on it again.
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
+    permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const decisions = [{ id: "yes", kind: "allow_once", label: "Allow" }, { id: "no", kind: "reject_once", label: "Reject" }];
+  const request = { approval_id: "poll", source: "ao", kind: "command", tool: "PowerShell", command: "python tools/poll.py", summary: "poll", decisions };
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single", grant: { executable_sha256: "a".repeat(64) }, nodes: [
+    { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session-1", request_key: "k" } }] };
+  const asked = [], resolved = [];
+  const realTimeout = AbortSignal.timeout;
+  // The review's clock is real time here; shrink every timeout 100x so the 45 s window is 450 ms.
+  AbortSignal.timeout = (ms) => realTimeout.call(AbortSignal, Math.max(1, Math.floor(ms / 100)));
+  const workflow = createAgentOrchestratorWorkflow({
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture" }),
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/models")) return { ok: true, json: async () => ({ data: [{ id: "test-model" }, { id: "codex-auto-review" }] }) };
+      const model = JSON.parse(init.body).model;
+      asked.push(model);
+      if (model === "codex-auto-review") {
+        return new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason ?? new Error("aborted")), { once: true }));
+      }
+      return { ok: true, json: async () => ({ choices: [{ message: { content: '{"outcome":"allow","rationale":"reads a status file"}' } }] }) };
+    },
+    requestHeadless: async (endpoint) => endpoint.endsWith("/read") ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "t", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (session, requestId, decisionId) => { resolved.push(decisionId); return { ok: true }; },
+    },
+    confirm: async () => true,
+  });
+  try {
+    // With "Let the model judge" on, the chat's own model is the next reviewer after Auto Review.
+    await workflow.call("chat_model_judges", { enabled: true });
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 300 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual(asked.slice(0, 2), ["codex-auto-review", "test-model"], `the next model is asked within the same review (${asked.join(", ")})`);
+    assert.deepEqual(resolved, ["yes"]);
+  } finally {
+    AbortSignal.timeout = realTimeout;
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});

@@ -4859,6 +4859,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // Codex's reviewer thinks before it answers (GPT-5.4 Thinking, low): at 25 s it timed out often
   // enough that reviews fell back to a paid model.
   const REVIEW_BUDGET_MS = 45_000;
+  // The part of what is left of the window one reviewer model may use while others are still to try.
+  const REVIEW_MODEL_SHARE = 0.6;
   const reviewWindows = new Set();
   function withinReview(operation, isCurrent = () => true, budget = REVIEW_BUDGET_MS) {
     const controller = new AbortController();
@@ -5436,14 +5438,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return { action: known.action, reason: known.reason };
     }
     let failure = null;
-    for (const model of candidates) {
+    for (const [index, model] of candidates.entries()) {
       if (approver.autobot && !autobotMayMeter()) return { action: "ask", unresolved: true, quotaBlocked: true, reason: "Autobot model fallback is off." };
       const beforeCall = blocked();
       if (beforeCall) return beforeCall;
       const left = deadline - now();
       if (left < 1_000) { failure ??= new Error("the review took too long"); break; }
       try {
-        const modelSignal = guardianFallback && signal ? AbortSignal.any([signal, AbortSignal.timeout(left)]) : signal ?? AbortSignal.timeout(left);
+        // A model that hangs gets its share of the window, not all of it: the review window's own
+        // signal alone let a hung codex-auto-review use the whole 45 s, so the next model was never
+        // asked and the hung one was never benched (its abort read as the window's). Its own timeout
+        // firing is a failure of that model; the window's abort (the person answered) is not.
+        const share = index < candidates.length - 1 ? Math.max(Math.floor(left * REVIEW_MODEL_SHARE), 1_000) : left;
+        const modelSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(share)]) : AbortSignal.timeout(share);
         const response = await chatCompletion(baseUrl, key,
           // Codex's policy first, then this request (Codex puts the policy in the session's developer message).
           // Room for a reasoning model to think first: at 400 a fallback reviewer (OpenCode Go's GPT-6
