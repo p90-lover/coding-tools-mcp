@@ -3059,3 +3059,48 @@ test("recovery gives up after five failed attempts in a row, however long each t
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a daemon whose shutdown failed is watched again, and Refresh bridge waits out a lifecycle operation", async () => {
+  // Bug hunt 2026-11-24 S4: shutdownDaemon marked the daemon as expected to exit before asking it to
+  // stop; when the request failed and the daemon was resumed, its later crash read as expected and
+  // was never recovered. S5: restartDaemonOnly ran beside a start, stop or recovery, spawning a
+  // second daemon on a contested port.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-daemon-shutdown-"));
+  const supervisor = new RuntimeSupervisor({
+    app: { getVersion: () => "0.2.0", isPackaged: false },
+    logger: { info() {}, warn() {}, error() {} },
+    sourceRoot: root, coreHome: root, browserDescriptorPath: path.join(root, "launcher.json"),
+  });
+  try {
+    const child = { pid: 4242, exitCode: null, signalCode: null, once() {}, on() {} };
+    supervisor.daemon = child;
+    supervisor.control = async () => ({ status: "error" });
+    await assert.rejects(supervisor.shutdownDaemon({ port: 1 }), /did not acknowledge/);
+    assert.equal(supervisor.expectedExits.has(child), false, "a later exit of the resumed daemon is a crash again");
+
+    supervisor.readConfig = () => ({ port: 1 });
+    let spawned = 0;
+    supervisor.startDaemon = async () => { spawned += 1; };
+    supervisor.daemon = null;
+    let finish;
+    const recovery = new Promise((resolve) => { finish = resolve; });
+    supervisor.recoveryTasks.add(recovery);
+    await assert.rejects(supervisor.restartDaemonOnly(), /lifecycle operation/);
+    assert.equal(spawned, 0, "no second daemon beside the recovery");
+    finish();
+    supervisor.recoveryTasks.delete(recovery);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the bridge watchdog and Refresh bridge never start the bridge once quit has begun", () => {
+  // Bug hunt 2026-11-24 S6: the watchdog checked quitting only on entry, then waited seconds on its
+  // health checks before startIfConfigured(), which could start a detached bridge after quit.
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const restart = main.indexOf('logger.warn("runtime.watchdog_restart", miss);');
+  const start = main.indexOf("await runtimeSupervisor.startIfConfigured();", restart);
+  assert.ok(restart > 0 && start > restart);
+  assert.match(main.slice(restart, start), /if \(quitting \|\| shutdownInProgress\) return;/);
+  assert.match(main, /bridge: \(\) => \{\s*if \(quitting \|\| shutdownInProgress\) throw new Error\("Launcher shutdown is already in progress"\);/);
+});

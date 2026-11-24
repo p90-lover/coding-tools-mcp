@@ -719,6 +719,9 @@ function startBridgeWatchdog(logger, stateStore) {
       }
       bridgeWatchdogMisses = 0;
       logger.warn("runtime.watchdog_restart", miss);
+      // Its checks took seconds: a quit that began meanwhile has stopped the runtime, and starting it
+      // now would leave a detached bridge running after the app.
+      if (quitting || shutdownInProgress) return;
       const result = await runtimeSupervisor.startIfConfigured();
       const waiting = BRIDGE_WATCHDOG_WAITING_STATUSES.has(result?.status);
       if (waiting) {
@@ -761,7 +764,10 @@ async function refreshPart(part, logger) {
     }
   };
   const actions = {
-    bridge: () => runtimeSupervisor.restartDaemonOnly(),
+    bridge: () => {
+      if (quitting || shutdownInProgress) throw new Error("Launcher shutdown is already in progress");
+      return runtimeSupervisor.restartDaemonOnly();
+    },
     mcp: () => {
       if (quitting || shutdownInProgress) throw new Error("Launcher shutdown is already in progress");
       const operation = runtimeHost?.currentOperation();

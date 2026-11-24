@@ -1115,6 +1115,10 @@ class RuntimeSupervisor {
 
   /** Restart only the bridge daemon, after its active turns drain. */
   async restartDaemonOnly() {
+    // Beside a start, stop or recovery it spawned a second daemon on a contested port.
+    if (this.startPromise || this.stopPromise || this.recoveryTasks.size) {
+      throw new Error("A runtime lifecycle operation is already in progress; retry the bridge restart after it finishes");
+    }
     const config = this.readConfig();
     if (!config) throw new Error("Codex bridge is not configured");
     if (this.launcherProfile === "development") throw new Error("The DEV profile has no Responses bridge");
@@ -2255,9 +2259,15 @@ class RuntimeSupervisor {
       return;
     }
     this.expectedExits.add(child);
-    const result = await this.control(config, "shutdown");
-    if (result.status !== "ok") throw new Error("daemon did not acknowledge graceful shutdown");
-    await this.waitForChildExit("daemon", child, timeoutMs);
+    try {
+      const result = await this.control(config, "shutdown");
+      if (result.status !== "ok") throw new Error("daemon did not acknowledge graceful shutdown");
+      await this.waitForChildExit("daemon", child, timeoutMs);
+    } catch (error) {
+      // Still running, and resumed by the caller: its next exit is a crash to recover from again.
+      if (child.exitCode === null && child.signalCode === null) this.expectedExits.delete(child);
+      throw error;
+    }
     await this.waitForPortRelease(config);
     this.daemon = null;
   }
