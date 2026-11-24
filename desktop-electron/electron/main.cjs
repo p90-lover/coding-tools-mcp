@@ -4992,7 +4992,8 @@ async function start() {
   await codexCli.load();
   const nativeGuardianReview = createGuardianReview({
     stateDir: path.join(app.getPath("userData"), "tools", "guardian-review"),
-    authFile: path.join(app.getPath("home"), ".codex", "auth.json"),
+    // The Codex home the app gives its agents (CODEX_HOME): a DEV profile has its own.
+    authFile: path.join(LAUNCHER_PROFILE.codexHome, "auth.json"),
     executable: codexCli.executable,
   });
   // Its long-lived Codex servers and their private profiles go with the app.

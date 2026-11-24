@@ -267,3 +267,11 @@ test("a Codex that cannot start (missing or quarantined) reads as unavailable, n
   const verdict = await review({ approval, folder: root, task: "The user asks to show the text fixture." });
   assert.equal(verdict.guardianUnavailable, true, JSON.stringify(verdict));
 });
+
+test("Guardian reads the sign-in of the Codex home the app gives its agents", async () => {
+  // Bug hunt 2026-11-24 S10b: authFile was ~/.codex/auth.json whatever CODEX_HOME was, so a DEV
+  // profile (whose Codex home is its own) reviewed with the production ChatGPT account.
+  const main = await fs.readFile(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  assert.match(main, /authFile: path\.join\(LAUNCHER_PROFILE\.codexHome, "auth\.json"\)/);
+  assert.doesNotMatch(main, /authFile: path\.join\(app\.getPath\("home"\), "\.codex"/);
+});
