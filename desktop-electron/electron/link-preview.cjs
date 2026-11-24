@@ -48,21 +48,68 @@ function privateIpv4([a, b]) {
     || (a === 198 && (b === 18 || b === 19));
 }
 
-function privateIpv6(host) {
-  const address = host.toLowerCase();
-  if (address === "::" || address === "::1") return true;
-  // IPv4-mapped (::ffff:7f00:1 is how the URL parser writes ::ffff:127.0.0.1).
-  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(address);
-  if (mapped) {
-    const high = parseInt(mapped[1], 16), low = parseInt(mapped[2], 16);
-    return privateIpv4([high >> 8, high & 255, low >> 8, low & 255]);
+/** An IPv6 address as its eight 16-bit groups, or null when it is not one. */
+function ipv6Groups(address) {
+  let text = address;
+  // A trailing dotted IPv4 (::ffff:127.0.0.1) is its last two groups.
+  const dotted = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  if (dotted) {
+    const v4 = ipv4Parts(dotted[2]);
+    if (!v4) return null;
+    text = `${dotted[1]}${((v4[0] << 8) | v4[1]).toString(16)}:${((v4[2] << 8) | v4[3]).toString(16)}`;
   }
-  const dotted = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(address);
-  if (dotted) return privateIpv4(ipv4Parts(dotted[1]) ?? [0]);
-  const first = parseInt(address.split(":")[0] || "0", 16);
-  return (first & 0xfe00) === 0xfc00 // unique local fc00::/7
-    || (first & 0xffc0) === 0xfe80 // link-local fe80::/10
-    || (first & 0xff00) === 0xff00; // multicast
+  const halves = text.split("::");
+  if (halves.length > 2) return null;
+  const part = (half) => (half ? half.split(":") : []);
+  const head = part(halves[0]), tail = halves.length === 2 ? part(halves[1]) : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return null;
+  const groups = [...head, ...Array(fill).fill("0"), ...tail];
+  if (groups.length !== 8 || groups.some((group) => !/^[0-9a-f]{1,4}$/.test(group))) return null;
+  return groups.map((group) => parseInt(group, 16));
+}
+
+function privateIpv6(host) {
+  const g = ipv6Groups(host.toLowerCase());
+  if (!g) return true; // not an address this can read: never asked
+  const v4 = (high, low) => privateIpv4([high >> 8, high & 255, low >> 8, low & 255]);
+  const zero = (from, to) => g.slice(from, to).every((group) => group === 0);
+  // ::, ::1 and IPv4-compatible ::a.b.c.d (the URL parser writes ::127.0.0.1 as ::7f00:1).
+  if (zero(0, 6)) return g[6] === 0 ? true : v4(g[6], g[7]);
+  // IPv4-mapped ::ffff:a.b.c.d and IPv4-translated ::ffff:0:a.b.c.d.
+  if (zero(0, 5) && g[5] === 0xffff) return v4(g[6], g[7]);
+  if (zero(0, 4) && g[4] === 0xffff && g[5] === 0) return v4(g[6], g[7]);
+  // NAT64 64:ff9b::a.b.c.d and 6to4 2002:aabb:ccdd::, which carry an IPv4 address inside.
+  if (g[0] === 0x64 && g[1] === 0xff9b && zero(2, 6)) return v4(g[6], g[7]);
+  if (g[0] === 0x2002) return v4(g[1], g[2]);
+  return (g[0] & 0xfe00) === 0xfc00 // unique local fc00::/7
+    || (g[0] & 0xffc0) === 0xfe80 // link-local fe80::/10
+    || (g[0] & 0xff00) === 0xff00; // multicast
+}
+
+// Public names that always answer with this computer's address.
+const LOOPBACK_NAMES = ["localtest.me", "lvh.me"];
+
+/**
+ * Whether a public name spells out a local address for wildcard DNS (127.0.0.1.nip.io,
+ * 10-0-0-5.sslip.io) or is a well-known name for this computer. A name that merely resolves to a
+ * local address (DNS rebinding) is not caught here: the App route resolves names, not the app, and
+ * a lookup of its own would send every hovered host to the local resolver around the person's proxy.
+ */
+function localByName(host) {
+  if (LOOPBACK_NAMES.some((name) => host === name || host.endsWith(`.${name}`))) return true;
+  const labels = host.split(".");
+  if (labels.includes("localhost")) return true;
+  for (let index = 0; index + 4 <= labels.length; index += 1) {
+    const window = labels.slice(index, index + 4);
+    const v4 = window.every((label) => /^\d{1,3}$/.test(label)) ? ipv4Parts(window.join(".")) : null;
+    if (v4 && privateIpv4(v4)) return true;
+  }
+  return labels.some((label) => {
+    const dashed = /^(?:.*-)?(\d{1,3})-(\d{1,3})-(\d{1,3})-(\d{1,3})$/.exec(label);
+    const v4 = dashed && ipv4Parts(dashed.slice(1, 5).join("."));
+    return Boolean(v4 && privateIpv4(v4));
+  });
 }
 
 /** Whether a host is this computer, its network or an intranet name rather than a public site. */
@@ -73,7 +120,7 @@ function isPrivateHost(hostname) {
   const v4 = ipv4Parts(host);
   if (v4) return privateIpv4(v4);
   if (host === "localhost" || !host.includes(".")) return true;
-  return LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix));
+  return LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix)) || localByName(host);
 }
 
 /** The URL a preview may be fetched for, or the reason it is not. */

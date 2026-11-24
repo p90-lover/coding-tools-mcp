@@ -193,3 +193,19 @@ test("a stalled page times out; answers are cached and failures asked again late
   assert.equal(a, b);
   assert.equal(asked, 2, "a page's answer is reused for half an hour, and hovers in flight share one request");
 });
+
+test("addresses that are local in other spellings are never previewed", () => {
+  // Bug hunt 2026-11-24 C5: [::7f00:1] (IPv4-compatible ::127.0.0.1) read as public, and so did
+  // public names that spell out a local address for wildcard DNS (127.0.0.1.nip.io).
+  for (const address of [
+    "http://[::127.0.0.1]/", "http://[::7f00:1]/", "http://[::ffff:0:7f00:1]/", "http://[64:ff9b::7f00:1]/", "http://[64:ff9b::a00:1]/",
+    "http://[2002:7f00:1::]/", "http://[2002:c0a8:101::1]/", "http://[0:0:0:0:0:0:0:1]/",
+    "http://127.0.0.1.nip.io:8080/admin", "http://app.10.0.0.5.sslip.io/", "http://192-168-1-1.sslip.io/", "http://localtest.me/",
+    "http://api.lvh.me/", "http://localhost.example.com/",
+  ]) {
+    assert.equal(isPrivateHost(new URL(address).hostname), true, address);
+  }
+  for (const address of ["https://[2001:4860:4860::8888]/", "http://8.8.8.8.nip.io/", "https://v1.2.3.example.com/", "https://[2002:808:808::1]/"]) {
+    assert.equal(isPrivateHost(new URL(address).hostname), false, address);
+  }
+});
