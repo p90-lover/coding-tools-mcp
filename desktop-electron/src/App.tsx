@@ -29,6 +29,7 @@ import { WorkspaceAuthPanel } from "./features/WorkspaceAuthPanel";
 import { NativeCodexPanel } from "./features/NativeCodexPanel";
 import { AgentOrchestratorOriginalSurface } from "./features/AgentOrchestratorOriginalSurface";
 import { ChatPages } from "./features/ChatPages";
+import { ChatAddonSettings } from "./features/ChatAddonSettings";
 import { AgentOrchestratorTeamsSurface } from "./features/AgentOrchestratorTeamsSurface";
 import { SubagentsSurface } from "./features/SubagentsSurface";
 import { ComputerUseSurface } from "./features/ComputerUseSurface";
@@ -2508,62 +2509,13 @@ function SettingsSurface({
             onChange={(checked) => void setCodexRoute(checked)}
           />
         </SettingRow> : null}
-        <SettingRow body={copy.chatAgentToolsBody} label={copy.chatAgentTools}>
-          <Switch
-            checked={snapshot.state.chatAgentTools !== false}
-            onChange={(checked) => void api!.setPreference("chatAgentTools", checked)
-              .then(updateState)
-              .catch((cause) => setError(messageOf(cause)))}
-          />
-        </SettingRow>
-        <SettingRow body={copy.chatAgentTerminalToolsBody} label={copy.chatAgentTerminalTools}>
-          <Switch
-            checked={snapshot.state.chatAgentTools !== false && (snapshot.state.chatAgentTerminalTools === true
-              || (snapshot.state.chatAgentTerminalTools !== false && snapshot.chatAgentSandbox === true))}
-            disabled={snapshot.state.chatAgentTools === false}
-            onChange={(checked) => void api!.setPreference("chatAgentTerminalTools", checked)
-              .then(updateState)
-              .catch((cause) => setError(messageOf(cause)))}
-          />
-        </SettingRow>
-        <SettingRow body={copy.chatAgentPreviewToolsBody} label={copy.chatAgentPreviewTools}>
-          <Switch
-            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentPreviewTools !== false}
-            disabled={snapshot.state.chatAgentTools === false}
-            onChange={(checked) => void api!.setPreference("chatAgentPreviewTools", checked)
-              .then(updateState)
-              .catch((cause) => setError(messageOf(cause)))}
-          />
-        </SettingRow>
-        <SettingRow body={copy.chatAgentRedactSecretsBody} label={copy.chatAgentRedactSecrets}>
-          <Switch
-            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentRedactSecrets === true}
-            disabled={snapshot.state.chatAgentTools === false}
-            onChange={(checked) => void api!.setPreference("chatAgentRedactSecrets", checked)
-              .then(updateState)
-              .catch((cause) => setError(messageOf(cause)))}
-          />
-        </SettingRow>
-        {snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentRedactSecrets === true && api?.setRedactList
-          ? <RedactListSetting copy={copy} lines={snapshot.state.chatAgentRedactList ?? snapshot.chatAgentRedactDefaults ?? []}
-            setError={setError} updateState={updateState} />
-          : null}
-        <SettingRow body="Give chat agents more tools: add your own STDIO or Streamable HTTP MCP servers under Plugins > MCPs." label="MCP servers">
+        <SettingRow body="Manage built-in chat tools, privacy, MCP servers, and add-on diagnostics in Plugins." label="Chat add-ons">
           <SecondaryButton onClick={openPlugins}>Open Plugins</SecondaryButton>
         </SettingRow>
         <SettingRow body={copy.confirmAgentToolRequestsBody} label={copy.confirmAgentToolRequests}>
           <Switch
             checked={snapshot.state.confirmAgentToolRequests !== false}
             onChange={(checked) => void api!.setPreference("confirmAgentToolRequests", checked)
-              .then(updateState)
-              .catch((cause) => setError(messageOf(cause)))}
-          />
-        </SettingRow>
-        <SettingRow body={copy.chatAgentDesktopToolsBody} label={copy.chatAgentDesktopTools}>
-          <Switch
-            checked={snapshot.state.chatAgentTools !== false && snapshot.state.chatAgentDesktopTools === true}
-            disabled={snapshot.state.chatAgentTools === false}
-            onChange={(checked) => void api!.setPreference("chatAgentDesktopTools", checked)
               .then(updateState)
               .catch((cause) => setError(messageOf(cause)))}
           />
@@ -2898,13 +2850,6 @@ type McpDraft = { id?: string; enabled: boolean; name: string; type: "stdio" | "
 const emptyMcpDraft = (): McpDraft => ({ enabled: true, name: "", type: "stdio", command: "", args: "", env: "", url: "", headers: "" });
 const mcpDraftOf = (server: McpServerInput): McpDraft => ({ id: server.id, enabled: server.enabled, name: server.name, type: server.type,
   command: server.command ?? "", args: (server.args ?? []).join("\n"), env: pairsText(server.env, "="), url: server.url ?? "", headers: pairsText(server.headers, ": ") });
-type AppToolKey = "chatAgentTools" | "chatAgentTerminalTools" | "chatAgentPreviewTools" | "chatAgentDesktopTools";
-
-/**
- * Plugins, laid out like Codex's: tabs for the kinds of tools chat agents get. Apps are the app's
- * own tool groups (the same switches as Settings); MCPs are the app's coding-tools server and the
- * person's own servers, which every new chat, and every chat resumed after a restart, gets too.
- */
 function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
   active: boolean;
   copy: Copy;
@@ -2928,16 +2873,6 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
     if (!active || !api?.mcpServers) return;
     void api.mcpServers().then(setServers, (cause) => setError(messageOf(cause)));
   }, [active, setError]);
-  const toolsOn = snapshot.state.chatAgentTools !== false;
-  const apps: Array<{ key: AppToolKey; label: string; body: string; checked: boolean }> = [
-    { key: "chatAgentTools", label: copy.chatAgentTools, body: copy.chatAgentToolsBody, checked: toolsOn },
-    { key: "chatAgentTerminalTools", label: copy.chatAgentTerminalTools, body: copy.chatAgentTerminalToolsBody,
-      checked: toolsOn && (snapshot.state.chatAgentTerminalTools === true || (snapshot.state.chatAgentTerminalTools !== false && snapshot.chatAgentSandbox === true)) },
-    { key: "chatAgentPreviewTools", label: copy.chatAgentPreviewTools, body: copy.chatAgentPreviewToolsBody, checked: toolsOn && snapshot.state.chatAgentPreviewTools !== false },
-    { key: "chatAgentDesktopTools", label: copy.chatAgentDesktopTools, body: copy.chatAgentDesktopToolsBody, checked: toolsOn && snapshot.state.chatAgentDesktopTools === true },
-  ];
-  const setPreference = (key: AppToolKey, checked: boolean) =>
-    void api!.setPreference(key, checked).then(updateState).catch((cause) => setError(messageOf(cause)));
   const run = async (call: () => Promise<McpServerEntry[]>) => {
     try { setServers(await call()); } catch (cause) { setError(messageOf(cause)); }
   };
@@ -3022,7 +2957,7 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
     <ContentSurface narrow title="Plugins" subtitle="Tools chat agents can use: the app's own, and MCP servers you add.">
       <div className="plugins-bar">
         <div className="plugins-tabs" role="tablist" aria-label="Plugin kinds">
-          <button type="button" role="tab" aria-selected={tab === "apps"} onClick={() => setTab("apps")}>Apps <span>{apps.length}</span></button>
+          <button type="button" role="tab" aria-selected={tab === "apps"} onClick={() => setTab("apps")}>Chat add-ons</button>
           <button type="button" role="tab" aria-selected={tab === "mcps"} onClick={() => setTab("mcps")}>MCPs <span>{1 + (servers?.length ?? 0)}</span></button>
         </div>
         <div className="plugins-add">
@@ -3035,11 +2970,14 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
           </div> : null}
         </div>
       </div>
-      {tab === "apps" ? <div className="settings-list">
-        {apps.map((item) => <SettingRow body={item.body} key={item.key} label={item.label}>
-          <Switch checked={item.checked} disabled={item.key !== "chatAgentTools" && !toolsOn} onChange={(checked) => setPreference(item.key, checked)} />
-        </SettingRow>)}
-      </div> : null}
+      {tab === "apps" ? <ChatAddonSettings copy={copy} snapshot={snapshot} servers={servers ?? []}
+        renderToggle={({ key, body, label, checked, disabled }) => <SettingRow key={key} body={body} label={label}>
+          <Switch label={label} checked={checked} disabled={disabled}
+            onChange={(value) => void api!.setPreference(key, value).then(updateState).catch((cause) => setError(messageOf(cause)))} />
+        </SettingRow>}
+        redactionDetails={api?.setRedactList ? <RedactListSetting copy={copy}
+          lines={snapshot.state.chatAgentRedactList ?? snapshot.chatAgentRedactDefaults ?? []}
+          setError={setError} updateState={updateState} /> : null} /> : null}
       {tab === "mcps" ? <>
         {connect ? <div ref={revealPanel} className="mcp-server-form mcp-live-fields" aria-label={`Add ${connect.title}`}>
           <h2>Add {connect.title}</h2>
@@ -3099,8 +3037,8 @@ function PluginsSurface({ active, copy, setError, snapshot, updateState }: {
           </div>
         </div> : null}
         <div className="settings-list">
-          <SettingRow body="The app's own tools (files, search, git, terminal, previews), built in. Turned on and off under Apps." label="coding-tools">
-            <span className="rtk-chip">{toolsOn ? "built in" : "off"}</span>
+          <SettingRow body="The app's own tools (files, search, git, terminal, previews), built in. Manage access under Chat add-ons." label="coding-tools">
+            <span className="rtk-chip">{snapshot.state.chatAgentTools !== false ? "built in" : "off"}</span>
           </SettingRow>
           {(servers ?? []).map((server) => <SettingRow key={server.id} label={server.name}
             body={server.type === "stdio" ? `STDIO · ${[server.command, ...(server.args ?? [])].join(" ")}` : `Streamable HTTP · ${server.url}`}>

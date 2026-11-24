@@ -2082,7 +2082,9 @@ test("a chat keeps its side panel through questions, remounts and chat switches,
     const { props } = base({ selectedTaskId: "panel-chat", projectId: "project-one" });
     const view = mount(props);
     const panel = (tree) => walk(tree).find((element) => element.type === "Workbench");
-    walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick();
+    walk(view.render()).find((element) => element.props?.["aria-label"] === "Chat add-ons").props.onClick();
+    assert.equal(panel(view.render()).props.tab, "new");
+    panel(view.render()).props.onTab("preview");
     assert.equal(panel(view.render()).props.tab, "preview");
     const asking = view.render({ approvals: [{ nodeId: "worker", approval_id: "ask", kind: "question" }] });
     assert.equal(panel(asking).props.tab, "preview", "asking does not replace or close the panel");
@@ -2172,30 +2174,35 @@ test("panel persistence tolerates invalid or blocked storage and preserves batch
     assert.equal(panel(mount(props).render()), undefined, "malformed saved tabs are ignored");
     workbenchStorage = { get() { throw new Error("blocked"); }, set() { throw new Error("blocked"); }, delete() { throw new Error("blocked"); } };
     const view = mount(props);
-    const toggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick;
+    const toggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Chat add-ons").props.onClick;
     toggle();
-    assert.equal(panel(view.render()).props.tab, "preview", "blocked storage does not stop opening");
-    const batchedToggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview").props.onClick;
+    assert.equal(panel(view.render()).props.tab, "new", "blocked storage does not stop opening");
+    const batchedToggle = walk(view.render()).find((element) => element.props?.["aria-label"] === "Chat add-ons").props.onClick;
     batchedToggle(); batchedToggle();
-    assert.equal(panel(view.render()).props.tab, "preview", "updaters in one batch see the preceding selection");
+    assert.equal(panel(view.render()).props.tab, "new", "updaters in one batch see the preceding selection");
   } finally { workbenchStorage = null; }
 });
 
-test("the chat header has a Preview button that opens the chat's browser with no page open, and closes it again", () => {
+test("one chat add-ons button opens the picker without replacing the composer or live preview shortcut", () => {
   const { props } = base({ selectedTaskId: "t",
     runs: [run("r1", "t", [node("w", "planner", "finished", { route: { harness_id: "ao:claude-code", model: "cpa/m" }, receipt: { thread_id: "s1" } })], { execution_mode: "single" })] });
   const view = mount(props);
-  const preview = () => walk(view.render()).find((element) => element.props?.["aria-label"] === "Preview");
-  assert.ok(preview(), "one click away, not behind Side panel → Overview");
-  assert.equal(preview().props["aria-pressed"], false);
-  preview().props.onClick();
-  assert.ok(walk(view.render()).some((element) => element.type === "Workbench" && element.props.tab === "preview"), "it opens the Preview tab");
-  assert.equal(preview().props["aria-pressed"], true);
-  preview().props.onClick();
-  assert.ok(!walk(view.render()).some((element) => element.type === "Workbench"), "a second click closes it");
+  const contents = () => walk(view.render());
+  const toggle = () => contents().find(element => element.props?.["aria-label"] === "Chat add-ons");
+  const composer = () => contents().find(element => element.type === "textarea" && element.props["aria-label"] === "Message");
+  composer().props.onChange({ target: { value: "Unsent draft" } });
+  assert.ok(!contents().some(element => ["Preview", "Show side panel"].includes(element.props?.["aria-label"])));
+  assert.equal(toggle().props["aria-pressed"], false);
+  toggle().props.onClick();
+  assert.ok(contents().some(element => element.type === "Workbench" && element.props.tab === "new"));
+  assert.equal(composer().props.value, "Unsent draft");
+  assert.equal(toggle().props["aria-pressed"], true);
+  toggle().props.onClick();
+  assert.ok(!contents().some(element => element.type === "Workbench"), "a second click closes it");
   openPage = { sessionId: "s1", url: "http://127.0.0.1:5173/", title: "App" };
   try {
-    assert.ok(!preview(), "while a hidden page is open the browser chip takes its place");
+    assert.ok(toggle(), "the full picker is still available when Preview has a live shortcut");
+    assert.ok(contents().some(element => element.props?.className === "cx-browser-chip"));
   } finally { openPage = null; }
 });
 
