@@ -244,3 +244,26 @@ test("uncertain cwd, non-shell and unavailable auth do not start a reviewer", as
   assert.match(outcome.reason, /ChatGPT sign-in/);
   assert.equal(outcome.guardianUnavailable, true);
 });
+
+test("a Codex that cannot start (missing or quarantined) reads as unavailable, not as no decision", async (t) => {
+  // Bug hunt 2026-11-24 R4: a spawn ENOENT arrives as the child's error event, and stop() rejected
+  // the pending call with a plain Error, so the ENOENT check never matched: every review returned
+  // "no decision" and the judge fallback that needs guardianUnavailable never ran.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "guardian-review-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const review = createGuardianReview({ platform: "win32", stateDir: path.join(root, "state"), executable: () => path.join(root, "codex.exe"),
+    env: {}, prepareAccount: async () => ({ accessToken: "fixture", chatgptAccountId: "fixture-account" }),
+    spawnProcess() {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.kill = () => {};
+      setImmediate(() => child.emit("error", Object.assign(new Error("spawn codex.exe ENOENT"), { code: "ENOENT" })));
+      return child;
+    },
+  });
+  t.after(() => review.close());
+  const approval = { source: "ao", kind: "command", tool: "PowerShell", cwd: root, command: "Write-Output 'fixture'" };
+  const verdict = await review({ approval, folder: root, task: "The user asks to show the text fixture." });
+  assert.equal(verdict.guardianUnavailable, true, JSON.stringify(verdict));
+});

@@ -74,18 +74,20 @@ function openReviewServer(executable, root, env, signal, spawnProcess, onStop = 
   const abandoned = new Set();
   let onClosed;
   const closed = new Promise(resolve => { onClosed = resolve; });
-  const stop = () => {
+  const stop = (cause) => {
     if (stopped) return;
     stopped = true;
     signal.removeEventListener("abort", stop);
-    for (const reply of pending.values()) reply.reject(new Error("The native reviewer did not complete the request"));
+    // A start failure keeps its code (ENOENT: Codex missing or quarantined), which reads as unavailable.
+    const code = cause instanceof Error && typeof cause.code === "string" ? cause.code : undefined;
+    for (const reply of pending.values()) reply.reject(Object.assign(new Error("The native reviewer did not complete the request"), code ? { code } : {}));
     pending.clear();
     child.stdin.destroy();
     child.kill();
     try { onStop(); } catch { /* the pool's own bookkeeping */ }
   };
   child.once("close", () => { stop(); onClosed(); });
-  child.once("error", () => { stop(); onClosed(); });
+  child.once("error", (error) => { stop(error); onClosed(); });
   child.stdin.on("error", stop);
   child.stdout.on("error", stop);
   signal.addEventListener("abort", stop, { once: true });
