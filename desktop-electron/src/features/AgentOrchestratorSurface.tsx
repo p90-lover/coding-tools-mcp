@@ -13,7 +13,7 @@ import {
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
-import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, permissionChangeNotice, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import { AgentOrchestratorPermissions, PERMISSION_MODES, allowsMode, asksForApproval, draftPermissionCapability, livePermissionRoute, mergeSavedPermissions, missionPermissionNodes, modeRefusal, permissionChangeNotice, selectPermissions, startsApproveForMe, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import type { AutobotControl, AutobotState } from "./AgentOrchestratorAutobot";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
@@ -235,13 +235,13 @@ function FloatingSheet({ stage, title, onClose, children, anchor, className = ""
 }
 
 /**
- * A new chat's single-model route: the default worker in the project, set to "Approve for me", so
- * routine commands run and anything else is judged by the command reviewer (codex-auto-review when
- * CPA can reach it), with only unclear requests coming to the person.
+ * A new chat's single-model route: the last chat's agent and model (or the default worker), set to
+ * "Approve for me" (startsApproveForMe), so routine commands run and anything else is judged by the
+ * command reviewer (codex-auto-review when CPA can reach it), with only unclear requests coming to
+ * the person. The last chat's mode is not carried: Ask for approval or Full access is picked per chat.
  */
 function newChatRoute(): AoRoute {
-  return lastChatRoute() ?? { ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
-    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  return startsApproveForMe(lastChatRoute() ?? workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL));
 }
 /**
  * A new chat starts on the route the last chat was sent with, as Codex and Claude Code keep the
@@ -1648,6 +1648,21 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     await loadMissions(workspaceId);
     return "Permissions saved for this chat's next turns. The running turn and the saved team are unchanged.";
   };
+  // "Ask for approval" leaves each of the chat's requests to the person, whatever the reviewer
+  // settings say, and the card read like a reviewer that never answered (chats 417 and 432 waited
+  // hours with Let the model judge on). A single chat's working card in that mode offers Approve for
+  // me on its requests, saved as the permission menu saves it: the running turn follows at once.
+  const askingCard = composerMode === "single" && permissionMission && singleAttempt && ["running", "reserved"].includes(singleAttempt.state)
+    && asksForApproval(livePermissionRoute(permissionMission, singleAttempt)) ? singleAttempt : undefined;
+  const approveForMe = askingCard && permissionTeam && permissionMission ? { nodeId: askingCard.id, run: async () => {
+    const mode = PERMISSION_MODES.find(entry => entry.reviewer === "auto_review")!;
+    const choice: PermissionSelection = { profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer };
+    const capability = await loadPermissionProfiles(singleRoleId);
+    if (!allowsMode(capability, choice)) throw new Error(modeRefusal(capability, choice));
+    // Autobot runs only in Ask for approval: the menu turns it off before leaving that mode, and so does this.
+    if (showAutobot && (await configureAutobot()).enabled) await configureAutobot({ disable: true });
+    return savePermissions(selectPermissions(permissionTeam, [singleRoleId], choice), permissionMission.revision, [singleRoleId], choice);
+  } } : undefined;
   const saveLimits = () => void run("limits", async () => {
     await moduleCall("team_update", { workspaceId, change: { operation: "set_limits", expected_revision: limits.revision, max_workers: globalLimit,
       ...(selectedRun ? { run_id: selectedRun.id, run_revision: selectedRun.revision, worker_limit: missionLimit } : {}) } });
@@ -3274,7 +3289,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                 permissions={<AgentOrchestratorPermissions key={JSON.stringify([workspaceId, chatTaskId, permissionMission?.id, composerMode, permissionTeam?.id, composerIntent.current])} team={permissionTeam} mission={permissionMission} busy={Boolean(busy)}
                   loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies}
                   configureAutobot={showAutobot ? configureAutobot : undefined} />}
-                approve={approve}
+                approve={approve} approveForMe={approveForMe}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
                 warning={chatTaskId && selectedRun?.project_id === chatTaskId ? runWarning || undefined : undefined}
                 retryStart={retryChatStart} retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}

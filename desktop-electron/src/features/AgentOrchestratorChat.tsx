@@ -1312,7 +1312,7 @@ function useFarTurns(scroller: { current: HTMLElement | null }, column: { curren
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, sendBusy = busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
+  approvals, approve, approveForMe, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover, resizeAgent,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue, drafts,
 }: {
@@ -1362,6 +1362,8 @@ export function AgentOrchestratorChat({
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => Promise<void>;
+  /** The chat is on "Ask for approval": its card's requests offer to switch it to Approve for me. */
+  approveForMe?: { nodeId: string; run: () => Promise<string> };
   permissions?: ReactNode;
   composer?: Omit<ComposerControlsProps, "permissions" | "busy">;
   onOpenTeam?: () => void;
@@ -3309,7 +3311,8 @@ export function AgentOrchestratorChat({
                 const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
                 const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
                 return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor}
-                  onOpenPlan={selectedTaskId ? openPlan : undefined} />;
+                  onOpenPlan={selectedTaskId ? openPlan : undefined}
+                  onApproveForMe={approveForMe && approval.nodeId === approveForMe.nodeId ? approveForMe.run : undefined} />;
               })}
             </div></div> : null}
           </div>
