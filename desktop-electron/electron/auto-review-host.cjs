@@ -73,7 +73,10 @@ function createAutoReviewHost({
     ready = new Promise((resolve) => {
       let own;
       try {
-        own = new WorkerImpl(path.join(__dirname, "auto-review-worker.cjs"), { workerData: { entry, dataDir, statsDebounceMs } });
+        // Started from its source text, as the app's other workers are (off-thread-run.cjs): a
+        // worker cannot load a script file from inside the packaged app.asar.
+        const source = fs.readFileSync(path.join(__dirname, "auto-review-worker.cjs"), "utf8");
+        own = new WorkerImpl(source, { eval: true, workerData: { entry, dataDir, statsDebounceMs } });
       } catch (error) {
         fail(error?.message || error);
         resolve(false);
