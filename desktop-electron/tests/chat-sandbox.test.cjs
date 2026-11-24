@@ -441,3 +441,55 @@ test("sandboxed commands on Windows carry the essential variables", async () => 
     assert.equal(options.env.OPENAI_API_KEY, undefined, "credentials still stay out");
   } finally { cleanup(); }
 });
+
+test("% in a command means what it means at a cmd prompt: variables the command has expand, everything else stays", async () => {
+  // Bug hunt 2026-11-24 C2: the command went into a .cmd script unchanged, where cmd drops a lone %
+  // and empties %unknown%: `echo 100%` printed 100, `git log --format="%h %s"` lost its format.
+  const { sandbox, spawned, cleanup } = runner();
+  try {
+    const commands = [
+      ["echo 100%", "echo 100%%"],
+      ['git log --format="%h %s"', 'git log --format="%%h %%s"'],
+      ['curl -w "%{http_code}" x', 'curl -w "%%{http_code}" x'],
+      ["for %i in (a b) do echo %i", "for %%i in (a b) do echo %%i"],
+      ["echo %PATH% %path:~0,3% %CD% %ERRORLEVEL%", "echo %PATH% %path:~0,3% %CD% %ERRORLEVEL%"],
+      ["echo %NOT_SET_HERE% %OPENAI_API_KEY%", "echo %%NOT_SET_HERE%% %%OPENAI_API_KEY%%"],
+    ];
+    for (const [cmd] of commands) await sandbox.start({ cmd, cwd: "G:/work", writable: "G:/work" });
+    commands.forEach(([cmd, line], index) => {
+      const script = spawned[index].script.split("\r\n");
+      assert.ok(script.includes(line), `${cmd} -> ${line}; got ${JSON.stringify(script)}`);
+    });
+  } finally { cleanup(); }
+});
+
+test("a command whose Stop fails keeps its deadline, and a child that exits is not left running", async () => {
+  // Bug hunt 2026-11-24 C1: kill() cleared the deadline and, when taskkill failed, put the command
+  // back to running with no timer; status changed only on close, which a grandchild holding the
+  // pipes delays forever.
+  const calls = [];
+  const { sandbox, spawned, cleanup } = runner({
+    execFileProcess: (file, args, options, done) => { calls.push(args); setImmediate(() => done(new Error("not found"))); },
+  });
+  const realSpawn = spawned;
+  try {
+    const id = await sandbox.start({ cmd: "npm run dev", cwd: "G:/work", writable: "G:/work", timeoutMs: 20 });
+    realSpawn[0].child.pid = 1234;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(sandbox.snapshot(id).status, "running");
+    assert.ok(sandbox.snapshot(id).stop_error, "the failed stop is reported");
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    assert.ok(calls.length >= 2, `the deadline tries Stop again (tried ${calls.length})`);
+
+    // The sandbox itself exits while something it started still holds its output open.
+    realSpawn[0].child.exitCode = 0;
+    realSpawn[0].child.emit("exit", 0, null);
+    const snap = sandbox.snapshot(id);
+    assert.equal(snap.status, "exited");
+    assert.equal(snap.exit_code, 0);
+    assert.equal(snap.finalization_pending, true, "output may still arrive");
+    const tries = calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    assert.equal(calls.length, tries, "no more Stop attempts once it exited");
+  } finally { cleanup(); }
+});

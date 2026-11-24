@@ -10,7 +10,8 @@
 // - Never Codex's elevated mode, whose setup creates local Windows accounts: only "unelevated".
 // - The command reaches cmd.exe through a script file outside the worktree (readable by the
 //   sandbox, never writable by it), so its quotes and operators arrive exactly as written:
-//   arguments passed through `codex sandbox` to cmd.exe lose their quoting.
+//   arguments passed through `codex sandbox` to cmd.exe lose their quoting. Its `%` signs are
+//   adjusted so they mean what they would at a cmd prompt (scriptPercents).
 // - Each command keeps its output (the latest STREAM_LIMIT bytes of each stream, with absolute
 //   offsets, as headless keeps exec_command's) for the agent's read_output and the chat's Terminal
 //   pane; its process tree is killed with it (taskkill /T).
@@ -27,6 +28,9 @@ const { spawnOffThread, execFileOffThread } = require("./off-thread-run.cjs");
 const STREAM_LIMIT = 4 * 1024 * 1024;
 const MAX_KEPT = 64;
 const LOCATE_TTL_MS = 60_000;
+// A timed-out command whose Stop failed is tried again after this, doubling up to the cap.
+const STOP_RETRY_MS = 1_000;
+const STOP_RETRY_MAX_MS = 60_000;
 // Environment the sandboxed command never sees: the app's own credentials and runtime switches.
 const PRIVATE_ENV = /^(?:CODING_TOOLS_|ELECTRON_|NODE_OPTIONS$|.*(?:TOKEN|SECRET|PASSWORD|API_?KEY|CREDENTIAL)S?$)/i;
 
@@ -168,6 +172,28 @@ function outputTailStart(bytes, limit) {
   return start;
 }
 
+// Variables cmd makes up itself, which a prompt expands though no environment holds them.
+const CMD_DYNAMIC = ["CD", "DATE", "TIME", "RANDOM", "ERRORLEVEL", "CMDEXTVERSION", "CMDCMDLINE", "HIGHESTNUMANODENUMBER"];
+
+/**
+ * `command` written for a cmd prompt, made to mean the same inside a .cmd script. At a prompt
+ * `%NAME%` (and `%NAME:~0,3%`, `%NAME:a=b%`) expands when NAME is set and every other % stays as
+ * typed; in a script a lone % is dropped, `%unknown%` becomes empty and `for` needs `%%i`. So
+ * `%NAME…%` spans naming a variable the command will have are kept and every other % is doubled.
+ */
+function scriptPercents(command, names) {
+  const known = new Set([...names, ...CMD_DYNAMIC].map((name) => String(name).toUpperCase()));
+  let out = "";
+  for (let index = 0; index < command.length;) {
+    if (command[index] !== "%") { out += command[index]; index += 1; continue; }
+    const span = /^%([^%:\s]+)(:[^%\r\n]*)?%/.exec(command.slice(index));
+    if (span && known.has(span[1].toUpperCase())) { out += span[0]; index += span[0].length; continue; }
+    out += "%%";
+    index += 1;
+  }
+  return out;
+}
+
 function createSandboxRunner({
   // Where command scripts go: a folder on the app data drive. No default: the system temp folder is
   // on C:, which holds no app storage (AGENTS.md).
@@ -260,8 +286,11 @@ function createSandboxRunner({
       const home = writable || cwd;
       const enter = cwd && path.resolve(cwd) !== path.resolve(home)
         ? `cd /d "${path.resolve(cwd).replace(/%/g, "%%")}" || exit /b 1\r\n` : "";
-      // UTF-8 code page, so non-ASCII paths and output survive; the command exactly as written.
-      await fs.promises.writeFile(script, `@echo off\r\nchcp 65001 >nul\r\n${enter}${cmd.replace(/\r?\n/g, "\r\n")}\r\n`, "utf8");
+      // UTF-8 code page, so non-ASCII paths and output survive; the command means what it would at
+      // a cmd prompt (scriptPercents).
+      const environment = childEnv();
+      const line = scriptPercents(cmd, Object.keys(environment)).replace(/\r?\n/g, "\r\n");
+      await fs.promises.writeFile(script, `@echo off\r\nchcp 65001 >nul\r\n${enter}${line}\r\n`, "utf8");
       signal?.throwIfAborted();
       const writableRoots = [...new Set([writable, ...roots()].filter(Boolean))];
       const args = [
@@ -274,7 +303,7 @@ function createSandboxRunner({
       ];
       // Awaited: the off-thread start resolves once the worker has the pid (a start failure arrives
       // as the child's error event, as with spawn), and holds its events until the listeners below.
-      child = await spawnProcess(found.codex, args, { cwd: home, env: childEnv(), windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+      child = await spawnProcess(found.codex, args, { cwd: home, env: environment, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
     } catch (error) {
       // No child owns the script yet; preserve the original cancellation or setup failure.
       await fs.promises.rm(script, { force: true }).catch(() => undefined);
@@ -299,6 +328,17 @@ function createSandboxRunner({
         resolve();
       });
     });
+    // The sandbox's own exit: something it started can hold its pipes open long after, delaying
+    // close indefinitely, and taskkill /T can no longer find that tree. The command has ended; its
+    // output may still arrive (finalization_pending) until close.
+    child.on("exit", (code, signal) => {
+      if (record.status !== "running") return;
+      clearTimeout(record.deadlineTimer);
+      record.deadlineTimer = null;
+      record.status = "exited";
+      record.exitCode = Number.isInteger(code) ? code : record.exitCode;
+      record.signal = signal ?? null;
+    });
     child.on("error", (error) => {
       record.status = "spawn_failed";
       keep(record, "stderr", Buffer.from(`The sandbox could not start: ${error.message}\n`));
@@ -310,11 +350,20 @@ function createSandboxRunner({
     processes.set(id, record);
     prune();
     if (runtimeLimit !== null) {
+      let stopRetryMs = STOP_RETRY_MS;
       const checkDeadline = () => {
+        record.deadlineTimer = null;
         if (record.status !== "running") return;
         const remaining = runtimeLimit - (now() - record.startedAt);
         if (remaining <= 0) {
-          void kill(id, "timed_out").catch(() => logger.warn?.("chat_sandbox.timeout_stop_failed", { id }));
+          void kill(id, "timed_out").catch(() => {
+            logger.warn?.("chat_sandbox.timeout_stop_failed", { id });
+            // Still over its time: try again, backing off, until it stops or exits.
+            if (record.status !== "running" || record.deadlineTimer) return;
+            record.deadlineTimer = setTimeout(checkDeadline, stopRetryMs);
+            record.deadlineTimer.unref?.();
+            stopRetryMs = Math.min(stopRetryMs * 2, STOP_RETRY_MAX_MS);
+          });
           return;
         }
         // Node overflows longer delays into a one-millisecond timer.
