@@ -15347,3 +15347,41 @@ test("a rewind in a compacted chat hides from the reply the chat shows under tha
     rewind: { index: 1, description } }), /still synchronizing/);
   assert.equal(short.tasks[0].description, description);
 });
+
+test("Full access answers a request again when its first answer could not be sent", async () => {
+  // Bug hunt 2026-11-24 W3: autoAnswerStale marked a request answered before sending, and a failed
+  // send (AO's busy writer, a timeout) left the agent parked on it for good.
+  const mission = { id: "run", workspace_id: "ws", revision: 3, execution_mode: "single",
+    grant: { executable_sha256: "a".repeat(64) }, nodes: [{ id: "worker", role: "worker", state: "running", parents: [],
+      route: { harness_id: "ao:claude-code", model: "cpa/test-model", approval_policy: "never", approvals_reviewer: "user" },
+      receipt: { thread_id: "session", request_key: "key" } }] };
+  const request = { approval_id: "status", source: "ao", kind: "command", tool: "Bash", command: "git status",
+    since: "2026-11-02T00:00:00.000Z", decisions: [{ id: "yes", kind: "allow_once" }, { id: "no", kind: "reject_once" }] };
+  const attempts = [], resolved = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    now: () => Date.parse("2026-11-03T00:00:00.000Z"),
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ executable: process.execPath, expected_sha256: "a".repeat(64) }),
+    requestHeadless: async endpoint => endpoint.endsWith("/read")
+      ? { ok: true, runs: [mission], worker_capacity: { run: 1 } } : { ok: true, run: mission },
+    aoHarness: {
+      observe: async () => ({ status: "working", turnId: "turn", turnState: "running", approvals: resolved.length ? [] : [request] }),
+      resolveApproval: async (_session, id, decision) => {
+        attempts.push(id);
+        if (attempts.length === 1) throw new Error("AO is busy (503)");
+        resolved.push([id, decision]);
+        return { ok: true };
+      },
+    },
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("start_run", { workspaceId: "ws", runId: "run" });
+    for (let tries = 0; tries < 400 && !resolved.length; tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(attempts.length >= 2, `tried again after the failed send (${attempts.length} attempts)`);
+    assert.deepEqual(resolved, [["status", "yes"]]);
+  } finally {
+    mission.nodes[0].state = "finished";
+    workflow.dispose();
+  }
+});

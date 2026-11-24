@@ -5977,6 +5977,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const noAnswerText = () => `No answer from the user within ${Math.round((questionWaitMs() ?? AUTO_ANSWER_MS) / 1000)} seconds; use your best judgment and continue.`;
   const pendingSeen = new Map(); // approval_id -> when it was first seen waiting
   const autoAnswered = new Map(); // approval_id -> the verdict sent ("allow", "deny"; null for a question or plan)
+  const autoAnswerFailures = new Map(); // approval_id -> sends that failed so far
+  const AUTO_ANSWER_TRIES = 5;
   /**
    * What an agent reads as the result of a call the reviewer or "Approve for me" denied. Claude Code
    * otherwise reports "User refused permission to run tool", and the agent took it as the person's
@@ -6097,8 +6099,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           }
           logger?.info?.("ao.auto_answered", { approval_id: id, actor: "timeout_policy", decision: verdict ?? approval.kind,
             kind: approval.kind, tool: String(approval.tool ?? "").slice(0, 80) });
+          autoAnswerFailures.delete(id);
         } catch (error) {
-          logger?.warn?.("ao.auto_answer_failed", { kind: approval.kind, message: publicText(error?.message || error, 200) });
+          // Not sent: the agent is still parked on it, so a later pass tries again (AO's busy writer
+          // or a timeout is usually gone by then). After AUTO_ANSWER_TRIES it stays with the person.
+          const failures = (autoAnswerFailures.get(id) ?? 0) + 1;
+          autoAnswerFailures.set(id, failures);
+          if (failures < AUTO_ANSWER_TRIES) autoAnswered.delete(id);
+          while (autoAnswerFailures.size > 500) autoAnswerFailures.delete(autoAnswerFailures.keys().next().value);
+          logger?.warn?.("ao.auto_answer_failed", { kind: approval.kind, failures, message: publicText(error?.message || error, 200) });
         }
       }
     }
