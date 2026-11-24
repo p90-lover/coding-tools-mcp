@@ -299,7 +299,9 @@ async function createWorkspaceConnector(options) {
       if (prepared?.available !== true) return false;
       await fresh();
       if (!isWorkspaceOwner(await fresh())) throw new Error(ADMIN_REQUIRED);
-      const confirmed = await contents.executeJavaScript(workspaceUiScript("confirm-publish", input), true);
+      // Publishing changes ChatGPT: a stop for a chat or the person's sign-in lets it end first.
+      const publish = () => contents.executeJavaScript(workspaceUiScript("confirm-publish", input), true);
+      const confirmed = await (typeof browserHost.whileChangingChatGpt === "function" ? browserHost.whileChangingChatGpt(publish) : publish());
       if (confirmed?.submitted !== true || confirmed?.published !== true) throw new Error(PUBLISH_REQUIRED);
       return true;
     });
@@ -315,7 +317,9 @@ async function createWorkspaceConnector(options) {
       throw error;
     }
     return { ...result, setupAccountId: admin.id, setupWorkspaceRole: admin.context.workspaceRole };
-  }, { preserveSurface: options.preserveSurface === true, stoppable: true });
+  // An automatic check (yieldsToChats) gives the browser to a chat that needs it; a Connect the person
+  // asked for keeps it (browser forChat).
+  }, { preserveSurface: options.preserveSurface === true, stoppable: true, yieldsToChats: options.yieldsToChats === true });
 }
 
 module.exports = { ADMIN_REQUIRED, PUBLISH_REQUIRED, CONTEXT_CHANGED, isWorkspaceAdmin, workspaceUiScript, inspectChatGptAccount, createWorkspaceConnector };

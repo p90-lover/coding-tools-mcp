@@ -96,6 +96,9 @@ const INTERACTION_MODE_CHANGE_OPERATION = "browser interaction mode change";
 // list) rather than failing. Every other manual operation still refuses a turn at once.
 const CONNECTOR_VERIFICATION_OPERATION = "connector verification";
 const CONNECTOR_VERIFICATION_TURN_WAIT_MS = 120_000;
+// How long a chat turn or the helper's session check waits for a background MCP check to let go of the
+// browser (forChat): it closes its hidden windows on the stop, after any step changing ChatGPT ends.
+const CHAT_YIELD_WAIT_MS = 20_000;
 const HIDDEN_TURN_VIEWPORT = Object.freeze({ width: 800, height: 600 });
 // These are lease/initialization guards only. They do not limit a live ChatGPT turn: active turns
 // stay alive as long as the helper keeps heartbeating. They only reclaim a blank surface or a turn
@@ -798,6 +801,11 @@ class BrowserHost {
     this.manualOperationSettled = null;
     // The running operation's AbortController when it can be stopped (stopOperationFor), else null.
     this.manualOperationStop = null;
+    // A background operation (an automatic MCP check) that stops for a chat (forChat), the step of it
+    // that is changing ChatGPT (whileChangingChatGpt), and the chats taking the browser right now.
+    this.manualOperationYieldsToChats = false;
+    this.operationChange = null;
+    this.chatStarts = 0;
     // The page an account switch is opening: { view, done } (presentHome).
     this.homeOpening = null;
     this.loginOperation = null;
@@ -3534,7 +3542,12 @@ class BrowserHost {
     return { cancelledByUser: true };
   }
 
-  async beginTurn(
+  /** Starts or resumes a Codex turn's tab (startTurnTab); a background MCP check gives way to it first. */
+  beginTurn(...args) {
+    return this.forChat("a chat turn", () => this.startTurnTab(...args));
+  }
+
+  async startTurnTab(
     traceId,
     reveal,
     helperPid,
@@ -4578,7 +4591,9 @@ class BrowserHost {
     if (this.manualOperation === INTERACTION_MODE_CHANGE_OPERATION) {
       return await this.runSessionInspection(detectCapabilities);
     }
-    return await this.withManualOperation("session inspection", () => this.runSessionInspection(detectCapabilities));
+    // The helper asks this before a chat's turns and model list: a background MCP check gives way to it.
+    return await this.forChat("a chat's session check", () =>
+      this.withManualOperation("session inspection", () => this.runSessionInspection(detectCapabilities)));
   }
 
   async runSessionInspection(detectCapabilities = false) {
@@ -4613,7 +4628,7 @@ class BrowserHost {
     return inspected;
   }
 
-  async withManualOperation(name, action, { preserveSurface = false, stoppable = false } = {}) {
+  async withManualOperation(name, action, { preserveSurface = false, stoppable = false, yieldsToChats = false } = {}) {
     await this.ready();
     // The page an account switch just opened (sign-in, the connector check and setup all read it).
     await this.homeOpened?.();
@@ -4623,6 +4638,9 @@ class BrowserHost {
     if (this.manualOperation) {
       throw new Error(`ChatGPT browser is already busy with ${this.manualOperation}`);
     }
+    // A background check never takes the browser from a chat that is taking it (forChat): it would
+    // slip in between the chat's stop of the last check and the chat's own tab.
+    if (yieldsToChats === true && this.chatStarts > 0) throw new Error("ChatGPT browser is starting a chat");
     if (!preserveSurface) this.activateHomeSurface();
     this.manualOperation = name;
     // One that leaves the shown page alone runs in the background and yields to an account switch.
@@ -4631,6 +4649,8 @@ class BrowserHost {
     // person's own sign-in, logout or account removal (stopOperationFor); it closes them on this signal.
     const stop = stoppable === true ? new AbortController() : null;
     this.manualOperationStop = stop;
+    // An automatic MCP check is stopped for a chat too (forChat); a Connect the person asked for is not.
+    this.manualOperationYieldsToChats = yieldsToChats === true && stop !== null;
     let settle;
     this.manualOperationSettled = new Promise((resolve) => { settle = resolve; });
     const contents = this.view?.webContents;
@@ -4649,9 +4669,47 @@ class BrowserHost {
       this.manualOperation = null;
       this.manualOperationYields = false;
       this.manualOperationStop = null;
+      this.manualOperationYieldsToChats = false;
       this.manualOperationSettled = null;
       settle();
     }
+  }
+
+  /**
+   * Runs one step of a stoppable operation that changes ChatGPT (creating, connecting or publishing a
+   * connector). A stop (stopOperationFor) lets the step end before the operation closes its windows,
+   * so a chat or the person's own sign-in never cuts off a Create or a consent halfway.
+   */
+  async whileChangingChatGpt(step) {
+    const run = Promise.resolve().then(step);
+    const change = run.then(() => {}, () => {});
+    this.operationChange = change;
+    try {
+      return await run;
+    } finally {
+      if (this.operationChange === change) this.operationChange = null;
+    }
+  }
+
+  /**
+   * Starts something a chat needs the browser for (a turn's tab, the helper's session check). A
+   * background MCP check stops for it first (the person chose background checks on 2026-11-24, and a
+   * check holds the browser 30-50 s per account); anything else keeps its own busy error. While it
+   * starts, no background check takes the browser (withManualOperation yieldsToChats).
+   */
+  async forChat(action, start) {
+    this.chatStarts = (this.chatStarts || 0) + 1;
+    try {
+      if (this.manualOperationYieldsToChats) await this.stopOperationFor(action, { timeoutMs: CHAT_YIELD_WAIT_MS });
+      return await start();
+    } finally {
+      this.chatStarts -= 1;
+    }
+  }
+
+  /** Whether a chat is taking the browser (forChat): automatic MCP checks wait meanwhile. */
+  chatStarting() {
+    return (this.chatStarts || 0) > 0;
   }
 
   /** The running operation's stop signal when it can be stopped (withManualOperation stoppable), else null. */
@@ -4669,12 +4727,15 @@ class BrowserHost {
   async stopOperationFor(action, { timeoutMs = 20_000 } = {}) {
     const stop = this.manualOperationStop, settled = this.manualOperationSettled, name = this.manualOperation;
     if (!stop || !settled) return false;
+    let timer, late = false;
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => { late = true; resolve(); }, timeoutMs); timer.unref?.(); });
+    // A step changing ChatGPT ends first (whileChangingChatGpt); one more may follow before this runs.
+    while (this.operationChange && this.manualOperationStop === stop && !late) await Promise.race([this.operationChange, deadline]);
     if (!stop.signal.aborted) {
       this.logger.info("browser.operation_stopped", { operation: name, for: action });
       stop.abort(Object.assign(new Error(`${name} stopped for ${action}`), { forAction: action }));
     }
-    let timer;
-    await Promise.race([settled, new Promise((resolve) => { timer = setTimeout(resolve, timeoutMs); timer.unref?.(); })]);
+    await Promise.race([settled, deadline]);
     clearTimeout(timer);
     if (this.manualOperationStop === stop) throw new Error(`${name} did not stop in time. Try again in a moment.`);
     return true;

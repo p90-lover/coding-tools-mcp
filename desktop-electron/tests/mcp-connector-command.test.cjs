@@ -551,6 +551,13 @@ test("account setup verifies the configured main tunnel without an extra assignm
     assert.equal(records.filter(value => value.bound).length, scenario.completes || scenario.saveRetarget ? 1 : 0);
     assert.equal(records.at(-1)?.bound, scenario.completes ? true : undefined);
     assert.equal(operations.at(-1)?.status, scenario.completes ? "completed" : "failed");
+    if (scenario.completes) {
+      // Background checks (2026-11-24): only an automatic check gives the browser to a chat that needs it.
+      assert.equal(created[0].yieldsToChats, false, "a Connect the person asked for keeps the browser");
+      const connectAccountMcp = vm.runInNewContext("connectAccountMcp", context);
+      assert.equal((await connectAccountMcp("account-2", () => {})).connected, true);
+      assert.equal(created.at(-1).yieldsToChats, true, "an automatic check gives way to chats");
+    }
   });
 });
 
@@ -1050,7 +1057,7 @@ test("every fixed text the setup throws reaches the card in its own words or a n
   // The click's own preflight texts are not mistaken for a ChatGPT verification or the catch-all.
   for (const text of ["Sign in to this account in the Browser tab before connecting MCP.",
     "Wait for the current runtime setup to finish before connecting MCP.",
-    "Automatic MCP setup is waiting for the focused, idle app and current account."]) {
+    "Automatic MCP setup is waiting for an idle browser and the current account."]) {
     assert.equal(mcpConnectorCommandFailure(new Error(text)).message, text);
   }
   assert.equal(mcpConnectorCommandFailure(new Error("PRIVATE_REMOTE_DOM_ALERT")).message, catchAll, "unknown text never passes");

@@ -31,7 +31,7 @@ const PREFLIGHT_FAILURES = new Map([
   ["connector_identity_unverified", "Existing connector exact tunnel identity is unverified. Creation and connection were not attempted."],
   ["busy", "Browser account switching or shutdown is in progress"],
   ["busy", "Wait for the current runtime setup to finish before connecting MCP."],
-  ["busy", "Automatic MCP setup is waiting for the focused, idle app and current account."],
+  ["busy", "Automatic MCP setup is waiting for an idle browser and the current account."],
   ["verification_required", "Sign in to this account in the Browser tab before connecting MCP."],
   ["creation_failed", "The account's MCP tunnel is not ready. Reconnect it before creating the connector."],
   ["creation_failed", "The account's MCP tunnel changed or is not ready."],
