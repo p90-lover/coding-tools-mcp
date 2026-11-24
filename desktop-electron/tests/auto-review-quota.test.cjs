@@ -58,16 +58,24 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
   };
 }
 
-for (const meteredReviews of [false, true]) test(`Approve for me routes the exact shell action to Guardian with CPA consent ${meteredReviews ? "on" : "off"}`, async () => {
+test("without quota consent, neither standalone Guardian nor CPA is called; opting in resumes the exact pending review", { timeout: 5_000 }, async () => {
   const seen = [];
   const state = fixture(undefined, { nativeGuardianReview: async (input) => {
     seen.push(input);
     return { action: "allow", reason: "fixture native verdict", actor: "guardian" };
   } });
   try {
-    await state.workflow.call("chat_model_judges", { meteredReviews });
-    assert.equal((await state.workflow.call("chat_model_judges")).meteredReviews, meteredReviews);
+    await state.workflow.call("chat_model_judges", { enabled: true });
+    const pending = await state.observe();
+    assert.equal(pending[0]?.recommendation?.quotaBlocked, true);
+    assert.match(pending[0].recommendation.reason, /Standalone Codex Guardian can use ChatGPT quota/);
+    assert.deepEqual(seen, []);
+    assert.deepEqual(state.calls, []);
+    assert.deepEqual(state.resolved, []);
+
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
     await state.observe();
+    await state.firstAnswer;
     assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
     assert.equal(seen.length, 1);
     assert.equal(seen[0].approval.command, "python tools/migrate.py --apply");
@@ -84,37 +92,37 @@ test("a changed pending command with the same ID does not receive the old Guardi
     return { action: "allow", reason: "fixture old verdict", actor: "guardian" };
   } });
   try {
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
     const pending = await state.observe();
     assert.equal(pending.length, 1);
+    assert.match(pending[0].recommendation.reason, /original request changed/);
     assert.deepEqual(state.resolved, []);
     assert.deepEqual(state.calls, []);
   } finally { state.workflow.dispose(); }
 });
 
-test("enabling quota reviews mid-Guardian cannot replace its decision or spend on an undecided review", { timeout: 5_000 }, async (t) => {
-  for (const action of ["ask", "deny", "unavailable"]) await t.test(action, async () => {
-    const started = Promise.withResolvers(), guardian = Promise.withResolvers();
-    let reviews = 0;
-    const state = fixture(undefined, { nativeGuardianReview: async () => {
-      reviews++;
-      started.resolve();
-      return guardian.promise;
-    } });
-    try {
-      await state.workflow.call("chat_model_judges", { enabled: true });
-      await state.observe();
-      await started.promise;
-      assert.deepEqual(state.calls, [], "turning the judge on does not enable paid reviews");
-      await state.workflow.call("chat_model_judges", { meteredReviews: true });
-      guardian.resolve(action === "unavailable" ? null : { action, reason: "fixture Guardian answer", actor: "guardian" });
-      let pending;
-      for (let tick = 0; tick < 3; tick++) pending = await state.observe();
-      assert.deepEqual(state.resolved, action === "deny" ? [["permission-1", "no"]] : []);
-      if (action !== "deny") assert.equal(pending[0]?.recommendation?.guardianPending, true);
-      assert.equal(reviews, 1);
-      assert.deepEqual(state.calls, []);
-    } finally { guardian.resolve(null); state.workflow.dispose(); }
-  });
+test("revoking quota consent cancels a waiting Guardian review and discards a late reply", { timeout: 5_000 }, async () => {
+  const entered = Promise.withResolvers(), guardian = Promise.withResolvers();
+  let reviews = 0;
+  const state = fixture(undefined, { nativeGuardianReview: async ({ signal }) => {
+    reviews++;
+    entered.resolve(signal);
+    return guardian.promise;
+  } });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    await state.observe();
+    const signal = await entered.promise;
+    assert.equal(signal.aborted, false);
+    await state.workflow.call("chat_model_judges", { meteredReviews: false });
+    assert.equal(signal.aborted, true);
+    guardian.resolve({ action: "allow", reason: "fixture late verdict", actor: "guardian" });
+    const pending = await state.observe();
+    assert.equal(pending[0]?.recommendation?.quotaBlocked, true);
+    assert.equal(reviews, 1);
+    assert.deepEqual(state.calls, []);
+    assert.deepEqual(state.resolved, []);
+  } finally { guardian.resolve(null); state.workflow.dispose(); }
 });
 
 test("an eligible Guardian fallback stays in review and removes the card after the harness accepts the answer", { timeout: 5_000 }, async () => {
