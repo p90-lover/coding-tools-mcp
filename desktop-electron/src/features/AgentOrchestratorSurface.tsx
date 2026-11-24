@@ -13,7 +13,7 @@ import {
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
-import { AgentOrchestratorPermissions, PERMISSION_MODES, allowsMode, asksForApproval, draftPermissionCapability, livePermissionRoute, mergeSavedPermissions, missionPermissionNodes, modeRefusal, permissionChangeNotice, selectPermissions, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import { AgentOrchestratorPermissions, PERMISSION_MODES, allowsMode, asksForApproval, draftPermissionCapability, livePermissionRoute, mergeSavedPermissions, missionPermissionNodes, modeRefusal, permissionChangeNotice, selectPermissions, startsApproveForMe, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import type { AutobotControl, AutobotState } from "./AgentOrchestratorAutobot";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
@@ -235,13 +235,13 @@ function FloatingSheet({ stage, title, onClose, children, anchor, className = ""
 }
 
 /**
- * A new chat's single-model route: the default worker in the project, set to "Approve for me", so
- * routine commands run and anything else is judged by the command reviewer (codex-auto-review when
- * CPA can reach it), with only unclear requests coming to the person.
+ * A new chat's single-model route: the last chat's agent and model (or the default worker), set to
+ * "Approve for me" (startsApproveForMe), so routine commands run and anything else is judged by the
+ * command reviewer (codex-auto-review when CPA can reach it), with only unclear requests coming to
+ * the person. The last chat's mode is not carried: Ask for approval or Full access is picked per chat.
  */
 function newChatRoute(): AoRoute {
-  return lastChatRoute() ?? { ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
-    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  return startsApproveForMe(lastChatRoute() ?? workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL));
 }
 /**
  * A new chat starts on the route the last chat was sent with, as Codex and Claude Code keep the

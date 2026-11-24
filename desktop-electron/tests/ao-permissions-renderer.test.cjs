@@ -763,6 +763,29 @@ test("only a chat on Ask for approval with an agent that asks the app is offered
   assert.equal(modeRefusal(undefined, approveForMe), "This agent can't run in that mode.");
 });
 
+test("a new chat starts in Approve for me whatever mode the last chat ran in, on agents that ask the app", () => {
+  const { startsApproveForMe } = renderer("AgentOrchestratorPermissions.tsx").exports;
+  const approveForMe = { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const last = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-4-argon", permission_profile: ":ao-default", effort: "high" };
+  // The live last-chat route on 2026-11-24 named no mode at all, which the engine reads as Ask for approval.
+  assert.deepEqual(plain(startsApproveForMe(last)), { ...last, ...approveForMe }, "agent, model and effort are kept");
+  for (const mode of [
+    { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" },
+    { native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" },
+  ]) {
+    for (const harness of ["ao:claude-code", "ao:codex", "ao:agy"]) {
+      assert.deepEqual(plain(startsApproveForMe({ ...last, ...mode, harness_id: harness })), { ...last, harness_id: harness, ...approveForMe }, harness + " " + mode.approval_policy);
+    }
+  }
+  // Agents that run in Full access only would be refused at launch in Approve for me; Native Codex reports its own modes.
+  const fullAccess = { ...last, harness_id: "ao:cline", native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" };
+  assert.deepEqual(plain(startsApproveForMe(fullAccess)), fullAccess);
+  const native = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model: "gpt-5.5", permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" };
+  assert.deepEqual(plain(startsApproveForMe(native)), native);
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.match(source, /function newChatRoute\(\): AoRoute \{\s*return startsApproveForMe\(lastChatRoute\(\) \?\? workerRoute\(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL\)\);/);
+});
+
 function pendingApprovalAttempt() {
   const view = renderer("AgentOrchestratorApproval.tsx", { persistentRefs: true });
   const approval = { nodeId: "worker", approval_id: "pending-request", source: "ao", kind: "command", command: "echo fixture",

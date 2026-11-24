@@ -108,6 +108,19 @@ export const PERMISSION_MODES = [
   { label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe", icon: "shieldCode", profile: ":workspace", policy: "on-request", reviewer: "auto_review", danger: false },
   { label: "Full access", detail: "Unrestricted access to the internet and any file on your computer", icon: "shieldAlert", profile: ":danger-full-access", policy: "never", reviewer: "user", danger: true },
 ] as const;
+/**
+ * A new chat's route set to "Approve for me", whatever mode the chat it was taken from ran in: a
+ * person who left the last chat on Ask for approval got a new chat whose requests all waited for
+ * them, with Let the model judge on (2026-11-24). Only an agent that asks this app about each request
+ * (PERMISSION_HARNESSES, all AO agents) is changed: the others run in Full access only and are
+ * refused at launch in Approve for me (fullAccessOnly in agent-orchestrator-workflow), and Native
+ * Codex reports its own modes once connected, so they keep the mode they were last sent in.
+ */
+export function startsApproveForMe(route: AoNode["route"]): AoNode["route"] {
+  if (!PERMISSION_HARNESSES.has(route.harness_id)) return route;
+  const mode = PERMISSION_MODES.find(entry => entry.reviewer === "auto_review")!;
+  return { ...route, native_permission_profile: mode.profile, approval_policy: mode.policy, approvals_reviewer: mode.reviewer };
+}
 const MODE_GLYPHS = { hand: HandGlyph, shieldCode: ShieldCodeGlyph, shieldAlert: ShieldAlertGlyph };
 
 // Codex's "Turn on Full Access?" dialog: what the agents can then do, three capability rows, Cancel and Confirm.
