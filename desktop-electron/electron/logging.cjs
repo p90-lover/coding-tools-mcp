@@ -211,7 +211,7 @@ function createLogger({ filePath, publish, persist = true }) {
     pending = [];
   });
 
-  const append = (level, event, detail = {}) => {
+  const append = (level, event, detail = {}, memoryOnly = false) => {
     const record = {
       at: new Date().toISOString(),
       level,
@@ -224,7 +224,7 @@ function createLogger({ filePath, publish, persist = true }) {
       notable.push(record);
       if (notable.length > MAX_MEMORY_RECORDS) notable.splice(0, notable.length - MAX_MEMORY_RECORDS);
     }
-    if (persist) {
+    if (persist && !memoryOnly) {
       pending.push(`${JSON.stringify(record)}\n`);
       if (!timer && !flushing) schedule();
     }
@@ -236,6 +236,7 @@ function createLogger({ filePath, publish, persist = true }) {
     debug: (event, detail) => append("debug", event, detail),
     info: (event, detail) => append("info", event, detail),
     warn: (event, detail) => append("warning", event, detail),
+    warnInMemory: (event, detail) => append("warning", event, detail, true),
     error: (event, detail) => append("error", event, detail),
     recent: (limit = 150) => records.slice(-Math.max(1, Math.min(300, limit))),
     /** This process's last warnings and errors, kept apart from routine lines. */

@@ -11,6 +11,7 @@ const REQUIRED_NAMESPACES = [
   "computer",
   "tasks",
   "history",
+  "links",
   "nativeCodex",
   "integrations",
   "execution",
@@ -197,6 +198,17 @@ test("a typed apps catalog call uses its exact channel", async () => {
     channel: "coding-tools:apps:catalog",
     payload: {},
   }]);
+});
+
+test("a link preview sends only the address through its own channel, and a share image fits the response", async () => {
+  const response = { ok: true, kind: "page", url: "https://example.test/", host: "example.test", title: "T", description: "", siteName: "", icon: null, image: `data:image/png;base64,${"A".repeat(430_000)}` };
+  const { api, invocations } = loadPreload(() => response);
+  assert.deepEqual(await api.links.preview({ url: "https://example.test/" }), response);
+  assert.deepEqual(invocations, [{ channel: "coding-tools:links:preview", payload: { url: "https://example.test/" } }]);
+  await assert.rejects(api.links.preview({ url: "https://example.test/", cookie: "x" }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.links.preview({ url: `https://example.test/${"a".repeat(4096)}` }), /IPC_REQUEST_SCHEMA_INVALID/);
+  await assert.rejects(api.links.preview({ url: "" }), /IPC_REQUEST_SCHEMA_INVALID/);
+  assert.equal(invocations.length, 1);
 });
 
 test("runtime status remains bounded without freezing the producer-owned DTO", async () => {

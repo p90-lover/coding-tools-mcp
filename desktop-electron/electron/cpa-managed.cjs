@@ -722,7 +722,20 @@ function runtimeConfiguration(state, managementKey, proxyApiKey, outboundProxyUr
     else delete merged.requests;
   }
   mergeManagedPayload(merged, managed.payload);
-  return (yaml.stringify ?? yaml.dump)(merged);
+  managedQuotaCooldown(merged);
+  return cpaConfigText(merged, yaml);
+}
+
+/**
+ * The config as CPA can read it. Bun's YAML writer (the CPA wrapper runs on Bun) writes one-line flow
+ * YAML and leaves some strings unquoted there, such as the Antigravity prompt filter's "(?i)\bword\b"
+ * patterns; Go's yaml.v3, which CPA parses with, stops at their "?" ("did not find expected ',' or
+ * '}'"). From 0.8.154 every restart wrote that config, and CPA exited at once, in a loop (2026-11-23).
+ * JSON is YAML that Go reads, with every string quoted. js-yaml's block output (Node) is read as is.
+ */
+function cpaConfigText(config, yaml) {
+  if (yaml && yaml === globalThis.Bun?.YAML) return `${JSON.stringify(config, null, 2)}\n`;
+  return (yaml.stringify ?? yaml.dump)(config);
 }
 
 const CODEX_MIN_OUTPUT_TOKENS = 16;
@@ -734,6 +747,18 @@ function codexMinimumOutputSelectors() {
 }
 
 const isPlainObject = (value) => Object.prototype.toString.call(value) === "[object Object]";
+
+/**
+ * Quota cooldowns stay on (cpaLongRunYamlLines). CPA 8 reads a saved `routing.cooldown` over the
+ * flat key and drops the flat one, so the managed value goes where CPA reads it: a hand-set
+ * `disable-cooling: true` there (in every saved config since 2026-10-20) outlived each restart.
+ */
+function managedQuotaCooldown(merged) {
+  if (isPlainObject(merged.routing) && isPlainObject(merged.routing.cooldown)) {
+    merged.routing = { ...merged.routing, cooldown: { ...merged.routing.cooldown, "disable-cooling": false } };
+    delete merged["disable-cooling"];
+  } else merged["disable-cooling"] = false;
+}
 
 /** A payload rule's identity: its models (empty fields dropped, as CPA saves them filled in) and its params' paths. */
 function payloadRuleIdentity(rule) {

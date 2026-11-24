@@ -17,7 +17,7 @@ const { loopMessage, loopAction, createLoopStore } = require("./chat-loops.cjs")
 const { scheduleMessage, scheduleAction, createScheduleStore } = require("./chat-schedules.cjs");
 const { FOLLOW_UP, STEER, automaticStamp, chatFollowUp, chatDescriptionWithout, chatDescriptionWithSteer,
   chatMessageCount, createChatEditStore, withoutAutomaticChatPrompts } = require("./chat-edits.cjs");
-const { chatDescriptionRedacted } = require("./chat-redaction.cjs");
+const { chatDescriptionRedacted, redactHandoffCredentials } = require("./chat-redaction.cjs");
 const { createChatArchiveStore } = require("./chat-archive.cjs");
 const { retainedChatRequest, isCompactedRecord } = require("./chat-history.cjs");
 const { createModelScoreStore, gradePrompt, modelHistory, parseGrade, pickerHints, scoreRound, scoredCards, summarize } = require("./model-scores.cjs");
@@ -190,15 +190,17 @@ const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
 // session/request_permission, or Codex's app-server approval), so all three permission modes run
 // there: Ask is the agent's accept-edits mode with the rest asked in the chat, Approve for me sends
 // those requests to this app's reviewer (Codex: its own auto-review), Full access is bypass.
+// agy too since it runs as a chat through Google's own `agy acp` (AO's ACP driver, ported from
+// upstream in AO#61): checked 2026-11-23 on agy 1.5.14, it raised session/request_permission
+// (allow_once / reject_once) before writing a file, and a declined request left the file alone.
 // Every other agent runs in Full access only, which each AO adapter maps onto its bypass flag:
 // in Ask or Approve for me it would never ask (Pi, Unreal Agent, opencode on its own default) or
-// ask in a terminal nobody sees (agy, Cline), and its card would run unchecked or wait for good.
+// ask in a terminal nobody sees (Cline), and its card would run unchecked or wait for good.
 // Those two modes are refused at launch with the agent's reason (fullAccessOnly) and shown so in
 // its permission menu.
-const PERMISSION_AGENTS = new Set(["claude-code", "codex"]);
+const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
 // Why an agent outside PERMISSION_AGENTS can't run in Ask or Approve for me, by agent.
 const FULL_ACCESS_REASONS = {
-  agy: "Antigravity asks for approval in its own terminal, which the chat does not show, so it would wait for good",
   cline: "Cline asks for approval in its own terminal, which the chat does not show, so it would wait for good",
   // AO leaves opencode on its own rules in every mode but bypass, and those allow every tool.
   opencode: "opencode allows every tool by its own default, so it would never ask the chat, and nothing would be reviewed",
@@ -211,10 +213,12 @@ const FULL_ACCESS_ONLY = "Choose Full access, the only mode it runs in.";
 const fullAccessOnly = (agent) => `${FULL_ACCESS_REASONS[agent]
   ?? `${agent} has no way to ask the chat before it runs a tool, so the chat can neither ask you nor review its tools for you`}. ${FULL_ACCESS_ONLY}`;
 // Gateway agents whose own model catalogs are not CPA or WebGPT models; they list only CPA models.
-// agy too, by the user's choice (2026-11-18): its own models run on its Google sign-in, which Google
-// refused here ("not currently available in your location", "Verify your account to continue"), so
-// a chat on one never sent its first message, while the same Gemini models answered through CPA.
-const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode", "agy"]);
+// agy was one from 2026-11-18 (Google refused its sign-in here: "not currently available in your
+// location"). Since 2026-11-23 it runs as a chat on Google's own `agy acp` and its own Google sign-in,
+// the way T3 Code does (Google: permitted for personal use; proxied OAuth tokens are not), so its
+// own models are listed beside CPA's once it is signed in on the Antigravity page; until then its
+// catalog is empty (see models()), never an error that would hide CPA's.
+const CPA_ONLY_AGENTS = new Set(["claude-code", "opencode"]);
 // Antigravity's models (Gemini and Claude) are offered to Claude Code like every other CPA model,
 // by the user's choice (2026-11-08). They were hidden from it from 2026-10-22: Antigravity refused
 // requests carrying Claude Code's Agent SDK identity line with "quota exhausted"; rechecked
@@ -265,6 +269,14 @@ function staleWhileRevalidate({ read, now = Date.now, freshMs, staleMs, keep = (
         return Promise.resolve(entry.value);
       }
       return reread(key, args, entry);
+    },
+    /** The kept value now (as `get` would serve it), or undefined: never waits, not even for a read in flight. */
+    peek(key, args) {
+      const entry = entries.get(key);
+      const age = entry ? now() - entry.at : Infinity;
+      if (entry?.value === undefined || age >= staleMs) return undefined;
+      if (age >= freshMs) void reread(key, args, entry).catch(() => undefined);
+      return entry.value;
     },
   };
 }
@@ -379,7 +391,36 @@ const ROUTE_REFUSED = /cannot honor the saved permission tuple|can't use the CPA
  */
 const DRIVER_INCOMPATIBLE = /chat driver incompatible:\s*read [^:\n]{1,40} version/i;
 
-const REVIEW_SCRIPT = /[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
+/**
+ * When native Guardian cannot decide a shell request, the model judge decides it ("Let the model
+ * judge"), rating the command's risk (low, medium, high, critical) and how clearly the user's request
+ * or standing instructions authorize it (high, medium, low, unknown). Its "allow" counts only for a
+ * risk listed here with one of the authorizations listed for it; anything else is a deny, which
+ * the agent hears with the judge's own reason. The judge's prompt states the same rule
+ * (fallbackJudgeRule), so it answers to the rule it is held to.
+ * Until 2026-11-23 only low risk with high authorization passed: a local update the user's standing
+ * instructions ask for ("install-verified-sha-044.ps1") was denied as "did not confirm".
+ */
+const FALLBACK_JUDGE_ALLOWS = Object.freeze({
+  // As native Guardian's own rule since 0.8.156: a low-risk allow stands unless the user's
+  // authorization is rated low.
+  low: Object.freeze(["high", "medium", "unknown"]),
+  // A step with real effects (an install, a restart, a release step) only when the user asked for it.
+  medium: Object.freeze(["high"]),
+  // High and critical risk are never approved by a model on its own.
+});
+/** Whether the fallback judge's answer clears the request under FALLBACK_JUDGE_ALLOWS. */
+function fallbackJudgeAllows(answer) {
+  return answer?.outcome === "allow" && (FALLBACK_JUDGE_ALLOWS[answer.risk_level] ?? []).includes(answer.user_authorization);
+}
+/** The rule as the judge's prompt states it, from the same table. */
+function fallbackJudgeRule() {
+  const cases = Object.entries(FALLBACK_JUDGE_ALLOWS).filter(([, authorizations]) => authorizations.length)
+    .map(([risk, authorizations]) => `${risk} risk with ${authorizations.join(" or ")} user authorization`);
+  return cases.length ? `Allow only for ${cases.join("; or ")}. Otherwise deny.` : "Deny.";
+}
+
+const REVIEW_SCRIPT =/[^\s"'`;|&<>()]+\.(?:ps1|psm1|py|sh|bash|bat|cmd|js|cjs|mjs|ts)\b/gi;
 const REVIEW_SCRIPT_BYTES = 4000;
 // Each name a command mentions costs a disk lookup; a grep listing a dozen .ts files is not a script.
 const REVIEW_SCRIPT_LOOKUPS = 6;
@@ -500,7 +541,7 @@ function createChatPreferences(file) {
   };
 }
 
-function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, logger = null }) {
+function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runReadFreshMs = 0, cpaConnection, webBridgeConnection, webBridgeReadiness, webModelCatalog, confirm, confirmToolRequest = null, confirmRecoverable = null, resolveHarness, aoHarness, agentWindow = null, fetchImpl = fetchOffThread, findCodexExecutable = findInstalledCodexExecutable, nativeGuardianReview = null, exists = (file) => fs.existsSync(file), onRunState = null, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, goalsFile = null, wakeupsFile = null, loopsFile = null, schedulesFile = null, chatQueueFile = null, chatDraftsFile = null, chatEditsFile = null, archiveFile = null, knownModelsFile = null, chatPreferencesFile = null, modelScoresFile = null, modelBenchFile = null, nativePreviewTools = null, releaseIdleAgents = false, agentToolsIdentity = () => null, computerStepAllowed = null, githubMcpServer = null, subagents = null, chatAttachmentsDir = null, reviewRepository = readReviewRepository, agentInstructions = null, handoffRedactionEnabled = () => false, logger = null }) {
   const nativePreviewLeases = new Map();
   function releaseNativePreviews(workspaceId, runId, nodeId = null) {
     nativePreviewTools?.revokeNativePreviews?.({ workspaceId, runId, nodeId });
@@ -518,6 +559,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // (runReadFreshMs); off by default, so a caller that changes runs some other way reads afresh.
   const HEADLESS_READS = new Set(["/api/v1/ao/read", "/api/v1/ao/harness/status", "/api/v1/ao/harness/permission-profiles"]);
   const runReads = new Map(); // JSON read key -> { at, pending, read }
+  const answerReads = new Map(); // JSON [workspace, run] -> the reviewer's in-flight fast-lane read (nodeForAnswer)
   // A person's own message (chat_send, chat_steer, and their queued message going out) is admitted
   // ahead of the background polls (headless-host.cjs `admissionControl`). Ten split chats polling on
   // a saturated disk kept a follow-up's reads in the ordinary queue behind their polls until it gave
@@ -559,7 +601,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       || endpoint === "/api/v1/ao/harness/compact" && rest[0]?.status === true
       || endpoint === "/api/v1/tools/call" && rest[0]?.tool === "workflow_list") return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered);
     runReads.clear();
-    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => runReads.clear());
+    answerReads.clear();
+    return Promise.resolve(sendHeadless(endpoint, ...rest)).then(headlessAnswered).finally(() => { runReads.clear(); answerReads.clear(); });
   };
   const goals = createGoalStore({ file: goalsFile, now });
   const chatPreferences = createChatPreferences(chatPreferencesFile);
@@ -671,14 +714,33 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * null: the chat's last run was a single model on exactly this route and its card is done (a
    * stopped one too: Stop only interrupts the turn, and continuable() checks the agent is there).
    */
+  function effectiveCardRoute(card, chat = null) {
+    if (!card?.route) return null;
+    const resized = chat && card.receipt?.thread_id
+      ? chatEdits.resizedWindow(chat.workspaceId, chat.taskId, card.receipt.thread_id) : undefined;
+    return resized === undefined ? card.route : { ...card.route, context_window: resized };
+  }
+  function implicitCardEffort(route) {
+    if (!route || route.effort || !String(route.model ?? "").startsWith(CPA_MODEL_PREFIX)) return null;
+    const baseModel = route.model.slice(CPA_MODEL_PREFIX.length)
+      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    const efforts = CLINE_EFFORTS.get(baseModel) ?? knownModels[baseModel]?.capability?.efforts;
+    return startEffort(route.model, efforts);
+  }
+  function routeMatchesCard(route, other) {
+    return ROUTE_IDENTITY.every(field => {
+      const left = route?.[field] ?? null, right = other?.[field] ?? null;
+      if (left === right) return true;
+      return field === "effort" && left === null && right !== null && right === implicitCardEffort(route);
+    });
+  }
   function continuationCard(previous, executionMode, singleRoute, chat = null) {
     const card = executionMode === "single" && singleRoute ? resumableChatCard(previous) : null;
     if (!card) return null;
     // An agent resized in place (chat_context_window) runs with the window it was resized to, not
     // the one its card was started with.
-    const resized = chat ? chatEdits.resizedWindow(chat.workspaceId, chat.taskId, card.receipt.thread_id) : undefined;
-    const route = resized === undefined ? card.route : { ...card.route, context_window: resized };
-    return ROUTE_IDENTITY.every(field => (route?.[field] ?? null) === (singleRoute[field] ?? null)) ? card : null;
+    const route = effectiveCardRoute(card, chat);
+    return routeMatchesCard(route, singleRoute) ? card : null;
   }
   /** The chat's single-model card whose AO agent a follow-up could go on with, whatever its route. */
   function resumableChatCard(previous) {
@@ -721,7 +783,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   }
   /** The AO spawn arguments for a card, without its prompt; throws when the route cannot be honored. */
   function aoLaunchArgs(workspaceId, node, plain, contextDefault = null, effortDefault = null) {
-    const contextWindow = node.route.context_window ?? contextDefault;
+    const contextWindow = declaredWindow(node.route, node.route.context_window ?? contextDefault);
     // "auto" is the model's own effort: nothing is sent, neither a CPA suffix nor a native effort.
     // Tried 2026-10-22 through CPA: every Cline Pass model refused "(auto)" with a 400 ("Supported
     // reasoning levels are …") while the bare model answered, as every model did.
@@ -788,7 +850,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The app's own terminal follows "Approve for me" too: routine project commands run unasked.
       ...(node.route.approvals_reviewer === "auto_review" ? { autoReview: true } : {}),
       ...(viaCpa ? { gateway: { provider: "cpa", model: wireModel } } : {}),
-      // A card left blank gets its model's full known limit (defaultContextWindow).
+      // A card left blank gets its model's full known limit (defaultContextWindow); a pick past
+      // that limit (1M on a model CPA reports at 872K) is declared at the limit (declaredWindow).
       ...(contextWindow != null ? { contextWindow } : {}),
       ...(plain ? { plain: true } : {}),
       // A native model takes its own effort; a CPA model's goes in the body where the harness can send it.
@@ -962,6 +1025,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   /** continuableSession settled as { usable } or { error }: a check begun ahead of its use never rejects unheard. */
   function continuableOutcome(session) {
     return continuableSession(session).then(usable => ({ usable }), error => ({ error }));
+  }
+  // Sessions whose agent's window was checked against its model's limit since the app started.
+  const windowsChecked = new Set();
+  /**
+   * An agent told a bigger window than its model takes in (a 1M card on an 872K model, launched
+   * before declaredWindow capped it) compacts too late and the upstream refuses its requests. Before
+   * its next message it is set to the limit, stopped and resumed on its own conversation, as a resize
+   * does; the card keeps its pick. `outcome` (continuableOutcome) comes back unchanged when there is
+   * nothing to do or the agent could not be stopped, else the resumed agent's. Once per session.
+   */
+  async function fitAgentWindow(session, route, outcome, onFit) {
+    const limit = windowLimit(route), card = route?.context_window ?? null;
+    if (!limit || (card !== null && card <= limit) || windowsChecked.has(session)) return outcome;
+    windowsChecked.add(session);
+    if (windowsChecked.size > 500) windowsChecked.delete(windowsChecked.values().next().value);
+    const service = harnessService();
+    // Not known (no reading yet): a card past the limit launched its agent at the card's window.
+    const reading = await Promise.resolve(agentWindow?.(session)).catch(() => null);
+    const told = Number.isSafeInteger(reading) && reading > 0 ? reading : null;
+    if (told === null ? card === null : told <= limit) return outcome;
+    onFit?.();
+    try {
+      await service.setContextWindow(session, limit);
+      await service.exitAgent(session);
+    } catch (error) {
+      logger?.warn?.("ao.window_fit_failed", { session, limit, message: publicText(error?.message || error, 200) });
+      return outcome;
+    }
+    logger?.info?.("ao.window_fitted", { session, from: told, to: limit });
+    return continuableOutcome(session);
   }
   // A pre-warm's check, which brings back an agent released while idle, runs one at a time. Several
   // chats opening together (split panes, restored tabs) resumed each one's agent at once: AO answers
@@ -1194,7 +1287,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       }
       // Only the window changed: the chat's own agent is resized to it (chat_context_window), which
       // the same pick asks for. Warming a new agent for that route was a spare model process.
-      if (!live && agent && windowOnlyChange(agent.route, singleRoute)) {
+      if (!live && agent && windowOnlyChange(effectiveCardRoute(agent, { workspaceId: id, taskId: task }), singleRoute)) {
         return { ok: true, warmed: false, reason: "The chat's agent is resized to the new window" };
       }
       return chatPrewarmRoute(id, singleRoute, true);
@@ -1209,8 +1302,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const chatResizes = new Map();
   const resizeKey = (workspaceId, taskId) => JSON.stringify([workspaceId, taskId]);
   /** Whether two routes differ in nothing that decides how an agent is launched but its window. */
-  const windowOnlyChange = (route, other) => ROUTE_IDENTITY.every(field => field === "context_window"
-    || (route?.[field] ?? null) === (other?.[field] ?? null));
+  const windowOnlyChange = (route, other) => routeMatchesCard({ ...route, context_window: other?.context_window ?? null }, other);
   /**
    * chat_context_window: resize the chat's agent to `contextWindow` (tokens, or null for the model's
    * default) now, keeping what it knows. AO saves the window with the session; the agent is stopped
@@ -1246,6 +1338,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           ?? catalog.capabilities?.[model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "")], tokens);
         if (refused) throw new Error(refused);
       } else tokens = await defaultContextWindow(id, { route }) ?? 0;
+      // The card keeps the pick (1M); the agent is told no more than its model takes in (872K).
+      tokens = declaredWindow(route, tokens);
       await harnessService().setContextWindow(session, tokens);
       // The agent reads its window when it starts: stopped and resumed, it keeps its conversation.
       // Recorded once it is stopped: one that could not be stopped still runs at its old size, and
@@ -1543,19 +1637,51 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       || typeof provider === "string" && PLUGIN_PROVIDERS.has(provider.trim().toLowerCase()) || pluginModels.has(base);
   };
   const VERBATIM_EFFORT_REASON = "This model is served by a CPA provider plugin, which passes the model name on unchanged, so it takes no reasoning level.";
-  /** The window CPA reports for any provider-plugin model it knows no limit for (GPT-5's default). */
+  /**
+   * The window CPA gives every model it knows no limit for: its GPT-5 template's, copied onto
+   * provider-plugin models and onto every model of a config API key (Claude and Gemini keys, an
+   * OpenAI key's gpt-4o, Mistral's). Real only for the GPT models it was made for (ownGptModel).
+   */
   const CPA_STOCK_WINDOW = 272_000;
   /**
-   * Real context ceilings of models that CPA reports only with its stock window, by the model's
-   * own name (after any provider prefix). Without one, the card offers the client's 2M ceiling as
-   * unverified; DeepSeek v4.1 Flash showed "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI
-   * Studio key is listed at the stock 272K, though CPA's own catalog gives 1,048,576 for every
-   * Gemini 4 model (Antigravity's and OpenCode's report it): until 2026-11-20 a Gemini 4 Carbon
-   * chat was capped at 272K and its window field refused 1m and every 7-digit size.
+   * A model's own name, comparable across providers and spellings: an Anthropic key's "Claude Opus
+   * 4.6", Antigravity's "claude-opus-4-6-thinking" and "cpa/openai-api/…" twins all name one model.
+   * Lowercase, after any provider prefix, no "(effort)", spaces and dots as dashes, no ISO date, and
+   * no trailing effort word or -thinking/-preview/-latest/-tiered. "max" stays: Qwen3 Max is its own model.
    */
-  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:[.-]\d+)?-flash\b/i, 1_000_000],
-    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/i, 1_048_576]];
-  const knownContextLimit = id => KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(id.slice(id.lastIndexOf("/") + 1)))?.[1];
+  const modelFamilyKey = id => {
+    const name = String(id ?? "");
+    return name.slice(name.lastIndexOf("/") + 1).toLowerCase().replace(/(?:\([^()]*\)|\[1m\])+$/, "").trim()
+      .replace(/[\s._]+/g, "-")
+      .replace(/(?:-(?:\d{4}-\d{2}-\d{2}|20\d{6}|1m|minimal|low|medium|high|xhigh|ultra|auto|none|thinking|nothinking|preview|latest|tiered))+$/, "");
+  };
+  /** GPT-5 and later as CPA's own Codex providers list them (no prefix): their 272K is real. */
+  const ownGptModel = id => !String(id).includes("/") && /^gpt-(?:[5-9]|\d{2,})(?:-|$)/.test(modelFamilyKey(id));
+  /**
+   * Real context ceilings of models that CPA reports only with its stock window, by modelFamilyKey.
+   * Without one, the card offers the client's 2M ceiling as unverified; DeepSeek v4.1 Flash showed
+   * "up to 2M" for its 1M. Gemini 4 from a Vertex AI or AI Studio key is listed at the stock 272K,
+   * though CPA's own catalog gives 1,048,576 for every Gemini 4 model: until 2026-11-20 a Gemini 4
+   * Carbon chat was capped at 272K and its window field refused 1m and every 7-digit size.
+   * The rest are from CPA's own model registry (inputTokenLimit/context_length, checked 2026-11-23):
+   * Gemini 2.5-3.x Pro/Flash text models 1,048,576 (its image, TTS, live, embedding and transcribe
+   * models are not matched); Claude 5.x, Fable and Opus 4.7/4.8 1M; older Claude 4 models 200K
+   * (Antigravity's Opus 4.6 reports 200K too). An Anthropic key's "Claude Opus 4.6" ran at the stock
+   * 272K and "Claude Opus 5.5" at 272K of its 1M. OpenAI's gpt-4.1 1,047,576, gpt-4o 128K, o3/o4 200K.
+   */
+  const KNOWN_CONTEXT_LIMITS = [[/^deepseek-v4(?:-\d+)?-flash\b/, 1_000_000],
+    [/^gemini-4-(?:argon|carbon|hydrogen|neon)\b/, 1_048_576],
+    [/^gemini-(?:2-[05]|3(?:-\d+)?)-(?:pro|flash)(?:-lite)?$/, 1_048_576],
+    [/^claude-(?:opus|sonnet|haiku|fable)-(?:[5-9](?:-\d+)?|4-[78])(?:-|$)/, 1_000_000],
+    [/^claude-(?:(?:opus|sonnet|haiku)-4(?:-[0-6])?|3(?:-[57])?-(?:opus|sonnet|haiku))$/, 200_000],
+    [/^gpt-4-1(?:-mini|-nano)?$/, 1_047_576],
+    [/^gpt-4o(?:-mini)?$/, 128_000],
+    [/^o[134](?:-pro|-mini|-deep-research)?$/, 200_000]];
+  const knownContextLimit = id => {
+    const raw = String(id ?? ""), family = modelFamilyKey(raw);
+    if ((/\[1m\]/i.test(raw) || /(?:^|-)1m(?:-|$|\()/i.test(raw)) && /^claude-/.test(family)) return 1_000_000;
+    return KNOWN_CONTEXT_LIMITS.find(([pattern]) => pattern.test(family))?.[1];
+  };
   /**
    * The largest window a card may set for a model whose catalog reports `limit`. CPA's
    * max_context_window counts what the model takes in: its window less the reply's 128K reserve,
@@ -1572,6 +1698,35 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return !setting || !Number.isSafeInteger(tokens) || tokens < setting.min || tokens > maximum
       ? "This model's context window can't be set to that. Its limit is " + maximum + " tokens." : null;
   }
+  /**
+   * The most an agent is told its window is for `route`'s model: the limit CPA's catalog reports
+   * for it (remembered in knownModels, read synchronously at launch), or null when none is known.
+   * A card may pick 1M for a model CPA reports at 872K (windowCeiling), but the agent was told 1M,
+   * compacted near it, and the upstream refused every request past 872K: "400 Your input exceeds
+   * the context window of this model" in GPT-6.2 Sol chats at 1M (2026-11-21, 2026-11-23), with
+   * no compaction before. So the pick stays the card's and the agent is told the limit.
+   */
+  function windowLimit(route) {
+    const model = String(route?.model ?? "");
+    const id = (model.startsWith(CPA_MODEL_PREFIX) ? model.slice(CPA_MODEL_PREFIX.length) : model)
+      .replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+    let limit = id ? knownModels[id]?.capability?.contextLimit ?? knownContextLimit(id) : undefined;
+    if (limit === undefined && id) {
+      const family = modelFamilyKey(id);
+      for (const [other, entry] of Object.entries(knownModels)) {
+        const candidate = entry?.capability?.contextLimit;
+        if (Number.isSafeInteger(candidate) && candidate >= 4096 && modelFamilyKey(other) === family) {
+          limit = limit === undefined ? candidate : Math.min(limit, candidate);
+        }
+      }
+    }
+    return Number.isSafeInteger(limit) && limit >= 4096 ? limit : null;
+  }
+  /** The window an agent is launched or resized with for a card's `tokens`: never past windowLimit. */
+  const declaredWindow = (route, tokens) => {
+    const limit = windowLimit(route);
+    return Number.isSafeInteger(tokens) && tokens > 0 && limit && tokens > limit ? limit : tokens;
+  };
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
@@ -1654,12 +1809,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (typeof harness === "string" && harness.startsWith("ao:")) {
       const agent = harness.slice(3);
       // Claude Code's and opencode's own catalogs (fable/haiku/opus/opus[1m]/sonnet, provider
-      // aliases) are neither CPA nor WebGPT models, and agy's run on a Google sign-in that may be
-      // refused (CPA_ONLY_AGENTS), so those agents offer only the CPA pool. Codex
-      // keeps its own ChatGPT-account models. For a CPA-only agent a CPA failure is reported,
-      // never silently replaced by its aliases; the renderer drops a rejected catalog and retries.
+      // aliases) are neither CPA nor WebGPT models (CPA_ONLY_AGENTS), so those agents offer only the
+      // CPA pool. Codex keeps its own ChatGPT-account models, agy its Google sign-in's: an agy not
+      // signed in yet lists none of its own, and still lists CPA's. For a CPA-only agent a CPA
+      // failure is reported, never silently replaced by its aliases; the renderer drops a rejected
+      // catalog and retries.
       const cpaOnly = CPA_ONLY_AGENTS.has(agent);
-      const items = cpaOnly ? [] : (await cachedAgentModels(agent, workspaceId))
+      const own = cpaOnly ? [] : agent === "agy"
+        ? await cachedAgentModels(agent, workspaceId).catch(() => [])
+        : await cachedAgentModels(agent, workspaceId);
+      const items = (Array.isArray(own) ? own : [])
         .filter(item => item.id !== "default" && !item.id.startsWith("chatgpt-web/"));
       let catalog = null;
       if (GATEWAY_AGENTS.has(agent)) {
@@ -1755,8 +1914,13 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       if (saved && typeof saved === "object" && !Array.isArray(saved)) {
         for (const [id, entry] of Object.entries(saved).slice(0, MAX_LISTED_MODELS)) {
           if (id && id.length <= 128 && Number.isFinite(entry?.seen) && entry.capability && typeof entry.capability === "object") {
+            const capability = { ...entry.capability };
+            const known = knownContextLimit(id);
+            if (capability.contextLimit === CPA_STOCK_WINDOW && !ownGptModel(id)) {
+              if (known) capability.contextLimit = known; else delete capability.contextLimit;
+            } else if (!capability.contextLimit && known) capability.contextLimit = known;
             // A date ahead of the clock (it was once set wrong) would never expire or refresh.
-            kept[id] = { seen: Math.min(entry.seen, now()), capability: entry.capability, ...(entry.plugin ? { plugin: true } : {}) };
+            kept[id] = { seen: Math.min(entry.seen, now()), capability, ...(entry.plugin ? { plugin: true } : {}) };
           }
         }
       }
@@ -1931,16 +2095,18 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       const efforts = CLINE_EFFORTS.get(id) ?? (!verbatim && !reportedLevels.length && /^claude-/i.test(id) ? CLAUDE_SUFFIX_EFFORTS : reportedLevels);
       // context_window is the default the client starts with; max_context_window is how far the
       // model goes (Luna: 272K by default, up to 1M).
-      // CPA gives every model of its provider plugins (cline-pass/…, commandcode-go/…) the same stock
-      // window, whatever the model really takes: that number is no limit, so it is left unknown
-      // instead of capping the card (and of becoming its default). A model of CPA's own providers
-      // reporting the stock window may really have it (Codex's GPT models do), so only a known
-      // ceiling (KNOWN_CONTEXT_LIMITS: Gemini 4 from a Vertex key) replaces it there.
+      // CPA gives every model it has no limit for the same stock window, whatever the model really
+      // takes: provider plugins' (cline-pass/…, commandcode-go/…) and every model of a config API
+      // key, 179 of them on 2026-11-23 (an Anthropic key's Claude Opus 4.6 at 272K of its 200K, its
+      // Opus 5.5 at 272K of 1M, Gemini at 272K of 1,048,576, gpt-4o at 272K of 128K). That number is
+      // no limit: a known ceiling replaces it, else the same model's limit on another provider
+      // (below), else it stays unknown instead of capping the card and becoming its default. Only
+      // the GPT models of CPA's own Codex providers really have it (ownGptModel).
       const reported = entry.max_context_window ?? entry.context_window ?? entry.context_length;
-      const stock = (id.includes("/") || knownContextLimit(id) !== undefined)
-        && reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
-      // A real number CPA reports wins; the stock one gives way to a known ceiling, else stays unknown.
-      const limit = stock ? knownContextLimit(id) : reported;
+      const stock = reported === CPA_STOCK_WINDOW && (entry.context_window ?? reported) === CPA_STOCK_WINDOW;
+      // A real number CPA reports wins; the stock one, or none, gives way to a known ceiling.
+      const real = Number.isSafeInteger(reported) && reported > 0 && !stock;
+      const limit = real ? reported : knownContextLimit(id) ?? (stock && ownGptModel(id) ? reported : undefined);
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
         : "CPA did not advertise reasoning levels for this model." } : {}),
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
@@ -1948,6 +2114,20 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       ids.push(id);
       if (unavailable[id]) { held[id] = unavailable[id]; delete unavailable[id]; }
       if (ids.length === MAX_LISTED_MODELS) break;
+    }
+    // A model still without a limit takes the same model's on another provider (modelFamilyKey): an
+    // OpenAI key's openai-api/gpt-5 the Codex gpt-5's 272K, an Anthropic key's "Claude Sonnet 4.6"
+    // Antigravity's claude-sonnet-4-6 200K. The smallest one, so no provider is asked past its own.
+    const familyLimits = new Map();
+    for (const id of ids) {
+      const limit = capabilities[id].contextLimit;
+      if (!limit) continue;
+      const family = modelFamilyKey(id);
+      familyLimits.set(family, Math.min(familyLimits.get(family) ?? limit, limit));
+    }
+    for (const id of ids) {
+      const limit = capabilities[id].contextLimit ? undefined : familyLimits.get(modelFamilyKey(id));
+      if (limit) capabilities[id] = { ...capabilities[id], contextLimit: limit };
     }
     // CPA's list is remembered (a model it serves now, with what it reports) and every model it
     // listed lately and left out now is listed again from memory.
@@ -2050,7 +2230,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
           throw new Error("This model doesn't support the chosen reasoning effort");
         }
         if (node.route.context_window != null) {
-          const refused = windowRefusal(capability, node.route.context_window);
+          // Judged as launched: a window past the model's known limit runs at it (declaredWindow), so
+          // a card saved before its limit was known (272K on a 200K Claude) is not refused for it.
+          const refused = windowRefusal(capability, declaredWindow(node.route, node.route.context_window));
           if (refused) throw new Error(refused);
         }
       };
@@ -2102,8 +2284,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         let unconfirmed = null;
         const checkStarted = now();
         // checkMs is what the launch still waited for here, after the check that began with it.
-        const outcome = !continued ? { usable: false }
+        let outcome = !continued ? { usable: false }
           : await (continued === early ? earlyCheck : continuableOutcome(continued.session));
+        if (continued && !continued.adoptTurn && outcome.usable && !outcome.error) {
+          outcome = await fitAgentWindow(continued.session, node.route, outcome,
+            () => stage("fitting the chat's agent to its model's context limit"));
+        }
         if (outcome.error && outcome.error.code !== "AO_SESSION_RESTORE_UNCONFIRMED") throw outcome.error;
         if (outcome.error) unconfirmed = outcome.error;
         const usable = Boolean(continued) && !outcome.error && Boolean(outcome.usable);
@@ -2241,11 +2427,16 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // returns one, end it, or it keeps working (and waiting for input) where no chat shows it.
       const stopIfAbandoned = async () => {
         if (!session) return false;
+        const stopped = Boolean(backgroundRuns.get(runKey(workspaceId, runId))?.stopped);
         const latest = await runs({ workspaceId, runId }).catch(() => null);
         const mission = latest?.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         const card = mission?.nodes.find(entry => entry.id === node.id);
-        if (!mission?.cancelled && card && card.state === "reserved" && !backgroundRuns.get(runKey(workspaceId, runId))?.stopped) return false;
-        await stopExternalTurn(session, mission?.cancelled || backgroundRuns.get(runKey(workspaceId, runId))?.stopped
+        if (!stopped && !mission) return false;
+        if (!mission?.cancelled && !stopped && card && (card.state === "reserved"
+          || (card.state === "running" && (!card.receipt?.thread_id || card.receipt.thread_id === session)))) {
+          return false;
+        }
+        await stopExternalTurn(session, mission?.cancelled || stopped
           ? { owner: runKey(workspaceId, runId), releaseAgent: true } : null);
         return true;
       };
@@ -2543,6 +2734,36 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const saved = await runs({ workspaceId, runId }, { freshMs });
     const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
     return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
+  }
+
+  /**
+   * The run as headless holds it now, for the reviewer's check just before it answers a request. It
+   * is read ahead of the background polls, as Stop reads (readForStop): queued behind every open
+   * chat's polls it took 14-35 s, twice per review, and reviews ran out of their 45 s before the
+   * model was asked (2026-11-23). The reviews of one run share a read while it is in flight; every
+   * write drops it, as it drops the shared reads. A full fast lane falls back to the ordinary read.
+   */
+  function nodeForAnswer(workspaceId, runId, nodeId) {
+    const key = JSON.stringify([workspaceId, runId]);
+    let read = answerReads.get(key);
+    if (!read) {
+      read = Promise.resolve()
+        .then(() => requestHeadless("/api/v1/ao/read", { workspace_id: clean(workspaceId, 128), run_id: clean(runId, 80) }, { admissionControl: true }))
+        .then((response) => {
+          if (response?.ok !== true || !Array.isArray(response.runs)) throw new Error("AO run read failed");
+          return response;
+        }, (error) => {
+          if (error?.code !== "HEADLESS_QUEUE_FULL" && !/queue is full/i.test(String(error?.message ?? ""))) throw error;
+          runReads.delete(key);
+          return runs({ workspaceId, runId });
+        })
+        .finally(() => { if (answerReads.get(key) === read) answerReads.delete(key); });
+      answerReads.set(key, read);
+    }
+    return read.then((saved) => {
+      const mission = saved.runs.find((entry) => entry.id === runId && entry.workspace_id === workspaceId);
+      return { mission, node: mission?.nodes?.find((entry) => entry.id === nodeId) };
+    });
   }
 
   // Callers only read what comes back (none changes a run in place), so one response is shared.
@@ -3740,14 +3961,25 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       stopConfirmed = action === "stop" && result.run.id === run && result.run.cancelled === true
         && Array.isArray(result.run.nodes) && !result.run.nodes.some(node => ["running", "reserved"].includes(node.state));
     } catch (error) {
-      // Stop the local loop and known owned agents even when saved mission cancellation
-      // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
-      if (action !== "stop") throw error;
-      const saved = await readForStop().catch(() => null);
-      const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
-      if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
-      logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
-      result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
+      if (action === "retry" || action === "retry_auto") {
+        const saved = await readForStop().catch(() => null);
+        const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
+        const target = nodeId ? mission?.nodes?.find(node => node.id === clean(nodeId, 80)) : mission?.nodes?.[0];
+        if (mission && !mission.cancelled && target?.state === "pending" && (target.history?.length ?? 0) > 0) {
+          result = { ok: true, run: mission };
+        } else {
+          throw error;
+        }
+      } else {
+        // Stop the local loop and known owned agents even when saved mission cancellation
+        // cannot be confirmed; report that uncertainty instead of claiming the saved state changed.
+        if (action !== "stop") throw error;
+        const saved = await readForStop().catch(() => null);
+        const mission = saved?.runs.find(entry => entry.id === run && entry.workspace_id === id);
+        if (!mission && !backgroundRuns.has(runKey(id, run))) throw error;
+        logger?.warn?.("ao.stop.control_failed", { run, error: String(error?.message || error).slice(0, 200) });
+        result = { ok: true, run: mission ?? { id: run, workspace_id: id, nodes: [] }, notice: "Future work stopped here; the saved mission cancellation could not be confirmed" };
+      }
     }
     clock.mark("control");
     if (action === "stop") releaseNativePreviews(id, run);
@@ -4211,10 +4443,52 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const base = path.resolve(folder).toLowerCase(), target = path.resolve(candidate).toLowerCase();
     return target === base || target.startsWith(base.endsWith(path.sep) ? base : base + path.sep);
   }
-  /** Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null. */
-  function readOnlyInspection(command, folder, cwd = null) {
+  // The native reviewer (nativeCommandReview) also lets a command create and change files inside the
+  // workspace folder, as Claude Code's auto mode runs "local file operations in your working
+  // directory" unasked. Never a delete, and never the files that steer agents, hooks or CI: an agent
+  // writing AGENTS.md through the shell would be writing the reviewer's own standing instructions.
+  const WRITE_VERBS = new Set(["new-item", "ni", "mkdir", "md", "set-content", "add-content", "ac", "out-file", "copy-item", "cpi", "copy", "cp",
+    "move-item", "mi", "move", "mv", "rename-item", "rni", "ren", "tee-object", "tee"]);
+  // Steps a script takes that write nothing at all: output dropped, strict mode on.
+  const QUIET_VERBS = new Set(["out-null", "set-strictmode"]);
+  // node_modules too: here it is often a junction to another checkout, so a write there leaves the folder.
+  const PROTECTED_WRITE = /(?:^|[\\/])(?:\.git|\.github|\.husky|\.claude|\.codex|\.agents|\.vscode|\.idea|node_modules)(?:[\\/]|$)|(?:^|[\\/])(?:AGENTS\.md|CLAUDE\.md|\.mcp\.json|package\.json)$/i;
+  /**
+   * `text` without its output redirects (`> file`, `>> file`, `2> file`), each checked to write a plain
+   * path inside `folder` that is not protected; null when one is not, or for an input redirect.
+   */
+  function withoutWriteRedirects(text, folder) {
+    let out = "", quote = null;
+    for (let at = 0; at < text.length; at += 1) {
+      const char = text[at];
+      if (quote) { if (char === quote) quote = null; out += char; continue; }
+      if (char === "\"" || char === "'") { quote = char; out += char; continue; }
+      if (char === "<") return null;
+      if (char !== ">") { out += char; continue; }
+      if (/(?:^|\s)[1-6*]$/.test(out)) out = out.slice(0, -1);
+      if (text[at + 1] === ">") at += 1;
+      const target = /^\s*(?:"([^"]*)"|'([^']*)'|([^\s;|&<>"'`(){}]+))/.exec(text.slice(at + 1));
+      const file = target ? target[1] ?? target[2] ?? target[3] : "";
+      if (!file || /[$`]/.test(file) || !insideFolder(file, folder) || PROTECTED_WRITE.test(file)) return null;
+      at += target[0].length;
+      out += " ";
+    }
+    return quote ? null : out;
+  }
+  /**
+   * Why `command` (run in `cwd`) is read-only inspection inside `folder` "Approve for me" may run, or null.
+   * With `writes`, creating and changing files inside the folder counts too (the native reviewer's mode).
+   */
+  function readOnlyInspection(command, folder, cwd = null, { writes = false } = {}) {
     // Errors shown with the output (2>&1) or dropped (2>$null) write no file; any other redirect still fails.
     let text = String(command ?? "").replace(/\s+[12]?>&[12](?=\s|;|\||$)|\s+2>\s*\$null\b/gi, "").trim();
+    let wrote = false;
+    if (writes && folder && /[<>]/.test(text)) {
+      const kept = withoutWriteRedirects(text, folder);
+      if (kept === null) return null;
+      wrote = kept.trim() !== text;
+      text = kept.trim();
+    }
     // A script on several lines: each line is a statement, comment lines are left out. A here-string
     // (@" … "@) can hold anything, so it still goes to the reviewer.
     if (/@["']/.test(text)) return null;
@@ -4302,6 +4576,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // A fragment that cannot start a command: a member after a parenthesis ((Get-Date).AddHours), a
       // number or an operator or switch ((-14), -not).
       if (first && /^(?:\.[A-Za-z_]\w*|[-+]?\d+(?:\.\d+)?|-[A-Za-z]\w*)$/.test(first)) continue;
+      if (writes && first && WRITE_VERBS.has(first.toLowerCase())) {
+        // A write names only places in the folder (checked below with every value) and none that steers agents.
+        wrote = true;
+        continue;
+      }
+      if (writes && first && QUIET_VERBS.has(first.toLowerCase())) continue;
       if (first && !isQuoted(first) && !READ_VERBS.has(first.toLowerCase()) && !INSPECTION_VARIABLE.test(first) && !localVariable(first)) return null;
     }
     // Paths stay inside the folder, an option's value (--git-dir=…) and a URL's host aside: a URL is
@@ -4311,7 +4591,81 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       .map((value) => /^--?[\w-]+=/.test(value) ? value.slice(value.indexOf("=") + 1) : value)
       .filter((value) => !/^https?:\/\//i.test(value));
     if (!values.every((value) => insideFolder(value, folder))) return null;
+    // A command that writes names no protected place anywhere, nor runs in one: `cd .git; Set-Content
+    // hooks\pre-commit …` would write there through a relative path.
+    // Every word counts here, `.git` included (the values above leave out what reads as a member name).
+    if (wrote && ([...quoted, ...words].some((value) => PROTECTED_WRITE.test(value)) || (cwd && PROTECTED_WRITE.test(cwd)))) return null;
     return "Read-only inspection inside the workspace folder";
+  }
+  // The native reviewer: decides a shell request on this machine, with no model and no quota, before
+  // Guardian or CPA are asked. It clears a command whose every step is read-only inspection, a
+  // routine project command, or a write inside the workspace folder, and it follows the PowerShell
+  // scripts the command runs, recursively, judging each script's own steps the same way. A step it
+  // cannot clear leaves the request to the quota reviewers, exactly as before.
+  const NATIVE_SCRIPT_BYTES = 64 * 1024;
+  const NATIVE_SCRIPT_DEPTH = 3;
+  const NATIVE_SCRIPT_COUNT = 8;
+  const NATIVE_REVIEW_BUDGET_MS = 2_000;
+  const NATIVE_ARG = String.raw`(?:"[^"$\x60]*"|'[^']*'|[^\s"'$\x60;|&<>(){}]+)`;
+  const NATIVE_SCRIPT = String.raw`(?:"([^"$\x60]+\.ps1)"|'([^']+\.ps1)'|([^\s"'$\x60;|&<>(){}]+\.ps1))`;
+  // How a step runs a script: `& 'x.ps1' args`, `.\x.ps1 args`, `powershell -NoProfile -File x.ps1 args`.
+  const NATIVE_INVOCATIONS = [
+    new RegExp(String.raw`^&\s*${NATIVE_SCRIPT}((?:\s+${NATIVE_ARG})*)$`, "i"),
+    new RegExp(String.raw`^()()((?:\.{1,2}[\\/]|[a-z]:[\\/])[^\s"'$\x60;|&<>(){}]*\.ps1)((?:\s+${NATIVE_ARG})*)$`, "i"),
+    new RegExp(String.raw`^(?:powershell|pwsh)(?:\.exe)?(?:\s+-(?:NoProfile|NoLogo|NonInteractive|ExecutionPolicy\s+(?:Bypass|RemoteSigned|Unrestricted)))*\s+-File\s+${NATIVE_SCRIPT}((?:\s+${NATIVE_ARG})*)$`, "i"),
+  ];
+  const unquote = (value) => value.replace(/^(["'])([\s\S]*)\1$/, "$2");
+  /**
+   * Why the native reviewer clears `command` (run in `cwd`, inside `folder`), or null to leave it to
+   * the quota reviewers. Async: it reads the scripts the command runs, within NATIVE_REVIEW_BUDGET_MS.
+   */
+  async function nativeCommandReview(command, folder, cwd = null, { files = fs.promises, budgetMs = NATIVE_REVIEW_BUDGET_MS } = {}) {
+    if (!folder || (cwd && !insideFolder(cwd, folder))) return null;
+    const deadline = now() + budgetMs;
+    const checked = [], seen = new Set();
+    async function review(text, depth) {
+      if (requestDenial(text)) return false;
+      // Each step on its own: a script it runs is set aside to read, a routine project command is
+      // cleared; what is left must be inspection or writes inside the folder, judged as one text so
+      // its variables and blocks keep their meaning.
+      const scripts = [];
+      const steps = [];
+      for (const line of String(text).split(/\r?\n/)) {
+        if (/^\s*#/.test(line)) continue;
+        const chain = commandChain(line);
+        if (chain === null) return false;
+        for (const step of chain) {
+          const invoked = NATIVE_INVOCATIONS.map((pattern) => pattern.exec(step)).find(Boolean);
+          if (invoked) {
+            const args = (invoked[4] ?? "").trim().match(new RegExp(NATIVE_ARG, "g")) ?? [];
+            if (!args.every((arg) => arg.startsWith("-") || insideFolder(unquote(arg), folder))) return false;
+            scripts.push(invoked[1] || invoked[2] || invoked[3]);
+            steps.push("Write-Output");
+          } else steps.push(routineCommand(step) ? "Write-Output" : step);
+        }
+      }
+      const rest = steps.filter((step) => step !== "Write-Output");
+      if (rest.length && !readOnlyInspection(steps.join("; "), folder, cwd, { writes: true })) return false;
+      for (const script of scripts) {
+        const file = path.resolve(cwd || folder, script);
+        const key = file.toLowerCase();
+        if (!insideFolder(file, folder) || depth >= NATIVE_SCRIPT_DEPTH || checked.length >= NATIVE_SCRIPT_COUNT || now() > deadline) return false;
+        // A script that runs itself again adds nothing to check.
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const stat = await files.stat(file).catch(() => null);
+        if (!stat?.isFile() || stat.size > NATIVE_SCRIPT_BYTES) return false;
+        const body = String(await files.readFile(file, "utf8").catch(() => "")).replace(/^﻿/, "");
+        if (!body.trim()) return false;
+        checked.push(path.relative(folder, file) || path.basename(file));
+        if (!await review(body, depth + 1)) return false;
+      }
+      return true;
+    }
+    if (!await review(String(command ?? ""), 0)) return null;
+    return checked.length
+      ? `Checked on this machine, no quota: every step, including ${checked.length === 1 ? "the script" : "the scripts"} ${checked.join(", ")}, reads or writes only inside the workspace folder`
+      : "Checked on this machine, no quota: every step reads or writes only inside the workspace folder";
   }
   /** Why `command` is a routine project command "Approve for me" may run, or null. */
   function routineCommand(command) {
@@ -4369,6 +4723,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (short === "sleep") return "Waits in this turn for at most 100 seconds; it runs nothing";
     if (short === "rename_chat") return "Names this chat after the task it works on; it runs nothing";
     if (short === "redact_message") return "Hides secrets you pasted in this chat's messages; it runs nothing and changes no files";
+    if (short === "app_layout") return "Reads or edits Coding Tools' App layout map; it runs nothing";
     if (short === "show_in_chat") return "Brings a pane of this chat forward; it shows only what already runs";
     if (short === "app_processes") return "Lists the app's own processes with their CPU and memory; read-only, no command lines";
     if (short === "view_app") return "An image of the Coding Tools window you see; nothing else on the screen";
@@ -4857,6 +5212,21 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const { modelJudges, meteredReviews } = chatPreferences.get();
     return modelJudges && meteredReviews;
   };
+  // Native Guardian's allows, reused for a while: each review spends the ChatGPT plan's quota (about
+  // 0.5% of a Plus 5-hour window per 100, measured 2026-11-23), and an agent asks for the same
+  // command again in the same chat (parallel calls, a check rerun after an edit). That day 9 of
+  // 640 Guardian reviews repeated an earlier request exactly, 6 of them within 10 minutes, mostly
+  // in the same turn. The key is everything Guardian saw or that made the request eligible: the
+  // chat, the user's request (a new message is reviewed afresh), the folder, the shell, the exact
+  // command and its working folder. Only an allow is kept, never a deny or an unclear answer, and the request
+  // must still be the same pending one before a kept allow answers it. An allow older than
+  // GUARDIAN_ALLOW_MS is not reused: one repeat 1.9 hours later was refused.
+  const GUARDIAN_ALLOW_MS = 10 * 60_000;
+  const guardianAllows = new Map(); // sha256(chat, folder, task, request) -> { at, reason }
+  const guardianAllowFields = ["source", "kind", "tool", "command", "cwd", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions"];
+  const guardianAllowKey = (approval, folder, task) => typeof approval.thread_id === "string" && approval.thread_id
+    ? createHash("sha256").update(JSON.stringify([approval.thread_id, folder, task, ...guardianAllowFields.map(field => approval[field] ?? null)])).digest("hex")
+    : null;
   const guardianJudgeScope = (approver, approval) => !approver.autobot && approver.role !== "approver" && approver.settings?.auto_decide === true
     && ["allow_once", "reject_once"].every(kind => approval.decisions?.some(option => option.kind === kind))
     && (!Array.isArray(approval.request?.availableDecisions) || ["accept", "decline"].every(decision => approval.request.availableDecisions.includes(decision)));
@@ -4874,12 +5244,24 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     await verifyCurrent();
     if (consent.aborted) return guardianQuotaPaused();
     if (signal.aborted || !task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
+    const allowKey = guardianAllowKey(approval, folder, task);
+    const kept = allowKey ? guardianAllows.get(allowKey) : null;
+    if (kept && now() - kept.at < GUARDIAN_ALLOW_MS) {
+      if (!await samePendingApproval(approval, verifyCurrent)) {
+        return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
+      }
+      if (consent.aborted) return guardianQuotaPaused();
+      return { action: "allow", reason: kept.reason, actor: "guardian", reason_code: "native_guardian", guardianCached: true };
+    }
+    if (kept) guardianAllows.delete(allowKey);
     const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
     if (consent.aborted) return guardianQuotaPaused();
     if (!outcome || !["allow", "deny"].includes(outcome.action)) {
       const result = manual(publicText(outcome?.reason || blocked.reason, 300));
       if (signal?.aborted) return result;
-      if (outcome?.guardianUnavailable === true) return { ...result, guardianUnavailable: true };
+      if (outcome?.guardianUnavailable === true) {
+        return { ...result, guardianUnavailable: true, ...(outcome.guardianTimedOut ? { guardianTimedOut: true } : {}) };
+      }
       if (outcome?.guardianAssessment) return { ...result, guardianAssessment: outcome.guardianAssessment };
       return result;
     }
@@ -4887,7 +5269,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
     }
     if (consent.aborted) return guardianQuotaPaused();
-    return { ...outcome, reason: publicText(outcome.reason, 300) };
+    const reason = publicText(outcome.reason, 300);
+    if (outcome.action === "allow" && allowKey) {
+      guardianAllows.delete(allowKey);
+      guardianAllows.set(allowKey, { at: now(), reason });
+      if (guardianAllows.size > 200) guardianAllows.delete(guardianAllows.keys().next().value);
+    }
+    return { ...outcome, reason };
   }
 
   async function askApproverSteps(input, clock = stepClock(now)) {
@@ -4904,13 +5292,19 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     });
     check();
     if (verdict.quotaBlocked) return verdict;
-    logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true });
+    logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true,
+      ...(verdict.guardianCached ? { cached: true } : {}) });
     if (verdict.action !== "ask") return { ...verdict, guardianSeal: guardianApprovalSeal(approval) };
     if (!judgeScope) return verdict;
     const unsafe = verdict.guardianAssessment === "high-risk";
     if (!unsafe && !verdict.guardianUnavailable && !["low-risk", "risk-unconfirmed"].includes(verdict.guardianAssessment)) return verdict;
     const manual = { ...verdict, guardianWaitForJudge: true };
-    if (!beganWithConsent || !guardianJudgeEnabled()) return manual;
+    if (!beganWithConsent || !guardianJudgeEnabled()) {
+      if (verdict.guardianTimedOut && approval?.approval_id && (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1 < REVIEW_TRIES) {
+        throw new Error(verdict.reason || "Native Codex Guardian timed out.");
+      }
+      return manual;
+    }
     const changed = { ...verdict, reason: "The original request changed or is no longer pending. No new answer was sent." };
     if (!await samePendingApproval(approval, verifyCurrent)) return changed;
     if (!guardianJudgeEnabled()) return manual;
@@ -4927,9 +5321,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let answer;
     try {
       answer = await askCpaApproverSteps({ ...input, decide: true, judge: true, verifyCurrent: verifyExact }, clock, verdict);
-    } catch {
+    } catch (error) {
       check();
       if (stale) return changed;
+      if (approval?.approval_id && (reviewFailures.get(approval.approval_id)?.tries ?? 0) + 1 < REVIEW_TRIES) throw error;
       answer = { action: "deny", unavailable: true, reason_code: "reviewer_unavailable", reason: "Neither Guardian nor the model judge could confirm this command." };
     }
     if (answer === verdict || !guardianJudgeEnabled()) return manual;
@@ -4944,7 +5339,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (beforeReview) return beforeReview;
     const deadline = now() + REVIEW_BUDGET_MS;
     const { baseUrl, key } = connection();
-    const catalog = await models();
+    // The launch catalog kept from earlier reads answers at once (it revalidates behind). Each time
+    // CPA's minute-long cache ran out, a review waited for the whole catalog (37 s on 2026-11-23)
+    // inside its 45 s. With none kept, or one offering this card no reviewer, CPA is read as before;
+    // a kept read still in flight is never waited on (it may be the one that hung).
+    const listed = launchCatalogs.peek(JSON.stringify([null, null]), {});
+    const catalog = listed && reviewerModels(approver, listed.models, listed.hidden ?? [], { judge }).length ? listed : await models();
     clock.mark("catalog");
     check();
     const all = reviewerModels(approver, catalog.models, catalog.hidden ?? [], { judge });
@@ -5048,7 +5448,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       decide ? "Nobody else will look at this request: the outcome must be allow or deny." : "",
       guardianFallback ? `${guardianFallback.guardianUnavailable ? "Native Guardian was unavailable."
         : guardianFallback.guardianAssessment === "low-risk" ? "Native Guardian did not confirm clear authorization."
-          : "Native Guardian did not confirm low risk and clear user authorization."} Review the exact command, its working folder, and the user's request independently. Allow only if the command is low risk and the user's authorization is high; otherwise deny.` : "",
+          : "Native Guardian did not confirm low risk and clear user authorization."} Review the exact command, its working folder, and the user's request independently. ${fallbackJudgeRule()}` : "",
       partial ? "The request above is cut short: it was too long to show whole. Judge from what is shown; deny unless what is shown is enough to tell it is safe." : "",
     ].filter(Boolean).join("\n");
     // The evidence goes last, so the rules above stay first, and it is marked as data: a tool's
@@ -5100,8 +5500,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         // Codex's outcome; an answer in this reviewer's older shape ({action, reason}) is read too.
         let decision = { action: answer?.outcome ?? answer?.action, reason: answer?.rationale ?? answer?.reason };
         if (!["allow", "deny", "ask"].includes(decision.action)) throw new Error(`Command approver ${model} gave no decision`);
-        if (guardianFallback && decision.action !== "deny" && (decision.action !== "allow" || answer.risk_level !== "low" || answer.user_authorization !== "high")) {
-          decision = { action: "deny", reason: "The model judge did not confirm low risk and clear user authorization." };
+        // The judge's own risk and authorization ratings must fit FALLBACK_JUDGE_ALLOWS. Its rationale
+        // stays in the reason: the fixed "did not confirm" line hid why it would not allow.
+        if (guardianFallback && decision.action !== "deny" && !fallbackJudgeAllows({ ...answer, outcome: decision.action })) {
+          decision = { action: "deny", reason: `The model judge did not clear it (${publicText(String(answer?.risk_level ?? "unrated"), 20)} risk, `
+            + `${publicText(String(answer?.user_authorization ?? "unrated"), 20)} authorization): ${publicText(String(decision.reason || "no reason given"), 200)}` };
         }
         clock.mark("model");
         await verifyCurrent();
@@ -5329,7 +5732,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const failed = reviewFailures.get(approval.approval_id);
         if (failed && now() - failed.at < REVIEW_RETRY_MS) continue;
         // The same request twice at once (an agent's parallel calls) is reviewed once: the second
-        // waits for a later pass, which finds the first one's verdict (reviewVerdicts).
+        // waits for a later pass, which finds the first one's verdict (reviewVerdicts, or Guardian's
+        // kept allow in guardianAllows).
         const request = describeRequest(approval);
         if (jobs.some(job => job.request === request) || [...screening.values()].some(job => job.request === request)) continue;
         if (screening.size + jobs.length >= REVIEW_CONCURRENCY) break;
@@ -5357,8 +5761,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         const said = await withinReview(review => {
           const verifyCurrent = async () => {
             review.check();
-            runReads.delete(JSON.stringify([workspaceId, runId]));
-            const latest = await savedNode(workspaceId, runId, job.node.id);
+            const latest = await nodeForAnswer(workspaceId, runId, job.node.id);
             review.check();
             if (latest.mission?.cancelled || latest.mission?.paused || latest.node?.state !== "running"
               || reviewAttempt(latest.mission, latest.node) !== owner) {
@@ -5431,6 +5834,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (prior?.unsent && !resend) return null;
     const sends = resend ? (resend.sends ?? 1) + 1 : 1;
     const exhausted = (reviewFailures.get(approval.approval_id)?.tries ?? 0) >= REVIEW_TRIES;
+    let native = null;
     let advice = approver.autobot
       ? { ...(await reviewAutobot({ config: approver.autobot, approval,
         hardDenial: blocked ? { action: "deny", actor: "safety_rules", reason_code: "blocked_command", reason: safetyReason(denial) } : null,
@@ -5474,6 +5878,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
               && readOnlyInspection(approval.command, await requestFolder(approval, mission), approval.cwd)
             ? { action: "allow", actor: "safety_rules", reason_code: "read_only_inspection", reason: "Read-only inspection inside the workspace folder" }
+            // The native reviewer: writes inside the folder and the scripts a command runs, read and
+            // judged here with no model, so no quota (nativeCommandReview).
+            : approval.kind === "command" && !/^mcp__/.test(String(approval.tool ?? ""))
+              && (native = await nativeCommandReview(approval.command, await requestFolder(approval, mission), approval.cwd))
+            ? { action: "allow", actor: "safety_rules", reason_code: "native_review", reason: native }
             // Unresolved, so it waits for the person: a plain "ask" is answered for them after AUTO_ANSWER_MS.
             : !judges && denialStreak(approval.thread_id) >= REVIEW_DENIAL_STREAK
             ? { action: "ask", unresolved: true, reason: `The reviewer denied this chat's last ${denialStreak(approval.thread_id)} requests, so this one waits for you instead of another review` }
@@ -5868,11 +6277,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
     if (retryCancelled(mission.workspace_id, mission.id)) return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
-    const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry") ?? mission.nodes.find(entry => entry.state === "held");
-    const error = String(node?.receipt?.error || "");
+    const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry")
+      ?? mission.nodes.find(entry => entry.state === "held")
+      ?? mission.nodes.find(entry => entry.state === "pending" && (entry.history?.length ?? 0) > 0);
+    const error = String((node?.state === "pending" ? node.history?.at(-1)?.error : node?.receipt?.error) || "");
+    const attempt = node?.state === "pending" ? (node.history?.length ?? 0) : (node?.history?.length ?? 0) + 1;
     return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error) && !ROUTE_REFUSED.test(error)
       && !DRIVER_INCOMPATIBLE.test(error)
-      && !pickedModelSince(mission) && (node.history?.length ?? 0) + 1 <= AUTO_RETRY_LIMIT;
+      && !pickedModelSince(mission) && attempt <= AUTO_RETRY_LIMIT;
   }
   /**
    * The model the person picked for the chat's goal (chat_goal "route") since this single-model round
@@ -6143,6 +6555,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // The loop's own run reads may be RUN_LOOP_READ_FRESH_MS old: any write through requestHeadless
     // drops them, so what the app changes is read on the next pass all the same.
     const loopRead = { freshMs: RUN_LOOP_READ_FRESH_MS };
+    // The run as this loop (or the one before it, restarted) last read it, and whether the pass that
+    // failed was launching a card: a loop that fails while a card is still at work starts again (see
+    // the catch below), even when its first read after a restart fails too.
+    let seen = state.seen ?? null;
+    let launching = false;
     state.driving = true;
     state.settled = false;
     try {
@@ -6154,9 +6571,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         let saved = await runs({ workspaceId, runId }, loopRead);
         let mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
         if (!mission) throw new Error("Saved mission is unavailable");
+        seen = state.seen = mission;
         if (!Number.isInteger(saved.worker_capacity?.[runId])) throw new Error("The installed orchestrator doesn't report worker capacity. Update the runtime.");
         state.socketRestarts = 0;
         state.timeoutRestarts = 0;
+        state.errorRestarts = 0;
         // Start every ready Native Codex card's harness together first. Launching a Codex process
         // can take minutes on a slow disk; done one card at a time, a sibling worker waited for
         // it and the workers ran one after another instead of in parallel. The launches below
@@ -6169,6 +6588,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           const ready = mission.nodes.find(node => node.state === "pending" && parentsReady(mission, node) && (node.role !== "worker" || capacity > 0));
           if (!ready) break;
           let sent;
+          launching = true;
           try {
             if (externalAgent(ready)) sent = await dispatchExternal(workspaceId, runId, ready, mission.revision, true, mission.execution_mode === "single");
             else {
@@ -6195,15 +6615,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             const next = fresh.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
             // Recover only a persisted failed launch. An unknown send is never replayed.
             if (!next?.nodes.some(node => node.id === ready.id && node.state === "held")) throw error;
-            saved = fresh; mission = next; continue;
+            saved = fresh; mission = next; seen = state.seen = mission; launching = false; continue;
           }
+          launching = false;
           if (sent.waiting) { state.detail = "Waiting for a worker slot or current graph revision"; break; }
           saved = await runs({ workspaceId, runId });
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
+          seen = state.seen = mission;
         }
         if (state.stopped) return;
-        const active = mission.nodes.filter(node => node.state === "running");
+        const active = mission.nodes.filter(node => node.state === "running"
+          || (node.state === "reserved" && externalAgent(node) && !dispatching.has(nodeKey(workspaceId, runId, node.id))));
         for (const [id] of observing) if (!active.some(node => node.id === id)) observing.delete(id);
         for (const [id] of quietUntil) if (!active.some(node => node.id === id)) quietUntil.delete(id);
         for (const [id] of observationState) if (!active.some(node => node.id === id)) observationState.delete(id);
@@ -6293,6 +6716,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
           saved = await runs({ workspaceId, runId }, loopRead);
           mission = saved.runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
           if (!mission) throw new Error("Saved mission is unavailable");
+          seen = state.seen = mission;
           // A retry needs a turn: a grant that is gone, or spent (a single chat's one turn was the
           // launch that failed), gets a fresh one through startRun. Relaunching on the spent grant
           // was refused, and the loop ended with the step still "held" and "Retry automatically" on.
@@ -6301,8 +6725,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
             // Taken over by a person's message meanwhile: that send retires the run instead.
             if (state.stopped) return;
             setTimeout(() => {
-              void startRun({ workspaceId, runId, executable }).catch(error => logger?.warn?.("ao.retry_start_failed",
-                { message: publicText(error?.message || error, 200) }));
+              void startRun({ workspaceId, runId, executable }).catch(error => {
+                logger?.warn?.("ao.retry_start_failed", { message: publicText(error?.message || error, 200) });
+                const current = backgroundRuns.get(runKey(workspaceId, runId)) ?? state;
+                if (!current.stopped) scheduleAutoRetry(workspaceId, runId, executable, current);
+              });
             }, 0);
             return;
           }
@@ -6396,6 +6823,30 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); }, false);
         return;
       }
+      // A pass that failed while a card is still at work (or because the local service was too busy
+      // to take the call): the card's agent goes on, and only this loop reviews its requests and
+      // notices its turn end. Ending here left it "held" with nothing watching, and "Retry
+      // automatically" passes over a card still running. Seen live 2026-11-23: four chats' loops
+      // ended in a burst of local load while their agents kept working, and their requests sat
+      // unreviewed for 3.5 hours, until the person opened each chat. The loop starts again after a
+      // pause (2 s, doubling to 60 s) for as long as the card works. A failed launch still stops it
+      // (its card's error is the person's to see), and so does a run that is gone.
+      const busy = error?.code === "HEADLESS_QUEUE_FULL" || /queue is full/i.test(message);
+      const working = !launching && Boolean(seen) && !seen.cancelled
+        && seen.nodes.some(node => ["running", "reserved"].includes(node.state)) && !DRIVE_FINAL.test(message);
+      if (!state.stopped && (busy || working)) {
+        const tries = state.errorRestarts ?? 0;
+        state.errorRestarts = tries + 1;
+        const delay = Math.min(60_000, 2_000 * 2 ** Math.min(tries, 5));
+        state.status = "running";
+        state.detail = "";
+        state.warning = `${busy ? "The app was too busy to check this chat" : "Checking this chat failed"} (${publicText(message, 80)}). The chat keeps going by itself.`;
+        state.warningAt = now();
+        reportRun(workspaceId, runId, state, null);
+        logger?.warn?.("ao.drive_error_retry", { attempt: state.errorRestarts, busy, message: publicText(message, 120) });
+        backOffDrive(workspaceId, runId, delay, () => { if (!state.stopped && !autoRetryDisposed) void driveRun(workspaceId, runId, executable, state); });
+        return;
+      }
       state.status = "held"; state.detail = publicText(error?.message || error, 500);
       // With automatic retry on, the run is tried again and has not ended; without it, it has.
       state.settled = !chatPreferences.get().autoRetry;
@@ -6453,7 +6904,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   function scheduleAutoRetry(workspaceId, runId, executable, state, tries = 0) {
     if (!chatPreferences.get().autoRetry) return;
     const key = runKey(workspaceId, runId);
-    const current = () => !autoRetryDisposed && !state.stopped && backgroundRuns.get(key) === state;
+    const current = () => {
+      const active = backgroundRuns.get(key);
+      return !autoRetryDisposed && !state.stopped && (active === state || (active?.status === "failed" && !active.stopped));
+    };
     const mission = async () => (await runs({ workspaceId, runId })).runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
     const later = (ms, work) => {
       const timer = setTimer(() => { autoRetryTimers.delete(timer); work(); }, ms);
@@ -6465,24 +6919,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // the same moment and then waited for a click with "Retry automatically" on (2026-10-31).
     const failedTry = (error) => {
       logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200), tries: tries + 1 });
-      if (current() && tries + 1 < AUTO_RETRY_LIMIT) later(autoRetryPause(tries + 1), () => scheduleAutoRetry(workspaceId, runId, executable, state, tries + 1));
+      if (current() && tries + 1 < AUTO_RETRY_LIMIT) {
+        later(autoRetryPause(tries + 1), () => scheduleAutoRetry(workspaceId, runId, executable, backgroundRuns.get(key) ?? state, tries + 1));
+      }
     };
     void (async () => {
       const failed = await mission();
       if (!current() || !autoRetryAllowed(failed)) return;
       // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second
       // (2 s and 5 s for a failure that never reached the provider).
-      const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry") ?? failed.nodes.find(node => node.state === "held");
-      const attempt = (held?.history?.length ?? 0) + 1;
+      const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry")
+        ?? failed.nodes.find(node => node.state === "held")
+        ?? failed.nodes.find(node => node.state === "pending" && (node.history?.length ?? 0) > 0);
+      const lastReceipt = held?.state === "pending" ? held.history?.at(-1) : held?.receipt;
+      const attempt = Math.max(1, held?.state === "pending" ? (held.history?.length ?? 0) : (held?.history?.length ?? 0) + 1);
       // Counted from when the step failed, as autoRetryStep counts it.
-      const failedAt = Number(held?.receipt?.finished_at_ms);
+      const failedAt = Number(lastReceipt?.finished_at_ms);
       const since = Number.isFinite(failedAt) && failedAt > 0 ? Math.max(0, now() - Math.min(failedAt, now())) : 0;
-      later(Math.max(0, autoRetryPause(attempt, localFailure(String(held?.receipt?.error || ""))) - since), () => {
+      later(Math.max(0, autoRetryPause(attempt, localFailure(String(lastReceipt?.error || ""))) - since), () => {
         void (async () => {
           const latest = await mission();
           if (!current() || !autoRetryAllowed(latest)) return;
           logger?.info?.("ao.auto_retry_restart", { attempt });
-          await startRun({ workspaceId, runId, executable });
+          await startRun({ workspaceId, runId, executable }, { fromAutoRetry: true });
         })().catch(failedTry);
       });
     })().catch(failedTry);
@@ -6493,6 +6952,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // A failed local connection, not a failed run (see driveRun).
   const LOCAL_SOCKET_FAILURE = /EADDRINUSE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOBUFS|socket hang up|other side closed|fetch failed/i;
   const SOCKET_RESTART_LIMIT = 10;
+  // A run loop's failures that starting it again cannot cure: the run is gone, or the installed
+  // orchestrator cannot drive it.
+  const DRIVE_FINAL = /Saved mission is unavailable|AO run not found|doesn't report worker capacity/i;
   /** Whether a run's background grant can start nothing more: every turn started, or its hour over. */
   function grantSpent(grant) {
     return Boolean(grant) && (grant.turns_started >= grant.max_turns || Date.now() >= grant.expires_at_ms);
@@ -6502,7 +6964,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * `known`: the run as the caller just made it (chat_send's new run), so the start does not read
    * it again first. Only this app's own callers pass it; the renderer's start_run cannot.
    */
-  async function startRun(input = {}, { known = null } = {}) {
+  async function startRun(input = {}, { known = null, fromAutoRetry = false, retryState = null } = {}) {
     if (!input || typeof input !== "object" || Array.isArray(input)
       || Object.keys(input).some((key) => !["workspaceId", "runId", "executable"].includes(key))) {
       throw new Error("Renderer credential or unsupported AO start field was refused");
@@ -6513,10 +6975,14 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const selectedExecutable = codexExecutable(executable);
     const key = runKey(id, run);
     const existing = backgroundRuns.get(key);
-    if (existing?.starting || existing?.driving || existing?.status === "running") {
+    if (existing && existing !== retryState && (existing.starting || existing.driving || existing.status === "running")) {
       return { ok: true, started: false, status: existing.status };
     }
-    const state = { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
+    if (retryState && (retryState.stopped || existing !== retryState)) {
+      return { ok: true, started: false, status: existing?.status ?? "held" };
+    }
+    const state = retryState ?? { status: "starting", starting: true, detail: "Awaiting local approval", recoveryDecisions: existing?.recoveryDecisions };
+    state.starting = true;
     backgroundRuns.set(key, state);
     try {
       // A run the caller has just made, and nothing has touched since, is not read again.
@@ -6587,11 +7053,33 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       void driveRun(id, run, selectedExecutable, state);
       return { ok: true, started: true, status: "running" };
     } catch (error) {
+      if (!fromAutoRetry && !autoRetryDisposed && !state.stopped && LOCAL_TIMEOUT.test(`${error?.message ?? error}`)) {
+        const message = `${error?.message ?? error}`;
+        const restarts = state.timeoutRestarts ?? 0;
+        state.timeoutRestarts = restarts + 1;
+        state.timeouts = (state.timeouts ?? 0) + 1;
+        const delay = Math.min(60_000, 2_000 * 2 ** Math.min(restarts, 5));
+        state.status = "running";
+        state.starting = false;
+        state.detail = "";
+        state.settled = false;
+        state.warning = `A tool call timed out (${publicText(message, 80)})${state.timeouts > 1 ? `, ${state.timeouts} times` : ""}. The chat keeps going by itself.`;
+        state.warningAt = now();
+        reportRun(id, run, state, null);
+        logger?.warn?.("ao.start_timeout_retry", { attempt: state.timeoutRestarts, message: publicText(message, 120) });
+        backOffDrive(id, run, delay, () => {
+          if (!state.stopped && !autoRetryDisposed) {
+            void startRun({ workspaceId: id, runId: run, executable }, { retryState: state }).catch(() => undefined);
+          }
+        });
+        return { ok: true, started: true, status: "running" };
+      }
       state.status = "failed";
       state.starting = false;
       state.detail = publicText(error?.message || error, 500);
-      state.settled = true;
+      state.settled = !chatPreferences.get().autoRetry;
       reportRun(id, run, state, null, "error");
+      if (!fromAutoRetry && !state.stopped) scheduleAutoRetry(id, run, selectedExecutable, state);
       throw error;
     }
   }
@@ -7712,11 +8200,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   // The next round runs as the last one did: the same Single model route, or the chat's team.
   const SINGLE_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
   /** How a chat's next turn the app sends itself runs: on `route` when one was picked, else as `previous` did (its Single route, or the chat's team). */
-  const followUpSelection = (previous, route = null) => (route && typeof route === "object"
-    ? { executionMode: "single", singleRoute: { ...route } }
-    : previous?.execution_mode === "single" && previous.nodes?.[0]?.route
-      ? { executionMode: "single", singleRoute: Object.fromEntries(Object.entries(previous.nodes[0].route).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)) }
-      : {});
+  const followUpSelection = (previous, route = null) => {
+    if (route && typeof route === "object") return { executionMode: "single", singleRoute: { ...route } };
+    if (previous?.execution_mode !== "single" || !previous.nodes?.[0]?.route) return {};
+    const effective = effectiveCardRoute(previous.nodes[0],
+      previous.workspace_id && previous.project_id ? { workspaceId: previous.workspace_id, taskId: previous.project_id } : null);
+    return {
+      executionMode: "single",
+      singleRoute: Object.fromEntries(Object.entries(effective).filter(([name, value]) => SINGLE_ROUTE_FIELDS.includes(name) && value !== undefined && value !== null)),
+    };
+  };
   // Chats whose next goal round is being started. A resume and a settling round (or two resumes)
   // both passed the "chat is working" check before either round existed, so the chat got the same
   // round message twice and ran two turns at once on one agent: one failed "restoration could not
@@ -7812,8 +8305,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Another turn started first (a wakeup, a queued message; see chatSend): that turn is the
       // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled. A
       // run that only reads busy (no newer turn) is tried again shortly (deferGoalRound).
-      if (/still running/.test(message)) {
-        deferGoalRound(id, task, previous, "still_running");
+      if (/still running|Workflow revision changed|AO (?:run|board) revision/i.test(message)
+        || LOCAL_TIMEOUT.test(message) || LOCAL_SOCKET_FAILURE.test(message)
+        || error?.code === "HEADLESS_QUEUE_FULL" || /queue is full/i.test(message)) {
+        deferGoalRound(id, task, previous, /still running/.test(message) ? "still_running" : "transient_timeout");
         return;
       }
       // A full chat says why it could not compact (the note was only "use /compact" before).
@@ -7935,7 +8430,12 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         if (!previous || latest?.id !== previous.id || !runSettled(previous) || chatWorking(workspaceId, task, saved.runs)) return;
         return goalAfterRun(workspaceId, retry.runId, "finished");
       });
-      void next.catch((error) => { logger?.warn?.("ao.goal_retry_failed", { message: publicText(error?.message || error, 200) }); });
+      void next.catch((error) => {
+        logger?.warn?.("ao.goal_retry_failed", { message: publicText(error?.message || error, 200) });
+        if (still() && !goals.get(workspaceId, task)?.retry) {
+          goalLater(workspaceId, task, GOAL_RETRY_DELAY_MS, retry.runId, Boolean(retry.check));
+        }
+      });
     }, Math.max(0, retry.at - now()));
     timer?.unref?.();
     goalTimers.set(key, timer);
@@ -9454,7 +9954,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * `maxChars` asks for a shorter one, and `instructions` are the person's own (/compact focus on
    * …), added to the prompt as Claude Code adds them.
    */
-  async function handoffSummary(text, { maxChars = 0, instructions = "" } = {}) {
+  async function handoffSummary(text, { maxChars = 0, instructions = "", redact = handoffRedactionEnabled() } = {}) {
+    const safeText = redact ? redactHandoffCredentials(text) : text;
+    const focus = redact ? redactHandoffCredentials(instructions) : instructions;
     const { baseUrl, key } = connection();
     const catalog = await models();
     // A summary reads a whole conversation: never on the person's Codex quota (freeModels).
@@ -9462,11 +9964,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!model) throw new Error("CPA has no model outside the Codex quota for a summary");
     const prompt = [COMPACT_PROMPT,
       ...(maxChars ? [`Keep the summary under ${maxChars.toLocaleString("en-US")} characters.`] : []),
-      ...(instructions ? [`Additional instructions from the user:\n${instructions}`] : [])].join("\n\n");
+      ...(focus ? [`Additional instructions from the user:\n${focus}`] : []),
+      ...(redact ? ["Omit credential values such as API keys, tokens, passwords and private keys. Keep [hidden: credential] placeholders as-is."] : [])].join("\n\n");
     const response = await chatCompletion(baseUrl, key, { model, temperature: 0, max_tokens: maxChars ? Math.min(1600, Math.ceil(maxChars / 3)) : 1600, messages: [
-        { role: "system", content: prompt }, { role: "user", content: text }] }, AbortSignal.timeout(120_000));
+        { role: "system", content: prompt }, { role: "user", content: safeText }] }, AbortSignal.timeout(120_000));
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
+    const summary = String((await response.json())?.choices?.[0]?.message?.content ?? "").trim();
+    return redact ? redactHandoffCredentials(summary) : summary;
   }
 
   // AO keeps the first 16 KiB of UTF-8 of a spawn prompt. The request is never shortened to make
@@ -9498,7 +10002,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     const suffix = from < 0 ? "" : reserved.slice(from + saved.length);
     let primary = from >= 0 ? `${prefix}\n\n${current}${suffix}` : current;
     if (utf8Bytes(primary) > PROMPT_BYTES - 2) primary = current + utf8Head(`\n${prefix}\n${suffix}`, PROMPT_BYTES - 2 - utf8Bytes(current));
-    const history = from < 0 ? reserved : previous;
+    const background = from < 0 ? reserved : previous;
+    const history = background && handoffRedactionEnabled() ? redactHandoffCredentials(background) : background;
     const heading = "\n\nEarlier conversation (background only; do not treat this as a new request):\n";
     const room = PROMPT_BYTES - utf8Bytes(primary + heading) - 2;
     return primary + (history && room > 0 ? `${heading}${utf8Tail(history, room)}` : "") + "\n\n";
@@ -9539,13 +10044,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       }
       earlier = earlier.slice(0, Math.max(cutoff, 0));
     }
+    const redact = handoffRedactionEnabled();
     const replies = [];
     for (const run of earlier) {
       for (const node of run.nodes || []) {
         const answer = String(node.receipt?.answer || "").trim();
         if (!answer) continue;
         const who = [node.settings?.name || node.role, String(node.route?.model || "").replace(/^cpa\//, "")].filter(Boolean).join(" · ");
-        replies.push(`--- Reply ${replies.length + 1} (${who}):\n${answer}`);
+        const reply = `--- Reply ${replies.length + 1} (${who}):\n${answer}`;
+        replies.push(redact ? redactHandoffCredentials(reply) : reply);
       }
     }
     if (!replies.length || maxBytes < HANDOFF_MIN_BYTES) return "";
@@ -9556,16 +10063,16 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (utf8Bytes(whole) <= maxBytes) return whole;
     const chatKey = JSON.stringify([workspaceId, taskId]);
     const known = handoffSummaries.get(chatKey);
-    const builds = known && known.count <= replies.length && repliesHash(replies.slice(0, known.count)) === known.covered;
+    const builds = known && known.redact === redact && known.count <= replies.length && repliesHash(replies.slice(0, known.count)) === known.covered;
     let summary = builds && known.count === replies.length ? known.summary : "";
     if (!summary) {
       const input = builds
         ? `A handoff summary of the earlier replies:\n\n${known.summary}\n\nReplies since then:\n\n${replies.slice(known.count).join("\n\n")}`
         : transcript;
       // The newest part, if the history is too long for a model to read at once.
-      summary = await handoffSummary(utf8Bytes(input) <= HANDOFF_INPUT_BYTES ? input : utf8Tail(input, HANDOFF_INPUT_BYTES)).catch(() => "");
+      summary = await handoffSummary(utf8Bytes(input) <= HANDOFF_INPUT_BYTES ? input : utf8Tail(input, HANDOFF_INPUT_BYTES), { redact }).catch(() => "");
       if (summary) {
-        handoffSummaries.set(chatKey, { covered: repliesHash(replies), count: replies.length, summary });
+        handoffSummaries.set(chatKey, { covered: repliesHash(replies), count: replies.length, summary, redact });
         if (handoffSummaries.size > 100) handoffSummaries.delete(handoffSummaries.keys().next().value);
       }
     }
@@ -9675,7 +10182,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   const rolloverRoom = (head, reserve) => Math.max(0, Math.min(SUMMARY_BYTES, BOARD_TEXT_BYTES - utf8Bytes(head) - reserve));
   /** The record kept as it was, its newest part within `room` bytes: no model needed, so it cannot fail. */
   function keptRecord(before, room) {
-    const plain = unmarkedRecord(withoutAutomaticChatPrompts(before)).trim();
+    const history = unmarkedRecord(withoutAutomaticChatPrompts(before)).trim();
+    const plain = handoffRedactionEnabled() ? redactHandoffCredentials(history) : history;
     if (utf8Bytes(plain) <= room) return plain;
     return room > utf8Bytes(ROLLED_NOTE) ? `${ROLLED_NOTE}${utf8Tail(plain, room - utf8Bytes(ROLLED_NOTE))}` : utf8Tail(plain, room);
   }
@@ -10542,8 +11050,18 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * AO's spawn arguments for a subagent (subagents.cjs) on `route`, as a single chat card's: its
    * model through CPA's gateway, effort and window honoured, a plain session.
    */
-  const subagentLaunchArgs = (workspaceId, route, name) => aoLaunchArgs(clean(workspaceId, 128),
-    { id: "subagent", role: "worker", route, settings: { name } }, true);
+  const subagentLaunchArgs = (workspaceId, route, name) => {
+    const agent = externalAgent({ route });
+    const model = String(route?.model ?? "");
+    const viaCpa = model.startsWith(CPA_MODEL_PREFIX);
+    const slash = model.indexOf("/");
+    const unqualifiedOpenCode = agent === "opencode" && !viaCpa
+      && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
+    const windowed = GATEWAY_AGENTS.has(agent) && agent !== "agy" && agent !== "unreal-agent"
+      && (agent !== "pi" || viaCpa) && !unqualifiedOpenCode;
+    return aoLaunchArgs(clean(workspaceId, 128),
+      { id: "subagent", role: "worker", route, settings: { name } }, true, windowed ? windowLimit(route) : null);
+  };
   /**
    * A saved team run as a subagent (subagents.cjs): the team works on the task as a chat of its own
    * (chat_send in team mode, started in the background as a /goal round is), and its closing cards'
@@ -10613,7 +11131,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Resolves once every deleted-message, archive and unsent-draft change so far is on disk (saved off the main thread too). */
   const chatEditsSaved = () => Promise.all([chatEdits.saved(), archive.saved(), chatDrafts.saved()]);
   return Object.freeze({ call, configureChatAutobot, restoreSchedules, dispose, goalsSaved, schedulesSaved, wakeupsSaved, chatEditsSaved, startGoalWatch, watchGoals,
-    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
+    startAutonomousTurnWatch, adoptAutonomousTurns, knownModelsSaved, goalAfterRun, queueAfterRun, scoreAfterRun, scheduleWakeup, registerCommandWatch, registerCommandMonitor, chatInputCheck, goalTool, chatTitleTool, chatRedactTool, chatMoveTool, moveAfterRun: applyMove, reviewToolCall, sessionModel, loopAfterRun, chatScheduleAfterRun, routineCommand, readOnlyInspection, nativeCommandReview, routineAppTool, githubRead, routineAppCommand, attachedFileRead, inAllowedApp, blockedRequest, recommendedAnswer, subagentLaunchArgs, subagentTeams, restoreRuns, resumeInterrupted, stopTracking });
 }
 
-module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };
+module.exports = { QUOTA_EXHAUSTED, quotaResets, REQUEST_REFUSED, refusedReason, agentApiError, ROUTE_REFUSED, DRIVER_INCOMPATIBLE, staleWhileRevalidate, createAgentOrchestratorWorkflow, delayToMilliseconds, reviewScriptExcerpts, FALLBACK_JUDGE_ALLOWS, fallbackJudgeAllows, fallbackJudgeRule, clausesFrom, resolveAoNativeConnection, findInstalledCodexExecutable, codexCliExecutable, aoWebCatalogForModel };

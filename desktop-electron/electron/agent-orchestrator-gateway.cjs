@@ -20,7 +20,7 @@ async function readJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
-function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, desktopRequest }) {
+function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, desktopRequest, beginMutation = () => () => {} }) {
   const bootstrap = crypto.randomBytes(32).toString("hex");
   const sessionKey = crypto.randomBytes(32).toString("hex");
   const cookieName = `ao_${crypto.randomBytes(8).toString("hex")}`;
@@ -75,6 +75,7 @@ function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, d
     });
     request.on("aborted", () => upstream.destroy());
     if (body) upstream.end(body); else request.pipe(upstream);
+    return upstream;
   }
 
   const server = http.createServer(async (request, response) => {
@@ -105,7 +106,14 @@ function createAgentOrchestratorGateway({ rendererRoot, daemonPort, getStatus, d
           const input = await readJson(request);
           body = Buffer.from(JSON.stringify(input));
         }
-        proxy(request, response, body);
+        const release = body ? beginMutation() : null;
+        try {
+          const upstream = proxy(request, response, body);
+          if (release) upstream.once("close", release);
+        } catch (error) {
+          release?.();
+          throw error;
+        }
         return;
       }
       if (request.method !== "GET" && request.method !== "HEAD") { json(response, 405, { error: "Method not allowed" }); return; }

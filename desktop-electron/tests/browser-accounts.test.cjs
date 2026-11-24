@@ -5,7 +5,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const { createBrowserAccounts: openBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID, MAX_ACCOUNTS } = require("../electron/browser-accounts.cjs");
+const { createBrowserAccounts: openBrowserAccounts, signedInFromCookies, takesNewSessions, FIRST_ACCOUNT_ID, MAX_ACCOUNTS } = require("../electron/browser-accounts.cjs");
+const { CHATGPT_SIGNED_OUT } = require("../electron/mcp-connector-setup.cjs");
 const { browserAccountPartition, isBrowserAccountPartition } = require("../electron/profile.cjs");
 const { BrowserHost, makeTabRoom } = require("../electron/browser-host.cjs");
 
@@ -18,6 +19,57 @@ function createBrowserAccounts(options) {
   opened.add(accounts);
   return accounts;
 }
+
+// Live 2026-11-23: six of seven accounts were signed out or had their sign-in rejected by ChatGPT, yet
+// all still took new sessions, so "the least busy account" could pick one that cannot answer.
+test("the least busy account is chosen only among accounts that can take a session", () => {
+  const account = (fields) => ({ id: "a", acceptsNewSessions: true, signedIn: true, connector: null, ...fields });
+  assert.equal(takesNewSessions(account()), true);
+  assert.equal(takesNewSessions(account({ signedIn: null })), true, "a sign-in not read yet still counts");
+  assert.equal(takesNewSessions(account({ acceptsNewSessions: false })), false);
+  assert.equal(takesNewSessions(account({ signedIn: false })), false, "no ChatGPT sign-in in its partition");
+  assert.equal(takesNewSessions(account({ connector: { okAt: 1, error: CHATGPT_SIGNED_OUT, errorAt: 2 } })), false,
+    "ChatGPT rejected its sign-in (the connector setup's own words)");
+  assert.equal(takesNewSessions(account({ connector: { okAt: 1, error: "ChatGPT is showing a Cloudflare security check for this account.", errorAt: 2 } })), true,
+    "a security check a visible tab can pass does not take the account out");
+  assert.equal(takesNewSessions(account({ connector: { okAt: 3, error: null, errorAt: null } })), true, "a bound connector clears the rejection");
+  assert.equal(takesNewSessions(null), false);
+});
+
+test("main balances new sessions with the sign-in-aware status and rule", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const body = source.slice(source.indexOf("function newSessionAccount()"), source.indexOf("async function routeIdleAccountPartition"));
+  assert.match(body, /browserAccountsStatus\(\)/, "the service status carries each account's signedIn");
+  assert.match(body, /accounts\.filter\(takesNewSessions\)/);
+});
+
+// Live 2026-11-23: "The account in use" was an account whose sign-in ChatGPT rejected on 11-21, so every
+// new session started there and failed while another account was signed in.
+test("the account in use that cannot take a session gives way to one that can; Always <account> stays", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const body = source.slice(source.indexOf("function newSessionAccount()"), source.indexOf("async function routeIdleAccountPartition"));
+  const rejected = { okAt: 1, error: CHATGPT_SIGNED_OUT, errorAt: 2 };
+  const pick = ({ newSessions, activeId = "dead", accounts, tabs = {} }) => {
+    const context = {
+      takesNewSessions, Date,
+      browserAccountsStatus: () => ({ accounts, activeId, settings: { newSessions } }),
+      browserAccountExists: id => accounts.some(entry => entry.id === id),
+      browserAccounts: { partitionOf: id => `persist:${id}` },
+      browserHost: { tabCount: partition => tabs[partition.slice("persist:".length)] ?? 0 },
+      threadAccounts: { list: () => [] },
+    };
+    vm.runInNewContext(`${body}\nresult = newSessionAccount();`, context);
+    return context.result;
+  };
+  const account = (id, fields = {}) => ({ id, acceptsNewSessions: true, signedIn: true, connector: null, ...fields });
+  const live = [account("dead", { connector: rejected }), account("busy"), account("quiet")];
+  assert.equal(pick({ newSessions: "active", accounts: live, tabs: { busy: 2 } }), "quiet", "a rejected account in use gives way to the least busy live one");
+  assert.equal(pick({ newSessions: "active", accounts: [account("dead", { signedIn: false }), account("busy")] }), "busy", "a signed-out account in use gives way too");
+  assert.equal(pick({ newSessions: "active", activeId: "busy", accounts: live, tabs: { busy: 2 } }), "busy", "a live account in use keeps the session");
+  assert.equal(pick({ newSessions: "active", accounts: [account("dead", { connector: rejected })] }), "dead", "with no live account it stays where it was");
+  assert.equal(pick({ newSessions: "dead", accounts: live }), "dead", "Always <account> is kept as chosen");
+  assert.equal(pick({ newSessions: "balance", activeId: "busy", accounts: live, tabs: { busy: 2 } }), "quiet", "balance is unchanged");
+});
 
 // Test files stay in the repo's aiTemp, never the system temp folder on C: (AGENTS.md).
 function tempRoot(t) {

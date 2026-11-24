@@ -1824,11 +1824,11 @@ test("a live helper retains exclusive ownership of its running turn", async () =
     interactionMode: "automatic",
   };
   await assert.rejects(
-    BrowserHost.prototype.beginTurn.call({
+    BrowserHost.prototype.beginTurn.call(Object.assign(Object.create(BrowserHost.prototype), {
       manualOperation: null,
       turnTabs: new Map([[tab.id, tab]]),
       userCancelledTurnOwners: new Map(),
-    }, tab.traceId, false, process.pid + 1),
+    }), tab.traceId, false, process.pid + 1),
     /owned by another helper process/,
   );
 });
@@ -2558,6 +2558,99 @@ test("an operation that is not stoppable keeps the browser, and one that will no
   // The stop's own timer never holds the app open (unref), so this test holds the loop meanwhile.
   const keepAlive = setTimeout(() => {}, 5_000);
   await assert.rejects(host.stopOperationFor("ChatGPT logout", { timeoutMs: 20 }), /MCP connector creation did not stop in time/);
+  clearTimeout(keepAlive);
+});
+
+// The person chose background MCP checks (2026-11-24). A check holds the browser 30-50 s per account,
+// and a chat turn or the helper's session check that came meanwhile failed as "ChatGPT browser is busy
+// with MCP connector creation". A background check now stops for them; a Connect the person asked for
+// keeps the browser as before.
+const backgroundCheck = (host, step = () => new Promise(() => {})) => host.withManualOperation("MCP connector creation", async () => {
+  const signal = host.operationSignal();
+  const closed = new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("window closed")), { once: true }));
+  return await Promise.race([step(signal), closed]);
+}, { preserveSurface: true, stoppable: true, yieldsToChats: true });
+
+test("a background MCP check stops for a chat turn or session check; a Connect the person asked for does not", async () => {
+  const host = operationFixture();
+  const started = [];
+  host.startTurnTab = async (traceId) => { started.push([traceId, host.manualOperation, host.chatStarting()]); return { tabId: traceId }; };
+  host.runSessionInspection = async () => { started.push(["inspect", host.manualOperation]); return { authenticated: true }; };
+
+  let check = backgroundCheck(host).catch(error => error.message);
+  while (!host.manualOperation) await nextTurn();
+  assert.equal(host.manualOperationYieldsToChats, true);
+  assert.deepEqual(await host.beginTurn("trace-1", false, 1, "key"), { tabId: "trace-1" });
+  assert.equal(await check, "window closed");
+  assert.deepEqual(started, [["trace-1", null, true]], "the turn starts once the check let go, still marked as starting");
+  assert.equal(host.chatStarting(), false);
+  assert.equal(host.manualOperationYieldsToChats, false);
+
+  check = backgroundCheck(host).catch(error => error.message);
+  while (!host.manualOperation) await nextTurn();
+  assert.deepEqual(await host.inspectSession(false), { authenticated: true });
+  assert.equal(await check, "window closed");
+  assert.deepEqual(started[1], ["inspect", "session inspection"]);
+
+  // A Connect the person asked for: no yieldsToChats. The turn keeps today's busy error and the Connect runs on.
+  let finish;
+  const connect = host.withManualOperation("MCP connector creation", () => new Promise(resolve => { finish = resolve; }),
+    { preserveSurface: true, stoppable: true });
+  while (!host.manualOperation) await nextTurn();
+  assert.equal(host.manualOperationYieldsToChats, false);
+  delete host.startTurnTab;
+  await assert.rejects(host.beginTurn("trace-2", false, 1, "key"), /busy with MCP connector creation/);
+  assert.equal(host.operationSignal().aborted, false, "the person's Connect is not stopped");
+  assert.equal(host.chatStarting(), false);
+  finish("connected");
+  assert.equal(await connect, "connected");
+});
+
+test("no background check takes the browser while a chat is taking it", async () => {
+  const host = operationFixture();
+  let release;
+  host.startTurnTab = () => new Promise(resolve => { release = resolve; });
+  const turn = host.beginTurn("trace", false, 1, "key");
+  while (!release) await nextTurn();
+  assert.equal(host.chatStarting(), true);
+  await assert.rejects(backgroundCheck(host, async () => "ran"), /starting a chat/);
+  assert.equal(host.manualOperation, null);
+  release({ tabId: "trace" });
+  assert.deepEqual(await turn, { tabId: "trace" });
+  assert.equal(host.chatStarting(), false);
+  assert.equal(await backgroundCheck(host, async () => "ran"), "ran");
+
+  host.startTurnTab = async () => { throw new Error("tab failed"); };
+  await assert.rejects(host.beginTurn("trace", false, 1, "key"), /tab failed/);
+  assert.equal(host.chatStarting(), false, "a start that failed is no longer starting");
+});
+
+test("a stop waits for a step that is changing ChatGPT, then closes the check", async () => {
+  const host = operationFixture();
+  const order = [];
+  let finishCreate;
+  const check = backgroundCheck(host, async (signal) => {
+    signal.addEventListener("abort", () => order.push("abort"), { once: true });
+    await host.whileChangingChatGpt(() => new Promise(resolve => { finishCreate = () => { order.push("created"); resolve(); }; }));
+    return await new Promise(() => {});
+  }).catch(error => error.message);
+  while (!finishCreate) await nextTurn();
+  const stopping = host.stopOperationFor("a chat turn");
+  for (let i = 0; i < 5; i++) await nextTurn();
+  assert.equal(host.operationSignal().aborted, false, "Create is not cut off");
+  finishCreate();
+  assert.equal(await stopping, true);
+  assert.equal(await check, "window closed");
+  assert.deepEqual(order, ["created", "abort"]);
+  assert.equal(host.operationChange, null);
+
+  // A step that outlasts the stop's time is reported, as an operation that will not stop is.
+  assert.equal(await host.whileChangingChatGpt(async () => 5), 5);
+  const stuck = backgroundCheck(host, () => host.whileChangingChatGpt(() => new Promise(() => {})));
+  void stuck.catch(() => {});
+  while (!host.operationChange) await nextTurn();
+  const keepAlive = setTimeout(() => {}, 5_000);
+  await assert.rejects(host.stopOperationFor("a chat turn", { timeoutMs: 20 }), /did not stop in time/);
   clearTimeout(keepAlive);
 });
 
@@ -4404,12 +4497,12 @@ test("a turn that starts during the automatic connector check waits for it inste
   // The check now runs while Codex holds its bridge connections open, so a turn can arrive mid-check.
   const tab = { id: "tab-check-owner", traceId: "trace_during_check", helperPid: process.pid, status: "running", interactionMode: "automatic" };
   let settle;
-  const fixture = {
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     manualOperation: "connector verification",
     manualOperationSettled: new Promise((resolve) => { settle = resolve; }),
     turnTabs: new Map([[tab.id, tab]]),
     userCancelledTurnOwners: new Map(),
-  };
+  });
   let settled = false;
   const pending = BrowserHost.prototype.beginTurn.call(fixture, tab.traceId, false, process.pid + 1);
   pending.catch(() => {}).finally(() => { settled = true; });
@@ -4422,13 +4515,14 @@ test("a turn that starts during the automatic connector check waits for it inste
 });
 
 test("any other manual operation still refuses a turn at once", async () => {
-  const fixture = {
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
     manualOperation: "ChatGPT login",
     manualOperationSettled: new Promise(() => {}),
     turnTabs: new Map(),
     userCancelledTurnOwners: new Map(),
-  };
+  });
   await assert.rejects(BrowserHost.prototype.beginTurn.call(fixture, "trace_during_login", false, process.pid), /busy with ChatGPT login/);
+  assert.equal(fixture.chatStarting(), false, "a refused start is no longer starting");
 });
 
 test("the wait for a connector check is bounded, and the caller then refuses the turn as before", async () => {

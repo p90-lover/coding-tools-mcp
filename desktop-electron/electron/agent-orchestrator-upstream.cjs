@@ -21,6 +21,7 @@ const { terminateOwnedProcessTreeAsync } = require("./process-tree.cjs");
 const { spawnOffThread, fetchOffThread, probeTcpOffThread } = require("./off-thread-run.cjs");
 const { redactionLabel } = require("./chat-redaction.cjs");
 const { createOrchestratorHandler } = require("./orchestrator-handler.cjs");
+const { createAoProcessHandler, stopOwnedAoChild } = require("./ao-process-handler.cjs");
 
 const API_OPERATIONS = Object.freeze({
   upstream_projects: { method: "GET", endpoint: "/api/v1/projects" },
@@ -299,6 +300,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   let error = null;
   let logTail = "";
   let databaseCompacted = false;
+  let verifiedChild = null;
+  const readyOwner = () => state === "ready" && child === verifiedChild ? child : null;
+  const daemonProcess = createAoProcessHandler({
+    readyOwner, isWorking: () => harness.anySessionWorking({ start: false }), startDaemon: start, stopDaemon,
+  });
   // Starts in a row that ran out of time getting ready. Each next start waits twice as long (up to
   // four times the limit): on 2026-10-24, after a reboot, AO's first database cleanup read a cold
   // HDD for over a minute while it started. Every start was killed at 90 s, which threw that work
@@ -449,9 +455,15 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       },
     }) : null;
 
-  async function requestApi(method, endpoint, body, { maxBytes, timeoutMs, preserveInlineBlobs = false } = {}) {
+  async function requestApi(method, endpoint, body, options) {
     if (state !== "ready") throw new Error("Start the source-integrated AO runtime first");
     if (body?.length > 65536) throw new Error("AO API request exceeds 64 KiB");
+    const release = method === "GET" ? null : daemonProcess.beginMutation();
+    try { return await requestDaemon(method, endpoint, body, options); }
+    finally { release?.(); }
+  }
+
+  async function requestDaemon(method, endpoint, body, { maxBytes, timeoutMs, preserveInlineBlobs = false } = {}) {
     const waitMs = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : method === "GET" ? 30000 : 180000;
     // From a worker: the chat's session and conversation reads come here 17 times a second with two
     // chats working, and on main a socket write that a network filter held froze every window.
@@ -1230,7 +1242,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // the real id (and suffix) for routing.
   const CPA_CLAUDE_ALIAS = "claude-fable-5-dd-";
   const reversed = text => [...text].reverse().join("");
-  const splitSuffix = id => /^(.*?)(\([^()]*\))?$/.exec(id).slice(1, 3).map(part => part ?? "");
+  const splitSuffix = id => /^(.*?)((?:\([^()]*\)|\[1m\])*)$/i.exec(id).slice(1, 3).map(part => part ?? "");
   /** A CPA model id as CPA lists it to Claude Code. */
   function cpaClaudeModel(id) {
     const [base, suffix] = splitSuffix(id);
@@ -1318,17 +1330,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   /** "current", "restarted", "busy" (an agent is mid-turn, or the restart did not take), or "unknown" (CPA has no key to give). */
   function syncGatewayKey() {
     if (gatewayKeySync) return gatewayKeySync;
+    const owner = readyOwner();
     gatewayKeySync = (async () => {
       let want = "";
       try { want = String(await gatewayKey() ?? "").trim(); } catch { return "unknown"; }
-      if (!want || state !== "ready") return "unknown";
+      if (!want || !owner) return "unknown";
+      if (readyOwner() !== owner) return "busy";
       if (want === daemonGatewayKey) return "current";
-      let working = true;
-      try { working = await harness.anySessionWorking({ start: false }); } catch { /* not known: as if working */ }
-      if (working) return "busy";
-      logger.warn?.("ao.restart_for_gateway_key", { had: Boolean(daemonGatewayKey) });
-      try { await stop(); await start(); } catch { return "busy"; }
-      return daemonGatewayKey === want ? "restarted" : "busy";
+      try {
+        const restarted = await daemonProcess.restartWhenIdle(owner, () => {
+          logger.warn?.("ao.restart_for_gateway_key", { had: Boolean(daemonGatewayKey) });
+        });
+        return restarted && daemonGatewayKey === want ? "restarted" : "busy";
+      } catch { return "busy"; }
     })().finally(() => { gatewayKeySync = null; });
     return gatewayKeySync;
   }
@@ -2295,19 +2309,19 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     const closingGateway = gateway;
     gateway = null; gatewayOrigin = ""; openUrl = "";
     await closingGateway?.close();
-    if (child && child.exitCode === null && child.signalCode === null) {
-      const stoppingChild = child;
-      try { await fetchOffThread(`http://127.0.0.1:${daemonPort}/shutdown`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(2000) }); } catch {}
-      await new Promise((resolve) => {
-        const timer = setTimeout(() => { stoppingChild.kill(); resolve(); }, 5000);
-        stoppingChild.once("exit", () => { clearTimeout(timer); resolve(); });
-        if (stoppingChild.exitCode !== null || stoppingChild.signalCode !== null) { clearTimeout(timer); resolve(); }
-      });
-    }
-    child = null; daemonPort = 0;
+    const owner = child;
+    await stopOwnedAoChild(owner, async () => {
+      if (owner !== verifiedChild) return false;
+      const origin = `http://127.0.0.1:${daemonPort}`;
+      const probe = await fetchOffThread(`${origin}/readyz`, { redirect: "error", maxBytes: 64 * 1024, signal: AbortSignal.timeout(2000) });
+      if (!probe.ok || (await probe.json()).pid !== owner.pid || owner.exitCode !== null || owner.signalCode !== null) return false;
+      const response = await fetchOffThread(`${origin}/shutdown`, { method: "POST", redirect: "error", signal: AbortSignal.timeout(2000) });
+      return response.ok;
+    });
+    verifiedChild = null; child = null; daemonPort = 0;
   }
 
-  async function stop() {
+  async function stopDaemon() {
     if (stopping) return stopping;
     lifecycleGeneration += 1;
     // A stop is the person's (or the app's) own restart: the next start is not held back.
@@ -2325,6 +2339,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         await cleanup();
         state = "stopped"; error = null;
         return snapshot();
+      } catch (cause) {
+        state = "error"; error = cause.message;
+        throw cause;
       } finally { stopping = null; }
     })();
     return stopping;
@@ -2448,7 +2465,12 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         const allocatedPort = await allocatePort();
         checkStartup();
         daemonPort = allocatedPort;
-        gateway = createAgentOrchestratorGateway({ rendererRoot: path.join(resourceRoot, "renderer"), daemonPort, getStatus: snapshot, desktopRequest });
+        gateway = createAgentOrchestratorGateway({ rendererRoot: path.join(resourceRoot, "renderer"), daemonPort, getStatus: snapshot, desktopRequest,
+          beginMutation: () => {
+            if (startupGeneration !== lifecycleGeneration || !readyOwner()) throw new Error("AO is not ready for changes");
+            return daemonProcess.beginMutation();
+          },
+        });
         const endpoint = await gateway.listen();
         checkStartup();
         gatewayOrigin = endpoint.origin; openUrl = endpoint.openUrl;
@@ -2575,6 +2597,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
             const ready = await response.json();
             checkStartup();
             if (response.ok && ready.pid === currentChild.pid && ready.status === "ready") {
+              verifiedChild = currentChild;
               state = "ready"; failedStarts = 0;
               // How long every start really took, not only the slow ones: the wait limit above is
               // a ceiling, and this is what says how low it can safely go on this machine.
@@ -2596,7 +2619,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         throw new Error(`Agent Orchestrator timed out getting ready.${stalled} ${logTail.slice(-1500)}`);
       } catch (cause) {
         // Do not call stop here: stop waits for this startup to settle.
-        await cleanup();
+        if (cause?.code !== "AO_STOP_UNCONFIRMED") {
+          try { await cleanup(); } catch (cleanupFailure) { cause = cleanupFailure; }
+        }
         if (startupGeneration === lifecycleGeneration) {
           state = "error"; error = cause.message;
           failedStarts += 1; failedStartAt = Date.now();
@@ -2706,7 +2731,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     if (operation === "upstream_start") return start();
     if (operation === "upstream_stop") {
       if (!await confirm({ message: "Stop Agent Orchestrator?", detail: "Running agent sessions may stop. Your chats stay saved." })) return { ok: true, cancelled: true };
-      return stop();
+      return daemonProcess.stop();
     }
     if (operation === "upstream_bind_workspace") {
       if (!workspaceBoard) throw new Error("Coding Tools mission service is unavailable");
@@ -2829,9 +2854,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // The open panel's category split reads the timeline back to the last compaction, so
         // only on request and for one session; the 4-second ring poll stays one small read.
         if (args.detail === true && ids.length === 1) {
+          const launched = sessions[id].launchedWindow;
+          const own = sessions[id].usage?.contextWindow ?? 0;
+          const breakdownUsage = sessions[id].usage && launched && own !== launched && !(own < launched && own >= launched * 0.8)
+            ? { ...sessions[id].usage, contextWindow: launched } : sessions[id].usage;
           sessions[id].breakdown = await readContextBreakdown(
             (query) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?${query}`),
-            sessions[id].usage,
+            breakdownUsage,
           ).catch(() => null);
         }
       }));
@@ -2936,7 +2965,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
     return fs.existsSync(path.join(folder, process.platform === "win32" ? "ao.cmd" : "ao")) ? folder : null;
   }
 
-  return createOrchestratorHandler({ runtime: { call, start, stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder } });
+  return createOrchestratorHandler({ runtime: { call, start, stop: daemonProcess.stop, show, hide, snapshot, harness, survivingChatHosts, endChatHosts, aoShimFolder } });
 }
 
 /**

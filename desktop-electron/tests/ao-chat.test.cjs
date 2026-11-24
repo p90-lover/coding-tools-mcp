@@ -617,7 +617,7 @@ test("a new chat's prompt is Codex's \"Do anything\" in either mode; follow-up a
       : name === "./AgentOrchestratorRoleEditor" ? { cpaProviderOf: () => null }
       : name === "./ChatReplyHead" ? replyHead
       : name === "./chat-reply-plan" ? replyPlan : name === "./ChatReplyPlan" ? replyPlanView
-      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen() {}, useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
+      : name === "./ChatWorkbench" ? { useWorkbenchAutoOpen: () => ({ page: null, plan: null }), useChatSubagents: () => [], useChatSummaryFacts: () => ({ changes: null, pullRequest: null }), useChatProcesses: () => [], chatProcessRows: () => [] }
       : name === "./ImagePreview" ? { ImagePreviewDialog: "ImagePreview" } : name === "./image-markup" ? { markupReadable: text => text }
       : name === "./ComputerControlCard" ? { ComputerControlCard: () => null, useComputerRequests: () => [], chatComputerRequests: () => [] }
       : name === "./ChatToolParts" ? { SentMessageView: react.createContext(null), Attachments: react.createContext({}),
@@ -2379,6 +2379,7 @@ function childPoll(file, selector, options = {}) {
     OVERVIEW_POLL_MS: 5000, SUBAGENT_WORK_POLL_MS: 2000, PREVIEW_POLL_MS: 1500, COMMANDS_POLL_MS: 2000, OUTPUT_POLL_MS: 1000,
     button: { current: { addEventListener: (_event, fn) => clicks.add(fn), removeEventListener: (_event, fn) => clicks.delete(fn) } },
     seen: { current: null }, polled: { current: new Set() }, openNow: { current: false }, onOpenNow: { current: noop },
+    visit: { current: { at: 0 } }, keyNow: { current: "cpa/model" }, takeWorkbenchReveal: () => null,
     startsNewChat: () => true, chatSubagents: chat.chatSubagents, subagentActive: chat.subagentActive, isLive: () => true,
     selected: "command", selectedAgentShell: false, offsets: { current: {} }, pinned: { current: false }, shownRequest: { current: "" },
     plain: value => value, TAIL_BYTES: 1024, MAX_OUTPUT_CHARS: 10000,
@@ -2411,7 +2412,7 @@ test("chat child refreshes skip hidden surfaces, minimized windows and hidden pa
     ["ChatContextMeter.tsx", "effect:let pending = false", ["chat_context"]],
     ["ChatTurnStats.tsx", "effect:const [first, ...rest]", ["chat_turn_stats"]],
     ["ChatWorkbench.tsx", "effect:!wanted", ["chat_processes"]],
-    ["ChatWorkbench.tsx", "effect:setLivePage(null)", ["chat_preview_state", "chat_processes"]],
+    ["ChatWorkbench.tsx", "effect:const visitedAt = visit.current.at", ["chat_preview_state", "chat_processes"]],
     ["ChatWorkbench.tsx", "effect:setRuns([])", ["subagents_runs"]],
     ["ChatWorkbench.tsx", "effect:countChanges", ["chat_context", "chat_changes", "chat_processes"]],
     ["ChatWorkbench.tsx", "effect:readCpaUsage(range)", ["usage:24h"]],
@@ -3692,4 +3693,21 @@ test("permission team saves update the shared catalog without replacing a newer 
     assert.equal(f.state.savedTeams.find(team => team.id === "team-b").nodes[0].route.model, "b-model");
     if (action === "unchanged") { assert.equal(f.state.draftTeam.id, "team-a"); assert.match(f.notice(), /Permissions saved/); }
   });
+});
+
+// Live 2026-11-23: a Team graph pane on an agent in Terminal UI mode asked for its conversation about
+// 100 times in 75 s (every answer SESSION_MODE_MISMATCH), each read taking a launcher request slot in
+// the minute ~180 requests failed HEADLESS_CAPACITY. On an interval, a slow service also stacked reads.
+test("an open team agent's conversation stops asking a Terminal UI agent and backs off on failures", () => {
+  const mismatch = new Error("IPC_TRANSPORT_FAILED: apps.call failed: this session was created in Terminal UI mode and has no chat conversation (SESSION_MODE_MISMATCH)");
+  assert.equal(chat.agentConversationNextReadMs(mismatch, 1), null, "a Terminal UI agent is not read again");
+  assert.equal(chat.agentConversationNextReadMs(mismatch.message, 3), null, "a plain message counts too");
+  const full = new Error("HEADLESS_CAPACITY: request admission is full (the launcher's queue did not clear in time)");
+  assert.deepEqual([0, 1, 2, 3, 5, 40].map((failures) => chat.agentConversationNextReadMs(full, failures)),
+    [chat.AGENT_CONVERSATION_POLL_MS, 4000, 8000, 16000, 60000, 60000], "2 s after a good read, then doubling to a minute");
+  const view = fs.readFileSync(path.resolve(__dirname, "../src/features/AgentOrchestratorChat.tsx"), "utf8");
+  const body = view.slice(view.indexOf("export function AgentConversation("), view.indexOf("const CHAT_WORK = new Map"));
+  assert.doesNotMatch(body, /setInterval/, "reads never overlap: the next starts after the last ends");
+  assert.match(body, /agentConversationNextReadMs\(cause, failures\)/);
+  assert.match(body, /if \(wait === null\) \{ setTerminal\(true\)/);
 });

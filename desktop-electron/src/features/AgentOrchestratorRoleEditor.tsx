@@ -118,9 +118,10 @@ export function workerRoute(harness: string, model: string, permission: NativePe
  * for me with the reason, and a chat keeps its mode when it moves there. Dropping that mode instead
  * (until 0.8.137) left the chat on the agent's own permissions ("Custom"), which AO ran as its
  * "auto": opencode then allowed every tool unasked, and Pi was refused with nothing left to pick.
- * Native Codex takes the modes on its own route.
+ * Native Codex takes the modes on its own route. Antigravity joined on 2026-11-23, running as a
+ * chat through Google's `agy acp`, which asks before it edits or runs anything.
  */
-export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex"]);
+export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex", "ao:agy"]);
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
@@ -170,7 +171,9 @@ export function withTuning(next: AoRoute, previous: AoRoute, capabilities?: Reco
   if (previous.context_window && (betweenAgents || contextApplies(route))) route.context_window = previous.context_window;
   // An AO model the catalog does not describe keeps it (a legacy id list knows no range); Native
   // Codex's range is known without one. The permission mode always goes along (PERMISSION_HARNESSES).
-  return capabilities && (capabilities[route.model] || route.harness_id === NATIVE_HARNESS) ? fitWindow(route, capabilities[route.model]) : route;
+  const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+  const cap = capabilities?.[route.model] ?? capabilities?.[baseModel];
+  return capabilities && (cap || route.harness_id === NATIVE_HARNESS) ? fitWindow(route, cap) : route;
 }
 
 /** A route's window inside what its model takes: clamped into the range, or dropped where none can be set. */
@@ -183,8 +186,9 @@ export function fitWindow(route: AoRoute, capability: AoModelCapabilities | unde
   return next;
 }
 
-/** 262144 -> "256K"; 1048576 and 1000000 -> "1M". */
+/** 262144 -> "256K"; 1048576, 1047576 and 1000000 -> "1M". */
 export function tokensLabel(tokens: number): string {
+  if (tokens === 1_047_576) return "1M";
   if (tokens >= 1_048_576 && tokens % 1_048_576 === 0) return `${tokens / 1_048_576}M`;
   if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`;
   if (tokens >= 1_024 && tokens % 1_024 === 0) return `${tokens / 1_024}K`;
@@ -218,7 +222,10 @@ export function capabilityText(capability: AoModelCapabilities | undefined, nati
   const top = efforts.sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b)).at(-1);
   // Only a limit the catalog reported is the model's; without one the window's max is just the
   // client's 2M ceiling, which every such model read as "2M context (unverified)". Say nothing then.
-  const limit = capability?.contextLimit ?? (native ? 2_000_000 : undefined);
+  const reportedLimit = capability?.contextLimit
+    ? (capability.contextWindow?.max === 1_000_000 && capability.contextLimit < 1_000_000 ? 1_000_000 : capability.contextLimit)
+    : (native ? 2_000_000 : undefined);
+  const limit = reportedLimit;
   // Catalog limits are decimal (272,000), so they read best as "272K" rather than tokensLabel's binary units.
   const size = !limit ? "" : limit >= 1_000_000 && limit % 100_000 === 0 ? `${limit / 1_000_000}M`
     : limit >= 1_000 && limit % 1_000 === 0 ? `${limit / 1_000}K` : tokensLabel(limit);
@@ -237,11 +244,14 @@ export function routeTuning(route: AoRoute, capability: AoModelCapabilities | un
   const native = route.harness_id === NATIVE_HARNESS;
   const efforts: readonly string[] | undefined = !native ? capability?.efforts
     : isWebModel(route.model) ? (capability?.efforts?.length ? capability.efforts : [...NATIVE_DEFAULT_EFFORTS]) : capability?.efforts ?? [];
-  const nativeMax = Math.min(2000000, capability?.contextLimit ?? 2000000);
+  const ceiling = capability?.contextWindow?.max
+    ?? (capability?.contextLimit && capability.contextLimit < 1_000_000 && capability.contextLimit + 128_000 >= 1_000_000
+      ? 1_000_000 : capability?.contextLimit);
+  const nativeMax = Math.min(2000000, ceiling ?? 2000000);
   // WebGPT's window is the Codex bridge's own (agent-orchestrator-workflow webWindow): one size, not a choice.
   const fixed = native && isWebModel(route.model) && capability?.contextWindow?.fixed === true ? capability.contextWindow.max ?? null : null;
   const context = fixed ? { min: fixed, max: fixed } : native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
-  const fullLimit = fixed ?? (!native && context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null);
+  const fullLimit = fixed ?? (context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null);
   const presets = fixed ? [] : context ? CONTEXT_PRESETS.filter(tokens => tokens >= context.min && (context.max === undefined || tokens <= context.max)) : [];
   return { native, efforts, nativeMax, context, fullLimit, presets, fixed };
 }
@@ -505,10 +515,11 @@ export function HarnessPicker({ route, harnesses, loadModels, onChange, disabled
   // Capabilities only from the card's own agent once it answered: another agent's never authorize it.
   const own = catalogOf(harness);
   const listed = own?.capabilities;
-  const capability = listed?.[route.model];
+  const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
+  const capability = listed?.[route.model] ?? listed?.[baseModel];
   const scores = Object.assign({}, ...(catalogs ?? []).map(item => item.catalog.scores ?? {})) as Record<string, ModelScoreHint>;
   // A saved model the card's agent no longer lists: say so, and offer the same model elsewhere.
-  const missing = !native && Boolean(own?.models.length) && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !own!.models.includes(route.model);
+  const missing = !native && Boolean(own?.models.length) && Boolean(route.model) && route.model !== AGENT_DEFAULT_MODEL && !own!.models.includes(route.model) && !own!.models.includes(baseModel);
   const { efforts, nativeMax, context, fullLimit, presets, fixed } = routeTuning(route, capability);
   const webEffort = native && isWebModel(route.model);
   const pick = (model: string, agent?: string) => {

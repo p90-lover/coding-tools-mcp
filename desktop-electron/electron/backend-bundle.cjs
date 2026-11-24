@@ -31,6 +31,7 @@ const BACKEND_MODULES = Object.freeze([
   "agent-orchestrator-accounting.cjs",
   "agent-orchestrator-upstream.cjs",
   "orchestrator-handler.cjs",
+  "ao-process-handler.cjs",
   "agent-orchestrator-workflow.cjs",
   // Publication review and subagent guards share its command parser and repository facts.
   "git-remote.cjs",
@@ -43,6 +44,7 @@ const BACKEND_MODULES = Object.freeze([
   "chat-redaction.cjs",
   "chat-archive.cjs",
   "chat-agent-tools.cjs",
+  "chat-tool-addons.cjs",
   "chat-tool-batches.cjs",
   "chat-verification.cjs",
   "chat-images.cjs",
@@ -93,6 +95,8 @@ const BACKEND_MODULES = Object.freeze([
   "chat-resume.cjs",
   // main.cjs gives chat agents computer control through it: the window picker and the control bar.
   "computer-control.cjs",
+  // Runtime > App layout and the app_layout MCP tool for chat agents.
+  "app-layout.cjs",
 ]);
 
 function sha256File(filePath) {

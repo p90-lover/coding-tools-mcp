@@ -24,6 +24,11 @@ const MAX_WAITING = 1000;
 const MAX_SERVERS = 2;
 const REVIEWS_PER_SERVER = 8;
 const IDLE_CLOSE_MS = 2 * 60_000;
+// Codex's own auto-review model, the one Codex Desktop's Guardian sessions run on. Codex 0.171 runs
+// Guardian on the model of the thread under review, so the review thread starts on it. Until
+// 2026-11-23 it started on Codex's default chat model (gpt-6.2-sol), and 400 reviews moved a Plus
+// account's 5-hour window by 2%. A Codex that refuses the name gets its default model instead.
+const REVIEW_MODEL = "codex-auto-review";
 const SHELLS = new Map([["Bash", "bash"], ["PowerShell", "powershell"]]);
 
 async function readNativeAccount(authFile, now = Date.now()) {
@@ -64,7 +69,7 @@ function openReviewServer(executable, root, env, signal, spawnProcess, onStop = 
     cwd: root, env: serverEnvironment(root, env), windowsHide: true, stdio: ["pipe", "pipe", "ignore"],
   });
   const decoder = new StringDecoder("utf8");
-  let buffer = "", next = 1, stopped = false;
+  let buffer = "", next = 1, stopped = false, protocolBreak = false;
   const pending = new Map();
   const abandoned = new Set();
   let onClosed;
@@ -77,7 +82,7 @@ function openReviewServer(executable, root, env, signal, spawnProcess, onStop = 
     pending.clear();
     child.stdin.destroy();
     child.kill();
-    try { onStop(); } catch { /* the pool's own bookkeeping */ }
+    try { onStop(protocolBreak); } catch { /* the pool's own bookkeeping */ }
   };
   child.once("close", () => { stop(); onClosed(); });
   child.once("error", () => { stop(); onClosed(); });
@@ -87,22 +92,22 @@ function openReviewServer(executable, root, env, signal, spawnProcess, onStop = 
   child.stdout.on("data", (chunk) => {
     if (stopped) return;
     buffer += decoder.write(chunk);
-    if (Buffer.byteLength(buffer) > MAX_RPC_BYTES) { stop(); return; }
+    if (Buffer.byteLength(buffer) > MAX_RPC_BYTES) { protocolBreak = true; stop(); return; }
     for (let newline; (newline = buffer.indexOf("\n")) >= 0;) {
       const line = buffer.slice(0, newline).trim();
       buffer = buffer.slice(newline + 1);
       if (!line) continue;
       let message;
-      try { message = JSON.parse(line); } catch { stop(); return; }
-      if (!message || typeof message !== "object") { stop(); return; }
+      try { message = JSON.parse(line); } catch { protocolBreak = true; stop(); return; }
+      if (!message || typeof message !== "object") { protocolBreak = true; stop(); return; }
       if (typeof message.method === "string") {
         // The isolated reviewer never receives consent to execute a tool, answer an approval, or refresh the source login.
-        if (message.id !== undefined) { stop(); return; }
+        if (message.id !== undefined) { protocolBreak = true; stop(); return; }
         continue;
       }
       const reply = pending.get(message.id);
       if (!reply && abandoned.delete(message.id)) continue;
-      if (!reply) { stop(); return; }
+      if (!reply) { protocolBreak = true; stop(); return; }
       pending.delete(message.id);
       if (message.error || !Object.hasOwn(message, "result")) {
         const error = new Error("Codex refused the review-only request");
@@ -152,7 +157,7 @@ async function exactShellAction(approval, folder) {
 }
 
 const pending = (reason) => ({ action: "ask", reason });
-const unavailable = (reason) => ({ ...pending(reason), guardianUnavailable: true });
+const unavailable = (reason, timedOut = false) => ({ ...pending(reason), guardianUnavailable: true, ...(timedOut ? { guardianTimedOut: true } : {}) });
 
 function usage(result) {
   const limits = result?.rateLimits;
@@ -236,14 +241,15 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
 
   /** A new server, registered at once so that concurrent reviews share it while it signs in. */
   function newServer(binary, account, key) {
-    const entry = { key, active: 0, dead: false, retired: false, stale: false, idleTimer: null, root: null, server: null, ready: null, gone: null };
+    const entry = { key, active: 0, dead: false, protocolBreak: false, retired: false, stale: false, idleTimer: null, root: null, server: null, ready: null, gone: null, reviewModel: REVIEW_MODEL };
     servers.add(entry);
     entry.ready = (async () => {
       await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
       entry.root = await fs.mkdtemp(path.join(stateDir, "review-"));
       if (entry.retired) throw new Error("The native reviewer pool is closed");
-      entry.server = openReviewServer(binary, entry.root, env, new AbortController().signal, spawnProcess, () => {
+      entry.server = openReviewServer(binary, entry.root, env, new AbortController().signal, spawnProcess, (brokeProtocol) => {
         entry.dead = true;
+        if (brokeProtocol) entry.protocolBreak = true;
         if (!entry.active) void retire(entry);
       });
       const opening = AbortSignal.timeout(workMs);
@@ -284,8 +290,17 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
   async function runReview(entry, action, task, signal, probeUsage) {
     await entry.ready;
     const server = entry.server;
-    const started = await server.request("thread/start", { cwd: entry.root, modelProvider: "openai", sandbox: "read-only",
-      approvalPolicy: "on-request", approvalsReviewer: "auto_review", ephemeral: true }, signal);
+    const thread = { cwd: entry.root, modelProvider: "openai", sandbox: "read-only", approvalPolicy: "on-request", approvalsReviewer: "auto_review", ephemeral: true };
+    let started = null;
+    if (entry.reviewModel) {
+      try { started = await server.request("thread/start", { ...thread, model: entry.reviewModel }, signal); }
+      catch (error) {
+        // Only Codex refusing the model falls back, once per server; anything else fails the review.
+        if (signal.aborted || entry.dead || !Number.isSafeInteger(error?.rpcCode)) throw error;
+        entry.reviewModel = null;
+      }
+    }
+    started ??= await server.request("thread/start", thread, signal);
     const threadId = started?.thread?.id;
     if (typeof threadId !== "string" || !threadId || started?.modelProvider !== "openai") {
       throw Object.assign(new Error("Codex did not confirm an isolated thread on its direct provider."), { notIsolated: true });
@@ -311,15 +326,19 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
     if (!path.isAbsolute(binary || "")) return unavailable("Install the stable Codex CLI in App Plugins to use native Guardian.");
     const queueLimit = AbortSignal.timeout(queueMs);
     if (!await acquireSlot(signal ? AbortSignal.any([signal, queueLimit]) : queueLimit)) {
-      return pending(signal?.aborted ? "Native Guardian cannot review this request."
-        : "Native Guardian was busy and this request waited too long for a review. Check it yourself.");
+      return signal?.aborted || closed ? pending("Native Guardian cannot review this request.")
+        : unavailable("Native Guardian was busy and this request waited too long for a review. Check it yourself.", true);
     }
     try {
       for (let tries = 0; ; tries++) {
         const timeout = AbortSignal.timeout(workMs);
         const workSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
         const account = await prepareAccount();
-        if (workSignal.aborted) return pending("Native Guardian did not return a valid decision. Check this request yourself.");
+        if (workSignal.aborted) {
+          return !signal?.aborted && timeout.aborted
+            ? unavailable("Native Codex Guardian is unavailable.", true)
+            : pending("Native Guardian did not return a valid decision. Check this request yourself.");
+        }
         if (!account) return unavailable("Native Guardian needs a current ChatGPT sign-in in the Codex CLI.");
         if (closed) return pending("Native Guardian cannot review this request.");
         const entry = take(binary, account);
@@ -337,8 +356,9 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
           // internal error (-32603: 2 of 300 reviews on 2026-11-23); never after the caller or the
           // time limit stopped it.
           if (tries === 0 && (entry.dead || error?.rpcCode === -32603) && !workSignal.aborted && !closed) continue;
-          const outcome = !signal?.aborted && (timeout.aborted || error?.rpcCode === -32601 || error?.code === "ENOENT")
-            ? unavailable("Native Codex Guardian is unavailable.")
+          const timedOut = !signal?.aborted && !entry.protocolBreak && (timeout.aborted || error?.name === "TimeoutError" || error?.rpcCode === -32603 || entry.dead);
+          const outcome = !signal?.aborted && !entry.protocolBreak && (timedOut || error?.rpcCode === -32601 || error?.code === "ENOENT")
+            ? unavailable("Native Codex Guardian is unavailable.", timedOut)
             : pending("Native Guardian did not return a valid decision. Check this request yourself.");
           return probeUsage ? { ...outcome, diagnostics: { method: error?.rpcMethod ?? null, code: error?.rpcCode ?? null } } : outcome;
         } finally {

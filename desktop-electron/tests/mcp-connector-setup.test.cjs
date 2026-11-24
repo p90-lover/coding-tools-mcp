@@ -5,7 +5,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { EventEmitter } = require("node:events");
 const { CHATGPT_SIGNED_OUT, chatGptMcpContext, chatGptMcpContextScript, platformMcpOwnerContext, observeMcpSetupContext, navigationPlace, connectorPageState, createConfiguredConnector, currentConnectorSettings, connectorCredentials, extensionHelpersSource } = require("../electron/mcp-connector-setup.cjs");
-const { mcpConnectorCommandFailure } = require("../electron/mcp-connector-command.cjs");
+const { mcpConnectorCommandFailure, mcpConnectorFailureCause } = require("../electron/mcp-connector-command.cjs");
 
 function fakeMcpNetwork() {
   const debuggerClient = new EventEmitter(), bodies = new Map(), bodyWaits = new Map(), commands = [];
@@ -388,6 +388,14 @@ test("the production connector action verifies fresh owner and workspace proof b
         && mcpConnectorCommandFailure(error).code === "stopped" },
     { name: "switching to manual mode after preparing cannot submit", change: "manual", error: /Zero Risk/i },
     { name: "unverified existing same-name connector stays frozen", existing: true, identityMissing: true, error: /existing connector.*tunnel.*unverified/i },
+    // Live 2026-11-23: the log said only connector_identity_unverified. The page's reason now rides along.
+    { name: "an unverified existing connector says which identity check failed, for the log", existing: true, identityMissing: true,
+      unverifiedReason: "tunnel-differs",
+      error: error => /existing connector.*tunnel.*unverified/i.test(error.message) && error.ownershipCause === "identity:tunnel-differs"
+        && mcpConnectorFailureCause(error, mcpConnectorCommandFailure(error)) === "ownership check identity:tunnel-differs" },
+    { name: "a reason that is not one of the page's fixed words is not logged", existing: true, identityMissing: true,
+      unverifiedReason: "Tunnel tunnel_" + "b".repeat(32),
+      error: error => /unverified/i.test(error.message) && error.ownershipCause === undefined },
     { name: "consent is not confirmed after a later workspace switch", change: "consent", error: /context|workspace.*changed/i, submitted: true },
     { name: "a targeted primary account retains the same owner and workspace checks", primary: true },
     { name: "an exact account binding rechecks ownership and consent without creating again", existing: true, bound: true },
@@ -410,6 +418,14 @@ test("the production connector action verifies fresh owner and workspace proof b
     // Browser" while it was signed in: the Browser's own page (no ChatGPT tab open, a failed load)
     // answered "signed out" without asking. The setup's page proves the session for every account.
     { name: "the shown account connects though the Browser's own page cannot vouch for its sign-in", shownPageSignedOut: true },
+    // Live 2026-11-23: a signed-in workspace owner's automatic check failed as "authentication or workspace
+    // context changed". ChatGPT rewrites /plugins?view=personal to ?directoryTab=personal in place as the
+    // page settles; one that lands during freshContext's session read is the same page and session.
+    { name: "ChatGPT's own same-page address rewrite during a session read is no context change", inPlaceMove: "/plugins?directoryTab=personal" },
+    { name: "a same-document move to another page during a session read still stops the setup, and says why", inPlaceMove: "/",
+      error: error => error.message === "The MCP authentication or workspace context changed. Retry in the intended workspace."
+        && error.ownershipCause === "context:navigation"
+        && mcpConnectorFailureCause(error, mcpConnectorCommandFailure(error)) === "ownership check context:navigation" },
   ]) await t.test(scenario.name, async () => {
     const work = path.resolve(__dirname, "../../aiTemp/account-mcp-bindings");
     fs.mkdirSync(work, { recursive: true });
@@ -437,13 +453,17 @@ test("the production connector action verifies fresh owner and workspace proof b
       ...(scenario.oversized ? { padding: "x".repeat(64 * 1024) } : {}) });
     fs.writeFileSync(bindingPath, original);
     const network = fakeMcpNetwork(), counts = { create: 0, open: 0, confirm: 0 };
-    let platformVisits = 0, blockedRedirects = 0;
+    let platformVisits = 0, blockedRedirects = 0, sessionReads = 0;
     let accountId = scenario.business && !scenario.selectAdmin ? businessId : personalId, userId = initialUser, destroyed = false, busy = false, url = "about:blank", windowCount = 0;
     let workspaceRole = scenario.shared ? "standard-user" : scenario.creatorRole ?? "account-owner", publishing = false, held = false, publisherResult;
     const runtimeHost = runtime();
     // What the browser's stopOperationFor aborts for the person's own sign-in, logout or removal.
     const stop = new AbortController();
+    // Steps that change ChatGPT (Create, consent) run through the browser's whileChangingChatGpt, so a
+    // stop for a chat or the person's sign-in lets them finish (background checks, 2026-11-24).
+    let changing = 0;
     const host = { partition: "persist:fixture", probeAuthentication: async () => ({ authenticated: !scenario.shownPageSignedOut }),
+      whileChangingChatGpt: async step => { changing++; try { return await step(); } finally { changing--; } },
       operationSignal: () => stop.signal,
       currentOperation: () => held ? "MCP connector creation" : null,
       withManualOperation: async (_name, work) => { const previous = held; held = true; try { return await work(); } finally { held = previous; } } };
@@ -456,10 +476,16 @@ test("the production connector action verifies fresh owner and workspace proof b
           const entry = id => ({ can_access_with_session: true, account: { account_id: id, account_user_role: workspaceRole,
             structure: id === personalId ? "personal" : "workspace", plan_type: id === personalId ? "free" : "team", name: "Fixture workspace", is_deactivated: false } });
           const requested = script.match(/activeAccountId: "([a-f0-9-]+)"/)?.[1] || accountId;
+          // The second read is freshContext's first: the page moves in place while it runs.
+          if (scenario.inPlaceMove && ++sessionReads === 2) {
+            url = `https://chatgpt.com${scenario.inPlaceMove}`;
+            contents.emit("did-start-navigation", {}, url, true, true);
+          }
           return chatGptMcpContext({ user: { id: userId }, auth: { chatgpt_user_id: userId }, activeAccountId: requested,
             accounts: scenario.mismatch ? {} : { [personalId]: entry(personalId), [businessId]: entry(businessId) } });
         }
         if (script.includes("globalThis.__codingToolsConnectorHelpers =")) return;
+        if (script.includes("unverifiedReason")) return scenario.unverifiedReason ?? null;
         if (script.includes("pageFailureState")) {
           assert(scenario.tabMissing, "page state is read only after a Personal plugins wait failed");
           // What the page left, with fields no log may keep (a label, an account email, a query).
@@ -474,6 +500,7 @@ test("the production connector action verifies fresh owner and workspace proof b
         const phase = script.match(/__codingToolsConnectorHelpers\.(\w+)\(/)?.[1];
         if (phase === "selectWorkspace") { accountId = businessId; select(accountId); return { selected: true }; }
         if (phase === "prepareTunnelConnector") {
+          assert.equal(changing, 0, "reading the plugin list changes nothing");
           if (scenario.tabMissing) throw new Error("ChatGPT did not expose one Personal plugins tab.");
           if (scenario.change === "reuse-prepare-workspace-reject") {
             accountId = personalId; select(accountId);
@@ -495,6 +522,7 @@ test("the production connector action verifies fresh owner and workspace proof b
           }
           return { prepared: true };
         }
+        if (phase === "submitPreparedTunnelConnector") assert.equal(changing, 1, "Create runs as a change step");
         if (phase === "submitPreparedTunnelConnector" || phase === "createTunnelConnector") { counts.create++; return { created: true, href: "/plugins/plugin_fixture" }; }
         if (phase === "inspectTunnelConnectorIdentity") {
           if (scenario.change === "reuse-workspace-reject") {
@@ -511,12 +539,14 @@ test("the production connector action verifies fresh owner and workspace proof b
           return { connected: false };
         }
         if (phase === "openTunnelConnectorConsent") {
+          assert.equal(changing, 1, "opening the consent runs as a change step");
           counts.open++;
           if (scenario.change === "role" && !publishing) workspaceRole = "account-admin";
           if (scenario.change === "consent") { accountId = businessId; select(accountId); }
           return { consentReady: true };
         }
         if (phase === "confirmTunnelConnectorConsent") {
+          assert.equal(changing, 1, "confirming the consent runs as a change step");
           if (scenario.consentError) throw new Error("fixture consent failed");
           counts.confirm++; return { connected: true };
         }
@@ -737,7 +767,11 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     assert.equal(clicks, changed ? 0 : 1, `${changed || "valid"}: validate the current form before Create`);
   }
   const document = { title: "Plugins", body: { innerText: "Plugins" }, querySelectorAll: () => [{ textContent: "Personal", getAttribute: () => "true" }] };
-  const prepareContext = {
+  // The page helper's own: each identity check leaves its reason (unverifiedReason) for the log.
+  const reasons = [];
+  const unverifiedBecause = reason => { reasons.push(reason);
+    return new Error("Existing connector exact tunnel identity is unverified. Creation and connection were not attempted."); };
+  const prepareContext = { unverifiedBecause,
     location: { origin: "https://chatgpt.com" }, URL, document, isPersonalPluginsPage: () => true, isPluginDetailUrl: () => true,
     visible: () => true, textMatches: matches, PERSONAL_VIEW_LABELS: ["Personal"],
     waitFor: async read => read(), personalPluginsLoaded: () => true, clearPluginSearch: async () => {},
@@ -753,6 +787,7 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     ...prepareContext, findManagedAppCard: () => null, pluginCardLinks: () => [], pluginsPageRenderState: () => "empty",
   });
   await assert.rejects(absent(settings, "existing"), /unverified/i, "a missing app must stop before Add or Create is inspected");
+  assert.equal(reasons.pop(), "no-card");
   for (const existingHref of ["/plugins/other", "https://elsewhere.invalid/plugins/existing"]) {
     assert.equal((await prepare({ ...settings, existingHref }, "prepare")).href, "/plugins/existing",
       "a cached pathname supplies no authority or alternate navigation target");
@@ -764,7 +799,7 @@ test("guarded renderer phases reject changed controls and unverified existing ca
     const fields = [nameField, ...(kind === "url-only" ? [{ id: "server-url", value: "https://example.test/mcp", getAttribute: () => null }]
       : kind === "duplicate" ? [field, field] : [field])];
     const root = {}, page = { querySelector: () => root };
-    const inspect = phase("inspectTunnelConnectorIdentity", "async function createTunnelConnector", {
+    const inspect = phase("inspectTunnelConnectorIdentity", "async function createTunnelConnector", { unverifiedBecause,
       location: { origin: "https://chatgpt.com", pathname: "/plugins/existing", href: "https://chatgpt.com/plugins/existing" },
       document: page, isPluginDetailUrl: () => true, exactNameIn: () => true,
       activeSurface: () => root,
@@ -774,7 +809,12 @@ test("guarded renderer phases reject changed controls and unverified existing ca
       pointerActivateMenu: () => { throw new Error("Identity inspection cannot click Create, Save or Connect"); },
     });
     if (kind === "exact") assert.equal((await inspect(settings)).verified, true);
-    else await assert.rejects(inspect(settings), /unverified/i);
+    else {
+      await assert.rejects(inspect(settings), /unverified/i);
+      // Live 2026-11-23: a signed-in owner's automatic setup failed here with nothing saying which check.
+      assert.equal(reasons.pop(), { "wrong-tunnel": "tunnel-differs", "wrong-name": "name-differs", duplicate: "form-ambiguous",
+        "url-only": "no-edit-control", "tool-field": "no-edit-control", "unsaved-create": "no-edit-control" }[kind], kind);
+    }
   }
   const stale = { tunnelConnectorConnected: () => false, tunnelConnectorConnectControl: () => null,
     tunnelConnectorConsent: () => null, pointerActivateMenu: () => { throw new Error("Stale control was clicked"); } };
@@ -1062,13 +1102,13 @@ test("account IPC preserves legacy arbitration and records only the requested, s
   context.publishOperation = value => operations.push(value);
   accounts.add("other"); removeDuringSave = false; records.length = 0;
   let admitted = true;
-  const admission = () => { if (!admitted) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account."); };
+  const admission = () => { if (!admitted) throw new Error("Automatic MCP setup is waiting for an idle browser and the current account."); };
   context.createWorkspaceConnector = async options => {
     options.assertCurrent();
     admitted = false;
     options.assertCurrent();
   };
-  await assert.rejects(connectAccountMcp("other", admission), error => /waiting for the focused, idle app/.test(error.message) && error.gaveWay === true);
+  await assert.rejects(connectAccountMcp("other", admission), error => /waiting for an idle browser/.test(error.message) && error.gaveWay === true);
   assert.deepEqual(records, [], "a setup that gave way leaves the account's connector state as it was");
   assert.equal(operations.at(-1).status, "cancelled");
   admitted = true;

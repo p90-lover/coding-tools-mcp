@@ -184,6 +184,11 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   saveMcpServer: (server, options) => ipcRenderer.invoke("mcp-servers:save", server, options),
   removeMcpServer: (id) => ipcRenderer.invoke("mcp-servers:remove", id),
   setMcpServerEnabled: (id, enabled) => ipcRenderer.invoke("mcp-servers:set-enabled", id, enabled),
+  // Runtime > App layout: the architecture map and layer editor shared by the tab and chat agents.
+  appLayout: () => ipcRenderer.invoke("launcher:app-layout"),
+  editAppLayout: (input) => ipcRenderer.invoke("launcher:app-layout-edit", input),
+  resetAppLayout: () => ipcRenderer.invoke("launcher:app-layout-reset"),
+  onAppLayoutChanged: (listener) => subscription("launcher:app-layout-changed", listener),
   setSidebarState: (state) => ipcRenderer.invoke("launcher:sidebar-state", state),
   externalServicesSnapshot: () => ipcRenderer.invoke("launcher:external-services-snapshot"),
   managedComponentsSnapshot: () => ipcRenderer.invoke("launcher:managed-components-snapshot"),
@@ -345,6 +350,9 @@ const codingToolsApi = Object.freeze({
   }),
   history: Object.freeze({
     search: (input) => invokeContract(ipcRenderer, "history.search", input),
+  }),
+  links: Object.freeze({
+    preview: (input) => invokeContract(ipcRenderer, "links.preview", input),
   }),
   nativeCodex: Object.freeze({
     status: (input = {}) => invokeContract(ipcRenderer, "nativeCodex.status", input),

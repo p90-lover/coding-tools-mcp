@@ -132,7 +132,7 @@ function createBrowserAccountMcpSync(deps) {
           });
         } finally { connecting = false; }
         if (gaveWay || !current()) {
-          // Losing admission defers work until focus/setup is available again. A Connect the person
+          // Losing admission (a chat took the browser, a switch, a setup) defers work. A Connect the person
           // asked for (hold) is not counted: once it is done, this account is tried again at once.
           attempts.delete(account.id);
           if (holds === 0) {
@@ -229,7 +229,7 @@ function createBrowserAccountMcpSync(deps) {
 /**
  * Whether an automatic connector setup stopped because it gave way, not because it failed: the shown
  * account changed under it (a switch, which no longer waits for it) or its admission no longer holds
- * (the app lost focus, a turn started). A manual setup, with no admission check, always failed.
+ * (a chat took the browser, a turn started). A manual setup, with no admission check, always failed.
  */
 function automaticSetupGaveWay(assertAdmitted, accountChanged) {
   if (typeof assertAdmitted !== "function") return false;

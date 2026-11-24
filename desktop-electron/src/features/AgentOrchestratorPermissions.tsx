@@ -18,6 +18,23 @@ export type PermissionCapability = {
 };
 const excludedMode = (capability: PermissionCapability, selection: PermissionSelection) => capability.excluded_modes?.find(mode =>
   mode.profile === selection.profile && mode.policy === selection.policy && mode.reviewer === selection.reviewer);
+/** Whether an agent's reported permissions take a whole mode: its profile, policy and reviewer, and the three together. */
+export const allowsMode = (capability: PermissionCapability | undefined, selection: PermissionSelection) => capability?.supported === true
+  && capability.profiles.some(profile => profile.id === selection.profile && profile.allowed)
+  && capability.approval_policies?.includes(selection.policy!) === true && capability.approvals_reviewers?.includes(selection.reviewer!) === true
+  && !excludedMode(capability, selection);
+/** Why an agent can't take a mode, in its own words where it gave them. */
+export const modeRefusal = (capability: PermissionCapability | undefined, selection: PermissionSelection) =>
+  (capability && excludedMode(capability, selection)?.reason) || capability?.reason || "This agent can't run in that mode.";
+/**
+ * Whether a card's requests wait for the person because its chat is on "Ask for approval": an agent
+ * that asks this app about each request (PERMISSION_HARNESSES), on-request, and no reviewer named.
+ * The reviewer settings (Let the model judge, quota-based reviews) apply only under Approve for me.
+ */
+export function asksForApproval(route: AoNode["route"] | undefined): boolean {
+  return Boolean(route) && PERMISSION_HARNESSES.has(route!.harness_id) && route!.approval_policy === "on-request"
+    && (route!.approvals_reviewer ?? "user") === "user";
+}
 export type RuntimePermissionPolicy = { policy_acknowledged: boolean; effective_policy?: { permission_profile?: string; active_permission_profile?: string; approval_policy?: string; approvals_reviewer?: string } | null };
 export type PermissionSelection = { profile?: string; policy?: string; reviewer?: string };
 /** The selected chat owns its role list. Include generated helpers without saving new roles. */
@@ -91,6 +108,19 @@ export const PERMISSION_MODES = [
   { label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe", icon: "shieldCode", profile: ":workspace", policy: "on-request", reviewer: "auto_review", danger: false },
   { label: "Full access", detail: "Unrestricted access to the internet and any file on your computer", icon: "shieldAlert", profile: ":danger-full-access", policy: "never", reviewer: "user", danger: true },
 ] as const;
+/**
+ * A new chat's route set to "Approve for me", whatever mode the chat it was taken from ran in: a
+ * person who left the last chat on Ask for approval got a new chat whose requests all waited for
+ * them, with Let the model judge on (2026-11-24). Only an agent that asks this app about each request
+ * (PERMISSION_HARNESSES, all AO agents) is changed: the others run in Full access only and are
+ * refused at launch in Approve for me (fullAccessOnly in agent-orchestrator-workflow), and Native
+ * Codex reports its own modes once connected, so they keep the mode they were last sent in.
+ */
+export function startsApproveForMe(route: AoNode["route"]): AoNode["route"] {
+  if (!PERMISSION_HARNESSES.has(route.harness_id)) return route;
+  const mode = PERMISSION_MODES.find(entry => entry.reviewer === "auto_review")!;
+  return { ...route, native_permission_profile: mode.profile, approval_policy: mode.policy, approvals_reviewer: mode.reviewer };
+}
 const MODE_GLYPHS = { hand: HandGlyph, shieldCode: ShieldCodeGlyph, shieldAlert: ShieldAlertGlyph };
 
 // Codex's "Turn on Full Access?" dialog: what the agents can then do, three capability rows, Cancel and Confirm.
@@ -195,10 +225,7 @@ export function AgentOrchestratorPermissions({ team, mission, busy, loadProfiles
   }, [popup.open, key, loadProfiles]);
   const capabilities = supported.map(node => metadata[node.id]);
   const available = nodes.length > 0 && nodes.every(node => metadata[node.id]?.supported === true);
-  const canSelect = (selection: PermissionSelection) => available && capabilities.every(capability =>
-    capability.profiles.some(profile => profile.id === selection.profile && profile.allowed) &&
-    capability.approval_policies?.includes(selection.policy!) && capability.approvals_reviewers?.includes(selection.reviewer!)
-    && !excludedMode(capability, selection));
+  const canSelect = (selection: PermissionSelection) => available && capabilities.every(capability => allowsMode(capability, selection));
   /** Why a mode is unavailable: the adapter's own reason for a mode it excludes, else the general one. */
   const unavailableReason = (selection: PermissionSelection) => capabilities.map(capability => excludedMode(capability, selection)?.reason).find(Boolean) || reason;
   const active = PERMISSION_MODES.find(mode => nodes.length > 0 && nodes.every(node =>

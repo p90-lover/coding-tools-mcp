@@ -26,12 +26,12 @@ import { ChatPet } from "./ChatPet";
 import { ChatTurnStats } from "./ChatTurnStats";
 import { ChatScrollToBottom } from "./ChatScrollToBottom";
 import { ReplyError, ReplyHead, cardTone, replyTone, turnChanges, type ReplyMember } from "./ChatReplyHead";
-import { FoldedRounds, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
-import { foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart } from "./chat-reply-plan";
+import { FoldedRounds, LivePlanCard, ReplyPlanView, RoundDivider } from "./ChatReplyPlan";
+import { agentReplyPlan, foldedRounds, goalRound, replyPlan, stepAttempt, turnDrawStart, turnWindowStart } from "./chat-reply-plan";
 import { DshTurnWork, type DshTurnWorkProps, type UseStepWork } from "./DshTranscript";
 import { AnsweredRecord, ApprovedMark, EarlierRounds, EditDiff, SentMessageView, SteerReader, SteerReceiptMark, StreamingMarkdown, TurnRestart, Attachments, ImageLightbox, SecretText, SentImage, ToolImages, WaitingAnswer, EarlierSteps, useWorkWindow } from "./ChatToolParts";
 import { PartErrorBoundary } from "../PartErrorBoundary";
-import { INIT_PROMPT, planMessage, reviewPrompt } from "./codex-prompts";
+import { INIT_PROMPT, PLAN_PREFIX, planMessage, reviewPrompt } from "./codex-prompts";
 import { ChatGlyph, ChatMenu, FloatingLayer, type ChatMenuItem, type ChatMenuState } from "./ChatMenu";
 import {
   CHAT_DEFAULT_TITLE, GOAL_SUMMARY, goalDetail, goalFeedback, goalRounds, chatAcceptsMessage, chatAnnotationsSplit, chatDuration, CHAT_MESSAGE_BYTES, CHAT_MESSAGE_LIMIT, chatList, chatMessageBytes, chatMessageFits, chatMessageReadable, chatMessageWithAnnotations, chatMessageWithAttachments, chatRunOpen, hasHiddenSecret,
@@ -42,7 +42,7 @@ import {
   subagentActive, subagentsSummary,
   chatLoopParse, loopInterval, loopLabel, type ChatLoop, localChatStamp,
   chatScheduleParse, scheduleCountdown, scheduleLabel, scheduleWhen, type ChatSchedule,
-  sendRefusedForNow,
+  sendRefusedForNow, AGENT_CONVERSATION_POLL_MS, agentConversationNextReadMs,
 } from "./ao-chat";
 
 export { ChatThreadList as ChatListPane } from "./ChatThreadList";
@@ -218,8 +218,14 @@ const routeEffortName = (route: RouteFields) => {
   const effort = typeof route.effort === "string" ? route.effort : "";
   return `${!effort ? "Auto" : effort === "xhigh" ? "Extra high" : effort[0].toUpperCase() + effort.slice(1)} effort`;
 };
-const routeWindowName = (route: RouteFields) => typeof route.context_window === "number" && route.context_window > 0
-  ? `${Math.round(route.context_window / 1000)}K context` : "the default context";
+const routeWindowName = (route: RouteFields) => {
+  const tokens = typeof route.context_window === "number" && route.context_window > 0 ? route.context_window : 0;
+  if (!tokens) return "the default context";
+  if (tokens === 1_048_576 || tokens === 1_047_576) return "1M context";
+  if (tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M context`;
+  if (tokens % 1_000 === 0) return `${tokens / 1_000}K context`;
+  return `${Math.round(tokens / 1000)}K context`;
+};
 /**
  * What differs between the agent's route and the picked one, in the composer's own words, and
  * what to pick to get the agent back: "Max effort" / "Medium effort". The note showed the raw
@@ -707,25 +713,40 @@ function LiveTimeline({ items, live = false, finished = false, reply, collapsed 
   </ol>;
 }
 
-const AGENT_CONVERSATION_POLL_MS = 2000;
-
 /**
  * One team agent's conversation, opened from its card on the Team graph as Claude Code and Codex
  * open a teammate or subagent: what it was asked, its thinking, tool calls and replies (its turn's
- * timeline, the chat's own renderer), read again every two seconds while it works.
+ * timeline, the chat's own renderer), read again two seconds after each read while it works. Reads
+ * never overlap: on an interval, a pane on a slow service (25 s reads) kept a dozen reads in flight.
+ * A failed read waits longer each time, and an agent in Terminal UI mode is not read again
+ * (agentConversationNextReadMs).
  */
 export function AgentConversation({ runId, nodeId, live, loadWork }: { runId: string; nodeId: string; live: boolean; loadWork: LoadWork }) {
   const [items, setItems] = useState<ChatLiveItem[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [terminal, setTerminal] = useState(false);
   useEffect(() => {
-    let current = true;
+    let current = true, timer = 0, failures = 0;
+    setTerminal(false);
+    const later = (ms: number) => { if (current && live) timer = window.setTimeout(read, ms); };
     const read = () => void loadWork(runId, nodeId).then(
-      (next) => { if (current) { setItems(next); setError(null); } },
-      (cause: unknown) => { if (current) setError(cause instanceof Error ? cause.message : String(cause)); });
+      (next) => { if (!current) return; failures = 0; setItems(next); setError(null); later(AGENT_CONVERSATION_POLL_MS); },
+      (cause: unknown) => {
+        if (!current) return;
+        failures += 1;
+        const wait = agentConversationNextReadMs(cause, failures);
+        if (wait === null) { setTerminal(true); setError(null); return; }
+        setError(cause instanceof Error ? cause.message : String(cause));
+        later(wait);
+      });
     read();
-    const timer = live ? window.setInterval(read, AGENT_CONVERSATION_POLL_MS) : 0;
-    return () => { current = false; if (timer) window.clearInterval(timer); };
+    return () => { current = false; window.clearTimeout(timer); };
   }, [runId, nodeId, live, loadWork]);
+  if (terminal) {
+    return <div className="cx-agent-conversation">
+      <p className="cx-workbench-empty">This agent runs in a terminal (Terminal UI mode), so it has no chat conversation to show here.</p>
+    </div>;
+  }
   return <div className="cx-agent-conversation">
     {error ? <p className="cx-workbench-error" role="alert">{error}</p> : null}
     {items === null ? <p className="cx-workbench-empty">Reading its conversation…</p>
@@ -1291,7 +1312,7 @@ function useFarTurns(scroller: { current: HTMLElement | null }, column: { curren
 
 export function AgentOrchestratorChat({
   runs, tasks, selectedTaskId, busy, sendBusy = busy, loadDescription, send, openStructure,
-  approvals, approve, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
+  approvals, approve, approveForMe, describeRoute: _describeRoute, notice, retryStart, retrying = false, working = false, describeNode, activity, modelName, permissions, composer, onOpenTeam, onOpenMissionBoard,
   projectName, stop, restart, thread, structure, onPause, onResume, onSettings, filePath, saveAttachment, revealFile, attachmentPreview, seed, onSeedUsed, headerExtra, onOpenProject, projects, projectId, draftScope, onPickProject, onAddProject, projectBranch: branch, steer, recover, resizeAgent,
   pendingMessage, pendingTitle, pendingCreation = false, deciding = false, projectLoadError, onRetryProject, onComposing, commands, loadWork, onClosePane, queue, drafts,
 }: {
@@ -1341,6 +1362,8 @@ export function AgentOrchestratorChat({
   openStructure: (runId: string) => void;
   approvals: ChatApproval[];
   approve: (approval: ChatApproval, reply: ApprovalReply) => Promise<void>;
+  /** The chat is on "Ask for approval": its card's requests offer to switch it to Approve for me. */
+  approveForMe?: { nodeId: string; run: () => Promise<string> };
   permissions?: ReactNode;
   composer?: Omit<ComposerControlsProps, "permissions" | "busy">;
   onOpenTeam?: () => void;
@@ -1575,10 +1598,26 @@ export function AgentOrchestratorChat({
   // The side panel beside the thread (ChatWorkbench: preview, changes, files, terminal) for the
   // chat's AO agents; it opens by itself when an agent first opens a page or starts a command.
   const workbenchKey = `coding-tools:ao:workbench:${JSON.stringify([projectId ?? "", selectedTaskId])}`;
+  const offeredPlan = selectedTaskId ? approvals.findLast(approval => approval.source === "ao" && approval.plan?.trim())?.plan : undefined;
+  const [planViews, setPlanViews] = useState(() => new Map<string, { text: string; offer?: string }>());
+  const rememberPlan = useCallback((text: string, onlyNew = false) => {
+    setPlanViews(previous => {
+      const seen = previous.get(workbenchKey);
+      if (seen?.offer === offeredPlan && (onlyNew || seen?.text === text)) return previous;
+      const next = new Map(previous);
+      next.delete(workbenchKey);
+      next.set(workbenchKey, { text, offer: offeredPlan });
+      if (next.size > 12) next.delete(next.keys().next().value!);
+      return next;
+    });
+  }, [offeredPlan, workbenchKey]);
+  useEffect(() => { if (offeredPlan) rememberPlan(offeredPlan, true); }, [offeredPlan, rememberPlan]);
+  const rememberedPlan = planViews.get(workbenchKey);
+  const planText = offeredPlan && offeredPlan !== rememberedPlan?.offer ? offeredPlan : rememberedPlan?.text ?? "";
   const readWorkbench = (): WorkbenchTab | null => {
     try {
       const tab = selectedTaskId ? window.localStorage.getItem(workbenchKey) : null;
-      return tab && ["overview", "preview", "terminal", "changes", "files", "subagents", "new"].includes(tab) ? tab as WorkbenchTab : null;
+      return tab && ["overview", "preview", "terminal", "changes", "files", "subagents", "plan", "new"].includes(tab) ? tab as WorkbenchTab : null;
     } catch { return null; }
   };
   const [workbenchState, setWorkbenchState] = useState(() => ({ key: workbenchKey, tab: readWorkbench() }));
@@ -1598,6 +1637,11 @@ export function AgentOrchestratorChat({
       else window.localStorage.removeItem(workbenchKey);
     } catch { /* keep the panel usable when storage is blocked */ }
   };
+  const openPlan = (text?: string) => {
+    if (!selectedTaskId) return;
+    if (text) rememberPlan(text);
+    setWorkbench("plan");
+  };
   const agentSessions = useMemo(() => chatAgentSessions(chatRuns), [chatRuns]);
   const agentSessionIds = useMemo(() => agentSessions.map((session) => session.id), [agentSessions]);
   // A reply's changed file, clicked in its summary: the side panel's Changes tab shows it, in the
@@ -1611,7 +1655,8 @@ export function AgentOrchestratorChat({
   const allComputerRequests = useComputerRequests();
   const computerRequests = useMemo(() => selectedTaskId ? chatComputerRequests(allComputerRequests, agentSessionIds, projectId) : [],
     [selectedTaskId, allComputerRequests, agentSessionIds, projectId]);
-  const livePage = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null, (tab) => setWorkbench(tab), projectId);
+  const { page: livePage, plan: livePlan } = useWorkbenchAutoOpen(selectedTaskId ? previewSessionIds : [], workbench !== null,
+    (tab) => setWorkbench(tab), projectId, workbenchKey);
   // The details panel's Processes: the agent's app page and the chat's terminals, read while it is open.
   const processCommands = useChatProcesses(selectedTaskId ? agentSessionIds : [], detailsOpen, projectId);
   const processRows = useMemo(() => detailsOpen ? chatProcessRows(processCommands, livePage) : [], [detailsOpen, processCommands, livePage]);
@@ -1629,6 +1674,23 @@ export function AgentOrchestratorChat({
   // this window has seen (CHAT_WORK holds live polls and turns read back), plus the newest turns'
   // finished cards, read back once each. Older turns count once their work is opened in the chat.
   const [detailsWorkTick, setDetailsWorkTick] = useState(0);
+  const currentPlan = useMemo(() => {
+    let tasks: ReturnType<typeof agentReplyPlan> = null;
+    let drafting = false, reply = "";
+    for (const turn of turns.slice(-DETAILS_READ_TURNS).reverse()) {
+      if (!reply && !turn.user?.automatic && turn.user?.text.startsWith(PLAN_PREFIX)) reply = turn.final?.text ?? "";
+      if (!tasks) {
+        const steps = [...turn.steps, ...(turn.final ? [turn.final] : [])];
+        drafting = liveTurn(turn);
+        tasks = agentReplyPlan(steps.flatMap(step => CHAT_WORK.get(stepWorkKey(step)) ?? step.working?.timeline ?? []), drafting,
+          steps.find(step => step.error)?.error);
+      }
+      if (reply && tasks) break;
+    }
+    return { reply, tasks: tasks ?? undefined, live: drafting };
+  }, [turns, detailsWorkTick]);
+  const shownPlan = planText || currentPlan.reply;
+  const hasPlan = Boolean(shownPlan || livePlan || currentPlan.tasks?.steps.length);
   useEffect(() => {
     if (!loadWork) return;
     for (const turn of turns.slice(-DETAILS_READ_TURNS)) {
@@ -1940,8 +2002,17 @@ export function AgentOrchestratorChat({
   const agentRoute: RouteFields | null = latest?.execution_mode === "single" && chatLead?.route
     ? { ...(chatLead.route as unknown as RouteFields), ...(resizeHere?.state === "done" ? { context_window: resizeHere.contextWindow } : {}) } : null;
   // Only the person's own pick: a window the composer fills in by itself (a blank card's default,
-  // `adjusted`) must not restart the agent of a chat that was merely opened.
+  // `adjusted`) must not restart the agent of a chat that was merely opened, nor replace an open
+  // chat's unset window or effort with another chat's saved tuning or the new-chat 400K default.
   const pickRoute = (route: ComposerControlsProps["route"], adjusted?: boolean) => {
+    if (adjusted && selectedTaskId && agentRoute) {
+      const kept = { ...route } as Record<string, unknown>;
+      const web = String(route.model ?? "").replace(/^cpa\//, "").startsWith("chatgpt-web/");
+      if (agentRoute.context_window == null && !web) delete kept.context_window;
+      if (agentRoute.effort == null && !web) delete kept.effort;
+      composer?.onRouteChange(kept as ComposerControlsProps["route"], true);
+      return;
+    }
     composer?.onRouteChange(route, adjusted);
     if (adjusted || !selectedTaskId || !resizeAgent || !agentRoute) return;
     const picked = route as unknown as RouteFields;
@@ -2726,15 +2797,14 @@ export function AgentOrchestratorChat({
   }, [attachments, preparing]);
 
   const chatRoot = useRef<HTMLDivElement>(null);
-  /** `narrow`: the head is too narrow for Preview, Show cards and Side panel (codex-chat.css hides them), so the menu has them. */
+  /** `narrow`: the head is too narrow for Show cards, so the menu has it. */
   const headerMenu = (narrow = false): ChatMenuItem[] => [
-    ...(narrow && selectedTaskId ? [
-      { label: "Preview", checked: workbench === "preview", run: () => setWorkbench((open) => (open === "preview" ? null : "preview")) },
-      ...(structure || latest ? [{ label: "Show cards", checked: showStructure,
-        ...(latest ? { run: () => structure ? setShowStructure((value) => !value) : openStructure(latest.id) } : { reason: "This chat has no mission yet" }) }] : []),
-      { label: "Side panel", checked: workbench !== null, run: () => setWorkbench((open) => (open ? null : "overview")) },
+    ...(narrow && selectedTaskId && (structure || latest) ? [
+      { label: "Show cards", checked: showStructure,
+        ...(latest ? { run: () => structure ? setShowStructure((value) => !value) : openStructure(latest.id) } : { reason: "This chat has no mission yet" }) },
       { kind: "separator" },
     ] as ChatMenuItem[] : []),
+    ...(selectedTaskId && hasPlan ? [{ label: "Plan", checked: workbench === "plan", run: () => openPlan() } as ChatMenuItem] : []),
     ...(thread && chat ? [
       { label: "Rename", shortcut: "Alt+Ctrl+R", run: () => setRenaming(chat.title) },
       { label: thread.pinned ? "Unpin" : "Pin", shortcut: "Alt+Ctrl+P", run: thread.togglePin },
@@ -3052,11 +3122,6 @@ export function AgentOrchestratorChat({
             title={`Agent's browser: ${livePage.url}\nClick to show`} onClick={() => setWorkbench("preview")}>
             <span className="cx-browser-dot" aria-hidden="true" /><Icon name="browser" width="13" height="13" />
             <span>{livePage.title || (() => { try { return new URL(livePage.url).host; } catch { return livePage.url; } })()}</span></button> : null}
-          {/* Preview, as Claude Code's header has it: the chat's browser in one click, open page or not
-              (the user found it only behind Side panel → Overview → Preview). */}
-          {selectedTaskId && !(livePage && workbench !== "preview") ? <button type="button" className="cx-icon-button" aria-pressed={workbench === "preview"}
-            title="Preview: the chat's browser" aria-label="Preview" onClick={() => setWorkbench((open) => (open === "preview" ? null : "preview"))}>
-            <Icon name="globe" width="16" height="16" /></button> : null}
           {selectedTaskId ? <button type="button" className="cx-icon-button cx-compact-toggle" aria-pressed={compactActivity}
             title={compactActivity ? "Show every step" : "Compact activity"}
             aria-label="Compact activity" onClick={toggleCompact}>
@@ -3064,11 +3129,9 @@ export function AgentOrchestratorChat({
           {structure || latest ? <button type="button" className="cx-icon-button" aria-pressed={showStructure} title="Show cards" aria-label="Show cards"
             disabled={!latest} onClick={() => structure ? setShowStructure((value) => !value) : latest && openStructure(latest.id)}>
             <Icon name="orchestrator" width="16" height="16" /></button> : null}
-          {/* The side panel opens on its Overview, as Claude Code's side column: context, changes,
-              tasks and usage, each a click from its tab (the browser chip still opens Preview). */}
-          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Show side panel"
-            aria-label="Show side panel" onClick={() => setWorkbench((open) => (open ? null : "overview"))}>
-            <Icon name="browser" width="16" height="16" /></button> : null}
+          {selectedTaskId ? <button type="button" className="cx-icon-button" aria-pressed={workbench !== null} title="Chat add-ons"
+            aria-label="Chat add-ons" onClick={() => setWorkbench((open) => (open ? null : "new"))}>
+            <Icon name="plug" width="16" height="16" /></button> : null}
           {onOpenMissionBoard ? <button type="button" className="cx-icon-button" title="Mission Board" aria-label="Open Mission Board" onClick={onOpenMissionBoard}>
             <Icon name="logs" width="16" height="16" /></button> : null}
           {selectedTaskId ? <button type="button" ref={detailsToggle} className="cx-icon-button" data-details-toggle=""
@@ -3247,7 +3310,9 @@ export function AgentOrchestratorChat({
                 // Codex names who asks ("Allow ChatGPT to run this command?"): here the card's model.
                 const model = latest?.nodes.find((node) => node.id === approval.nodeId)?.route?.model;
                 const actor = model ? modelName?.(model) || model.slice(model.lastIndexOf("/") + 1) : undefined;
-                return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor} />;
+                return <AgentOrchestratorApproval key={JSON.stringify([approval.nodeId, approval.approval_id])} approval={approval} busy={busy} approve={approve} actor={actor}
+                  onOpenPlan={selectedTaskId ? openPlan : undefined}
+                  onApproveForMe={approveForMe && approval.nodeId === approveForMe.nodeId ? approveForMe.run : undefined} />;
               })}
             </div></div> : null}
           </div>
@@ -3312,6 +3377,7 @@ export function AgentOrchestratorChat({
           onMenu={(owner, items) => toggleMenu(owner, (box) => ({ x: box.right - 180, y: box.bottom + 4, label: "Queued message actions", items }))}
           // Queued commands and goals show in the bar too now, so Clear all clears all of them.
           onClearAll={() => dequeue(selectedTaskId, null)} />
+        {livePlan ? <div className="cx-inline-plan"><LivePlanCard plan={livePlan} onOpen={() => openPlan()} /></div> : null}
         {goalEditing !== null && commands?.goal ? (() => {
           // The goal bar opened for editing: its target and "Edit goal", the objective in a box that
           // grows with it, then how long it may be, Cancel and Save. Ctrl+Enter saves, Esc cancels.
@@ -3484,7 +3550,11 @@ export function AgentOrchestratorChat({
                 previousSessionIds={agentSessions.slice(1).filter((session) => session.model === agentSessions[0]?.model
                   && session.label.split(" · ")[0] === agentSessions[0]?.label.split(" · ")[0]).map((session) => session.id)}
                 agentLabel={agentSessions[0]?.label} model={agentSessions[0]?.model}
-                launchedWindow={agentSessions[0]?.contextWindow} nextWindow={composer?.route?.context_window}
+                launchedWindow={agentSessions[0]?.contextWindow}
+                // A pick the agent already has is not a next window, though it runs at less (a 1M pick
+                // on an 872K model, or Codex keeping 5% back).
+                nextWindow={agentRoute && (composer?.route?.context_window ?? null) === (agentRoute.context_window ?? null)
+                  ? undefined : composer?.route?.context_window ?? undefined}
                 canCompact={Boolean(commands && accepts && agentSessions[0]?.id)} onCompact={() => void runCommand("compact", "", false)} onFraction={setContextShare} compacting={compacting} /> : null}
               {/* A run waiting out an automatic retry (or an answer) takes a message, yet it is still open: with
                   nothing typed, Stop shows instead of a disabled Send. It showed only while a card ran, so a step
@@ -3535,7 +3605,8 @@ export function AgentOrchestratorChat({
         <div className="cx-structure-body">{structure}</div>
       </aside> : null}
       {workbench && selectedTaskId ? <ChatWorkbench key={workbenchKey} sessions={workbench === "preview" ? previewSessions : agentSessions} workspaceId={projectId} tab={workbench} onTab={setWorkbench} onClose={() => setWorkbench(null)}
-        subagents={subagents} renderWork={renderSubagentWork} changesTarget={changesTarget?.taskId === selectedTaskId ? changesTarget : undefined} /> : null}
+        plan={{ text: shownPlan, tasks: currentPlan.tasks, live: currentPlan.live, published: livePlan }} subagents={subagents} renderWork={renderSubagentWork}
+        changesTarget={changesTarget?.taskId === selectedTaskId ? changesTarget : undefined} /> : null}
       {responseStyleNotice ? <p role="status" className="cx-note">{responseStyleNotice}</p> : null}
       {responseSettingsOpen ? <div className="cxs-root" role="dialog" aria-label="Response style settings" onKeyDown={event => {
         if (event.key === "Escape") { event.stopPropagation(); setResponseSettingsOpen(false); }

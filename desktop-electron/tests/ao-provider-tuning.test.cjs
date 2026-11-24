@@ -50,7 +50,7 @@ test("classic CPA catalog remains usable but absent capabilities are not invente
 });
 
 test("all AO harnesses receive truthful tuning outcomes; unsupported transport stays unavailable and Claude models take a window", async () => {
-  // agy lists only CPA's models (CPA_ONLY_AGENTS), like Claude Code: checked below with them.
+  // agy's catalog (its own sign-in's models beside CPA's) is checked below and in its own test.
   const ids = ["aider", "grok", "droid", "crush", "cursor", "qwen", "copilot", "goose", "auggie", "continue",
     "devin", "cline", "kimi", "muse", "kiro", "kilocode", "vibe", "kimchi", "prime-agent", "autohand", "omp", "amp", "pi", "unreal-agent"];
   const workflow = createAgentOrchestratorWorkflow({
@@ -68,21 +68,23 @@ test("all AO harnesses receive truthful tuning outcomes; unsupported transport s
   }
   // Claude Code lists only CPA models; a Claude model through CPA keeps CPA's advertised efforts and
   // takes a window up to its reported limit (its picker was off). A CPA alias with no reported limit
-  // ("Claude Opus 5.5") offers the client's 2M ceiling, said to be unverified.
+  // takes its model's known one ("Claude Opus 5.5", 1M); an unknown one offers the client's 2M
+  // ceiling, said to be unverified.
   const claude = createAgentOrchestratorWorkflow({
     aoHarness: { models: async () => { throw Error("Claude Code's own aliases are not listed"); } },
     cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
     fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "claude-sonnet-4-6", context_window: 200000,
-      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }, { slug: "Claude Opus 5.5" }] }) }),
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }] }, { slug: "Claude Opus 5.5" }, { slug: "Brand New Model" }] }) }),
   });
   const catalog = (await claude.call("models", { harness: "ao:claude-code" })).capabilities;
   const caps = catalog["cpa/claude-sonnet-4-6"];
   assert.deepEqual(caps.efforts, ["low", "high"]);
   assert.deepEqual(caps.contextWindow, { min: 4096, max: 200000, kind: "context" });
-  assert.deepEqual(catalog["cpa/Claude Opus 5.5"].contextWindow, { min: 4096, max: 2000000, kind: "context" });
-  assert.match(catalog["cpa/Claude Opus 5.5"].contextReason, /unverified/);
-  // agy lists only CPA's models too, and takes no window on them: its gateway variables carry none,
-  // so the chip says why (windowlessReason).
+  assert.deepEqual(catalog["cpa/Claude Opus 5.5"].contextWindow, { min: 4096, max: 1000000, kind: "context" });
+  assert.deepEqual(catalog["cpa/Brand New Model"].contextWindow, { min: 4096, max: 2000000, kind: "context" });
+  assert.match(catalog["cpa/Brand New Model"].contextReason, /unverified/);
+  // agy takes no window on CPA's models: its gateway variables carry none, so the chip says why
+  // (windowlessReason). Its own catalog failing here (not signed in) leaves CPA's listed.
   const agy = (await claude.call("models", { harness: "ao:agy" })).capabilities["cpa/claude-sonnet-4-6"];
   assert.equal(agy.contextWindow, undefined);
   assert.match(agy.contextReason, /^Antigravity sizes its own context window/);
@@ -177,7 +179,7 @@ test("Cline DeepSeek V4.1 Flash lists native efforts and forwards them unchanged
   }
 });
 
-test("agy gets the bare model name and runs unattended only with Full access", async () => {
+test("agy gets the bare model name and runs in every permission mode as a chat", async () => {
   // agy sends its tools only for a model it recognizes; "gemini-3-flash(medium)" is not one ("not
   // recognized as a known model"), so the model printed its tool calls as text.
   const catalog = [{ slug: "gemini-3-flash", supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }] }];
@@ -188,12 +190,24 @@ test("agy gets the bare model name and runs unattended only with Full access", a
   assert.deepEqual([other.model, other.effort], ["gemini-3-flash(medium)", "medium"], "Claude Code keeps its supported start effort through the gateway");
   const full = await dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" }, catalog);
   assert.equal(full.approvalMode, "bypass-permissions");
-  // Ask stays at an approval in agy's terminal, which nobody sees, and Approve for me (--mode auto)
-  // is "not available for this account" through the gateway, so it falls back to asking: refused.
+  // Until 2026-11-23 Ask and Approve for me were refused: agy ran in a terminal and asked there,
+  // where nobody saw it. As a chat (`agy acp`) it raises each approval to the chat, so both launch in
+  // accept-edits, where agy asks before running anything and this app answers or reviews it.
   for (const reviewer of ["user", "auto_review"]) {
-    await assert.rejects(dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer }, catalog),
-      /asks for approval in its own terminal.*Choose Full access, the only mode it runs in\./, reviewer);
+    const asked = await dispatched("agy", "cpa/gemini-3-flash", { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer }, catalog);
+    assert.equal(asked.approvalMode, "accept-edits", reviewer);
   }
+});
+
+test("agy lists its own Google sign-in's models beside CPA's, and only CPA's until it is signed in", async () => {
+  const cpa = { cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ models: [{ slug: "gemini-3-flash" }] }) }) };
+  const signedIn = createAgentOrchestratorWorkflow({ ...cpa, aoHarness: { models: async () => [{ id: "gemini-4-carbon" }] } });
+  const listed = (await signedIn.call("models", { harness: "ao:agy" })).models;
+  assert.ok(listed.includes("gemini-4-carbon") && listed.includes("cpa/gemini-3-flash"), JSON.stringify(listed));
+  // `agy models` refuses until agy is signed in: its own list is empty, and CPA's still shows.
+  const signedOut = createAgentOrchestratorWorkflow({ ...cpa, aoHarness: { models: async () => { throw new Error("agy is not signed in"); } } });
+  assert.deepEqual((await signedOut.call("models", { harness: "ao:agy" })).models, ["cpa/gemini-3-flash"]);
 });
 
 test("a blank CPA card's start effort follows the effort rank, and Auto or a model's own effort is left alone", async () => {
@@ -291,7 +305,9 @@ test("a launch that fails before returning a session saves the launcher's reason
 
 test("persisted CPA tuning is checked against the current model capabilities before dispatch", async () => {
   await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { effort: "xhigh" }), /doesn't support the chosen reasoning effort/i);
-  await assert.rejects(dispatched("codex", "cpa/gpt-5.5", { context_window: 1048576 }), /context.*262144|context.*limit/i);
+  // A window saved past the model's limit, or one the limit later came down under (CPA's stock 272K
+  // on a 200K Claude, now known), runs at the limit: the agent is told no more than the model takes.
+  assert.equal((await dispatched("codex", "cpa/gpt-5.5", { context_window: 1048576 })).contextWindow, 262144);
 });
 
 test("upstream spawn preserves context and the effort on Chat/TUI fallback, the effort going in a CPA session's body", async () => {
@@ -388,6 +404,7 @@ test("Claude Code through CPA starts on the model id CPA lists to Claude clients
   ], "only Claude Code takes CPA's Claude spelling; a claude-… id and other agents keep the id");
   const back = vm.runInContext("cpaModelFromClaude", context);
   assert.equal(back("claude-fable-5-dd-hsalf-1.4v-keespeed/og-edocnepo(max)"), "opencode-go/deepseek-v4.1-flash(max)");
+  assert.equal(back("claude-fable-5-dd-nogra-4-inimeg(medium)[1m]"), "gemini-4-argon(medium)[1m]");
   assert.equal(back("gpt-6.1-sol"), "gpt-6.1-sol");
   assert.equal(back("claude-fable-5-dd-"), "claude-fable-5-dd-");
 });

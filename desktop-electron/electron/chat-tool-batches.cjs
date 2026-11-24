@@ -34,6 +34,12 @@ const MAX_CONCURRENT_READS = 4;
  * serialize heavy build commands.
  */
 const FAST_EXECUTION_GUIDANCE = Object.freeze(
+  "Choose the lightest process that fits the task. " +
+  "Small: answer or make the contained fix directly, without a formal plan. " +
+  "Medium: list the few necessary steps, then carry them out. " +
+  "Long: verify work in milestones and record the next action. " +
+  "Very long: maintain one task handoff with scope, exact revision, evidence, pending jobs, blockers and the next safe action. " +
+  "Read it first on resume and check uncertain outcomes before repeating work; an expired command handle does not prove nothing ran. " +
   "Batch independent reads (e.g. ReadMany/SearchAndRead) to minimize turn latency. " +
   "Run one focused test by default; reuse unchanged passing evidence from recent runs. " +
   "No automatic command skipping and no bypass of required gates (all permission checks and safety approvals apply). " +

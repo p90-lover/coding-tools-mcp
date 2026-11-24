@@ -1052,8 +1052,8 @@ test("a running agent keeps its tools across an app restart: same port, its cred
   t.after(() => second.close());
   await second.listen();
   const list = await post(url, { jsonrpc: "2.0", id: id++, method: "tools/list" }, { authorization: headers.Authorization });
-  // show_in_chat comes with every agent's tools (#386).
-  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["read_file", "show_in_chat"], "the old address and credential still work");
+  // show_in_chat comes with every agent's tools (#386); open_plan with every top-level agent's (not subagents or previews).
+  assert.deepEqual(list.result.tools.map((tool) => tool.name), ["read_file", "show_in_chat", "open_plan"], "the old address and credential still work");
   const forged = await new Promise((resolve) => {
     const request = http.request(url, { method: "POST", headers: { "content-type": "application/json", authorization: "Bearer forged" } },
       (response) => { response.resume(); resolve(response.statusCode); });

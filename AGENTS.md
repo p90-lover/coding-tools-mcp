@@ -32,6 +32,7 @@
 ## Plan and execute in one task
 
 - When the user asks for a plan and tells you to execute it, the plan is a working outline. Start the first executable step immediately, then carry the requested fixes or additions through verification and applicable delivery. Do not stop to report the plan or ask again for routine approval.
+- Follow the user's direct choices about task scope, order, and other workflow details where this file gives a default. When the user asked for a fix, review it and apply confirmed in-scope changes without another go-ahead. An explicit review-only request remains report-only. Required checks and actual tool permissions still apply.
 - If one step is blocked, finish the independent in-scope work you can still do. Checkpoint and stop only for completion, an explicit stop or plan-only request, or a genuine dependency, permission, safety, or verification gate you cannot resolve. Never bypass a denial or claim that an unverified change works.
 
 <!-- gitnexus:start -->

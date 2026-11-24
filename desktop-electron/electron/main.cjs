@@ -38,7 +38,7 @@ const { createConversationActions } = require("./chatgpt-conversation-actions.cj
 const { cpaAccountOf, createChatGptDesktopHost, proxyRouteFromEnvironment } = require("./chatgpt-desktop.cjs");
 const { cleanUserAgent } = require("./browser-url.cjs");
 const { mergeGptBrowserAccounts } = require("./gpt-browser-merge.cjs");
-const { createBrowserAccounts, signedInFromCookies, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
+const { createBrowserAccounts, signedInFromCookies, takesNewSessions, FIRST_ACCOUNT_ID: FIRST_BROWSER_ACCOUNT_ID } = require("./browser-accounts.cjs");
 const { createBrowserAccountService } = require("./browser-account-service.cjs");
 const { automaticSetupGaveWay, createBrowserAccountMcpSync } = require("./browser-account-mcp.cjs");
 const { readChatGptAuthSession } = require("./chatgpt-auth-session.cjs");
@@ -102,6 +102,7 @@ const {
 
 const { createManagedExternalServicesController, resolveManagedProxyEnvironmentAsync } = require("./managed-external-services.cjs");
 const { fetchFollowingRedirects } = require("./managed-components.cjs");
+const { createLinkPreviewService } = require("./link-preview.cjs");
 const { createManagedBootstrap } = require("./managed-bootstrap.cjs");
 const { createUpstreamToolController } = require("./upstream-tools.cjs");
 const { createOriginalUiController } = require("./original-ui.cjs");
@@ -298,6 +299,8 @@ let quitLogger = null;
 let launcherRuntimeRoot = null;
 // Runtime > RTK (rtk.cjs), made once the logger exists; IPC reads it from here.
 let rtkService = null;
+// The chat's link hover cards (link-preview.cjs), made on the first hover.
+let linkPreviewService = null;
 /** How long Electron may linger after app.quit() once every stop has run (app.relaunch still applies). */
 const QUIT_EXIT_GRACE_MS = 10_000;
 let codexBridgeConnectInFlight = null;
@@ -384,6 +387,16 @@ function userMcpServers(logger = null) {
 async function savedMcpServers(list) {
   await userMcpServers().saved();
   return list;
+}
+// Runtime > App layout (app-layout.cjs): the architecture map and layer editor shared by the tab and chat agents.
+let appLayoutService = null;
+function appLayoutStore(logger = null) {
+  appLayoutService ??= require("./app-layout.cjs").createAppLayoutStore({
+    filePath: path.join(app.getPath("userData"), "app-layout.json"),
+    logger,
+    onChange: (next) => send("launcher:app-layout-changed", next),
+  });
+  return appLayoutService;
 }
 // The person's unified-agent-tools (vendor/unified-agent-tools), for every chat that runs a GPT model.
 let gptFileTools = null;
@@ -1343,13 +1356,16 @@ const refreshBrowserAccountSignIns = (logger) => browserAccountService.refreshSi
 const browserAccountExists = (accountId) => browserAccounts.has(accountId);
 
 // Where a new Codex session starts (the setting): the account in use, a chosen account, or the
-// least busy account that takes new sessions: fewest tabs open, then fewest sessions used in the
-// last day, then the account in use.
+// least busy account that can take it (takesNewSessions: signed in, sign-in not rejected): fewest
+// tabs open, then fewest sessions used in the last day, then the account in use.
+// "The account in use" that cannot take it gives way to the least busy one that can. Seen 2026-11-23:
+// the account in use was one whose sign-in ChatGPT had rejected two days before, so every new session
+// started there and failed while another account was signed in. "Always <account>" stays that account.
 function newSessionAccount() {
-  const { accounts, activeId, settings } = browserAccounts.status();
-  if (settings.newSessions !== "balance") return browserAccountExists(settings.newSessions) ? settings.newSessions : activeId;
-  const open = accounts.filter((entry) => entry.acceptsNewSessions);
-  if (!open.length) return activeId;
+  const { accounts, activeId, settings } = browserAccountsStatus();
+  const open = accounts.filter(takesNewSessions);
+  if (browserAccountExists(settings.newSessions)) return settings.newSessions;
+  if (!open.length || (settings.newSessions !== "balance" && open.some((entry) => entry.id === activeId))) return activeId;
   const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
   const recent = new Map();
   for (const entry of threadAccounts?.list() ?? []) {
@@ -2478,6 +2494,15 @@ function registerIpc({ logger, stateStore }) {
   });
   handle("coding-tools:tasks:list", (event, input) => codingTools.listTasks(event, input));
   handle("coding-tools:history:search", (event, input) => codingTools.searchHistory(event, input));
+  // A link's hover card. The page is read on the App route without cookies, never by the window;
+  // the service asks only public hosts and follows each redirect itself.
+  handle("coding-tools:links:preview", (event, input) => {
+    assertFocusedMainWindow(event, false);
+    linkPreviewService ??= createLinkPreviewService({
+      fetchPage: (url, options) => fetchThroughLauncherNetwork(url, options),
+    });
+    return linkPreviewService.preview(input.url);
+  });
   let nativeApprovalPromptInFlight = false;
   handle("coding-tools:native-codex:status", async (event, input) => {
     const snapshot = await codingTools.nativeCodexStatus(event, input);
@@ -3640,6 +3665,8 @@ function registerIpc({ logger, stateStore }) {
       try {
         result = await createWorkspaceConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
         preserveSurface: true,
+        // An automatic check runs in the background and gives the browser to a chat that needs it (forChat).
+        yieldsToChats: typeof assertAutomaticCurrent === "function",
         onContext: recordBrowserWorkspaceContext,
         accountCandidates: async () => {
           const candidates = [];
@@ -3713,6 +3740,10 @@ function registerIpc({ logger, stateStore }) {
   });
 
   let accountMcpConfig = null;
+  // Automatic MCP checks go on in the background once the person has used the app this run (their choice,
+  // 2026-11-24). Until then a check ran only while the window was focused, and on 2026-11-23 no account
+  // was checked all night. A copy started hidden still reads no account before it is first opened.
+  let accountMcpAttended = false;
   automaticAccountMcp = createBrowserAccountMcpSync({
     logger,
     accounts: () => browserAccounts.status().accounts.map(account => ({
@@ -3721,12 +3752,15 @@ function registerIpc({ logger, stateStore }) {
     canRun: ({ connecting = false } = {}) => {
       const state = stateStore.read();
       const operation = browserHost?.currentOperation();
+      if (!mainWindow || mainWindow.isDestroyed()) return false;
+      // Genuine focus once: the window and its page (native focus alone is not the person).
+      if (!accountMcpAttended && mainWindow.isFocused() && mainWindow.webContents.isFocused()) accountMcpAttended = true;
       return !IS_DEV_PROFILE && !quitting && !shutdownInProgress
         && state.autoConnectExistingMcp === true && state.coreSetupComplete === true
-        && state.browserInteractionMode === "automatic"
-        && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()
-        && mainWindow.isFocused() && mainWindow.webContents.isFocused()
-        && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
+        && state.browserInteractionMode === "automatic" && accountMcpAttended
+        // Only browser work holds it: a running turn, a chat taking the browser (which also stops a running
+        // check, browser forChat), an account switch, another operation or the runtime's own setup.
+        && browserHost && !browserHost.activeTraceId && !browserHost.chatStarting?.() && !browserAccountsStatus().switching
         && (!operation || (connecting && operation === "MCP connector creation"))
         && runtimeHost && !runtimeHost.setupOperation();
     },
@@ -3752,7 +3786,7 @@ function registerIpc({ logger, stateStore }) {
         "https://chatgpt.com", 10_000);
     },
     connect: (accountId, current) => connectAccountMcp(accountId, () => {
-      if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
+      if (!current()) throw new Error("Automatic MCP setup is waiting for an idle browser and the current account.");
     }),
   });
   const syncAccountMcp = () => void automaticAccountMcp.sync().catch(error => logger.warn("browser_accounts.automatic_mcp_pending", {
@@ -4209,6 +4243,20 @@ function registerIpc({ logger, stateStore }) {
   handle("mcp-servers:set-enabled", async (event, id, enabled) => {
     if (enabled === true) await assertFocusedMainWindowSettled(event, true);
     return savedMcpServers(userMcpServers(logger).setEnabled(String(id), enabled === true));
+  });
+  // Runtime > App layout: read and edit the Coding Tools category/layer map.
+  handle("launcher:app-layout", () => appLayoutStore(logger).get());
+  handle("launcher:app-layout-edit", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
+    const updated = await appLayoutStore(logger).act(input);
+    await appLayoutStore(logger).saved();
+    return updated;
+  });
+  handle("launcher:app-layout-reset", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
+    const reset = await appLayoutStore(logger).reset();
+    await appLayoutStore(logger).saved();
+    return reset;
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
@@ -5337,6 +5385,8 @@ async function start() {
             return missionWorkflowRuntime.chatMoveTool(request);
           },
         },
+        // app_layout: lets chat agents read or edit the Runtime > App layout layers live.
+        appLayout: appLayoutStore(logger),
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         // The person's notes for computer_guide: <app>.md (chrome.md, notepad.md) or <topic>.md, read on each call.
@@ -5509,6 +5559,7 @@ async function start() {
     const agentOrchestratorWorkflow = createAgentOrchestratorWorkflow({
       findCodexExecutable: () => codexCli.executable() || findInstalledCodexExecutable?.() || null,
       nativeGuardianReview,
+      handoffRedactionEnabled: () => stateStore.read().chatAgentRedactSecrets === true,
       // Stop agents that sat idle for a while; their chats resume them on the next message.
       releaseIdleAgents: true,
       // Files the person attached (saved by launcher:save-attachment): reading one needs no review.
@@ -5589,6 +5640,12 @@ async function start() {
       },
       resolveHarness: (selection) => resolveAoNativeConnection({ ...selection, userData: app.getPath("userData") }),
       aoHarness: agentOrchestratorUpstream.harness,
+      // The window a session's agent was told (what the context meter shows): the one this app
+      // launched or resized it with, else the agent's own latest report. Codex reports 95% of it.
+      agentWindow: async (session) => {
+        const reading = (await agentOrchestratorUpstream.call("chat_context", { sessionIds: [session] }))?.sessions?.[session];
+        return reading?.launchedWindow || reading?.usage?.contextWindow || null;
+      },
       confirm: confirmAoAction,
       confirmToolRequest,
       confirmRecoverable,

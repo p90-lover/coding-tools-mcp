@@ -112,6 +112,11 @@ function fixture(options = {}) {
     Object.assign(contents, { state, setWindowOpenHandler() {}, executeJavaScript: async script => {
       if (script.includes('fetch("/api/auth/session"')) {
         const id = script.match(/activeAccountId: "([a-f0-9-]+)"/)?.[1];
+        // ChatGPT settles the page's address in place while the session read runs (fresh() included).
+        if (options.rewriteDuringRead && contents.loaded) {
+          const page = new URL(contents.loaded);
+          contents.emit("did-start-navigation", {}, `${page.origin}${page.pathname}?directoryTab=personal`, true, true);
+        }
         return setup.chatGptMcpContext({ user: { id: profile.userId }, auth: { chatgpt_user_id: profile.userId }, activeAccountId: id,
           accounts: Object.fromEntries(Object.entries(profile.memberships).map(([key, role]) => [key, {
             can_access_with_session: true, account: { account_id: key, account_user_role: role, structure: "workspace",
@@ -137,6 +142,7 @@ function fixture(options = {}) {
       destroy: () => { state.destroyed = true; }, loadURL: async url => {
         if (url === "about:blank") { contents.rendererInitialized = true; return; }
         contents.emit("did-start-navigation", {}, url, false, true);
+        contents.loaded = url;
         if (options.redirect) {
           const destination = "https://frame.invalid/redirect", mainFrame = options.redirect === "unknown" ? undefined : options.redirect === "main";
           const event = { preventDefault() { calls.push(["blocked-redirect", partition]); }, ...(options.details ? { url: destination, isMainFrame: mainFrame } : {}) };
@@ -231,6 +237,25 @@ test("same-workspace owner is preferred, publishes there, and connects the origi
   assert(f.contexts.some(value => value.partition === "persist:member" && value.context.planType === "team"));
 });
 
+// Background checks (2026-11-24): an automatic check's lock gives way to chats (yieldsToChats), and its
+// Publish click runs as a step changing ChatGPT, which a stop lets finish (browser whileChangingChatGpt).
+test("an automatic check's lock yields to chats, a Connect's does not, and Publish finishes before any stop", async () => {
+  for (const yieldsToChats of [true, undefined]) {
+    const f = fixture({ owner: true });
+    const lock = f.input.browserHost.withManualOperation, changed = [];
+    let options;
+    f.input.browserHost.withManualOperation = (name, action, opts) => { options = opts; return lock(name, action); };
+    f.input.browserHost.whileChangingChatGpt = async step => {
+      const before = f.calls.length;
+      try { return await step(); } finally { changed.push(...f.calls.slice(before)); }
+    };
+    if (yieldsToChats) f.input.yieldsToChats = true;
+    assert.equal((await f.run()).connected, true);
+    assert.deepEqual({ ...options }, { preserveSurface: false, stoppable: true, yieldsToChats: yieldsToChats === true });
+    assert.deepEqual(changed, [["publish", "persist:owner"]], "only the Publish click is a change step here");
+  }
+});
+
 test("a member or admin uses fresh exact existing connector identity before looking for an owner", async () => {
   for (const role of ["standard-user", "account-admin"]) {
     const f = fixture({ existingVerified: true });
@@ -254,6 +279,12 @@ test("consent, uncertain mutation, and changed context failures cannot fall back
 
 test("same-page directory filters keep the verified workspace inspection usable", async () => {
   const f = fixture({ owner: true, filterNavigation: true });
+  const result = await f.run();
+  assert.equal(result.connected, true);
+});
+
+test("a same-page address rewrite during a fresh session read keeps the inspection usable", async () => {
+  const f = fixture({ owner: true, rewriteDuringRead: true });
   const result = await f.run();
   assert.equal(result.connected, true);
 });

@@ -29,7 +29,7 @@ test("the Claude hook supplies context once for the matching unchanged call, nev
 });
 
 async function fixture(t, { badCall = false, asksForTool = false, authKind = "chatgpt", assessment = { outcome: "allow", riskLevel: "low", userAuthorization: "high" },
-  holdReview, onExecutable, limits, crashFirstReview = false, internalErrorOnce = false, accounts = null } = {}) {
+  holdReview, onExecutable, limits, crashFirstReview = false, internalErrorOnce = false, accounts = null, rejectReviewModel = false } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "guardian-review-"));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const requests = [];
@@ -63,7 +63,10 @@ async function fixture(t, { badCall = false, asksForTool = false, authKind = "ch
         let result = {};
         if (method === "account/login/start") logins.push({ token: params.accessToken, server: options.cwd });
         if (method === "account/read") result.account = { type: authKind };
-        else if (method === "thread/start") result = { thread: { id: `review-thread-${++threads}` }, modelProvider: "openai" };
+        else if (method === "thread/start") {
+          if (rejectReviewModel && params.model) return deliver({ id, error: { code: -32600, message: "unknown model" } });
+          result = { thread: { id: `review-thread-${++threads}` }, modelProvider: "openai", model: params.model ?? "default-chat-model" };
+        }
         else if (method === "thread/inject_items") calls.set(params.threadId, params.items.at(-1).call_id);
         else if (method === "thread/guardianReview") {
           if (asksForTool) return deliver({ id: 7654, method: "item/commandExecution/requestApproval", params: {} });
@@ -93,6 +96,8 @@ test("native Guardian reviews the recorded command in an isolated thread and nev
   assert.equal(options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(requests.find(entry => entry.method === "account/login/start").params.type, "chatgptAuthTokens");
   assert.equal(requests.find(entry => entry.method === "thread/start").params.ephemeral, true);
+  // Codex runs Guardian on the reviewed thread's model: its own auto-review model, not the chat default.
+  assert.equal(requests.find(entry => entry.method === "thread/start").params.model, "codex-auto-review");
   const items = requests.find(entry => entry.method === "thread/inject_items").params.items;
   assert.equal(items[0].role, "user");
   assert.equal(JSON.parse(items[1].arguments).cmd, request.approval.command);
@@ -101,6 +106,14 @@ test("native Guardian reviews the recorded command in an isolated thread and nev
   assert.equal((await fs.readdir(path.join(root, "state"))).length, 1);
   await review.close();
   assert.deepEqual(await fs.readdir(path.join(root, "state")), []);
+});
+
+test("a Codex that refuses the auto-review model reviews on its default model, asking only once per server", async (t) => {
+  const { review, request, requests } = await fixture(t, { rejectReviewModel: true });
+  assert.equal((await review(request)).action, "allow");
+  assert.equal((await review(request)).action, "allow");
+  const starts = requests.filter(entry => entry.method === "thread/start").map(entry => entry.params.model ?? null);
+  assert.deepEqual(starts, ["codex-auto-review", null, null]);
 });
 
 test("a burst shares a few long-lived servers, several reviews each, and the rest wait without opening cancelled work", { timeout: 5000 }, async (t) => {
@@ -230,4 +243,38 @@ test("uncertain cwd, non-shell and unavailable auth do not start a reviewer", as
   const outcome = await noAuth(request);
   assert.match(outcome.reason, /ChatGPT sign-in/);
   assert.equal(outcome.guardianUnavailable, true);
+});
+
+test("queue, account-read, and server timeouts or repeated server crashes report Guardian timed out and unavailable", async (t) => {
+  const { request } = await fixture(t);
+  const slowAccount = createGuardianReview({
+    platform: "win32", stateDir: path.join(request.folder, "slow-account"),
+    executable: () => path.join(request.folder, "codex.exe"),
+    limits: { workMs: 30, queueMs: 30 },
+    prepareAccount: async () => new Promise(resolve => setTimeout(() => resolve({ accessToken: "t", chatgptAccountId: "a" }), 80)),
+    spawnProcess: () => assert.fail("timed out reading account"),
+  });
+  t.after(() => slowAccount.close());
+  const accountTimedOut = await slowAccount(request);
+  assert.equal(accountTimedOut.guardianUnavailable, true);
+  assert.equal(accountTimedOut.guardianTimedOut, true);
+
+  const crashing = createGuardianReview({
+    platform: "win32", stateDir: path.join(request.folder, "crashing"),
+    executable: () => path.join(request.folder, "codex.exe"),
+    limits: { workMs: 200, queueMs: 100 },
+    prepareAccount: async () => ({ accessToken: "t", chatgptAccountId: "a" }),
+    spawnProcess() {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.kill = () => child.emit("close");
+      setImmediate(() => child.emit("close"));
+      return child;
+    },
+  });
+  t.after(() => crashing.close());
+  const crashedOutcome = await crashing(request);
+  assert.equal(crashedOutcome.guardianUnavailable, true);
+  assert.equal(crashedOutcome.guardianTimedOut, true);
 });

@@ -1502,6 +1502,24 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
 .cx-workbench-tab:hover .cx-workbench-tab-close, .cx-workbench-tab.is-active .cx-workbench-tab-close { opacity: 1; }
 .cx-workbench-tab-close:hover { background: var(--cx-hover); color: var(--color-text-primary); }
 .cx-workbench-add { flex: 0 0 auto; width: 26px; height: 26px; }
+.cx-workbench-plan { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; }
+.cx-workbench-plan-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 8px 16px 0; color: var(--ao-muted); font-size: 12px; }
+.cx-workbench-plan-body { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 12px 24px 24px; overflow-wrap: anywhere; }
+.cx-workbench-plan-body .cx-rplan-step-title { white-space: normal; }
+.cx-workbench-plan-body .cx-workbench-empty { margin: 12px 0; }
+.cx-inline-plan { flex: 0 0 auto; min-width: 0; margin: 0 16px; }
+.cx-inline-plan .cx-rplan-steps { max-height: min(18vh, 156px); overflow: auto; }
+.cx-live-plan .cx-rplan-head { align-items: center; }
+.cx-live-plan .cx-rplan-head button { margin-left: auto; }
+.cx-live-plan-outcome { display: flex; gap: 6px; align-items: baseline; min-width: 0; overflow-wrap: anywhere; }
+.cx-live-plan-outcome strong { flex: 0 0 auto; }
+.cx-live-plan .cx-rplan-step-title { white-space: normal; overflow-wrap: anywhere; }
+.cx-chat:has(> .cx-workbench.is-plan) { container: cx-plan-shell / inline-size; }
+@container cx-plan-shell (max-width: 620px) {
+  .cx-chat > .cx-thread, .cx-chat > .cx-structure:not(.cx-workbench.is-plan) { display: none; }
+  .cx-chat > .cx-workbench.is-plan { flex-grow: 1; min-width: 0; max-width: none; border-left: 0; }
+  .cx-workbench.is-plan > .cx-structure-resize { display: none; }
+}
 /* New-tab page: the panel's tools and recent pages. */
 .cx-newtab { flex: 1 1 auto; min-height: 0; padding: 18px 24px; overflow: auto; }
 .cx-newtab-label { margin: 14px 0 8px; font-size: 13px; font-weight: 600; }
@@ -2259,6 +2277,6 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
    AgentOrchestratorChat.tsx); Chat details stays, its panel opens under its button. */
 @container cx-thread (max-width: 300px) {
   .cx-thread-head { padding: 0 6px 0 10px; }
-  .cx-thread-head > :is(.cx-browser-chip, [aria-label="Preview"], [aria-label="Show cards"], [aria-label="Show side panel"]) { display: none; }
+  .cx-thread-head > :is(.cx-browser-chip, [aria-label="Show cards"]) { display: none; }
   .cx-goal { gap: 4px; }
 }

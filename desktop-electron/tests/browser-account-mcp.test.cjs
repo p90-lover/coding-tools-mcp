@@ -299,7 +299,7 @@ test("a setup that keeps giving way waits longer each time, and one that finishe
   let interrupt = true;
   f.deps.connect = async id => {
     f.connected.push(id);
-    if (id === "one" && interrupt) throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."), { gaveWay: true });
+    if (id === "one" && interrupt) throw Object.assign(new Error("Automatic MCP setup is waiting for an idle browser and the current account."), { gaveWay: true });
     return { connected: true };
   };
   const tries = () => f.connected.filter(id => id === "one").length;
@@ -344,7 +344,7 @@ test("a Connect the user asked for holds the sync: none starts, and one connecti
     f.connected.push(id);
     if (id === "one") { started.resolve(); await gate.promise; }
     // main.cjs's connect checks admission at each step and reports a lost one as gaveWay.
-    if (!current()) throw Object.assign(new Error("Automatic MCP setup is waiting for the focused, idle app and current account."), { gaveWay: true });
+    if (!current()) throw Object.assign(new Error("Automatic MCP setup is waiting for an idle browser and the current account."), { gaveWay: true });
     return { connected: true };
   };
   const running = f.sync.sync();
@@ -519,7 +519,7 @@ test("automatic admission preserves the selected surface while manual defaults a
 test("an automatic setup that gave way is told apart from one that failed", () => {
   const { automaticSetupGaveWay } = require("../electron/browser-account-mcp.cjs");
   const admitted = () => {};
-  const refused = () => { throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account."); };
+  const refused = () => { throw new Error("Automatic MCP setup is waiting for an idle browser and the current account."); };
   assert.equal(automaticSetupGaveWay(undefined, () => true), false, "a setup someone asked for reports every failure");
   assert.equal(automaticSetupGaveWay(admitted, () => false), false, "still admitted, same account: it failed");
   assert.equal(automaticSetupGaveWay(admitted, () => true), true, "the shown account changed under it");
@@ -532,7 +532,7 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
   const end = source.indexOf('\n  handle("launcher:doctor",', start);
   assert(start > 0 && end > start);
   const state = { autoConnectExistingMcp: true, coreSetupComplete: true, browserInteractionMode: "automatic" };
-  let focused = false, nativeFocus = false, mode = null, coreReads = 0;
+  let focused = false, nativeFocus = false, mode = null, coreReads = 0, chatStarting = false;
   const probes = [], routes = [], connections = [], callbacks = {};
   const accounts = [{ id: "one" }, { id: "two" }];
   const config = { browserHost: "launcher", mode: "full", appName: "Coding Tools Native2", automaticTunnel: { tunnelId: "configured" } };
@@ -540,7 +540,7 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
     createBrowserAccountMcpSync, readChatGptAuthSession,
     stateStore: { read: () => state }, logger: { warn() {} },
     IS_DEV_PROFILE: false, quitting: false, shutdownInProgress: false,
-    browserHost: { partition: "persist:shown", activeTraceId: null, currentOperation: () => mode },
+    browserHost: { partition: "persist:shown", activeTraceId: null, currentOperation: () => mode, chatStarting: () => chatStarting },
     browserAccounts: { status: () => ({ accounts }), partitionOf: id => `persist:${id}` },
     browserAccountsStatus: () => ({ switching: false }),
     mainWindow: { isDestroyed: () => false, isVisible: () => true, isMinimized: () => false,
@@ -578,6 +578,25 @@ test("production wiring uses owned native sessions and actual focus; it leaves a
   assert.equal(context.browserHost.partition, "persist:shown");
   await context.automaticAccountMcp.sync();
   assert.equal(connections.length, 2);
+
+  // The person chose background checks (2026-11-24): once they have used the app this run, checks go on
+  // with its window behind others, hidden or minimized. Only browser work holds them: a chat taking the
+  // browser (chatStarting) or a running turn.
+  focused = false; nativeFocus = false;
+  Object.assign(context.mainWindow, { isVisible: () => false, isMinimized: () => true });
+  context.automaticAccountMcp.invalidate();
+  await context.automaticAccountMcp.sync();
+  assert.deepEqual(connections, ["one", "two", "one", "two"], "checks go on in the background");
+  context.automaticAccountMcp.invalidate();
+  chatStarting = true;
+  await context.automaticAccountMcp.sync();
+  assert.equal(connections.length, 4, "a chat taking the browser holds them");
+  chatStarting = false; context.browserHost.activeTraceId = "turn";
+  await context.automaticAccountMcp.sync();
+  assert.equal(connections.length, 4, "so does a running turn");
+  context.browserHost.activeTraceId = null;
+  await context.automaticAccountMcp.sync();
+  assert.equal(connections.length, 6);
 });
 
 // The app's own requests take the App route (Global Routing) through the default session, never the
