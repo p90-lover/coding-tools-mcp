@@ -66,6 +66,8 @@ function fixture({ active = null, browserActive = null, failCleanup = false, res
     quitLogger: null, antigravityAuthBrowser: { closeAll() {} },
     // The forced-exit timer after app.quit() must never fire in a test.
     QUIT_EXIT_GRACE_MS: 0, setTimeout: () => ({ unref() {} }),
+    // The bounded wait for a runtime startup (main.cjs delay): never the one that settles first here.
+    QUIT_STARTUP_WAIT_MS: 30_000, delay: () => new Promise(() => {}),
     showMainWindow() {}, publishOperation() {}, app: { quit: () => quits.push(true), relaunch: () => relaunches.push(true) },
     dialog: { showMessageBox: async () => ({ response: quitAnyway ? 1 : 0 }) },
     mainWindow: { isDestroyed: () => false },

@@ -3104,3 +3104,15 @@ test("the bridge watchdog and Refresh bridge never start the bridge once quit ha
   assert.match(main.slice(restart, start), /if \(quitting \|\| shutdownInProgress\) return;/);
   assert.match(main, /bridge: \(\) => \{\s*if \(quitting \|\| shutdownInProgress\) throw new Error\("Launcher shutdown is already in progress"\);/);
 });
+
+test("quit waits for the runtime's startup only so long, and a startup stops once quit begins", () => {
+  // Bug hunt 2026-11-24 S7: requestQuit awaited the runtime startup with no deadline (an upgrade
+  // waits for the browser's sign-in refresh unbounded, each idle wait up to minutes), and the startup
+  // went on starting the bridge meanwhile; Quit looked hung and every further click was refused.
+  const main = fs.readFileSync(path.join(__dirname, "../electron/main.cjs"), "utf8");
+  const quit = main.slice(main.indexOf("async function requestQuit"), main.indexOf("async function requestQuit") + 4000);
+  assert.match(quit, /await Promise\.race\(\[\s*Promise\.allSettled\(\[runtimeStartupInFlight, codexBridgeConnectInFlight\]\.filter\(Boolean\)\),\s*delay\(QUIT_STARTUP_WAIT_MS\)/);
+  const startup = main.slice(main.indexOf("function startManagedRuntime"), main.indexOf("function startManagedRuntime") + 5000);
+  const checks = startup.match(/if \(quitting\) return \{ status: "cancelled", reason: "quitting" \};/g) ?? [];
+  assert.ok(checks.length >= 3, `the startup checks for quit between its steps (${checks.length})`);
+});

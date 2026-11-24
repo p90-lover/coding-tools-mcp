@@ -797,6 +797,9 @@ async function refreshPart(part, logger) {
 
 const AUTHENTICATION_RETRY_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
 const STARTUP_AUTH_WAIT_MS = 20_000;
+// How long a quit waits for the runtime's startup to settle; the runtime's shutdown then stops
+// whatever it started (requestQuit).
+const QUIT_STARTUP_WAIT_MS = 30_000;
 const PROXY_STARTUP_WAIT_MS = 10_000;
 /**
  * Resolves once the proxy in HTTPS_PROXY/HTTP_PROXY accepts a connection, or after `timeoutMs`
@@ -1190,9 +1193,12 @@ function startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh 
     // Otherwise a slow sign-in or proxy must not hold the Codex bridge down: start it after a bounded wait.
     if (runtimeHost.managedRuntimeUpgradeRequired()) await startupAuthenticationRefresh;
     else await Promise.race([startupAuthenticationRefresh, delay(STARTUP_AUTH_WAIT_MS)]);
+    // A quit begun meanwhile is not raced: nothing more starts (requestQuit waits a bounded time).
+    if (quitting) return { status: "cancelled", reason: "quitting" };
     // The upgrade refuses to run while any operation is active, even when none is needed (seen
     // live: a sign-in's route check made every such launch fail until the watchdog restarted it).
     const upgrade = await whenRuntimeHostIdle(logger, "upgrade", () => runtimeHost.upgradeManagedRuntime());
+    if (quitting) return { status: "cancelled", reason: "quitting" };
     if (upgrade.updated) {
       const state = stateStore.update({
         coreSetupComplete: true,
@@ -1238,7 +1244,9 @@ function startManagedRuntime({ logger, stateStore, startupAuthenticationRefresh 
       await connectCodexBridgeAfterAuthentication({ logger, stateStore, reason: "startup" });
     }
     // That route check (or a sign-in's) may still be finishing; see whenRuntimeHostIdle.
-    const runtime = await whenRuntimeHostIdle(logger, "start", () => runtimeSupervisor.startIfConfigured());
+    if (quitting) return { status: "cancelled", reason: "quitting" };
+    const runtime = await whenRuntimeHostIdle(logger, "start", () => (quitting
+      ? { status: "cancelled", reason: "quitting" } : runtimeSupervisor.startIfConfigured()));
     // "degraded" means the bridge is up and only the MCP tunnel is still being retried.
     if (runtime.status !== "ready" && runtime.status !== "degraded") return runtime;
     const browser = await startupAuthenticationRefresh;
@@ -4506,7 +4514,12 @@ async function requestQuit({ keepBridge = false, relaunch = false } = {}) {
       if (decision.response !== 1) throw new Error(`Wait for ${browserOperation} to finish before quitting Coding Tools`);
     }
     quitting = true;
-    await Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean));
+    // A startup stops at its next step once quitting is set; one stuck in a step (an upgrade waiting
+    // on the browser's sign-in, a minutes-long idle wait) does not hold the quit past this.
+    await Promise.race([
+      Promise.allSettled([runtimeStartupInFlight, codexBridgeConnectInFlight].filter(Boolean)),
+      delay(QUIT_STARTUP_WAIT_MS),
+    ]);
     // A goal, /schedule, wake-up, /loop, deleted message, archive, browser-account or settings change
     // still being saved (off the main thread) lands before the app goes; a disk that hangs holds the
     // quit 5 s at most, and each file keeps the change before.
