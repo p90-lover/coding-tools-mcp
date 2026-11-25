@@ -6106,7 +6106,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   /** Whether this chat answers a card's requests for the person: by its permissions as they are now (liveRoute). */
   const answersForPerson = (node, mission) => {
     const route = mission ? liveRoute(mission, node) : node?.route;
-    return route?.approval_policy === "never" || reviewsForPerson(route);
+    if (route?.approval_policy === "never" || route?.approvals_reviewer === "auto_review") return true;
+    // "Auto-review every approval request" answers for the person only where a reviewer takes the card's
+    // requests. A card with none (a native one, a team whose Command approver has not approved yet) would
+    // otherwise get its commands allowed by the AUTO_ANSWER_MS timer below with nothing reviewing them.
+    return Boolean(mission) && reviewsForPerson(route) && Boolean(cardApprover(mission, node));
   };
   /** The answer a question gets when nobody answers it: each field's recommended choice. */
   function recommendedAnswer(approval) {

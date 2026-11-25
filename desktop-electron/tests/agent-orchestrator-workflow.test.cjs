@@ -3484,8 +3484,20 @@ test("an Ask-for-approval chat's request is reviewed while Auto-review every app
   saved = { ...saved, nodes: [{ ...saved.nodes[0], route: { ...route, approval_policy: "never" } }] };
   assert.equal(shown(await status(), "cmd").auto_review_off, undefined);
   // A native card has no AO reviewer to send it to.
-  saved = { ...saved, nodes: [{ ...saved.nodes[0], route: { harness_id: "codex-native", model: "chatgpt-web/high" } }] };
+  const native = { ...saved.nodes[0], route: { harness_id: "codex-native", model: "chatgpt-web/high", approval_policy: "on-request", approvals_reviewer: "user" } };
+  saved = { ...saved, nodes: [native] };
   assert.equal(shown(await status(), "cmd").auto_review_off, undefined);
+  // On, a card nothing reviews is still not answered for the person: answering it would allow its
+  // commands on the AUTO_ANSWER_MS timer with no review (autoAnswerStale shares answersForPerson).
+  await workflow.call("chat_model_judges", { autoReviewAll: true });
+  const unreviewed = await status();
+  assert.equal(shown(unreviewed, "ask").auto_answer_at, undefined, "a native card's question waits for the person");
+  assert.equal(shown(unreviewed, "cmd").awaiting_review, undefined, "and its command is the person's");
+  // A team whose Command approver has not approved yet: its requests wait for it or the person.
+  saved = { ...saved, nodes: [{ ...saved.nodes[0], route }, { id: "approver", role: "approver", state: "running" }] };
+  const team = await status();
+  assert.equal(shown(team, "ask").auto_answer_at, undefined);
+  assert.equal(shown(team, "cmd").awaiting_review, undefined);
 });
 
 test("a request no review ever reached goes to the person after the review deadline", async () => {
