@@ -121,3 +121,23 @@ test("desktop shell and MCP catalog share the in-process apps overlay", () => {
   assert.match(panel, /client\.apps\.call/);
   assert.match(panel, /client\.apps\.invoke/);
 });
+
+test("apps_invoke's read-only check judges the module it will actually run", async () => {
+  // apps_invoke runs `handle` (moduleId only when handle is missing): a read-only module named in
+  // moduleId beside a writing handle must not let the write skip the focused-window check.
+  const calls = [];
+  const host = {
+    isReadOnly: (id, operation) => id === "reader" && operation === "inspect",
+    invoke: async (input) => { calls.push(input.handle); return { ok: true }; },
+    list: () => ({ modules: [] }),
+    catalog: () => ({ tools: [] }),
+  };
+  const mcp = createCodingToolsAppsMcp({ getHost: () => host });
+  const args = { handle: "writer", moduleId: "reader", operation: "inspect" };
+  assert.equal(mcp.isReadOnly("apps_invoke", args), false);
+  await mcp.callTool("apps_invoke", args);
+  assert.deepEqual(calls, ["writer"]);
+  assert.equal(mcp.isReadOnly("apps_invoke", { handle: "reader", moduleId: "writer", operation: "inspect" }), true);
+  // apps_call runs moduleId first, and is judged the same way.
+  assert.equal(mcp.isReadOnly("apps_call", { moduleId: "writer", handle: "reader", operation: "inspect" }), false);
+});

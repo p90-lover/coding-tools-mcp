@@ -135,7 +135,10 @@ function createCodingToolsAppsMcp({ getHost } = {}) {
     if (tool !== "apps_call" && tool !== "apps_invoke") return false;
     const host = hostOrNull();
     const input = asRecord(args);
-    const id = text(input.moduleId) || text(input.handle);
+    // The same module callTool will run: apps_call takes moduleId first, apps_invoke takes handle first.
+    const id = tool === "apps_invoke"
+      ? text(input.handle) || text(input.moduleId)
+      : text(input.moduleId) || text(input.handle);
     const operation = text(input.operation);
     if (!host || typeof host.isReadOnly !== "function" || !id || !operation) return false;
     return host.isReadOnly(id, operation) === true;
