@@ -1243,6 +1243,10 @@ function withoutConsent(args) {
 /** The call's arguments with every path scoped to the worktree; throws ScopeError on any escape. */
 async function scopeArguments(name, args, root) {
   const scoped = { ...args };
+  // A null directory is no directory: headless takes `workdir` over `cwd` whenever the key is
+  // present, null included, so `{ workdir: null, cwd: "src" }` ran in the worktree root while the
+  // dialog (and the sandbox) used src.
+  if (name === "exec_command") for (const key of ["workdir", "cwd"]) if (scoped[key] === null) delete scoped[key];
   // One path at a time, in the same order as before, so the first refusal is the one reported.
   if (Object.hasOwn(scoped, "project_root")) scoped.project_root = await scopePath(root, scoped.project_root, "project_root");
   for (const key of PATH_ARGUMENTS[name] ?? []) {

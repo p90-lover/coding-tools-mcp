@@ -954,6 +954,27 @@ test("exec_command always starts in the worktree", async () => {
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("a null workdir does not send a command to another directory than the one the user approved", async () => {
+  const tree = tempTree();
+  const { tools, calls, confirmations } = fixture({ root: tree.root, terminal: () => true });
+  // Headless takes workdir over cwd whenever the key is present, null included (exec.rs:
+  // args.get("workdir").or_else(|| args.get("cwd")), then "." when it is not a string).
+  const headlessDirectory = (args) => {
+    const value = Object.hasOwn(args, "workdir") ? args.workdir : args.cwd;
+    return typeof value === "string" ? value : ".";
+  };
+  try {
+    const { url, auth } = await session(tools);
+    // A model with strict tool schemas sends null for an optional argument it does not use.
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "rmdir /s /q build", workdir: null, cwd: "src" })).isError, false);
+    assert.match(confirmations.at(-1).detail, /Directory: .*src/s, "the user was shown src");
+    assert.equal(headlessDirectory(calls.at(-1).body.arguments), "src", "and headless runs it in src");
+    assert.equal((await callTool(url, auth, "exec_command", { cmd: "dir", workdir: null, cwd: null })).isError, false);
+    assert.equal(headlessDirectory(calls.at(-1).body.arguments), ".");
+    assert.equal(calls.at(-1).body.arguments.workdir, ".", "neither given: the worktree root");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("the terminal is its own group, off by default, and turning it on reaches only new sessions", async () => {
   const tree = tempTree();
   let terminal = false;
