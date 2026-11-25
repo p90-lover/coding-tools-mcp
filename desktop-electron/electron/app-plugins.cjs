@@ -77,6 +77,7 @@ const BUNDLE_FILE = path.join(__dirname, "..", "vendor", "bundled", "cpa-plugins
 const COMMIT = /^[0-9a-f]{7,40}$/u;
 const newerCommits = (count) => `${count} newer commit${count === 1 ? "" : "s"}`;
 const AUTO_EVERY_MS = 6 * 60 * 60_000;
+const TOKEN_RETRY_MS = 60_000;
 
 /** A plugin DLL's id and version, from its file name (`<id>-v<version>.dll` or `<id>.dll`). */
 function parsePluginFile(name) {
@@ -178,9 +179,16 @@ function createAppPlugins({
     || (item.id === "codex-cli" && item.supported === true)
     || (item.kind === "cpa-plugin" && Boolean(PLUGIN_SOURCES[item.id.slice("cpa-plugin:".length)]) && !PLUGIN_SOURCES[item.id.slice("cpa-plugin:".length)].rebuilt);
 
-  // One lookup however many checks ask at once: the list checks every item together.
+  // One lookup however many checks ask at once: the list checks every item together. A lookup that
+  // found no token is tried again a minute later: kept for good, the `gh auth login` that a private
+  // plugin's error asks for changed nothing until the app restarted.
+  let tokenMissingAt = null;
   function githubToken() {
-    token ??= Promise.resolve(env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || ghToken(spawnImpl));
+    if (tokenMissingAt !== null && now() - tokenMissingAt >= TOKEN_RETRY_MS) { token = undefined; tokenMissingAt = null; }
+    token ??= Promise.resolve(env.GH_TOKEN?.trim() || env.GITHUB_TOKEN?.trim() || ghToken(spawnImpl)).then((value) => {
+      if (!value) tokenMissingAt = now();
+      return value;
+    });
     return token;
   }
 

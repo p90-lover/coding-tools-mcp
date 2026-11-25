@@ -52,3 +52,53 @@ test("a plugin download whose file can't be written fails and installs nothing",
   assert.equal(fs.existsSync(path.join(stateDir, "plugin-updates.json")), false);
   assert.equal(restarts, 0);
 });
+
+test("signing in to gh after a check that found no token lets the next check read private plugins", async () => {
+  const { EventEmitter } = require("node:events");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "app-plugins-gh-"));
+  const stateDir = path.join(root, "cpa");
+  const pluginDir = path.join(stateDir, "plugins", "windows", "amd64");
+  fs.mkdirSync(pluginDir, { recursive: true });
+  fs.writeFileSync(path.join(pluginDir, "cpa-provider-manager-v0.2.1.dll"), "old");
+  let signedIn = false;
+  let ghRuns = 0;
+  const spawnImpl = () => {
+    ghRuns += 1;
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.kill = () => {};
+    setImmediate(() => {
+      if (signedIn) child.stdout.emit("data", "gho_signedintoken0123456789");
+      child.emit("close", signedIn ? 0 : 1);
+    });
+    return child;
+  };
+  const fetchImpl = async (input, init = {}) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/repos/p90-lover/cpa_provider_manager/releases") {
+      // A private repository: GitHub answers 404 without a token.
+      if (!init.headers?.Authorization) return new Response("{}", { status: 404 });
+      return json([{ tag_name: "v0.2.2", draft: false, prerelease: false, html_url: "https://github.com/x", assets: [] }]);
+    }
+    return new Response("{}", { status: 404 });
+  };
+  let clock = 1_000_000;
+  const plugins = createAppPlugins({
+    cpaStateDir: stateDir, services: () => ({ managedComponentsSnapshot: () => ({ components: [] }), checkManagedComponentUpdate: async () => ({}) }),
+    restartCpa: async () => {}, fetchImpl, env: {}, spawnImpl, platform: "win32", arch: "x64",
+    logger: { info() {}, warn() {} }, pluginBundleFile: path.join(root, "BUNDLE.json"), now: () => clock,
+  });
+  const row = async (refresh) => (await plugins.list({ refresh })).items.find((item) => item.id === "cpa-plugin:cpa-provider-manager");
+  assert.match((await row(true)).error, /gh auth login/);
+  signedIn = true;
+  clock += 10 * 60_000;
+  const after = await row(true);
+  assert.equal(after.error, null);
+  assert.equal(after.latest, "0.2.2");
+  assert.ok(ghRuns >= 2);
+  // A token that was found is kept: no gh run per check.
+  const runs = ghRuns;
+  clock += 60 * 60_000;
+  await row(true);
+  assert.equal(ghRuns, runs);
+});
