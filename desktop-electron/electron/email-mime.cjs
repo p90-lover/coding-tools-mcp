@@ -10,6 +10,10 @@
 // defense-in-depth, not the only line.
 
 function splitHeadersBody(section) {
+  // An empty header block (a part starting with its blank line) defaults to text/plain; the first
+  // blank line inside the body must not be taken as the end of headers.
+  const empty = /^\r?\n/.exec(section);
+  if (empty) return { headers: {}, body: section.slice(empty[0].length) };
   const boundary = section.search(/\r?\n\r?\n/);
   if (boundary === -1) return { headers: parseHeaders(section), body: "" };
   const headerText = section.slice(0, boundary);

@@ -433,3 +433,10 @@ test("parseMessage decodes non-ASCII attachment filenames (RFC 2231 and encoded 
   const parsed = await parseMessage(raw);
   assert.deepEqual(parsed.attachments.map(a => a.filename), ["日本.pdf", "日本.pdf", "café-report.pdf", "plain name.pdf"]);
 });
+
+test("parseMessage keeps the whole body of a multipart part that has no headers", async () => {
+  const raw = ["From: a@example.test", 'Content-Type: multipart/mixed; boundary="m"', "", "--m", "",
+    "First paragraph.", "", "Second paragraph.", "--m--"].join("\r\n");
+  const parsed = await parseMessage(raw);
+  assert.match(parsed.text, /^First paragraph\.\r\n\r\nSecond paragraph\./);
+});
