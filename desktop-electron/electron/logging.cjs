@@ -1,6 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { renameAtomicFile } = require("./atomic-file.cjs");
+const { renameAtomicFileAsync } = require("./atomic-file.cjs");
 
 const MAX_LOG_BYTES = 4 * 1024 * 1024;
 const MAX_MEMORY_RECORDS = 300;
@@ -185,9 +185,14 @@ function createLogger({ filePath, publish, persist = true }) {
         if (!ready) { await fs.promises.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 }); ready = true; }
         if (size === null) size = (await fs.promises.stat(filePath).catch(() => null))?.size ?? 0;
         if (size >= MAX_LOG_BYTES) {
-          await fs.promises.rm(`${filePath}.1`, { force: true });
-          renameAtomicFile(filePath, `${filePath}.1`);
-          size = 0;
+          // Off the main thread: the synchronous rename's retries (Windows holding the file) held
+          // every window up to 1.4 s, at every batch while the hold lasted. A rotation that fails
+          // still writes the batch; the next batch tries it again.
+          try {
+            await fs.promises.rm(`${filePath}.1`, { force: true });
+            await renameAtomicFileAsync(filePath, `${filePath}.1`);
+            size = 0;
+          } catch {}
         }
         await fs.promises.appendFile(filePath, lines, { mode: 0o600 });
         size += Buffer.byteLength(lines);

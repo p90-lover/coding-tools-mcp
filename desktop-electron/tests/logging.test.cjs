@@ -163,3 +163,24 @@ test("a closed Windows diagnostic pipe is recorded without becoming an uncaught 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a log rotation that fails still writes the batch's lines", async () => {
+  // A full log is renamed to launcher.jsonl.1 before the next batch. When that failed (Windows holds
+  // the file open: an indexer, an antivirus scan, an editor showing the log), the whole batch was
+  // dropped with it, and so was every later batch for as long as the rotation kept failing.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-logging-rotate-"));
+  const filePath = path.join(root, "launcher.jsonl");
+  try {
+    fs.writeFileSync(filePath, "x".repeat(4 * 1024 * 1024) + "\n");
+    // The old copy cannot be removed (here: a folder with a file in it), so the rotation fails.
+    fs.mkdirSync(`${filePath}.1`);
+    fs.writeFileSync(path.join(`${filePath}.1`, "held"), "");
+    const logger = createLogger({ filePath });
+    logger.info("after-full");
+    await logger.flush();
+    const tail = fs.readFileSync(filePath, "utf8").slice(-500);
+    assert.match(tail, /"event":"after-full"/, "the line is in the log although the rotation failed");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
