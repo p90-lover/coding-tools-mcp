@@ -69,3 +69,14 @@ test("an app named like a property of every object has nothing built in", async 
   assert.match(guide, /## constructor\nNothing specific is known about this app/);
   assert.doesNotMatch(await guides.brief("constructor"), /native code|function Object/);
 });
+
+test("a note cut at 16 KB never ends in half a character", async () => {
+  const folder = fs.mkdtempSync(path.join(os.tmpdir(), "computer-guides-"));
+  try {
+    // 16 KB of "é" (two bytes each) after one ASCII byte: the cut falls inside a character.
+    fs.writeFileSync(path.join(folder, "notes.md"), `a${"é".repeat(10_000)}`);
+    const guide = await createComputerGuides({ notesDir: folder, logger: { warn() {} } }).guide({ app: "notes" });
+    assert.match(guide, /\(cut at 16 KB\)/);
+    assert.doesNotMatch(guide, /�/);
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});

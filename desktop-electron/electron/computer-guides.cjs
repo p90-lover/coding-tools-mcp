@@ -142,7 +142,9 @@ function createComputerGuides({ notesDir = null, logger = null } = {}) {
       try {
         const buffer = Buffer.alloc(Math.min(stat.size, MAX_NOTES_BYTES));
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-        const text = buffer.subarray(0, bytesRead).toString("utf8").trim();
+        // Cut at 16 KB, the last character may be incomplete: decoded as a stream, it is left out
+        // rather than shown as U+FFFD.
+        const text = new TextDecoder().decode(buffer.subarray(0, bytesRead), { stream: stat.size > MAX_NOTES_BYTES }).trim();
         return text ? `${text}${stat.size > MAX_NOTES_BYTES ? "\n(cut at 16 KB)" : ""}` : null;
       } finally { await handle.close(); }
     } catch (error) {
