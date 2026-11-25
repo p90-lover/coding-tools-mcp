@@ -55,10 +55,12 @@ function sanitizeForExport(value, seen = new WeakSet()) {
   );
 }
 
-function exportSanitizedLogs({ filePath = null, destinationPath, records: memoryRecords = [] }) {
+function exportSanitizedLogs({ filePath = null, destinationPath, records: memoryRecords = [], platform = process.platform }) {
   const sourcePaths = filePath ? [`${filePath}.1`, filePath] : [];
+  // Windows paths ignore case: "Launcher.JSONL" typed in the save dialog is the source log itself.
+  const same = platform === "win32" ? (value) => path.resolve(value).toLowerCase() : (value) => path.resolve(value);
   const destination = path.resolve(destinationPath);
-  if (sourcePaths.some(sourcePath => path.resolve(sourcePath) === destination)) {
+  if (sourcePaths.some(sourcePath => same(sourcePath) === same(destination))) {
     throw new Error("Refusing to overwrite a launcher source log with an exported diagnostic");
   }
   const records = [];

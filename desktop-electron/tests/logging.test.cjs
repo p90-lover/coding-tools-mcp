@@ -145,6 +145,14 @@ test("exported launcher logs remove local usernames, private ChatGPT titles, and
       () => exportSanitizedLogs({ filePath, destinationPath: filePath }),
       /Refusing to overwrite a launcher source log/,
     );
+    // Windows paths ignore case: "Launcher.JSONL" picked in the save dialog is the same file, and the
+    // guard compared them case-sensitively, so the export replaced the source log.
+    for (const destinationPath of [path.join(root, "LAUNCHER.JSONL"), path.join(root, "Launcher.jsonl.1")]) {
+      assert.throws(
+        () => exportSanitizedLogs({ filePath, destinationPath, platform: "win32" }),
+        /Refusing to overwrite a launcher source log/,
+      );
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
