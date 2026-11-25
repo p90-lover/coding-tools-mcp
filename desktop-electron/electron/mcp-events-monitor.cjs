@@ -115,13 +115,14 @@ function createMcpEventMonitor({
       while (sentAt.length && sentAt[0] < cutoff) sentAt.shift();
       if (sentAt.length >= MAX_REPORTS_PER_WINDOW) {
         logger?.warn?.("mcp_events.rate_limited", { event: entry.event });
-        return;
+        return false;
       }
       sentAt.push(now());
     }
     pending.push(entry);
     while (pending.length > MAX_PENDING) pending.shift();
     void flush();
+    return true;
   }
 
   let flushing = null;
@@ -144,12 +145,14 @@ function createMcpEventMonitor({
     if (open.has(key)) return false;
     const at = now();
     const incidentId = fixedId ?? `${key}@${at}`;
-    open.set(key, { event, incidentId });
-    enqueue({
+    // Held back by the rate limit: not kept open, so the next check that still sees it reports it
+    // once the limit allows, and a recovery sends no resolve for an incident never reported.
+    if (!enqueue({
       event,
       workspace_id: workspaceId ?? null,
       data: { incident_id: incidentId, occurred_at: iso(at), ...data },
-    });
+    })) return false;
+    open.set(key, { event, incidentId });
     return true;
   }
 

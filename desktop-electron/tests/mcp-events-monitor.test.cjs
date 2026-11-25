@@ -240,3 +240,31 @@ test("a full queue that drops the report being sent still sends the one after it
   assert.ok(delivered.includes("trace_001"), "the report after the one in flight was dropped unsent");
   assert.equal(delivered.length, 51);
 });
+
+test("an outage that hit the rate limit is reported once the limit allows, and no lone resolve is sent", async () => {
+  const h = harness({ bridge: "http://127.0.0.1:17841/healthz" });
+  for (let index = 0; index < 20; index += 1) {
+    h.monitor.turnEvent({ type: "end", traceId: `trace_${index}_burst`, status: "failed" });
+  }
+  h.probes.http.push({ ok: false, code: "ECONNREFUSED" }, { ok: false, code: "ECONNREFUSED" });
+  await h.monitor.tick();
+  await h.monitor.tick();
+  assert.equal(h.emitted(EVENTS.bridgeDown).length, 0, "the rate limit holds the report back");
+  h.advance(11 * 60_000);
+  h.probes.http.push({ ok: false, code: "ECONNREFUSED" });
+  await h.monitor.tick();
+  assert.equal(h.emitted(EVENTS.bridgeDown).length, 1, "the bridge outage still open is reported once the window allows");
+  h.probes.http.push({ ok: true });
+  await h.monitor.tick();
+  assert.equal(h.resolved().length, 1);
+
+  // Recovered before the limit allowed a report: nothing was sent, so nothing is resolved.
+  for (let index = 0; index < 20; index += 1) {
+    h.monitor.turnEvent({ type: "end", traceId: `trace_${index}_again`, status: "failed" });
+  }
+  h.probes.http.push({ ok: false, code: "ECONNREFUSED" }, { ok: false, code: "ECONNREFUSED" }, { ok: true });
+  await h.monitor.tick();
+  await h.monitor.tick();
+  await h.monitor.tick();
+  assert.equal(h.resolved().length, 1);
+});
