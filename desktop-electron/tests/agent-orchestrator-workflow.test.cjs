@@ -15347,3 +15347,53 @@ test("a rewind in a compacted chat hides from the reply the chat shows under tha
     rewind: { index: 1, description } }), /still synchronizing/);
   assert.equal(short.tasks[0].description, description);
 });
+
+test("startRun and resumeInterrupted settle an expired-grant running turn via observe and retry on a fresh grant", async () => {
+  const oldSha = "a".repeat(64), currentSha = "b".repeat(64);
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6.2-sol", permission_profile: ":ao-default" };
+  const run = {
+    id: "r-exp", workspace_id: "ws-1", project_id: "task-1", revision: 2, cancelled: false, execution_mode: "single",
+    grant: { executable_sha256: oldSha, max_turns: 1, turns_started: 1, granted_at_ms: Date.now() - 7200_000, expires_at_ms: Date.now() - 3600_000 },
+    nodes: [{ id: "one", role: "planner", parents: [], state: "running", route, history: [],
+      receipt: { thread_id: "sess-exp", request_key: "k1", started_at_ms: Date.now() - 3700_000 } }],
+  };
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "r-exp": 1 } };
+      if (endpoint === "/api/v1/ao/external/terminal") {
+        run.nodes[0].state = "held";
+        run.nodes[0].receipt = { ...run.nodes[0].receipt, error: "The agent's process ended before it finished (the app restarted); retry this card." };
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/control") {
+        assert.equal(body.action, "retry");
+        run.nodes[0].history.push(run.nodes[0].receipt);
+        run.nodes[0].state = "pending";
+        run.nodes[0].receipt = null;
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/grant") {
+        run.grant = { executable_sha256: currentSha, max_turns: 1, turns_started: 0, expires_at_ms: Date.now() + 3600_000 };
+        return { ok: true, run: structuredClone(run), grant: run.grant };
+      }
+      throw new Error(`stop at ${endpoint}`);
+    },
+    aoHarness: {
+      observe: async () => ({ status: "exited", exited: true, turnState: "interrupted", error: "The agent's process ended before it finished (the app restarted); retry this card." }),
+    },
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ expected_sha256: currentSha, executable: process.execPath }),
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("chat_auto_retry", { enabled: true });
+    const started = await workflow.call("start_run", { workspaceId: "ws-1", runId: "r-exp" });
+    assert.equal(started.started, true);
+    assert.ok(calls.includes("/api/v1/ao/external/terminal"), "running turn with expired/mismatched grant is observed first");
+    assert.ok(calls.includes("/api/v1/ao/control"), "settled held turn is reset for retry");
+    assert.ok(calls.includes("/api/v1/ao/grant"), "a fresh grant for the current build is requested");
+  } finally { workflow.dispose(); }
+});
+

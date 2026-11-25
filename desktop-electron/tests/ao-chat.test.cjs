@@ -2344,6 +2344,35 @@ test("with Retry automatically on, opening a project retries a single chat's fai
   })();
   for (let i = 0; i < 3; i += 1) await new Promise(setImmediate);
   assert.equal(settledRuns.current.size, 0);
+
+  // A run first seen while running and driven is also cleared from settledRuns so a later held transition is picked up.
+  const runningMission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "running", route: { harness_id: "ao:claude-code" }, history: [], receipt: { thread_id: "s1", started_at_ms: Date.now() - 60_000 } }] };
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
+    workspaceId: "a", mounted: { current: true }, missions: [runningMission], settledRuns, resumedRuns: { current: new Set() },
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
+    moduleCall: async () => ({ driven: true, status: "running" }), loadMissions: async () => {}, setTimeout,
+  })();
+  for (let i = 0; i < 3; i += 1) await new Promise(setImmediate);
+  assert.equal(settledRuns.current.size, 0, "driven running mission does not stay locked in settledRuns");
+
+  // An orphaned running card that observe settles into held reads chat_auto_retry and retries at once.
+  const orphanCalls = [];
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
+    workspaceId: "a", mounted: { current: true }, missions: [runningMission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
+    moduleCall: async (operation) => {
+      orphanCalls.push(operation);
+      if (operation === "run_status") return { driven: false, status: "held" };
+      if (operation === "observe") return { ok: true };
+      if (operation === "runs") return { runs: [mission] };
+      if (operation === "chat_auto_retry") return { ok: true, autoRetry: true };
+      return { ok: true };
+    },
+    loadMissions: async () => {}, setTimeout,
+  })();
+  for (let i = 0; i < 8; i += 1) await new Promise(setImmediate);
+  assert.deepEqual(orphanCalls, ["run_status", "observe", "runs", "chat_auto_retry", "control_run", "start_run"]);
 });
 
 function childPoll(file, selector, options = {}) {

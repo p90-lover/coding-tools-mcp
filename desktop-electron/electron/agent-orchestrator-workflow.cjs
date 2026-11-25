@@ -2297,8 +2297,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
           // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
-          const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId));
-          if (stopped?.ok !== true) throw unconfirmed;
+          const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId)).catch(() => null);
+          if (stopped?.ok !== true && stopped?.exiting !== true) throw unconfirmed;
         }
         if (usable && continued.adoptTurn) {
           // A turn the agent started by itself (adoptAutonomousTurns): the card takes that turn as
@@ -3681,7 +3681,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     if (since === Infinity || now() - since < ORPHANED_NATIVE_MS) return;
     orphanedSince.set(key, Infinity);
     void observe({ workspaceId, runId, nodeId: node.id }).then(
-      () => logger?.info?.("ao.orphaned_native_settled", {}),
+      () => {
+        logger?.info?.("ao.orphaned_native_settled", {});
+        if (!autoRetryDisposed && chatPreferences.get().autoRetry) {
+          const rKey = runKey(workspaceId, runId);
+          const current = backgroundRuns.get(rKey) ?? { status: "held", settled: false };
+          if (!backgroundRuns.has(rKey)) backgroundRuns.set(rKey, current);
+          if (!current.stopped && !current.driving && !current.starting) {
+            scheduleAutoRetry(workspaceId, runId, undefined, current);
+          }
+        }
+      },
       (error) => {
         orphanedSince.set(key, now());
         logger?.warn?.("ao.orphaned_native_settle_failed", { message: publicText(error?.message || error, 200) });
@@ -6273,15 +6283,15 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
    * that timed out throws out of driveRun before recoverHeld sees the held card): on, a held step,
    * within the attempt limit, and not a failure only the person can fix.
    */
-  function autoRetryAllowed(mission) {
+  function autoRetryAllowed(mission, fallbackError = "") {
     if (!chatPreferences.get().autoRetry || !mission || mission.cancelled || mission.paused || mission.execution_mode !== "single") return false;
     if (retryCancelled(mission.workspace_id, mission.id)) return false;
     if (mission.nodes.some(node => ["running", "reserved"].includes(node.state))) return false;
     const node = mission.nodes.find(entry => entry.state === "held" && entry.role !== "retry")
       ?? mission.nodes.find(entry => entry.state === "held")
-      ?? mission.nodes.find(entry => entry.state === "pending" && (entry.history?.length ?? 0) > 0);
-    const error = String((node?.state === "pending" ? node.history?.at(-1)?.error : node?.receipt?.error) || "");
-    const attempt = node?.state === "pending" ? (node.history?.length ?? 0) : (node?.history?.length ?? 0) + 1;
+      ?? mission.nodes.find(entry => entry.state === "pending" && ((entry.history?.length ?? 0) > 0 || Boolean(fallbackError)));
+    const error = String((node?.state === "pending" ? node.history?.at(-1)?.error || fallbackError : node?.receipt?.error || fallbackError) || "");
+    const attempt = node?.state === "pending" ? Math.max(1, node.history?.length ?? 0) : (node?.history?.length ?? 0) + 1;
     return Boolean(node) && !POOL_EXHAUSTED.test(error) && !MODEL_RETIRED.test(error) && !REQUEST_REFUSED.test(error) && !ROUTE_REFUSED.test(error)
       && !DRIVER_INCOMPATIBLE.test(error)
       && !pickedModelSince(mission) && attempt <= AUTO_RETRY_LIMIT;
@@ -6788,7 +6798,8 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // starts again after a pause (2 s, doubling to 60 s) for as long as it takes; the chat shows
       // the timeout as a warning, not a failure.
       const message = `${error?.message ?? error}`;
-      if (!state.stopped && LOCAL_TIMEOUT.test(message)) {
+      const timeoutText = `${error?.name ?? ""} ${error?.cause?.name ?? ""} ${message}`;
+      if (!state.stopped && LOCAL_TIMEOUT.test(timeoutText)) {
         const restarts = state.timeoutRestarts ?? 0;
         state.timeoutRestarts = restarts + 1;
         state.timeouts = (state.timeouts ?? 0) + 1;
@@ -6903,10 +6914,13 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   function scheduleAutoRetry(workspaceId, runId, executable, state, tries = 0) {
     if (!chatPreferences.get().autoRetry) return;
+    if (tries === 0 && state?.autoRetryScheduled) return;
+    if (state) state.autoRetryScheduled = true;
     const key = runKey(workspaceId, runId);
     const current = () => {
       const active = backgroundRuns.get(key);
-      return !autoRetryDisposed && !state.stopped && (active === state || (active?.status === "failed" && !active.stopped));
+      return !autoRetryDisposed && !state.stopped
+        && (active === state || ((active?.status === "failed" || active?.status === "held") && !active.stopped && !active.driving && !active.starting));
     };
     const mission = async () => (await runs({ workspaceId, runId })).runs.find(entry => entry.id === runId && entry.workspace_id === workspaceId);
     const later = (ms, work) => {
@@ -6918,6 +6932,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     // the next pause. It gave up at once: four chats logged "Local execution service is stopping" at
     // the same moment and then waited for a click with "Retry automatically" on (2026-10-31).
     const failedTry = (error) => {
+      if (state) state.autoRetryScheduled = false;
       logger?.warn?.("ao.auto_retry_restart_failed", { message: publicText(error?.message || error, 200), tries: tries + 1 });
       if (current() && tries + 1 < AUTO_RETRY_LIMIT) {
         later(autoRetryPause(tries + 1), () => scheduleAutoRetry(workspaceId, runId, executable, backgroundRuns.get(key) ?? state, tries + 1));
@@ -6925,21 +6940,26 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     };
     void (async () => {
       const failed = await mission();
-      if (!current() || !autoRetryAllowed(failed)) return;
+      const fallbackError = String(state?.detail || "");
+      if (!current() || !autoRetryAllowed(failed, fallbackError)) {
+        if (state) state.autoRetryScheduled = false;
+        return;
+      }
       // The same growing pause as autoRetryStep: 10 s before the first try, 20 s before the second
       // (2 s and 5 s for a failure that never reached the provider).
       const held = failed.nodes.find(node => node.state === "held" && node.role !== "retry")
         ?? failed.nodes.find(node => node.state === "held")
-        ?? failed.nodes.find(node => node.state === "pending" && (node.history?.length ?? 0) > 0);
+        ?? failed.nodes.find(node => node.state === "pending" && ((node.history?.length ?? 0) > 0 || Boolean(fallbackError)));
       const lastReceipt = held?.state === "pending" ? held.history?.at(-1) : held?.receipt;
       const attempt = Math.max(1, held?.state === "pending" ? (held.history?.length ?? 0) : (held?.history?.length ?? 0) + 1);
       // Counted from when the step failed, as autoRetryStep counts it.
       const failedAt = Number(lastReceipt?.finished_at_ms);
       const since = Number.isFinite(failedAt) && failedAt > 0 ? Math.max(0, now() - Math.min(failedAt, now())) : 0;
-      later(Math.max(0, autoRetryPause(attempt, localFailure(String(lastReceipt?.error || ""))) - since), () => {
+      later(Math.max(0, autoRetryPause(attempt, localFailure(String(lastReceipt?.error || fallbackError || ""))) - since), () => {
         void (async () => {
+          if (state) state.autoRetryScheduled = false;
           const latest = await mission();
-          if (!current() || !autoRetryAllowed(latest)) return;
+          if (!current() || !autoRetryAllowed(latest, fallbackError)) return;
           logger?.info?.("ao.auto_retry_restart", { attempt });
           await startRun({ workspaceId, runId, executable }, { fromAutoRetry: true });
         })().catch(failedTry);
@@ -6948,7 +6968,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
   // A local call that took too long, not a failed run (see driveRun): the headless service's own
   // request timeout, one it answered while restarting, or a socket timeout.
-  const LOCAL_TIMEOUT = /Headless request timed out|Local execution service is (stopping|starting|not ready)|ETIMEDOUT|\btimed out after \d+ ?ms/i;
+  const LOCAL_TIMEOUT = /Headless request timed out|Local execution service is (stopping|starting|not ready)|ETIMEDOUT|\btimed out after \d+ ?ms|aborted due to timeout|\bTimeoutError\b|context deadline exceeded|request timed out/i;
   // A failed local connection, not a failed run (see driveRun).
   const LOCAL_SOCKET_FAILURE = /EADDRINUSE|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|ENOBUFS|socket hang up|other side closed|fetch failed/i;
   const SOCKET_RESTART_LIMIT = 10;
@@ -7019,11 +7039,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (!/^[a-f0-9]{64}$/.test(selected?.expected_sha256 || "") || !path.isAbsolute(selected.executable)) {
         throw new Error("AO executable identity changed; select the current executable");
       }
+      // A running card whose grant is gone, expired, or from another build was skipped by startup's
+      // restoreRuns: observe it now so a finished or interrupted turn settles before checking grants.
+      if (mission.nodes.some((node) => node.state === "running" && node.receipt?.thread_id)
+        && (!mission.grant || grantSpent(mission.grant) || mission.grant.executable_sha256 !== selected.expected_sha256)) {
+        for (const node of mission.nodes) {
+          if (node.state === "running" && node.receipt?.thread_id) {
+            await observe({ workspaceId: id, runId: run, nodeId: node.id }).catch(() => undefined);
+          }
+        }
+        const observed = await runs({ workspaceId: id, runId: run });
+        mission = observed.runs.find((entry) => entry.id === run && entry.workspace_id === id);
+        if (!mission || mission.cancelled || !mission.nodes?.length
+          || mission.nodes.some((node) => ["cancelled", "archived", "reserved"].includes(node.state))) {
+          throw new Error("AO run has an active or unresolved card; inspect it before starting");
+        }
+        if (missionSettled(mission)) throw new Error("This task is already finished");
+        resuming = mission.nodes.some((node) => node.state === "running")
+          || Boolean(mission.grant && !grantSpent(mission.grant) && mission.nodes.some((node) => ["held", "failed"].includes(node.state)));
+      }
       // A grant for another build of the agent's program (Claude Code updates itself; an app update
       // replaces the harnesses) can start nothing: a held or failed card waiting on it is retried on a
       // fresh grant, as one whose grant is spent is. Retry refused "no matching background grant"
       // (2026-10-24 08:31). A card still running on the old program keeps the refusal.
-      if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256
+      if ((mission.grant?.executable_sha256 !== selected.expected_sha256 || !resuming)
+        && mission.nodes.some((node) => ["held", "failed"].includes(node.state))
         && !mission.nodes.some((node) => ["running", "reserved"].includes(node.state))) {
         await controlRun({ workspaceId: id, runId: run, action: "retry", automatic: true });
         const again = await runs({ workspaceId: id, runId: run });
@@ -7033,7 +7073,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
         }
         resuming = false;
       }
-      if (resuming && mission.grant?.executable_sha256 !== selected.expected_sha256) {
+      const externalWatchOnly = resuming && !mission.nodes.some((node) => node.state === "pending")
+        && mission.nodes.every((node) => node.state !== "running" || (externalAgent(node) && Boolean(node.receipt?.thread_id)));
+      if (resuming && !externalWatchOnly && mission.grant?.executable_sha256 !== selected.expected_sha256) {
         throw new Error("AO running turn has no matching background grant");
       }
       if (!resuming) {
@@ -7053,7 +7095,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       void driveRun(id, run, selectedExecutable, state);
       return { ok: true, started: true, status: "running" };
     } catch (error) {
-      if (!fromAutoRetry && !autoRetryDisposed && !state.stopped && LOCAL_TIMEOUT.test(`${error?.message ?? error}`)) {
+      if (!fromAutoRetry && !autoRetryDisposed && !state.stopped && LOCAL_TIMEOUT.test(`${error?.name ?? ""} ${error?.cause?.name ?? ""} ${error?.message ?? error}`)) {
         const message = `${error?.message ?? error}`;
         const restarts = state.timeoutRestarts ?? 0;
         state.timeoutRestarts = restarts + 1;
@@ -7344,13 +7386,29 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     let resumed = 0;
     for (const workspaceId of workspaceIds) {
       const saved = await runs({ workspaceId }).catch(() => null);
-      for (const run of saved?.runs ?? []) {
+      for (let run of saved?.runs ?? []) {
         if (generation !== recoveryGeneration) return { resumed };
         // Chats only, and only a chat's newest run: an older one gave way to the message after it.
         if (!run.project_id || saved.runs.filter(entry => entry.project_id === run.project_id).at(-1)?.id !== run.id) continue;
-        const resume = restartResume(run, now(), { autoRetry: autoRetry && !retryCancelled(workspaceId, run.id) });
         const live = backgroundRuns.get(runKey(workspaceId, run.id));
-        if (!resume || (live && (live.starting || live.driving || live.status === "running"))) continue;
+        if (live && (live.starting || live.driving || live.status === "running")) continue;
+        const canAutoRetry = autoRetry && !retryCancelled(workspaceId, run.id);
+        // A running card whose grant expired was skipped by restoreRuns: observe it first when
+        // automatic retry is on so a turn that ended while the app was down settles before restartResume.
+        if (canAutoRetry && !run.cancelled && !run.paused && (!run.grant || grantSpent(run.grant))
+          && (run.nodes ?? []).some(node => node.state === "running" && node.receipt?.thread_id)
+          && !(run.nodes ?? []).some(node => node.state === "reserved")) {
+          for (const node of run.nodes ?? []) {
+            if (generation !== recoveryGeneration) return { resumed };
+            if (node.state === "running" && node.receipt?.thread_id) {
+              await observe({ workspaceId, runId: run.id, nodeId: node.id }, () => generation === recoveryGeneration).catch(() => undefined);
+            }
+          }
+          const refreshed = await runs({ workspaceId, runId: run.id }).catch(() => null);
+          run = refreshed?.runs?.find(entry => entry.id === run.id && entry.workspace_id === workspaceId) ?? run;
+        }
+        const resume = restartResume(run, now(), { autoRetry: canAutoRetry });
+        if (!resume) continue;
         // startRun resumes on the run's own grant only while a card is still running under it.
         const onItsGrant = resume === "continue" && Boolean(run.grant) && !grantSpent(run.grant)
           && (run.nodes ?? []).some(node => node.state === "running");
@@ -8305,8 +8363,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       // Another turn started first (a wakeup, a queued message; see chatSend): that turn is the
       // goal's to judge once it settles (goalAfterRun), so this round is not counted or stalled. A
       // run that only reads busy (no newer turn) is tried again shortly (deferGoalRound).
+      const timeoutText = `${error?.name ?? ""} ${error?.cause?.name ?? ""} ${message}`;
       if (/still running|Workflow revision changed|AO (?:run|board) revision/i.test(message)
-        || LOCAL_TIMEOUT.test(message) || LOCAL_SOCKET_FAILURE.test(message)
+        || LOCAL_TIMEOUT.test(timeoutText) || LOCAL_SOCKET_FAILURE.test(`${error?.code ?? ""} ${error?.cause?.code ?? ""} ${message}`)
         || error?.code === "HEADLESS_QUEUE_FULL" || /queue is full/i.test(message)) {
         deferGoalRound(id, task, previous, /still running/.test(message) ? "still_running" : "transient_timeout");
         return;
