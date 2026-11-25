@@ -476,6 +476,20 @@
   flex-wrap: wrap;
 }
 
+.provider-fast-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.provider-fast-mode input {
+  margin: 0;
+}
+
 .provider-detail-badges span,
 .provider-account-tags em {
   padding: 3px 6px;

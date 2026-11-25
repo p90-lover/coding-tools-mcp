@@ -15,6 +15,10 @@ export type AoModelCapabilities = {
   /** `fixed`: the window is set for the model (WebGPT's, by the Codex bridge), not picked. */
   contextWindow?: { min: number; max?: number; kind?: "context" | "compaction"; fixed?: boolean };
   contextLimit?: number; effortReason?: string; contextReason?: string;
+  /** The harness can run this model in fast mode (Codex's fast tier, Claude Code's fastMode). */
+  fast?: boolean;
+  /** CPA can serve this model in Codex's fast tier (the catalog's own note; `fast` is per harness). */
+  fastTier?: boolean;
 };
 /** `unavailable`: models CPA lists but cannot serve now, with why (e.g. their plugin's account is disabled in CPA). */
 /** `held`: listed models CPA is not listing right now (kept from memory), with why; they still run.
@@ -167,6 +171,8 @@ export function withTuning(next: AoRoute, previous: AoRoute, capabilities?: Reco
   // (A WebGPT model sets its own effort: it is one ChatGPT effort.)
   delete route.effort;
   delete route.context_window;
+  // Fast mode too: the new model starts on its own saved choice or its provider's default (tunedRoute).
+  delete route.fast_mode;
   const betweenAgents = next.harness_id.startsWith("ao:") && previous.harness_id.startsWith("ao:");
   if (previous.context_window && (betweenAgents || contextApplies(route))) route.context_window = previous.context_window;
   // An AO model the catalog does not describe keeps it (a legacy id list knows no range); Native
@@ -253,7 +259,9 @@ export function routeTuning(route: AoRoute, capability: AoModelCapabilities | un
   const context = fixed ? { min: fixed, max: fixed } : native ? { min: 4096, max: nativeMax } : capability?.contextWindow;
   const fullLimit = fixed ?? (context && capability?.contextLimit ? Math.min(capability.contextLimit, context.max ?? capability.contextLimit) : null);
   const presets = fixed ? [] : context ? CONTEXT_PRESETS.filter(tokens => tokens >= context.min && (context.max === undefined || tokens <= context.max)) : [];
-  return { native, efforts, nativeMax, context, fullLimit, presets, fixed };
+  // Native Codex (the headless bridge) has no fast setting; AO agents do, per model.
+  const fast = !native && capability?.fast === true;
+  return { native, efforts, nativeMax, context, fullLimit, presets, fixed, fast };
 }
 
 /** Listed models serving the same model as `model` under another provider: a card saved on

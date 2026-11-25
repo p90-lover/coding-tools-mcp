@@ -751,8 +751,9 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     return ["finished", "failed", "cancelled", "held"].includes(card.state) ? card : null;
   }
   // Everything that decides how an agent is launched; two routes alike in these share a session.
+  // fast_mode is stored only as true, so a route without it compares as before.
   const ROUTE_IDENTITY = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
-    "approval_policy", "approvals_reviewer", "effort", "context_window"];
+    "approval_policy", "approvals_reviewer", "effort", "context_window", "fast_mode"];
   /**
    * The window a card with none set starts with: its model's full known limit, where the harness can
    * set one and the catalog reports a real limit for the model. Null leaves the agent's own default.
@@ -838,6 +839,11 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // The suffix is session-local; the saved mission model and account remain unchanged.
       wireModel = baseModel + "(" + effort + ")";
     }
+    // Fast mode where it can work: Codex (its own sign-in, or CPA, which sends OpenAI's priority tier)
+    // and Claude Code on a direct Claude sign-in. Behind CPA Claude Code turns it off itself, so a
+    // route carried there launches without it rather than claiming a speed it doesn't get.
+    const fastMode = node.route.fast_mode === true && (agent === "codex" || (agent === "claude-code" && !viaCpa));
+    if (node.route.fast_mode === true && !fastMode) logger?.info?.("ao.fast_mode_dropped", { agent, viaCpa: Boolean(viaCpa) });
     // Pi reaches CPA as the provider AO's Pi extension registers from the gateway's model.
     const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}`
       : wireModel && agent === "pi" ? `${PI_GATEWAY_PROVIDER}/${wireModel}` : wireModel ?? node.route.model;
@@ -853,6 +859,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       // A card left blank gets its model's full known limit (defaultContextWindow); a pick past
       // that limit (1M on a model CPA reports at 872K) is declared at the limit (declaredWindow).
       ...(contextWindow != null ? { contextWindow } : {}),
+      ...(fastMode ? { fastMode: true } : {}),
       ...(plain ? { plain: true } : {}),
       // A native model takes its own effort; a CPA model's goes in the body where the harness can send it.
       ...(!viaCpa && node.route.effort && node.route.effort !== "auto" ? { effort: node.route.effort }
@@ -1730,6 +1737,30 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   const reportedEfforts = values => [...new Set((Array.isArray(values) ? values : [])
     .map(value => typeof value === "string" ? value : value?.effort)
     .filter(value => typeof value === "string" && tuningEfforts.has(value)))];
+  /**
+   * Whether CPA can serve a model in Codex's fast tier: CPA 8.1.2's Responses-to-Codex translator
+   * sends "fast" (or "priority") on as OpenAI's priority tier for any model of its Codex upstream,
+   * and a catalog that lists the tiers (Codex's own format: service_tiers, additional_speed_tiers)
+   * says so per model.
+   */
+  /**
+   * Whether Claude Code offers fast mode for `model`, a Claude Code model id as AO lists it on a
+   * direct Claude sign-in ("opus", "claude-opus-5-5", "sonnet[1m]", "claude-haiku-5-5", …). AO's
+   * Claude list comes from Anthropic's /v1/models, which doesn't say; Claude Code's own model info
+   * does (supportsFastMode), but AO doesn't read it. A model offered here that Claude Code then
+   * refuses runs at standard speed (its fast_mode_state reads "off"), so a wrong "yes" costs a
+   * misleading switch, a wrong "no" hides a speed the person could have had.
+   */
+  function claudeFastModel(model) {
+    // TODO(human): decide which Claude Code model ids offer fast mode.
+    return false;
+  }
+  const FAST_TIER_IDS = new Set(["fast", "priority"]);
+  const cpaFastTier = (entry, provider) => {
+    const listed = [...(Array.isArray(entry?.service_tiers) ? entry.service_tiers.map(tier => tier?.id ?? tier) : []),
+      ...(Array.isArray(entry?.additional_speed_tiers) ? entry.additional_speed_tiers : [])];
+    return listed.some(tier => FAST_TIER_IDS.has(String(tier).toLowerCase())) || String(provider ?? "").trim().toLowerCase() === "codex";
+  };
 
   function modelCapabilities(agent, model, info, viaCpa = false) {
     // Operating modes and unimplemented generic Chat effort are not reasoning setters.
@@ -1742,6 +1773,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       : "This harness/model has no verified reasoning-effort transport.";
     const limit = info?.contextLimit;
     if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
+    // Fast mode where it can work: Codex's fast tier (its own catalog names the models; through CPA,
+    // CPA's Codex upstream), and Claude Code's fastMode on a direct Claude sign-in only: behind a
+    // gateway Claude Code turns fast mode off itself ("not_first_party").
+    const fast = agent === "codex" ? (viaCpa ? info?.fastTier === true : info?.supportsFastMode === true)
+      : agent === "claude-code" && !viaCpa && claudeFastModel(model);
+    if (fast) capabilities.fast = true;
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
       && (slash < 0 || !model.slice(0, slash).trim() || !model.slice(slash + 1).trim());
@@ -2110,6 +2147,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       capabilities[id] = { efforts, ...(!efforts.length ? { effortReason: verbatim ? VERBATIM_EFFORT_REASON
         : "CPA did not advertise reasoning levels for this model." } : {}),
         ...(provider ? { provider: String(provider).trim().slice(0, 64) } : {}),
+        ...(cpaFastTier(entry, provider) ? { fastTier: true } : {}),
         ...(Number.isSafeInteger(limit) && limit > 0 ? { contextLimit: limit } : {}) };
       ids.push(id);
       if (unavailable[id]) { held[id] = unavailable[id]; delete unavailable[id]; }
@@ -7926,9 +7964,10 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (deferStart !== undefined && typeof deferStart !== "boolean") throw new Error("Choose a valid deferred startup option");
     let team = saved.team;
     if (executionMode === "single") {
-      const allowed = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
+      const allowed = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window", "fast_mode"];
       if (teamId !== undefined || teamRevision !== undefined || !singleRoute || typeof singleRoute !== "object" || Array.isArray(singleRoute)
         || Object.keys(singleRoute).some(key => !allowed.includes(key))
+        || (singleRoute.fast_mode !== undefined && singleRoute.fast_mode !== true)
         || typeof singleRoute.model !== "string" || !singleRoute.model || singleRoute.model === "default") {
         throw new Error("Choose one explicit model route without saved-team fields");
       }
@@ -8182,7 +8221,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
   }
 
   // The next round runs as the last one did: the same Single model route, or the chat's team.
-  const SINGLE_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window"];
+  const SINGLE_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer", "effort", "context_window", "fast_mode"];
   /** How a chat's next turn the app sends itself runs: on `route` when one was picked, else as `previous` did (its Single route, or the chat's team). */
   const followUpSelection = (previous, route = null) => {
     if (route && typeof route === "object") return { executionMode: "single", singleRoute: { ...route } };

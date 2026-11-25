@@ -21,6 +21,7 @@ fn fixture() -> (AppData, Run) {
         approvals_reviewer: None,
         effort: None,
         context_window: None,
+        fast_mode: None,
     };
     // A CPA model on an AO harness runs through the gateway ("cpa/<model>").
     let worker = Route {
@@ -34,6 +35,7 @@ fn fixture() -> (AppData, Run) {
         approvals_reviewer: None,
         effort: None,
         context_window: None,
+        fast_mode: None,
     };
     // Built from JSON so fields added to Node and Run later (all optional) keep this fixture valid.
     let node = |id: &str, role: Role, parents: Vec<&str>, route: Route| -> Node {

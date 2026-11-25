@@ -29,7 +29,8 @@ const defaultWindow = (route: AoRoute, capability: AoModelCapabilities | undefin
   if (!context || !capability?.contextLimit && !isWebModel(route.model)) return null;
   return Math.max(context.min, Math.min(DEFAULT_CONTEXT_WINDOW, context.max ?? DEFAULT_CONTEXT_WINDOW));
 };
-type ModelTuning = { effort?: string | null; context_window?: number | null };
+/** `fast_mode`: true on, false turned off, absent or null not chosen (the provider's default applies). */
+type ModelTuning = { effort?: string | null; context_window?: number | null; fast_mode?: boolean | null };
 const tuningKey = (route: AoRoute) => `coding-tools:ao:model-tuning:${JSON.stringify([route.harness_id, route.provider_id, route.account_id, route.model])}`;
 /** Only explicit picks are saved: fitting a smaller model must not replace the person's preference. */
 function savedTuning(route: AoRoute): ModelTuning {
@@ -39,12 +40,35 @@ function savedTuning(route: AoRoute): ModelTuning {
     const tuning: ModelTuning = {};
     if (saved.effort === null || ["auto", "none", ...EFFORTS].includes(saved.effort)) tuning.effort = saved.effort;
     if (saved.context_window === null || Number.isSafeInteger(saved.context_window) && saved.context_window > 0) tuning.context_window = saved.context_window;
+    if (saved.fast_mode === null || typeof saved.fast_mode === "boolean") tuning.fast_mode = saved.fast_mode;
     return tuning;
   } catch { return {}; }
 }
-function rememberTuning(route: AoRoute, field: keyof ModelTuning) {
+function rememberTuning(route: AoRoute, field: "effort" | "context_window") {
   if (!route.model) return;
   try { localStorage.setItem(tuningKey(route), JSON.stringify({ ...savedTuning(route), [field]: route[field] ?? null })); } catch { /* The current chat still keeps its pick. */ }
+}
+/** Fast mode is saved as the pick itself: off is `false`, so the provider's default no longer applies. */
+function rememberFast(route: AoRoute, on: boolean) {
+  if (!route.model) return;
+  try { localStorage.setItem(tuningKey(route), JSON.stringify({ ...savedTuning(route), fast_mode: on })); } catch { /* The current chat still keeps its pick. */ }
+}
+
+/** The Provider Manager row whose "Fast mode for new chats" covers a route (only fast-capable ones ask). */
+const fastProvider = (route: AoRoute) => route.harness_id === "ao:codex" ? "codex-oauth"
+  : route.harness_id === "ao:claude-code" ? "claude-oauth" : null;
+/** The providers whose new chats start in fast mode, kept current from the Provider Manager. */
+function useProviderFastDefaults(): Record<string, true> {
+  const [defaults, setDefaults] = useState<Record<string, true>>({});
+  useEffect(() => {
+    const api = window.codexWebLauncher;
+    if (!api) return;
+    let live = true;
+    void api.providerSnapshot().then(snapshot => { if (live) setDefaults(snapshot.fastMode ?? {}); }, () => undefined);
+    const stop = api.onProviderNetworkChanged(snapshot => setDefaults(snapshot.fastMode ?? {}));
+    return () => { live = false; stop?.(); };
+  }, []);
+  return defaults;
 }
 
 /**
@@ -66,10 +90,17 @@ const startEffort = (route: AoRoute, efforts: readonly string[] | undefined) => 
 };
 
 /** Restore unset fields, then fit this chat without writing over the saved model preference. */
-function tunedRoute(route: AoRoute, capability: AoModelCapabilities | undefined): AoRoute {
+function tunedRoute(route: AoRoute, capability: AoModelCapabilities | undefined, fastDefaults: Record<string, true> = {}): AoRoute {
   const next = { ...route };
   const saved = savedTuning(route);
-  const { context, efforts } = routeTuning(route, capability);
+  const { context, efforts, fast } = routeTuning(route, capability);
+  // Fast mode only where the model has it; else the person's saved pick, else the provider's default.
+  // Before the catalog says (no capability yet) a carried choice stays as it is.
+  if (capability && !fast) delete next.fast_mode;
+  else if (fast && next.fast_mode === undefined) {
+    const provider = fastProvider(route);
+    if (saved.fast_mode === true || (saved.fast_mode == null && provider && fastDefaults[provider])) next.fast_mode = true;
+  }
   if (!next.effort && saved.effort) next.effort = saved.effort;
   if (capability && next.effort && next.effort !== "auto" && efforts && !efforts.includes(next.effort)) delete next.effort;
   const tier = webTier(route.model);
@@ -218,6 +249,7 @@ export function AgentOrchestratorComposerControls({
   const [held, setHeld] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
   const [contextDraft, setContextDraft] = useState("");
+  const fastDefaults = useProviderFastDefaults();
   useEffect(() => { setSearch(""); }, [mode]);
   // The harness's catalog is read whenever the composer shows a single model, not only when its
   // menu opens: the effort and window chips need the picked model's options to label themselves.
@@ -253,12 +285,12 @@ export function AgentOrchestratorComposerControls({
       if (current.harness_id !== route.harness_id || current.model !== route.model) return;
       // A late catalog fits restored preferences too; existing chat picks keep priority over them.
       const currentBase = current.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
-      const next = tunedRoute(current, loaded[current.model] ?? loaded[currentBase]);
+      const next = tunedRoute(current, loaded[current.model] ?? loaded[currentBase], fastDefaults);
       // Reported as an adjustment: it is this chat's fit, not a pick the next new chat should start on.
-      if (next.context_window !== current.context_window || next.effort !== current.effort) onRouteChange(next, true);
+      if (next.context_window !== current.context_window || next.effort !== current.effort || next.fast_mode !== current.fast_mode) onRouteChange(next, true);
     }).catch(cause => { if (live) { setModels([]); setError(cause instanceof Error ? cause.message : String(cause)); } });
     return () => { live = false; };
-  }, [mode, route.harness_id, route.model, loadModels, reload]);
+  }, [mode, route.harness_id, route.model, loadModels, reload, fastDefaults]);
   const selectedTeam = teams.find(team => team.id === teamId);
   // Native Codex runs a bare non-WebGPT id through the CPA pool; the labels need to know which.
   const viaPool = (model: string) => route.harness_id === NATIVE_HARNESS && !isWebModel(model);
@@ -281,7 +313,7 @@ export function AgentOrchestratorComposerControls({
   const harnessName = harness?.label ?? harnessLabel(route.harness_id, harnesses);
   const baseModel = route.model.replace(/\((?:\d+|none|auto|minimal|low|medium|high|xhigh|max|ultra)\)$/i, "");
   const capability = caps[route.model] ?? caps[baseModel];
-  const { efforts, context, fullLimit, presets, fixed } = routeTuning(route, models === null ? undefined : capability);
+  const { efforts, context, fullLimit, presets, fixed, fast } = routeTuning(route, models === null ? undefined : capability);
   const millionTokenMax = !fixed && (context?.max === 1_048_576 || context?.max === 1_047_576) ? context.max : null;
   const topLimit = fullLimit && context?.max === 1_000_000 && fullLimit < 1_000_000 && fullLimit + 128_000 >= 1_000_000 ? 1_000_000 : fullLimit;
   const lastChoice = millionTokenMax ?? topLimit;
@@ -293,6 +325,8 @@ export function AgentOrchestratorComposerControls({
   const effortUnsupported = Boolean(route.effort && route.effort !== "auto" && efforts && !efforts.includes(route.effort));
   const levels = (efforts ?? []).filter(effort => effort !== "auto");
   const setEffort = (effort: string | null) => { const next = { ...route }; if (effort) next.effort = effort; else delete next.effort; rememberTuning(next, "effort"); onRouteChange(next); };
+  // Fast mode is a separate switch under the efforts: it changes the speed tier, not how hard the model thinks.
+  const setFast = (on: boolean) => { const next = { ...route }; if (on) next.fast_mode = true; else delete next.fast_mode; rememberFast(next, on); onRouteChange(next); };
   const setWindow = (tokens: number | null) => { const next = { ...route }; if (tokens) next.context_window = tokens; else delete next.context_window; rememberTuning(next, "context_window"); onRouteChange(next); };
   const inRange = (tokens: number) => Boolean(context) && Number.isSafeInteger(tokens) && tokens >= context!.min && (context!.max === undefined || tokens <= context!.max);
   /** Why the typed size can't be set, in the field's own terms, or null (empty or fine). */
@@ -310,7 +344,8 @@ export function AgentOrchestratorComposerControls({
   // No "Default" effort either: unpicked, a model runs at its own effort, which the chip names
   // when the model's id carries it ("Gemini 3.8 Flash High" -> High) and otherwise calls "Auto".
   const modelEffort = ownEffort(route.model);
-  const effortLabel = route.effort ? effortWord(route.effort) : modelEffort ? effortWord(modelEffort) : "Auto";
+  const effortLabel = (route.effort ? effortWord(route.effort) : modelEffort ? effortWord(modelEffort) : "Auto")
+    + (fast && route.fast_mode ? " · Fast" : "");
   // A picked model the harness no longer offers (CPA dropped cline-pass/deepseek-v4.1-flash when
   // Cline stopped serving it) must not look as if it would run; the send is refused up front too.
   const unlisted = Boolean(route.model) && models !== null && models.length > 0 && !models.includes(route.model) && !models.includes(baseModel);
@@ -326,7 +361,7 @@ export function AgentOrchestratorComposerControls({
     // Tuning belongs to the destination model, not the one we just left. Unset fields use defaults.
     delete next.context_window;
     const capability = next.harness_id === route.harness_id || isWebModel(model) ? caps[model] : undefined;
-    onRouteChange(tunedRoute(next, capability));
+    onRouteChange(tunedRoute(next, capability, fastDefaults));
   };
   return <div className="ao-composer-controls">
     {permissions}
@@ -429,11 +464,11 @@ export function AgentOrchestratorComposerControls({
         </div>}
       </ChipMenu> : <ChipMenu heading="Reasoning effort" popupClass="ao-tuning-popup" className={effortUnsupported ? "is-warning" : ""}
         ariaLabel={`Reasoning effort: ${effortLabel}`}
-        disabled={busy || (!levels.length && !route.effort)}
+        disabled={busy || (!levels.length && !route.effort && !fast)}
         title={!efforts ? capability?.effortReason || "This model's efforts are not known yet" : !efforts.length ? capability?.effortReason || "This model takes no effort setting"
           : route.effort ? "How hard the model thinks" : "The model's own effort until you pick one"}
         label={<span>{effortLabel}</span>}>
-        {(close) => <div role="radiogroup" aria-label="Efforts">
+        {(close) => <><div role="radiogroup" aria-label="Efforts">
           {/* Auto on every model: no effort is sent, so CPA and the provider can never refuse the level
               (a level a plugin lacked 400ed, and the chat's launch looked stuck). It is saved as "auto",
               so the model's start effort (startEffort) never replaces it. */}
@@ -450,7 +485,14 @@ export function AgentOrchestratorComposerControls({
           {!levels.length && route.effort ? <Option picked={false} disabled={busy} onPick={() => { setEffort(null); close(); }}>
             Auto<small>the model's own</small></Option> : null}
           {effortUnsupported && levels.length ? <p className="ao-popup-muted" role="status">This model doesn't take {effortWord(route.effort)}. Pick another above.</p> : null}
-        </div>}
+        </div>
+        {/* Fast mode beside any effort: Codex's fast tier or Claude Code's fast mode, at a higher
+            usage cost. A change starts the next message on a new agent, as an effort change does. */}
+        {fast ? <button type="button" role="switch" aria-checked={route.fast_mode === true} className="ao-picker-option ao-fast-option" disabled={busy}
+          title="Faster output, at a higher usage cost" onClick={() => { setFast(route.fast_mode !== true); close(); }}>
+          <span className="ao-option-radio" aria-hidden="true" /><span>Fast<small>{route.fast_mode ? "on" : "off"}</small></span>
+          {route.fast_mode ? <Icon name="check" width="16" height="16" /> : null}
+        </button> : null}</>}
       </ChipMenu>}
       {/* WebGPT's window is the Codex bridge's (ChatGPT's own limit): shown, locked. */}
       {/* A slim, see-through column of sizes, as the model menu: no title, no notes (the user: "remove

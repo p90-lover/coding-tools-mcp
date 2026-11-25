@@ -412,6 +412,8 @@ export interface ProviderNetworkSnapshot {
     credentials?: CredentialProxyPolicyRecord[];
   };
   decodo?: DecodoSettings;
+  /** Providers whose new chats start in fast mode ("codex-oauth", "claude-oauth"); off is absent. */
+  fastMode?: Record<string, true>;
   /** Set when the saved settings could not be read. */
   error?: string;
 }
@@ -1426,6 +1428,7 @@ export interface LauncherApi {
     mode: ProxyPolicyMode;
     profileId?: string;
   }): Promise<ProviderNetworkSnapshot>;
+  setProviderFastMode(input: { providerId: string; enabled: boolean }): Promise<ProviderNetworkSnapshot>;
   setAccountProxyPolicy(input: {
     accountId: string;
     mode: ProxyPolicyMode;

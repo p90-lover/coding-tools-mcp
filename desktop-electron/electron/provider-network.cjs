@@ -68,6 +68,8 @@ function defaultState() {
     router: { port: null },
     // Decodo's sticky proxy list (decodo-proxies.cjs); its password lives in secrets.decodo.
     decodo: { ...normalizeDecodoSettings(), lastSyncAt: null, lastError: null },
+    // Providers whose new chats start in fast mode (providerId -> true); see FAST_MODE_PROVIDERS.
+    fastMode: {},
     secrets: {
       accounts: {},
       proxies: {},
@@ -75,6 +77,18 @@ function defaultState() {
       router: null,
     },
   };
+}
+
+// Providers with a fast mode: Codex (its "fast" service tier, OpenAI's priority processing) and
+// Claude (Claude Code's fast mode). The chat's effort menu can still turn it off or on per chat.
+const FAST_MODE_PROVIDERS = new Set(["codex-oauth", "claude-oauth"]);
+
+/** Only `true` entries for known providers are kept: off is the absence of an entry. */
+function normalizeFastMode(value) {
+  const kept = {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) return kept;
+  for (const providerId of FAST_MODE_PROVIDERS) if (value[providerId] === true) kept[providerId] = true;
+  return kept;
 }
 
 function clone(value) {
@@ -278,6 +292,7 @@ function normalizeState(parsed) {
     },
     router: { port: Number.isInteger(parsed.router?.port) && parsed.router.port >= 1024 && parsed.router.port <= 65535 ? parsed.router.port : null },
     decodo: normalizeDecodoState(parsed.decodo),
+    fastMode: normalizeFastMode(parsed.fastMode),
     secrets: {
       accounts: secrets.accounts && typeof secrets.accounts === "object" ? secrets.accounts : {},
       proxies: secrets.proxies && typeof secrets.proxies === "object" ? secrets.proxies : {},
@@ -480,6 +495,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
       proxyProfiles: state.proxyProfiles.map((profile) => ({ ...clone(profile) })),
       routing: clone(state.routing),
       decodo: { ...clone(state.decodo), hasPassword: Boolean(state.secrets.decodo) },
+      fastMode: clone(state.fastMode ?? {}),
     };
   }
 
@@ -878,6 +894,20 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     return publicSnapshot();
   }
 
+  /** A provider's fast mode default for new chats; an unchanged value writes nothing. */
+  function setProviderFastMode(input) {
+    const providerId = requiredText(input?.providerId, "Provider ID", 160);
+    if (!FAST_MODE_PROVIDERS.has(providerId)) throw new Error("This provider has no fast mode");
+    if (typeof input?.enabled !== "boolean") throw new Error("Choose fast mode on or off");
+    const current = state.fastMode?.[providerId] === true;
+    if (current === input.enabled) return publicSnapshot();
+    const next = { ...(state.fastMode ?? {}) };
+    if (input.enabled) next[providerId] = true; else delete next[providerId];
+    state.fastMode = next;
+    write();
+    return publicSnapshot();
+  }
+
   function setProviderPolicy(input) {
     const providerId = requiredText(input?.providerId, "Provider ID", 160);
     const mode = input?.mode;
@@ -1077,6 +1107,7 @@ function createProviderNetworkStore({ filePath, keyPath, safeStorage, readText =
     syncSourceProfiles,
     adoptSourceProfiles,
     setGlobalRouting,
+    setProviderFastMode,
     setProviderPolicy,
     setAccountPolicy,
     setCredentialPolicy,

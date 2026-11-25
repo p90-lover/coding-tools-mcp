@@ -326,6 +326,11 @@ function installProviderNetwork({
     () => active.store.setGlobalRouting(input),
     { refreshGlobal: true },
   ), "network");
+  // A provider's fast mode default for new chats (Codex, Claude); no route or proxy changes.
+  handle("launcher:provider-fast-mode", (active, _event, input) => publishMutation(
+    active,
+    () => active.store.setProviderFastMode(input),
+  ), "network");
   handle("launcher:proxy-provider-policy", (active, _event, input) => publishMutation(
     active,
     () => active.store.setProviderPolicy(input),

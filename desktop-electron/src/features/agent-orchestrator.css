@@ -565,6 +565,8 @@
 }
 .ao-workflow .ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
 .ao-workflow .ao-tuning-popup [role="radiogroup"] { display: grid; gap: 2px; }
+/* Fast mode sits under the efforts, set apart by a hairline: it is a switch, not another level. */
+.ao-workflow .ao-tuning-popup .ao-fast-option { width: 100%; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--ao-line); }
 .ao-workflow .ao-context-custom { display: flex; gap: 6px; margin-top: 8px; }
 .ao-workflow .ao-context-custom input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px; }
 .ao-workflow .ao-context-custom input[aria-invalid="true"] { border-color: var(--ao-red, #c0392b); }

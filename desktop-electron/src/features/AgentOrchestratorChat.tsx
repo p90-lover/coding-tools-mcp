@@ -237,6 +237,7 @@ function routeChange(agent: RouteFields, picked: RouteFields): { now: string; ba
   if (!same("model") || !same("harness_id") || !same("provider_id") || !same("account_id")) parts.push([routeModelName(picked), routeModelName(agent)]);
   if (!same("effort")) parts.push([routeEffortName(picked), routeEffortName(agent)]);
   if (!same("context_window")) parts.push([routeWindowName(picked), routeWindowName(agent)]);
+  if (!same("fast_mode")) parts.push(picked.fast_mode ? ["Fast mode", "standard speed"] : ["Standard speed", "fast mode"]);
   if (["permission_profile", "native_permission_profile", "approval_policy", "approvals_reviewer"].some((field) => !same(field))) {
     parts.push(["Other permissions", "the earlier permissions"]);
   }
@@ -2010,6 +2011,8 @@ export function AgentOrchestratorChat({
       const web = String(route.model ?? "").replace(/^cpa\//, "").startsWith("chatgpt-web/");
       if (agentRoute.context_window == null && !web) delete kept.context_window;
       if (agentRoute.effort == null && !web) delete kept.effort;
+      // A provider's fast default applies to new chats: an open chat's agent keeps its own speed.
+      if (agentRoute.fast_mode == null) delete kept.fast_mode;
       composer?.onRouteChange(kept as ComposerControlsProps["route"], true);
       return;
     }

@@ -526,3 +526,67 @@ test("a chat host that was only slow to start is retried as chat, not turned int
   const tooOldClaude = await run(["spawn: chat driver incompatible: ACP initialize: unsupported protocol (CHAT_DRIVER_INCOMPATIBLE)"]);
   assert.deepEqual(tooOldClaude.modes, ["chat"], "an incompatible agent never becomes a terminal session either");
 });
+
+test("fast mode reaches AO only where it can work, and off sends nothing", async () => {
+  // Codex, on its own sign-in and through CPA (whose Codex upstream sends OpenAI's priority tier).
+  assert.equal((await dispatched("codex", "own-model", { fast_mode: true })).fastMode, true);
+  assert.equal((await dispatched("codex", "cpa/gpt-5.5", { fast_mode: true })).fastMode, true);
+  // Claude Code on a direct sign-in; behind CPA Claude Code turns fast mode off itself.
+  assert.equal((await dispatched("claude-code", "own-model", { fast_mode: true })).fastMode, true);
+  assert.equal(Object.hasOwn(await dispatched("claude-code", "cpa/gpt-5.5", { fast_mode: true }), "fastMode"), false);
+  // Other agents have no fast mode, and an untuned launch is exactly as before.
+  assert.equal(Object.hasOwn(await dispatched("opencode", "cpa/gpt-5.5", { fast_mode: true }), "fastMode"), false);
+  assert.equal(Object.hasOwn(await dispatched("codex", "own-model", {}), "fastMode"), false);
+});
+
+test("a model offers fast mode from Codex's own catalog, or CPA's Codex upstream on Codex only", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    aoHarness: { models: async () => [{ id: "gpt-5.5", efforts: ["low", "high"], supportsFastMode: true }, { id: "gpt-mini", efforts: ["low"] }] },
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [
+      { id: "gpt-5.5", owned_by: "codex" },
+      { id: "listed-fast", owned_by: "openai-api", service_tiers: [{ id: "fast", name: "Fast" }] },
+      { id: "gemini-3.8-flash-high", owned_by: "antigravity" },
+    ] }) }),
+  });
+  const codex = (await workflow.call("models", { harness: "ao:codex" })).capabilities;
+  assert.equal(codex["gpt-5.5"].fast, true, "Codex's catalog names its fast-tier models");
+  assert.equal(codex["gpt-mini"].fast, undefined);
+  assert.equal(codex["cpa/gpt-5.5"].fast, true, "any model of CPA's Codex upstream");
+  assert.equal(codex["cpa/listed-fast"].fast, true, "a model whose CPA entry lists a fast tier");
+  assert.equal(codex["cpa/gemini-3.8-flash-high"].fast, undefined);
+  const claude = (await workflow.call("models", { harness: "ao:claude-code" })).capabilities;
+  assert.equal(claude["cpa/gpt-5.5"].fast, undefined, "behind CPA Claude Code has no fast mode");
+});
+
+test("upstream spawn sends fastMode only when on, and keeps a model's fast support", async () => {
+  const file = path.join(__dirname, "../electron/agent-orchestrator-upstream.cjs");
+  const source = fs.readFileSync(file, "utf8");
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const methods = {};
+  const visit = node => {
+    if (ts.isMethodDeclaration(node) && ["spawn", "models"].includes(node.name.getText(ast))) methods[node.name.getText(ast)] = node;
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  const bodies = [];
+  const context = {
+    Buffer, projectFor: async () => "project", forgetProject: () => {}, agentId: id => id, sessionId: id => id, utf8Prefix: text => text,
+    TUI_RESULT_INSTRUCTION: "Write fixture result", TRANSIENT_CHAT_START: /timed out/i, CHAT_RETRY_PAUSE_MS: 0, setTimeout,
+    rememberLaunchWindow: () => {}, chatTools: async () => null, syncGatewayKey: async () => "current", userServers: () => [], gptFileServer: async () => null,
+    internalApi: async (verb, endpoint, body) => {
+      if (endpoint.includes("/models")) return { models: [{ id: "gpt-5.5", efforts: ["high"], supportsFastMode: true }, { id: "gpt-mini", supportsFastMode: "yes" }] };
+      if (verb === "GET") return { chatHarnesses: ["codex"] };
+      bodies.push(body);
+      return { session: { id: "session" } };
+    },
+  };
+  const api = vm.runInNewContext("({" + methods.spawn.getText(ast) + "," + methods.models.getText(ast) + "})", context);
+  await api.spawn({ workspaceId: "ws", agent: "codex", model: "gpt-5.5", prompt: "task", fastMode: true });
+  await api.spawn({ workspaceId: "ws", agent: "codex", model: "gpt-5.5", prompt: "task" });
+  assert.equal(bodies[0].fastMode, true);
+  assert.equal(Object.hasOwn(bodies[1], "fastMode"), false, "off sends nothing, so other launches are unchanged");
+  const listed = await api.models("codex");
+  assert.equal(listed[0].supportsFastMode, true);
+  assert.equal(Object.hasOwn(listed[1], "supportsFastMode"), false, "only a real true is kept");
+});
