@@ -60,3 +60,12 @@ test("the person's notes for an app or a topic join the built-in guide, read fre
     assert.match(await guides.brief("chrome.exe"), /The person's notes on chrome: Use the Work profile/);
   } finally { fs.rmSync(folder, { recursive: true, force: true }); }
 });
+
+test("an app named like a property of every object has nothing built in", async () => {
+  const guides = createComputerGuides();
+  // "constructor" is a valid program name (constructor.exe); it read Object.prototype.constructor.
+  const guide = await guides.guide({ app: "constructor.exe" });
+  assert.doesNotMatch(guide, /native code|function Object/);
+  assert.match(guide, /## constructor\nNothing specific is known about this app/);
+  assert.doesNotMatch(await guides.brief("constructor"), /native code|function Object/);
+});

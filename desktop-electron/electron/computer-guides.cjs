@@ -118,6 +118,9 @@ const APP_GUIDES = Object.freeze({
   "systemsettings": "Settings: each page's options are named elements, and the search box finds a setting by name. Don't change security, privacy, account or network settings unless the person asked for that exact change.",
 });
 
+/** What's built in about an app: only APP_GUIDES' own entries ("constructor" is a program name too). */
+const builtIn = (key) => (Object.hasOwn(APP_GUIDES, key) ? APP_GUIDES[key] : null);
+
 /** "C:\\...\\Chrome.EXE", "chrome.exe" or "Chrome" -> "chrome"; null when it can't be a program name. */
 function appKey(app) {
   const base = path.win32.basename(String(app ?? "").trim()).toLowerCase().replace(/\.exe$/, "");
@@ -166,10 +169,10 @@ function createComputerGuides({ notesDir = null, logger = null } = {}) {
       const topicNotes = await notes(topic);
       if (topicNotes) parts.push(`## The person's notes on ${topic}\n${topicNotes}`);
       if (key) {
-        if (APP_GUIDES[key]) parts.push(`## ${key}\n${APP_GUIDES[key]}`);
+        if (builtIn(key)) parts.push(`## ${key}\n${builtIn(key)}`);
         const appNotes = await notes(key);
         if (appNotes) parts.push(`## The person's notes on ${key}\n${appNotes}`);
-        if (!APP_GUIDES[key] && !appNotes) parts.push(`## ${key}\nNothing specific is known about this app: follow topic "locate".`);
+        if (!builtIn(key) && !appNotes) parts.push(`## ${key}\nNothing specific is known about this app: follow topic "locate".`);
       }
       const own = await listed();
       parts.push(`Other topics: ${TOPICS.filter((name) => name !== topic).join(", ")}.`
@@ -180,7 +183,7 @@ function createComputerGuides({ notesDir = null, logger = null } = {}) {
     /** A few lines about `app` for computer_select_window's result, so the model starts informed. */
     async brief(app) {
       const key = appKey(app);
-      const known = key ? APP_GUIDES[key] ?? null : null;
+      const known = key ? builtIn(key) : null;
       const own = key ? await notes(key) : null;
       return [known, own ? `The person's notes on ${key}: ${own.length > 1200 ? `${own.slice(0, 1200)}…` : own}` : null,
         `Next: get_window_state {include_text: true}, then act by element_index. computer_guide${key ? ` {app: "${key}"}` : ""} has every method's parameters and how to find a control.`]
