@@ -201,3 +201,42 @@ test("helpers keep credentials out of targets and bound the stall setting", () =
   assert.equal(stallMinutesFrom({ CODING_TOOLS_EVENT_STALL_MINUTES: "0" }), 5);
   assert.ok(!redact("https://u:secret@example.test").includes("secret"));
 });
+
+test("a full queue that drops the report being sent still sends the one after it", async () => {
+  let clock = Date.parse("2026-09-30T12:00:00Z");
+  let mode = "down";
+  let release = null;
+  const delivered = [];
+  const monitor = createMcpEventMonitor({
+    report: async (entry) => {
+      if (mode === "down") throw new Error("headless not running");
+      if (mode === "slow") {
+        mode = "up";
+        await new Promise((resolve) => { release = resolve; });
+      }
+      delivered.push(entry.data.trace_id);
+    },
+    now: () => clock,
+    bridgeHealthUrl: () => null,
+    proxyUrl: () => null,
+  });
+  // 50 reports wait while the headless service is down (20 per rate window).
+  for (let index = 0; index < 50; index += 1) {
+    if (index % 20 === 0) clock += 11 * 60_000;
+    monitor.turnEvent({ type: "end", traceId: `trace_${String(index).padStart(3, "0")}`, status: "failed" });
+  }
+  await monitor.flush();
+  assert.equal(monitor.snapshot().pending, 50);
+  // The service is back; the first report is on its way when one more arrives and the full queue drops its oldest.
+  mode = "slow";
+  const flushing = monitor.flush();
+  await new Promise((resolve) => setImmediate(resolve));
+  monitor.turnEvent({ type: "end", traceId: "trace_new", status: "failed" });
+  release();
+  await flushing;
+  await monitor.flush();
+  assert.equal(monitor.snapshot().pending, 0);
+  assert.equal(delivered[0], "trace_000");
+  assert.ok(delivered.includes("trace_001"), "the report after the one in flight was dropped unsent");
+  assert.equal(delivered.length, 51);
+});

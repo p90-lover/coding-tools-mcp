@@ -129,8 +129,11 @@ function createMcpEventMonitor({
     if (flushing) return flushing;
     flushing = (async () => {
       while (pending.length) {
-        if (!await deliver(pending[0])) break;
-        pending.shift();
+        const entry = pending[0];
+        if (!await deliver(entry)) break;
+        // A full queue may have dropped this entry while it was sent: remove it, not whatever is first now.
+        const index = pending.indexOf(entry);
+        if (index !== -1) pending.splice(index, 1);
       }
     })().finally(() => { flushing = null; });
     return flushing;
