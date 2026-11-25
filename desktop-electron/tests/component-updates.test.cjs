@@ -679,3 +679,33 @@ test("stopping the updater while an update check is running stops its later chec
   // One chain: the restarted first check (1 ms) and at most one 40 ms interval check after it.
   assert.ok(calls <= 3, `expected one chain of checks, saw ${calls} checks`);
 });
+
+test("a switch is not started while an update check began during its quiet-time probe", async () => {
+  // trySwap checked `working` before awaiting the component's last activity and the busy check, not
+  // after: a check that started meanwhile (downloading and installing a release) ran alongside the
+  // switch, and its end cleared `working` while the switch still ran, so a second switch could start.
+  let releaseActivity = null;
+  let releaseStage = null;
+  let stages = 0;
+  const swaps = [];
+  const updater = createComponentUpdater({
+    componentId: "cpa",
+    stage: async () => {
+      stages += 1;
+      if (stages > 1) await new Promise((resolve) => { releaseStage = resolve; });
+      return { staged: true, current: "1", latest: "2" };
+    },
+    swap: async (id) => { swaps.push(id); return {}; },
+    lastActivityAt: () => new Promise((resolve) => { releaseActivity = () => resolve(0); }),
+    now: () => 10 * 60 * 60_000,
+  });
+  await updater.check(); // staged
+  const swapping = updater.trySwap(); // waits on the component's last activity
+  const checking = updater.check(); // a check starts meanwhile and is installing
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseActivity();
+  assert.equal(await swapping, null, "no switch while a check is installing");
+  assert.deepEqual(swaps, []);
+  releaseStage();
+  await checking;
+});

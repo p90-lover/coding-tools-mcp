@@ -99,7 +99,8 @@ function createComponentUpdater({
       componentIdleMs: Math.max(0, now() - last),
       stagedForMs: now() - stagedAt,
     };
-    if (stopped || !readyToSwap(moment)) return null;
+    // A check may have started while the probe waited: never switch under a release being installed.
+    if (stopped || working || stagedAt === null || !readyToSwap(moment)) return null;
     working = true;
     swapping = (async () => {
       try {
