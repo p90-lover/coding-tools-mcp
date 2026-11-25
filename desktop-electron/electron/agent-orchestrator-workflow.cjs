@@ -193,18 +193,21 @@ const PI_GATEWAY_PROVIDER = "coding-tools-cpa";
 // agy too since it runs as a chat through Google's own `agy acp` (AO's ACP driver, ported from
 // upstream in AO#61): checked 2026-11-23 on agy 1.5.14, it raised session/request_permission
 // (allow_once / reject_once) before writing a file, and a declined request left the file alone.
+// opencode and Pi since AO's fix/harness-asks (checked 2026-11-25 against real opencode 1.19.5 and
+// pi-acp 0.17.1, each on a local stand-in model): opencode's AO agents now ask about the shell, the
+// network and subagents (its own default allows them), with the user's own opencode rules still
+// deciding first; Pi, whose pi-acp sends no approval requests, asks through AO's managed Pi
+// extension, which puts each tool call but the read-only ones to the chat and blocks it on a deny.
+// In both, a `git status` reached the chat as a request and a reject kept it from running.
 // Every other agent runs in Full access only, which each AO adapter maps onto its bypass flag:
-// in Ask or Approve for me it would never ask (Pi, Unreal Agent, opencode on its own default) or
-// ask in a terminal nobody sees (Cline), and its card would run unchecked or wait for good.
+// in Ask or Approve for me it would never ask (Unreal Agent) or ask in a terminal nobody sees
+// (Cline), and its card would run unchecked or wait for good.
 // Those two modes are refused at launch with the agent's reason (fullAccessOnly) and shown so in
 // its permission menu.
-const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy"]);
+const PERMISSION_AGENTS = new Set(["claude-code", "codex", "agy", "opencode", "pi"]);
 // Why an agent outside PERMISSION_AGENTS can't run in Ask or Approve for me, by agent.
 const FULL_ACCESS_REASONS = {
   cline: "Cline asks for approval in its own terminal, which the chat does not show, so it would wait for good",
-  // AO leaves opencode on its own rules in every mode but bypass, and those allow every tool.
-  opencode: "opencode allows every tool by its own default, so it would never ask the chat, and nothing would be reviewed",
-  pi: "Pi runs its tools without asking first (pi-acp sends no approval requests), so the chat can neither ask you nor review them for you",
   "unreal-agent": "Unreal Agent has no approval channel, so the chat can neither ask you nor review its tools for you",
 };
 // The end of every such reason, which ROUTE_REFUSED matches: retrying never gets past it.

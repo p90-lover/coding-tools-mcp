@@ -123,9 +123,11 @@ export function workerRoute(harness: string, model: string, permission: NativePe
  * (until 0.8.137) left the chat on the agent's own permissions ("Custom"), which AO ran as its
  * "auto": opencode then allowed every tool unasked, and Pi was refused with nothing left to pick.
  * Native Codex takes the modes on its own route. Antigravity joined on 2026-11-23, running as a
- * chat through Google's `agy acp`, which asks before it edits or runs anything.
+ * chat through Google's `agy acp`, which asks before it edits or runs anything. opencode and Pi
+ * joined on 2026-11-25: AO's opencode agents ask about the shell, the network and subagents, and
+ * AO's managed Pi extension puts each Pi tool call but the read-only ones to the chat.
  */
-export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex", "ao:agy"]);
+export const PERMISSION_HARNESSES: ReadonlySet<string> = new Set(["ao:claude-code", "ao:codex", "ao:agy", "ao:opencode", "ao:pi"]);
 
 /** Reasoning efforts a card may ask for (Codex's names; the engine checks the same list). */
 export const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
