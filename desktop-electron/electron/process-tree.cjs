@@ -46,8 +46,10 @@ function terminateOwnedProcessTree(child, signal = "SIGTERM") {
     // Ask the process tree to close politely first, and only force it if it does not
     // stop on its own. Escalating instead of always force-killing is gentler on the
     // child's own cleanup and avoids the aggressive whole-tree force-kill pattern.
-    const graceful = runTaskkill(taskkill, ["/PID", String(pid), "/T"]);
-    if ((!graceful.error && graceful.status === 0) || !processRunning(pid)) return;
+    // Its 0 only says the close request was sent (GUI processes), not that the process has gone:
+    // whether it went is what decides, here and after the pause.
+    runTaskkill(taskkill, ["/PID", String(pid), "/T"]);
+    if (!processRunning(pid)) return;
     sleepSync(400);
     if (!processRunning(pid)) return;
     const forced = runTaskkill(taskkill, ["/PID", String(pid), "/T", "/F"]);
@@ -97,8 +99,9 @@ async function terminateOwnedProcessTreeAsync(child, signal = "SIGTERM") {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
   const taskkill = path.join(systemRoot, "System32", "taskkill.exe");
-  const graceful = await runTaskkillAsync(taskkill, ["/PID", String(pid), "/T"]);
-  if ((!graceful.error && graceful.status === 0) || !processRunning(pid)) return;
+  // A 0 from the polite taskkill only says the close request was sent, as above.
+  await runTaskkillAsync(taskkill, ["/PID", String(pid), "/T"]);
+  if (!processRunning(pid)) return;
   await new Promise((resolve) => setTimeout(resolve, 400));
   if (!processRunning(pid)) return;
   const forced = await runTaskkillAsync(taskkill, ["/PID", String(pid), "/T", "/F"]);

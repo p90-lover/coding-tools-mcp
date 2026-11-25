@@ -64,3 +64,34 @@ test("the async tree kill starts taskkill from a worker, never from the calling 
     try { if (processRunning(parent.pid)) process.kill(parent.pid); } catch {}
   }
 });
+
+test("a polite taskkill that the process does not act on is followed by the forced one", async () => {
+  // taskkill without /F answers 0 once it has *sent* the close request ("SUCCESS: Sent termination
+  // signal"), not once the process has gone. That answer used to end the stop: a process that did not
+  // close on its own was left running although the caller was told it had been ended.
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  await new Promise((resolve) => child.once("spawn", resolve));
+  const modules = ["../electron/process-tree.cjs", "../electron/off-thread-run.cjs"].map((name) => require.resolve(name));
+  const saved = modules.map((file) => require.cache[file]);
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const runs = [];
+  try {
+    for (const file of modules) delete require.cache[file];
+    require.cache[modules[1]] = { id: modules[1], filename: modules[1], loaded: true, exports: {
+      runOffThread: async ({ args }) => {
+        runs.push(args.join(" "));
+        if (args.includes("/F")) process.kill(child.pid, "SIGKILL"); // the forced taskkill ends it
+        return { code: 0 }; // the polite one "succeeds" and the process keeps running
+      },
+    } };
+    const fresh = require("../electron/process-tree.cjs");
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    await fresh.terminateOwnedProcessTreeAsync(child);
+    Object.defineProperty(process, "platform", platform);
+    assert.deepEqual(runs, [`/PID ${child.pid} /T`, `/PID ${child.pid} /T /F`]);
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    modules.forEach((file, index) => { if (saved[index]) require.cache[file] = saved[index]; else delete require.cache[file]; });
+    try { if (processRunning(child.pid)) process.kill(child.pid, "SIGKILL"); } catch {}
+  }
+});
