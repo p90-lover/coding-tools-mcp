@@ -605,17 +605,30 @@ function createAppPlugins({
       if (!response.ok || !response.body) throw new Error(`Download failed (HTTP ${response.status})`);
       const hash = crypto.createHash("sha256");
       const out = fs.createWriteStream(target, { mode: 0o600 });
+      // The hash is of the bytes received, so a failed write (a full disk, a locked file) is the only
+      // sign the file is not that download. Unheard, it was an uncaught exception and the partial
+      // file was installed as checked.
+      let writeError = null;
+      out.on("error", (error) => { writeError ??= error; });
       let size = 0;
       try {
         for await (const chunk of response.body) {
+          if (writeError) throw writeError;
           size += chunk.length;
           if (size > MAX_PLUGIN_BYTES) throw new Error("The download is larger than a plugin can be");
           hash.update(chunk);
-          if (!out.write(chunk)) await new Promise((resolve) => out.once("drain", resolve));
+          if (!out.write(chunk)) {
+            await new Promise((resolve) => {
+              const done = () => { out.off("drain", done); out.off("error", done); resolve(); };
+              out.on("drain", done);
+              out.on("error", done);
+            });
+          }
         }
       } finally {
         await new Promise((resolve) => out.end(resolve));
       }
+      if (writeError) throw new Error(`The download could not be saved: ${writeError.message}`);
       if (hash.digest("hex") !== asset.sha256) throw new Error("The download doesn't match GitHub's SHA-256 for it");
       return;
     }
