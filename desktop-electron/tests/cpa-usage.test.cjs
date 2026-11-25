@@ -473,3 +473,19 @@ test("an HTTP error from a CPA that answers does not pause the reads", async () 
   assert.equal(sent, 6, "a helper route that is missing is not an outage");
   assert.equal(logs.length, 0);
 });
+
+test("a small or pro variant is not estimated at its family's base price", () => {
+  // "gpt-4o-mini" fell to GPT-4o (16x its price), "o3-mini" and "o3-pro" to o3, "gpt-5-pro" to GPT-5.
+  const rate = (model) => { const row = priceFor(model); return row && [row.input, row.output]; };
+  assert.deepEqual(rate("gpt-4o-mini"), [0.15, 0.6]);
+  assert.deepEqual(rate("gpt-4o-mini-2024-07-18"), [0.15, 0.6]);
+  assert.deepEqual(rate("gpt-4o"), [2.5, 10]);
+  assert.deepEqual(rate("gpt-4.1-mini"), [0.4, 1.6]);
+  assert.deepEqual(rate("gpt-4.1-nano"), [0.1, 0.4]);
+  assert.deepEqual(rate("gpt-4.1"), [2, 8]);
+  assert.deepEqual(rate("o3-mini"), [1.1, 4.4]);
+  assert.deepEqual(rate("o3-pro"), [20, 80]);
+  assert.deepEqual(rate("o3"), [2, 8]);
+  assert.deepEqual(rate("gpt-5-pro"), [15, 120]);
+  assert.deepEqual(rate("gpt-5-codex"), [1.25, 10]);
+});

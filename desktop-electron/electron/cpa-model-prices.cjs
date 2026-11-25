@@ -28,12 +28,18 @@ const MODEL_PRICES = Object.freeze([
   // OpenAI. Codex models are priced as their GPT-5 base model.
   { label: "GPT-5 nano", pattern: /^gpt-5(\.\d+)?-nano/, input: 0.05, cachedInput: 0.005, output: 0.4 },
   { label: "GPT-5 mini", pattern: /^gpt-5(\.\d+)?(-codex)?-mini/, input: 0.25, cachedInput: 0.025, output: 2 },
+  { label: "GPT-5 pro", pattern: /^gpt-5-pro/, input: 15, cachedInput: 15, output: 120 },
   { label: "GPT-5 / 5.1", pattern: /^gpt-5(\.1)?($|-)/, input: 1.25, cachedInput: 0.125, output: 10 },
   { label: "GPT-5.2+", pattern: /^gpt-5\.\d+/, input: 1.75, cachedInput: 0.175, output: 14 },
   { label: "codex-mini", pattern: /^codex-mini/, input: 1.5, cachedInput: 0.375, output: 6 },
+  { label: "GPT-4.1 nano", pattern: /^gpt-4\.1-nano/, input: 0.1, cachedInput: 0.025, output: 0.4 },
+  { label: "GPT-4.1 mini", pattern: /^gpt-4\.1-mini/, input: 0.4, cachedInput: 0.1, output: 1.6 },
   { label: "GPT-4.1", pattern: /^gpt-4\.1/, input: 2, cachedInput: 0.5, output: 8 },
+  { label: "GPT-4o mini", pattern: /^gpt-4o-mini/, input: 0.15, cachedInput: 0.075, output: 0.6 },
   { label: "GPT-4o", pattern: /^gpt-4o/, input: 2.5, cachedInput: 1.25, output: 10 },
   { label: "o4-mini", pattern: /^o4-mini/, input: 1.1, cachedInput: 0.275, output: 4.4 },
+  { label: "o3-mini", pattern: /^o3-mini/, input: 1.1, cachedInput: 0.55, output: 4.4 },
+  { label: "o3-pro", pattern: /^o3-pro/, input: 20, cachedInput: 20, output: 80 },
   { label: "o3", pattern: /^o3($|-)/, input: 2, cachedInput: 0.5, output: 8 },
 
   // Google Gemini (prompts up to 200K tokens).
