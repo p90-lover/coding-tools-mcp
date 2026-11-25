@@ -962,13 +962,14 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
         // A loop in this app session drives it (or is starting it).
         if (status.driven !== false || ["starting", "running"].includes(String(status.status))) {
-          if (held) settledRuns.current.delete(key);
+          settledRuns.current.delete(key);
           return;
         }
         // Read only where it decides anything: a single chat with a failed step.
         // Asked for this run: one whose retry the person ended by changing the chat's setup is not
         // retried here either (chat_retry_cancel), or the old harness and model ran after all.
-        const autoRetry = held && mission.execution_mode === "single"
+        let autoRetryChecked = held;
+        let autoRetry = held && mission.execution_mode === "single"
           ? await moduleCall("chat_auto_retry", { workspaceId, runId: mission.id }).then((result) => result.autoRetry === true, () => false) : false;
         let nodes = running;
         let still: AoMission | undefined = mission;
@@ -977,6 +978,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
           const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
           still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
+          if (!autoRetryChecked && still?.execution_mode === "single" && still.nodes.some((node) => node.state === "held")) {
+            autoRetryChecked = true;
+            autoRetry = await moduleCall("chat_auto_retry", { workspaceId, runId: mission.id }).then((result) => result.autoRetry === true, () => false);
+          }
           // Resumable now: its loop takes over the cards still running and starts the next ones.
           if (still && !resumedRuns.current.has(key) && restartResume(still, Date.now(), { autoRetry })) break;
           nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
