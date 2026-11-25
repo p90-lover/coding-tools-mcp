@@ -5230,6 +5230,9 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     return chatPreferences.get().meteredReviews ? null : { action: "ask", unresolved: true, quotaBlocked: true, reason };
   }
 
+  let guardianQuota = new AbortController();
+  const guardianQuotaPaused = () => ({ action: "ask", unresolved: true, quotaBlocked: true,
+    reason: "Quota-based reviews are off. Standalone Codex Guardian can use ChatGPT quota. This request needs your approval." });
   const guardianApprovalFields = ["thread_id", "turn_id", "kind", "source", "tool", "command", "cwd", "path", "reviewTruncated", "guardianUnsupported", "guardianRequiresHuman", "toolInput", "permissions", "decisions"];
   const guardianApprovalSeal = approval => createHash("sha256").update(JSON.stringify({
     ...Object.fromEntries(guardianApprovalFields.map(field => [field, approval[field]])),
@@ -5269,25 +5272,31 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     && ["allow_once", "reject_once"].every(kind => approval.decisions?.some(option => option.kind === kind))
     && (!Array.isArray(approval.request?.availableDecisions) || ["accept", "decline"].every(decision => approval.request.availableDecisions.includes(decision)));
 
-  async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal, verifyCurrent }, blocked) {
+  async function reviewWithNativeGuardian({ approver, mission, approval, partial, signal: requestSignal, verifyCurrent }, blocked) {
     const manual = reason => ({ ...blocked, reason });
     if (!guardianScope(approver, approval, partial)) return blocked;
     if (approval.kind === "permission") return { ...blocked, guardianUnavailable: true };
     if (!guardianShell(approval)) return blocked;
     if (!nativeGuardianReview || gitPushRequest(approval.command)) return { ...blocked, guardianUnavailable: true };
+    if (!chatPreferences.get().meteredReviews) return guardianQuotaPaused();
+    const consent = guardianQuota.signal;
+    const signal = requestSignal ? AbortSignal.any([requestSignal, consent]) : consent;
     const [folder, task] = await Promise.all([requestFolder(approval, mission), requestTask(mission)]);
     await verifyCurrent();
-    if (!task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
+    if (consent.aborted) return guardianQuotaPaused();
+    if (signal.aborted || !task || !folder || publicText(approval.command, 4001) !== approval.command || publicText(approval.cwd, 2048) !== approval.cwd) return blocked;
     const allowKey = guardianAllowKey(approval, folder, task);
     const kept = allowKey ? guardianAllows.get(allowKey) : null;
     if (kept && now() - kept.at < GUARDIAN_ALLOW_MS) {
       if (!await samePendingApproval(approval, verifyCurrent)) {
         return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
       }
+      if (consent.aborted) return guardianQuotaPaused();
       return { action: "allow", reason: kept.reason, actor: "guardian", reason_code: "native_guardian", guardianCached: true };
     }
     if (kept) guardianAllows.delete(allowKey);
     const outcome = await nativeGuardianReview({ approval, folder, task, signal }).catch(() => null);
+    if (consent.aborted) return guardianQuotaPaused();
     if (!outcome || !["allow", "deny"].includes(outcome.action)) {
       const result = manual(publicText(outcome?.reason || blocked.reason, 300));
       if (signal?.aborted) return result;
@@ -5300,6 +5309,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
     if (!await samePendingApproval(approval, verifyCurrent)) {
       return manual("The original request changed or is no longer pending. Guardian did not answer it for you.");
     }
+    if (consent.aborted) return guardianQuotaPaused();
     const reason = publicText(outcome.reason, 300);
     if (outcome.action === "allow" && allowKey) {
       guardianAllows.delete(allowKey);
@@ -5322,6 +5332,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       reason: "Native Guardian could not decide. Check the request yourself; it was not sent to CPA.",
     });
     check();
+    if (verdict.quotaBlocked) return verdict;
     logger?.info?.("ao.guardian_review_routed", { tool: approval.tool, action: verdict.action, unavailable: verdict.guardianUnavailable === true,
       ...(verdict.guardianCached ? { cached: true } : {}) });
     if (verdict.action !== "ask") return { ...verdict, guardianSeal: guardianApprovalSeal(approval) };
@@ -6375,6 +6386,11 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       if (typeof meteredReviews !== "boolean") throw new Error("Choose on or off for quota-based reviews");
       const changed = chatPreferences.get().meteredReviews !== meteredReviews;
       const saving = chatPreferences.set({ meteredReviews });
+      if (changed && !meteredReviews) {
+        const prior = guardianQuota;
+        guardianQuota = new AbortController();
+        prior.abort();
+      }
       if (changed) logger?.info?.("ao.quota_review_consent_changed", { enabled: meteredReviews });
       await saving;
       for (const [id, advice] of approverAdvice) {

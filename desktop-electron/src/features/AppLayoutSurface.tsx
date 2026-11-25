@@ -494,7 +494,7 @@ export const INITIAL_APP_LAYOUT: AppLayoutSnapshot = {
           belongsIn: "Settings › Approvals & Safety",
           items: [
             "Let the model judge (modelJudges — reviewer decides eligible requests and goal rounds)",
-            "Allow quota-based reviews (meteredReviews — off by default; uses native Codex Guardian when off)",
+            "Allow quota-based reviews (meteredReviews — off by default; covers standalone Codex Guardian and CPA)",
             "Agent questions timeout (Wait for my answer vs. Answer for me after N seconds)",
             "Confirm agent requests in a dialog (confirmAgentToolRequests)",
             "Let chat agents hide secrets in your messages (chatAgentRedactSecrets) + What to hide list",

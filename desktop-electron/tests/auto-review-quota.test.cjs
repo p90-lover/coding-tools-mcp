@@ -60,16 +60,24 @@ function fixture(preferences, { reviewer = "auto_review", nativeGuardianReview, 
   };
 }
 
-for (const meteredReviews of [false, true]) test(`Approve for me routes the exact shell action to Guardian with CPA consent ${meteredReviews ? "on" : "off"}`, async () => {
+test("without quota consent, neither standalone Guardian nor CPA is called; opting in resumes the exact pending review", { timeout: 5_000 }, async () => {
   const seen = [];
   const state = fixture(undefined, { nativeGuardianReview: async (input) => {
     seen.push(input);
     return { action: "allow", reason: "fixture native verdict", actor: "guardian" };
   } });
   try {
-    await state.workflow.call("chat_model_judges", { meteredReviews });
-    assert.equal((await state.workflow.call("chat_model_judges")).meteredReviews, meteredReviews);
+    await state.workflow.call("chat_model_judges", { enabled: true });
+    const pending = await state.observe();
+    assert.equal(pending[0]?.recommendation?.quotaBlocked, true);
+    assert.match(pending[0].recommendation.reason, /Standalone Codex Guardian can use ChatGPT quota/);
+    assert.deepEqual(seen, []);
+    assert.deepEqual(state.calls, []);
+    assert.deepEqual(state.resolved, []);
+
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
     await state.observe();
+    await state.firstAnswer;
     assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
     assert.equal(seen.length, 1);
     assert.equal(seen[0].approval.command, "python tools/migrate.py --apply");
@@ -86,16 +94,40 @@ test("a changed pending command with the same ID does not receive the old Guardi
     return { action: "allow", reason: "fixture old verdict", actor: "guardian" };
   } });
   try {
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
     const pending = await state.observe();
     assert.equal(pending.length, 1);
+    assert.match(pending[0].recommendation.reason, /original request changed/);
     assert.deepEqual(state.resolved, []);
     assert.deepEqual(state.calls, []);
   } finally { state.workflow.dispose(); }
 });
 
-// Each native Guardian review spends plan quota (about 0.5% of a Plus 5-hour window per 100). On
-// 2026-11-23, 9 of a day's 640 Guardian reviews repeated an earlier request in the same chat exactly.
-test("Guardian's allow answers the same command again in the same chat without another review", { timeout: 5_000 }, async () => {
+test("revoking quota consent cancels a waiting Guardian review and discards a late reply", { timeout: 5_000 }, async () => {
+  const entered = Promise.withResolvers(), guardian = Promise.withResolvers();
+  let reviews = 0;
+  const state = fixture(undefined, { nativeGuardianReview: async ({ signal }) => {
+    reviews++;
+    entered.resolve(signal);
+    return guardian.promise;
+  } });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true, meteredReviews: true });
+    await state.observe();
+    const signal = await entered.promise;
+    assert.equal(signal.aborted, false);
+    await state.workflow.call("chat_model_judges", { meteredReviews: false });
+    assert.equal(signal.aborted, true);
+    guardian.resolve({ action: "allow", reason: "fixture late verdict", actor: "guardian" });
+    const pending = await state.observe();
+    assert.equal(pending[0]?.recommendation?.quotaBlocked, true);
+    assert.equal(reviews, 1);
+    assert.deepEqual(state.calls, []);
+    assert.deepEqual(state.resolved, []);
+  } finally { guardian.resolve(null); state.workflow.dispose(); }
+});
+
+test("Guardian's allow answers the same command again in the same chat only with quota consent", { timeout: 5_000 }, async () => {
   const details = {};
   let reviews = 0;
   const state = fixture(undefined, { approvalDetails: details, nativeGuardianReview: async () => {
@@ -103,8 +135,17 @@ test("Guardian's allow answers the same command again in the same chat without a
     return { action: "allow", reason: "fixture native verdict", actor: "guardian", reason_code: "native_guardian" };
   } });
   try {
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
     await state.observe();
+    await state.firstAnswer;
+    await state.workflow.call("chat_model_judges", { meteredReviews: false });
     details.approval_id = "permission-2";
+    const pending = await state.observe();
+    assert.equal(pending[0]?.recommendation?.quotaBlocked, true);
+    assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
+    assert.equal(reviews, 1);
+
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
     await state.observe();
     assert.deepEqual(state.resolved, [["permission-1", "yes"], ["permission-2", "yes"]]);
     assert.equal(reviews, 1, "the repeat is answered from Guardian's kept allow");
@@ -126,6 +167,7 @@ test("a Guardian deny or unclear answer is never kept for the same command", { t
       return { action, reason: "fixture Guardian answer", actor: "guardian" };
     } });
     try {
+      await state.workflow.call("chat_model_judges", { meteredReviews: true });
       await state.observe();
       details.approval_id = "permission-2";
       await state.observe();
@@ -143,6 +185,7 @@ test("a kept Guardian allow lapses after ten minutes and never outlives the user
     return { action: "allow", reason: "fixture native verdict", actor: "guardian", reason_code: "native_guardian" };
   } });
   try {
+    await state.workflow.call("chat_model_judges", { meteredReviews: true });
     await state.observe();
     at += 9 * 60_000;
     details.approval_id = "permission-2";
@@ -158,32 +201,6 @@ test("a kept Guardian allow lapses after ten minutes and never outlives the user
     assert.equal(reviews, 3, "a new message from the user is reviewed afresh");
     assert.deepEqual(state.resolved.map(([id]) => id), ["permission-1", "permission-2", "permission-3", "permission-4"]);
   } finally { state.workflow.dispose(); }
-});
-
-test("enabling quota reviews mid-Guardian cannot replace its decision or spend on an undecided review", { timeout: 5_000 }, async (t) => {
-  for (const action of ["ask", "deny", "unavailable"]) await t.test(action, async () => {
-    const started = Promise.withResolvers(), guardian = Promise.withResolvers();
-    let reviews = 0;
-    const state = fixture(undefined, { nativeGuardianReview: async () => {
-      reviews++;
-      started.resolve();
-      return guardian.promise;
-    } });
-    try {
-      await state.workflow.call("chat_model_judges", { enabled: true });
-      await state.observe();
-      await started.promise;
-      assert.deepEqual(state.calls, [], "turning the judge on does not enable paid reviews");
-      await state.workflow.call("chat_model_judges", { meteredReviews: true });
-      guardian.resolve(action === "unavailable" ? null : { action, reason: "fixture Guardian answer", actor: "guardian" });
-      let pending;
-      for (let tick = 0; tick < 3; tick++) pending = await state.observe();
-      assert.deepEqual(state.resolved, action === "deny" ? [["permission-1", "no"]] : []);
-      if (action !== "deny") assert.equal(pending[0]?.recommendation?.guardianPending, true);
-      assert.equal(reviews, 1);
-      assert.deepEqual(state.calls, []);
-    } finally { guardian.resolve(null); state.workflow.dispose(); }
-  });
 });
 
 test("an eligible Guardian fallback stays in review and removes the card after the harness accepts the answer", { timeout: 5_000 }, async () => {
@@ -332,6 +349,17 @@ for (const judge of [false, true]) test(`screen reviews cannot spend CPA quota w
   } finally { state.workflow.dispose(); }
 });
 
+test("the local workspace reviewer still answers without spending quota", async () => {
+  const state = fixture(undefined, { nativeGuardianReview: async () => assert.fail("standalone Guardian with quota off") });
+  try {
+    await state.workflow.call("chat_model_judges", { enabled: true });
+    state.command("Set-Content -Path quota-fixture.txt -Value sample");
+    await state.observe();
+    assert.deepEqual(state.resolved, [["permission-1", "yes"]]);
+    assert.deepEqual(state.calls, []);
+  } finally { state.workflow.dispose(); }
+});
+
 test("a harness-required human decision is not automated even with the paid reviewer enabled", async () => {
   const state = fixture(undefined, { approvalDetails: { guardianRequiresHuman: true }, nativeGuardianReview: async () => assert.fail("human-only") });
   try {
@@ -375,7 +403,7 @@ test("quota-review consent is separate from model judge and persists across work
   } finally { second.workflow.dispose(); }
 });
 
-test("a timed-out Guardian review retries automatically when CPA consent is off, and CPA fallback also retries on transient failure", { timeout: 5_000 }, async () => {
+test("a timed-out Guardian review retries with quota consent and Model Judge off; CPA fallback also retries on transient failure", { timeout: 5_000 }, async () => {
   let at = 1_000_000, guardianCalls = 0;
   const unpaved = fixture(undefined, {
     now: () => at,
@@ -385,7 +413,7 @@ test("a timed-out Guardian review retries automatically when CPA consent is off,
     },
   });
   try {
-    await unpaved.workflow.call("chat_model_judges", { enabled: true, meteredReviews: false });
+    await unpaved.workflow.call("chat_model_judges", { enabled: false, meteredReviews: true });
     const firstPending = await unpaved.observe();
     assert.equal(firstPending[0]?.awaiting_review, true, "first timeout stays in review for automatic retry");
     assert.deepEqual(unpaved.resolved, []);
