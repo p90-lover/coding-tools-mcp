@@ -476,6 +476,26 @@
   flex-wrap: wrap;
 }
 
+.provider-fast-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* The console's text-field rule (.provider-console input: full width, 36px tall) would size the checkbox. */
+.provider-console .provider-fast-mode input {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
 .provider-detail-badges span,
 .provider-account-tags em {
   padding: 3px 6px;

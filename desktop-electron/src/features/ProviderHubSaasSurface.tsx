@@ -445,6 +445,9 @@ function normalizeSearch(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
+// The providers with a fast mode (provider-network.cjs keeps the same list).
+const FAST_MODE_PROVIDERS = new Set(["codex-oauth", "claude-oauth"]);
+
 export function ProviderCenterSurface({ initialCategory = "all", language, setError }: SurfaceProps) {
   const [snapshot, setSnapshot] = useState<ProviderNetworkSnapshot>(EMPTY_SNAPSHOT);
   const [externalServices, setExternalServices] = useState<ExternalServicesSnapshot>(EMPTY_EXTERNAL_SERVICES);
@@ -842,6 +845,23 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
     }
   };
 
+  // Fast mode default for new chats on this provider's models; the effort menu overrides it per chat.
+  const fastModeProvider = FAST_MODE_PROVIDERS.has(selectedProvider.id);
+  const fastModeOn = snapshot.fastMode?.[selectedProvider.id] === true;
+  const toggleProviderFastMode = async () => {
+    const api = window.codexWebLauncher;
+    if (!api || !fastModeProvider) return;
+    setBusy("fast-mode");
+    setError(null);
+    try {
+      adoptSnapshot(await api.setProviderFastMode({ providerId: selectedProvider.id, enabled: !fastModeOn }));
+    } catch (cause) {
+      setError(messageOf(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const toggleAccountEnabled = async () => {
     const api = window.codexWebLauncher;
     if (!api || !selectedAccount) return;
@@ -1094,6 +1114,20 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
                   <span key={capability}>{capabilityLabel(language, capability)}</span>
                 ))}
               </div>
+              {fastModeProvider ? (
+                <label className="provider-fast-mode" title={selectedProvider.id === "claude-oauth"
+                  ? text(language, "Opus models served by Anthropic, through CPA too. Anthropic charges fast mode as extra usage credits; without them the request is refused. Change it per chat in the effort menu.", "由 Anthropic 提供的 Opus 模型，經 CPA 亦適用。Anthropic 以額外用量點數計費快速模式；沒有點數時請求會被拒絕。可在每個聊天的推理強度選單中更改。")
+                  : text(language, "Codex's fast service tier, on its own sign-in or through CPA. Change it per chat in the effort menu.", "Codex 的快速服務層級，適用於其自身登入或經 CPA。可在每個聊天的推理強度選單中更改。")}>
+                  <input
+                    checked={fastModeOn}
+                    disabled={busy === "fast-mode"}
+                    onChange={() => void toggleProviderFastMode()}
+                    role="switch"
+                    type="checkbox"
+                  />
+                  <span>{text(language, "Fast mode for new chats", "新聊天預設快速模式")}</span>
+                </label>
+              ) : null}
             </div>
             <button className="provider-primary-button" onClick={() => startNewAccount(selectedProvider.id)} type="button">
               + {text(language, "Add account", "新增帳戶")}

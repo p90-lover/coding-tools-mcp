@@ -116,6 +116,10 @@ pub struct Route {
     /// applies it; AO harnesses have no such setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
+    /// Fast mode for an AO card (Codex's fast service tier, Claude Code's fast mode). Stored only
+    /// as Some(true): off is None, so routes without it keep their fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode: Option<bool>,
 }
 
 /// Current Unix time in milliseconds (0 if the clock is before 1970).
@@ -156,6 +160,9 @@ fn route_tuning_valid(route: &Route) -> bool {
         && route
             .context_window
             .is_none_or(|tokens| CONTEXT_WINDOWS.contains(&tokens))
+        && route
+            .fast_mode
+            .is_none_or(|on| on && route.harness_id.starts_with("ao:"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2703,8 +2710,22 @@ mod tests {
                 assert!(!route_tuning_valid(&route), "{harness} context {tokens}");
             }
             route.context_window = None;
+            // Fast mode is an AO harness setting, stored only as on.
+            route.fast_mode = Some(true);
+            assert_eq!(
+                route_tuning_valid(&route),
+                harness.starts_with("ao:"),
+                "{harness} fast"
+            );
+            route.fast_mode = Some(false);
+            assert!(!route_tuning_valid(&route), "{harness} fast off");
+            route.fast_mode = None;
             let plain = serde_json::to_value(&route).unwrap();
-            assert!(plain.get("effort").is_none() && plain.get("context_window").is_none());
+            assert!(
+                plain.get("effort").is_none()
+                    && plain.get("context_window").is_none()
+                    && plain.get("fast_mode").is_none()
+            );
         }
     }
 
@@ -2741,6 +2762,8 @@ mod tests {
             json!({"effort":""}),
             json!({"context_window":1_024}),
             json!({"context_window":4_000_000}),
+            // Native Codex has no fast mode; only AO cards carry it.
+            json!({"fast_mode":true}),
         ] {
             assert!(validate(None, &run(bad.clone())).is_err(), "{bad}");
         }

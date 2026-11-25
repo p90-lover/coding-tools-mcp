@@ -268,6 +268,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
   testProxyProfile: (profileId) => ipcRenderer.invoke("launcher:proxy-profile-test", profileId),
   setGlobalProxyRouting: (input) => ipcRenderer.invoke("launcher:proxy-global-routing", input),
   setProviderProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-provider-policy", input),
+  setProviderFastMode: (input) => ipcRenderer.invoke("launcher:provider-fast-mode", input),
   setAccountProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-account-policy", input),
   setCredentialProxyPolicy: (input) => ipcRenderer.invoke("launcher:proxy-credential-policy", input),
   egressStatus: () => ipcRenderer.invoke("launcher:egress-status"),
