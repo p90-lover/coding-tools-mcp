@@ -1296,6 +1296,19 @@ test("ended chats reap agent commands while ordinary credential release retains 
   });
 });
 
+test("the Terminal pane names the directory a command given by cwd started in", async () => {
+  const tree = tempTree();
+  const sandbox = fakeSandbox();
+  const { tools } = fixture({ root: tree.root, terminal: () => true, sandbox });
+  try {
+    const client = await session(tools, { approvalMode: "bypass-permissions" });
+    await callTool(client.url, client.auth, "exec_command", { cmd: "npm test", cwd: "src/deep", yield_time_ms: 0 });
+    assert.equal(sandbox.started[0].cwd, path.join(path.resolve(tree.root), "src", "deep"), "it ran in src/deep");
+    const [listing] = await tools.processes(["ao-1"], "ws1");
+    assert.equal(listing.commands[0].workdir, "src/deep", "and the pane says so");
+  } finally { await tools.close(); tree.cleanup(); }
+});
+
 test("sandbox commands are owned before yielding and survive credential renewal", async (t) => {
   for (const change of ["end", "renew", "renew then end"]) await t.test(change, async () => {
     const tree = tempTree();

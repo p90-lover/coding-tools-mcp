@@ -2885,7 +2885,7 @@ function createChatAgentTools({
       exitCode: Number.isInteger(value.exit_code) ? value.exit_code : null };
     if (name === "exec_command") {
       const command = Object.assign(entry.commands.get(id) ?? { id, cmd: String(args.cmd ?? "").slice(0, 2000),
-        workdir: String(args.workdir ?? "."), startedAt: now(), root: entry.root }, status, sandboxed ? { sandboxed: true } : {});
+        workdir: String(args.workdir ?? args.cwd ?? "."), startedAt: now(), root: entry.root }, status, sandboxed ? { sandboxed: true } : {});
       entry.commands.set(id, command);
       while (entry.commands.size > MAX_TRACKED_COMMANDS) {
         const oldest = [...entry.commands.values()].filter((command) => command.status !== "running").sort((left, right) => left.startedAt - right.startedAt)[0];
