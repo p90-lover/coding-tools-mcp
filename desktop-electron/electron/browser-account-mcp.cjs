@@ -147,6 +147,11 @@ function createBrowserAccountMcpSync(deps) {
         // a failure waits its turn (FAILED_RETRY_MS, WAITS_FOR_SIGN_IN), a connected account waits for
         // new sign-in cookies or a newer failure recorded elsewhere.
         const recorded = deps.accounts().find(entry => entry.id === account.id);
+        // The sign-in as the setup left it: its own chatgpt.com pages may have refreshed the cookie,
+        // which is no new sign-in. Kept with the old one, a connected account's next scan read the
+        // refreshed cookie as a new sign-in and ran the whole setup again.
+        const after = await deps.readCookies(account.partition).catch(() => null);
+        const settledSession = after && signedInFromCookies(after) ? sessionFingerprint(after) : sessionKey;
         let retryAt = Infinity;
         if (failed) {
           const before = failures.get(account.id);
@@ -154,15 +159,13 @@ function createBrowserAccountMcpSync(deps) {
           const code = typeof failed?.code === "string" ? failed.code : null;
           retryAt = WAITS_FOR_SIGN_IN.has(code) ? Infinity : now() + (NEEDS_THE_PERSON.has(code) ? FAILED_RETRY_MAX_MS
             : Math.min(FAILED_RETRY_MAX_MS, FAILED_RETRY_MS * 2 ** (count - 1)));
-          // The sign-in as the setup left it: its own chatgpt.com pages may have refreshed the cookie,
-          // which is no new sign-in.
-          const after = await deps.readCookies(account.partition).catch(() => null);
           failures.set(account.id, { place, count, code, retryAt, okAt: recorded?.connector?.okAt ?? null,
-            session: after && signedInFromCookies(after) ? sessionFingerprint(after) : sessionKey });
+            session: settledSession });
         } else {
           failures.delete(account.id);
         }
-        attempts.set(account.id, { key, errorAt: recorded?.connector?.errorAt ?? null, retryAt });
+        attempts.set(account.id, { key: `${account.partition}\0${target}\0${settledSession}`,
+          errorAt: recorded?.connector?.errorAt ?? null, retryAt });
       } catch (error) {
         deps.logger?.warn?.("browser_accounts.automatic_mcp_scan_failed", {
           message: error instanceof Error ? error.message : String(error),

@@ -635,3 +635,22 @@ test("launcher transport sends the app's own requests on the App route and sessi
     assert.equal(requests.length, 1);
   });
 });
+
+test("a setup whose own ChatGPT pages refreshed the sign-in cookie does not start again for it", async () => {
+  const f = fixture();
+  // The setup's chatgpt.com pages re-issue the session cookie (same sign-in, new value).
+  f.deps.connect = async (id, current) => {
+    assert(current());
+    f.connected.push(id);
+    f.cookies.set(`persist:${id}`, cookie(`${id}-refreshed-${f.connected.length}`));
+    return { connected: true };
+  };
+  await f.sync.sync();
+  await f.sync.sync();
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two"]);
+  // A sign-in after that is still a reason to check again.
+  f.cookies.set("persist:one", cookie("signed-in-again"));
+  await f.sync.sync();
+  assert.deepEqual(f.connected, ["one", "two", "one"]);
+});
