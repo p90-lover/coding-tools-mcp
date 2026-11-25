@@ -3357,6 +3357,17 @@ test("every character in a confirmation is visible: bidi, zero-width and control
   } finally { await tools.close(); tree.cleanup(); }
 });
 
+test("letters and marks that draw nothing (Hangul fillers, variation selectors) are escaped too", () => {
+  // Default_Ignorable_Code_Point characters outside Cf: a Hangul filler is a letter (Lo) that draws
+  // as blank space, a variation selector or the grapheme joiner a mark (Mn) that draws nothing at
+  // all, so "cat secret\u{FE0F}.txt" read as "cat secret.txt".
+  for (const char of ["\u3164", "\uFFA0", "\u115F", "\u1160", "\uFE0F", "\uFE00", "\u034F", "\u{E0100}"]) {
+    const escape = `\\u{${char.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}}`;
+    assert.equal(displaySafe(`cat secret${char}.txt`), `cat secret${escape}.txt`, escape);
+  }
+  assert.equal(displaySafe("e\u0301"), "e\u0301", "a mark that draws something still sits on its letter");
+});
+
 test("a combining mark is drawn only on a character drawn as itself", () => {
   assert.equal(displaySafe("e\u0301"), "e\u0301");
   assert.equal(displaySafe("a \u0301"), "a \\u{0301}", "not on a space");

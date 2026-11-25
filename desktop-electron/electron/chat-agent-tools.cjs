@@ -998,8 +998,10 @@ function criticalFile(target) {
 
 // Characters that would hide or disguise text in a dialog: controls (Cc), format characters such
 // as bidi overrides and zero-width spaces (Cf), line and paragraph separators (Zl, Zp), spaces
-// other than U+0020 (Zs), surrogates, private-use and unassigned code points.
-const INVISIBLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$/u;
+// other than U+0020 (Zs), surrogates, private-use and unassigned code points, and whatever else
+// Unicode says draws nothing (Default_Ignorable_Code_Point): Hangul fillers, which are letters
+// drawn as blank space, and variation selectors and the grapheme joiner, marks drawn as nothing.
+const INVISIBLE = /^[\p{Cc}\p{Cf}\p{Cs}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}\p{Default_Ignorable_Code_Point}]$/u;
 // Right-to-left text: every code point whose Bidi_Class is R or AL, as the ranges where those are
 // the default (DerivedBidiClass.txt): Hebrew, Arabic, Syriac, Thaana, NKo, Samaritan, Mandaic, their
 // presentation forms, and the RTL scripts beyond the BMP (Kharoshthi, Old Turkic, Adlam and more).
