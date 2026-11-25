@@ -1994,12 +1994,21 @@ export function goalRounds(goal: Pick<ChatGoal, "round" | "rounds">): string {
 
 const GOAL_FEEDBACK = /^Stop hook feedback:\n\[([\s\S]*?)\]: ([\s\S]+)$/;
 /**
+ * The rules every goal round ends with (chat-goals GOAL_RULES): the app's words to the agent, the
+ * same each round, so the chat shows the person's condition or the evaluator's reason without them.
+ */
+const GOAL_RULES_TAIL = /\n\nGoal rules \(sent by Coding Tools with every round of this goal\):\n[\s\S]*$/;
+/** A message without the goal rules the app added to it (none on a message the person sent). */
+export function withoutGoalRules(text: string): string {
+  return text.replace(GOAL_RULES_TAIL, "");
+}
+/**
  * A goal's later round (chat-goals goalMessage): the goal's own feedback to the agent, which Claude
  * Code shows as its Stop hook's feedback under the turn, not as something the person typed. It
  * showed as the person's message bubble. Null for any other message.
  */
 export function goalFeedback(text: string): { objective: string; reason: string } | null {
-  const match = GOAL_FEEDBACK.exec(text.trim());
+  const match = GOAL_FEEDBACK.exec(withoutGoalRules(text.trim()));
   return match ? { objective: match[1], reason: match[2].trim() } : null;
 }
 /**
@@ -2190,6 +2199,8 @@ export function hiddenSecretParts(text: string): Array<string | { hidden: string
  * agent reads. For copying, exporting, and putting a message back in a chat box (rewind, continue).
  */
 export function chatMessageReadable(message: string): string {
+  // A goal round's rules are the app's, not the person's: a rewind or copy gives back their words.
+  message = withoutGoalRules(message);
   const { annotations, rest } = chatAnnotationsSplit(message);
   if (!annotations.length) return message;
   const lines = annotations.map((item, index) => `${index + 1}. "${item.text.replace(/\s+/g, " ")}"${item.comment ? ` — ${item.comment}` : ""}`);
@@ -2204,7 +2215,8 @@ export function chatMessageReadable(message: string): string {
 export function chatMessageParts(message: string): { text: string; attachments: ChatSentAttachment[]; annotations?: ChatAnnotation[] } {
   const attachments: ChatSentAttachment[] = [];
   const name = (file: string) => file.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || file;
-  const split = chatAnnotationsSplit(message);
+  // A goal's first round is the person's condition plus the app's goal rules: the bubble shows theirs.
+  const split = chatAnnotationsSplit(withoutGoalRules(message));
   const annotations = split.annotations.length ? split.annotations : undefined;
   message = split.rest;
   const text = message

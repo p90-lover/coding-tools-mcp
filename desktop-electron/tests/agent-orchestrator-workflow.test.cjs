@@ -4591,11 +4591,11 @@ test("a start blocked on the browser returns its reason instead of a generic tra
 
 // ---- Codex slash commands: /goal, /compact, /diff ----
 
-const { closingAnswers, createGoalStore, goalMessage, roundAnswers, roundTranscript, goalCheckPrompt, parseGoalCheck } = require("../electron/chat-goals.cjs");
+const { closingAnswers, createGoalStore, goalMessage, roundAnswers, roundTranscript, goalCheckPrompt, parseGoalCheck, withoutGoalRules, GOAL_RULES, GOAL_RULES_AGAIN } = require("../electron/chat-goals.cjs");
 
 test("a goal round says what Claude Code's /goal says: the condition first, then stop-hook feedback with the evaluator's reason", () => {
-  assert.equal(goalMessage("ship it", 1), "ship it", "the first round is the condition itself");
-  assert.equal(goalMessage("ship it", 2, "Two tests still fail in auth.test.ts."), "Stop hook feedback:\n[ship it]: Two tests still fail in auth.test.ts.");
+  assert.equal(withoutGoalRules(goalMessage("ship it", 1)), "ship it", "the first round is the condition itself");
+  assert.equal(withoutGoalRules(goalMessage("ship it", 2, "Two tests still fail in auth.test.ts.")), "Stop hook feedback:\n[ship it]: Two tests still fail in auth.test.ts.");
   assert.match(goalMessage("ship it", 3, ""), /^Stop hook feedback:\n\[ship it\]: The condition is not met yet/);
   // The evaluator reads the closing cards: a team's reviewer, a Single card, or a solo orchestrator.
   const team = { nodes: [
@@ -4632,6 +4632,37 @@ test("a goal round says what Claude Code's /goal says: the condition first, then
   assert.equal(parseGoalCheck('{"met": false, "stop": true}').stop, true, "an explicit stop does not depend on progress");
   assert.throws(() => parseGoalCheck("I think it is done."), /no verdict/);
   assert.throws(() => parseGoalCheck('{"met": "yes"}'), /no verdict/);
+});
+
+test("every goal round tells the agent where its turn ends, and the evaluator holds it to the whole condition", () => {
+  // Seen in the saved goals (2026-11-24): rounds that stopped partway to report or ask, and verdicts
+  // on an easier task than the one set (a unit test for "working live", one account of several).
+  assert.ok(goalMessage("ship it", 1).endsWith(`\n\n${GOAL_RULES}`), "the first round closes with the whole rules");
+  for (const message of [goalMessage("ship it", 2, "Two tests still fail."), goalMessage("ship it", 7)]) {
+    assert.ok(message.endsWith(`\n\n${GOAL_RULES_AGAIN}`), "later rounds close with the short form");
+    assert.equal(withoutGoalRules(message).includes("Goal rules"), false);
+  }
+  assert.match(GOAL_RULES, /Keep working in this turn until it holds and you have checked it yourself/);
+  assert.match(GOAL_RULES, /Do not stop to summarise, to ask whether to go on, or to list next steps: do them/);
+  assert.match(GOAL_RULES, /Do not swap in an easier or different task/);
+  assert.match(GOAL_RULES, /say exactly what is needed and keep working on every other part/);
+  assert.match(GOAL_RULES, /End the turn with what you did, how you checked it/);
+  // The short form keeps each rule, in half the bytes: every round's message stays in the chat's record.
+  for (const rule of [/until the condition holds and you have checked it/, /do not stop to summarise, ask whether to go on, or list next steps/,
+    /Stay inside the condition as written/, /if only the person can unblock a part, say exactly what and keep working on the rest/, /End with what you did, how you checked it/]) {
+    assert.match(GOAL_RULES_AGAIN, rule);
+  }
+  assert.ok(Buffer.byteLength(GOAL_RULES_AGAIN) * 2 <= Buffer.byteLength(GOAL_RULES) + 100, "about half the bytes");
+  assert.equal(withoutGoalRules("fix it\n\nGoal rules: mine, typed by hand"), "fix it\n\nGoal rules: mine, typed by hand", "only the app's own block is taken off");
+  // The evaluator reads the round without the rules: it has the condition, and the room is the answers'.
+  assert.equal(roundTranscript(goalMessage("ship it", 1), ["Shipped; 40/40 pass."]), "User:\nship it\n\nAssistant:\nShipped; 40/40 pass.");
+  const prompt = goalCheckPrompt("fix the login on every account, verified live", "User:\nx\n\nAssistant:\ny");
+  assert.match(prompt, /Every part of the condition must hold\. When it names several things .* each needs its own evidence/);
+  assert.match(prompt, /Judge the condition as written, not as the agent restated it\. A narrower, easier or different task does not satisfy it/);
+  assert.match(prompt, /"Implemented", "should work", "ready to test" or "likely fixed" are claims, not evidence/);
+  assert.match(prompt, /lists remaining work, next steps, unverified items or open problems .* it is not satisfied/);
+  assert.match(prompt, /the reason is sent to the agent as its next instruction: name the parts still missing, most important first/);
+  assert.match(goalCheckPrompt("x", "t", { judge: true }), /Every part of the condition must hold/, "the same bar when the model judges for the person");
 });
 
 test("goals are kept per chat in a file and survive a restart", async () => {
@@ -9045,7 +9076,8 @@ test("a /goal sent mid-turn steers its condition in and becomes the goal of the 
     aoHarness: { steer: async (id, text) => { steered.push([id, text]); return { steered: true }; } } });
   const result = await workflow.call("chat_steer", { workspaceId: "ws-1", taskId: "task-1", message: "make CI green", goal: "make CI green" });
   assert.equal(result.steered, true);
-  assert.deepEqual(steered, [["sess-1", "make CI green"]], "its first round is the condition itself");
+  assert.deepEqual(steered, [["sess-1", goalMessage("make CI green", 1)]], "its first round is the condition itself, with the goal's rules");
+  assert.equal(withoutGoalRules(steered[0][1]), "make CI green");
   const goal = (await workflow.call("runs", { workspaceId: "ws-1" })).goals["task-1"];
   assert.deepEqual([goal.objective, goal.status, goal.round, goal.lastRunId], ["make CI green", "active", 1, "r1"]);
   // A steer that does not land sets no goal: the chat sends it as a new turn, which sets it then.
