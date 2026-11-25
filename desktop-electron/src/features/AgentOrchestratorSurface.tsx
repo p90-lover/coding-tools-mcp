@@ -13,7 +13,7 @@ import {
   type PanePos, type SplitDropTarget, type SplitPane, type SplitSaved,
 } from "./chat-split";
 import { ProjectEditDialog, type WorkspaceMode, type WorkspaceModeState } from "./ProjectEditDialog";
-import { AgentOrchestratorPermissions, draftPermissionCapability, mergeSavedPermissions, missionPermissionNodes, permissionChangeNotice, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
+import { AgentOrchestratorPermissions, PERMISSION_MODES, allowsMode, asksForApproval, draftPermissionCapability, livePermissionRoute, mergeSavedPermissions, missionPermissionNodes, modeRefusal, permissionChangeNotice, selectPermissions, startsApproveForMe, type PermissionCapability, type PermissionSelection, type RuntimePermissionPolicy } from "./AgentOrchestratorPermissions";
 import type { AutobotControl, AutobotState } from "./AgentOrchestratorAutobot";
 import { AgentOrchestratorApproval, type AoApproval, type ApprovalReply } from "./AgentOrchestratorApproval";
 import { AgentOrchestratorTeam, prepareTeamGraph } from "./AgentOrchestratorTeam";
@@ -44,7 +44,7 @@ export type AoNode = {
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
   clause_id?: string; request_key?: string; template_role_id?: string;
   settings?: RoleSettings;
-  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; native_permission_profile?: string; approval_policy?: string; approvals_reviewer?: string; effort?: string; context_window?: number };
+  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; native_permission_profile?: string; approval_policy?: string; approvals_reviewer?: string; effort?: string; context_window?: number; fast_mode?: true };
   receipt?: AoReceipt;
   history?: AoReceipt[];
 };
@@ -235,13 +235,13 @@ function FloatingSheet({ stage, title, onClose, children, anchor, className = ""
 }
 
 /**
- * A new chat's single-model route: the default worker in the project, set to "Approve for me", so
- * routine commands run and anything else is judged by the command reviewer (codex-auto-review when
- * CPA can reach it), with only unclear requests coming to the person.
+ * A new chat's single-model route: the last chat's agent and model (or the default worker), set to
+ * "Approve for me" (startsApproveForMe), so routine commands run and anything else is judged by the
+ * command reviewer (codex-auto-review when CPA can reach it), with only unclear requests coming to
+ * the person. The last chat's mode is not carried: Ask for approval or Full access is picked per chat.
  */
 function newChatRoute(): AoRoute {
-  return lastChatRoute() ?? { ...workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL),
-    native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  return startsApproveForMe(lastChatRoute() ?? workerRoute(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL));
 }
 /**
  * A new chat starts on the route the last chat was sent with, as Codex and Claude Code keep the
@@ -250,7 +250,7 @@ function newChatRoute(): AoRoute {
  */
 const LAST_CHAT_ROUTE = "coding-tools:ao:last-chat-route";
 const CHAT_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
-  "approval_policy", "approvals_reviewer", "effort", "context_window"];
+  "approval_policy", "approvals_reviewer", "effort", "context_window", "fast_mode"];
 /**
  * What a chat says about a start that did not get going: a failed start, or one held before it
  * began (a WebGPT card whose browser check failed was held with its reason, and the chat said
@@ -285,7 +285,7 @@ function lastChatRoute(): AoRoute | null {
     const saved: unknown = JSON.parse(localStorage.getItem(LAST_CHAT_ROUTE) || "null");
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
     const route = Object.fromEntries(Object.entries(saved).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name)
-      && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)))));
+      && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)) || (name === "fast_mode" && value === true))));
     const required = ["harness_id", "provider_id", "account_id", "model", "permission_profile"];
     return required.every(name => typeof route[name] === "string") && route.model && route.model !== AGENT_DEFAULT_MODEL
       ? route as unknown as AoRoute : null;
@@ -962,13 +962,14 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
         if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
         // A loop in this app session drives it (or is starting it).
         if (status.driven !== false || ["starting", "running"].includes(String(status.status))) {
-          if (held) settledRuns.current.delete(key);
+          settledRuns.current.delete(key);
           return;
         }
         // Read only where it decides anything: a single chat with a failed step.
         // Asked for this run: one whose retry the person ended by changing the chat's setup is not
         // retried here either (chat_retry_cancel), or the old harness and model ran after all.
-        const autoRetry = held && mission.execution_mode === "single"
+        let autoRetryChecked = held;
+        let autoRetry = held && mission.execution_mode === "single"
           ? await moduleCall("chat_auto_retry", { workspaceId, runId: mission.id }).then((result) => result.autoRetry === true, () => false) : false;
         let nodes = running;
         let still: AoMission | undefined = mission;
@@ -977,6 +978,10 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
           if (!mounted.current || selection.current.workspaceId !== workspaceId) { settledRuns.current.delete(key); return; }
           const after = await moduleCall("runs", { workspaceId, runId: mission.id }).catch(() => null);
           still = (after?.runs as AoMission[] | undefined)?.find((run) => run.id === mission.id);
+          if (!autoRetryChecked && still?.execution_mode === "single" && still.nodes.some((node) => node.state === "held")) {
+            autoRetryChecked = true;
+            autoRetry = await moduleCall("chat_auto_retry", { workspaceId, runId: mission.id }).then((result) => result.autoRetry === true, () => false);
+          }
           // Resumable now: its loop takes over the cards still running and starts the next ones.
           if (still && !resumedRuns.current.has(key) && restartResume(still, Date.now(), { autoRetry })) break;
           nodes = still && !still.cancelled ? still.nodes.filter((node) => node.state === "running" && node.route?.harness_id?.startsWith("ao:")) : [];
@@ -1648,6 +1653,21 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
     await loadMissions(workspaceId);
     return "Permissions saved for this chat's next turns. The running turn and the saved team are unchanged.";
   };
+  // "Ask for approval" leaves each of the chat's requests to the person, whatever the reviewer
+  // settings say, and the card read like a reviewer that never answered (chats 417 and 432 waited
+  // hours with Let the model judge on). A single chat's working card in that mode offers Approve for
+  // me on its requests, saved as the permission menu saves it: the running turn follows at once.
+  const askingCard = composerMode === "single" && permissionMission && singleAttempt && ["running", "reserved"].includes(singleAttempt.state)
+    && asksForApproval(livePermissionRoute(permissionMission, singleAttempt)) ? singleAttempt : undefined;
+  const approveForMe = askingCard && permissionTeam && permissionMission ? { nodeId: askingCard.id, run: async () => {
+    const mode = PERMISSION_MODES.find(entry => entry.reviewer === "auto_review")!;
+    const choice: PermissionSelection = { profile: mode.profile, policy: mode.policy, reviewer: mode.reviewer };
+    const capability = await loadPermissionProfiles(singleRoleId);
+    if (!allowsMode(capability, choice)) throw new Error(modeRefusal(capability, choice));
+    // Autobot runs only in Ask for approval: the menu turns it off before leaving that mode, and so does this.
+    if (showAutobot && (await configureAutobot()).enabled) await configureAutobot({ disable: true });
+    return savePermissions(selectPermissions(permissionTeam, [singleRoleId], choice), permissionMission.revision, [singleRoleId], choice);
+  } } : undefined;
   const saveLimits = () => void run("limits", async () => {
     await moduleCall("team_update", { workspaceId, change: { operation: "set_limits", expected_revision: limits.revision, max_workers: globalLimit,
       ...(selectedRun ? { run_id: selectedRun.id, run_revision: selectedRun.revision, worker_limit: missionLimit } : {}) } });
@@ -3274,7 +3294,7 @@ export function AgentOrchestratorSurface({ language, setError, pane, pageNumber 
                 permissions={<AgentOrchestratorPermissions key={JSON.stringify([workspaceId, chatTaskId, permissionMission?.id, composerMode, permissionTeam?.id, composerIntent.current])} team={permissionTeam} mission={permissionMission} busy={Boolean(busy)}
                   loadProfiles={loadPermissionProfiles} save={savePermissions} runtimePolicies={runtimePolicies}
                   configureAutobot={showAutobot ? configureAutobot : undefined} />}
-                approve={approve}
+                approve={approve} approveForMe={approveForMe}
                 notice={chatTaskId ? chatNotices[chatTaskId] || (selectedRun?.project_id === chatTaskId && ["held", "failed"].includes(autoStatus) ? advanceNotice || undefined : undefined) : undefined}
                 warning={chatTaskId && selectedRun?.project_id === chatTaskId ? runWarning || undefined : undefined}
                 retryStart={retryChatStart} retrying={Boolean(chatTaskId && chatBusy.includes(chatTaskId))}

@@ -168,3 +168,16 @@ test("a restart is marked on its run, so the chat shows it under the message it 
   assert.deepEqual([...chat.chatRunsOfMessage(shown, "r2")], ["r2", "r2r"]);
   assert.deepEqual([...chat.chatRunsOfMessage(shown, "")], [], "a message that has not run has no runs");
 });
+
+test("an in-place resized session projects its updated context window onto visible runs without mutating AO's snapshot", () => {
+  const store = createChatEditStore();
+  const runs = [
+    { id: "r1", project_id: "task-1", nodes: [{ id: "one", route: { harness_id: "ao:claude-code", model: "cpa/gpt-5.5", context_window: 200_000 }, receipt: { thread_id: "sess-1" } }] },
+    { id: "r2", project_id: "task-2", nodes: [{ id: "one", route: { harness_id: "ao:claude-code", model: "cpa/gpt-5.5", context_window: 200_000 }, receipt: { thread_id: "sess-1" } }] },
+  ];
+  store.resized("ws-1", "task-1", "sess-1", 300_000);
+  const visible = store.visible("ws-1", runs);
+  assert.equal(visible[0].nodes[0].route.context_window, 300_000, "the resized chat's card carries the new window");
+  assert.equal(visible[1].nodes[0].route.context_window, 200_000, "another chat's card is untouched");
+  assert.equal(runs[0].nodes[0].route.context_window, 200_000, "the runs read from AO are not mutated");
+});

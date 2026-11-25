@@ -700,6 +700,96 @@ test("an AO agent's tool request is answered by clicking an option: no Submit or
   assert.equal(replies.length, 1);
 });
 
+// Live 2026-11-24: chat 432 waited 2 h 40 min on one PowerShell request with Let the model judge on. It was
+// on Ask for approval, which nothing reviews, and its card didn't say so. The card says why and switches it.
+test("a request in an Ask for approval chat offers Approve for me and says what the switch did", async () => {
+  const view = renderer("AgentOrchestratorApproval.tsx");
+  // auto_review_off: Auto-review every approval request is off, so nothing reviews this chat's requests.
+  const approval = { nodeId: "lead", approval_id: "ask", source: "ao", kind: "command", tool: "PowerShell", auto_review_off: true,
+    command: "Invoke-RestMethod -Uri 'http://127.0.0.1:7380/api/status'", decisions: [{ id: "yes", kind: "allow_once", label: "Yes" }, { id: "no", kind: "reject_once", label: "No" }] };
+  let switches = 0;
+  let outcome = async () => "Active now: the running turn's requests follow it.";
+  const onApproveForMe = () => { switches++; return outcome(); };
+  const row = (props = {}) => {
+    const outer = view.render("AgentOrchestratorApproval", { approval, busy: false, approve() {}, onApproveForMe, ...props });
+    const found = elements(outer.type(outer.props), item => typeof item.type === "function" && item.type.name === "AskModeRow")[0];
+    return found && found.type(found.props);
+  };
+  const button = tree => elements(tree, item => item.type === "button")[0];
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  let tree = row();
+  assert.match(text(tree), /Ask for approval: the reviewer doesn't check this chat's requests, so each one waits for you\. Approve for me$/);
+  button(tree).props.onClick();
+  tree = row();
+  assert.equal(text(button(tree)), "Switching…");
+  assert.equal(button(tree).props.disabled, true, "one switch at a time");
+  await settle();
+  tree = row();
+  assert.equal(switches, 1);
+  const note = () => elements(tree, item => item.type === "span" && /cdx-ask-mode-note/.test(item.props.className ?? ""))[0];
+  assert.equal(note().props.role, "status");
+  assert.equal(text(note()), "Active now: the running turn's requests follow it.");
+  // A refused switch (an agent that can't run in Approve for me) says why, and may be tried again.
+  outcome = async () => { throw new Error("Antigravity can't run in Approve for me."); };
+  button(tree).props.onClick();
+  await settle();
+  tree = row();
+  assert.equal(note().props.role, "alert");
+  assert.equal(text(note()), "Antigravity can't run in Approve for me.");
+  assert.equal(button(tree).props.disabled, false);
+  // Without the switch (the chat isn't on Ask for approval), or with the reviewer's note (it was reviewed), no row.
+  assert.equal(row({ onApproveForMe: undefined }), undefined);
+  assert.equal(row({ approval: { ...approval, recommendation: { action: "ask", reason: "Check it yourself." } } }), undefined);
+  // With Auto-review every approval request on, the reviewer checks an Ask chat's requests: no row saying it doesn't.
+  assert.equal(row({ approval: { ...approval, auto_review_off: undefined } }), undefined);
+});
+
+test("only a chat on Ask for approval with an agent that asks the app is offered the switch, and only where the agent takes it", () => {
+  const { allowsMode, asksForApproval, modeRefusal } = renderer("AgentOrchestratorPermissions.tsx").exports;
+  const ask = { harness_id: "ao:claude-code", approval_policy: "on-request", approvals_reviewer: "user" };
+  assert.equal(asksForApproval(ask), true);
+  assert.equal(asksForApproval({ ...ask, approvals_reviewer: undefined }), true, "no reviewer named is the person, as the engine reads it");
+  assert.equal(asksForApproval({ ...ask, approvals_reviewer: "auto_review" }), false, "Approve for me is reviewed already");
+  assert.equal(asksForApproval({ ...ask, approval_policy: "never" }), false, "Full access asks nobody");
+  assert.equal(asksForApproval({ ...ask, approval_policy: undefined }), false, "a legacy route runs on the agent's own permissions");
+  assert.equal(asksForApproval({ ...ask, harness_id: "ao:unreal-agent" }), false, "an agent that can't ask the app runs in Full access only");
+  for (const harness_id of ["ao:opencode", "ao:pi"]) assert.equal(asksForApproval({ ...ask, harness_id }), true, `${harness_id} asks the app since 2026-11-25`);
+  assert.equal(asksForApproval(undefined), false);
+  const approveForMe = { profile: ":workspace", policy: "on-request", reviewer: "auto_review" };
+  const capability = { supported: true, profiles: [{ id: ":workspace", allowed: true }, { id: ":danger-full-access", allowed: true }],
+    approval_policies: ["on-request", "never"], approvals_reviewers: ["user", "auto_review"] };
+  assert.equal(allowsMode(capability, approveForMe), true);
+  assert.equal(allowsMode({ ...capability, supported: false }, approveForMe), false);
+  assert.equal(allowsMode({ ...capability, approvals_reviewers: ["user"] }, approveForMe), false);
+  const excluded = { ...capability, excluded_modes: [{ ...approveForMe, reason: "Pi runs in Full access only." }] };
+  assert.equal(allowsMode(excluded, approveForMe), false);
+  assert.equal(modeRefusal(excluded, approveForMe), "Pi runs in Full access only.");
+  assert.equal(modeRefusal(undefined, approveForMe), "This agent can't run in that mode.");
+});
+
+test("a new chat starts in Approve for me whatever mode the last chat ran in, on agents that ask the app", () => {
+  const { startsApproveForMe } = renderer("AgentOrchestratorPermissions.tsx").exports;
+  const approveForMe = { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "auto_review" };
+  const last = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gemini-4-argon", permission_profile: ":ao-default", effort: "high" };
+  // The live last-chat route on 2026-11-24 named no mode at all, which the engine reads as Ask for approval.
+  assert.deepEqual(plain(startsApproveForMe(last)), { ...last, ...approveForMe }, "agent, model and effort are kept");
+  for (const mode of [
+    { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" },
+    { native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" },
+  ]) {
+    for (const harness of ["ao:claude-code", "ao:codex", "ao:agy", "ao:opencode", "ao:pi"]) {
+      assert.deepEqual(plain(startsApproveForMe({ ...last, ...mode, harness_id: harness })), { ...last, harness_id: harness, ...approveForMe }, harness + " " + mode.approval_policy);
+    }
+  }
+  // Agents that run in Full access only would be refused at launch in Approve for me; Native Codex reports its own modes.
+  const fullAccess = { ...last, harness_id: "ao:cline", native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" };
+  assert.deepEqual(plain(startsApproveForMe(fullAccess)), fullAccess);
+  const native = { harness_id: "codex-native", provider_id: "cliproxyapi-antigravity", account_id: "shared-cpa-pool", model: "gpt-5.5", permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" };
+  assert.deepEqual(plain(startsApproveForMe(native)), native);
+  const source = fs.readFileSync(path.join(__dirname, "../src/features/AgentOrchestratorSurface.tsx"), "utf8");
+  assert.match(source, /function newChatRoute\(\): AoRoute \{\s*return startsApproveForMe\(lastChatRoute\(\) \?\? workerRoute\(DEFAULT_WORKER_HARNESS, DEFAULT_WORKER_MODEL\)\);/);
+});
+
 function pendingApprovalAttempt() {
   const view = renderer("AgentOrchestratorApproval.tsx", { persistentRefs: true });
   const approval = { nodeId: "worker", approval_id: "pending-request", source: "ao", kind: "command", command: "echo fixture",
@@ -976,6 +1066,22 @@ test("picking an unconfigured model uses its own default window, not the previou
   pick("cpa/unknown");
   assert.equal(routes.at(-1).context_window, undefined, "an unconfigured model with an unknown limit uses the agent's default");
 });
+
+test("1M models with 872K or 1,047,576 input budgets list one 1M top choice without a duplicate 872k or 1,047,576 row", () => {
+  const view = renderer("AgentOrchestratorComposerControls.tsx");
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6-luna", permission_profile: ":ao-default", context_window: 1_000_000 };
+  const caps = {
+    "cpa/gpt-6-luna": { efforts: ["high"], contextLimit: 872_000, contextWindow: { min: 4096, max: 1_000_000 } },
+    "cpa/gpt-4.1": { efforts: ["high"], contextLimit: 1_047_576, contextWindow: { min: 4096, max: 1_047_576 } },
+  };
+  const props = { mode: "single", onModeChange() {}, route, onRouteChange() {}, harnesses: [], loadModels: async () => [], teams: [], teamId: "", onTeamChange() {}, permissions: null, busy: false };
+  const lunaMenu = menuNamed(view.render("AgentOrchestratorComposerControls", props, composerState(Object.keys(caps), caps)), "Context window");
+  assert.deepEqual(optionsIn(lunaMenu).map(row => text(row.props.children)), ["32k", "64k", "128k", "200k", "272k", "400k", "1M"]);
+  const gpt41Menu = menuNamed(view.render("AgentOrchestratorComposerControls", { ...props, route: { ...route, model: "cpa/gpt-4.1", context_window: 1_047_576 } }, composerState(Object.keys(caps), caps)), "Context window");
+  assert.deepEqual(optionsIn(gpt41Menu).map(row => text(row.props.children)), ["32k", "64k", "128k", "200k", "272k", "400k", "1M"]);
+  assert.equal(text(gpt41Menu.props.label), "1M");
+});
+
 
 function tuningStorage() {
   const values = new Map();

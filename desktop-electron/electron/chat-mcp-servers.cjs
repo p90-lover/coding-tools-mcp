@@ -9,6 +9,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const { writePrivateFileAtomicAsync } = require("./atomic-file.cjs");
+const { createChatAddonConflictReporter } = require("./chat-tool-addons.cjs");
 
 // AO takes at most 8 servers per session; the app's own server is one of them.
 const MAX_SESSION_SERVERS = 8;
@@ -187,6 +188,7 @@ async function cachedCatalogLaunch(server, { nodeExecutable, npmCacheRoots, envi
 function createChatMcpServers({ filePath, logger = null, nodeExecutable = process.execPath, environment = process.env,
   npmCacheRoots = [path.join(path.dirname(filePath), "cache", "mcp-npm"),
     ...(environment.LOCALAPPDATA ? [path.join(environment.LOCALAPPDATA, "npm-cache")] : [])] }) {
+  const reportConflict = createChatAddonConflictReporter(logger);
   let servers = null;
   let launchGeneration = 0;
   let launches = new Map();
@@ -307,9 +309,15 @@ function createChatMcpServers({ filePath, logger = null, nodeExecutable = proces
     forSession(agent, taken = [], httpAgents = new Set()) {
       const names = new Set(taken.map((server) => String(server?.name ?? "").toLowerCase()));
       const room = Math.max(0, MAX_SESSION_SERVERS - taken.length);
-      return load().filter((server) => server.enabled && !names.has(server.name.toLowerCase())
-        && (server.type === "stdio" || httpAgents.has(agent))).slice(0, room)
-        .map(server => sessionConfig({ ...server, ...launches.get(launchKey(server)) }));
+      const available = load().filter(server => {
+        if (!server.enabled || (server.type !== "stdio" && !httpAgents.has(agent))) return false;
+        const name = server.name.toLowerCase();
+        if (!names.has(name)) return true;
+        const existing = name === "coding-tools" || name === "unified-agent-tools" ? name : "attached-server";
+        reportConflict({ kind: "server_name", addon: `mcp:${server.id}`, existing: `builtin:${existing}`, capability: "mcp.namespace" });
+        return false;
+      });
+      return available.slice(0, room).map(server => sessionConfig({ ...server, ...launches.get(launchKey(server)) }));
     },
   });
 }

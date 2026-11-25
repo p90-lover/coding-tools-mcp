@@ -2277,6 +2277,6 @@ details[open] > summary > .cx-step-caret { transform: rotate(90deg); }
    AgentOrchestratorChat.tsx); Chat details stays, its panel opens under its button. */
 @container cx-thread (max-width: 300px) {
   .cx-thread-head { padding: 0 6px 0 10px; }
-  .cx-thread-head > :is(.cx-browser-chip, [aria-label="Preview"], [aria-label="Show cards"], [aria-label="Show side panel"]) { display: none; }
+  .cx-thread-head > :is(.cx-browser-chip, [aria-label="Show cards"]) { display: none; }
   .cx-goal { gap: 4px; }
 }

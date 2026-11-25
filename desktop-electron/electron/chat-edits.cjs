@@ -174,9 +174,27 @@ function createChatEditStore({ file = null, logger = null } = {}) {
       const project = projectChats(workspaceId);
       const deleted = new Set(project.flatMap(chat => chat.deletedRuns ?? []));
       const restarts = Object.assign({}, ...project.map(chat => chat.restarts ?? {}));
-      if (!deleted.size && !Object.keys(restarts).length) return runs;
-      return runs.filter(run => !deleted.has(run?.id))
-        .map(run => restarts[run?.id] && !run.restarts_run_id ? { ...run, restarts_run_id: restarts[run.id] } : run);
+      const windows = Object.assign({}, ...project.map(chat => chat.windows ?? {}));
+      if (!deleted.size && !Object.keys(restarts).length && !Object.keys(windows).length) return runs;
+      return runs.filter(run => !deleted.has(run?.id)).map(run => {
+        const restarted = restarts[run?.id] && !run.restarts_run_id ? { ...run, restarts_run_id: restarts[run.id] } : run;
+        const runWindows = restarted?.project_id ? chats[key(workspaceId, restarted.project_id)]?.windows : windows;
+        if (!runWindows || !Array.isArray(restarted?.nodes) || !restarted.nodes.some(node => node?.route && node?.receipt?.thread_id
+          && Object.hasOwn(runWindows, node.receipt.thread_id) && (node.route.context_window ?? null) !== runWindows[node.receipt.thread_id])) {
+          return restarted;
+        }
+        return {
+          ...restarted,
+          nodes: restarted.nodes.map(node => {
+            const session = node?.receipt?.thread_id;
+            if (!node?.route || !session || !Object.hasOwn(runWindows, session)) return node;
+            const resized = runWindows[session];
+            if ((node.route.context_window ?? null) === resized) return node;
+            const { context_window: _previous, ...rest } = node.route;
+            return { ...node, route: resized === null ? rest : { ...rest, context_window: resized } };
+          }),
+        };
+      });
     },
   };
 }

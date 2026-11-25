@@ -1214,23 +1214,26 @@ test("a subagent's harness and effort come back with it after a restart", async 
     interrupt: async () => {}, exitAgent: async () => ({ ok: true }),
   };
   const make = () => createSubagents({ statePath: path.join(dir, "subagents.json"), harness: () => harness, logger: { info() {}, warn() {} },
-    // AO is given the route's effort, as the workflow's launch arguments give it.
-    launchArgs: (_workspace, route) => ({ workspace_id: "ws-1", ...(route.effort ? { effort: route.effort } : {}) }), now: () => 1_000_000 });
+    // AO is given the route's effort and window, as the workflow's launch arguments give them.
+    launchArgs: (_workspace, route) => ({ workspace_id: "ws-1", ...(route.effort ? { effort: route.effort } : {}),
+      contextWindow: route.context_window ?? 200_000 }), now: () => 1_000_000 });
   try {
     const before = make();
-    await before.save({ settings: { defaultRoute: { ...ROUTE, effort: "high" } }, agents: STARTERS });
+    await before.save({ settings: { defaultRoute: { ...ROUTE, effort: "high", context_window: 300_000 } }, agents: STARTERS });
     await before.call("chat-1", "ws-1", "subagent_start", { agent: "explorer", task: "Read it" });
     for (let tries = 0; tries < 100 && !fs.existsSync(path.join(dir, "subagent-runs.json")); tries += 1) await new Promise((resolve) => setTimeout(resolve, 20));
     const shown = before.runs()[0];
     before.dispose();
     assert.equal(shown.harness, ROUTE.harness_id);
     assert.equal(shown.effort, "high");
+    assert.equal(shown.context_window, 300_000);
     const after = make();
     await after.preload();
     const back = after.runs()[0];
     after.dispose();
     assert.equal(back.harness, shown.harness, "its harness");
     assert.equal(back.effort, shown.effort, "its effort");
+    assert.equal(back.context_window, 300_000, "its context window");
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1257,4 +1260,38 @@ test("a subagent's effort label is the effort its agent was given, never a saved
   const body = await runOn({ harness_id: "ao:claude-code", model: "cpa/cline-pass/deepseek-v4.1-flash", effort: "medium" });
   assert.equal(body.spawned.effort, "high");
   assert.equal(body.shown.effort, "high");
+});
+
+test("when ao:codex is allowed, subagent_models lists Codex own-account models like gpt-6.2-sol and subagent_start runs them on ao:codex", async () => {
+  const ccCatalog = {
+    ok: true, harness: "ao:claude-code", models: ["cpa/gemini-4-hydrogen-xhigh", "cpa/gpt-6.2-sol"],
+    capabilities: {
+      "cpa/gemini-4-hydrogen-xhigh": { efforts: ["low", "medium", "high", "xhigh"], provider: "antigravity", contextLimit: 1048576, contextWindow: { min: 4096, max: 1048576, kind: "context" } },
+      "cpa/gpt-6.2-sol": { efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], provider: "openai", contextLimit: 872000, contextWindow: { min: 4096, max: 1000000, kind: "context" } },
+    },
+  };
+  const codexCatalog = {
+    ok: true, harness: "ao:codex", models: ["gpt-6.2-sol", "cpa/gpt-6.2-sol"],
+    capabilities: {
+      "gpt-6.2-sol": { efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], contextLimit: 872000, contextWindow: { min: 4096, max: 1000000, kind: "context" } },
+    },
+  };
+  const w = world({
+    settings: { allowedProviders: ["antigravity", "ao:codex"], defaultRoute: { harness_id: "ao:claude-code", model: "cpa/gemini-4-hydrogen-xhigh" } },
+    models: async (_workspaceId, harness = "ao:claude-code") => (harness === "ao:codex" ? codexCatalog : ccCatalog),
+  });
+  try {
+    const listed = parse(await w.service.call("chat-1", "ws-1", "subagent_models", {}));
+    assert.deepEqual(listed.models.map((item) => [item.id, item.provider]), [
+      ["gemini-4-hydrogen-xhigh", "antigravity"],
+      ["gpt-6.2-sol", "ao:codex"],
+    ]);
+    const started = parse(await w.service.call("chat-1", "ws-1", "subagent_start", {
+      agent: "implementer", task: "Split the task", model: "gpt-6.2-sol", effort: "high",
+    }));
+    assert.equal(started.model, "gpt-6.2-sol");
+    assert.equal(w.spawned[0].agent, "codex", "runs on ao:codex when openai is off and ao:codex is on");
+    assert.equal(w.spawned[0].model, "gpt-6.2-sol");
+    assert.equal(w.spawned[0].effort, "high");
+  } finally { await w.cleanup(); }
 });

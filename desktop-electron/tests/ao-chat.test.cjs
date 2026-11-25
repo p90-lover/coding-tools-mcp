@@ -2344,6 +2344,35 @@ test("with Retry automatically on, opening a project retries a single chat's fai
   })();
   for (let i = 0; i < 3; i += 1) await new Promise(setImmediate);
   assert.equal(settledRuns.current.size, 0);
+
+  // A run first seen while running and driven is also cleared from settledRuns so a later held transition is picked up.
+  const runningMission = { id: "r", workspace_id: "a", execution_mode: "single", cancelled: false, nodes: [
+    { id: "p", role: "planner", state: "running", route: { harness_id: "ao:claude-code" }, history: [], receipt: { thread_id: "s1", started_at_ms: Date.now() - 60_000 } }] };
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
+    workspaceId: "a", mounted: { current: true }, missions: [runningMission], settledRuns, resumedRuns: { current: new Set() },
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
+    moduleCall: async () => ({ driven: true, status: "running" }), loadMissions: async () => {}, setTimeout,
+  })();
+  for (let i = 0; i < 3; i += 1) await new Promise(setImmediate);
+  assert.equal(settledRuns.current.size, 0, "driven running mission does not stay locked in settledRuns");
+
+  // An orphaned running card that observe settles into held reads chat_auto_retry and retries at once.
+  const orphanCalls = [];
+  rendererCallback("AgentOrchestratorSurface.tsx", "effect:settledRuns.current.add(key)", {
+    workspaceId: "a", mounted: { current: true }, missions: [runningMission], settledRuns: { current: new Set() }, resumedRuns: { current: new Set() },
+    selection: { current: { workspaceId: "a" } }, restartResume: chat.restartResume, executableArg: () => ({}), document: { hasFocus: () => true },
+    moduleCall: async (operation) => {
+      orphanCalls.push(operation);
+      if (operation === "run_status") return { driven: false, status: "held" };
+      if (operation === "observe") return { ok: true };
+      if (operation === "runs") return { runs: [mission] };
+      if (operation === "chat_auto_retry") return { ok: true, autoRetry: true };
+      return { ok: true };
+    },
+    loadMissions: async () => {}, setTimeout,
+  })();
+  for (let i = 0; i < 8; i += 1) await new Promise(setImmediate);
+  assert.deepEqual(orphanCalls, ["run_status", "observe", "runs", "chat_auto_retry", "control_run", "start_run"]);
 });
 
 function childPoll(file, selector, options = {}) {
@@ -2984,6 +3013,19 @@ test("a goal's later round shows as its Stop hook feedback, not as the person's 
   assert.deepEqual(plain(chat.goalFeedback("Stop hook feedback:\n[fix [the] tests]: two still fail")), { objective: "fix [the] tests", reason: "two still fail" });
   assert.equal(chat.goalFeedback("make village attack first"), null);
   assert.equal(chat.goalFeedback("Stop hook feedback: typed by hand"), null);
+});
+
+test("the goal rules each round carries stay out of the person's bubble, its copy and the feedback line", () => {
+  // The app's own goalMessage, so the chat keeps recognising what the main process sends.
+  const { goalMessage } = require("../electron/chat-goals.cjs");
+  const first = goalMessage("make every test pass", 1);
+  assert.match(first, /Goal rules/, "the agent reads the rules");
+  assert.equal(chat.chatMessageParts(first).text, "make every test pass", "the bubble shows the condition as typed");
+  assert.equal(chat.chatMessageReadable(first), "make every test pass", "copy and rewind give back the person's words");
+  assert.deepEqual(plain(chat.goalFeedback(goalMessage("make every test pass", 3, "Two tests still fail."))),
+    { objective: "make every test pass", reason: "Two tests still fail." });
+  assert.equal(chat.goalFeedback(first), null, "the first round is still the person's message");
+  assert.equal(chat.withoutGoalRules("my own text\n\nGoal rules: typed by hand"), "my own text\n\nGoal rules: typed by hand");
 });
 
 test("a working AO card's last sign of life comes from its activity time, for last heard and the quiet note", () => {

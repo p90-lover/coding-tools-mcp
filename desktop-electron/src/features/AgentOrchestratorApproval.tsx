@@ -229,14 +229,41 @@ function ApprovalCode({ text, label }: { text: string; label: string }) {
 }
 
 /**
+ * On a request in a chat set to "Ask for approval" while "Auto-review every approval request" is off:
+ * nothing reviews it, whatever the other reviewer settings say, and the card read like a reviewer that
+ * never answered. Chat 417 waited 3.5 hours (2026-11-23)
+ * and chat 432 2 h 40 min on one PowerShell request (11-24), both with Let the model judge on. The
+ * card says why, and one click puts the chat on Approve for me: this request and the rest of the
+ * running turn's are reviewed at once (liveRoute in agent-orchestrator-workflow).
+ */
+function AskModeRow({ switchMode }: { switchMode: () => Promise<string> }) {
+  const [state, setState] = useState<{ busy?: boolean; note?: string; failed?: boolean }>({});
+  const run = async () => {
+    if (state.busy) return;
+    setState({ busy: true });
+    try { setState({ note: await switchMode() || "Approve for me is on." }); }
+    catch (cause) { setState({ failed: true, note: String((cause as Error | undefined)?.message || cause) }); }
+  };
+  return <div className="cdx-row cdx-ask-mode"><span>Mode</span><p>
+    Ask for approval: the reviewer doesn't check this chat's requests, so each one waits for you.{" "}
+    {/* The card takes Enter (and Escape) for itself; this button keeps Enter and Space. */}
+    <button type="button" className="cdx-inline-action" disabled={Boolean(state.busy)} onClick={() => void run()}
+      onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") event.stopPropagation(); }}>
+      {state.busy ? "Switching…" : "Approve for me"}</button>
+    {state.note ? <span className={state.failed ? "cdx-ask-mode-note is-error" : "cdx-ask-mode-note"} role={state.failed ? "alert" : "status"}>{state.note}</span> : null}
+  </p></div>;
+}
+
+/**
  * A tool request from an AO agent as Codex's approval card asks it: "Terminal" / "Edit files" /
  * "Ask permission", "Allow {agent} to run this command?", the complete command in a scrollable box, the
  * reason (and the reviewer's, when it left it to you), then the answers the agent offered as
  * numbered options. As in Claude Code's permission prompt, clicking one (or pressing its number)
  * answers at once: no Submit or Deny button. Escape answers Deny.
  */
-function AoAsk({ approval, busy, approve, actor }: {
+function AoAsk({ approval, busy, approve, actor, onApproveForMe }: {
   approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => Promise<void>; actor: string;
+  onApproveForMe?: () => Promise<string>;
 }) {
   const tool = String(approval.tool ?? "").replace(/^mcp__[\w-]+__/, "");
   const shell = approval.kind === "command" || Boolean(approval.command) || SHELL_TOOL.test(String(approval.tool ?? ""));
@@ -273,6 +300,9 @@ function AoAsk({ approval, busy, approve, actor }: {
       {body ? <ApprovalCode text={body} label={shell ? "Command" : "Tool input"} /> : null}
       {reason ? <div className="cdx-row"><span>Reason</span><p>{reason}</p></div> : null}
       {approval.recommendation?.reason ? <div className="cdx-row"><span>Reviewer</span><p>{approval.recommendation.reason}</p></div> : null}
+      {/* Ask for approval is why it waits only while nothing reviews it (auto_review_off): with Auto-review every
+          approval request on, the reviewer checks an Ask chat's requests too, even one past its review deadline. */}
+      {onApproveForMe && approval.auto_review_off && !approval.recommendation ? <AskModeRow switchMode={onApproveForMe} /> : null}
       {/* The reviewer left it to you: the model can judge this and every later one instead. */}
       {approval.recommendation?.reason ? <div className="cdx-row"><span /><ModelJudgesToggle /></div> : null}
       {/* It waits on Allow quota-based reviews: the switch it needs is here too, not only in Settings. */}
@@ -298,11 +328,13 @@ function waited(since?: string) {
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 
-export function AgentOrchestratorApproval({ approval, busy, approve, actor = "the agent", onOpenPlan }: {
+export function AgentOrchestratorApproval({ approval, busy, approve, actor = "the agent", onOpenPlan, onApproveForMe }: {
   approval: AoApproval; busy: boolean; approve: (approval: AoApproval, reply: ApprovalReply) => Promise<void>;
   /** Who asks, as Codex names "ChatGPT" in "Allow ChatGPT to run this command?": the card's model. */
   actor?: string;
   onOpenPlan?: (text: string) => void;
+  /** The request's chat is on "Ask for approval": switches it to Approve for me (AskModeRow), saying what changed. */
+  onApproveForMe?: () => Promise<string>;
 }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [content, setContent] = useState("{}");
@@ -369,7 +401,7 @@ export function AgentOrchestratorApproval({ approval, busy, approve, actor = "th
     </div>;
   }
   // An AO agent's tool request: Codex's approval card.
-  if (approval.source === "ao") return <AoAsk approval={approval} busy={busy} approve={approve} actor={actor} />;
+  if (approval.source === "ao") return <AoAsk approval={approval} busy={busy} approve={approve} actor={actor} onApproveForMe={onApproveForMe} />;
   const nativeBody = <>
     <span className={nativeCommand ? "cdx-kind" : "ao-msg-meta"}>{nativeCommand ? "Terminal" : <>{typed ? "Native request" : "Approval needed"} · {kind || "Tool request"}{approval.tool ? " · " + approval.tool : ""}</>}</span>
     {nativeCommand ? <span className="cdx-title">Allow {actor} to run this command?</span> : null}

@@ -13,6 +13,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const HEARTBEAT_MS = 1_000;
+const MONITOR_READY_MS = 5_000;
 // A session's approvals are kept for this many sessions, newest last.
 const MAX_CONVERSATIONS = 200;
 
@@ -344,6 +345,8 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   }
   // The window control was last started on, by this app ({ window_id, pid, title, app }).
   let controlled = null;
+  let starting = null;
+  let stopping = null;
   // The requests waiting for the person: { public, finish, workspace, captureOff, target, conversation }.
   const pending = [];
   // What the chats show: every waiting request (each shows in the chat that asked).
@@ -432,12 +435,17 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
   }
 
   async function stop(reason = "stopped") {
+    starting?.abort();
     closeBar();
     controlled = null;
-    try { await request("/api/v1/computer/stop", {}); } catch (error) {
-      logger?.warn?.("computer.stop_failed", { message: String(error?.message || error).slice(0, 200) });
-    }
-    logger?.info?.("computer.stopped", { reason });
+    if (stopping) return stopping;
+    stopping = (async () => {
+      try { await request("/api/v1/computer/stop", {}); } catch (error) {
+        logger?.warn?.("computer.stop_failed", { message: String(error?.message || error).slice(0, 200) });
+      }
+      logger?.info?.("computer.stopped", { reason });
+    })();
+    try { await stopping; } finally { stopping = null; }
   }
 
   // A page of ours that never navigates: every navigation and popup is refused.
@@ -446,7 +454,7 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
     window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   }
 
-  function openBar({ title, agent = "A chat", app = "", model = "" }) {
+  async function openBar({ title, agent = "A chat", app = "", model = "", pid, sessionId, signal }) {
     closeBar();
     shown = { agent, model: modelLabel(model), action: null, app: app || title, icon: "" };
     // On the screen the person is looking at (the pointer's), at its top centre.
@@ -477,36 +485,63 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
         toggleHistory(own, String(pageTitle).slice(HISTORY_TITLE.length).startsWith("open:"));
       }
     });
-    void own.loadURL(pageUrl(barPage({ title, agent: shown.agent, app: shown.app, model: shown.model }))).then(() => {
-      if (own.isDestroyed() || bar !== own) return;
-      own.showInactive();
-      // A step that started while the page loaded.
-      painted = JSON.stringify({ ...shown, action: null });
-      paint();
-    });
-    // The bar's heartbeat keeps input allowed; a bar hidden or gone sends none, and input stops.
-    // Control is on until the person stops it, so there is no time left to redraw each second.
-    heartbeat = setInterval(async () => {
-      if (bar !== own || own.isDestroyed()) return;
-      if (!own.isVisible()) return;
-      // Back on top of a window that took the top of the always-on-top band since (a full-screen
-      // player, another app's overlay). No activation, so the focus stays where it is.
+    const visible = () => bar === own && !own.isDestroyed() && own.isVisible();
+    let beating = false;
+    const beat = async (expectedSession = null) => {
+      if (!visible()) return null;
+      // Stay above other overlays without taking focus from the approved window.
       try { own.moveTop?.(); } catch { /* stays where it is */ }
+      if (beating) return null;
+      beating = true;
       try {
         const current = (await request("/api/v1/computer/status?heartbeat=true", null, { method: "GET", localConfirmation: true }))?.status;
-        if (bar !== own || own.isDestroyed()) return;
-        if (!current || current.state === "stopped") { closeBar(); controlled = null; return; }
-        // The app under control quit (the agent closed it, or it crashed), so there is nothing left
-        // to control: control ends and the pill closes. Until 2026-11-17 headless kept control on
-        // and the pill stayed, "waiting for its next step", until the person found Stop: once for
-        // two hours after an agent closed the test app it had been driving.
-        if (controlled && !processAlive(controlled.pid)) { void stop("the controlled app closed"); return; }
-        // A new frame the agent was given (a snapshot, or the one after each action) goes on the preview.
+        if (!visible()) return null;
+        if (!current || current.state === "stopped") { closeBar(); controlled = null; return null; }
+        if (expectedSession && current.session_id !== expectedSession) return current;
+        if (!processAlive(pid)) { void stop("the controlled app closed"); return null; }
         const snapshot = typeof current.last_snapshot_id === "string" ? current.last_snapshot_id : null;
         if (snapshot && snapshot !== frameShown && snapshot !== frameTried) void loadFrame(own, snapshot);
-      } catch { /* a missed beat only pauses input; the next one restores it */ }
-    }, HEARTBEAT_MS);
-    heartbeat.unref?.();
+        return current;
+      } finally { beating = false; }
+    };
+
+    const deadline = performance.now() + MONITOR_READY_MS;
+    const notReady = "The computer control monitor did not become ready.";
+    const interrupted = "Computer control stopped or was cancelled during startup.";
+    const checkReadyWindow = () => {
+      if (signal.aborted || bar !== own || own.isDestroyed()) throw new Error(interrupted);
+      if (performance.now() >= deadline) throw new Error(notReady);
+    };
+    let timeout, onAbort;
+    try {
+      const ready = await Promise.race([
+        new Promise((_, reject) => {
+          onAbort = () => reject(new Error(interrupted));
+          signal.addEventListener("abort", onAbort, { once: true });
+          timeout = setTimeout(() => reject(new Error(notReady)), MONITOR_READY_MS);
+        }),
+        (async () => {
+          checkReadyWindow();
+          await own.loadURL(pageUrl(barPage({ title, agent: shown.agent, app: shown.app, model: shown.model })));
+          checkReadyWindow();
+          own.showInactive();
+          painted = JSON.stringify({ ...shown, action: null });
+          paint();
+          const current = await beat(sessionId);
+          checkReadyWindow();
+          if (current?.session_id !== sessionId || current.state !== "active" || current.overlay_ready !== true) throw new Error(notReady);
+          return current;
+        })(),
+      ]);
+      checkReadyWindow();
+      // Hidden or destroyed monitors cannot keep the backend's input lease alive.
+      heartbeat = setInterval(() => { void beat().catch(() => undefined); }, HEARTBEAT_MS);
+      heartbeat.unref?.();
+      return ready;
+    } finally {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   /**
@@ -707,37 +742,65 @@ function createComputerControl({ request, BrowserWindow, screen, logger = null, 
    * person stops it on the control bar, and resolves headless's status (its session_id). Control
    * already on another window moves to this one.
    */
-  async function start({ workspaceId, target, agent = "A chat", model = "" }) {
-    // Headless keeps one control at a time and refuses a second start (CONTROL_ALREADY_ARMED), so
-    // every switch to another window failed until 2026-11-09. The old control ends first.
-    let current = null;
-    try { current = await status(); } catch { current = null; }
-    if (controlled || (current?.state && current.state !== "stopped")) {
-      closeBar();
-      controlled = null;
-      await request("/api/v1/computer/stop", {});
-      logger?.info?.("computer.moved", { app: appKey(target.app) });
-    }
-    const started = await request("/api/v1/computer/start", { workspace_id: workspaceId, window_id: target.window_id, pid: target.pid,
-      duration_seconds: 0, always_enabled: true }, { localConfirmation: true });
-    const startedOn = { window_id: target.window_id, pid: target.pid, title: target.title, app: appKey(target.app) };
-    controlled = startedOn;
-    logger?.info?.("computer.started", { pid: target.pid, app: controlled.app });
-    const name = appName(target.app, target.title);
-    openBar({ title: target.title, agent, model, app: name });
-    void iconOf(target.path).then((icon) => {
-      if (!icon || controlled !== startedOn) return;
-      appIcons.set(name, icon);
-      shown = { ...shown, icon };
-      paint();
-      paintHistory();
-    });
-    return started?.status ?? await status();
+  async function start({ workspaceId, target, agent = "A chat", model = "", activate = false, signal = null, expectedStatus = null }) {
+    if (starting || stopping) throw new Error("Computer control is changing. Check computer_status before selecting again.");
+    starting = new AbortController();
+    const selection = signal ? AbortSignal.any([starting.signal, signal]) : starting.signal;
+    const checkCancelled = () => {
+      if (selection.aborted) throw new Error("Computer control stopped or was cancelled during startup.");
+    };
+    let sessionId, startedOn;
+    try {
+      checkCancelled();
+      const current = await status();
+      checkCancelled();
+      if (expectedStatus && (current?.state !== expectedStatus.state || current?.session_id !== expectedStatus.session_id)) {
+        throw new Error("Desktop control changed before startup; check computer_status.");
+      }
+      // Headless accepts one active lease; a switch ends the old one first.
+      if (controlled || (current?.state && current.state !== "stopped")) {
+        closeBar();
+        controlled = null;
+        await request("/api/v1/computer/stop", {});
+        logger?.info?.("computer.moved", { app: appKey(target.app) });
+      }
+      checkCancelled();
+      const { status: armed } = await request("/api/v1/computer/start", { workspace_id: workspaceId, window_id: target.window_id, pid: target.pid,
+        duration_seconds: 0, always_enabled: true, activate: activate === true }, { localConfirmation: true }) ?? {};
+      sessionId = typeof armed?.session_id === "string" ? armed.session_id : null;
+      checkCancelled();
+      if (!sessionId || armed.state !== "active") throw new Error("The backend did not acknowledge the selected computer session.");
+      startedOn = { window_id: target.window_id, pid: target.pid, title: target.title, app: appKey(target.app) };
+      const name = appName(target.app, target.title);
+      const ready = await openBar({ title: target.title, agent, model, app: name, pid: target.pid, sessionId, signal: selection });
+      checkCancelled();
+      controlled = startedOn;
+      logger?.info?.("computer.started", { pid: target.pid, app: startedOn.app });
+      void iconOf(target.path).then((icon) => {
+        if (!icon || controlled !== startedOn) return;
+        appIcons.set(name, icon);
+        shown = { ...shown, icon };
+        paint();
+        paintHistory();
+      });
+      return ready;
+    } catch (error) {
+      if (startedOn) {
+        closeBar();
+        controlled = null;
+      }
+      if (sessionId) {
+        if (stopping) await stopping;
+        const current = await status().catch(() => null);
+        if (current?.session_id === sessionId) await stop("control monitor startup failed");
+      }
+      throw error;
+    } finally { starting = null; }
   }
 
   function dispose() {
     for (const item of [...pending]) item.finish({ allowed: false, reason: "the app quit" });
-    if (bar) void stop("app quit");
+    if (bar || starting) void stop("app quit");
   }
 
   /**

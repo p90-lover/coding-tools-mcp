@@ -266,7 +266,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
   // one could no longer read it ("No such subagent in this chat").
   const runsPath = statePath ? path.join(path.dirname(statePath), "subagent-runs.json") : null;
   // A field the views show must be here too, or a restart drops it (effort and harness did, 2026-11-13).
-  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "effort", "harness", "task",
+  const SAVED_FIELDS = ["id", "kind", "runId", "taskId", "parent", "workspaceId", "agentId", "agentName", "model", "effort", "contextWindow", "harness", "task",
     "startedAt", "endedAt", "state", "report", "error", "turns", "turnId", "turnStartedAt", "recoveries", "released"];
   let runsSaving = Promise.resolve();
   let runsQueued = false;
@@ -348,7 +348,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
 
   const view = (run) => ({
     subagent_id: run.id, ...(run.kind === "team" ? { team: run.agentId } : { agent: run.agentId }), name: run.agentName,
-    ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}), state: run.state, task: run.task.slice(0, 200),
+    ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
+    ...(run.contextWindow ? { context_window: run.contextWindow } : {}), state: run.state, task: run.task.slice(0, 200),
     elapsed_seconds: Math.round(((run.endedAt ?? now()) - run.startedAt) / 1000), ...(run.turns > 1 ? { turns: run.turns } : {}),
     ...(run.report ? { report: run.report } : {}), ...(run.error ? { error: run.error } : {}), ...(run.stopping ? { stopping: true } : {}),
     // Cut short and coming back (recover): why, and how many tries so far.
@@ -651,8 +652,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     }
   }
 
-  /** Claude Code's model catalog as the model pickers read it, or null when it cannot be read. */
-  const catalogFor = (workspaceId) => Promise.resolve().then(() => models?.(workspaceId) ?? null).catch(() => null);
+  /** An agent's model catalog as the model pickers read it, or null when it cannot be read. */
+  const catalogFor = (workspaceId, harness = PICKED_HARNESS) => Promise.resolve().then(() => models?.(workspaceId, harness) ?? null).catch(() => null);
 
   /** Who serves a route's model (providerOf); a CPA model's provider is read from Claude Code's catalog, which lists them all. */
   async function providerFor(workspaceId, route) {
@@ -673,10 +674,24 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const inherit = (model === undefined || model === null) && saved?.harness_id === PICKED_HARNESS;
     let id = inherit ? saved.model : text(model, 256);
     if (!id) throw new Error("Name the model to run it on (subagent_models lists them); a picked effort or window runs on Claude Code");
-    const catalog = await catalogFor(workspaceId);
+    const allowed = read().settings.allowedProviders ?? null;
+    let targetHarness = PICKED_HARNESS;
+    let catalog = await catalogFor(workspaceId);
     const offered = Array.isArray(catalog?.models) ? catalog.models : null;
     if (offered && !offered.includes(id) && offered.includes(`cpa/${id}`)) id = `cpa/${id}`;
-    if (offered && offered.length && !catalog.stale && !offered.includes(id)) {
+    const ccProvider = offered?.includes(id) ? providerOf(id, PICKED_HARNESS, catalog?.capabilities?.[id], true) : null;
+    const rawId = id.replace(/^cpa\//, "");
+    if (!inherit && (!offered?.includes(id) || (allowed && !providerAllowed(allowed, ccProvider)))
+      && !rawId.includes("/") && providerAllowed(allowed, "ao:codex")) {
+      const codexCatalog = await catalogFor(workspaceId, "ao:codex");
+      if (Array.isArray(codexCatalog?.models) && codexCatalog.models.includes(rawId)) {
+        targetHarness = "ao:codex";
+        id = rawId;
+        catalog = codexCatalog;
+      }
+    }
+    const activeOffered = Array.isArray(catalog?.models) ? catalog.models : null;
+    if (activeOffered && activeOffered.length && !catalog.stale && !activeOffered.includes(id)) {
       const why = catalog.unavailable?.[id] ?? catalog.unavailable?.[`cpa/${id}`];
       throw new Error(`${id.replace(/^cpa\//, "")} is not offered to Claude Code${why ? ` (${String(why).slice(0, 200)})` : ""}; subagent_models lists the ones that are`);
     }
@@ -695,7 +710,7 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
         throw new Error(`${id.replace(/^cpa\//, "")} takes a context window from ${range.min} to ${range.max} tokens`);
       }
     }
-    return cleanRoute({ harness_id: PICKED_HARNESS, model: id, ...(inherit && saved.provider_id ? { provider_id: saved.provider_id } : {}),
+    return cleanRoute({ harness_id: targetHarness, model: id, ...(inherit && saved.provider_id ? { provider_id: saved.provider_id } : {}),
       ...(chosenEffort !== undefined && chosenEffort !== null ? { effort: chosenEffort } : {}),
       ...(chosenWindow !== undefined && chosenWindow !== null ? { context_window: chosenWindow } : {}) });
   }
@@ -782,7 +797,8 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     const named = String(args.gateway?.model ?? "").match(/\((none|minimal|low|medium|high|xhigh|max|ultra)\)$/i)?.[1]?.toLowerCase();
     const effort = args.effort ?? named ?? null;
     const run = { id, parent, workspaceId, agentId: agent.id, agentName: agent.name, model: route.model.replace(/^cpa\//, ""), task: brief,
-      ...(typeof effort === "string" && effort ? { effort } : {}), harness: route.harness_id,
+      ...(typeof effort === "string" && effort ? { effort } : {}),
+      ...(Number.isSafeInteger(args.contextWindow) && args.contextWindow > 0 ? { contextWindow: args.contextWindow } : {}), harness: route.harness_id,
       startedAt: now(), endedAt: null, state: "starting", report: "", error: "", turns: 1 };
     remember(run);
     await stopIfParentStopped(run, parent, generation);
@@ -992,18 +1008,27 @@ function createSubagents({ statePath = null, launchArgs, harness, blockedRequest
     if (!Array.isArray(catalog?.models)) throw new Error("Claude Code's model list cannot be read right now; try again shortly");
     const allowed = read().settings.allowedProviders ?? null;
     const providers = new Map(catalog.models.map((id) => [id, providerOf(id, PICKED_HARNESS, catalog.capabilities?.[id], true)]));
-    const offered = catalog.models.filter((id) => providerAllowed(allowed, providers.get(id)));
-    const list = offered.slice(0, MAX_MODELS_LISTED).map((id) => {
-      const capabilities = catalog.capabilities?.[id] ?? {};
-      const provider = providers.get(id);
-      return { id: id.replace(/^cpa\//, ""), ...(provider && provider !== "cpa" ? { provider } : {}),
-        ...(Array.isArray(capabilities.efforts) && capabilities.efforts.length ? { efforts: capabilities.efforts } : {}),
-        ...(capabilities.contextWindow ? { context_window: { min: capabilities.contextWindow.min, max: capabilities.contextWindow.max } } : {}),
-        ...(capabilities.contextLimit ? { context_limit: capabilities.contextLimit } : {}) };
-    });
+    const entries = catalog.models
+      .filter((id) => providerAllowed(allowed, providers.get(id)))
+      .map((id) => ({ id: id.replace(/^cpa\//, ""), provider: providers.get(id), capabilities: catalog.capabilities?.[id] ?? {} }));
+    const seen = new Set(entries.map((entry) => entry.id));
+    if (providerAllowed(allowed, "ao:codex")) {
+      const codexCatalog = await catalogFor(workspaceId, "ao:codex");
+      for (const id of Array.isArray(codexCatalog?.models) ? codexCatalog.models : []) {
+        if (typeof id !== "string" || !id || id === "default" || id.startsWith("cpa/") || id.startsWith("chatgpt-web/") || seen.has(id)) continue;
+        seen.add(id);
+        entries.push({ id, provider: "ao:codex", capabilities: codexCatalog.capabilities?.[id] ?? {} });
+      }
+    }
+    const list = entries.slice(0, MAX_MODELS_LISTED).map(({ id, provider, capabilities }) => ({
+      id, ...(provider && provider !== "cpa" ? { provider } : {}),
+      ...(Array.isArray(capabilities.efforts) && capabilities.efforts.length ? { efforts: capabilities.efforts } : {}),
+      ...(capabilities.contextWindow ? { context_window: { min: capabilities.contextWindow.min, max: capabilities.contextWindow.max } } : {}),
+      ...(capabilities.contextLimit ? { context_limit: capabilities.contextLimit } : {}),
+    }));
     return { harness: "Claude Code (picked models always run on it)", models: list,
       ...(allowed ? { allowed_providers: allowed } : {}),
-      ...(offered.length > MAX_MODELS_LISTED ? { more: offered.length - MAX_MODELS_LISTED } : {}), ...(catalog.stale ? { stale: true } : {}) };
+      ...(entries.length > MAX_MODELS_LISTED ? { more: entries.length - MAX_MODELS_LISTED } : {}), ...(catalog.stale ? { stale: true } : {}) };
   }
 
   /** One subagent tool call from the chat session `parent` (an AO session id) in `workspaceId`. */

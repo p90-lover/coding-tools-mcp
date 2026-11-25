@@ -1047,6 +1047,9 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
     freshConnectorResults.delete(shared.creationResult);
   }
   const activePartition = browserHost.partition;
+  // A step changing ChatGPT (Create, consent): a stop for a chat or the person's own sign-in lets it end
+  // before the windows close (browser whileChangingChatGpt), so none is cut off halfway.
+  const changingChatGpt = step => typeof browserHost.whileChangingChatGpt === "function" ? browserHost.whileChangingChatGpt(step) : step();
   // Read in run(): only then does this setup hold the browser and its stop signal.
   let stopSignal = null;
   const checkHost = () => {
@@ -1257,7 +1260,7 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       else {
         mutationStarted = true;
         submitting = true;
-        try { result = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.submitPreparedTunnelConnector(${JSON.stringify(settings)})`, true); }
+        try { result = await changingChatGpt(() => popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.submitPreparedTunnelConnector(${JSON.stringify(settings)})`, true)); }
         finally { submitting = false; }
       }
       const url = new URL(result?.href, "https://chatgpt.com");
@@ -1298,11 +1301,11 @@ async function createConfiguredConnector({ app, BrowserWindow, browserHost, runt
       if (!connection.connected) {
         await freshContext();
         mutationStarted = true;
-        const consent = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.openTunnelConnectorConsent(${JSON.stringify(settings.name)})`, true);
+        const consent = await changingChatGpt(() => popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.openTunnelConnectorConsent(${JSON.stringify(settings.name)})`, true));
         if (consent?.connected !== true) {
           if (consent?.consentReady !== true) throw new Error("ChatGPT did not prepare the exact connector consent.");
           await freshContext();
-          const confirmed = await popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.confirmTunnelConnectorConsent(${JSON.stringify(settings.name)})`, true);
+          const confirmed = await changingChatGpt(() => popup.webContents.executeJavaScript(`globalThis.__codingToolsConnectorHelpers.confirmTunnelConnectorConsent(${JSON.stringify(settings.name)})`, true));
           if (confirmed?.connected !== true) throw new Error("ChatGPT did not confirm the exact connector consent.");
         }
       }

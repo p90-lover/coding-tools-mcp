@@ -2085,6 +2085,7 @@ mod workspace_auth_tests {
                 approvals_reviewer: None,
                 effort: None,
                 context_window: None,
+                fast_mode: None,
             },
             request_key: None,
             receipt: None,
@@ -2278,6 +2279,19 @@ mod workspace_auth_tests {
         assert_eq!(saved.actions.auth_type, "api_key");
     }
 
+    #[test]
+    fn computer_start_activation_is_opt_in() {
+        let mut body = serde_json::json!({"workspace_id":"fixture","window_id":53,"pid":70});
+        let omitted: ComputerStartRequest = serde_json::from_value(body.clone()).unwrap();
+        assert!(!omitted.activate);
+        body["activate"] = json!(false);
+        let disabled: ComputerStartRequest = serde_json::from_value(body.clone()).unwrap();
+        assert!(!disabled.activate);
+        body["activate"] = json!(true);
+        let enabled: ComputerStartRequest = serde_json::from_value(body).unwrap();
+        assert!(enabled.activate);
+    }
+
     #[tokio::test]
     async fn computer_control_starts_only_from_the_app_and_only_where_capture_is_on() {
         let data = serde_json::from_value(serde_json::json!({
@@ -2319,6 +2333,7 @@ mod workspace_auth_tests {
                     pid: 1,
                     duration_seconds: 300,
                     always_enabled: false,
+                    activate: false,
                 }),
             )
         };
@@ -6970,6 +6985,8 @@ struct ComputerStartRequest {
     duration_seconds: u64,
     #[serde(default)]
     always_enabled: bool,
+    #[serde(default)]
+    activate: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -7061,19 +7078,26 @@ async fn computer_start(
     };
     let result = tokio::task::spawn_blocking(move || {
         let target = tools::computer::list_local_targets()
-            .map_err(|error| error.message())?
+            .map_err(|error| ("COMPUTER_START_FAILED", error.message()))?
             .into_iter()
             .find(|target| target.window_id == body.window_id && target.pid == body.pid)
-            .ok_or_else(|| "That window changed or closed; pick it again".to_string())?;
-        let armed = tools::computer::local_arm_with_mode(root, target, body.duration_seconds, body.always_enabled)
-            .map_err(|error| error.message())?;
-        let _ = tools::computer::focus_local_target();
-        Ok::<_, String>(armed)
+            .ok_or_else(|| ("COMPUTER_START_FAILED", "That window changed or closed; pick it again".to_string()))?;
+        let mut armed = tools::computer::local_arm_with_mode(root, target, body.duration_seconds, body.always_enabled)
+            .map_err(|error| ("COMPUTER_START_FAILED", error.message()))?;
+        if body.activate {
+            let session_id = armed["session_id"].as_str().ok_or_else(|| {
+                ("COMPUTER_START_FAILED", "The selected window has no control session".to_string())
+            })?;
+            tools::computer::focus_local_target_in_session(session_id)
+                .map_err(|error| (error.code(), error.message()))?;
+        }
+        armed["activation_performed"] = json!(body.activate);
+        Ok::<_, (&'static str, String)>(armed)
     })
     .await;
     match result {
         Ok(Ok(status)) => Json(json!({"ok": true, "status": status})).into_response(),
-        Ok(Err(message)) => json_error(StatusCode::BAD_REQUEST, "COMPUTER_START_FAILED", message),
+        Ok(Err((code, message))) => json_error(StatusCode::BAD_REQUEST, code, message),
         Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, "COMPUTER_START_FAILED", text_error(error)),
     }
 }

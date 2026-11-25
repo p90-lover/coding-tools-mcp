@@ -75,13 +75,13 @@ test("Settings › Chat holds Claude Code's auto-compact and the chat's own swit
   assert.match(read("electron/main.cjs"), /\["chat_auto_retry", "chat_model_judges", "chat_auto_compact", "chat_question_timeout"\]\.includes\(input\.operation\) && input\.arguments\?\.enabled === undefined && input\.arguments\?\.percent === undefined && input\.arguments\?\.seconds === undefined/);
 });
 
-test("Settings › Chat: CPA approval reviews require explicit consent separate from the chat mode", () => {
+test("Settings › Chat: standalone Guardian and CPA reviews share consent separate from native Codex", () => {
   const page = read("src/features/ChatSettingsPage.tsx");
   assert.match(page, /<Toggle label="Allow quota-based reviews" checked=\{chat\?\.meteredReviews === true\}/);
   assert.match(page, /setChatPreference\("chat_model_judges", \{ meteredReviews: next \}\)/);
-  assert.match(page, /Off by default\. In Approve for me, eligible shell requests try native Codex Guardian first/);
-  assert.match(page, /With this and Let the model judge on, eligible fallback reviews can use account quota/);
-  assert.match(page, /Approve for me and Let the model judge do not turn CPA reviews on/);
+  assert.match(page, /Off by default\. Local safety checks still run/);
+  assert.match(page, /standalone Codex Guardian or CPA, which can use account quota/);
+  assert.match(page, /This does not change Auto Review inside a native Codex session/);
   assert.match(read("electron/main.cjs"), /input\.arguments\?\.meteredReviews === undefined/);
 });
 

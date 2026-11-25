@@ -1242,7 +1242,7 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
   // the real id (and suffix) for routing.
   const CPA_CLAUDE_ALIAS = "claude-fable-5-dd-";
   const reversed = text => [...text].reverse().join("");
-  const splitSuffix = id => /^(.*?)(\([^()]*\))?$/.exec(id).slice(1, 3).map(part => part ?? "");
+  const splitSuffix = id => /^(.*?)((?:\([^()]*\)|\[1m\])*)$/i.exec(id).slice(1, 3).map(part => part ?? "");
   /** A CPA model id as CPA lists it to Claude Code. */
   function cpaClaudeModel(id) {
     const [base, suffix] = splitSuffix(id);
@@ -1457,9 +1457,11 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
       const catalog = await internalApi("GET", `/api/v1/agents/${agentId(agent)}/models${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`);
       return (Array.isArray(catalog?.models) ? catalog.models : []).filter(model => typeof model?.id === "string" && model.id.length <= 128)
         .slice(0, 500).map(model => ({ id: model.id, label: String(model.label || model.id).slice(0, 128), isDefault: model.isDefault === true,
-          efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [] }));
+          efforts: Array.isArray(model.efforts) ? model.efforts.filter(value => typeof value === "string" && value.length <= 32).slice(0, 16) : [],
+          // Codex lists a "fast" service tier for the models that offer fast mode; AO reports it.
+          ...(model.supportsFastMode === true ? { supportsFastMode: true } : {}) }));
     },
-    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, approvalMode = null, autoReview = false, plain = false, warm = false, subagent = false }) {
+    async spawn({ workspaceId, agent, model, prompt, name, gateway = null, effort = null, contextWindow = null, fastMode = false, approvalMode = null, autoReview = false, plain = false, warm = false, subagent = false }) {
       if (approvalMode !== null && !["default", "accept-edits", "auto", "bypass-permissions"].includes(approvalMode)) throw new Error("Unsupported AO permission mode");
       // A CPA chat needs AO to hold CPA's current key (syncGatewayKey). Before anything of this AO
       // is read: the sync may start AO again.
@@ -1503,6 +1505,9 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // Through CPA too: the agent sends it in the request body (the workflow's aoLaunchArgs).
         ...(effort ? { effort: String(effort).slice(0, 32) } : {}),
         ...(contextWindow != null ? { contextWindow } : {}),
+        // Fast mode: Codex's "fast" service tier, or Claude Code's fastMode setting (aoLaunchArgs
+        // sends it only where it can work). Off sends nothing, so other launches are unchanged.
+        ...(fastMode === true ? { fastMode: true } : {}),
         // A single-model chat is a plain assistant: AO adds none of its worker/orchestrator prompt.
         ...(plain ? { plainPrompt: true } : {}),
         // A CPA model runs through the local gateway; AO adds the key from its own environment.
@@ -2854,9 +2859,13 @@ function createAgentOrchestratorUpstream({ resourceRoot, dataRoot, confirm, getW
         // The open panel's category split reads the timeline back to the last compaction, so
         // only on request and for one session; the 4-second ring poll stays one small read.
         if (args.detail === true && ids.length === 1) {
+          const launched = sessions[id].launchedWindow;
+          const own = sessions[id].usage?.contextWindow ?? 0;
+          const breakdownUsage = sessions[id].usage && launched && own !== launched && !(own < launched && own >= launched * 0.8)
+            ? { ...sessions[id].usage, contextWindow: launched } : sessions[id].usage;
           sessions[id].breakdown = await readContextBreakdown(
             (query) => internalApi("GET", `/api/v1/sessions/${sessionId(id)}/conversation?${query}`),
-            sessions[id].usage,
+            breakdownUsage,
           ).catch(() => null);
         }
       }));

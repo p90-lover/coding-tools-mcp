@@ -388,6 +388,16 @@ async function savedMcpServers(list) {
   await userMcpServers().saved();
   return list;
 }
+// Runtime > App layout (app-layout.cjs): the architecture map and layer editor shared by the tab and chat agents.
+let appLayoutService = null;
+function appLayoutStore(logger = null) {
+  appLayoutService ??= require("./app-layout.cjs").createAppLayoutStore({
+    filePath: path.join(app.getPath("userData"), "app-layout.json"),
+    logger,
+    onChange: (next) => send("launcher:app-layout-changed", next),
+  });
+  return appLayoutService;
+}
 // The person's unified-agent-tools (vendor/unified-agent-tools), for every chat that runs a GPT model.
 let gptFileTools = null;
 function unifiedAgentTools(logger = null) {
@@ -3655,6 +3665,8 @@ function registerIpc({ logger, stateStore }) {
       try {
         result = await createWorkspaceConnector({ app, BrowserWindow, browserHost: operationBrowser, runtimeHost, assertCurrent,
         preserveSurface: true,
+        // An automatic check runs in the background and gives the browser to a chat that needs it (forChat).
+        yieldsToChats: typeof assertAutomaticCurrent === "function",
         onContext: recordBrowserWorkspaceContext,
         accountCandidates: async () => {
           const candidates = [];
@@ -3728,6 +3740,10 @@ function registerIpc({ logger, stateStore }) {
   });
 
   let accountMcpConfig = null;
+  // Automatic MCP checks go on in the background once the person has used the app this run (their choice,
+  // 2026-11-24). Until then a check ran only while the window was focused, and on 2026-11-23 no account
+  // was checked all night. A copy started hidden still reads no account before it is first opened.
+  let accountMcpAttended = false;
   automaticAccountMcp = createBrowserAccountMcpSync({
     logger,
     accounts: () => browserAccounts.status().accounts.map(account => ({
@@ -3736,12 +3752,15 @@ function registerIpc({ logger, stateStore }) {
     canRun: ({ connecting = false } = {}) => {
       const state = stateStore.read();
       const operation = browserHost?.currentOperation();
+      if (!mainWindow || mainWindow.isDestroyed()) return false;
+      // Genuine focus once: the window and its page (native focus alone is not the person).
+      if (!accountMcpAttended && mainWindow.isFocused() && mainWindow.webContents.isFocused()) accountMcpAttended = true;
       return !IS_DEV_PROFILE && !quitting && !shutdownInProgress
         && state.autoConnectExistingMcp === true && state.coreSetupComplete === true
-        && state.browserInteractionMode === "automatic"
-        && mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized()
-        && mainWindow.isFocused() && mainWindow.webContents.isFocused()
-        && browserHost && !browserHost.activeTraceId && !browserAccountsStatus().switching
+        && state.browserInteractionMode === "automatic" && accountMcpAttended
+        // Only browser work holds it: a running turn, a chat taking the browser (which also stops a running
+        // check, browser forChat), an account switch, another operation or the runtime's own setup.
+        && browserHost && !browserHost.activeTraceId && !browserHost.chatStarting?.() && !browserAccountsStatus().switching
         && (!operation || (connecting && operation === "MCP connector creation"))
         && runtimeHost && !runtimeHost.setupOperation();
     },
@@ -3767,7 +3786,7 @@ function registerIpc({ logger, stateStore }) {
         "https://chatgpt.com", 10_000);
     },
     connect: (accountId, current) => connectAccountMcp(accountId, () => {
-      if (!current()) throw new Error("Automatic MCP setup is waiting for the focused, idle app and current account.");
+      if (!current()) throw new Error("Automatic MCP setup is waiting for an idle browser and the current account.");
     }),
   });
   const syncAccountMcp = () => void automaticAccountMcp.sync().catch(error => logger.warn("browser_accounts.automatic_mcp_pending", {
@@ -4224,6 +4243,20 @@ function registerIpc({ logger, stateStore }) {
   handle("mcp-servers:set-enabled", async (event, id, enabled) => {
     if (enabled === true) await assertFocusedMainWindowSettled(event, true);
     return savedMcpServers(userMcpServers(logger).setEnabled(String(id), enabled === true));
+  });
+  // Runtime > App layout: read and edit the Coding Tools category/layer map.
+  handle("launcher:app-layout", () => appLayoutStore(logger).get());
+  handle("launcher:app-layout-edit", async (event, input) => {
+    await assertFocusedMainWindowSettled(event, true);
+    const updated = await appLayoutStore(logger).act(input);
+    await appLayoutStore(logger).saved();
+    return updated;
+  });
+  handle("launcher:app-layout-reset", async (event) => {
+    await assertFocusedMainWindowSettled(event, true);
+    const reset = await appLayoutStore(logger).reset();
+    await appLayoutStore(logger).saved();
+    return reset;
   });
   handle("launcher:set-preference", (_event, key, value) => {
     const ordinary = key === "keepRunningOnClose" || key === "showBrowserDuringTurns" || key === "autoConnectExistingMcp"
@@ -5174,9 +5207,9 @@ async function start() {
         harness: () => agentOrchestratorUpstream?.harness ?? null,
         blockedRequest: (text) => missionWorkflowRuntime?.blockedRequest?.(text) ?? true,
         recommendedAnswer: (approval) => missionWorkflowRuntime?.recommendedAnswer?.(approval) ?? { action: "decline" },
-        // A model the chat agent picks runs on Claude Code and is checked against its catalog; a
-        // saved team can run as one subagent.
-        models: (workspaceId) => missionWorkflowRuntime?.call("models", { harness: "ao:claude-code", workspaceId }) ?? null,
+        // A model the chat agent picks runs on Claude Code (or Codex for its own-account models)
+        // and is checked against that agent's catalog; a saved team can run as one subagent.
+        models: (workspaceId, harness = "ao:claude-code") => missionWorkflowRuntime?.call("models", { harness, workspaceId }) ?? null,
         teams: () => missionWorkflowRuntime?.subagentTeams ?? null,
         logger,
       });
@@ -5352,6 +5385,8 @@ async function start() {
             return missionWorkflowRuntime.chatMoveTool(request);
           },
         },
+        // app_layout: lets chat agents read or edit the Runtime > App layout layers live.
+        appLayout: appLayoutStore(logger),
         // Running agents keep their tools across app restarts (credential hashes and the port only).
         statePath: path.join(app.getPath("userData"), "chat-agent-tools.json"),
         // The person's notes for computer_guide: <app>.md (chrome.md, notepad.md) or <topic>.md, read on each call.

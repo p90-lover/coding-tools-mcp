@@ -2,7 +2,91 @@ export type Language = "en" | "zh-CN" | "zh-TW" | "ja";
 export type RefreshPart = "ui" | "bridge" | "mcp" | "agent-orchestrator" | "cpa" | "headless" | "backend" | "all" | "app";
 export type LauncherProfile = "production" | "development";
 export type BrowserInteractionMode = "automatic" | "manual";
-export type Surface = "browser" | "chatgpt-browser-management" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "computer-use" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+export type Surface = "browser" | "chatgpt-browser-management" | "chatgpt-desktop" | "email" | "register" | "setup" | "mcp" | "instant-mcp" | "workspace-auth" | "native-codex" | "oauth" | "api-models" | "orchestrator" | "agent-orchestrator" | "agent-orchestrator-original" | "agent-orchestrator-teams" | "subagents" | "computer-use" | "app-layout" | "rtk" | "plugins" | "antigravity-cli" | "providers" | "integrations" | "app-plugins" | "cpa" | "paseo" | "anneal" | "network" | "activity" | "settings";
+
+export interface AppLayoutCategoryItem {
+  id: string;
+  title: string;
+  surfaceId?: string;
+  summary: string;
+  bullets: string[];
+}
+
+export interface AppLayoutCategory {
+  id: string;
+  title: string;
+  eli5: string;
+  items: AppLayoutCategoryItem[];
+}
+
+export interface AppLayoutLayerRow {
+  id: string;
+  category: string;
+  title: string;
+  surfaceId?: string;
+  controllingSwitch?: string;
+  currentLocation: string;
+  belongsIn: string;
+  items: string[];
+  note?: string;
+}
+
+export interface AppLayoutLayer {
+  id: string;
+  title: string;
+  eli5: string;
+  rows: AppLayoutLayerRow[];
+}
+
+export interface AppLayoutOverlap {
+  id: string;
+  item: string;
+  currentLocation: string;
+  belongsIn: string;
+  why: string;
+}
+
+export interface AppLayoutSnapshot {
+  version: number;
+  updatedAt: string;
+  overview: {
+    title: string;
+    subtitle: string;
+  };
+  categories: AppLayoutCategory[];
+  layers: AppLayoutLayer[];
+  overlaps: AppLayoutOverlap[];
+}
+
+export type AppLayoutEditInput = {
+  action:
+    | "update_overview"
+    | "upsert_category"
+    | "remove_category"
+    | "upsert_category_item"
+    | "remove_category_item"
+    | "upsert_layer_row"
+    | "remove_layer_row"
+    | "upsert_overlap"
+    | "remove_overlap"
+    | "replace"
+    | "reset";
+  title?: string;
+  subtitle?: string;
+  id?: string;
+  categoryId?: string;
+  itemId?: string;
+  layerId?: string;
+  layerTitle?: string;
+  layerEli5?: string;
+  rowId?: string;
+  overlapId?: string;
+  category?: Partial<AppLayoutCategory>;
+  item?: Partial<AppLayoutCategoryItem>;
+  row?: Partial<AppLayoutLayerRow>;
+  overlap?: Partial<AppLayoutOverlap>;
+  layout?: Partial<AppLayoutSnapshot>;
+};
 
 /** Plugins > MCPs (chat-mcp-servers.cjs): one of the person's own MCP servers for chat agents. */
 export interface McpServerEntry {
@@ -328,6 +412,8 @@ export interface ProviderNetworkSnapshot {
     credentials?: CredentialProxyPolicyRecord[];
   };
   decodo?: DecodoSettings;
+  /** Providers whose new chats start in fast mode ("codex-oauth", "claude-oauth"); off is absent. */
+  fastMode?: Record<string, true>;
   /** Set when the saved settings could not be read. */
   error?: string;
 }
@@ -1266,6 +1352,10 @@ export interface LauncherApi {
   saveMcpServer(server: McpServerInput, options?: { githubCliToken?: boolean }): Promise<McpServerEntry[]>;
   removeMcpServer(id: string): Promise<McpServerEntry[]>;
   setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerEntry[]>;
+  appLayout?(): Promise<AppLayoutSnapshot>;
+  editAppLayout?(input: AppLayoutEditInput): Promise<AppLayoutSnapshot>;
+  resetAppLayout?(): Promise<AppLayoutSnapshot>;
+  onAppLayoutChanged?(listener: (layout: AppLayoutSnapshot) => void): () => void;
   setSidebarState(state: { open: boolean; width: number; moreToolsPinned?: boolean } | { moreToolsPinned: boolean }): Promise<LauncherState>;
   externalServicesSnapshot(): Promise<ExternalServicesSnapshot>;
   managedComponentsSnapshot(): Promise<ManagedComponentsSnapshot>;
@@ -1338,6 +1428,7 @@ export interface LauncherApi {
     mode: ProxyPolicyMode;
     profileId?: string;
   }): Promise<ProviderNetworkSnapshot>;
+  setProviderFastMode(input: { providerId: string; enabled: boolean }): Promise<ProviderNetworkSnapshot>;
   setAccountProxyPolicy(input: {
     accountId: string;
     mode: ProxyPolicyMode;

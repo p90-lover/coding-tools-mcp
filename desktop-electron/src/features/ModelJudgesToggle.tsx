@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { getCodingToolsClient } from "../api/client";
 import { knownQuotaReviews, onQuotaReviews, refreshQuotaReviews, setQuotaReviews } from "./quota-reviews";
 
-const QUOTA_DETAIL = "Reviews by a CPA model use your accounts' quota (Native Guardian uses a little too). While this is off, a request Guardian can't decide, or that needs a CPA review, waits for you even with Let the model judge on. Turned on, those waiting requests are reviewed at once. The same switch is in Settings > Chat";
+const QUOTA_DETAIL = "Standalone Codex Guardian and CPA reviews can use account quota. While this is off, local safety checks still run, but a request that needs a cloud review waits for you even with Let the model judge on. Turning it on lets the reviewer check eligible waiting requests. The same switch is in Settings > Chat";
 
 /**
  * "Allow quota-based reviews", on a request that waits on it. Live 2026-11-23: with Let the model judge
@@ -62,7 +62,7 @@ export function AutoReviewAllToggle() {
  * allow the model to judge it … until end and it can safety kill the goal". The preference lives in
  * the app, so it holds for every chat and after a restart; shown where something waits on you.
  */
-const DETAIL = "In Approve for me, eligible requests are answered without a manual approval prompt. Guardian is tried first for supported shell commands. Model fallback uses quota only when Allow quota-based reviews is also on. Unsafe requests are not approved, and requests that require you still wait for you. The judge may also end a goal that cannot safely go on";
+const DETAIL = "In Approve for me, eligible requests are checked locally first. When Allow quota-based reviews is on, standalone Guardian can review eligible shell requests, and the model judge can handle eligible fallbacks. Requests that require you still wait for you. The judge may also end a goal that cannot safely go on";
 
 /** Lucide's scale, the mark of the goal bar's Model judges toggle. */
 function JudgeGlyph() {

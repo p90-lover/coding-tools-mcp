@@ -13,7 +13,8 @@ function load(file, imports = {}, globals = {}) {
   vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.resolve(__dirname, "../src/features", file), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   }).outputText, { exports, structuredClone, crypto: { randomUUID },
-    require: name => name === "react" || name === "react/jsx-runtime" ? require(name) : imports[name] ?? {}, ...globals });
+    require: name => name === "react" || name === "react/jsx-runtime" ? require(name)
+      : imports[name] ?? (name === "./ChatAddonPicker" ? load("ChatAddonPicker.tsx") : {}), ...globals });
   return exports;
 }
 const chat = load("ao-chat.ts");
@@ -906,6 +907,21 @@ test("a request waiting only because Auto-review every approval request is off o
   assert.match(card({ auto_review_off: true }), all);
   assert.match(card({ auto_review_off: true }), /role="switch"/);
   assert.doesNotMatch(card({}), all, "only where the request waits on it");
+});
+
+test("a request in an Ask for approval chat says on its card why it waits, with the switch to Approve for me", () => {
+  const approvalUi = load("AgentOrchestratorApproval.tsx", { "./ChatMarkdown": markdown, "./ModelJudgesToggle": judges });
+  // auto_review_off: nothing reviews it (Auto-review every approval request is off), so it waits for the person.
+  const approval = { nodeId: "one", approval_id: "req", kind: "command", source: "ao", tool: "PowerShell", command: "Invoke-RestMethod http://127.0.0.1:7380/api/status", auto_review_off: true };
+  const card = (props, extra = {}) => renderToStaticMarkup(React.createElement(approvalUi.AgentOrchestratorApproval, { approval: { ...approval, ...extra }, busy: false, approve() {}, ...props }));
+  const asking = card({ onApproveForMe: async () => "" });
+  assert.match(asking, /<div class="cdx-row cdx-ask-mode"><span>Mode<\/span><p>Ask for approval: the reviewer doesn&#x27;t check this chat&#x27;s requests, so each one waits for you\./);
+  assert.match(asking, /<button type="button" class="cdx-inline-action">Approve for me<\/button>/);
+  assert.match(asking, /<span>Auto-review every approval request<\/span>/, "and the switch that reviews every chat's requests");
+  assert.doesNotMatch(card({}), /cdx-ask-mode/, "a chat on Approve for me or Full access has no such row");
+  // With Auto-review every approval request on, the reviewer does check an Ask chat's requests: one past the
+  // review deadline with no answer must not claim it doesn't.
+  assert.doesNotMatch(card({ onApproveForMe: async () => "" }, { auto_review_off: undefined }), /cdx-ask-mode/);
 });
 
 test("AO and native approval commands share directly scrollable cards without extra viewer controls", () => {

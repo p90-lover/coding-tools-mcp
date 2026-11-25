@@ -92,6 +92,8 @@ test("native Guardian reviews the recorded command in an isolated thread and nev
   const options = childOptions();
   assert.ok(options.cwd.startsWith(path.join(root, "state") + path.sep));
   assert.equal(options.env.CODEX_HOME, options.cwd);
+  assert.equal(options.env.TEMP, path.join(options.cwd, "tmp"));
+  assert.equal(options.env.TMP, path.join(options.cwd, "tmp"));
   assert.equal(options.env.OPENAI_API_KEY, undefined);
   assert.equal(options.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(requests.find(entry => entry.method === "account/login/start").params.type, "chatgptAuthTokens");
@@ -243,4 +245,97 @@ test("uncertain cwd, non-shell and unavailable auth do not start a reviewer", as
   const outcome = await noAuth(request);
   assert.match(outcome.reason, /ChatGPT sign-in/);
   assert.equal(outcome.guardianUnavailable, true);
+});
+
+test("queue, account-read, and server timeouts or repeated server crashes report Guardian timed out and unavailable", async (t) => {
+  const { request } = await fixture(t);
+  const slowAccount = createGuardianReview({
+    platform: "win32", stateDir: path.join(request.folder, "slow-account"),
+    executable: () => path.join(request.folder, "codex.exe"),
+    limits: { workMs: 30, queueMs: 30 },
+    prepareAccount: async () => new Promise(resolve => setTimeout(() => resolve({ accessToken: "t", chatgptAccountId: "a" }), 80)),
+    spawnProcess: () => assert.fail("timed out reading account"),
+  });
+  t.after(() => slowAccount.close());
+  const accountTimedOut = await slowAccount(request);
+  assert.equal(accountTimedOut.guardianUnavailable, true);
+  assert.equal(accountTimedOut.guardianTimedOut, true);
+
+  const crashing = createGuardianReview({
+    platform: "win32", stateDir: path.join(request.folder, "crashing"),
+    executable: () => path.join(request.folder, "codex.exe"),
+    limits: { workMs: 200, queueMs: 100 },
+    prepareAccount: async () => ({ accessToken: "t", chatgptAccountId: "a" }),
+    spawnProcess() {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      child.kill = () => child.emit("close");
+      setImmediate(() => child.emit("close"));
+      return child;
+    },
+  });
+  t.after(() => crashing.close());
+  const crashedOutcome = await crashing(request);
+  assert.equal(crashedOutcome.guardianUnavailable, true);
+  assert.equal(crashedOutcome.guardianTimedOut, true);
+});
+
+test("a ChatGPT usage-limit refusal on Guardian is not retried, marks Guardian unavailable without timeout retries, and cools down only that sign-in", async (t) => {
+  const { root, request } = await fixture(t);
+  let at = 1_000, currentAccount = { accessToken: "first-token", chatgptAccountId: "account-1" };
+  let reviews = 0;
+  const review = createGuardianReview({
+    platform: "win32", stateDir: path.join(root, "state-limit"),
+    executable: () => path.join(root, "codex.exe"),
+    now: () => at,
+    limits: { idleMs: 60_000, usageLimitCooldownMs: 60_000 },
+    prepareAccount: async () => currentAccount,
+    spawnProcess(_file, _args, options) {
+      const child = new EventEmitter();
+      child.stdin = new PassThrough();
+      child.stdout = new PassThrough();
+      const reader = createInterface({ input: child.stdin });
+      child.kill = () => { reader.close(); child.emit("close"); };
+      let callId = "call-1";
+      reader.on("line", (line) => {
+        const { id, method, params } = JSON.parse(line);
+        const deliver = value => child.stdout.write(JSON.stringify(value) + "\n");
+        if (method === "initialized") return;
+        if (method === "account/read") return deliver({ id, result: { account: { type: "chatgpt" } } });
+        if (method === "thread/start") return deliver({ id, result: { thread: { id: "t-1" }, modelProvider: "openai", model: params.model ?? "codex-auto-review" } });
+        if (method === "thread/inject_items") { callId = params.items.at(-1).call_id; return deliver({ id, result: {} }); }
+        if (method === "thread/guardianReview") {
+          reviews++;
+          if (currentAccount.accessToken === "first-token") {
+            return deliver({ id, error: { code: -32603, message: 'Guardian review failed: Session { message: "You’ve hit your usage limit.", error_info: Some(UsageLimitExceeded) }' } });
+          }
+          return deliver({ id, result: { callId, assessment: { outcome: "allow", riskLevel: "low", userAuthorization: "high" } } });
+        }
+        deliver({ id, result: { cwd: options.cwd } });
+      });
+      return child;
+    },
+  });
+  t.after(() => review.close());
+  const first = await review(request);
+  assert.equal(first.action, "ask");
+  assert.equal(first.guardianUnavailable, true);
+  assert.equal(first.guardianTimedOut, undefined, "a usage-limit refusal must not trigger timeout retries");
+  assert.match(first.reason, /usage limit/i);
+  assert.equal(reviews, 1, "a usage-limit refusal is not retried on the same sign-in");
+
+  const cooled = await review(request);
+  assert.equal(cooled.guardianUnavailable, true);
+  assert.equal(reviews, 1, "cooldown skips calling Codex again while the same sign-in is exhausted");
+
+  currentAccount = { accessToken: "second-token", chatgptAccountId: "account-2" };
+  const switched = await review(request);
+  assert.equal(switched.action, "allow");
+  assert.equal(reviews, 2, "a new Codex CLI sign-in bypasses the old account's cooldown");
+
+  currentAccount = { accessToken: "first-token", chatgptAccountId: "account-1" };
+  at += 60_001;
+  await review(request);
+  assert.equal(reviews, 3, "after cooldown expires the original account is checked again");
 });
