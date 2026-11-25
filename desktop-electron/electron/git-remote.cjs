@@ -212,7 +212,9 @@ function gitPushRequest(command) {
     const dangerous = rest.some(value => /^(?:\+|--(?:force(?:-with-lease|-if-includes)?|delete|mirror|all|tags|no-verify)(?:=|$)|-[^-]*[fd])/.test(value));
     const args = rest.filter(value => !["-u", "--set-upstream", "--dry-run", "-n"].includes(value));
     const [remote, ...refs] = args;
-    const destinations = refs.map(ref => (ref.includes(":") ? ref.slice(ref.indexOf(":") + 1) : ref).replace(/^refs\/heads\//, ""));
+    // Git matches a short destination against the remote's refs through refs/%s too, so
+    // "feature:heads/main" updates refs/heads/main: that destination is the branch "main".
+    const destinations = refs.map(ref => (ref.includes(":") ? ref.slice(ref.indexOf(":") + 1) : ref).replace(/^(?:refs\/)?heads\//, ""));
     const protectedBranch = destinations.some(ref => /^(?:main|master|HEAD)$/.test(ref) || ref.startsWith("refs/") || !ref);
     if (dangerous || protectedBranch || refs.some(ref => ref.startsWith(":"))) { requests.push({ status: "blocked", reason: "Destructive, broad or protected-branch publication requires a person" }); continue; }
     const validRef = ref => /^(?:HEAD|[\w./-]+)(?::(?:refs\/heads\/)?[\w./-]+)?$/.test(ref) && !ref.includes("..") && !ref.includes("@{");

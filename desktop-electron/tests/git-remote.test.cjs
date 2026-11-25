@@ -241,3 +241,13 @@ test("a repository opened through a junction or a short name is the repository, 
     fs.rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("a push to heads/<branch> names that branch, as git resolves it on the remote", () => {
+  // `git push origin feature:heads/main` updates refs/heads/main: git matches a short destination
+  // against the remote's refs through refs/%s, so heads/main is main, not a new branch.
+  for (const command of ["git push origin feature:heads/main", "git push origin heads/master", "git push origin HEAD:heads/HEAD"]) {
+    assert.equal(gitPushRequest(command).status, "blocked", command);
+  }
+  assert.deepEqual(gitPushRequest("git push origin feature:heads/develop").destinations, ["develop"]);
+  assert.deepEqual(gitPushRequest("git push origin feature:refs/heads/heads/x").destinations, ["heads/x"]);
+});
