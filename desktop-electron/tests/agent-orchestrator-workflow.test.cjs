@@ -3729,7 +3729,10 @@ test("external Codex-style permission tuples map to the real AO approval mode at
   // every agent's bypass.
   for (const agent of ["codex", "claude-code", "opencode", "agy", "pi", "unreal-agent", "cline"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review",agent === "codex" ? "auto" : "accept-edits"],["never","user","bypass-permissions"]]) {
     // An agent that can't ask the chat runs in Full access only (the next test refuses the rest).
-    if (policy === "on-request" && !["codex", "claude-code"].includes(agent)) continue;
+    // opencode and Pi ask since AO's fix/harness-asks: Approve for me launches them, like Claude
+    // Code and agy, in accept edits with this app's reviewer (autoReview), never AO's auto, which
+    // would allow every request unreviewed.
+    if (policy === "on-request" && !["codex", "claude-code", "agy", "opencode", "pi"].includes(agent)) continue;
     let launched;
     const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-6-luna",
       permission_profile: ":ao-default", native_permission_profile: policy === "never" ? ":danger-full-access" : ":workspace", approval_policy: policy, approvals_reviewer: reviewer };
@@ -3741,7 +3744,8 @@ test("external Codex-style permission tuples map to the real AO approval mode at
       confirm: async () => true,
     });
     await workflow.call("advance", {workspaceId:"ws",runId:"run",executable:"C:/codex.exe"});
-    assert.equal(launched.approvalMode, expected);
+    assert.equal(launched.approvalMode, expected, `${agent} ${policy} ${reviewer}`);
+    assert.equal(launched.autoReview === true, reviewer === "auto_review", `${agent} ${policy} ${reviewer} reviewer`);
   }
 });
 
@@ -4343,11 +4347,12 @@ test("permission capabilities use installed AO adapter modes without fabricating
     aoHarness: { catalog: async () => [
       { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
       { id: "agy", installed: true }, { id: "pi", installed: true, chat: true },
+      { id: "unreal-agent", installed: true },
     ], spawn: async (...args) => { launches.push(args); } },
   });
   // Every installed AO harness offers the menu, Full access at least: a chat moved onto Pi or
   // Antigravity had nothing it could pick before (2026-11-17), Full access included.
-  for (const harness_id of ["ao:claude-code", "ao:opencode", "ao:agy", "ao:pi"]) {
+  for (const harness_id of ["ao:claude-code", "ao:opencode", "ao:agy", "ao:pi", "ao:unreal-agent"]) {
     const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } })).capability;
     assert.equal(capability.supported, true, harness_id);
     assert.equal(capability.source, "ao-adapter");
@@ -4355,10 +4360,10 @@ test("permission capabilities use installed AO adapter modes without fabricating
     assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
     assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
     assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
-    // Pi and opencode (on its own allow-all default) never ask, so Ask and Approve for me are
-    // excluded there with that reason; Full access remains. agy asks the chat as `agy acp` (since
-    // 2026-11-23), so it offers all three, like Claude Code.
-    const fullAccessOnly = harness_id !== "ao:claude-code" && harness_id !== "ao:agy";
+    // Unreal Agent never asks, so Ask and Approve for me are excluded there with that reason; Full
+    // access remains. agy asks the chat as `agy acp` (since 2026-11-23), and opencode and Pi since
+    // AO's fix/harness-asks (2026-11-25), so they offer all three, like Claude Code.
+    const fullAccessOnly = harness_id === "ao:unreal-agent";
     assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
       fullAccessOnly ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
     if (fullAccessOnly) for (const mode of capability.excluded_modes) assert.match(mode.reason, /Choose Full access, the only mode it runs in\.$/);
@@ -4428,11 +4433,12 @@ test("external dispatch refuses permission tuples the adapter cannot honor", asy
     assert.equal(launched, false);
   }
   // Ask or Approve for me on an agent that can't ask the chat is refused with its reason, never
-  // launched to wait at an approval nobody sees (Cline) or to run unchecked (Pi, Unreal Agent).
-  // agy left this list on 2026-11-23: as a chat (`agy acp`) it asks the chat before each tool.
-  for (const [agent, why] of [["pi", /^Pi runs its tools without asking/],
+  // launched to wait at an approval nobody sees (Cline) or to run unchecked (Unreal Agent).
+  // agy left this list on 2026-11-23: as a chat (`agy acp`) it asks the chat before each tool;
+  // opencode and Pi left it on 2026-11-25 (AO's fix/harness-asks).
+  for (const [agent, why] of [
     ["unreal-agent", /^Unreal Agent has no approval channel/], ["cline", /^Cline asks for approval in its own terminal/],
-    ["opencode", /^opencode allows every tool by its own default/], ["kimi", /^kimi has no way to ask the chat/]]) {
+    ["kimi", /^kimi has no way to ask the chat/]]) {
     for (const reviewer of ["user", "auto_review"]) {
       let launched = false;
       const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "default", permission_profile: ":ao-default",
