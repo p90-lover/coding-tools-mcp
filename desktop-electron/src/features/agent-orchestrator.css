@@ -565,8 +565,15 @@
 }
 .ao-workflow .ao-tuning-popup { width: min(260px, calc(100vw - 40px)); }
 .ao-workflow .ao-tuning-popup [role="radiogroup"] { display: grid; gap: 2px; }
-/* Fast mode sits under the efforts, set apart by a hairline: it is a switch, not another level. */
-.ao-workflow .ao-tuning-popup .ao-fast-option { width: 100%; margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--ao-line); }
+/* Fast mode sits under the efforts, set apart by a rule, and draws as a switch (a pill with a knob),
+   not another effort's radio: it goes with any effort. */
+.ao-workflow .ao-tuning-popup .ao-picker-option.ao-fast-option { width: 100%; margin-top: 6px; border-top: 1px solid #c9d3df; border-radius: 0 0 8px 8px; }
+.ao-workflow .ao-tuning-popup .ao-picker-option.ao-fast-option[aria-checked="true"] { background: transparent; }
+.ao-workflow .ao-tuning-popup .ao-picker-option.ao-fast-option > svg { display: none; }
+.ao-workflow .ao-tuning-popup .ao-picker-option.ao-fast-option .ao-option-radio { position: relative; flex: 0 0 24px; width: 24px; height: 14px; border-radius: 999px; background: #c9d3df; border-color: #c9d3df; box-shadow: none; transition: background-color 120ms; }
+.ao-workflow .ao-tuning-popup .ao-picker-option.ao-fast-option .ao-option-radio::after { content: ""; position: absolute; top: 1px; left: 1px; width: 10px; height: 10px; border-radius: 50%; background: #fff; transition: transform 120ms; }
+.ao-workflow .ao-tuning-popup .ao-picker-option.ao-fast-option[aria-checked="true"] .ao-option-radio { background: #1677ff; border-color: #1677ff; box-shadow: none; }
+.ao-workflow .ao-tuning-popup .ao-picker-option.ao-fast-option[aria-checked="true"] .ao-option-radio::after { transform: translateX(10px); }
 .ao-workflow .ao-context-custom { display: flex; gap: 6px; margin-top: 8px; }
 .ao-workflow .ao-context-custom input { flex: 1; min-width: 0; height: 28px; padding: 0 8px; border: 1px solid var(--ao-line); border-radius: 6px; }
 .ao-workflow .ao-context-custom input[aria-invalid="true"] { border-color: var(--ao-red, #c0392b); }
