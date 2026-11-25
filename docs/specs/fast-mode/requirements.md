@@ -14,8 +14,12 @@ Requirements:
 1. The composer's effort menu shows a Fast switch only for a model that can run fast:
    - Codex: a model whose Codex catalog lists a fast service tier, or a CPA model served by CPA's
      Codex upstream (or whose CPA entry lists a fast/priority tier), on the Codex harness.
-   - Claude Code: a Claude model on a direct Claude sign-in. Behind a gateway Claude Code turns
-     fast mode off itself (`not_first_party`), so CPA Claude models never offer it.
+   - Claude Code: Opus models only (the user, 2026-11-25). In this app Claude Code runs only CPA
+     models, and behind a gateway Claude Code turns its own fastMode off (`not_first_party`), so AO
+     sends `speed: "fast"` in the request body (`CLAUDE_CODE_EXTRA_BODY`) and CPA 8.1.2 adds the
+     `fast-mode-2026-02-01` beta. Only Opus models CPA serves from Anthropic (provider `claude` or
+     `anthropic`; not Antigravity) offer it. Anthropic bills it as usage credits; without them the
+     request is refused (CPA does not rotate accounts for that refusal).
 2. Fast on adds `fast_mode: true` to the chat's route; off removes it. Routes without it compare,
    warm, serialize and fingerprint exactly as before.
 3. Changing fast mode on an open chat behaves like an effort change: the next message starts a new

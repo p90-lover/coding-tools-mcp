@@ -531,8 +531,9 @@ test("fast mode reaches AO only where it can work, and off sends nothing", async
   // Codex, on its own sign-in and through CPA (whose Codex upstream sends OpenAI's priority tier).
   assert.equal((await dispatched("codex", "own-model", { fast_mode: true })).fastMode, true);
   assert.equal((await dispatched("codex", "cpa/gpt-5.5", { fast_mode: true })).fastMode, true);
-  // Claude Code on a direct sign-in; behind CPA Claude Code turns fast mode off itself.
-  assert.equal((await dispatched("claude-code", "own-model", { fast_mode: true })).fastMode, true);
+  // Claude Code on Opus, directly or through CPA (AO sends the speed in the body there); never another model.
+  assert.equal((await dispatched("claude-code", "opus", { fast_mode: true })).fastMode, true);
+  assert.equal((await dispatched("claude-code", "cpa/claude-opus-5-5", { fast_mode: true })).fastMode, true);
   assert.equal(Object.hasOwn(await dispatched("claude-code", "cpa/gpt-5.5", { fast_mode: true }), "fastMode"), false);
   // Other agents have no fast mode, and an untuned launch is exactly as before.
   assert.equal(Object.hasOwn(await dispatched("opencode", "cpa/gpt-5.5", { fast_mode: true }), "fastMode"), false);
@@ -556,7 +557,25 @@ test("a model offers fast mode from Codex's own catalog, or CPA's Codex upstream
   assert.equal(codex["cpa/listed-fast"].fast, true, "a model whose CPA entry lists a fast tier");
   assert.equal(codex["cpa/gemini-3.8-flash-high"].fast, undefined);
   const claude = (await workflow.call("models", { harness: "ao:claude-code" })).capabilities;
-  assert.equal(claude["cpa/gpt-5.5"].fast, undefined, "behind CPA Claude Code has no fast mode");
+  assert.equal(claude["cpa/gpt-5.5"].fast, undefined, "a Codex model on Claude Code has no fast mode");
+});
+
+test("Claude Code offers fast mode on Opus models CPA serves from Anthropic, Opus only", async () => {
+  const workflow = createAgentOrchestratorWorkflow({
+    cpaConnection: () => ({ baseUrl: "http://127.0.0.1:8317", proxyApiKey: "fixture-key" }),
+    fetchImpl: async () => ({ ok: true, json: async () => ({ data: [
+      { id: "claude-opus-5-5", owned_by: "anthropic" }, { id: "claude-opus-4-6", owned_by: "claude" },
+      { id: "claude-sonnet-5-5", owned_by: "anthropic" }, { id: "claude-opus-4-6-thinking", owned_by: "antigravity" },
+      { id: "claude-opus-5", },
+    ] }) }),
+  });
+  // Claude Code offers only CPA's pool: its own aliases are not listed (CPA_ONLY_AGENTS).
+  const caps = (await workflow.call("models", { harness: "ao:claude-code" })).capabilities;
+  assert.equal(caps["cpa/claude-opus-5-5"].fast, true, "Anthropic's Opus through CPA: AO sends speed fast in the body");
+  assert.equal(caps["cpa/claude-opus-4-6"].fast, true, "CPA's Claude sign-ins count as Anthropic too");
+  assert.equal(caps["cpa/claude-sonnet-5-5"].fast, undefined, "Opus only");
+  assert.equal(caps["cpa/claude-opus-4-6-thinking"].fast, undefined, "Antigravity sends Claude to Google, where speed means nothing");
+  assert.equal(caps["cpa/claude-opus-5"].fast, undefined, "an upstream CPA does not name is not assumed");
 });
 
 test("upstream spawn sends fastMode only when on, and keeps a model's fast support", async () => {

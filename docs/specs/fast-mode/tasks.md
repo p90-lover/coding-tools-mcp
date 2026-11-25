@@ -8,6 +8,7 @@
 - [x] Provider Manager: "Fast mode for new chats" switch on Codex and Claude, stored in
       provider-network.json.
 - [x] Rust run store: `Route.fast_mode` (AO harnesses, Some(true) only).
-- [ ] Claude Code model eligibility (`claudeFastModel`).
+- [x] Claude Code model eligibility (`claudeFastModel`): Opus only; through CPA via
+      `CLAUDE_CODE_EXTRA_BODY` on Anthropic upstreams.
 - [ ] Tests: app focused suites, AO focused packages, Rust (CI).
 - [ ] Deliver: AO PR on the fork, app batch with the AO pin, release, local update.

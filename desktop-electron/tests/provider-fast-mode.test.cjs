@@ -8,6 +8,8 @@ const { createProviderNetworkStore } = require("../electron/provider-network.cjs
 // The Provider Manager's "Fast mode for new chats" switch on Codex and Claude: the default a new
 // chat on that provider's models starts with; the chat's effort menu turns it off or on per chat.
 test("a provider's fast mode default is kept for Codex and Claude only, saved only when it changes", async (t) => {
+  // The repo's own scratch folder (never the C: temp); other suites may have cleared it.
+  fs.mkdirSync(path.join(__dirname, "../../aiTemp"), { recursive: true });
   const root = fs.mkdtempSync(path.join(__dirname, "../../aiTemp/provider-fast-mode-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const filePath = path.join(root, "providers", "provider-network.json");

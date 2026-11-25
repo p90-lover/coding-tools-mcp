@@ -1116,7 +1116,7 @@ export function ProviderCenterSurface({ initialCategory = "all", language, setEr
               </div>
               {fastModeProvider ? (
                 <label className="provider-fast-mode" title={selectedProvider.id === "claude-oauth"
-                  ? text(language, "Claude Code runs fast mode on a direct Claude sign-in only, not through CPA. Change it per chat in the effort menu.", "Claude Code 只在直接登入 Claude 時使用快速模式，經 CPA 時不適用。可在每個聊天的推理強度選單中更改。")
+                  ? text(language, "Opus models served by Anthropic, through CPA too. Anthropic charges fast mode as extra usage credits; without them the request is refused. Change it per chat in the effort menu.", "由 Anthropic 提供的 Opus 模型，經 CPA 亦適用。Anthropic 以額外用量點數計費快速模式；沒有點數時請求會被拒絕。可在每個聊天的推理強度選單中更改。")
                   : text(language, "Codex's fast service tier, on its own sign-in or through CPA. Change it per chat in the effort menu.", "Codex 的快速服務層級，適用於其自身登入或經 CPA。可在每個聊天的推理強度選單中更改。")}>
                   <input
                     checked={fastModeOn}

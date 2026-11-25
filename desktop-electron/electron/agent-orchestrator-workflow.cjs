@@ -840,9 +840,10 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
       wireModel = baseModel + "(" + effort + ")";
     }
     // Fast mode where it can work: Codex (its own sign-in, or CPA, which sends OpenAI's priority tier)
-    // and Claude Code on a direct Claude sign-in. Behind CPA Claude Code turns it off itself, so a
-    // route carried there launches without it rather than claiming a speed it doesn't get.
-    const fastMode = node.route.fast_mode === true && (agent === "codex" || (agent === "claude-code" && !viaCpa));
+    // and Claude Code on an Opus model (AO sends its speed in the body through CPA). A route carried
+    // anywhere else launches without it rather than claiming a speed it doesn't get.
+    const fastMode = node.route.fast_mode === true
+      && (agent === "codex" || (agent === "claude-code" && claudeFastModel(baseModel ?? node.route.model)));
     if (node.route.fast_mode === true && !fastMode) logger?.info?.("ao.fast_mode_dropped", { agent, viaCpa: Boolean(viaCpa) });
     // Pi reaches CPA as the provider AO's Pi extension registers from the gateway's model.
     const agentModel = wireModel && agent === "opencode" ? `openai/${wireModel}`
@@ -1744,17 +1745,17 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
    * says so per model.
    */
   /**
-   * Whether Claude Code offers fast mode for `model`, a Claude Code model id as AO lists it on a
-   * direct Claude sign-in ("opus", "claude-opus-5-5", "sonnet[1m]", "claude-haiku-5-5", …). AO's
-   * Claude list comes from Anthropic's /v1/models, which doesn't say; Claude Code's own model info
-   * does (supportsFastMode), but AO doesn't read it. A model offered here that Claude Code then
-   * refuses runs at standard speed (its fast_mode_state reads "off"), so a wrong "yes" costs a
-   * misleading switch, a wrong "no" hides a speed the person could have had.
+   * Whether a Claude model takes fast mode: Opus only (the user, 2026-11-25), as an alias ("opus",
+   * "opus[1m]") or a full id ("claude-opus-5-5"). Anthropic's model lists don't say which do.
    */
   function claudeFastModel(model) {
-    // TODO(human): decide which Claude Code model ids offer fast mode.
-    return false;
+    return /opus/i.test(String(model));
   }
+  /**
+   * CPA's upstreams that send a Claude request to Anthropic itself, where `speed: "fast"` works (CPA
+   * adds the fast-mode beta for it). Antigravity's Claude models go to Google and never take it.
+   */
+  const ANTHROPIC_UPSTREAMS = new Set(["claude", "anthropic"]);
   const FAST_TIER_IDS = new Set(["fast", "priority"]);
   const cpaFastTier = (entry, provider) => {
     const listed = [...(Array.isArray(entry?.service_tiers) ? entry.service_tiers.map(tier => tier?.id ?? tier) : []),
@@ -1774,10 +1775,12 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
     const limit = info?.contextLimit;
     if (Number.isSafeInteger(limit) && limit > 0) capabilities.contextLimit = limit;
     // Fast mode where it can work: Codex's fast tier (its own catalog names the models; through CPA,
-    // CPA's Codex upstream), and Claude Code's fastMode on a direct Claude sign-in only: behind a
-    // gateway Claude Code turns fast mode off itself ("not_first_party").
+    // CPA's Codex upstream), and Claude's on Opus. Behind CPA Claude Code turns its own fastMode off
+    // ("not_first_party"), so AO sends `speed: "fast"` in the request body (CLAUDE_CODE_EXTRA_BODY)
+    // and CPA adds the fast-mode beta: only for a model CPA serves from Anthropic itself.
     const fast = agent === "codex" ? (viaCpa ? info?.fastTier === true : info?.supportsFastMode === true)
-      : agent === "claude-code" && !viaCpa && claudeFastModel(model);
+      : agent === "claude-code" && claudeFastModel(model)
+        && (!viaCpa || ANTHROPIC_UPSTREAMS.has(String(info?.provider ?? "").trim().toLowerCase()));
     if (fast) capabilities.fast = true;
     const slash = model.indexOf("/");
     const unqualifiedOpenCode = agent === "opencode" && !viaCpa
