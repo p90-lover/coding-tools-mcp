@@ -268,3 +268,19 @@ test("an outage that hit the rate limit is reported once the limit allows, and n
   await h.monitor.tick();
   assert.equal(h.resolved().length, 1);
 });
+
+test("an incident held back by the rate limit is logged once, not at every check", async () => {
+  let clock = Date.parse("2026-09-30T12:00:00Z");
+  const warnings = [];
+  const monitor = createMcpEventMonitor({
+    report: async () => {},
+    logger: { warn: (event) => warnings.push(event), debug() {} },
+    now: () => clock,
+    bridgeHealthUrl: () => "http://127.0.0.1:17841/healthz",
+    proxyUrl: () => null,
+    probeHttp: async () => ({ ok: false, code: "ECONNREFUSED" }),
+  });
+  for (let index = 0; index < 20; index += 1) monitor.turnEvent({ type: "end", traceId: `trace_${index}_burst`, status: "failed" });
+  for (let index = 0; index < 6; index += 1) { await monitor.tick(); clock += 30_000; }
+  assert.deepEqual(warnings.filter((event) => event === "mcp_events.rate_limited"), ["mcp_events.rate_limited"]);
+});

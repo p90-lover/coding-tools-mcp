@@ -98,6 +98,7 @@ function createMcpEventMonitor({
   const sentAt = [];
   let timer = null;
   let ticking = false;
+  let rateLimited = false;
 
   async function deliver(entry) {
     try {
@@ -114,9 +115,12 @@ function createMcpEventMonitor({
       const cutoff = now() - REPORT_WINDOW_MS;
       while (sentAt.length && sentAt[0] < cutoff) sentAt.shift();
       if (sentAt.length >= MAX_REPORTS_PER_WINDOW) {
-        logger?.warn?.("mcp_events.rate_limited", { event: entry.event });
+        // An incident held back is offered again at every check (30 s): said once while limited.
+        if (!rateLimited) logger?.warn?.("mcp_events.rate_limited", { event: entry.event });
+        rateLimited = true;
         return false;
       }
+      rateLimited = false;
       sentAt.push(now());
     }
     pending.push(entry);
