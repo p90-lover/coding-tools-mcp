@@ -99,13 +99,51 @@ function decodeEncodedWords(value) {
     });
 }
 
+// "filename" from a Content-Disposition, else the Content-Type "name". Mail clients send a
+// non-ASCII name as RFC 2231 (filename*=UTF-8''%E6%97%A5.pdf, maybe split as filename*0*, *1...)
+// or as an RFC 2047 encoded word inside the quotes; both are decoded to the readable name.
+function attachmentFilename(disposition, typeAttrs) {
+  const params = {};
+  for (const m of disposition.matchAll(/;\s*([^\s=;]+)\s*=\s*("(?:[^"\\]|\\.)*"|[^;]*)/g)) {
+    const value = m[2].trim();
+    params[m[1].toLowerCase()] = value.startsWith('"') ? value.slice(1, -1).replace(/\\(.)/g, "$1") : value;
+  }
+  const extended = (name) => {
+    const pieces = [];
+    for (let i = 0; ; i++) {
+      const key = `${name}*${i}`;
+      if (params[key] != null) pieces.push({ text: params[key], encoded: false });
+      else if (params[`${key}*`] != null) pieces.push({ text: params[`${key}*`], encoded: true });
+      else break;
+    }
+    if (!pieces.length && params[`${name}*`] != null) pieces.push({ text: params[`${name}*`], encoded: true });
+    if (!pieces.length) return null;
+    let charset = "utf-8";
+    const bytes = [];
+    pieces.forEach((piece, index) => {
+      let text = piece.text;
+      if (piece.encoded && index === 0) {
+        const m = /^([^']*)'[^']*'(.*)$/s.exec(text);
+        if (m) { charset = m[1] || charset; text = m[2]; }
+      }
+      if (!piece.encoded) { bytes.push(...Buffer.from(text, "utf8")); return; }
+      for (let i = 0; i < text.length; i++) {
+        if (text[i] === "%" && /^[0-9A-Fa-f]{2}$/.test(text.slice(i + 1, i + 3))) { bytes.push(parseInt(text.slice(i + 1, i + 3), 16)); i += 2; }
+        else bytes.push(...Buffer.from(text[i], "utf8"));
+      }
+    });
+    return decodeCharset(Buffer.from(bytes), charset);
+  };
+  const name = extended("filename") ?? params.filename ?? extended("name") ?? typeAttrs?.name ?? null;
+  return name ? decodeHeaderWords(name) : null;
+}
+
 function parseSection(section, out) {
   const { headers, body } = splitHeadersBody(section);
   const { type, attrs } = contentType(headers);
   const disposition = headers["content-disposition"] || "";
   if (disposition.split(";", 1)[0].trim().toLowerCase() === "attachment") {
-    const nameMatch = /filename="?([^";]+)"?/i.exec(disposition);
-    out.attachments.push({ filename: nameMatch?.[1] ?? null, mimeType: type, size: decodedByteLength(body, headers) });
+    out.attachments.push({ filename: attachmentFilename(disposition, attrs), mimeType: type, size: decodedByteLength(body, headers) });
     return;
   }
   if (type.startsWith("multipart/") && attrs.boundary) {

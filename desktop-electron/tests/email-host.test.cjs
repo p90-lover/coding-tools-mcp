@@ -421,3 +421,15 @@ test("parseMessage reports an attachment's size in bytes, not decoded characters
   const parsed = await parseMessage(raw);
   assert.deepEqual(parsed.attachments.map(a => a.size), [pdf.length, text.length]);
 });
+
+test("parseMessage decodes non-ASCII attachment filenames (RFC 2231 and encoded words)", async () => {
+  const part = disposition => ["Content-Type: application/pdf", `Content-Disposition: ${disposition}`, "Content-Transfer-Encoding: base64", "", "JVBERg=="].join("\r\n");
+  const raw = ["From: a@example.test", 'Content-Type: multipart/mixed; boundary="m"', "", "--m", "Content-Type: text/plain", "", "body",
+    "--m", part("attachment; filename*=UTF-8''%E6%97%A5%E6%9C%AC.pdf"),
+    "--m", part('attachment; filename="=?UTF-8?B?5pel5pys?=.pdf"'),
+    "--m", part("attachment;\r\n filename*0*=UTF-8''caf%C3%A9-;\r\n filename*1=report.pdf"),
+    "--m", part('attachment; filename="plain name.pdf"'),
+    "--m--"].join("\r\n");
+  const parsed = await parseMessage(raw);
+  assert.deepEqual(parsed.attachments.map(a => a.filename), ["日本.pdf", "日本.pdf", "café-report.pdf", "plain name.pdf"]);
+});
