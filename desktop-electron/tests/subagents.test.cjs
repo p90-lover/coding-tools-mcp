@@ -1295,4 +1295,3 @@ test("when ao:codex is allowed, subagent_models lists Codex own-account models l
     assert.equal(w.spawned[0].effort, "high");
   } finally { await w.cleanup(); }
 });
-
