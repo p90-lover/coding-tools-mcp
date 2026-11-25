@@ -432,7 +432,7 @@ export function ChatSettingsPage({ onClose, onArchiveChanged, workspaceId = null
                 <Toggle label="Retry automatically" checked={chat?.autoRetry === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_auto_retry", { enabled: next })} />
               </Row>
-              <Row label="Allow quota-based reviews" description="Off by default. In Approve for me, eligible shell requests try native Codex Guardian first. With this and Let the model judge on, eligible fallback reviews can use account quota. Approve for me and Let the model judge do not turn CPA reviews on.">
+              <Row label="Allow quota-based reviews" description="Off by default. Local safety checks still run. Turn this on to let Coding Tools send approval requests to standalone Codex Guardian or CPA, which can use account quota. This does not change Auto Review inside a native Codex session.">
                 <Toggle label="Allow quota-based reviews" checked={chat?.meteredReviews === true} disabled={!chat}
                   onChange={(next) => setChatPreference("chat_model_judges", { meteredReviews: next })} />
               </Row>
