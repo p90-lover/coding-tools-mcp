@@ -63,6 +63,14 @@ function quotedPrintableBytes(text) {
   return Buffer.from(bytes);
 }
 
+// The part's bytes after its transfer encoding, before any charset: what an attachment's size counts.
+function decodedByteLength(body, headers) {
+  const encoding = (headers["content-transfer-encoding"] || "7bit").toLowerCase();
+  if (encoding === "base64") return Buffer.from(body.replace(/\s+/g, ""), "base64").length;
+  if (encoding === "quoted-printable") return quotedPrintableBytes(body).length;
+  return Buffer.byteLength(body, "utf8");
+}
+
 function decodeBody(body, headers, charset) {
   const encoding = (headers["content-transfer-encoding"] || "7bit").toLowerCase();
   if (encoding === "base64") {
@@ -96,9 +104,8 @@ function parseSection(section, out) {
   const { type, attrs } = contentType(headers);
   const disposition = headers["content-disposition"] || "";
   if (disposition.split(";", 1)[0].trim().toLowerCase() === "attachment") {
-    const decoded = decodeBody(body, headers, attrs.charset);
     const nameMatch = /filename="?([^";]+)"?/i.exec(disposition);
-    out.attachments.push({ filename: nameMatch?.[1] ?? null, mimeType: type, size: decoded.length });
+    out.attachments.push({ filename: nameMatch?.[1] ?? null, mimeType: type, size: decodedByteLength(body, headers) });
     return;
   }
   if (type.startsWith("multipart/") && attrs.boundary) {

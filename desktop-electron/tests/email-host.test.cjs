@@ -410,3 +410,14 @@ test("the HTML safety floor still removes handlers and unsafe URLs while keeping
   assert.ok(html.includes('src="data:image/png;base64,AA"'));
   assert.ok(html.includes('<p>Hello</p>'));
 });
+
+test("parseMessage reports an attachment's size in bytes, not decoded characters", async () => {
+  const pdf = Buffer.from([0x25, 0x50, 0x44, 0x46, 0xff, 0xfe, 0x00, 0x80, 0xc3, 0xe2, 0x82]);
+  const text = Buffer.from("日本語のメモ", "utf8");
+  const raw = ["From: a@example.test", 'Content-Type: multipart/mixed; boundary="m"', "", "--m",
+    "Content-Type: text/plain", "", "body", "--m",
+    "Content-Type: application/pdf", 'Content-Disposition: attachment; filename="a.pdf"', "Content-Transfer-Encoding: base64", "", pdf.toString("base64"), "--m",
+    "Content-Type: text/plain; charset=utf-8", 'Content-Disposition: attachment; filename="memo.txt"', "Content-Transfer-Encoding: base64", "", text.toString("base64"), "--m--"].join("\r\n");
+  const parsed = await parseMessage(raw);
+  assert.deepEqual(parsed.attachments.map(a => a.size), [pdf.length, text.length]);
+});
