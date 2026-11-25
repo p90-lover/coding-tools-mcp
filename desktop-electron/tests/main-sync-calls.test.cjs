@@ -29,10 +29,13 @@ const ALLOWED = {
   "browser-account-mcp.cjs": 1,
   // The prior port record is captured before the first await; ready apps are rejected before IO.
   "browser-debugging.cjs": 1,
-  "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 4, "chat-archive.cjs": 1, "chat-edits.cjs": 1,
-  "chat-goals.cjs": 2, "chat-loops.cjs": 1, "chat-mcp-servers.cjs": 1, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 1,
+  "browser-host.cjs": 3, "ca-distrust.cjs": 5, "chat-agent-tools.cjs": 4, "chat-archive.cjs": 1,
+  // chat-edits, chat-loops, chat-wakeups, chat-schedules +1 (2026-11-25): a torn state file is renamed
+  // aside (renameSync) in the same one read at startup, when the workflow is created, as chat-goals.cjs
+  // already did; chat-mcp-servers +1 for the same in load(), the rare read before preload() (async).
+  "chat-edits.cjs": 2, "chat-goals.cjs": 2, "chat-loops.cjs": 2, "chat-mcp-servers.cjs": 2, "chat-sandbox.cjs": 5, "chat-wakeups.cjs": 2,
   // /schedule reads its saved schedules once, when the workflow is created at startup; it saves off the main thread.
-  "chat-schedules.cjs": 1,
+  "chat-schedules.cjs": 2,
   "chatgpt-desktop-sync.cjs": 1, "chatgpt-desktop.cjs": 25, "codex-chat-lifecycle-sync.cjs": 9,
   "codex-thread-accounts.cjs": 2, "codex-thread-stats.cjs": 1, "computer-control.cjs": 4, "cpa-antigravity-reauth.cjs": 4,
   // +9 (#1251): the account migration to Provider Manager kinds and the retired-plugin Trash step run in

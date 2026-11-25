@@ -206,11 +206,17 @@ function createChatMcpServers({ filePath, logger = null, nodeExecutable = proces
     let pending;
     do { pending = resolving; await pending; } while (pending !== resolving);
   };
+  // A file a crash tore (or a hand edit broke) read as "no servers", and the next save wrote over it:
+  // every server the person had added was gone. It is kept beside the new file instead, as the goals
+  // file is (chat-goals.cjs); `torn` says the caller should move it aside.
+  const asideName = () => `${filePath}.unreadable-${Date.now()}`;
   // The saved list from `readText()`: the file's text, or the error reading it threw.
   const fromSaved = (readText) => {
     const list = [];
     let saved = null;
+    let torn = false;
     try { saved = JSON.parse(readText()); } catch (error) {
+      torn = error instanceof SyntaxError;
       // Never the message: JSON.parse quotes the text around a syntax error, which can be a token.
       if (error?.code !== "ENOENT") logger?.warn?.("chat_mcp_servers.unreadable", {
         reason: error instanceof SyntaxError ? "invalid_json" : typeof error?.code === "string" ? error.code : "read_failed" });
@@ -219,12 +225,14 @@ function createChatMcpServers({ filePath, logger = null, nodeExecutable = proces
       // A saved entry that no longer passes (edited by hand, or the rules changed) is dropped, not sent to AO.
       try { list.push(normalizeServer(item, list)); } catch { logger?.warn?.("chat_mcp_servers.dropped", { name: String(item?.name ?? "").slice(0, 64) }); }
     }
-    return list;
+    return { list, torn };
   };
   // preload() normally reads the file first, off the main thread; this read is for a call before it.
   const load = () => {
     if (!servers) {
-      servers = fromSaved(() => fs.readFileSync(filePath, "utf8"));
+      const read = fromSaved(() => fs.readFileSync(filePath, "utf8"));
+      if (read.torn) { try { fs.renameSync(filePath, asideName()); } catch { /* the next save replaces it */ } }
+      servers = read.list;
       refreshLaunches();
     }
     return servers;
@@ -237,8 +245,13 @@ function createChatMcpServers({ filePath, logger = null, nodeExecutable = proces
     let failure = null;
     try { text = await fs.promises.readFile(filePath, "utf8"); } catch (error) { failure = error; }
     if (!servers) {
-      servers = fromSaved(() => { if (failure) throw failure; return text; });
-      refreshLaunches();
+      const read = fromSaved(() => { if (failure) throw failure; return text; });
+      // Moved aside before the list is in memory, so no save can write the new file first.
+      if (read.torn) await fs.promises.rename(filePath, asideName()).catch(() => { /* the next save replaces it */ });
+      if (!servers) {
+        servers = read.list;
+        refreshLaunches();
+      }
     }
     await awaitLaunches();
   }

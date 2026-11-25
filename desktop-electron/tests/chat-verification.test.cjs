@@ -72,3 +72,16 @@ test("verification scope is bounded, canonical and does not accept path escapes"
   await fs.symlink(outside, path.join(root, "link"), process.platform === "win32" ? "junction" : "dir");
   await assert.rejects(fingerprintInputs(root, verificationSpec({ inputs: ["link/secret"] })), /outside the workspace/);
 });
+
+test("a command that never started is a failed check, not an unknown or still-running one", async t => {
+  const { root, args } = await world(t);
+  // The sandbox reports a spawn failure as exited with termination_reason spawn_failed and no code.
+  const sandboxed = await prepareVerification(root, args, new Map(), 1);
+  await observeVerification(sandboxed, { ok: true, status: "exited", termination_reason: "spawn_failed", exit_code: null }, 2);
+  assert.equal(sandboxed.outcome, "failed");
+  // A host that reports the status itself (as watch_command reads it) settles the check too.
+  const reported = await prepareVerification(root, args, new Map(), 1);
+  await observeVerification(reported, { ok: true, status: "spawn_failed", exit_code: null }, 2);
+  assert.equal(reported.outcome, "failed");
+  assert.equal((await verificationReceipt(reported, 3)).completed_at_ms, 2);
+});

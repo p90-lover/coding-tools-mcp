@@ -634,7 +634,7 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
   // Each composer's unsent draft (chat-drafts.cjs): a crash or restart no longer loses a prompt being written.
   const chatDrafts = createChatDraftStore({ file: chatDraftsFile, now, logger });
   // Deleted chat messages: their runs are hidden from the chat, and the next follow-up starts afresh.
-  const chatEdits = createChatEditStore({ file: chatEditsFile, logger });
+  const chatEdits = createChatEditStore({ file: chatEditsFile, logger, now });
   // When each chat was archived, and how many days it stays before moving to "deleted" (archivedChats).
   const archive = createChatArchiveStore({ file: archiveFile, now, logger });
   // Points per model from finished Team rounds, for the model picker (model-scores.cjs).

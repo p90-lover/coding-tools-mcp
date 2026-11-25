@@ -92,8 +92,11 @@ function createCommandWatches({ now = Date.now, setTimer = setTimeout, clearTime
     const previous = [...records.values()].find(record => record.owner === owner && record.commandId === commandId
       && (["registering", "watching", "completed"].includes(record.status) || record.delivery === "pending"));
     if (previous) {
-      if (previous.registering) await previous.registering;
-      if (!["registering", "watching"].includes(previous.status)) return publicRecord(previous);
+      // The earlier registration's own failure is its caller's to report: awaited bare, it failed
+      // this call too, which never tried to register, and the agent was told no watch was confirmed.
+      if (previous.registering) await previous.registering.catch(() => {});
+      // An earlier watch that failed to register is replaced like an unfinished one.
+      if (!["registering", "watching", "cancelled"].includes(previous.status)) return publicRecord(previous);
       cancel(previous);
     }
     if ([...records.values()].filter(record => record.owner === owner && (["registering", "watching"].includes(record.status) || record.delivery === "pending")).length >= 16

@@ -268,3 +268,19 @@ test("agent guidance does not claim nonexistent watches, and distinguishes real 
   assert.doesNotMatch(instructionsFor(["agent"], { wakeups: false }), /call watch_command/i);
   assert.match(instructionsFor(["terminal"], { watches: true }), /command running in a terminal alone does not schedule/i);
 });
+
+test("an earlier registration's failure is not this call's: a repeat registers its own watch", async () => {
+  const state = clocked();
+  try {
+    let refuse;
+    const first = state.watches.watch({ ...state.input, prepare: () => new Promise((_, reject) => { refuse = reject; }) });
+    await tick();
+    const second = state.watches.watch(state.input);
+    await tick();
+    refuse(new Error("Command continuation is unavailable"));
+    await assert.rejects(first, /Command continuation is unavailable/);
+    const registered = await second;
+    assert.equal(registered.status, "watching", "the repeat tried its own registration");
+    assert.equal(state.watches.list(state.owner).filter(watch => watch.status === "watching").length, 1);
+  } finally { state.watches.close(); }
+});

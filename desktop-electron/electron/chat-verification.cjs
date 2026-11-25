@@ -86,13 +86,14 @@ async function observeVerification(record, value, now) {
   if (record.finishedAt !== null || !value || value.ok === false || value.finalization_pending === true
     || ["running", "terminating"].includes(value.status)) return;
   // Transport success alone cannot prove process success or even process completion.
-  if (!["exited", "completed", "failed", "killed", "timed_out"].includes(value.status)) return;
+  if (!["exited", "completed", "failed", "killed", "timed_out", "spawn_failed"].includes(value.status)) return;
   if (record.settling) return record.settling;
   record.settling = (async () => {
     record.finishedAt = now;
     record.exitCode = Number.isInteger(value.exit_code) ? value.exit_code : null;
-    const interrupted = ["killed", "timed_out", "cancelled"].includes(value.termination_reason)
-      || ["failed", "killed", "timed_out"].includes(value.status);
+    // A command that never started (spawn_failed) failed; it is not an unknown outcome.
+    const interrupted = ["killed", "timed_out", "cancelled", "spawn_failed"].includes(value.termination_reason)
+      || ["failed", "killed", "timed_out", "spawn_failed"].includes(value.status);
     record.outcome = interrupted || value.command_ok === false || record.exitCode !== null && record.exitCode !== 0
       ? "failed" : record.exitCode === 0 ? "passed" : "unknown";
     try {

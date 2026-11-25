@@ -13,6 +13,11 @@
 const FOLLOW_UP = /((?:\n\n|^(?=Follow-up \(automatic \d{4}-\d\d-\d\d \d\d:\d\d UTC\):\n))Follow-up \([^)\n]+ UTC\):\n)/;
 // What a hidden secret becomes; ao-chat.ts (hiddenSecretParts) draws it blurred.
 const HIDDEN = /\[hidden: [^\]\n]{1,40}\]/;
+// Inside a message: its steer lines' headers (chat-edits.cjs STEER) and earlier hidden markers. A
+// secret is matched only in the text between them, so one quoted across a boundary ("x9!\n\n↳" before
+// a steer, "]4f9a!" after a marker) can never cut the chat's structure: the steer, or the marker,
+// then showed as raw text in the user's message.
+const PROTECTED = /(\n\n↳ Steer \([^)]+ UTC\): |\[hidden: [^\]\n]{1,40}\])/;
 
 const MAX_LIST_ITEMS = 30;
 const MAX_LIST_ITEM = 200;
@@ -92,9 +97,13 @@ function chatDescriptionRedacted(description, secrets, label) {
         ? [...new Set([secret, secret.replace(/\r\n/g, "\n"), secret.replace(/\r?\n/g, "\r\n")])]
         : [secret];
       for (const form of forms) {
-        const pieces = text.split(form);
-        hidden += pieces.length - 1;
-        text = pieces.join(marker);
+        // split with a capturing group keeps the protected spans at odd indexes.
+        text = text.split(PROTECTED).map((span, at) => {
+          if (at % 2 === 1) return span;
+          const pieces = span.split(form);
+          hidden += pieces.length - 1;
+          return pieces.join(marker);
+        }).join("");
       }
     }
     return text;

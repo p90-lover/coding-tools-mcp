@@ -114,6 +114,31 @@ function goalCheckPrompt(objective, transcript, { judge = false, ended = "", pre
 }
 
 /**
+ * The verdict's JSON object in the evaluator's text. Usually the text is that object alone, or the
+ * object in a code fence; a model that also writes braces in prose around it ("the {auth} tests")
+ * made the first "{" to the last "}" invalid JSON, and a clear verdict failed the check as if the
+ * evaluator had given none. Then the object is the first span between a "{" and a "}" that parses to
+ * one with a boolean `met` (a bounded search: the answer is one short paragraph).
+ */
+function verdictObject(raw, start, end) {
+  let firstError;
+  try { return JSON.parse(raw.slice(start, end + 1)); } catch (error) { firstError = error; }
+  const opens = [], closes = [];
+  for (let at = raw.indexOf("{"); at >= 0 && opens.length < 32; at = raw.indexOf("{", at + 1)) opens.push(at);
+  for (let at = raw.lastIndexOf("}"); at >= 0 && closes.length < 32; at = at > 0 ? raw.lastIndexOf("}", at - 1) : -1) closes.push(at);
+  for (const open of opens) {
+    for (const close of closes) {
+      if (close <= open) break;
+      try {
+        const parsed = JSON.parse(raw.slice(open, close + 1));
+        if (typeof parsed?.met === "boolean") return parsed;
+      } catch { /* not this span */ }
+    }
+  }
+  throw firstError;
+}
+
+/**
  * The evaluator's answer as { met, stop, progress, reason }. An unmet goal can go on only with an
  * explicit progress verdict; an incomplete check follows the evaluator failure path.
  */
@@ -121,7 +146,7 @@ function parseGoalCheck(text) {
   const raw = String(text ?? "");
   const start = raw.indexOf("{"), end = raw.lastIndexOf("}");
   if (start < 0 || end <= start) throw new Error("The goal evaluator gave no verdict");
-  const parsed = JSON.parse(raw.slice(start, end + 1));
+  const parsed = verdictObject(raw, start, end);
   if (typeof parsed?.met !== "boolean") throw new Error("The goal evaluator gave no verdict");
   const reason = String(parsed.reason ?? "").replace(/\s+/g, " ").trim().slice(0, REASON_LIMIT);
   const stop = !parsed.met && parsed.stop === true;
@@ -141,7 +166,8 @@ function closingAnswers(mission) {
   const closing = nodes.filter(node => !parents.has(node.id));
   const planner = nodes.find(node => node.role === "planner");
   // An orchestrator that answered alone ("solo") closes the mission itself.
-  if (mission?.solo && planner) closing.push(planner);
+  // Not twice when it is already closing (a solo mission that holds the orchestrator alone).
+  if (mission?.solo && planner && !closing.includes(planner)) closing.push(planner);
   return closing.map(node => node.receipt?.answer).filter(answer => typeof answer === "string" && answer.trim());
 }
 
@@ -234,8 +260,10 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
     update(workspaceId, taskId, change) {
       const goal = goals[key(workspaceId, taskId)];
       if (!goal) return null;
+      // Checked before the goal changes: assigned first, a refused status stayed in memory and the
+      // next change saved it, so the goal read back as neither active nor ended.
+      if (!STATUSES.has(change && Object.hasOwn(change, "status") ? change.status : goal.status)) throw new Error("Unknown goal status");
       Object.assign(goal, change, { updatedAt: now() });
-      if (!STATUSES.has(goal.status)) throw new Error("Unknown goal status");
       persist();
       return goal;
     },

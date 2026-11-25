@@ -90,13 +90,20 @@ function chatDescriptionWithSteer(description, messages, steer) {
  * writeFileSync chat-edits.json < clearFresh < startChatSend, 2026-11-12). Each change returns its
  * save, so a delete that must not stand unsaved waits for it and fails with it; saves land in order.
  */
-function createChatEditStore({ file = null, logger = null } = {}) {
+function createChatEditStore({ file = null, logger = null, now = Date.now } = {}) {
   let chats = {};
   if (file) {
+    let text = null;
+    try { text = fs.readFileSync(file, "utf8"); } catch { /* Nothing deleted yet. */ }
     try {
-      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+      const saved = text === null ? null : JSON.parse(text);
       if (saved && typeof saved === "object" && !Array.isArray(saved)) chats = saved;
-    } catch { /* Nothing deleted yet. */ }
+    } catch {
+      // A torn file read as "nothing deleted", and the next save wrote over it: every deleted message
+      // came back into its chat, and a resized session's window was forgotten. It is kept aside.
+      logger?.warn?.("chat_edits.unreadable", {});
+      try { fs.renameSync(file, `${file}.unreadable-${now()}`); } catch { /* the next save replaces it */ }
+    }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
   let lastSave = Promise.resolve();

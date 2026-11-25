@@ -59,10 +59,16 @@ function loopAction(loop, chat, at = Date.now()) {
 function createLoopStore({ file = null, now = Date.now } = {}) {
   let loops = {};
   if (file) {
+    let text = null;
+    try { text = fs.readFileSync(file, "utf8"); } catch { /* No loops saved yet. */ }
     try {
-      const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+      const saved = text === null ? null : JSON.parse(text);
       if (saved && typeof saved === "object" && !Array.isArray(saved)) loops = saved;
-    } catch { /* No loops saved yet. */ }
+    } catch {
+      // A file a crash tore read as empty, and the next save wrote over it: every one was gone after
+      // the restart. It is kept beside the new file instead, as chat-goals.cjs keeps a torn goals file.
+      try { fs.renameSync(file, `${file}.unreadable-${now()}`); } catch { /* the next save replaces it */ }
+    }
   }
   const key = (workspaceId, taskId) => `${workspaceId}:${taskId}`;
   // Saved off the main thread, as wake-ups, schedules and goals are: a loop's every round updates it,

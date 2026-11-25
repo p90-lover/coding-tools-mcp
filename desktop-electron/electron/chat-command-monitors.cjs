@@ -136,11 +136,19 @@ function createCommandMonitors({ now = Date.now, setTimer = setTimeout, clearTim
       const read = await record.read(record.offset, record.controller.signal);
       if (!running(record)) return;
       record.failures = 0;
-      if (read.gap) record.lines.push("[earlier output expired before it was read]");
+      if (read.gap) {
+        // The output before this read is gone: an unfinished line it held ends here, never joined to
+        // text that came after the missing part as if it were one line.
+        if (record.partial) { record.lines.push(record.partial); record.partial = ""; }
+        record.lines.push("[earlier output expired before it was read]");
+      }
       if (read.content) {
         const text = record.partial + read.content;
         const parts = text.split(/\r?\n/);
-        record.partial = parts.pop() ?? "";
+        // An unfinished line is kept only as far as an event shows (MAX_LINE, cut there anyway): a
+        // command that prints without newlines (a progress bar redrawn with \r) grew it with every
+        // read, for as long as the monitor ran.
+        record.partial = (parts.pop() ?? "").slice(0, MAX_LINE + 1);
         record.lines.push(...parts.filter(line => line.trim()));
       }
       if (Number.isSafeInteger(read.nextOffset) && read.nextOffset >= record.offset) record.offset = read.nextOffset;
@@ -175,7 +183,9 @@ function createCommandMonitors({ now = Date.now, setTimer = setTimeout, clearTim
     record.ticket = await prepare(record);
     if (typeof record.ticket?.emit !== "function" || typeof record.ticket?.end !== "function" || typeof record.ticket?.cancel !== "function") throw new Error("Monitor delivery is unavailable");
     records.set(record.id, record);
-    record.deadlineTimer = setTimer(() => end(record, { kind: "expired", note: `The monitor's ${Math.round(timeoutMs / 60_000)}-minute deadline passed and its command was stopped. Re-arm it with monitor if you still need the watch.` }), timeoutMs);
+    // Under a minute it is said in seconds: "0-minute deadline" for a 20-second monitor.
+    const span = timeoutMs < 60_000 ? `${Math.round(timeoutMs / 1000)}-second` : `${Math.round(timeoutMs / 60_000)}-minute`;
+    record.deadlineTimer = setTimer(() => end(record, { kind: "expired", note: `The monitor's ${span} deadline passed and its command was stopped. Re-arm it with monitor if you still need the watch.` }), timeoutMs);
     record.deadlineTimer?.unref?.();
     arm(record, 1);
     return publicRecord(record);

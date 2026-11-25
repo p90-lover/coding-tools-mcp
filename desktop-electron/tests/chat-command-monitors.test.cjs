@@ -235,3 +235,43 @@ test("push_notification reaches the notifier, and sleep returns the elapsed time
     assert.equal((await quiet.rpc("tools/list")).tools.some(tool => tool.name === "push_notification"), false, "no notifier, no tool");
   } finally { await quiet.close(); }
 });
+
+test("a command that prints without newlines sends its line cut to one event, read after read", async () => {
+  const clock = fakeClock();
+  const monitors = createCommandMonitors(clock);
+  const command = fakeCommand();
+  const { seen, value } = ticket();
+  await monitors.start({ owner: "chat", description: "progress", timeoutMs: 600_000, commandId: "cmd-1",
+    active: () => true, read: command.read, prepare: async () => value });
+  // A progress bar redrawn with \r: one line that never ends, read over many polls.
+  for (let round = 0; round < 50; round++) {
+    command.push(`\r${String(round).padStart(3, "0")} ${"#".repeat(400)}`);
+    await clock.advance(1100);
+  }
+  assert.deepEqual(seen.events, [], "an unfinished line is no event yet");
+  command.push(" done\nnext line\n");
+  await clock.advance(1100);
+  assert.equal(seen.events.length, 2);
+  assert.equal(seen.events[0], `${"\r000 " + "#".repeat(400) + "\r001 " + "#".repeat(400)}`.slice(0, 500) + "…");
+  assert.equal(seen.events[1], "next line");
+  monitors.close();
+});
+
+test("expired output ends an unfinished line instead of joining it to later text; a short deadline is said in seconds", async () => {
+  const clock = fakeClock();
+  const monitors = createCommandMonitors(clock);
+  const { seen, value } = ticket();
+  const reads = [
+    { content: "step 1 ok\nstep 2 sta", nextOffset: 20, gap: false, status: "running" },
+    // The ring buffer dropped the rest of "step 2 ..." and more before this read.
+    { content: "rted\nstep 9 ok\n", nextOffset: 900, gap: true, status: "running" },
+  ];
+  await monitors.start({ owner: "chat", description: "log", timeoutMs: 20_000, commandId: "cmd-1", active: () => true,
+    read: async () => reads.shift() ?? { content: "", nextOffset: 900, gap: false, status: "running" }, prepare: async () => value });
+  await clock.advance(1500);
+  assert.deepEqual(seen.events, ["step 1 ok", "step 2 sta", "[earlier output expired before it was read]", "rted", "step 9 ok"]);
+  await clock.advance(20_000);
+  assert.equal(seen.ended?.kind, "expired");
+  assert.match(seen.ended.note, /20-second deadline/);
+  monitors.close();
+});

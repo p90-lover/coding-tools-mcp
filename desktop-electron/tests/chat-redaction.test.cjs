@@ -102,3 +102,24 @@ test("the chat draws each hidden mark as its label", () => {
     ["use ", { hidden: "API key" }, " and ", { hidden: "password" }, "."]);
   assert.deepEqual([...chat.hiddenSecretParts("nothing hidden")], ["nothing hidden"]);
 });
+
+test("a secret quoted across a steer header or an earlier marker never cuts the chat's structure", () => {
+  // Quoted with the start of the steer line after it: the steer must stay a steer.
+  const steered = "token x9!k2Lp\n\n↳ Steer (2026-10-10 09:05 UTC): keep going";
+  const cut = chatDescriptionRedacted(steered, ["x9!k2Lp\n\n↳"], "token");
+  assert.equal(cut.description, steered);
+  assert.equal(cut.hidden, 0);
+  assert.deepEqual(said(cut.description)[0].steers.map(steer => steer.text), ["keep going"]);
+  // The secret itself, quoted alone, is still hidden, and the steer stays.
+  const whole = chatDescriptionRedacted(steered, ["x9!k2Lp"], "token");
+  assert.equal(whole.description, "token [hidden: token]\n\n↳ Steer (2026-10-10 09:05 UTC): keep going");
+  assert.equal(whole.hidden, 1);
+  // Quoted with the end of a marker before it: the marker must stay whole.
+  const marked = "first [hidden: API key]4f9a!Qz then 4f9a!Qz";
+  const after = chatDescriptionRedacted(marked, ["]4f9a!Qz"], "token");
+  assert.equal(after.description, marked);
+  assert.equal(after.hidden, 0);
+  const plain = chatDescriptionRedacted(marked, ["4f9a!Qz"], "token");
+  assert.equal(plain.description, "first [hidden: API key][hidden: token] then [hidden: token]");
+  assert.equal(plain.hidden, 2);
+});
