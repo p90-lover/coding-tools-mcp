@@ -26,7 +26,7 @@ test("with no plugin at the configured path nothing starts and every call answer
   let workers = 0;
   const host = createAutoReviewHost({ pluginPath: path.join(os.tmpdir(), "no-such-auto-review-plugin"), WorkerImpl: class { constructor() { workers++; } } });
   try {
-    assert.equal(host.available(), false);
+    assert.equal(await host.available(), false);
     assert.equal(await host.review({ command: "git status" }), null);
     assert.equal(await host.answerQuestion({ question: "Continue?" }), null);
     assert.equal(await host.getStats(), null);
@@ -60,7 +60,7 @@ test("the plugin runs in a worker thread: review, outcome and override reach it,
   const seen = [];
   const off = host.onStats((stats) => seen.push(stats));
   try {
-    assert.equal(host.available(), true);
+    assert.equal(await host.available(), true);
     const verdict = await host.review({ command: "npm test", cwd: root, appId: "coding-tools" });
     assert.equal(verdict.verdict, "approve");
     assert.equal(verdict.decisionId, "c1");
@@ -119,4 +119,37 @@ test("the real plugin, when installed, approves read-only commands and declines 
     const stats = await host.getStats();
     assert.equal(stats.commands.today.total, 2);
   } finally { await host.close(); }
+});
+
+test("the host never reads the disk synchronously: available() answers a promise and the worker's source is read once", { timeout: 20_000 }, async () => {
+  const root = fakePlugin(`review() { return null; }`);
+  const realStatSync = fs.statSync, realReadFileSync = fs.readFileSync;
+  const sync = [];
+  fs.statSync = (...args) => { sync.push(["statSync", String(args[0])]); return realStatSync(...args); };
+  fs.readFileSync = (...args) => { sync.push(["readFileSync", String(args[0])]); return realReadFileSync(...args); };
+  const reads = [];
+  class FakeWorker {
+    constructor(source) { reads.push(source.length); this.handlers = {}; setTimeout(() => this.handlers.message?.({ type: "ready", stats: null }), 0); }
+    on(event, handler) { this.handlers[event] = handler; return this; }
+    unref() {}
+    postMessage(message) {
+      if (message?.type === "close") setTimeout(() => this.handlers.message?.({ type: "closed" }), 0);
+      else if (message?.id) queueMicrotask(() => this.handlers.message?.({ type: "reply", id: message.id, result: { ok: true } }));
+    }
+    terminate() {}
+  }
+  const host = createAutoReviewHost({ pluginPath: root, WorkerImpl: FakeWorker });
+  try {
+    const answer = host.available();
+    assert.ok(answer instanceof Promise, "available() is asynchronous");
+    assert.equal(await answer, true);
+    assert.deepEqual(await host.review({ command: "git status" }), { ok: true });
+    assert.deepEqual(await host.review({ command: "git diff" }), { ok: true });
+    assert.equal(reads.length, 1, "one worker for two calls");
+    const ours = sync.filter(([, file]) => file.includes("auto-review"));
+    assert.deepEqual(ours, [], "no synchronous stat or read on Electron main");
+  } finally {
+    fs.statSync = realStatSync; fs.readFileSync = realReadFileSync;
+    await host.close();
+  }
 });

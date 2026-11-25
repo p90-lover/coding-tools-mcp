@@ -46,8 +46,14 @@ function createAutoReviewHost({
   const waiting = new Map(); // id -> { resolve, timer }
   const listeners = new Set();
 
-  const present = () => {
-    try { return fs.statSync(entry).isFile(); } catch { return false; }
+  // Both asynchronous: this module runs on Electron main, where a synchronous stat or read holds
+  // every window (tests/main-sync-calls.test.cjs).
+  const present = () => fs.promises.stat(entry).then((stat) => stat.isFile(), () => false);
+  let workerSource = null; // Promise<string>, read once
+  const readWorkerSource = () => {
+    workerSource ??= fs.promises.readFile(path.join(__dirname, "auto-review-worker.cjs"), "utf8")
+      .catch((error) => { workerSource = null; throw error; });
+    return workerSource;
   };
   function settleAll() {
     for (const [id, call] of waiting) { clearTimeout(call.timer); call.resolve(null); waiting.delete(id); }
@@ -68,14 +74,16 @@ function createAutoReviewHost({
     if (was) void Promise.resolve().then(() => was.terminate?.()).catch(() => undefined);
   }
   function start() {
-    if (closed || !present() || now() - failedAt < restartDelayMs) return Promise.resolve(false);
+    if (closed || now() - failedAt < restartDelayMs) return Promise.resolve(false);
     if (ready) return ready;
-    ready = new Promise((resolve) => {
+    ready = new Promise((resolve) => void (async () => {
       let own;
       try {
+        if (!await present() || closed) { ready = null; resolve(false); return; }
         // Started from its source text, as the app's other workers are (off-thread-run.cjs): a
         // worker cannot load a script file from inside the packaged app.asar.
-        const source = fs.readFileSync(path.join(__dirname, "auto-review-worker.cjs"), "utf8");
+        const source = await readWorkerSource();
+        if (closed) { ready = null; resolve(false); return; }
         own = new WorkerImpl(source, { eval: true, workerData: { entry, dataDir, statsDebounceMs } });
       } catch (error) {
         fail(error?.message || error);
@@ -106,7 +114,7 @@ function createAutoReviewHost({
       });
       own.on("error", (error) => { if (own === worker) { fail(error?.message || error); resolve(false); } });
       own.on("exit", (code) => { if (own === worker) { fail(`the auto-review worker exited (${code})`); resolve(false); } });
-    });
+    })());
     return ready;
   }
   /** One call to the plugin; null when it is absent, failed or slower than callTimeoutMs. */
@@ -132,8 +140,8 @@ function createAutoReviewHost({
   }
   return {
     pluginPath,
-    /** Whether the plugin is installed where it is looked for (not whether it loaded yet). */
-    available: () => !closed && present(),
+    /** Resolves whether the plugin is installed where it is looked for (not whether it loaded yet). */
+    available: async () => !closed && await present(),
     call,
     review: (input) => call("review", input),
     answerQuestion: (input) => call("answerQuestion", input),

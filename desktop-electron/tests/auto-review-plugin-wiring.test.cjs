@@ -41,7 +41,7 @@ function fakePlugin({ verdict = () => null, question = () => null, available = t
 }
 
 /** A Claude Code chat; `reviewer` "auto_review" is Approve for me, "user" is Ask for approval. */
-function fixture({ plugin = fakePlugin(), reviewer = "auto_review", command = "python tools/migrate.py --apply", tool = "Bash", nativeGuardianReview } = {}) {
+function fixture({ plugin = fakePlugin(), reviewer = "auto_review", command = "python tools/migrate.py --apply", tool = "Bash", nativeGuardianReview, meteredReviews = false } = {}) {
   const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/test-model",
     permission_profile: ":ao-default", native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: reviewer };
   const node = { id: "one", role: "planner", state: "running", parents: [], route, receipt: { thread_id: "session", request_key: "key" } };
@@ -75,7 +75,10 @@ function fixture({ plugin = fakePlugin(), reviewer = "auto_review", command = "p
       },
     },
   });
+  // Since 0.8.165 Guardian runs only with Settings › Chat › "Allow quota-based reviews" on.
+  const judges = meteredReviews ? workflow.call("chat_model_judges", { meteredReviews: true }) : Promise.resolve();
   const observe = async () => {
+    await judges;
     await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" });
     for (let tick = 0; tick < 40; tick++) await new Promise(resolve => setImmediate(resolve));
     return (await workflow.call("observe", { workspaceId: "ws", runId: "run", nodeId: "one" })).pending_approvals;
@@ -119,7 +122,7 @@ test("what the plugin cannot settle goes on as before: ask_user, simplify, unrea
     ["unreadable", { verdict: "decline", settlement: "declined_as_unreadable", layer: "unreadable", reason: "contains control characters" }],
     ["unavailable", null],
   ]) await t.test(name, async () => {
-    const state = fixture({ plugin: fakePlugin({ verdict: () => verdict }) });
+    const state = fixture({ plugin: fakePlugin({ verdict: () => verdict }), meteredReviews: true });
     try {
       await state.observe();
       assert.equal(state.plugin.calls.review.length, 1);
@@ -127,6 +130,17 @@ test("what the plugin cannot settle goes on as before: ask_user, simplify, unrea
       assert.deepEqual(state.resolved, [], "Guardian was unsure, so it waits for the person as before");
     } finally { state.workflow.dispose(); }
   });
+});
+
+test("with quota-based reviews off, what the plugin cannot settle waits for the person and Guardian is not asked", async () => {
+  const state = fixture({ plugin: fakePlugin({ verdict: () => ({ verdict: "ask_user", settlement: "passed_to_user", layer: "default", reason: "new command" }) }) });
+  try {
+    const pending = await state.observe();
+    assert.equal(state.plugin.calls.review.length, 1);
+    assert.equal(state.guardian.length, 0, "Guardian stays off without the person's quota-based reviews setting");
+    assert.deepEqual(state.resolved, []);
+    assert.equal(pending?.length, 1, "the card stays for the person");
+  } finally { state.workflow.dispose(); }
 });
 
 test("a blocklist match declines even when the plugin would otherwise hand it to the person", async () => {
@@ -177,7 +191,7 @@ test("only Approve for me cards, only the agent's own shell tool", async (t) => 
 
 test("Settings › Chat › Local auto-review: on by default, kept off when the person turns it off, with the plugin's stats", async () => {
   const plugin = fakePlugin({ verdict: () => approve });
-  const state = fixture({ plugin });
+  const state = fixture({ plugin, meteredReviews: true });
   try {
     const first = await state.workflow.call("chat_auto_review", {});
     assert.equal(first.ok, true);

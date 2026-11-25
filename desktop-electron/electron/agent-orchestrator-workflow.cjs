@@ -6531,7 +6531,7 @@ ${pending.command ? `Command: ${pending.command}` : pending.path ? `Path: ${pend
       await chatPreferences.set({ autoReview: enabled });
       if (changed) logger?.info?.("ao.auto_review_plugin_switched", { enabled });
     }
-    const available = Boolean(autoReview?.available?.());
+    const available = Boolean(await Promise.resolve(autoReview?.available?.()).catch(() => false));
     const stats = available ? await Promise.resolve(autoReview.getStats?.()).catch(() => null) : null;
     return { ok: true, enabled: chatPreferences.get().autoReview, available, stats: stats ?? null };
   }
