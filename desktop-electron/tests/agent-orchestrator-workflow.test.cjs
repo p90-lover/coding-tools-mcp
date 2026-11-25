@@ -3729,7 +3729,10 @@ test("external Codex-style permission tuples map to the real AO approval mode at
   // every agent's bypass.
   for (const agent of ["codex", "claude-code", "opencode", "agy", "pi", "unreal-agent", "cline"]) for (const [policy, reviewer, expected] of [["on-request","user","accept-edits"],["on-request","auto_review",agent === "codex" ? "auto" : "accept-edits"],["never","user","bypass-permissions"]]) {
     // An agent that can't ask the chat runs in Full access only (the next test refuses the rest).
-    if (policy === "on-request" && !["codex", "claude-code"].includes(agent)) continue;
+    // opencode and Pi ask since AO's fix/harness-asks: Approve for me launches them, like Claude
+    // Code and agy, in accept edits with this app's reviewer (autoReview), never AO's auto, which
+    // would allow every request unreviewed.
+    if (policy === "on-request" && !["codex", "claude-code", "agy", "opencode", "pi"].includes(agent)) continue;
     let launched;
     const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "gpt-6-luna",
       permission_profile: ":ao-default", native_permission_profile: policy === "never" ? ":danger-full-access" : ":workspace", approval_policy: policy, approvals_reviewer: reviewer };
@@ -3741,7 +3744,8 @@ test("external Codex-style permission tuples map to the real AO approval mode at
       confirm: async () => true,
     });
     await workflow.call("advance", {workspaceId:"ws",runId:"run",executable:"C:/codex.exe"});
-    assert.equal(launched.approvalMode, expected);
+    assert.equal(launched.approvalMode, expected, `${agent} ${policy} ${reviewer}`);
+    assert.equal(launched.autoReview === true, reviewer === "auto_review", `${agent} ${policy} ${reviewer} reviewer`);
   }
 });
 
@@ -4343,11 +4347,12 @@ test("permission capabilities use installed AO adapter modes without fabricating
     aoHarness: { catalog: async () => [
       { id: "claude-code", installed: true }, { id: "codex", installed: true }, { id: "opencode", installed: true },
       { id: "agy", installed: true }, { id: "pi", installed: true, chat: true },
+      { id: "unreal-agent", installed: true },
     ], spawn: async (...args) => { launches.push(args); } },
   });
   // Every installed AO harness offers the menu, Full access at least: a chat moved onto Pi or
   // Antigravity had nothing it could pick before (2026-11-17), Full access included.
-  for (const harness_id of ["ao:claude-code", "ao:opencode", "ao:agy", "ao:pi"]) {
+  for (const harness_id of ["ao:claude-code", "ao:opencode", "ao:agy", "ao:pi", "ao:unreal-agent"]) {
     const capability = (await workflow.call("permission_profiles", { workspaceId: "ws-1", route: { harness_id } })).capability;
     assert.equal(capability.supported, true, harness_id);
     assert.equal(capability.source, "ao-adapter");
@@ -4355,10 +4360,10 @@ test("permission capabilities use installed AO adapter modes without fabricating
     assert.deepEqual(capability.profiles.map(profile => profile.id), [":workspace", ":danger-full-access"]);
     assert.deepEqual(capability.approval_policies, ["on-request", "never"]);
     assert.deepEqual(capability.approvals_reviewers, ["user", "auto_review"]);
-    // Pi and opencode (on its own allow-all default) never ask, so Ask and Approve for me are
-    // excluded there with that reason; Full access remains. agy asks the chat as `agy acp` (since
-    // 2026-11-23), so it offers all three, like Claude Code.
-    const fullAccessOnly = harness_id !== "ao:claude-code" && harness_id !== "ao:agy";
+    // Unreal Agent never asks, so Ask and Approve for me are excluded there with that reason; Full
+    // access remains. agy asks the chat as `agy acp` (since 2026-11-23), and opencode and Pi since
+    // AO's fix/harness-asks (2026-11-25), so they offer all three, like Claude Code.
+    const fullAccessOnly = harness_id === "ao:unreal-agent";
     assert.deepEqual((capability.excluded_modes ?? []).map(mode => [mode.profile, mode.policy, mode.reviewer]),
       fullAccessOnly ? [[":workspace", "on-request", "user"], [":workspace", "on-request", "auto_review"]] : [], harness_id);
     if (fullAccessOnly) for (const mode of capability.excluded_modes) assert.match(mode.reason, /Choose Full access, the only mode it runs in\.$/);
@@ -4428,11 +4433,12 @@ test("external dispatch refuses permission tuples the adapter cannot honor", asy
     assert.equal(launched, false);
   }
   // Ask or Approve for me on an agent that can't ask the chat is refused with its reason, never
-  // launched to wait at an approval nobody sees (Cline) or to run unchecked (Pi, Unreal Agent).
-  // agy left this list on 2026-11-23: as a chat (`agy acp`) it asks the chat before each tool.
-  for (const [agent, why] of [["pi", /^Pi runs its tools without asking/],
+  // launched to wait at an approval nobody sees (Cline) or to run unchecked (Unreal Agent).
+  // agy left this list on 2026-11-23: as a chat (`agy acp`) it asks the chat before each tool;
+  // opencode and Pi left it on 2026-11-25 (AO's fix/harness-asks).
+  for (const [agent, why] of [
     ["unreal-agent", /^Unreal Agent has no approval channel/], ["cline", /^Cline asks for approval in its own terminal/],
-    ["opencode", /^opencode allows every tool by its own default/], ["kimi", /^kimi has no way to ask the chat/]]) {
+    ["kimi", /^kimi has no way to ask the chat/]]) {
     for (const reviewer of ["user", "auto_review"]) {
       let launched = false;
       const route = { harness_id: `ao:${agent}`, provider_id: "agent-orchestrator", account_id: "ao-local", model: "default", permission_profile: ":ao-default",
@@ -15489,4 +15495,53 @@ test("a rewind in a compacted chat hides from the reply the chat shows under tha
   await assert.rejects(workflow.call("chat_send", { workspaceId: "ws-1", taskId: "task-1", message: "second ask",
     rewind: { index: 1, description } }), /still synchronizing/);
   assert.equal(short.tasks[0].description, description);
+});
+
+test("startRun and resumeInterrupted settle an expired-grant running turn via observe and retry on a fresh grant", async () => {
+  const oldSha = "a".repeat(64), currentSha = "b".repeat(64);
+  const route = { harness_id: "ao:claude-code", provider_id: "agent-orchestrator", account_id: "ao-local", model: "cpa/gpt-6.2-sol", permission_profile: ":ao-default" };
+  const run = {
+    id: "r-exp", workspace_id: "ws-1", project_id: "task-1", revision: 2, cancelled: false, execution_mode: "single",
+    grant: { executable_sha256: oldSha, max_turns: 1, turns_started: 1, granted_at_ms: Date.now() - 7200_000, expires_at_ms: Date.now() - 3600_000 },
+    nodes: [{ id: "one", role: "planner", parents: [], state: "running", route, history: [],
+      receipt: { thread_id: "sess-exp", request_key: "k1", started_at_ms: Date.now() - 3700_000 } }],
+  };
+  const calls = [];
+  const workflow = createAgentOrchestratorWorkflow({
+    requestHeadless: async (endpoint, body) => {
+      calls.push(endpoint);
+      if (endpoint === "/api/v1/ao/read") return { ok: true, runs: [structuredClone(run)], worker_capacity: { "r-exp": 1 } };
+      if (endpoint === "/api/v1/ao/external/terminal") {
+        run.nodes[0].state = "held";
+        run.nodes[0].receipt = { ...run.nodes[0].receipt, error: "The agent's process ended before it finished (the app restarted); retry this card." };
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/control") {
+        assert.equal(body.action, "retry");
+        run.nodes[0].history.push(run.nodes[0].receipt);
+        run.nodes[0].state = "pending";
+        run.nodes[0].receipt = null;
+        return { ok: true, run: structuredClone(run) };
+      }
+      if (endpoint === "/api/v1/ao/grant") {
+        run.grant = { executable_sha256: currentSha, max_turns: 1, turns_started: 0, expires_at_ms: Date.now() + 3600_000 };
+        return { ok: true, run: structuredClone(run), grant: run.grant };
+      }
+      throw new Error(`stop at ${endpoint}`);
+    },
+    aoHarness: {
+      observe: async () => ({ status: "exited", exited: true, turnState: "interrupted", error: "The agent's process ended before it finished (the app restarted); retry this card." }),
+    },
+    findCodexExecutable: () => process.execPath,
+    resolveHarness: async () => ({ expected_sha256: currentSha, executable: process.execPath }),
+    confirm: async () => true,
+  });
+  try {
+    await workflow.call("chat_auto_retry", { enabled: true });
+    const started = await workflow.call("start_run", { workspaceId: "ws-1", runId: "r-exp" });
+    assert.equal(started.started, true);
+    assert.ok(calls.includes("/api/v1/ao/external/terminal"), "running turn with expired/mismatched grant is observed first");
+    assert.ok(calls.includes("/api/v1/ao/control"), "settled held turn is reset for retry");
+    assert.ok(calls.includes("/api/v1/ao/grant"), "a fresh grant for the current build is requested");
+  } finally { workflow.dispose(); }
 });

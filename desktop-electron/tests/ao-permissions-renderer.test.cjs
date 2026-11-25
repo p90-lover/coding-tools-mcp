@@ -749,7 +749,8 @@ test("only a chat on Ask for approval with an agent that asks the app is offered
   assert.equal(asksForApproval({ ...ask, approvals_reviewer: "auto_review" }), false, "Approve for me is reviewed already");
   assert.equal(asksForApproval({ ...ask, approval_policy: "never" }), false, "Full access asks nobody");
   assert.equal(asksForApproval({ ...ask, approval_policy: undefined }), false, "a legacy route runs on the agent's own permissions");
-  assert.equal(asksForApproval({ ...ask, harness_id: "ao:opencode" }), false, "an agent that can't ask the app runs in Full access only");
+  assert.equal(asksForApproval({ ...ask, harness_id: "ao:unreal-agent" }), false, "an agent that can't ask the app runs in Full access only");
+  for (const harness_id of ["ao:opencode", "ao:pi"]) assert.equal(asksForApproval({ ...ask, harness_id }), true, `${harness_id} asks the app since 2026-11-25`);
   assert.equal(asksForApproval(undefined), false);
   const approveForMe = { profile: ":workspace", policy: "on-request", reviewer: "auto_review" };
   const capability = { supported: true, profiles: [{ id: ":workspace", allowed: true }, { id: ":danger-full-access", allowed: true }],
@@ -773,7 +774,7 @@ test("a new chat starts in Approve for me whatever mode the last chat ran in, on
     { native_permission_profile: ":workspace", approval_policy: "on-request", approvals_reviewer: "user" },
     { native_permission_profile: ":danger-full-access", approval_policy: "never", approvals_reviewer: "user" },
   ]) {
-    for (const harness of ["ao:claude-code", "ao:codex", "ao:agy"]) {
+    for (const harness of ["ao:claude-code", "ao:codex", "ao:agy", "ao:opencode", "ao:pi"]) {
       assert.deepEqual(plain(startsApproveForMe({ ...last, ...mode, harness_id: harness })), { ...last, harness_id: harness, ...approveForMe }, harness + " " + mode.approval_policy);
     }
   }
