@@ -37,20 +37,56 @@ const TRANSCRIPT_LIMIT = 24_000;
 const EVIDENCE_LIMIT = 3_000;
 const REASON_LIMIT = 1_500;
 /**
+ * What every goal round tells the agent besides the condition: where its turn ends. Sent as the
+ * condition alone, an agent stopped partway as it would after any request (a summary of the first
+ * fixes, "want me to go on?", a list of next steps), and called the goal done on an easier task
+ * than the one set: a unit test for "working live", one account of several (seen in the saved
+ * goals, 2026-11-24). The chat hides this block under the person's message (ao-chat.ts
+ * GOAL_RULES_TAIL), so it starts with a line the person never types.
+ */
+const GOAL_RULES_HEAD = "Goal rules (sent by Coding Tools with every round of this goal):";
+const GOAL_RULES = [
+  GOAL_RULES_HEAD,
+  "- This chat keeps going until the condition holds: after each turn a separate evaluator checks it against what you report.",
+  "- Keep working in this turn until it holds and you have checked it yourself. Do not stop to summarise, to ask whether to go on, or to list next steps: do them.",
+  "- Stay inside the condition as written. Do not swap in an easier or different task, and do not call it done on a plan, a partial fix or an unchecked change.",
+  "- If only the person can unblock a part (a sign-in, an approval, a decision), say exactly what is needed and keep working on every other part.",
+  "- End the turn with what you did, how you checked it (the command or check and its result), and what is still left, if anything.",
+].join("\n");
+// Later rounds carry the same rules in half the bytes: each round's message stays in the chat's
+// record, and a goal can run hundreds of rounds (1,339 in one saved goal). Still whole on its own,
+// for an agent that compacted or restarted since the first round.
+const GOAL_RULES_AGAIN = [
+  GOAL_RULES_HEAD,
+  "- Keep working in this turn until the condition holds and you have checked it; do not stop to summarise, ask whether to go on, or list next steps.",
+  "- Stay inside the condition as written; if only the person can unblock a part, say exactly what and keep working on the rest.",
+  "- End with what you did, how you checked it and the result, and what is left.",
+].join("\n");
+const GOAL_RULES_SEPARATOR = "\n\n";
+/** A round's message without its goal rules: what the person (or the evaluator) reads. */
+function withoutGoalRules(message) {
+  const text = String(message ?? "");
+  const at = text.lastIndexOf(GOAL_RULES_SEPARATOR + GOAL_RULES_HEAD + "\n");
+  return at < 0 ? text : text.slice(0, at);
+}
+/**
  * The message a goal round sends. The first round sends the condition itself, as the person set
  * it; every later one is Claude Code's stop-hook feedback: the condition in brackets and the
- * evaluator's reason it is not met yet.
+ * evaluator's reason it is not met yet. Both end with the goal's rules (GOAL_RULES).
  */
 function goalMessage(objective, round, reason = "") {
-  if (round <= 1) return utf8Head(objective, GOAL_MESSAGE_BYTES);
-  const why = String(reason || "").trim() || "The condition is not met yet; continue from where the last round left off.";
+  const rules = GOAL_RULES_SEPARATOR + (round <= 1 ? GOAL_RULES : GOAL_RULES_AGAIN);
   // A round's message is a chat message: within the chat's byte budget, or the round could not be
-  // sent and the goal stalled. The evaluator's reason gives way first, then the condition's end.
+  // sent and the goal stalled. The rules always go; the evaluator's reason gives way first, then
+  // the condition's end.
+  const budget = GOAL_MESSAGE_BYTES - utf8Bytes(rules);
+  if (round <= 1) return utf8Head(objective, budget) + rules;
+  const why = String(reason || "").trim() || "The condition is not met yet; continue from where the last round left off.";
   const frame = (goal, said) => `Stop hook feedback:\n[${goal}]: ${said}`;
   const whole = frame(objective, why);
-  if (utf8Bytes(whole) <= GOAL_MESSAGE_BYTES) return whole;
-  const goal = utf8Head(objective, GOAL_MESSAGE_BYTES - utf8Bytes(frame("", "")) - 400);
-  return frame(goal, utf8Head(why, GOAL_MESSAGE_BYTES - utf8Bytes(frame(goal, ""))));
+  if (utf8Bytes(whole) <= budget) return whole + rules;
+  const goal = utf8Head(objective, budget - utf8Bytes(frame("", "")) - 400);
+  return frame(goal, utf8Head(why, budget - utf8Bytes(frame(goal, "")))) + rules;
 }
 
 /**
@@ -59,7 +95,8 @@ function goalMessage(objective, round, reason = "") {
  * closing answers come last, so the cut, which keeps the end, keeps them.
  */
 function roundTranscript(message, answers) {
-  const input = `User:\n${utf8Head(String(message || "").trim() || "(no message)", GOAL_MESSAGE_BYTES)}\n\n`;
+  // The goal's rules are the app's, the same every round, and the evaluator has the condition itself.
+  const input = `User:\n${utf8Head(withoutGoalRules(message).trim() || "(no message)", GOAL_MESSAGE_BYTES)}\n\n`;
   const said = (answers ?? []).map((answer) => (typeof answer === "string" ? { label: "", text: answer } : answer))
     .filter((answer) => typeof answer?.text === "string" && answer.text.trim());
   const evidence = said.length
@@ -95,8 +132,13 @@ function goalCheckPrompt(objective, transcript, { judge = false, ended = "", pre
     "Rules:",
     "- The condition is satisfied only when the transcript shows evidence that it holds now: the work done, checked, and its result reported.",
     "- Claims without evidence, plans, partial progress, waiting on someone or something, or work left for later are not satisfied.",
+    "- Every part of the condition must hold. When it names several things (several fixes, accounts, features or checks), each needs its own evidence; some of them done is not the condition met.",
+    "- Judge the condition as written, not as the agent restated it. A narrower, easier or different task does not satisfy it: a unit test where the condition asks for it working live, a workaround where it asks for a fix, one case where it asks for all.",
+    "- The agent's own report counts as evidence only where it names what was run or checked and the result (a command and its output, test counts, what a live check showed). \"Implemented\", \"should work\", \"ready to test\" or \"likely fixed\" are claims, not evidence.",
+    "- If the turn's final answer lists remaining work, next steps, unverified items or open problems for the condition, or the turn stopped partway (for example to ask whether to go on), it is not satisfied.",
     "- A condition that describes an ongoing aim rather than an end state is not satisfied by progress alone.",
     "- If the transcript does not show enough to decide, it is not satisfied.",
+    "- When not satisfied, the reason is sent to the agent as its next instruction: name the parts still missing, most important first, and what would show that each holds.",
     "- Also say whether this turn made progress. \"progress\" is false when the agent did no new work toward the condition: it only restated the condition, a plan or an earlier report, or it stayed blocked on something it cannot change itself (a refused approval, an account or service that is unavailable, a decision only the user can make) without working around it. New work toward the condition, or clearing a blocker, is progress.",
     ...(previous ? ["- A turn that reports the same blocker or the same missing work as the previous verdict, with nothing new done, made no progress."] : []),
     ...(judge ? [
@@ -106,7 +148,7 @@ function goalCheckPrompt(objective, transcript, { judge = false, ended = "", pre
     "",
     judge
       ? 'Answer with JSON only: {"met": true|false, "progress": true|false, "stop": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met, or why the goal must end when stopping>"}'
-      : 'Answer with JSON only: {"met": true|false, "progress": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing when not met>"}',
+      : 'Answer with JSON only: {"met": true|false, "progress": true|false, "reason": "<one short paragraph: what the transcript shows, and what is still missing and how to show it when not met>"}',
     "",
     "Transcript:",
     transcript,
@@ -257,4 +299,4 @@ function createGoalStore({ file = null, now = Date.now } = {}) {
   };
 }
 
-module.exports = { goalMessage, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, GOAL_MESSAGE_BYTES };
+module.exports = { goalMessage, withoutGoalRules, roundTranscript, goalCheckPrompt, parseGoalCheck, closingAnswers, roundAnswers, cleanObjective, createGoalStore, GOAL_MESSAGE_BYTES, GOAL_RULES, GOAL_RULES_AGAIN };

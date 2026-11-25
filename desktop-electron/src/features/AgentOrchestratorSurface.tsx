@@ -44,7 +44,7 @@ export type AoNode = {
   parents: string[]; x: number; y: number; positioned?: boolean; state: string;
   clause_id?: string; request_key?: string; template_role_id?: string;
   settings?: RoleSettings;
-  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; native_permission_profile?: string; approval_policy?: string; approvals_reviewer?: string; effort?: string; context_window?: number };
+  route: { harness_id: string; provider_id: string; account_id: string; model: string; permission_profile: string; native_permission_profile?: string; approval_policy?: string; approvals_reviewer?: string; effort?: string; context_window?: number; fast_mode?: true };
   receipt?: AoReceipt;
   history?: AoReceipt[];
 };
@@ -250,7 +250,7 @@ function newChatRoute(): AoRoute {
  */
 const LAST_CHAT_ROUTE = "coding-tools:ao:last-chat-route";
 const CHAT_ROUTE_FIELDS = ["harness_id", "provider_id", "account_id", "model", "permission_profile", "native_permission_profile",
-  "approval_policy", "approvals_reviewer", "effort", "context_window"];
+  "approval_policy", "approvals_reviewer", "effort", "context_window", "fast_mode"];
 /**
  * What a chat says about a start that did not get going: a failed start, or one held before it
  * began (a WebGPT card whose browser check failed was held with its reason, and the chat said
@@ -285,7 +285,7 @@ function lastChatRoute(): AoRoute | null {
     const saved: unknown = JSON.parse(localStorage.getItem(LAST_CHAT_ROUTE) || "null");
     if (!saved || typeof saved !== "object" || Array.isArray(saved)) return null;
     const route = Object.fromEntries(Object.entries(saved).filter(([name, value]) => CHAT_ROUTE_FIELDS.includes(name)
-      && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)))));
+      && (typeof value === "string" || (name === "context_window" && Number.isSafeInteger(value)) || (name === "fast_mode" && value === true))));
     const required = ["harness_id", "provider_id", "account_id", "model", "permission_profile"];
     return required.every(name => typeof route[name] === "string") && route.model && route.model !== AGENT_DEFAULT_MODEL
       ? route as unknown as AoRoute : null;

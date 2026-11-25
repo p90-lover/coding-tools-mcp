@@ -2085,6 +2085,7 @@ mod workspace_auth_tests {
                 approvals_reviewer: None,
                 effort: None,
                 context_window: None,
+                fast_mode: None,
             },
             request_key: None,
             receipt: None,

@@ -24,6 +24,7 @@ const MAX_WAITING = 1000;
 const MAX_SERVERS = 2;
 const REVIEWS_PER_SERVER = 8;
 const IDLE_CLOSE_MS = 2 * 60_000;
+const USAGE_LIMIT_COOLDOWN_MS = 10 * 60_000;
 // Codex's own auto-review model, the one Codex Desktop's Guardian sessions run on. Codex 0.171 runs
 // Guardian on the model of the thread under review, so the review thread starts on it. Until
 // 2026-11-23 it started on Codex's default chat model (gpt-6.2-sol), and 400 reviews moved a Plus
@@ -53,7 +54,8 @@ async function readNativeAccount(authFile, now = Date.now()) {
 
 function serverEnvironment(root, env) {
   const kept = Object.fromEntries(Object.entries(env).filter(([key]) => /^(?:path|pathext|systemroot|windir|comspec|(?:http|https|all|no)_proxy)$/iu.test(key)));
-  return { ...kept, CODEX_HOME: root, HOME: root, USERPROFILE: root, APPDATA: root, LOCALAPPDATA: root, TEMP: root, TMP: root };
+  const tmp = path.join(root, "tmp");
+  return { ...kept, CODEX_HOME: root, HOME: root, USERPROFILE: root, APPDATA: root, LOCALAPPDATA: root, TEMP: tmp, TMP: tmp };
 }
 
 /**
@@ -112,6 +114,9 @@ function openReviewServer(executable, root, env, signal, spawnProcess, onStop = 
       if (message.error || !Object.hasOwn(message, "result")) {
         const error = new Error("Codex refused the review-only request");
         if (Number.isSafeInteger(message.error?.code)) error.rpcCode = message.error.code;
+        if (typeof message.error?.message === "string" && /UsageLimitExceeded|usage_limit_reached|hit your usage limit/iu.test(message.error.message)) {
+          error.usageLimit = true;
+        }
         error.rpcMethod = reply.method;
         reply.reject(error);
       } else reply.resolve(message.result);
@@ -199,14 +204,15 @@ function verdict(result, callId) {
  * `close()` ends the pool (the app quitting).
  */
 function createGuardianReview({ stateDir, authFile, executable, env = process.env, spawnProcess = spawn,
-  prepareAccount = () => readNativeAccount(authFile), platform = process.platform, limits = {} }) {
+  prepareAccount = () => readNativeAccount(authFile), platform = process.platform, now = Date.now, limits = {} }) {
   if (!path.isAbsolute(stateDir || "")) throw new Error("Native Guardian needs an absolute app data path");
   const { workMs = WORK_LIMIT_MS, queueMs = QUEUE_LIMIT_MS, maxServers = MAX_SERVERS, perServer = REVIEWS_PER_SERVER,
-    idleMs = IDLE_CLOSE_MS, maxWaiting = MAX_WAITING } = limits;
+    idleMs = IDLE_CLOSE_MS, maxWaiting = MAX_WAITING, usageLimitCooldownMs = USAGE_LIMIT_COOLDOWN_MS } = limits;
   const capacity = maxServers * perServer;
   let active = 0, closed = false;
   const waiting = [];
   const servers = new Set();
+  const usageLimitedUntil = new Map();
 
   /** A review slot: resolves true once it has one, false if the caller gave up, the wait ran out or the line is full. */
   function acquireSlot(signal) {
@@ -246,6 +252,7 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
     entry.ready = (async () => {
       await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
       entry.root = await fs.mkdtemp(path.join(stateDir, "review-"));
+      await fs.mkdir(path.join(entry.root, "tmp"), { recursive: true, mode: 0o700 });
       if (entry.retired) throw new Error("The native reviewer pool is closed");
       entry.server = openReviewServer(binary, entry.root, env, new AbortController().signal, spawnProcess, (brokeProtocol) => {
         entry.dead = true;
@@ -340,6 +347,10 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
             : pending("Native Guardian did not return a valid decision. Check this request yourself.");
         }
         if (!account) return unavailable("Native Guardian needs a current ChatGPT sign-in in the Codex CLI.");
+        const accountKey = fingerprint(account);
+        if ((usageLimitedUntil.get(accountKey) ?? 0) > now()) {
+          return unavailable("Native Codex Guardian hit the ChatGPT usage limit for the Codex CLI sign-in.");
+        }
         if (closed) return pending("Native Guardian cannot review this request.");
         const entry = take(binary, account);
         try {
@@ -351,6 +362,10 @@ function createGuardianReview({ stateDir, authFile, executable, env = process.en
         } catch (error) {
           if (error?.notChatgpt) return pending("Codex did not confirm a direct ChatGPT sign-in.");
           if (error?.notIsolated) return pending("Codex did not confirm an isolated thread on its direct provider.");
+          if (error?.usageLimit) {
+            if (usageLimitCooldownMs > 0) usageLimitedUntil.set(accountKey, now() + usageLimitCooldownMs);
+            return unavailable("Native Codex Guardian hit the ChatGPT usage limit for the Codex CLI sign-in.");
+          }
           // Once more when the server failed under the review (its process ended, it broke the
           // protocol or it asked to run something: then on a fresh server) or Codex answered an
           // internal error (-32603: 2 of 300 reviews on 2026-11-23); never after the caller or the

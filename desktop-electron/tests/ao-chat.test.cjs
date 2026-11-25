@@ -2986,6 +2986,19 @@ test("a goal's later round shows as its Stop hook feedback, not as the person's 
   assert.equal(chat.goalFeedback("Stop hook feedback: typed by hand"), null);
 });
 
+test("the goal rules each round carries stay out of the person's bubble, its copy and the feedback line", () => {
+  // The app's own goalMessage, so the chat keeps recognising what the main process sends.
+  const { goalMessage } = require("../electron/chat-goals.cjs");
+  const first = goalMessage("make every test pass", 1);
+  assert.match(first, /Goal rules/, "the agent reads the rules");
+  assert.equal(chat.chatMessageParts(first).text, "make every test pass", "the bubble shows the condition as typed");
+  assert.equal(chat.chatMessageReadable(first), "make every test pass", "copy and rewind give back the person's words");
+  assert.deepEqual(plain(chat.goalFeedback(goalMessage("make every test pass", 3, "Two tests still fail."))),
+    { objective: "make every test pass", reason: "Two tests still fail." });
+  assert.equal(chat.goalFeedback(first), null, "the first round is still the person's message");
+  assert.equal(chat.withoutGoalRules("my own text\n\nGoal rules: typed by hand"), "my own text\n\nGoal rules: typed by hand");
+});
+
 test("a working AO card's last sign of life comes from its activity time, for last heard and the quiet note", () => {
   const card = node("w", "planner", "running", { receipt: { started_at_ms: 1_000 } });
   const quiet = chat.chatWorkingDetail(card, { activity: "running", activity_at_ms: 600_000 }, 900_000);
