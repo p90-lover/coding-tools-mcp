@@ -2341,7 +2341,8 @@ function createAgentOrchestratorWorkflow({ requestHeadless: sendHeadless, runRea
         if (unconfirmed) {
           stage("stopping the chat's agent, which did not come back");
           // One AO is already stopping is left to the exit worker: the fresh agent need not wait for it.
-          const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId)).catch(() => null);
+          // A shutdown that failed outright is the error the card shows (its reason, not "restore pending").
+          const stopped = await releaseAgent(continued.session, runKey(workspaceId, runId));
           if (stopped?.ok !== true && stopped?.exiting !== true) throw unconfirmed;
         }
         if (usable && continued.adoptTurn) {
